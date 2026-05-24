@@ -9,6 +9,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from shrike.collection import CollectionWrapper
+from shrike.log import configure_logging
 from shrike.tools import register_tools
 
 logger = logging.getLogger("shrike")
@@ -38,14 +39,30 @@ def main() -> None:
         default="127.0.0.1",
         help="Host to bind to (default: 127.0.0.1)",
     )
+    parser.add_argument(
+        "--log-dir",
+        default=None,
+        help="Directory for log files (default: ~/.local/state/shrike/logs)",
+    )
+    parser.add_argument(
+        "--log-level",
+        default=None,
+        help="Log level (default: info)",
+    )
+    parser.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Log to console in addition to file (set by CLI foreground mode)",
+    )
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    log_dir = configure_logging(
+        foreground=args.foreground,
+        log_dir_override=args.log_dir,
+        log_level_override=args.log_level,
     )
 
-    logger.info(f"Opening collection: {args.collection}")
+    logger.info("Opening collection: %s", args.collection)
     wrapper = CollectionWrapper(args.collection)
 
     def shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
@@ -58,7 +75,8 @@ def main() -> None:
 
     register_tools(mcp, wrapper)
 
-    logger.info(f"Starting MCP server on {args.host}:{args.port}")
+    logger.info("Starting MCP server on %s:%s", args.host, args.port)
+    logger.info("Log directory: %s", log_dir)
     mcp.settings.host = args.host
     mcp.settings.port = args.port
     mcp.run(transport="streamable-http")
