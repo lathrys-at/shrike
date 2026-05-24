@@ -221,6 +221,8 @@ def server_start(
         )
     )
 
+    json_out: bool = ctx.obj["json"]
+
     # Save config if it doesn't exist yet
     config_path = ctx.obj.get("config_path")
     if config_path and not config_path.exists():
@@ -228,27 +230,53 @@ def server_start(
         config["server"]["host"] = server_host
         config["server"]["port"] = server_port
         saved = save_config(config, config_path)
-        output.console.print(f"  [dim]Config saved to {saved}[/dim]")
+        if not json_out:
+            output.console.print(f"  [dim]Config saved to {saved}[/dim]")
 
     # Wait for server to come up
-    output.console.print(f"Starting server (PID {proc.pid})...")
+    if not json_out:
+        output.console.print(f"Starting server (PID {proc.pid})...")
 
     log_file = get_log_file(config, log_dir_override=resolved_log_dir)
     if _wait_for_server(url):
-        output.success(f"Server running at {url}")
-        output.kv("Collection", collection_path, indent=2)
-        output.kv("Log", str(log_file), indent=2)
-        output.kv("Level", resolved_log_level, indent=2)
+        if json_out:
+            output.emit_json(
+                {
+                    "started": True,
+                    "pid": proc.pid,
+                    "url": url,
+                    "collection": collection_path,
+                    "log": str(log_file),
+                    "log_level": resolved_log_level,
+                }
+            )
+        else:
+            output.success(f"Server running at {url}")
+            output.kv("Collection", collection_path, indent=2)
+            output.kv("Log", str(log_file), indent=2)
+            output.kv("Level", resolved_log_level, indent=2)
     else:
         if proc.poll() is not None:
             _cleanup_state()
             raise click.ClickException(
                 f"Server process exited with code {proc.returncode}.\nCheck log: {log_file}"
             )
-        output.console.print(
-            "[yellow]Server started but not yet responding. Check log for details:[/yellow]\n"
-            f"  {log_file}"
-        )
+        if json_out:
+            output.emit_json(
+                {
+                    "started": True,
+                    "pid": proc.pid,
+                    "url": url,
+                    "responding": False,
+                    "log": str(log_file),
+                }
+            )
+        else:
+            output.console.print(
+                "[yellow]Server started but not yet responding."
+                " Check log for details:[/yellow]\n"
+                f"  {log_file}"
+            )
 
 
 @server.command("stop", short_help="Stop the running server")
@@ -256,36 +284,52 @@ def server_start(
 @click.pass_context
 def server_stop(ctx: click.Context) -> None:
     """Stop the Shrike MCP server daemon."""
+    json_out: bool = ctx.obj["json"]
     pid = _read_pid()
     if pid is None:
         meta = _read_meta()
         if meta:
             _cleanup_state()
-            output.console.print("Server is not running (cleaned up stale state).")
+        if json_out:
+            output.emit_json({"stopped": False, "reason": "not running"})
         else:
-            output.console.print("Server is not running.")
+            if meta:
+                output.console.print("Server is not running (cleaned up stale state).")
+            else:
+                output.console.print("Server is not running.")
         return
 
-    output.console.print(f"Stopping server (PID {pid})...")
+    if not json_out:
+        output.console.print(f"Stopping server (PID {pid})...")
+
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         _cleanup_state()
-        output.success("Server already stopped.")
+        if json_out:
+            output.emit_json({"stopped": True, "pid": pid})
+        else:
+            output.success("Server already stopped.")
         return
 
     # Wait for graceful shutdown
+    forced = False
     for _ in range(50):  # 5 seconds
         if not _is_process_alive(pid):
             break
         time.sleep(0.1)
     else:
-        output.console.print("[yellow]Graceful shutdown timed out, forcing...[/yellow]")
+        forced = True
+        if not json_out:
+            output.console.print("[yellow]Graceful shutdown timed out, forcing...[/yellow]")
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
 
     _cleanup_state()
-    output.success("Server stopped.")
+    if json_out:
+        output.emit_json({"stopped": True, "pid": pid, "forced": forced})
+    else:
+        output.success("Server stopped.")
 
 
 @server.command("status", short_help="Show server status")
