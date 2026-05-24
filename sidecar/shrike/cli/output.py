@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from rich.console import Console
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -24,12 +25,12 @@ def table(headers: list[str], rows: list[list[str]]) -> None:
         console.print("  [dim](none)[/dim]")
         return
 
-    t = Table(show_edge=False, pad_edge=False, box=None, padding=(0, 2))
+    t = Table(show_edge=False, box=None, pad_edge=False, padding=(0, 2, 0, 0))
     for h in headers:
         t.add_column(h, style="bold")
     for row in rows:
         t.add_row(*row)
-    console.print(t)
+    console.print(Padding(t, (0, 0, 0, 2)))
 
 
 def section(title: str) -> None:

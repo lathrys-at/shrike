@@ -168,11 +168,12 @@ def style_log_line(line: str) -> Any:
     level_style = _LEVEL_STYLES.get(level_upper, "")
     msg_style = level_style if level_upper in _LOUD_LEVELS else ""
 
-    styled = Text()
+    styled = Text(no_wrap=True, overflow="ellipsis")
     styled.append(timestamp, style="dim")
     styled.append(" ")
     styled.append(f"{level:<8s}", style=level_style)
-    styled.append(f"{logger_name:<40s}", style="cyan dim")
+    styled.append(logger_name, style="cyan dim")
+    styled.append("  ", style="")
     styled.append(message, style=msg_style)
     return styled
 
