@@ -16,6 +16,7 @@ import click
 from shrike.cli import output
 from shrike.cli.client import ShrikeClient
 from shrike.cli.config import resolve_collection, save_config
+from shrike.cli.output import output_options
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
 
 STATE_DIR = Path("~/.local/state/shrike").expanduser()
@@ -73,6 +74,7 @@ def server() -> None:
 
 
 @server.command("start", short_help="Start the MCP server")
+@output_options
 @click.option(
     "--collection",
     type=click.Path(),
@@ -250,6 +252,7 @@ def server_start(
 
 
 @server.command("stop", short_help="Stop the running server")
+@output_options
 @click.pass_context
 def server_stop(ctx: click.Context) -> None:
     """Stop the Shrike MCP server daemon."""
@@ -286,6 +289,7 @@ def server_stop(ctx: click.Context) -> None:
 
 
 @server.command("status", short_help="Show server status")
+@output_options
 @click.pass_context
 def server_status(ctx: click.Context) -> None:
     """Check whether the Shrike MCP server is running."""
@@ -348,6 +352,7 @@ def server_status(ctx: click.Context) -> None:
 
 
 @server.command("logs", short_help="View server logs")
+@output_options
 @click.option("--follow", "-f", is_flag=True, help="Follow the log output (like tail -f).")
 @click.option("--lines", "-n", type=int, default=50, help="Number of lines to show (default: 50).")
 @click.option(

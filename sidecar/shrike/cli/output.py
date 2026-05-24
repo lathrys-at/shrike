@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import click
 from rich.console import Console
 from rich.padding import Padding
 from rich.panel import Panel
@@ -20,6 +21,46 @@ def set_pretty(enabled: bool) -> None:
     if not enabled:
         console = Console(no_color=True, highlight=False)
         err_console = Console(stderr=True, no_color=True, highlight=False)
+
+
+def _merge_json(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
+    if value:
+        ctx.obj["json"] = True
+
+
+def _merge_pretty(ctx: click.Context, _param: click.Parameter, value: bool | None) -> None:
+    if value is not None:
+        ctx.obj["pretty"] = value
+        set_pretty(value)
+
+
+def output_options(fn: Any) -> Any:
+    """Add ``--json`` and ``--pretty/--no-pretty`` to a command.
+
+    Values are merged into ``ctx.obj`` via callbacks so the command
+    function's signature doesn't change.  This lets the same flags
+    appear on both the root group and each leaf command — users can
+    write either ``shrike --json info`` or ``shrike info --json``.
+    """
+    fn = click.option(
+        "--pretty/--no-pretty",
+        default=None,
+        callback=_merge_pretty,
+        expose_value=False,
+        is_eager=True,
+        help="Styled output (default: --pretty).",
+    )(fn)
+    fn = click.option(
+        "--json",
+        "json_flag",
+        is_flag=True,
+        default=False,
+        callback=_merge_json,
+        expose_value=False,
+        is_eager=True,
+        help="Output raw JSON instead of formatted text.",
+    )(fn)
+    return fn
 
 
 def emit_json(data: Any) -> None:

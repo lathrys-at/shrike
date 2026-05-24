@@ -3,9 +3,11 @@ from __future__ import annotations
 import click
 
 from shrike.cli import output
+from shrike.cli.output import output_options
 
 
 @click.command("info", short_help="Show collection structure and stats")
+@output_options
 @click.option("--types", "show_types", is_flag=True, help="Show only note types.")
 @click.option("--decks", "show_decks", is_flag=True, help="Show only decks.")
 @click.option("--tags", "show_tags", is_flag=True, help="Show only tags.")

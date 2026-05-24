@@ -7,6 +7,7 @@ from typing import Any
 import click
 
 from shrike.cli import output
+from shrike.cli.output import output_options
 
 
 def _parse_field(value: str) -> tuple[str, str]:
@@ -37,6 +38,7 @@ def note() -> None:
 
 
 @note.command("list", short_help="List notes by filters")
+@output_options
 @click.option("--deck", help="Filter by deck name.")
 @click.option(
     "--tags",
@@ -117,6 +119,7 @@ def note_list(
 
 
 @note.command("show", short_help="Show a note by ID")
+@output_options
 @click.argument("note_id", type=int)
 @click.pass_context
 def note_show(ctx: click.Context, note_id: int) -> None:
@@ -136,6 +139,7 @@ def note_show(ctx: click.Context, note_id: int) -> None:
 
 
 @note.command("create", short_help="Create a new note")
+@output_options
 @click.option("--deck", help="Target deck.")
 @click.option("--type", "note_type", help="Note type (e.g., Basic, Cloze).")
 @click.option(
@@ -215,6 +219,7 @@ def note_create(
 
 
 @note.command("update", short_help="Update an existing note")
+@output_options
 @click.argument("note_id", type=int)
 @click.option(
     "-f",
@@ -273,6 +278,7 @@ def note_update(
 
 
 @note.command("delete", short_help="Delete notes by ID")
+@output_options
 @click.argument("note_ids", type=int, nargs=-1, required=True)
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
 @click.pass_context
@@ -309,6 +315,7 @@ def note_delete(ctx: click.Context, note_ids: tuple[int, ...], yes: bool) -> Non
 
 
 @note.command("search", short_help="Semantic search over notes")
+@output_options
 @click.argument("queries", nargs=-1)
 @click.option(
     "--similar-to",
