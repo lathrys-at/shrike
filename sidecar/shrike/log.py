@@ -114,6 +114,69 @@ def configure_logging(
     return log_dir
 
 
+_LEVEL_STYLES: dict[str, str] = {
+    "DEBUG": "dim",
+    "INFO": "green",
+    "WARNING": "yellow",
+    "ERROR": "bold red",
+    "CRITICAL": "bold red reverse",
+}
+
+_LOUD_LEVELS = {"ERROR", "CRITICAL"}
+
+
+def style_log_line(line: str) -> Any:
+    """Turn a plain-text log line into a styled ``rich.text.Text``.
+
+    Returns ``None`` for blank lines.  Returns an unstyled ``Text`` if the
+    line doesn't match the expected format.
+
+    This keeps the format knowledge (``FILE_FORMAT``) and the display
+    knowledge in the same module.
+    """
+    from rich.text import Text
+
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    # Timestamp is always 19 chars (YYYY-MM-DDTHH:MM:SS), followed by a space.
+    if len(stripped) < 21 or stripped[19] != " ":
+        return Text(stripped)
+
+    timestamp = stripped[:19]
+    after_ts = stripped[20:]
+
+    # Level is the next whitespace-delimited token.
+    space_idx = after_ts.find(" ")
+    if space_idx < 0:
+        return Text(stripped)
+
+    level = after_ts[:space_idx].strip()
+    rest = after_ts[space_idx + 1 :].lstrip()
+
+    # Logger name and message are separated by double-space.
+    double_space = rest.find("  ")
+    if double_space > 0:
+        logger_name = rest[:double_space]
+        message = rest[double_space + 2 :]
+    else:
+        logger_name = rest
+        message = ""
+
+    level_upper = level.upper()
+    level_style = _LEVEL_STYLES.get(level_upper, "")
+    msg_style = level_style if level_upper in _LOUD_LEVELS else ""
+
+    styled = Text()
+    styled.append(timestamp, style="dim")
+    styled.append(" ")
+    styled.append(f"{level:<8s}", style=level_style)
+    styled.append(f"{logger_name:<40s}", style="cyan dim")
+    styled.append(message, style=msg_style)
+    return styled
+
+
 def get_log_file(
     config: dict[str, Any] | None = None,
     *,

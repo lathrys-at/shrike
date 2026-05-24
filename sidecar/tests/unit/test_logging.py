@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from shrike.log import configure_logging, get_log_file
+from shrike.log import configure_logging, get_log_file, style_log_line
 
 
 @pytest.fixture(autouse=True)
@@ -142,3 +142,37 @@ class TestGetLogFile:
         config = {"logging": {"dir": str(tmp_path / "config")}}
         path = get_log_file(config, log_dir_override=override)
         assert path.parent == override
+
+
+class TestStyleLogLine:
+    def test_blank_line_returns_none(self) -> None:
+        assert style_log_line("") is None
+        assert style_log_line("   ") is None
+
+    def test_info_line(self) -> None:
+        styled = style_log_line(
+            "2026-05-24T16:00:06 INFO  shrike  Opening collection: /tmp/test"
+        )
+        assert styled is not None
+        plain = styled.plain
+        assert "2026-05-24T16:00:06" in plain
+        assert "INFO" in plain
+        assert "shrike" in plain
+        assert "Opening collection: /tmp/test" in plain
+
+    def test_warning_line(self) -> None:
+        styled = style_log_line(
+            "2026-05-24T16:00:06 WARNING shrike.tools  Something odd"
+        )
+        assert styled is not None
+        assert "WARNING" in styled.plain
+
+    def test_unrecognized_format_returns_unstyled(self) -> None:
+        styled = style_log_line("this is just some random text")
+        assert styled is not None
+        assert styled.plain == "this is just some random text"
+
+    def test_no_message_part(self) -> None:
+        styled = style_log_line("2026-05-24T16:00:06 DEBUG logger_only_no_message")
+        assert styled is not None
+        assert "logger_only_no_message" in styled.plain
