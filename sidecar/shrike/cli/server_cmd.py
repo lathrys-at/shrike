@@ -432,18 +432,73 @@ def _tail_follow(path: Path, initial_lines: int) -> None:
         fh.close()
 
 
+_LEVEL_STYLES: dict[str, str] = {
+    "DEBUG": "dim",
+    "INFO": "green",
+    "WARNING": "yellow",
+    "ERROR": "bold red",
+    "CRITICAL": "bold red reverse",
+}
+
+# Levels that color the entire message, not just the level badge
+_LOUD_LEVELS = {"ERROR", "CRITICAL"}
+
+
 def _print_log_line(line: str) -> None:
-    """Print a log line with level-based coloring."""
-    if not line.strip():
+    """Print a log line with per-component styling.
+
+    Expected format from shrike.log.FILE_FORMAT::
+
+        2026-05-24T16:00:06 INFO  shrike.tools  message text
+        <-- timestamp 19 --> <level> <logger>  <message...>
+
+    The level field is variable-width (%-5s pads short names but
+    WARNING/CRITICAL are longer).  The logger-to-message boundary is
+    always a double-space ``  ``.
+
+    Falls back to unstyled output if the line doesn't match.
+    """
+    from rich.text import Text
+
+    stripped = line.strip()
+    if not stripped:
         return
 
-    # Color based on log level keyword
-    line_upper = line.upper()
-    if " ERROR " in line_upper:
-        output.console.print(f"[red]{line}[/red]")
-    elif " WARN" in line_upper:
-        output.console.print(f"[yellow]{line}[/yellow]")
-    elif " DEBUG " in line_upper:
-        output.console.print(f"[dim]{line}[/dim]")
+    # Timestamp is always 19 chars (YYYY-MM-DDTHH:MM:SS), followed by a space.
+    if len(stripped) < 21 or stripped[19] != " ":
+        output.console.print(stripped, highlight=False)
+        return
+
+    timestamp = stripped[:19]
+    after_ts = stripped[20:]
+
+    # Level is the next whitespace-delimited token.
+    space_idx = after_ts.find(" ")
+    if space_idx < 0:
+        output.console.print(stripped, highlight=False)
+        return
+
+    level = after_ts[:space_idx].strip()
+    rest = after_ts[space_idx + 1 :].lstrip()
+
+    # Logger name and message are separated by double-space.
+    double_space = rest.find("  ")
+    if double_space > 0:
+        logger_name = rest[:double_space]
+        message = rest[double_space + 2 :]
     else:
-        output.console.print(line)
+        logger_name = rest
+        message = ""
+
+    level_upper = level.upper()
+    level_style = _LEVEL_STYLES.get(level_upper, "")
+    msg_style = level_style if level_upper in _LOUD_LEVELS else ""
+
+    styled = Text()
+    styled.append(timestamp, style="dim")
+    styled.append(" ")
+    styled.append(f"{level:<8s}", style=level_style)
+    styled.append(f"{logger_name:<40s}", style="cyan dim")
+    styled.append(message, style=msg_style)
+
+    output.console.print(styled, highlight=False)
