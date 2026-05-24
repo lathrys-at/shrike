@@ -26,10 +26,14 @@ def set_pretty(enabled: bool) -> None:
 def _merge_json(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
     if value:
         ctx.obj["json"] = True
+        ctx.obj["pretty"] = False
+        set_pretty(False)
 
 
 def _merge_pretty(ctx: click.Context, _param: click.Parameter, value: bool | None) -> None:
     if value is not None:
+        if value and ctx.obj.get("json"):
+            raise click.UsageError("--pretty and --json are mutually exclusive.")
         ctx.obj["pretty"] = value
         set_pretty(value)
 

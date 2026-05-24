@@ -67,11 +67,13 @@ def cli(
     ctx.obj["config_path"] = config_path
     ctx.obj["url"] = server_url
     ctx.obj["json"] = json_output
-    ctx.obj["pretty"] = pretty
     ctx.obj["client"] = ShrikeClient(server_url)
 
     from shrike.cli import output
 
+    if json_output:
+        pretty = False
+    ctx.obj["pretty"] = pretty
     output.set_pretty(pretty)
 
 
