@@ -14,6 +14,14 @@ console = Console()
 err_console = Console(stderr=True)
 
 
+def set_pretty(enabled: bool) -> None:
+    """Switch the module-level consoles between styled and plain output."""
+    global console, err_console  # noqa: PLW0603
+    if not enabled:
+        console = Console(no_color=True, highlight=False)
+        err_console = Console(stderr=True, no_color=True, highlight=False)
+
+
 def emit_json(data: Any) -> None:
     """Print data as formatted JSON."""
     console.print_json(json.dumps(data, ensure_ascii=False))

@@ -295,8 +295,41 @@ def server_status(ctx: click.Context) -> None:
     if pid is None:
         if meta:
             _cleanup_state()
-        output.console.print("[dim]Server is not running.[/dim]")
+        if ctx.obj["json"]:
+            output.emit_json({"running": False})
+        else:
+            output.console.print("[dim]Server is not running.[/dim]")
         ctx.exit(1)
+        return
+
+    uptime: str | None = None
+    started = (meta or {}).get("started", "")
+    if started:
+        try:
+            start_dt = datetime.fromisoformat(started)
+            delta = datetime.now(UTC) - start_dt
+            hours, remainder = divmod(int(delta.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            if hours:
+                uptime = f"{hours}h {minutes}m"
+            elif minutes:
+                uptime = f"{minutes}m {seconds}s"
+            else:
+                uptime = f"{seconds}s"
+        except ValueError:
+            pass
+
+    if ctx.obj["json"]:
+        data: dict[str, Any] = {"running": True, "pid": pid}
+        if meta:
+            data["url"] = meta.get("url")
+            data["collection"] = meta.get("collection")
+            data["log_level"] = meta.get("log_level")
+            data["log_dir"] = meta.get("log_dir")
+            data["started"] = meta.get("started")
+            if uptime:
+                data["uptime"] = uptime
+        output.emit_json(data)
         return
 
     output.console.print("[bold green]Server is running[/bold green]")
@@ -306,27 +339,12 @@ def server_status(ctx: click.Context) -> None:
         output.kv("Collection", meta.get("collection", "unknown"), indent=2)
         output.kv("Log level", meta.get("log_level", "info"), indent=2)
 
-        # Show log file path
         log_dir = meta.get("log_dir")
         if log_dir:
             output.kv("Log", str(Path(log_dir) / "shrike.log"), indent=2)
 
-        started = meta.get("started", "")
-        if started:
-            try:
-                start_dt = datetime.fromisoformat(started)
-                delta = datetime.now(UTC) - start_dt
-                hours, remainder = divmod(int(delta.total_seconds()), 3600)
-                minutes, seconds = divmod(remainder, 60)
-                if hours:
-                    uptime = f"{hours}h {minutes}m"
-                elif minutes:
-                    uptime = f"{minutes}m {seconds}s"
-                else:
-                    uptime = f"{seconds}s"
-                output.kv("Uptime", uptime, indent=2)
-            except ValueError:
-                pass
+        if uptime:
+            output.kv("Uptime", uptime, indent=2)
 
 
 @server.command("logs", short_help="View server logs")
@@ -339,16 +357,12 @@ def server_status(ctx: click.Context) -> None:
     default="shrike",
     help="Which process log to view (default: shrike).",
 )
-@click.option("--json-output", "--json", "json_out", is_flag=True, help="Output as JSON array.")
-@click.option("--pretty/--no-pretty", default=True, help="Styled output (default: --pretty).")
 @click.pass_context
 def server_logs(
     ctx: click.Context,
     follow: bool,
     lines: int,
     process: str,
-    json_out: bool,
-    pretty: bool,
 ) -> None:
     """View the server log output.
 
@@ -359,10 +373,13 @@ def server_logs(
       shrike server logs
       shrike server logs -f
       shrike server logs -n 100
-      shrike server logs --json
-      shrike server logs --no-pretty
-      cat ~/.local/state/shrike/logs/shrike.log | shrike server logs --json
+      shrike --json server logs
+      shrike --no-pretty server logs
+      cat ~/.local/state/shrike/logs/shrike.log | shrike --json server logs
     """
+    json_out: bool = ctx.obj["json"]
+    pretty: bool = ctx.obj["pretty"]
+
     if json_out and follow:
         raise click.ClickException("--json and --follow cannot be used together.")
 

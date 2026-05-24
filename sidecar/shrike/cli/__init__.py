@@ -31,9 +31,20 @@ from shrike.cli.config import DEFAULT_CONFIG_PATH, load_config, resolve_url
     is_flag=True,
     help="Output raw JSON instead of formatted text.",
 )
+@click.option(
+    "--pretty/--no-pretty",
+    default=True,
+    help="Styled output (default: --pretty).",
+)
 @click.version_option(package_name="shrike")
 @click.pass_context
-def cli(ctx: click.Context, config_path: Path, url: str | None, json_output: bool) -> None:
+def cli(
+    ctx: click.Context,
+    config_path: Path,
+    url: str | None,
+    json_output: bool,
+    pretty: bool,
+) -> None:
     """Shrike — manage your Anki collection from the command line.
 
     \b
@@ -56,7 +67,12 @@ def cli(ctx: click.Context, config_path: Path, url: str | None, json_output: boo
     ctx.obj["config_path"] = config_path
     ctx.obj["url"] = server_url
     ctx.obj["json"] = json_output
+    ctx.obj["pretty"] = pretty
     ctx.obj["client"] = ShrikeClient(server_url)
+
+    from shrike.cli import output
+
+    output.set_pretty(pretty)
 
 
 # Register subcommands
