@@ -9,9 +9,7 @@ from anki.consts import MODEL_CLOZE
 logger = logging.getLogger("shrike")
 
 
-def upsert_note_types(
-    col: Collection, note_types: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
+def upsert_note_types(col: Collection, note_types: list[dict[str, Any]]) -> list[dict[str, Any]]:
     results = []
     for i, nt_input in enumerate(note_types):
         try:
@@ -20,17 +18,17 @@ def upsert_note_types(
             else:
                 results.append(_create_note_type(col, nt_input))
         except Exception as e:
-            results.append({
-                "status": "error",
-                "index": i,
-                "error": str(e),
-            })
+            results.append(
+                {
+                    "status": "error",
+                    "index": i,
+                    "error": str(e),
+                }
+            )
     return results
 
 
-def _create_note_type(
-    col: Collection, nt_input: dict[str, Any]
-) -> dict[str, Any]:
+def _create_note_type(col: Collection, nt_input: dict[str, Any]) -> dict[str, Any]:
     name = nt_input.get("name")
     fields = nt_input.get("fields")
     templates = nt_input.get("templates")
@@ -74,9 +72,7 @@ def _create_note_type(
     }
 
 
-def _update_note_type(
-    col: Collection, nt_input: dict[str, Any]
-) -> dict[str, Any]:
+def _update_note_type(col: Collection, nt_input: dict[str, Any]) -> dict[str, Any]:
     nt_id = nt_input["id"]
     notetype = col.models.get(nt_id)
     if notetype is None:
