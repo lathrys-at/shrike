@@ -17,7 +17,14 @@ from shrike.cli import output
     help="Show full templates and CSS for a note type.",
 )
 @click.pass_context
-def info(ctx, show_types, show_decks, show_tags, show_stats, type_details):
+def info(
+    ctx: click.Context,
+    show_types: bool,
+    show_decks: bool,
+    show_tags: bool,
+    show_stats: bool,
+    type_details: tuple[str, ...],
+) -> None:
     """Show the structure of the Anki collection.
 
     Displays note types, decks, tags, and scheduling statistics.
@@ -53,11 +60,13 @@ def info(ctx, show_types, show_decks, show_tags, show_stats, type_details):
         output.section("Note Types")
         rows = []
         for nt in note_types:
-            rows.append([
-                nt["name"],
-                nt.get("type", "standard"),
-                ", ".join(nt.get("fields", [])),
-            ])
+            rows.append(
+                [
+                    nt["name"],
+                    nt.get("type", "standard"),
+                    ", ".join(nt.get("fields", [])),
+                ]
+            )
         output.table(["Name", "Type", "Fields"], rows)
 
         # Show details for requested types
@@ -69,10 +78,7 @@ def info(ctx, show_types, show_decks, show_tags, show_stats, type_details):
     decks = result.get("decks")
     if decks is not None:
         output.section("Decks")
-        rows = [
-            [d["name"], str(d.get("note_count", 0))]
-            for d in decks
-        ]
+        rows = [[d["name"], str(d.get("note_count", 0))] for d in decks]
         output.table(["Name", "Notes"], rows)
 
     # Tags
@@ -80,10 +86,10 @@ def info(ctx, show_types, show_decks, show_tags, show_stats, type_details):
     if tags is not None:
         output.section("Tags")
         if tags:
-            styled = " ".join(click.style(t, **output.TAG_STYLE) for t in tags)
-            click.echo(f"  {styled}")
+            styled = " ".join(f"[yellow]{t}[/yellow]" for t in tags)
+            output.console.print(f"  {styled}")
         else:
-            click.echo(click.style("  (none)", dim=True))
+            output.console.print("  [dim](none)[/dim]")
 
     # Stats
     stats = result.get("stats")
@@ -94,4 +100,4 @@ def info(ctx, show_types, show_decks, show_tags, show_stats, type_details):
         output.kv("Cards due today", stats.get("cards_due_today", 0))
         output.kv("New cards", stats.get("new_cards", 0))
 
-    click.echo()
+    output.console.print()

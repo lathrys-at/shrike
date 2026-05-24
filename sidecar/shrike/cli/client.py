@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 import click
@@ -22,7 +21,7 @@ class ShrikeClient:
         self.url = url
         self._request_id = 0
 
-    def call(self, tool_name: str, arguments: dict[str, Any] | None = None) -> dict:
+    def call(self, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         """Invoke an MCP tool and return the structured result.
 
         Raises:
@@ -48,15 +47,13 @@ class ShrikeClient:
                 },
                 timeout=30.0,
             )
-        except httpx.ConnectError:
+        except httpx.ConnectError as err:
             raise click.ClickException(
                 f"Cannot connect to server at {self.url}\n"
                 "Is the server running? Start it with: shrike server start"
-            )
-        except httpx.TimeoutException:
-            raise click.ClickException(
-                f"Request to {self.url} timed out"
-            )
+            ) from err
+        except httpx.TimeoutException as err:
+            raise click.ClickException(f"Request to {self.url} timed out") from err
 
         resp.raise_for_status()
         body = resp.json()
@@ -71,7 +68,7 @@ class ShrikeClient:
         if isinstance(content, dict) and "error" in content:
             raise ServerError(content["error"])
 
-        return content
+        return content  # type: ignore[no-any-return]
 
     def ping(self) -> bool:
         """Check if the server is reachable and responding."""

@@ -89,7 +89,7 @@ def resolve_collection(
 
     config_collection = config.get("collection")
     if config_collection:
-        return os.path.expanduser(config_collection)
+        return str(os.path.expanduser(config_collection))
 
     return None
 
@@ -97,7 +97,7 @@ def resolve_collection(
 def _deep_copy_defaults() -> dict[str, Any]:
     return {
         "collection": DEFAULT_CONFIG["collection"],
-        "server": dict(DEFAULT_CONFIG["server"]),
+        "server": dict(DEFAULT_CONFIG["server"]),  # type: ignore[arg-type]
     }
 
 

@@ -4,6 +4,7 @@ import argparse
 import logging
 import signal
 import sys
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -19,7 +20,7 @@ mcp = FastMCP(
 )
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Shrike MCP server for Anki")
     parser.add_argument(
         "--collection",
@@ -47,7 +48,7 @@ def main():
     logger.info(f"Opening collection: {args.collection}")
     wrapper = CollectionWrapper(args.collection)
 
-    def shutdown(signum, frame):
+    def shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
         logger.info("Shutting down...")
         wrapper.close()
         sys.exit(0)

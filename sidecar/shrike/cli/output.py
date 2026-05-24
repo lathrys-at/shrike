@@ -3,71 +3,49 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import click
+from rich.console import Console
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.table import Table
+from rich.text import Text
 
-
-# -- Colors and styles --
-
-HEADER = {"bold": True}
-DIM = {"dim": True}
-ID_STYLE = {"fg": "cyan"}
-NAME_STYLE = {"fg": "green"}
-TAG_STYLE = {"fg": "yellow"}
-ERROR_STYLE = {"fg": "red", "bold": True}
-SUCCESS_STYLE = {"fg": "green"}
-LABEL_STYLE = {"fg": "blue", "bold": True}
+console = Console()
+err_console = Console(stderr=True)
 
 
 def emit_json(data: Any) -> None:
-    """Print data as formatted JSON and exit."""
-    click.echo(json.dumps(data, indent=2, ensure_ascii=False))
+    """Print data as formatted JSON."""
+    console.print_json(json.dumps(data, ensure_ascii=False))
 
 
-def table(headers: list[str], rows: list[list[str]], max_col_width: int = 50) -> None:
-    """Print an aligned table with styled headers."""
+def table(headers: list[str], rows: list[list[str]]) -> None:
+    """Print a table with styled headers."""
     if not rows:
-        click.echo(click.style("  (none)", **DIM))
+        console.print("  [dim](none)[/dim]")
         return
 
-    # Calculate column widths
-    all_rows = [headers] + rows
-    widths = [
-        min(max(len(str(row[i])) for row in all_rows), max_col_width)
-        for i in range(len(headers))
-    ]
-
-    # Header
-    header_line = "  ".join(
-        click.style(h.ljust(widths[i]), **HEADER) for i, h in enumerate(headers)
-    )
-    click.echo(header_line)
-    click.echo(click.style("  ".join("─" * w for w in widths), **DIM))
-
-    # Rows
+    t = Table(show_edge=False, pad_edge=False, box=None, padding=(0, 2))
+    for h in headers:
+        t.add_column(h, style="bold")
     for row in rows:
-        cells = []
-        for i, cell in enumerate(row):
-            text = str(cell)
-            if len(text) > widths[i]:
-                text = text[: widths[i] - 1] + "…"
-            cells.append(text.ljust(widths[i]))
-        click.echo("  ".join(cells))
+        t.add_row(*row)
+    console.print(t)
 
 
 def section(title: str) -> None:
     """Print a section header."""
-    click.echo()
-    click.echo(click.style(f"  {title}", **LABEL_STYLE))
-    click.echo(click.style("  " + "─" * len(title), **DIM))
+    console.print()
+    console.print(f"  [bold blue]{title}[/bold blue]")
+    console.print(f"  [dim]{'─' * len(title)}[/dim]")
 
 
 def kv(label: str, value: Any, indent: int = 4) -> None:
     """Print a key-value pair."""
     prefix = " " * indent
-    click.echo(f"{prefix}{click.style(label + ':', **DIM)} {value}")
+    console.print(f"{prefix}[dim]{label}:[/dim] {value}")
 
 
-def note_summary_row(note: dict) -> list[str]:
+def note_summary_row(note: dict[str, Any]) -> list[str]:
     """Format a note dict as a table row."""
     tags = ", ".join(note.get("tags", []))
     modified = note.get("modified", "")
@@ -82,84 +60,93 @@ def note_summary_row(note: dict) -> list[str]:
     ]
 
 
-def note_detail(note: dict) -> None:
+def note_detail(note: dict[str, Any]) -> None:
     """Render a full note with all its fields."""
-    click.echo()
-    click.echo(
-        f"  {click.style('Note', **HEADER)} {click.style(str(note['id']), **ID_STYLE)}"
-    )
-    kv("Type", note.get("note_type", ""))
-    kv("Deck", note.get("deck", ""))
+    header = Text()
+    header.append("Note ", style="bold")
+    header.append(str(note["id"]), style="cyan")
+
+    lines: list[str] = []
+    lines.append(f"[dim]Type:[/dim] {note.get('note_type', '')}")
+    lines.append(f"[dim]Deck:[/dim] {note.get('deck', '')}")
     if note.get("tags"):
-        tags = " ".join(click.style(t, **TAG_STYLE) for t in note["tags"])
-        kv("Tags", tags)
-    kv("Modified", note.get("modified", ""))
+        tags = " ".join(f"[yellow]{t}[/yellow]" for t in note["tags"])
+        lines.append(f"[dim]Tags:[/dim] {tags}")
+    lines.append(f"[dim]Modified:[/dim] {note.get('modified', '')}")
 
     content = note.get("content", {})
     if content:
-        click.echo()
+        lines.append("")
         for field_name, value in content.items():
-            click.echo(f"    {click.style(field_name, **LABEL_STYLE)}")
-            # Indent field content
+            lines.append(f"[bold blue]{field_name}[/bold blue]")
             for line in str(value).splitlines():
-                click.echo(f"      {line}")
-    click.echo()
+                lines.append(f"  {line}")
 
-
-def note_type_detail(nt: dict) -> None:
-    """Render a full note type definition."""
-    click.echo()
-    click.echo(
-        f"  {click.style('Note Type', **HEADER)} "
-        f"{click.style(nt['name'], **NAME_STYLE)}"
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title=header,
+            title_align="left",
+            border_style="dim",
+            padding=(0, 2),
+        )
     )
-    kv("ID", nt.get("id", ""))
-    kv("Type", nt.get("type", "standard"))
-    kv("Fields", ", ".join(nt.get("fields", [])))
+
+
+def note_type_detail(nt: dict[str, Any]) -> None:
+    """Render a full note type definition."""
+    header = Text()
+    header.append("Note Type ", style="bold")
+    header.append(nt["name"], style="green")
+
+    lines: list[str] = []
+    lines.append(f"[dim]ID:[/dim] {nt.get('id', '')}")
+    lines.append(f"[dim]Type:[/dim] {nt.get('type', 'standard')}")
+    lines.append(f"[dim]Fields:[/dim] {', '.join(nt.get('fields', []))}")
 
     templates = nt.get("templates", [])
     if templates:
-        click.echo()
-        click.echo(f"    {click.style('Templates', **LABEL_STYLE)}")
+        lines.append("")
+        lines.append("[bold blue]Templates[/bold blue]")
         for tmpl in templates:
-            click.echo(f"      {click.style(tmpl['name'], **HEADER)}")
-            click.echo(f"        Front: {click.style(tmpl['front'], **DIM)}")
-            click.echo(f"        Back:  {click.style(tmpl['back'], **DIM)}")
+            lines.append(f"  [bold]{tmpl['name']}[/bold]")
+            lines.append(f"    [dim]Front:[/dim] {tmpl['front']}")
+            lines.append(f"    [dim]Back:[/dim]  {tmpl['back']}")
+
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title=header,
+            title_align="left",
+            border_style="dim",
+            padding=(0, 2),
+        )
+    )
 
     css = nt.get("css")
     if css is not None:
-        click.echo()
-        click.echo(f"    {click.style('CSS', **LABEL_STYLE)}")
-        for line in css.splitlines():
-            click.echo(f"      {click.style(line, **DIM)}")
-
-    click.echo()
+        console.print(Syntax(css, "css", theme="monokai", padding=1))
 
 
-def result_status(results: list[dict]) -> None:
+def result_status(results: list[dict[str, Any]]) -> None:
     """Render a list of upsert/delete results."""
     for r in results:
         status = r.get("status", "unknown")
         if status == "created":
-            icon = click.style("+", **SUCCESS_STYLE)
-            msg = f"Created note {click.style(str(r['id']), **ID_STYLE)}"
+            console.print(f"  [green]+[/green] Created note [cyan]{r['id']}[/cyan]")
         elif status == "updated":
-            icon = click.style("~", fg="yellow")
-            msg = f"Updated note {click.style(str(r['id']), **ID_STYLE)}"
+            console.print(f"  [yellow]~[/yellow] Updated note [cyan]{r['id']}[/cyan]")
         elif status == "error":
-            icon = click.style("!", **ERROR_STYLE)
-            msg = click.style(r.get("error", "Unknown error"), **ERROR_STYLE)
+            console.print(f"  [bold red]![/bold red] [red]{r.get('error', 'Unknown error')}[/red]")
         else:
-            icon = " "
-            msg = str(r)
-        click.echo(f"  {icon} {msg}")
+            console.print(f"    {r}")
 
 
 def error(message: str) -> None:
-    """Print an error message."""
-    click.echo(click.style(f"Error: {message}", **ERROR_STYLE), err=True)
+    """Print an error message to stderr."""
+    err_console.print(f"[bold red]Error:[/bold red] {message}")
 
 
 def success(message: str) -> None:
     """Print a success message."""
-    click.echo(click.style(message, **SUCCESS_STYLE))
+    console.print(f"[green]{message}[/green]")

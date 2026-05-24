@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -39,21 +41,20 @@ def _read_pid() -> int | None:
         return None
 
 
-def _read_meta() -> dict | None:
+def _read_meta() -> dict[str, Any] | None:
     if not META_FILE.exists():
         return None
     try:
-        return json.loads(META_FILE.read_text())
+        result: dict[str, Any] = json.loads(META_FILE.read_text())
+        return result
     except (json.JSONDecodeError, OSError):
         return None
 
 
-def _cleanup_state():
+def _cleanup_state() -> None:
     for f in (PID_FILE, META_FILE):
-        try:
+        with contextlib.suppress(OSError):
             f.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _wait_for_server(url: str, timeout: float = 15.0) -> bool:
@@ -67,9 +68,8 @@ def _wait_for_server(url: str, timeout: float = 15.0) -> bool:
 
 
 @click.group("server", short_help="Manage the Shrike daemon")
-def server():
+def server() -> None:
     """Start, stop, and check the status of the Shrike MCP server."""
-    pass
 
 
 @server.command("start", short_help="Start the MCP server")
@@ -80,11 +80,15 @@ def server():
 )
 @click.option("--port", type=int, help="Port to listen on (default: 8372).")
 @click.option("--host", help="Host to bind to (default: 127.0.0.1).")
-@click.option(
-    "--foreground", is_flag=True, help="Run in the foreground instead of daemonizing."
-)
+@click.option("--foreground", is_flag=True, help="Run in the foreground instead of daemonizing.")
 @click.pass_context
-def server_start(ctx, collection, port, host, foreground):
+def server_start(
+    ctx: click.Context,
+    collection: str | None,
+    port: int | None,
+    host: str | None,
+    foreground: bool,
+) -> None:
     """Start the Shrike MCP server as a background daemon.
 
     The collection path can be set via --collection, the config file,
@@ -124,32 +128,38 @@ def server_start(ctx, collection, port, host, foreground):
         )
 
     if foreground:
-        click.echo(
-            f"Starting server in foreground on {server_host}:{server_port}"
-        )
-        click.echo(f"Collection: {collection_path}")
-        click.echo("Press Ctrl+C to stop.\n")
-        # Import and run directly
+        output.console.print(f"Starting server in foreground on {server_host}:{server_port}")
+        output.console.print(f"Collection: {collection_path}")
+        output.console.print("Press Ctrl+C to stop.\n")
         sys.argv = [
             "shrike-server",
-            "--collection", collection_path,
-            "--port", str(server_port),
-            "--host", server_host,
+            "--collection",
+            collection_path,
+            "--port",
+            str(server_port),
+            "--host",
+            server_host,
         ]
         from shrike.server import main
+
         main()
         return
 
     # Daemon mode
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    log_file = open(LOG_FILE, "a")
+    log_file = open(LOG_FILE, "a")  # noqa: SIM115
 
     proc = subprocess.Popen(
         [
-            sys.executable, "-m", "shrike.server",
-            "--collection", collection_path,
-            "--port", str(server_port),
-            "--host", server_host,
+            sys.executable,
+            "-m",
+            "shrike.server",
+            "--collection",
+            collection_path,
+            "--port",
+            str(server_port),
+            "--host",
+            server_host,
         ],
         stdout=log_file,
         stderr=log_file,
@@ -158,15 +168,20 @@ def server_start(ctx, collection, port, host, foreground):
 
     # Write PID and metadata
     PID_FILE.write_text(str(proc.pid))
-    META_FILE.write_text(json.dumps({
-        "pid": proc.pid,
-        "url": url,
-        "host": server_host,
-        "port": server_port,
-        "collection": collection_path,
-        "started": datetime.now(timezone.utc).isoformat(),
-        "log": str(LOG_FILE),
-    }, indent=2))
+    META_FILE.write_text(
+        json.dumps(
+            {
+                "pid": proc.pid,
+                "url": url,
+                "host": server_host,
+                "port": server_port,
+                "collection": collection_path,
+                "started": datetime.now(UTC).isoformat(),
+                "log": str(LOG_FILE),
+            },
+            indent=2,
+        )
+    )
 
     # Save config if it doesn't exist yet
     config_path = ctx.obj.get("config_path")
@@ -175,45 +190,42 @@ def server_start(ctx, collection, port, host, foreground):
         config["server"]["host"] = server_host
         config["server"]["port"] = server_port
         saved = save_config(config, config_path)
-        click.echo(click.style(f"  Config saved to {saved}", dim=True))
+        output.console.print(f"  [dim]Config saved to {saved}[/dim]")
 
     # Wait for server to come up
-    click.echo(f"Starting server (PID {proc.pid})...")
+    output.console.print(f"Starting server (PID {proc.pid})...")
 
     if _wait_for_server(url):
         output.success(f"Server running at {url}")
         output.kv("Collection", collection_path, indent=2)
         output.kv("Log", str(LOG_FILE), indent=2)
     else:
-        # Check if process died
         if proc.poll() is not None:
             _cleanup_state()
             raise click.ClickException(
-                f"Server process exited with code {proc.returncode}.\n"
-                f"Check log: {LOG_FILE}"
+                f"Server process exited with code {proc.returncode}.\nCheck log: {LOG_FILE}"
             )
-        click.echo(click.style(
-            "Server started but not yet responding. Check log for details:\n"
-            f"  {LOG_FILE}",
-            fg="yellow",
-        ))
+        output.console.print(
+            "[yellow]Server started but not yet responding. Check log for details:[/yellow]\n"
+            f"  {LOG_FILE}"
+        )
 
 
 @server.command("stop", short_help="Stop the running server")
 @click.pass_context
-def server_stop(ctx):
+def server_stop(ctx: click.Context) -> None:
     """Stop the Shrike MCP server daemon."""
     pid = _read_pid()
     if pid is None:
         meta = _read_meta()
         if meta:
             _cleanup_state()
-            click.echo("Server is not running (cleaned up stale state).")
+            output.console.print("Server is not running (cleaned up stale state).")
         else:
-            click.echo("Server is not running.")
+            output.console.print("Server is not running.")
         return
 
-    click.echo(f"Stopping server (PID {pid})...")
+    output.console.print(f"Stopping server (PID {pid})...")
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -227,12 +239,9 @@ def server_stop(ctx):
             break
         time.sleep(0.1)
     else:
-        # Force kill
-        click.echo(click.style("Graceful shutdown timed out, forcing...", fg="yellow"))
-        try:
+        output.console.print("[yellow]Graceful shutdown timed out, forcing...[/yellow]")
+        with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
 
     _cleanup_state()
     output.success("Server stopped.")
@@ -240,7 +249,7 @@ def server_stop(ctx):
 
 @server.command("status", short_help="Show server status")
 @click.pass_context
-def server_status(ctx):
+def server_status(ctx: click.Context) -> None:
     """Check whether the Shrike MCP server is running."""
     pid = _read_pid()
     meta = _read_meta()
@@ -248,11 +257,11 @@ def server_status(ctx):
     if pid is None:
         if meta:
             _cleanup_state()
-        click.echo(click.style("Server is not running.", dim=True))
+        output.console.print("[dim]Server is not running.[/dim]")
         ctx.exit(1)
         return
 
-    click.echo(click.style("Server is running", fg="green", bold=True))
+    output.console.print("[bold green]Server is running[/bold green]")
     if meta:
         output.kv("URL", meta.get("url", "unknown"), indent=2)
         output.kv("PID", meta.get("pid", pid), indent=2)
@@ -261,7 +270,7 @@ def server_status(ctx):
         if started:
             try:
                 start_dt = datetime.fromisoformat(started)
-                delta = datetime.now(timezone.utc) - start_dt
+                delta = datetime.now(UTC) - start_dt
                 hours, remainder = divmod(int(delta.total_seconds()), 3600)
                 minutes, seconds = divmod(remainder, 60)
                 if hours:

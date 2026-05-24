@@ -17,21 +17,19 @@ def _parse_template(value: str) -> dict:
     parts = value.split(":", 2)
     if len(parts) != 3:
         raise click.BadParameter(
-            f"Invalid template format: {value!r}. "
-            "Use NAME:FRONT_HTML:BACK_HTML"
+            f"Invalid template format: {value!r}. Use NAME:FRONT_HTML:BACK_HTML"
         )
     return {"name": parts[0], "front": parts[1], "back": parts[2]}
 
 
 @click.group("type", short_help="Manage note types")
-def type_group():
+def type_group() -> None:
     """Create, list, show, and update note type definitions."""
-    pass
 
 
 @type_group.command("list", short_help="List note types")
 @click.pass_context
-def type_list(ctx):
+def type_list(ctx: click.Context) -> None:
     """List all note types with their fields."""
     client = ctx.obj["client"]
     result = client.collection_info(include=["note_types"])
@@ -42,7 +40,7 @@ def type_list(ctx):
 
     note_types = result.get("note_types", [])
     if not note_types:
-        click.echo(click.style("No note types found.", dim=True))
+        output.console.print("[dim]No note types found.[/dim]")
         return
 
     rows = [
@@ -50,13 +48,13 @@ def type_list(ctx):
         for nt in note_types
     ]
     output.table(["Name", "Type", "Fields"], rows)
-    click.echo()
+    output.console.print()
 
 
 @type_group.command("show", short_help="Show note type details")
 @click.argument("name")
 @click.pass_context
-def type_show(ctx, name):
+def type_show(ctx: click.Context, name: str) -> None:
     """Show the full definition of a note type, including templates and CSS."""
     client = ctx.obj["client"]
     result = client.collection_info(
@@ -97,11 +95,20 @@ def type_show(ctx, name):
 @click.option("--css", "css_text", help="CSS styling for all cards.")
 @click.option("--cloze", is_flag=True, help="Create a cloze deletion note type.")
 @click.option(
-    "--json-input", is_flag=True,
+    "--json-input",
+    is_flag=True,
     help="Read a JSON note type definition from stdin.",
 )
 @click.pass_context
-def type_create(ctx, name, field, template, css_text, cloze, json_input):
+def type_create(
+    ctx: click.Context,
+    name: str | None,
+    field: tuple[str, ...],
+    template: tuple[str, ...],
+    css_text: str | None,
+    cloze: bool,
+    json_input: bool,
+) -> None:
     """Create a new note type definition.
 
     \b
@@ -121,11 +128,8 @@ def type_create(ctx, name, field, template, css_text, cloze, json_input):
         try:
             data = json.load(sys.stdin)
         except json.JSONDecodeError as e:
-            raise click.ClickException(f"Invalid JSON input: {e}")
-        if isinstance(data, list):
-            note_types = data
-        else:
-            note_types = [data]
+            raise click.ClickException(f"Invalid JSON input: {e}") from e
+        note_types = data if isinstance(data, list) else [data]
     else:
         if not name:
             raise click.ClickException("--name is required.")
@@ -154,8 +158,7 @@ def type_create(ctx, name, field, template, css_text, cloze, json_input):
         status = r.get("status")
         if status == "created":
             output.success(
-                f"Created note type '{r.get('name', '')}' "
-                f"(ID: {click.style(str(r.get('id', '')), **output.ID_STYLE)})"
+                f"Created note type '{r.get('name', '')}' (ID: [cyan]{r.get('id', '')}[/cyan])"
             )
         elif status == "error":
             output.error(r.get("error", "Unknown error"))
@@ -166,11 +169,18 @@ def type_create(ctx, name, field, template, css_text, cloze, json_input):
 @click.option("--name", help="New name for the note type.")
 @click.option("--css", "css_text", help="New CSS styling.")
 @click.option(
-    "--json-input", is_flag=True,
+    "--json-input",
+    is_flag=True,
     help="Read a full JSON note type definition from stdin (merged with ID).",
 )
 @click.pass_context
-def type_update(ctx, note_type_id, name, css_text, json_input):
+def type_update(
+    ctx: click.Context,
+    note_type_id: int,
+    name: str | None,
+    css_text: str | None,
+    json_input: bool,
+) -> None:
     """Update an existing note type by ID.
 
     \b
@@ -186,7 +196,7 @@ def type_update(ctx, note_type_id, name, css_text, json_input):
         try:
             data = json.load(sys.stdin)
         except json.JSONDecodeError as e:
-            raise click.ClickException(f"Invalid JSON input: {e}")
+            raise click.ClickException(f"Invalid JSON input: {e}") from e
         data["id"] = note_type_id
         note_types = [data]
     else:
@@ -197,9 +207,7 @@ def type_update(ctx, note_type_id, name, css_text, json_input):
             nt_obj["css"] = css_text
 
         if len(nt_obj) == 1:
-            raise click.ClickException(
-                "Nothing to update. Use --name, --css, or --json-input."
-            )
+            raise click.ClickException("Nothing to update. Use --name, --css, or --json-input.")
         note_types = [nt_obj]
 
     result = client.upsert_note_types(note_types)
@@ -212,8 +220,7 @@ def type_update(ctx, note_type_id, name, css_text, json_input):
         status = r.get("status")
         if status == "updated":
             output.success(
-                f"Updated note type '{r.get('name', '')}' "
-                f"(ID: {click.style(str(r.get('id', '')), **output.ID_STYLE)})"
+                f"Updated note type '{r.get('name', '')}' (ID: [cyan]{r.get('id', '')}[/cyan])"
             )
         elif status == "error":
             output.error(r.get("error", "Unknown error"))

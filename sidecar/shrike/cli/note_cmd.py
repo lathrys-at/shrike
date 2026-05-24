@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import sys
+from typing import Any
 
 import click
 
 from shrike.cli import output
-from shrike.cli.client import ServerError
 
 
 def _parse_field(value: str) -> tuple[str, str]:
@@ -19,15 +19,32 @@ def _parse_field(value: str) -> tuple[str, str]:
     return key.strip(), val.strip()
 
 
+def _parse_comma_separated(
+    ctx: click.Context,
+    param: click.Parameter,
+    value: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Split comma-separated values so --tags a,b and --tags a --tags b both work."""
+    result: list[str] = []
+    for v in value:
+        result.extend(part.strip() for part in v.split(",") if part.strip())
+    return tuple(result)
+
+
 @click.group("note", short_help="Manage notes")
-def note():
+def note() -> None:
     """Create, list, update, search, and delete notes."""
-    pass
 
 
 @note.command("list", short_help="List notes by filters")
 @click.option("--deck", help="Filter by deck name.")
-@click.option("--tags", multiple=True, help="Filter by tag (repeatable, ANDed).")
+@click.option(
+    "--tags",
+    multiple=True,
+    callback=_parse_comma_separated,
+    expose_value=True,
+    help="Filter by tag (repeatable, comma-separated, ANDed).",
+)
 @click.option("--type", "note_type", help="Filter by note type.")
 @click.option("--ids", multiple=True, type=int, help="Fetch specific note IDs.")
 @click.option("--since", "modified_since", help="Notes modified after this date (ISO 8601).")
@@ -35,7 +52,17 @@ def note():
 @click.option("--meta", is_flag=True, help="Show only metadata, not field content.")
 @click.option("--limit", type=int, default=50, help="Max notes to return (default: 50).")
 @click.pass_context
-def note_list(ctx, deck, tags, note_type, ids, modified_since, query, meta, limit):
+def note_list(
+    ctx: click.Context,
+    deck: str | None,
+    tags: tuple[str, ...],
+    note_type: str | None,
+    ids: tuple[int, ...],
+    modified_since: str | None,
+    query: str | None,
+    meta: bool,
+    limit: int,
+) -> None:
     """List notes matching structured filters.
 
     At least one filter is required. Use --meta for compact output.
@@ -43,12 +70,12 @@ def note_list(ctx, deck, tags, note_type, ids, modified_since, query, meta, limi
     \b
     Examples:
       shrike note list --deck "Japanese::Vocabulary"
-      shrike note list --tags verb --tags chapter-3
+      shrike note list --tags verb,chapter-3
       shrike note list --type Cloze --meta --limit 20
     """
     client = ctx.obj["client"]
 
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "deck": deck,
         "tags": list(tags) or None,
         "note_type": note_type,
@@ -69,35 +96,30 @@ def note_list(ctx, deck, tags, note_type, ids, modified_since, query, meta, limi
     total = result.get("total", len(notes))
 
     if not notes:
-        click.echo(click.style("No notes found.", dim=True))
+        output.console.print("[dim]No notes found.[/dim]")
         return
 
-    # Summary header
     if total > len(notes):
-        click.echo(click.style(
-            f"  Showing {len(notes)} of {total} matching notes", dim=True
-        ))
+        output.console.print(f"  [dim]Showing {len(notes)} of {total} matching notes[/dim]")
     else:
-        click.echo(click.style(f"  {total} note(s)", dim=True))
+        output.console.print(f"  [dim]{total} note(s)[/dim]")
 
-    click.echo()
+    output.console.print()
 
     if meta or not any(n.get("content") for n in notes):
-        # Table view
         rows = [output.note_summary_row(n) for n in notes]
         output.table(["ID", "Type", "Deck", "Tags", "Modified"], rows)
     else:
-        # Detail view for full results
         for n in notes:
             output.note_detail(n)
 
-    click.echo()
+    output.console.print()
 
 
 @note.command("show", short_help="Show a note by ID")
 @click.argument("note_id", type=int)
 @click.pass_context
-def note_show(ctx, note_id):
+def note_show(ctx: click.Context, note_id: int) -> None:
     """Show the full content of a specific note."""
     client = ctx.obj["client"]
     result = client.list_notes(ids=[note_id], fields="full")
@@ -117,18 +139,33 @@ def note_show(ctx, note_id):
 @click.option("--deck", help="Target deck.")
 @click.option("--type", "note_type", help="Note type (e.g., Basic, Cloze).")
 @click.option(
-    "-f", "--field",
+    "-f",
+    "--field",
     multiple=True,
     metavar="KEY=VALUE",
     help="Field value (repeatable). E.g., -f Front='Question' -f Back='Answer'",
 )
-@click.option("--tags", multiple=True, help="Tags for the note (repeatable).")
 @click.option(
-    "--json-input", is_flag=True,
+    "--tags",
+    multiple=True,
+    callback=_parse_comma_separated,
+    expose_value=True,
+    help="Tags for the note (repeatable, comma-separated).",
+)
+@click.option(
+    "--json-input",
+    is_flag=True,
     help="Read a JSON array of note objects from stdin.",
 )
 @click.pass_context
-def note_create(ctx, deck, note_type, field, tags, json_input):
+def note_create(
+    ctx: click.Context,
+    deck: str | None,
+    note_type: str | None,
+    field: tuple[str, ...],
+    tags: tuple[str, ...],
+    json_input: bool,
+) -> None:
     """Create one or more new notes.
 
     \b
@@ -146,7 +183,7 @@ def note_create(ctx, deck, note_type, field, tags, json_input):
         try:
             data = json.load(sys.stdin)
         except json.JSONDecodeError as e:
-            raise click.ClickException(f"Invalid JSON input: {e}")
+            raise click.ClickException(f"Invalid JSON input: {e}") from e
         if not isinstance(data, list):
             data = [data]
         notes = data
@@ -156,12 +193,10 @@ def note_create(ctx, deck, note_type, field, tags, json_input):
         if not note_type:
             raise click.ClickException("--type is required for inline creation.")
         if not field:
-            raise click.ClickException(
-                "At least one field is required. Use -f KEY=VALUE."
-            )
+            raise click.ClickException("At least one field is required. Use -f KEY=VALUE.")
 
         fields = dict(_parse_field(f) for f in field)
-        note_obj: dict = {
+        note_obj: dict[str, Any] = {
             "deck": deck,
             "note_type": note_type,
             "fields": fields,
@@ -182,15 +217,28 @@ def note_create(ctx, deck, note_type, field, tags, json_input):
 @note.command("update", short_help="Update an existing note")
 @click.argument("note_id", type=int)
 @click.option(
-    "-f", "--field",
+    "-f",
+    "--field",
     multiple=True,
     metavar="KEY=VALUE",
     help="Field to update (repeatable).",
 )
-@click.option("--tags", multiple=True, help="Replace all tags (repeatable).")
+@click.option(
+    "--tags",
+    multiple=True,
+    callback=_parse_comma_separated,
+    expose_value=True,
+    help="Replace all tags (repeatable, comma-separated).",
+)
 @click.option("--deck", help="Move note to this deck.")
 @click.pass_context
-def note_update(ctx, note_id, field, tags, deck):
+def note_update(
+    ctx: click.Context,
+    note_id: int,
+    field: tuple[str, ...],
+    tags: tuple[str, ...],
+    deck: str | None,
+) -> None:
     """Update an existing note by ID.
 
     Only specified fields are changed; unspecified fields are left as-is.
@@ -199,12 +247,12 @@ def note_update(ctx, note_id, field, tags, deck):
     \b
     Examples:
       shrike note update 170000123 -f Back="New answer"
-      shrike note update 170000123 --tags newtag --tags kept-tag
+      shrike note update 170000123 --tags newtag,kept-tag
       shrike note update 170000123 --deck "Other::Deck"
     """
     client = ctx.obj["client"]
 
-    note_obj: dict = {"id": note_id}
+    note_obj: dict[str, Any] = {"id": note_id}
     if field:
         note_obj["fields"] = dict(_parse_field(f) for f in field)
     if tags:
@@ -228,7 +276,7 @@ def note_update(ctx, note_id, field, tags, deck):
 @click.argument("note_ids", type=int, nargs=-1, required=True)
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
 @click.pass_context
-def note_delete(ctx, note_ids, yes):
+def note_delete(ctx: click.Context, note_ids: tuple[int, ...], yes: bool) -> None:
     """Permanently delete notes and their cards.
 
     \b
@@ -241,7 +289,7 @@ def note_delete(ctx, note_ids, yes):
         if not click.confirm(
             f"Delete {len(note_ids)} note(s)? IDs: {ids_str}\nThis cannot be undone"
         ):
-            click.echo("Cancelled.")
+            output.console.print("Cancelled.")
             return
 
     client = ctx.obj["client"]
@@ -257,22 +305,36 @@ def note_delete(ctx, note_ids, yes):
     if deleted:
         output.success(f"Deleted {len(deleted)} note(s).")
     if not_found:
-        click.echo(click.style(
-            f"Not found: {', '.join(str(i) for i in not_found)}", dim=True
-        ))
+        output.console.print(f"[dim]Not found: {', '.join(str(i) for i in not_found)}[/dim]")
 
 
 @note.command("search", short_help="Semantic search over notes")
 @click.argument("queries", nargs=-1)
 @click.option(
-    "--similar-to", multiple=True, type=int, metavar="ID",
+    "--similar-to",
+    multiple=True,
+    type=int,
+    metavar="ID",
     help="Find notes similar to this note ID.",
 )
 @click.option("--top-k", type=int, default=10, help="Results per query (default: 10).")
 @click.option("--deck", help="Restrict search to this deck.")
-@click.option("--tags", multiple=True, help="Restrict search to notes with these tags.")
+@click.option(
+    "--tags",
+    multiple=True,
+    callback=_parse_comma_separated,
+    expose_value=True,
+    help="Restrict search to notes with these tags.",
+)
 @click.pass_context
-def note_search(ctx, queries, similar_to, top_k, deck, tags):
+def note_search(
+    ctx: click.Context,
+    queries: tuple[str, ...],
+    similar_to: tuple[int, ...],
+    top_k: int,
+    deck: str | None,
+    tags: tuple[str, ...],
+) -> None:
     """Semantic similarity search over the collection.
 
     \b
@@ -282,13 +344,11 @@ def note_search(ctx, queries, similar_to, top_k, deck, tags):
       shrike note search "mitochondria" --deck Biochemistry
     """
     if not queries and not similar_to:
-        raise click.ClickException(
-            "Provide query strings and/or --similar-to note IDs."
-        )
+        raise click.ClickException("Provide query strings and/or --similar-to note IDs.")
 
     client = ctx.obj["client"]
 
-    kwargs: dict = {"top_k": top_k}
+    kwargs: dict[str, Any] = {"top_k": top_k}
     if queries:
         kwargs["queries"] = list(queries)
     if similar_to:
@@ -306,31 +366,28 @@ def note_search(ctx, queries, similar_to, top_k, deck, tags):
 
     message = result.get("_message")
     if message:
-        click.echo(click.style(f"  {message}", dim=True))
+        output.console.print(f"  [dim]{message}[/dim]")
         return
 
     results = result.get("results", [])
     if not results:
-        click.echo(click.style("No results.", dim=True))
+        output.console.print("[dim]No results.[/dim]")
         return
 
     for group in results:
         source = group.get("source", "")
-        click.echo(f"\n  {click.style('Results for:', bold=True)} {source}")
+        output.console.print(f"\n  [bold]Results for:[/bold] {source}")
         matches = group.get("matches", [])
         for m in matches:
             score = m.get("score", 0)
-            score_str = click.style(f"{score:.2f}", fg="cyan")
-            click.echo(f"    [{score_str}] ", nl=False)
-            click.echo(
-                f"{click.style(str(m['id']), **output.ID_STYLE)} "
-                f"({m.get('deck', '')}) "
+            output.console.print(
+                f"    \\[[cyan]{score:.2f}[/cyan]] [cyan]{m['id']}[/cyan] ({m.get('deck', '')})"
             )
             content = m.get("content", {})
             if content:
                 first_field = next(iter(content.values()), "")
                 if len(first_field) > 80:
                     first_field = first_field[:77] + "..."
-                click.echo(f"      {first_field}")
+                output.console.print(f"      {first_field}")
 
-    click.echo()
+    output.console.print()

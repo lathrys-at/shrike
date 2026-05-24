@@ -15,9 +15,7 @@ logger = logging.getLogger("shrike")
 
 class TemplateInput(BaseModel):
     name: str = Field(description="Template name (e.g., 'Recognition', 'Recall').")
-    front: str = Field(
-        description="Front side HTML. Use {{FieldName}} to insert field values."
-    )
+    front: str = Field(description="Front side HTML. Use {{FieldName}} to insert field values.")
     back: str = Field(
         description=(
             "Back side HTML. Use {{FieldName}} for fields and "
@@ -91,9 +89,9 @@ class NoteTypeInput(BaseModel):
     )
 
 
-def _safe_tool(fn):
+def _safe_tool(fn: Any) -> Any:
     @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return fn(*args, **kwargs)
         except Exception as e:
@@ -114,11 +112,19 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
         include: list[str] | None = None,
         note_type_details: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Get the structure and summary statistics of the Anki collection. Returns available note types with their field names, deck names with note counts, all tags in use, and scheduling statistics.
+        """Get the structure and summary statistics of the Anki collection.
 
-Use this to orient yourself before creating or searching for notes — especially to discover which note types, fields, and decks exist.
+        Returns available note types with their field names, deck names with
+        note counts, all tags in use, and scheduling statistics.
 
-With no arguments, returns summaries of everything. Use `include` to request only a subset. Note type summaries include field names and type (standard/cloze) but not full template HTML or CSS — use `note_type_details` to request full definitions for specific note types when you need to inspect or author templates."""
+        Use this to orient yourself before creating or searching for notes —
+        especially to discover which note types, fields, and decks exist.
+
+        With no arguments, returns summaries of everything. Use `include` to
+        request only a subset. Note type summaries include field names and
+        type (standard/cloze) but not full template HTML or CSS — use
+        `note_type_details` to request full definitions for specific note
+        types when you need to inspect or author templates."""
         return wrapper.get_collection_info(include, note_type_details)
 
     @mcp.tool()
@@ -133,18 +139,31 @@ With no arguments, returns summaries of everything. Use `include` to request onl
         fields: str | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """Retrieve notes matching structured filters — by deck, tags, note type, note IDs, or modification date. Returns note metadata and field content.
+        """Retrieve notes matching structured filters.
 
-Use this for precise lookups: fetching specific notes by ID, listing a deck's contents, or filtering by exact criteria. For conceptual or fuzzy queries, use search_notes instead.
+        Filter by deck, tags, note type, note IDs, or modification date.
+        Returns note metadata and field content.
 
-At least one filter must be provided. Combine filters freely — they are ANDed together. Use `fields: "meta"` to return only metadata for large result sets. The response includes `total` (full match count); if more notes matched than `limit` allows, narrow your filters."""
+        Use this for precise lookups: fetching specific notes by ID, listing
+        a deck's contents, or filtering by exact criteria. For conceptual or
+        fuzzy queries, use search_notes instead.
+
+        At least one filter must be provided. Combine filters freely — they
+        are ANDed together. Use `fields: "meta"` to return only metadata for
+        large result sets. The response includes `total` (full match count);
+        if more notes matched than `limit` allows, narrow your filters."""
         if limit < 1:
             limit = 1
         elif limit > 200:
             limit = 200
 
         if not any([ids, deck, tags, note_type, modified_since, query]):
-            return {"error": "At least one filter (ids, deck, tags, note_type, modified_since, or query) must be provided."}
+            return {
+                "error": (
+                    "At least one filter (ids, deck, tags, note_type,"
+                    " modified_since, or query) must be provided."
+                ),
+            }
 
         return wrapper.list_notes(
             ids=ids,
@@ -167,11 +186,18 @@ At least one filter must be provided. Combine filters freely — they are ANDed 
         tags: list[str] | None = None,
         exclude_ids: list[int] | None = None,
     ) -> dict[str, Any]:
-        """Semantic similarity search over the Anki collection. Accepts natural-language query strings, note IDs (to find conceptually similar notes), or both. Returns the top matches ranked by similarity score.
+        """Semantic similarity search over the Anki collection.
 
-Use this for conceptual queries that keyword search cannot handle: finding cards about a topic, checking if a concept is already covered before creating new cards, or exploring thematic clusters in the collection.
+        Accepts natural-language query strings, note IDs (to find
+        conceptually similar notes), or both. Returns the top matches
+        ranked by similarity score.
 
-At least one of `queries` or `ids` must be provided."""
+        Use this for conceptual queries that keyword search cannot handle:
+        finding cards about a topic, checking if a concept is already
+        covered before creating new cards, or exploring thematic clusters
+        in the collection.
+
+        At least one of `queries` or `ids` must be provided."""
         if not queries and not ids:
             return {"error": "At least one of queries or ids must be provided."}
 
@@ -202,20 +228,24 @@ At least one of `queries` or `ids` must be provided."""
     @mcp.tool()
     @_safe_tool
     def upsert_notes(notes: list[NoteInput]) -> dict[str, Any]:
-        """Create or update notes in bulk (1-100 per call). If a note object includes an `id`, the existing note is updated; if `id` is absent, a new note is created.
+        """Create or update notes in bulk (1-100 per call).
 
-For new notes, `deck`, `note_type`, and `fields` are required. For updates, only `id` and the properties being changed are needed — omitted properties are left unchanged.
+        If a note object includes an `id`, the existing note is updated;
+        if `id` is absent, a new note is created.
 
-Duplicate detection is handled by the application and surfaced in its own UI, not controlled through this tool."""
+        For new notes, `deck`, `note_type`, and `fields` are required. For
+        updates, only `id` and the properties being changed are needed —
+        omitted properties are left unchanged.
+
+        Duplicate detection is handled by the application and surfaced in
+        its own UI, not controlled through this tool."""
         if len(notes) > 100:
             return {"error": "Maximum 100 notes per call."}
 
         note_dicts = [n.model_dump(exclude_none=True) for n in notes]
         results = wrapper.upsert_notes(note_dicts)
 
-        changed_ids = [
-            r["id"] for r in results if r.get("status") in ("created", "updated")
-        ]
+        changed_ids = [r["id"] for r in results if r.get("status") in ("created", "updated")]
         if changed_ids:
             index.on_notes_changed(changed_ids)
 
@@ -224,13 +254,21 @@ Duplicate detection is handled by the application and surfaced in its own UI, no
     @mcp.tool()
     @_safe_tool
     def upsert_note_types(note_types: list[NoteTypeInput]) -> dict[str, Any]:
-        """Create or update note type definitions (1-10 per call). A note type defines the schema for notes: its fields, card templates (front/back HTML), and shared CSS styling.
+        """Create or update note type definitions (1-10 per call).
 
-If a note type object includes an `id`, the existing note type is updated; if `id` is absent, a new note type is created. For new note types, `name`, `fields`, `templates`, and `css` are required.
+        A note type defines the schema for notes: its fields, card templates
+        (front/back HTML), and shared CSS styling.
 
-Card templates use Anki's replacement syntax: {{FieldName}} inserts a field value, {{FrontSide}} on the back template inserts the rendered front side. Cloze note types use {{cloze:FieldName}}.
+        If a note type object includes an `id`, the existing note type is
+        updated; if `id` is absent, a new note type is created. For new note
+        types, `name`, `fields`, `templates`, and `css` are required.
 
-Note: removing fields from an existing note type deletes that field's data from all notes of that type."""
+        Card templates use Anki's replacement syntax: {{FieldName}} inserts
+        a field value, {{FrontSide}} on the back template inserts the
+        rendered front side. Cloze note types use {{cloze:FieldName}}.
+
+        Note: removing fields from an existing note type deletes that
+        field's data from all notes of that type."""
         if len(note_types) > 10:
             return {"error": "Maximum 10 note types per call."}
 
@@ -241,7 +279,10 @@ Note: removing fields from an existing note type deletes that field's data from 
     @mcp.tool()
     @_safe_tool
     def delete_notes(ids: list[int]) -> dict[str, Any]:
-        """Permanently delete notes and all their associated cards. This cannot be undone. Use list_notes or search_notes first to verify which notes will be deleted."""
+        """Permanently delete notes and all their associated cards.
+
+        This cannot be undone. Use list_notes or search_notes first to
+        verify which notes will be deleted."""
         if len(ids) > 100:
             return {"error": "Maximum 100 note IDs per call."}
 

@@ -10,7 +10,8 @@ from shrike.cli.config import DEFAULT_CONFIG_PATH, load_config, resolve_url
 
 @click.group()
 @click.option(
-    "-c", "--config",
+    "-c",
+    "--config",
     "config_path",
     type=click.Path(path_type=Path),
     default=DEFAULT_CONFIG_PATH,
@@ -25,13 +26,14 @@ from shrike.cli.config import DEFAULT_CONFIG_PATH, load_config, resolve_url
     help="Server URL (overrides config). [env: SHRIKE_URL]",
 )
 @click.option(
-    "--json", "json_output",
+    "--json",
+    "json_output",
     is_flag=True,
     help="Output raw JSON instead of formatted text.",
 )
 @click.version_option(package_name="shrike")
 @click.pass_context
-def cli(ctx, config_path, url, json_output):
+def cli(ctx: click.Context, config_path: Path, url: str | None, json_output: bool) -> None:
     """Shrike — manage your Anki collection from the command line.
 
     \b
