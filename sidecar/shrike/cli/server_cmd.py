@@ -441,13 +441,13 @@ def _emit_line(line: str, *, pretty: bool) -> None:
 
 
 def _emit_json(lines: list[str]) -> None:
-    """Parse log lines and emit as a JSON array."""
+    """Parse log lines and emit as a JSON object with a ``messages`` key."""
     records: list[dict[str, str]] = []
     for line in lines:
         parsed = parse_log_line(line)
         if parsed is not None:
             records.append(parsed)
-    output.emit_json(records)
+    output.emit_json({"messages": records})
 
 
 def _tail_follow(path: Path, initial_lines: int, *, pretty: bool) -> None:
