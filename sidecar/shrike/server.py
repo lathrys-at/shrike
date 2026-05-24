@@ -12,7 +12,7 @@ from shrike.collection import CollectionWrapper
 from shrike.log import configure_logging
 from shrike.tools import register_tools
 
-logger = logging.getLogger("shrike")
+logger = logging.getLogger("shrike.server")
 
 mcp = FastMCP(
     "Shrike",
@@ -62,12 +62,24 @@ def main() -> None:
         log_level_override=args.log_level,
     )
 
-    logger.info("Opening collection: %s", args.collection)
+    logger.info("Opening collection at %s", args.collection)
     wrapper = CollectionWrapper(args.collection)
+    info = wrapper.get_collection_info(include=["note_types", "decks", "stats"])
+    note_count = info.get("stats", {}).get("total_notes", 0)
+    deck_count = len(info.get("decks", []))
+    type_count = len(info.get("note_types", []))
+    logger.info(
+        "Collection ready: %d notes, %d decks, %d note types",
+        note_count,
+        deck_count,
+        type_count,
+    )
 
     def shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
-        logger.info("Shutting down...")
+        sig_name = signal.Signals(signum).name
+        logger.info("Received %s, shutting down", sig_name)
         wrapper.close()
+        logger.info("Shutdown complete")
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, shutdown)
@@ -75,8 +87,13 @@ def main() -> None:
 
     register_tools(mcp, wrapper)
 
-    logger.info("Starting MCP server on %s:%s", args.host, args.port)
-    logger.info("Log directory: %s", log_dir)
+    logger.info(
+        "Listening on %s:%s (log_dir=%s, log_level=%s)",
+        args.host,
+        args.port,
+        log_dir,
+        args.log_level or "info",
+    )
     mcp.settings.host = args.host
     mcp.settings.port = args.port
     mcp.run(transport="streamable-http")
