@@ -17,12 +17,14 @@ def wrapper(tmp_path):
 @pytest.fixture()
 def basic_note(wrapper):
     """Create a single Basic note in the Test deck and return its ID."""
-    results = wrapper.upsert_notes([
-        {
-            "deck": "Test",
-            "note_type": "Basic",
-            "fields": {"Front": "What is 2+2?", "Back": "4"},
-            "tags": ["math", "easy"],
-        }
-    ])
+    results = wrapper.upsert_notes(
+        [
+            {
+                "deck": "Test",
+                "note_type": "Basic",
+                "fields": {"Front": "What is 2+2?", "Back": "4"},
+                "tags": ["math", "easy"],
+            }
+        ]
+    )
     return results[0]["id"]

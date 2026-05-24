@@ -23,11 +23,16 @@ def _wait_for_server(url: str, timeout: float = 10.0) -> None:
         try:
             resp = httpx.post(
                 url,
-                json={"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
-                    "protocolVersion": "2025-03-26",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "0.0.0"},
-                }},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "0.0.0"},
+                    },
+                },
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 timeout=2.0,
             )
@@ -53,9 +58,13 @@ def server():
 
     proc = subprocess.Popen(
         [
-            sys.executable, "-m", "shrike.server",
-            "--collection", collection_path,
-            "--port", str(port),
+            sys.executable,
+            "-m",
+            "shrike.server",
+            "--collection",
+            collection_path,
+            "--port",
+            str(port),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -68,7 +77,7 @@ def server():
         stdout, stderr = proc.communicate(timeout=5)
         raise RuntimeError(
             f"Server failed to start.\nstdout: {stdout.decode()}\nstderr: {stderr.decode()}"
-        )
+        ) from None
 
     yield {"url": url, "collection_path": collection_path}
 

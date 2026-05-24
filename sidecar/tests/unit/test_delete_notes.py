@@ -22,14 +22,16 @@ class TestDeleteNotes:
         assert 9999999999999 in result["not_found"]
 
     def test_delete_multiple(self, wrapper):
-        results = wrapper.upsert_notes([
-            {
-                "deck": "Test",
-                "note_type": "Basic",
-                "fields": {"Front": f"Q{i}", "Back": f"A{i}"},
-            }
-            for i in range(3)
-        ])
+        results = wrapper.upsert_notes(
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": f"Q{i}", "Back": f"A{i}"},
+                }
+                for i in range(3)
+            ]
+        )
         ids = [r["id"] for r in results]
         result = wrapper.delete_notes(ids)
         assert set(result["deleted"]) == set(ids)

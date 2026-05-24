@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -90,9 +89,7 @@ class TestConfigureLogging:
         configure_logging(config, log_dir_override=tmp_path)
         root = logging.getLogger()
         file_handlers = [
-            h
-            for h in root.handlers
-            if isinstance(h, logging.handlers.RotatingFileHandler)
+            h for h in root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)
         ]
         assert len(file_handlers) == 1
         assert file_handlers[0].maxBytes == 1024
@@ -150,9 +147,7 @@ class TestStyleLogLine:
         assert style_log_line("   ") is None
 
     def test_info_line(self) -> None:
-        styled = style_log_line(
-            "2026-05-24T16:00:06 INFO  shrike  Opening collection: /tmp/test"
-        )
+        styled = style_log_line("2026-05-24T16:00:06 INFO  shrike  Opening collection: /tmp/test")
         assert styled is not None
         plain = styled.plain
         assert "2026-05-24T16:00:06" in plain
@@ -161,9 +156,7 @@ class TestStyleLogLine:
         assert "Opening collection: /tmp/test" in plain
 
     def test_warning_line(self) -> None:
-        styled = style_log_line(
-            "2026-05-24T16:00:06 WARNING shrike.tools  Something odd"
-        )
+        styled = style_log_line("2026-05-24T16:00:06 WARNING shrike.tools  Something odd")
         assert styled is not None
         assert "WARNING" in styled.plain
 

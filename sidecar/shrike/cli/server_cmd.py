@@ -16,7 +16,7 @@ import click
 from shrike.cli import output
 from shrike.cli.client import ShrikeClient
 from shrike.cli.config import resolve_collection, save_config
-from shrike.log import DEFAULT_LOG_DIR, get_log_file, style_log_line
+from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
 
 STATE_DIR = Path("~/.local/state/shrike").expanduser()
 PID_FILE = STATE_DIR / "server.pid"
@@ -339,29 +339,48 @@ def server_status(ctx: click.Context) -> None:
     default="shrike",
     help="Which process log to view (default: shrike).",
 )
+@click.option("--json-output", "--json", "json_out", is_flag=True, help="Output as JSON array.")
+@click.option("--pretty/--no-pretty", default=True, help="Styled output (default: --pretty).")
 @click.pass_context
 def server_logs(
     ctx: click.Context,
     follow: bool,
     lines: int,
     process: str,
+    json_out: bool,
+    pretty: bool,
 ) -> None:
     """View the server log output.
 
-    Shows the most recent log lines by default. Use --follow to stream
-    new entries as they are written.
+    Reads from the log file by default, or from stdin if piped.
 
     \b
     Examples:
       shrike server logs
       shrike server logs -f
       shrike server logs -n 100
-      shrike server logs -p llama
+      shrike server logs --json
+      shrike server logs --no-pretty
+      cat ~/.local/state/shrike/logs/shrike.log | shrike server logs --json
     """
+    if json_out and follow:
+        raise click.ClickException("--json and --follow cannot be used together.")
+
+    reading_stdin = not sys.stdin.isatty()
+
+    if reading_stdin:
+        input_lines = sys.stdin.read().splitlines()
+        if json_out:
+            _emit_json(input_lines)
+        else:
+            for line in input_lines:
+                _emit_line(line, pretty=pretty)
+        return
+
+    # Reading from log file
     config = ctx.obj["config"]
     meta = _read_meta()
 
-    # Resolve log file path
     log_dir = None
     if meta:
         log_dir = meta.get("log_dir")
@@ -376,25 +395,40 @@ def server_logs(
             "Is the server running? Start it with: shrike server start"
         )
 
-    if follow:
-        _tail_follow(log_file, lines)
+    if json_out:
+        all_lines = log_file.read_text(encoding="utf-8").splitlines()
+        _emit_json(all_lines[-lines:])
+    elif follow:
+        _tail_follow(log_file, lines, pretty=pretty)
     else:
-        _tail_lines(log_file, lines)
+        all_lines = log_file.read_text(encoding="utf-8").splitlines()
+        for line in all_lines[-lines:]:
+            _emit_line(line, pretty=pretty)
 
 
-def _tail_lines(path: Path, n: int) -> None:
-    """Print the last n lines of a file."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as err:
-        raise click.ClickException(f"Cannot read log file: {err}") from err
+def _emit_line(line: str, *, pretty: bool) -> None:
+    """Print a single log line — styled or plain."""
+    if pretty:
+        styled = style_log_line(line)
+        if styled is not None:
+            output.console.print(styled, highlight=False)
+    else:
+        stripped = line.strip()
+        if stripped:
+            click.echo(stripped)
 
-    all_lines = text.splitlines()
-    for line in all_lines[-n:]:
-        _print_log_line(line)
+
+def _emit_json(lines: list[str]) -> None:
+    """Parse log lines and emit as a JSON array."""
+    records: list[dict[str, str]] = []
+    for line in lines:
+        parsed = parse_log_line(line)
+        if parsed is not None:
+            records.append(parsed)
+    output.emit_json(records)
 
 
-def _tail_follow(path: Path, initial_lines: int) -> None:
+def _tail_follow(path: Path, initial_lines: int, *, pretty: bool) -> None:
     """Print the last n lines then follow new output."""
     import select
 
@@ -404,16 +438,13 @@ def _tail_follow(path: Path, initial_lines: int) -> None:
         raise click.ClickException(f"Cannot read log file: {err}") from err
 
     try:
-        # Read existing content, show last N lines
         content = fh.read()
         existing = content.splitlines()
         for line in existing[-initial_lines:]:
-            _print_log_line(line)
+            _emit_line(line, pretty=pretty)
 
-        # Follow new lines
         output.console.print("[dim]--- following (Ctrl+C to stop) ---[/dim]")
         while True:
-            # Use select for interruptible waiting on macOS/Linux
             if hasattr(fh, "fileno"):
                 try:
                     select.select([fh], [], [], 0.5)
@@ -425,15 +456,8 @@ def _tail_follow(path: Path, initial_lines: int) -> None:
             new_data = fh.read()
             if new_data:
                 for line in new_data.splitlines():
-                    _print_log_line(line)
+                    _emit_line(line, pretty=pretty)
     except KeyboardInterrupt:
-        output.console.print()  # clean line after ^C
+        output.console.print()
     finally:
         fh.close()
-
-
-def _print_log_line(line: str) -> None:
-    """Print a styled log line.  Formatting lives in ``shrike.log``."""
-    styled = style_log_line(line)
-    if styled is not None:
-        output.console.print(styled, highlight=False)

@@ -26,10 +26,13 @@ class TestCollectionInfo:
         assert "note_types" not in result
 
     def test_note_type_details(self, mcp):
-        result = mcp("collection_info", {
-            "include": ["note_types"],
-            "note_type_details": ["Basic"],
-        })
+        result = mcp(
+            "collection_info",
+            {
+                "include": ["note_types"],
+                "note_type_details": ["Basic"],
+            },
+        )
         basic = next(nt for nt in result["note_types"] if nt["name"] == "Basic")
         assert "templates" in basic
         assert "css" in basic
@@ -41,14 +44,19 @@ class TestNoteLifecycle:
     _note_id: int | None = None
 
     def test_01_create_note(self, mcp):
-        result = mcp("upsert_notes", {
-            "notes": [{
-                "deck": "Integration",
-                "note_type": "Basic",
-                "fields": {"Front": "Capital of France?", "Back": "Paris"},
-                "tags": ["geography"],
-            }]
-        })
+        result = mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "deck": "Integration",
+                        "note_type": "Basic",
+                        "fields": {"Front": "Capital of France?", "Back": "Paris"},
+                        "tags": ["geography"],
+                    }
+                ]
+            },
+        )
         assert result["results"][0]["status"] == "created"
         TestNoteLifecycle._note_id = result["results"][0]["id"]
 
@@ -71,12 +79,17 @@ class TestNoteLifecycle:
         assert note["note_type"] == "Basic"
 
     def test_05_update_fields(self, mcp):
-        result = mcp("upsert_notes", {
-            "notes": [{
-                "id": self._note_id,
-                "fields": {"Back": "Paris (Île-de-France)"},
-            }]
-        })
+        result = mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "id": self._note_id,
+                        "fields": {"Back": "Paris (Île-de-France)"},
+                    }
+                ]
+            },
+        )
         assert result["results"][0]["status"] == "updated"
 
     def test_06_verify_update(self, mcp):
@@ -86,16 +99,12 @@ class TestNoteLifecycle:
         assert note["content"]["Front"] == "Capital of France?"  # unchanged
 
     def test_07_update_tags(self, mcp):
-        mcp("upsert_notes", {
-            "notes": [{"id": self._note_id, "tags": ["geography", "europe"]}]
-        })
+        mcp("upsert_notes", {"notes": [{"id": self._note_id, "tags": ["geography", "europe"]}]})
         result = mcp("list_notes", {"ids": [self._note_id]})
         assert set(result["notes"][0]["tags"]) == {"geography", "europe"}
 
     def test_08_move_deck(self, mcp):
-        mcp("upsert_notes", {
-            "notes": [{"id": self._note_id, "deck": "Integration::Moved"}]
-        })
+        mcp("upsert_notes", {"notes": [{"id": self._note_id, "deck": "Integration::Moved"}]})
         result = mcp("list_notes", {"ids": [self._note_id]})
         assert result["notes"][0]["deck"] == "Integration::Moved"
 
@@ -110,16 +119,19 @@ class TestNoteLifecycle:
 
 class TestBulkOperations:
     def test_create_multiple(self, mcp):
-        result = mcp("upsert_notes", {
-            "notes": [
-                {
-                    "deck": "Bulk",
-                    "note_type": "Basic",
-                    "fields": {"Front": f"Q{i}", "Back": f"A{i}"},
-                }
-                for i in range(5)
-            ]
-        })
+        result = mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "deck": "Bulk",
+                        "note_type": "Basic",
+                        "fields": {"Front": f"Q{i}", "Back": f"A{i}"},
+                    }
+                    for i in range(5)
+                ]
+            },
+        )
         assert len(result["results"]) == 5
         assert all(r["status"] == "created" for r in result["results"])
 
@@ -127,20 +139,23 @@ class TestBulkOperations:
         assert listed["total"] == 5
 
     def test_partial_failure(self, mcp):
-        result = mcp("upsert_notes", {
-            "notes": [
-                {
-                    "deck": "Bulk",
-                    "note_type": "Basic",
-                    "fields": {"Front": "Good", "Back": "Note"},
-                },
-                {
-                    "deck": "Bulk",
-                    "note_type": "DoesNotExist",
-                    "fields": {"Front": "Bad", "Back": "Note"},
-                },
-            ]
-        })
+        result = mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "deck": "Bulk",
+                        "note_type": "Basic",
+                        "fields": {"Front": "Good", "Back": "Note"},
+                    },
+                    {
+                        "deck": "Bulk",
+                        "note_type": "DoesNotExist",
+                        "fields": {"Front": "Bad", "Back": "Note"},
+                    },
+                ]
+            },
+        )
         assert result["results"][0]["status"] == "created"
         assert result["results"][1]["status"] == "error"
 
@@ -154,65 +169,82 @@ class TestNoteTypeLifecycle:
     _note_type_id: int | None = None
 
     def test_01_create_note_type(self, mcp):
-        result = mcp("upsert_note_types", {
-            "note_types": [{
-                "name": "Integration Test Type",
-                "fields": ["Term", "Definition", "Example"],
-                "templates": [{
-                    "name": "Forward",
-                    "front": "<div>{{Term}}</div>",
-                    "back": "{{FrontSide}}<hr>{{Definition}}<br>{{Example}}",
-                }],
-                "css": ".card { font-family: sans-serif; }",
-            }]
-        })
+        result = mcp(
+            "upsert_note_types",
+            {
+                "note_types": [
+                    {
+                        "name": "Integration Test Type",
+                        "fields": ["Term", "Definition", "Example"],
+                        "templates": [
+                            {
+                                "name": "Forward",
+                                "front": "<div>{{Term}}</div>",
+                                "back": "{{FrontSide}}<hr>{{Definition}}<br>{{Example}}",
+                            }
+                        ],
+                        "css": ".card { font-family: sans-serif; }",
+                    }
+                ]
+            },
+        )
         assert result["results"][0]["status"] == "created"
         TestNoteTypeLifecycle._note_type_id = result["results"][0]["id"]
 
     def test_02_visible_in_collection_info(self, mcp):
-        result = mcp("collection_info", {
-            "include": ["note_types"],
-            "note_type_details": ["Integration Test Type"],
-        })
-        nt = next(
-            nt for nt in result["note_types"]
-            if nt["name"] == "Integration Test Type"
+        result = mcp(
+            "collection_info",
+            {
+                "include": ["note_types"],
+                "note_type_details": ["Integration Test Type"],
+            },
         )
+        nt = next(nt for nt in result["note_types"] if nt["name"] == "Integration Test Type")
         assert nt["fields"] == ["Term", "Definition", "Example"]
         assert len(nt["templates"]) == 1
         assert "font-family" in nt["css"]
 
     def test_03_create_note_with_custom_type(self, mcp):
-        result = mcp("upsert_notes", {
-            "notes": [{
-                "deck": "Integration",
-                "note_type": "Integration Test Type",
-                "fields": {
-                    "Term": "Photosynthesis",
-                    "Definition": "Conversion of light to chemical energy",
-                    "Example": "Plants use chlorophyll",
-                },
-            }]
-        })
+        result = mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "deck": "Integration",
+                        "note_type": "Integration Test Type",
+                        "fields": {
+                            "Term": "Photosynthesis",
+                            "Definition": "Conversion of light to chemical energy",
+                            "Example": "Plants use chlorophyll",
+                        },
+                    }
+                ]
+            },
+        )
         assert result["results"][0]["status"] == "created"
 
     def test_04_update_note_type_css(self, mcp):
-        result = mcp("upsert_note_types", {
-            "note_types": [{
-                "id": self._note_type_id,
-                "css": ".card { font-family: serif; color: #333; }",
-            }]
-        })
+        result = mcp(
+            "upsert_note_types",
+            {
+                "note_types": [
+                    {
+                        "id": self._note_type_id,
+                        "css": ".card { font-family: serif; color: #333; }",
+                    }
+                ]
+            },
+        )
         assert result["results"][0]["status"] == "updated"
 
-        info = mcp("collection_info", {
-            "include": ["note_types"],
-            "note_type_details": ["Integration Test Type"],
-        })
-        nt = next(
-            nt for nt in info["note_types"]
-            if nt["name"] == "Integration Test Type"
+        info = mcp(
+            "collection_info",
+            {
+                "include": ["note_types"],
+                "note_type_details": ["Integration Test Type"],
+            },
         )
+        nt = next(nt for nt in info["note_types"] if nt["name"] == "Integration Test Type")
         assert "serif" in nt["css"]
 
 
@@ -233,35 +265,44 @@ class TestValidationOverTransport:
         assert "error" in result
 
     def test_upsert_notes_missing_deck(self, mcp):
-        result = mcp("upsert_notes", {
-            "notes": [{"note_type": "Basic", "fields": {"Front": "Q", "Back": "A"}}]
-        })
+        result = mcp(
+            "upsert_notes",
+            {"notes": [{"note_type": "Basic", "fields": {"Front": "Q", "Back": "A"}}]},
+        )
         assert result["results"][0]["status"] == "error"
 
     def test_upsert_notes_invalid_note_type(self, mcp):
-        result = mcp("upsert_notes", {
-            "notes": [{
-                "deck": "Test",
-                "note_type": "Nonexistent",
-                "fields": {"Front": "Q", "Back": "A"},
-            }]
-        })
+        result = mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "deck": "Test",
+                        "note_type": "Nonexistent",
+                        "fields": {"Front": "Q", "Back": "A"},
+                    }
+                ]
+            },
+        )
         assert result["results"][0]["status"] == "error"
         assert "not found" in result["results"][0]["error"].lower()
 
     def test_update_nonexistent_note(self, mcp):
-        result = mcp("upsert_notes", {
-            "notes": [{"id": 9999999999999, "fields": {"Front": "Q"}}]
-        })
+        result = mcp("upsert_notes", {"notes": [{"id": 9999999999999, "fields": {"Front": "Q"}}]})
         assert result["results"][0]["status"] == "error"
 
     def test_create_duplicate_note_type(self, mcp):
-        result = mcp("upsert_note_types", {
-            "note_types": [{
-                "name": "Basic",
-                "fields": ["A"],
-                "templates": [{"name": "C", "front": "{{A}}", "back": "{{A}}"}],
-                "css": "",
-            }]
-        })
+        result = mcp(
+            "upsert_note_types",
+            {
+                "note_types": [
+                    {
+                        "name": "Basic",
+                        "fields": ["A"],
+                        "templates": [{"name": "C", "front": "{{A}}", "back": "{{A}}"}],
+                        "css": "",
+                    }
+                ]
+            },
+        )
         assert result["results"][0]["status"] == "error"

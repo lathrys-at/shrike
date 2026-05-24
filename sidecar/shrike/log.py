@@ -125,24 +125,20 @@ _LEVEL_STYLES: dict[str, str] = {
 _LOUD_LEVELS = {"ERROR", "CRITICAL"}
 
 
-def style_log_line(line: str) -> Any:
-    """Turn a plain-text log line into a styled ``rich.text.Text``.
+def parse_log_line(line: str) -> dict[str, str] | None:
+    """Parse a plain-text log line into its components.
 
-    Returns ``None`` for blank lines.  Returns an unstyled ``Text`` if the
-    line doesn't match the expected format.
-
-    This keeps the format knowledge (``FILE_FORMAT``) and the display
-    knowledge in the same module.
+    Returns a dict with ``timestamp``, ``level``, ``logger``, and
+    ``message`` keys, or ``None`` if the line is blank or doesn't
+    match the expected format.
     """
-    from rich.text import Text
-
     stripped = line.strip()
     if not stripped:
         return None
 
     # Timestamp is always 19 chars (YYYY-MM-DDTHH:MM:SS), followed by a space.
     if len(stripped) < 21 or stripped[19] != " ":
-        return Text(stripped)
+        return None
 
     timestamp = stripped[:19]
     after_ts = stripped[20:]
@@ -150,7 +146,7 @@ def style_log_line(line: str) -> Any:
     # Level is the next whitespace-delimited token.
     space_idx = after_ts.find(" ")
     if space_idx < 0:
-        return Text(stripped)
+        return None
 
     level = after_ts[:space_idx].strip()
     rest = after_ts[space_idx + 1 :].lstrip()
@@ -164,17 +160,40 @@ def style_log_line(line: str) -> Any:
         logger_name = rest
         message = ""
 
-    level_upper = level.upper()
-    level_style = _LEVEL_STYLES.get(level_upper, "")
-    msg_style = level_style if level_upper in _LOUD_LEVELS else ""
+    return {
+        "timestamp": timestamp,
+        "level": level.upper(),
+        "logger": logger_name,
+        "message": message,
+    }
+
+
+def style_log_line(line: str) -> Any:
+    """Turn a plain-text log line into a styled ``rich.text.Text``.
+
+    Returns ``None`` for blank lines.  Returns an unstyled ``Text`` for
+    lines that don't match the expected format.
+    """
+    from rich.text import Text
+
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    parsed = parse_log_line(stripped)
+    if parsed is None:
+        return Text(stripped)
+
+    level_style = _LEVEL_STYLES.get(parsed["level"], "")
+    msg_style = level_style if parsed["level"] in _LOUD_LEVELS else ""
 
     styled = Text(no_wrap=True, overflow="ellipsis")
-    styled.append(timestamp, style="dim")
+    styled.append(parsed["timestamp"], style="dim")
     styled.append(" ")
-    styled.append(f"{level:<8s}", style=level_style)
-    styled.append(logger_name, style="cyan dim")
+    styled.append(f"{parsed['level']:<8s}", style=level_style)
+    styled.append(parsed["logger"], style="cyan dim")
     styled.append("  ", style="")
-    styled.append(message, style=msg_style)
+    styled.append(parsed["message"], style=msg_style)
     return styled
 
 
