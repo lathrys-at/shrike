@@ -139,8 +139,20 @@ The CLI talks to the MCP server over HTTP — it can target a remote server via 
 
 ### Daemon management
 
-`shrike server start` spawns the server as a background process. State files live in the platform state directory (see `shrike/paths.py`):
-- `server.pid` — PID file
+`shrike server start` spawns the server as a background process. Lifecycle is managed by `shrike/daemon.py`.
+
+**Liveness detection** uses file locks via `filelock` (fcntl on Unix, msvcrt on Windows). The server holds an exclusive lock on `server.lock` for its entire lifetime. When the server exits — cleanly or via crash — the OS releases the lock. Clients probe liveness by attempting a non-blocking lock acquisition. This avoids PID recycling issues entirely.
+
+**Shutdown** is cross-platform via an HTTP endpoint (`POST /shutdown` on the running server, registered via FastMCP's `custom_route`). The CLI's `stop_server()` uses a three-tier strategy:
+1. HTTP POST `/shutdown` — clean, works on all platforms
+2. SIGTERM (Unix only) — fallback if HTTP is unresponsive
+3. SIGKILL / TerminateProcess — last resort for hung processes
+
+Signal handlers (SIGTERM, SIGINT) remain as a secondary path for Unix `kill` commands and Ctrl+C in foreground mode.
+
+State files live in the platform state directory (see `shrike/paths.py`):
+- `server.lock` — exclusive file lock held by the running server
+- `server.pid` — PID file (convenience for diagnostics, not used for liveness)
 - `server.json` — metadata (URL, port, collection path, start time, log dir)
 
 ### Platform directories

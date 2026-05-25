@@ -128,6 +128,8 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         root = tmp_path_factory.mktemp(name)
         log_dir = root / "logs"
         log_dir.mkdir()
+        state_dir = root / "state"
+        state_dir.mkdir()
         collection_path = str(root / "collection.anki2")
 
         port = _free_port()
@@ -144,6 +146,8 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
                 str(port),
                 "--log-dir",
                 str(log_dir),
+                "--state-dir",
+                str(state_dir),
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

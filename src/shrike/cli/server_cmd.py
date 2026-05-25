@@ -1,13 +1,8 @@
 from __future__ import annotations
 
-import contextlib
-import json
-import os
-import signal
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,50 +12,20 @@ from shrike.cli import output
 from shrike.cli.client import ShrikeClient
 from shrike.cli.config import resolve_collection, save_config
 from shrike.cli.output import output_options
+from shrike.daemon import (
+    META_FILE,
+    STATE_DIR,
+    cleanup_state,
+    is_server_alive,
+    read_server_meta,
+    server_status,
+    stop_server,
+)
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
-from shrike.paths import state_dir
-
-STATE_DIR = state_dir()
-PID_FILE = STATE_DIR / "server.pid"
-META_FILE = STATE_DIR / "server.json"
-
-
-def _is_process_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
-
-
-def _read_pid() -> int | None:
-    if not PID_FILE.exists():
-        return None
-    try:
-        pid = int(PID_FILE.read_text().strip())
-        return pid if _is_process_alive(pid) else None
-    except (ValueError, OSError):
-        return None
-
-
-def _read_meta() -> dict[str, Any] | None:
-    if not META_FILE.exists():
-        return None
-    try:
-        result: dict[str, Any] = json.loads(META_FILE.read_text())
-        return result
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def _cleanup_state() -> None:
-    for f in (PID_FILE, META_FILE):
-        with contextlib.suppress(OSError):
-            f.unlink(missing_ok=True)
 
 
 def _wait_for_server(url: str, timeout: float = 15.0) -> bool:
-    client = ShrikeClient(url)
+    client = ShrikeClient(url, autostart=False)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if client.ping():
@@ -79,11 +44,16 @@ def ensure_server(config: dict[str, Any]) -> str:
     from shrike.cli.config import resolve_collection, resolve_url
 
     url = resolve_url(config)
-    pid = _read_pid()
-    if pid is not None:
+
+    if is_server_alive():
+        meta = read_server_meta()
+        if meta:
+            return str(meta.get("url", url))
         return url
 
-    # Resolve everything we need to spawn the daemon
+    # Clean up any stale state from a crashed server
+    cleanup_state()
+
     collection_path = resolve_collection(config)
     if not collection_path:
         raise click.ClickException(
@@ -133,25 +103,8 @@ def ensure_server(config: dict[str, Any]) -> str:
         start_new_session=True,
     )
 
-    PID_FILE.write_text(str(proc.pid))
-    META_FILE.write_text(
-        json.dumps(
-            {
-                "pid": proc.pid,
-                "url": url,
-                "host": server_host,
-                "port": server_port,
-                "collection": collection_path,
-                "log_dir": resolved_log_dir,
-                "log_level": resolved_log_level,
-                "started": datetime.now(UTC).isoformat(),
-            },
-            indent=2,
-        )
-    )
-
     if not _wait_for_server(url) and proc.poll() is not None:
-        _cleanup_state()
+        cleanup_state()
         log_file = get_log_file(config, log_dir_override=resolved_log_dir)
         raise click.ClickException(
             f"Auto-started server exited with code {proc.returncode}.\nCheck log: {log_file}"
@@ -229,11 +182,11 @@ def server_start(
     )
     resolved_log_level = log_level or log_config.get("level", "info")
 
-    # Check if already running
-    existing_pid = _read_pid()
-    if existing_pid is not None:
-        meta = _read_meta()
+    # Check if already running (via lock, not PID)
+    if is_server_alive():
+        meta = read_server_meta()
         existing_url = meta.get("url", "unknown") if meta else "unknown"
+        existing_pid = meta.get("pid", "unknown") if meta else "unknown"
         raise click.ClickException(
             f"Server is already running (PID {existing_pid})\n"
             f"  URL: {existing_url}\n\n"
@@ -267,9 +220,6 @@ def server_start(
     # Daemon mode
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # The server process handles its own log files via RotatingFileHandler.
-    # We still capture stderr to a bootstrap log in case the process crashes
-    # before logging is configured.
     bootstrap_log = Path(resolved_log_dir)
     bootstrap_log.mkdir(parents=True, exist_ok=True)
     bootstrap_log_file = open(bootstrap_log / "shrike-bootstrap.log", "a")  # noqa: SIM115
@@ -295,24 +245,6 @@ def server_start(
         start_new_session=True,
     )
 
-    # Write PID and metadata
-    PID_FILE.write_text(str(proc.pid))
-    META_FILE.write_text(
-        json.dumps(
-            {
-                "pid": proc.pid,
-                "url": url,
-                "host": server_host,
-                "port": server_port,
-                "collection": collection_path,
-                "log_dir": resolved_log_dir,
-                "log_level": resolved_log_level,
-                "started": datetime.now(UTC).isoformat(),
-            },
-            indent=2,
-        )
-    )
-
     json_out: bool = ctx.obj["json"]
 
     # Save config if it doesn't exist yet
@@ -325,7 +257,7 @@ def server_start(
         if not json_out:
             output.console.print(f"  [dim]Config saved to {saved}[/dim]")
 
-    # Wait for server to come up
+    # Wait for server to come up (lock acquired + responding to pings)
     if not json_out:
         output.console.print(f"Starting server (PID {proc.pid})...")
 
@@ -349,7 +281,7 @@ def server_start(
             output.kv("Level", resolved_log_level, indent=2)
     else:
         if proc.poll() is not None:
-            _cleanup_state()
+            cleanup_state()
             raise click.ClickException(
                 f"Server process exited with code {proc.returncode}.\nCheck log: {log_file}"
             )
@@ -377,114 +309,61 @@ def server_start(
 def server_stop(ctx: click.Context) -> None:
     """Stop the Shrike MCP server daemon."""
     json_out: bool = ctx.obj["json"]
-    pid = _read_pid()
-    if pid is None:
-        meta = _read_meta()
-        if meta:
-            _cleanup_state()
-        if json_out:
-            output.emit_json({"stopped": False, "reason": "not running"})
-        else:
-            if meta:
-                output.console.print("Server is not running (cleaned up stale state).")
-            else:
-                output.console.print("Server is not running.")
-        return
 
     if not json_out:
-        output.console.print(f"Stopping server (PID {pid})...")
-
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        _cleanup_state()
-        if json_out:
-            output.emit_json({"stopped": True, "pid": pid})
+        if is_server_alive():
+            output.console.print("Stopping server...")
         else:
-            output.success("Server already stopped.")
-        return
+            output.console.print("Server is not running.")
+            if META_FILE.exists():
+                cleanup_state()
+                output.console.print("[dim](cleaned up stale state)[/dim]")
+            return
 
-    # Wait for graceful shutdown
-    forced = False
-    for _ in range(50):  # 5 seconds
-        if not _is_process_alive(pid):
-            break
-        time.sleep(0.1)
-    else:
-        forced = True
-        if not json_out:
-            output.console.print("[yellow]Graceful shutdown timed out, forcing...[/yellow]")
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
+    result = stop_server()
 
-    _cleanup_state()
     if json_out:
-        output.emit_json({"stopped": True, "pid": pid, "forced": forced})
+        output.emit_json(result)
     else:
-        output.success("Server stopped.")
+        if result.get("stopped"):
+            if result.get("forced"):
+                output.console.print("[yellow]Graceful shutdown timed out, forced kill.[/yellow]")
+            output.success("Server stopped.")
+        else:
+            output.console.print(f"[dim]{result.get('reason', 'unknown')}[/dim]")
 
 
 @server.command("status", short_help="Show server status")
 @output_options
 @click.pass_context
-def server_status(ctx: click.Context) -> None:
+def server_status_cmd(ctx: click.Context) -> None:
     """Check whether the Shrike MCP server is running."""
-    pid = _read_pid()
-    meta = _read_meta()
+    status = server_status()
 
-    if pid is None:
-        if meta:
-            _cleanup_state()
-        if ctx.obj["json"]:
-            output.emit_json({"running": False})
-        else:
-            output.console.print("[dim]Server is not running.[/dim]")
+    if ctx.obj["json"]:
+        output.emit_json(status)
+        if not status["running"]:
+            ctx.exit(1)
+        return
+
+    if not status["running"]:
+        output.console.print("[dim]Server is not running.[/dim]")
         ctx.exit(1)
         return
 
-    uptime: str | None = None
-    started = (meta or {}).get("started", "")
-    if started:
-        try:
-            start_dt = datetime.fromisoformat(started)
-            delta = datetime.now(UTC) - start_dt
-            hours, remainder = divmod(int(delta.total_seconds()), 3600)
-            minutes, seconds = divmod(remainder, 60)
-            if hours:
-                uptime = f"{hours}h {minutes}m"
-            elif minutes:
-                uptime = f"{minutes}m {seconds}s"
-            else:
-                uptime = f"{seconds}s"
-        except ValueError:
-            pass
-
-    if ctx.obj["json"]:
-        data: dict[str, Any] = {"running": True, "pid": pid}
-        if meta:
-            data["url"] = meta.get("url")
-            data["collection"] = meta.get("collection")
-            data["log_level"] = meta.get("log_level")
-            data["log_dir"] = meta.get("log_dir")
-            data["started"] = meta.get("started")
-            if uptime:
-                data["uptime"] = uptime
-        output.emit_json(data)
-        return
-
     output.console.print("[bold green]Server is running[/bold green]")
-    if meta:
-        output.kv("URL", meta.get("url", "unknown"), indent=2)
-        output.kv("PID", meta.get("pid", pid), indent=2)
-        output.kv("Collection", meta.get("collection", "unknown"), indent=2)
-        output.kv("Log level", meta.get("log_level", "info"), indent=2)
-
-        log_dir = meta.get("log_dir")
-        if log_dir:
-            output.kv("Log", str(Path(log_dir) / "shrike.log"), indent=2)
-
-        if uptime:
-            output.kv("Uptime", uptime, indent=2)
+    if status.get("url"):
+        output.kv("URL", status["url"], indent=2)
+    if status.get("pid"):
+        output.kv("PID", status["pid"], indent=2)
+    if status.get("collection"):
+        output.kv("Collection", status["collection"], indent=2)
+    if status.get("log_level"):
+        output.kv("Log level", status["log_level"], indent=2)
+    if status.get("log_dir"):
+        output.kv("Log", str(Path(status["log_dir"]) / "shrike.log"), indent=2)
+    if status.get("uptime"):
+        output.kv("Uptime", status["uptime"], indent=2)
 
 
 @server.command("logs", short_help="View server logs")
@@ -535,15 +414,15 @@ def server_logs(
 
     # Reading from log file
     config = ctx.obj["config"]
-    meta = _read_meta()
+    meta = read_server_meta()
 
-    log_dir = None
+    log_dir_path = None
     if meta:
-        log_dir = meta.get("log_dir")
-    if not log_dir:
-        log_dir = config.get("logging", {}).get("dir")
+        log_dir_path = meta.get("log_dir")
+    if not log_dir_path:
+        log_dir_path = config.get("logging", {}).get("dir")
 
-    log_file = get_log_file(config, log_dir_override=log_dir, process_name=process)
+    log_file = get_log_file(config, log_dir_override=log_dir_path, process_name=process)
 
     if not log_file.exists():
         raise click.ClickException(

@@ -5,6 +5,9 @@ Each test class gets its own isolated server with a fresh collection.
 
 from __future__ import annotations
 
+import time
+
+import httpx
 import pytest
 
 pytestmark = pytest.mark.integration
@@ -690,6 +693,34 @@ class TestValidation:
         result = mcp("list_notes", {"ids": [9999999999999]})
         assert result["total"] == 0
         assert result["notes"] == []
+
+
+class TestHttpShutdown:
+    """Verify the POST /shutdown endpoint cleanly stops the server."""
+
+    def test_shutdown_returns_ok_and_server_exits(self, server_factory):
+        srv = server_factory("shutdown")
+        shutdown_url = srv.url.rsplit("/", 1)[0] + "/shutdown"
+
+        resp = httpx.post(shutdown_url, timeout=5.0)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert "pid" in body
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                httpx.post(
+                    srv.url,
+                    json={"jsonrpc": "2.0", "id": 0, "method": "ping", "params": {}},
+                    timeout=1.0,
+                )
+                time.sleep(0.1)
+            except (httpx.ConnectError, httpx.RemoteProtocolError):
+                break
+        else:
+            pytest.fail("Server did not exit after /shutdown")
 
 
 class TestBatchLimits:
