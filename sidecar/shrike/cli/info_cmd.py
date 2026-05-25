@@ -56,22 +56,18 @@ def info(
         output.emit_json(result)
         return
 
+    sections: list[bool] = []
+
     # Note types
     note_types = result.get("note_types")
     if note_types is not None:
-        output.section("Note Types")
-        rows = []
-        for nt in note_types:
-            rows.append(
-                [
-                    nt["name"],
-                    nt.get("type", "standard"),
-                    ", ".join(nt.get("fields", [])),
-                ]
-            )
-        output.table(["Name", "Type", "Fields"], rows)
+        rows = [
+            [nt["name"], nt.get("type", "standard"), ", ".join(nt.get("fields", []))]
+            for nt in note_types
+        ]
+        output.table(["Note Type", "Kind", "Fields"], rows)
+        sections.append(True)
 
-        # Show details for requested types
         for nt in note_types:
             if nt.get("templates") is not None or nt.get("css") is not None:
                 output.note_type_detail(nt)
@@ -79,27 +75,33 @@ def info(
     # Decks
     decks = result.get("decks")
     if decks is not None:
-        output.section("Decks")
+        if sections:
+            output.console.print()
         rows = [[d["name"], str(d.get("note_count", 0))] for d in decks]
-        output.table(["Name", "Notes"], rows)
+        output.table(["Deck", "Notes"], rows)
+        sections.append(True)
 
     # Tags
     tags = result.get("tags")
     if tags is not None:
-        output.section("Tags")
+        if sections:
+            output.console.print()
         if tags:
             styled = " ".join(f"[yellow]{t}[/yellow]" for t in tags)
-            output.console.print(f"  {styled}")
+            output.console.print(f"  [bold]Tags[/bold]  {styled}")
         else:
-            output.console.print("  [dim](none)[/dim]")
+            output.console.print("  [bold]Tags[/bold]  [dim](none)[/dim]")
+        sections.append(True)
 
     # Stats
     stats = result.get("stats")
     if stats is not None:
-        output.section("Stats")
-        output.kv("Total notes", stats.get("total_notes", 0))
-        output.kv("Total cards", stats.get("total_cards", 0))
-        output.kv("Cards due today", stats.get("cards_due_today", 0))
-        output.kv("New cards", stats.get("new_cards", 0))
-
-    output.console.print()
+        if sections:
+            output.console.print()
+        rows = [
+            ["Notes", str(stats.get("total_notes", 0))],
+            ["Cards", str(stats.get("total_cards", 0))],
+            ["Due today", str(stats.get("cards_due_today", 0))],
+            ["New", str(stats.get("new_cards", 0))],
+        ]
+        output.table(["Stat", "Count"], rows)
