@@ -186,8 +186,33 @@ Logging is configured in `shrike/log.py`. Log format, parsing, and styling all l
 ```
 Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, logger and message are separated by double-space. `parse_log_line()` and `style_log_line()` in `log.py` know this format — keep them in sync if you change it.
 
+## Upcoming tasks
+
+### 1. CLI integration tests and bug fixes
+
+Systematically exercise every `shrike` CLI command against a running server and verify it works end-to-end. At least one command currently fails with an exception traceback. Add integration tests in `tests/integration/` that cover the full CLI surface: `server start/stop/status/logs`, `info`, `note list/show/create/update/delete/search`, `type list/show/create/update`. Fix any broken commands found during the audit.
+
+### 2. CLI output UI/UX review
+
+Once all commands work, systematically review the pretty output of each command for readability and visual consistency. Check: table alignment, color usage, error presentation, empty-state messages, `--no-pretty` degradation, `--json` output structure. The goal is compact, scannable output — no decorative noise.
+
+### 3. Tab completion for the CLI
+
+Add shell completion support (bash, zsh, fish) via Click's built-in completion system. Consider dynamic completions where useful — e.g., deck names for `--deck`, note type names for `--type`, tag names for `--tags`.
+
+### 4. CLI transparent batching for large requests
+
+The MCP tools enforce per-call limits (100 notes, 10 note types) which are appropriate for LLM tool calls. The CLI client should transparently batch larger requests — e.g., a 500-note upsert becomes 5 server calls with results stitched together. This keeps the server simple (one set of limits, no caller-aware logic) and makes the CLI a capable scripting tool. Implement in `ShrikeClient` so individual commands don't need to think about it.
+
+### 5. Sync auth and operations
+
+Support syncing the collection to both AnkiWeb (ankiweb.net) and self-hosted anki-sync-server instances, configurable in `config.yml`. Add `shrike sync` commands for authentication (store credentials securely), triggering sync, and checking sync status. Both sync targets should work interchangeably.
+
+### 6. Sync server lifecycle management
+
+The `anki` Python package provides an entrypoint for the sync server. Add `shrike sync-server start/stop/status` as a separate command group (parallel to `shrike server`) to launch and manage a local sync server instance. This lets users run a self-hosted sync target without needing Anki desktop. Separate PID file and metadata from the MCP server.
+
 ## What's not yet implemented
 
 - **Semantic search** (`search_notes`): `index.py` is a stub. Needs llama-server for embeddings and usearch for the vector index.
 - **Tauri desktop shell**: Not started. The sidecar is designed to be wrapped by Tauri.
-- **AnkiWeb sync**: Config has a placeholder for sync settings but no implementation.
