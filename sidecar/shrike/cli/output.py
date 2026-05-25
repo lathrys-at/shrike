@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import click
 from rich.console import Console
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -11,6 +13,58 @@ from rich.text import Text
 
 console = Console()
 err_console = Console(stderr=True)
+
+
+def set_pretty(enabled: bool) -> None:
+    """Switch the module-level consoles between styled and plain output."""
+    global console, err_console  # noqa: PLW0603
+    if not enabled:
+        console = Console(no_color=True, highlight=False)
+        err_console = Console(stderr=True, no_color=True, highlight=False)
+
+
+def _merge_json(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
+    if value:
+        ctx.obj["json"] = True
+        ctx.obj["pretty"] = False
+        set_pretty(False)
+
+
+def _merge_pretty(ctx: click.Context, _param: click.Parameter, value: bool | None) -> None:
+    if value is not None:
+        if value and ctx.obj.get("json"):
+            raise click.UsageError("--pretty and --json are mutually exclusive.")
+        ctx.obj["pretty"] = value
+        set_pretty(value)
+
+
+def output_options(fn: Any) -> Any:
+    """Add ``--json`` and ``--pretty/--no-pretty`` to a command.
+
+    Values are merged into ``ctx.obj`` via callbacks so the command
+    function's signature doesn't change.  This lets the same flags
+    appear on both the root group and each leaf command — users can
+    write either ``shrike --json info`` or ``shrike info --json``.
+    """
+    fn = click.option(
+        "--pretty/--no-pretty",
+        default=None,
+        callback=_merge_pretty,
+        expose_value=False,
+        is_eager=True,
+        help="Styled output (default: --pretty).",
+    )(fn)
+    fn = click.option(
+        "--json",
+        "json_flag",
+        is_flag=True,
+        default=False,
+        callback=_merge_json,
+        expose_value=False,
+        is_eager=True,
+        help="Output raw JSON instead of formatted text.",
+    )(fn)
+    return fn
 
 
 def emit_json(data: Any) -> None:
@@ -24,12 +78,12 @@ def table(headers: list[str], rows: list[list[str]]) -> None:
         console.print("  [dim](none)[/dim]")
         return
 
-    t = Table(show_edge=False, pad_edge=False, box=None, padding=(0, 2))
+    t = Table(show_edge=False, box=None, pad_edge=False, padding=(0, 2, 0, 0))
     for h in headers:
         t.add_column(h, style="bold")
     for row in rows:
         t.add_row(*row)
-    console.print(t)
+    console.print(Padding(t, (0, 0, 0, 2)))
 
 
 def section(title: str) -> None:

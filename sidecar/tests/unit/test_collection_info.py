@@ -34,9 +34,7 @@ class TestCollectionInfo:
         assert cloze["type"] == "cloze"
 
     def test_note_type_details_includes_templates(self, wrapper):
-        info = wrapper.get_collection_info(
-            include=["note_types"], note_type_details=["Basic"]
-        )
+        info = wrapper.get_collection_info(include=["note_types"], note_type_details=["Basic"])
         basic = next(nt for nt in info["note_types"] if nt["name"] == "Basic")
         assert "templates" in basic
         assert "css" in basic

@@ -8,11 +8,18 @@ import yaml
 
 DEFAULT_CONFIG_PATH = Path("~/.config/shrike/config.yml").expanduser()
 
-DEFAULT_CONFIG = {
+DEFAULT_CONFIG: dict[str, Any] = {
     "collection": None,
     "server": {
         "host": "127.0.0.1",
         "port": 8372,
+    },
+    "logging": {
+        "dir": "~/.local/state/shrike/logs",
+        "level": "info",
+        "levels": {},
+        "max_bytes": 10485760,
+        "backup_count": 5,
     },
 }
 
@@ -95,9 +102,12 @@ def resolve_collection(
 
 
 def _deep_copy_defaults() -> dict[str, Any]:
+    logging_defaults = dict(DEFAULT_CONFIG["logging"])  # type: ignore[arg-type]
+    logging_defaults["levels"] = dict(logging_defaults.get("levels", {}))
     return {
         "collection": DEFAULT_CONFIG["collection"],
         "server": dict(DEFAULT_CONFIG["server"]),  # type: ignore[arg-type]
+        "logging": logging_defaults,
     }
 
 

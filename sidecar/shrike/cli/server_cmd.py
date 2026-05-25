@@ -16,11 +16,12 @@ import click
 from shrike.cli import output
 from shrike.cli.client import ShrikeClient
 from shrike.cli.config import resolve_collection, save_config
+from shrike.cli.output import output_options
+from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
 
 STATE_DIR = Path("~/.local/state/shrike").expanduser()
 PID_FILE = STATE_DIR / "server.pid"
 META_FILE = STATE_DIR / "server.json"
-LOG_FILE = STATE_DIR / "server.log"
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -73,6 +74,7 @@ def server() -> None:
 
 
 @server.command("start", short_help="Start the MCP server")
+@output_options
 @click.option(
     "--collection",
     type=click.Path(),
@@ -81,6 +83,16 @@ def server() -> None:
 @click.option("--port", type=int, help="Port to listen on (default: 8372).")
 @click.option("--host", help="Host to bind to (default: 127.0.0.1).")
 @click.option("--foreground", is_flag=True, help="Run in the foreground instead of daemonizing.")
+@click.option(
+    "--log-dir",
+    type=click.Path(),
+    help="Directory for log files (default: ~/.local/state/shrike/logs).",
+)
+@click.option(
+    "--log-level",
+    type=click.Choice(["debug", "info", "warning", "error"], case_sensitive=False),
+    help="Log level (default: info).",
+)
 @click.pass_context
 def server_start(
     ctx: click.Context,
@@ -88,6 +100,8 @@ def server_start(
     port: int | None,
     host: str | None,
     foreground: bool,
+    log_dir: str | None,
+    log_level: str | None,
 ) -> None:
     """Start the Shrike MCP server as a background daemon.
 
@@ -116,6 +130,13 @@ def server_start(
     server_port = port or config.get("server", {}).get("port", 8372)
     url = f"http://{server_host}:{server_port}/mcp"
 
+    # Resolve logging settings
+    log_config = config.get("logging", {})
+    resolved_log_dir = str(
+        Path(log_dir or log_config.get("dir") or str(DEFAULT_LOG_DIR)).expanduser()
+    )
+    resolved_log_level = log_level or log_config.get("level", "info")
+
     # Check if already running
     existing_pid = _read_pid()
     if existing_pid is not None:
@@ -130,6 +151,7 @@ def server_start(
     if foreground:
         output.console.print(f"Starting server in foreground on {server_host}:{server_port}")
         output.console.print(f"Collection: {collection_path}")
+        output.console.print(f"Log level: {resolved_log_level}")
         output.console.print("Press Ctrl+C to stop.\n")
         sys.argv = [
             "shrike-server",
@@ -139,6 +161,11 @@ def server_start(
             str(server_port),
             "--host",
             server_host,
+            "--log-dir",
+            resolved_log_dir,
+            "--log-level",
+            resolved_log_level,
+            "--foreground",
         ]
         from shrike.server import main
 
@@ -147,7 +174,13 @@ def server_start(
 
     # Daemon mode
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    log_file = open(LOG_FILE, "a")  # noqa: SIM115
+
+    # The server process handles its own log files via RotatingFileHandler.
+    # We still capture stderr to a bootstrap log in case the process crashes
+    # before logging is configured.
+    bootstrap_log = Path(resolved_log_dir)
+    bootstrap_log.mkdir(parents=True, exist_ok=True)
+    bootstrap_log_file = open(bootstrap_log / "shrike-bootstrap.log", "a")  # noqa: SIM115
 
     proc = subprocess.Popen(
         [
@@ -160,9 +193,13 @@ def server_start(
             str(server_port),
             "--host",
             server_host,
+            "--log-dir",
+            resolved_log_dir,
+            "--log-level",
+            resolved_log_level,
         ],
-        stdout=log_file,
-        stderr=log_file,
+        stdout=bootstrap_log_file,
+        stderr=bootstrap_log_file,
         start_new_session=True,
     )
 
@@ -176,12 +213,15 @@ def server_start(
                 "host": server_host,
                 "port": server_port,
                 "collection": collection_path,
+                "log_dir": resolved_log_dir,
+                "log_level": resolved_log_level,
                 "started": datetime.now(UTC).isoformat(),
-                "log": str(LOG_FILE),
             },
             indent=2,
         )
     )
+
+    json_out: bool = ctx.obj["json"]
 
     # Save config if it doesn't exist yet
     config_path = ctx.obj.get("config_path")
@@ -190,64 +230,110 @@ def server_start(
         config["server"]["host"] = server_host
         config["server"]["port"] = server_port
         saved = save_config(config, config_path)
-        output.console.print(f"  [dim]Config saved to {saved}[/dim]")
+        if not json_out:
+            output.console.print(f"  [dim]Config saved to {saved}[/dim]")
 
     # Wait for server to come up
-    output.console.print(f"Starting server (PID {proc.pid})...")
+    if not json_out:
+        output.console.print(f"Starting server (PID {proc.pid})...")
 
+    log_file = get_log_file(config, log_dir_override=resolved_log_dir)
     if _wait_for_server(url):
-        output.success(f"Server running at {url}")
-        output.kv("Collection", collection_path, indent=2)
-        output.kv("Log", str(LOG_FILE), indent=2)
+        if json_out:
+            output.emit_json(
+                {
+                    "started": True,
+                    "pid": proc.pid,
+                    "url": url,
+                    "collection": collection_path,
+                    "log": str(log_file),
+                    "log_level": resolved_log_level,
+                }
+            )
+        else:
+            output.success(f"Server running at {url}")
+            output.kv("Collection", collection_path, indent=2)
+            output.kv("Log", str(log_file), indent=2)
+            output.kv("Level", resolved_log_level, indent=2)
     else:
         if proc.poll() is not None:
             _cleanup_state()
             raise click.ClickException(
-                f"Server process exited with code {proc.returncode}.\nCheck log: {LOG_FILE}"
+                f"Server process exited with code {proc.returncode}.\nCheck log: {log_file}"
             )
-        output.console.print(
-            "[yellow]Server started but not yet responding. Check log for details:[/yellow]\n"
-            f"  {LOG_FILE}"
-        )
+        if json_out:
+            output.emit_json(
+                {
+                    "started": True,
+                    "pid": proc.pid,
+                    "url": url,
+                    "responding": False,
+                    "log": str(log_file),
+                }
+            )
+        else:
+            output.console.print(
+                "[yellow]Server started but not yet responding."
+                " Check log for details:[/yellow]\n"
+                f"  {log_file}"
+            )
 
 
 @server.command("stop", short_help="Stop the running server")
+@output_options
 @click.pass_context
 def server_stop(ctx: click.Context) -> None:
     """Stop the Shrike MCP server daemon."""
+    json_out: bool = ctx.obj["json"]
     pid = _read_pid()
     if pid is None:
         meta = _read_meta()
         if meta:
             _cleanup_state()
-            output.console.print("Server is not running (cleaned up stale state).")
+        if json_out:
+            output.emit_json({"stopped": False, "reason": "not running"})
         else:
-            output.console.print("Server is not running.")
+            if meta:
+                output.console.print("Server is not running (cleaned up stale state).")
+            else:
+                output.console.print("Server is not running.")
         return
 
-    output.console.print(f"Stopping server (PID {pid})...")
+    if not json_out:
+        output.console.print(f"Stopping server (PID {pid})...")
+
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         _cleanup_state()
-        output.success("Server already stopped.")
+        if json_out:
+            output.emit_json({"stopped": True, "pid": pid})
+        else:
+            output.success("Server already stopped.")
         return
 
     # Wait for graceful shutdown
+    forced = False
     for _ in range(50):  # 5 seconds
         if not _is_process_alive(pid):
             break
         time.sleep(0.1)
     else:
-        output.console.print("[yellow]Graceful shutdown timed out, forcing...[/yellow]")
+        forced = True
+        if not json_out:
+            output.console.print("[yellow]Graceful shutdown timed out, forcing...[/yellow]")
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
 
     _cleanup_state()
-    output.success("Server stopped.")
+    if json_out:
+        output.emit_json({"stopped": True, "pid": pid, "forced": forced})
+    else:
+        output.success("Server stopped.")
 
 
 @server.command("status", short_help="Show server status")
+@output_options
 @click.pass_context
 def server_status(ctx: click.Context) -> None:
     """Check whether the Shrike MCP server is running."""
@@ -257,8 +343,41 @@ def server_status(ctx: click.Context) -> None:
     if pid is None:
         if meta:
             _cleanup_state()
-        output.console.print("[dim]Server is not running.[/dim]")
+        if ctx.obj["json"]:
+            output.emit_json({"running": False})
+        else:
+            output.console.print("[dim]Server is not running.[/dim]")
         ctx.exit(1)
+        return
+
+    uptime: str | None = None
+    started = (meta or {}).get("started", "")
+    if started:
+        try:
+            start_dt = datetime.fromisoformat(started)
+            delta = datetime.now(UTC) - start_dt
+            hours, remainder = divmod(int(delta.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            if hours:
+                uptime = f"{hours}h {minutes}m"
+            elif minutes:
+                uptime = f"{minutes}m {seconds}s"
+            else:
+                uptime = f"{seconds}s"
+        except ValueError:
+            pass
+
+    if ctx.obj["json"]:
+        data: dict[str, Any] = {"running": True, "pid": pid}
+        if meta:
+            data["url"] = meta.get("url")
+            data["collection"] = meta.get("collection")
+            data["log_level"] = meta.get("log_level")
+            data["log_dir"] = meta.get("log_dir")
+            data["started"] = meta.get("started")
+            if uptime:
+                data["uptime"] = uptime
+        output.emit_json(data)
         return
 
     output.console.print("[bold green]Server is running[/bold green]")
@@ -266,20 +385,145 @@ def server_status(ctx: click.Context) -> None:
         output.kv("URL", meta.get("url", "unknown"), indent=2)
         output.kv("PID", meta.get("pid", pid), indent=2)
         output.kv("Collection", meta.get("collection", "unknown"), indent=2)
-        started = meta.get("started", "")
-        if started:
-            try:
-                start_dt = datetime.fromisoformat(started)
-                delta = datetime.now(UTC) - start_dt
-                hours, remainder = divmod(int(delta.total_seconds()), 3600)
-                minutes, seconds = divmod(remainder, 60)
-                if hours:
-                    uptime = f"{hours}h {minutes}m"
-                elif minutes:
-                    uptime = f"{minutes}m {seconds}s"
-                else:
-                    uptime = f"{seconds}s"
-                output.kv("Uptime", uptime, indent=2)
-            except ValueError:
-                pass
-        output.kv("Log", meta.get("log", "unknown"), indent=2)
+        output.kv("Log level", meta.get("log_level", "info"), indent=2)
+
+        log_dir = meta.get("log_dir")
+        if log_dir:
+            output.kv("Log", str(Path(log_dir) / "shrike.log"), indent=2)
+
+        if uptime:
+            output.kv("Uptime", uptime, indent=2)
+
+
+@server.command("logs", short_help="View server logs")
+@output_options
+@click.option("--follow", "-f", is_flag=True, help="Follow the log output (like tail -f).")
+@click.option("--lines", "-n", type=int, default=50, help="Number of lines to show (default: 50).")
+@click.option(
+    "--process",
+    "-p",
+    type=click.Choice(["shrike", "llama"], case_sensitive=False),
+    default="shrike",
+    help="Which process log to view (default: shrike).",
+)
+@click.pass_context
+def server_logs(
+    ctx: click.Context,
+    follow: bool,
+    lines: int,
+    process: str,
+) -> None:
+    """View the server log output.
+
+    Reads from the log file by default, or from stdin if piped.
+
+    \b
+    Examples:
+      shrike server logs
+      shrike server logs -f
+      shrike server logs -n 100
+      shrike --json server logs
+      shrike --no-pretty server logs
+      cat ~/.local/state/shrike/logs/shrike.log | shrike --json server logs
+    """
+    json_out: bool = ctx.obj["json"]
+    pretty: bool = ctx.obj["pretty"]
+
+    if json_out and follow:
+        raise click.ClickException("--json and --follow cannot be used together.")
+
+    reading_stdin = not sys.stdin.isatty()
+
+    if reading_stdin:
+        input_lines = sys.stdin.read().splitlines()
+        if json_out:
+            _emit_json(input_lines)
+        else:
+            for line in input_lines:
+                _emit_line(line, pretty=pretty)
+        return
+
+    # Reading from log file
+    config = ctx.obj["config"]
+    meta = _read_meta()
+
+    log_dir = None
+    if meta:
+        log_dir = meta.get("log_dir")
+    if not log_dir:
+        log_dir = config.get("logging", {}).get("dir")
+
+    log_file = get_log_file(config, log_dir_override=log_dir, process_name=process)
+
+    if not log_file.exists():
+        raise click.ClickException(
+            f"Log file not found: {log_file}\n"
+            "Is the server running? Start it with: shrike server start"
+        )
+
+    if json_out:
+        all_lines = log_file.read_text(encoding="utf-8").splitlines()
+        _emit_json(all_lines[-lines:])
+    elif follow:
+        _tail_follow(log_file, lines, pretty=pretty)
+    else:
+        all_lines = log_file.read_text(encoding="utf-8").splitlines()
+        for line in all_lines[-lines:]:
+            _emit_line(line, pretty=pretty)
+
+
+def _emit_line(line: str, *, pretty: bool) -> None:
+    """Print a single log line — styled or plain."""
+    if pretty:
+        styled = style_log_line(line)
+        if styled is not None:
+            output.console.print(styled, highlight=False)
+    else:
+        stripped = line.strip()
+        if stripped:
+            click.echo(stripped)
+
+
+def _emit_json(lines: list[str]) -> None:
+    """Parse log lines and emit as a JSON object with a ``messages`` key."""
+    records: list[dict[str, str]] = []
+    for line in lines:
+        parsed = parse_log_line(line)
+        if parsed is not None:
+            records.append(parsed)
+    output.emit_json({"messages": records})
+
+
+def _tail_follow(path: Path, initial_lines: int, *, pretty: bool) -> None:
+    """Print the last n lines then follow new output."""
+    import select
+
+    try:
+        fh = open(path, encoding="utf-8")  # noqa: SIM115
+    except OSError as err:
+        raise click.ClickException(f"Cannot read log file: {err}") from err
+
+    try:
+        content = fh.read()
+        existing = content.splitlines()
+        for line in existing[-initial_lines:]:
+            _emit_line(line, pretty=pretty)
+
+        output.console.print("[dim]--- following (Ctrl+C to stop) ---[/dim]")
+        while True:
+            if hasattr(fh, "fileno"):
+                try:
+                    select.select([fh], [], [], 0.5)
+                except (ValueError, OSError):
+                    time.sleep(0.5)
+            else:
+                time.sleep(0.5)
+
+            new_data = fh.read()
+            if new_data:
+                for line in new_data.splitlines():
+                    _emit_line(line, pretty=pretty)
+    except KeyboardInterrupt:
+        output.console.print()
+    finally:
+        fh.close()

@@ -32,16 +32,17 @@ sidecar/                          # Python package root (cd here to work)
 │   ├── collection.py             # CollectionWrapper — all Anki DB operations
 │   ├── note_types.py             # upsert_note_types() — create/update note types
 │   ├── tools.py                  # Registers 6 MCP tools, Pydantic input models
+│   ├── log.py                    # Logging config, log parsing and styling
 │   ├── index.py                  # VectorIndex stub (search_notes not yet implemented)
 │   └── cli/
-│       ├── __init__.py           # Root Click group, global options (--config, --url, --json)
+│       ├── __init__.py           # Root Click group, global options (--config, --url, --json, --pretty)
 │       ├── client.py             # ShrikeClient — HTTP client for MCP JSON-RPC calls
 │       ├── config.py             # YAML config loading/saving (~/.config/shrike/config.yml)
-│       ├── server_cmd.py         # shrike server start/stop/status (daemon management)
+│       ├── server_cmd.py         # shrike server start/stop/status/logs (daemon management)
 │       ├── info_cmd.py           # shrike info
 │       ├── note_cmd.py           # shrike note list/show/create/update/delete/search
 │       ├── type_cmd.py           # shrike type list/show/create/update
-│       └── output.py             # Rich-based formatting (tables, panels, styled output)
+│       └── output.py             # Rich formatting, output_options decorator
 ├── tests/
 │   ├── unit/                     # 53 tests — direct CollectionWrapper calls, no server
 │   │   ├── conftest.py           # wrapper fixture (temp collection), basic_note fixture
@@ -49,7 +50,8 @@ sidecar/                          # Python package root (cd here to work)
 │   │   ├── test_list_notes.py
 │   │   ├── test_upsert_notes.py
 │   │   ├── test_delete_notes.py
-│   │   └── test_note_types.py
+│   │   ├── test_note_types.py
+│   │   └── test_logging.py
 │   └── integration/              # 27 tests — real server subprocess + HTTP transport
 │       ├── conftest.py           # server fixture (session-scoped), mcp fixture
 │       └── test_tools.py
@@ -130,8 +132,8 @@ Tool input schemas are defined as Pydantic models (`NoteInput`, `NoteTypeInput`,
 The CLI uses Click with rich for output formatting. Command hierarchy:
 
 ```
-shrike [--config PATH] [--url URL] [--json]
-├── server start|stop|status
+shrike [--config PATH] [--url URL] [--json] [--pretty/--no-pretty]
+├── server start|stop|status|logs
 ├── info [--types] [--decks] [--tags] [--stats] [--type-details NAME]
 ├── note list|show|create|update|delete|search
 └── type list|show|create|update
@@ -139,12 +141,14 @@ shrike [--config PATH] [--url URL] [--json]
 
 The CLI talks to the MCP server over HTTP — it can target a remote server via `--url` or `SHRIKE_URL`.
 
+`--json` and `--pretty/--no-pretty` are global options but also accepted on every leaf command (via the `@output_options` decorator in `output.py`), so both `shrike --json info` and `shrike info --json` work. `--json` implies `--no-pretty`; combining `--json --pretty` is an error.
+
 ### Daemon management
 
 `shrike server start` spawns the server as a background process. State files live in `~/.local/state/shrike/`:
 - `server.pid` — PID file
-- `server.json` — metadata (URL, port, collection path, start time)
-- `server.log` — stdout/stderr
+- `server.json` — metadata (URL, port, collection path, start time, log dir)
+- `logs/shrike.log` — rotating log file (10 MB, 5 backups)
 
 ### Config file
 
@@ -158,6 +162,29 @@ YAML at `~/.config/shrike/config.yml`. Auto-created on first `shrike server star
 - **`raise ... from err`** in except blocks (enforced by ruff B904)
 - **`contextlib.suppress`** instead of bare `try/except/pass`
 - **`datetime.UTC`** not `timezone.utc` (ruff UP017)
+
+### Logging
+
+Logging is configured in `shrike/log.py`. Log format, parsing, and styling all live in that module — formatting knowledge should not be spread across CLI commands.
+
+**Logger names** — Use per-module loggers: `shrike.server`, `shrike.tools`, `shrike.collection`, `shrike.note_types`. This makes the config's per-logger level overrides (`logging.levels.shrike.collection: debug`) actually work. Never log everything under a bare `shrike` logger.
+
+**Principles for log messages:**
+
+1. **Say what happened and include the key context.** "Collection ready: 847 notes, 5 decks, 12 note types" not "Collection opened". Include counts, IDs, paths, durations — the things that make a log line useful without having to correlate it with other lines.
+2. **Log operational boundaries at INFO.** Startup, shutdown, configuration loaded, server listening. These are the anchors you scan for when reading a log.
+3. **Log every tool call at INFO.** This is a server; knowing what it did is the point. Log the tool name with its parameters on entry, and a result summary on completion: `list_notes deck=Test limit=50` → `list_notes returned 3/3 notes`.
+4. **Use DEBUG for internals.** Individual note creates/updates, query construction, index lookups. Things you'd turn on when debugging a specific module, not things you want in production logs.
+5. **Use WARNING for recoverable failures that deserve attention.** A single note failing in a batch upsert, a note type update that was rejected. Not normal empty-result responses.
+6. **Use `%s` formatting, not f-strings.** Lazy evaluation — the format string is only interpolated if the log level is enabled.
+7. **Don't repeat what the logger name already says.** The log line already shows `shrike.tools` — don't prefix the message with "tools:".
+8. **Log the signal name on shutdown**, not just "shutting down" — you want to know whether it was SIGTERM (normal stop) or SIGINT (Ctrl+C) or something else.
+
+**Log file format** (defined in `log.py`):
+```
+2025-05-24T10:30:00 INFO  shrike.tools  list_notes deck=Test limit=50
+```
+Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, logger and message are separated by double-space. `parse_log_line()` and `style_log_line()` in `log.py` know this format — keep them in sync if you change it.
 
 ## What's not yet implemented
 

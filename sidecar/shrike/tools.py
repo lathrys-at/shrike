@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from shrike.collection import CollectionWrapper
 from shrike.index import VectorIndex
 
-logger = logging.getLogger("shrike")
+logger = logging.getLogger("shrike.tools")
 
 
 class TemplateInput(BaseModel):
@@ -93,9 +93,10 @@ def _safe_tool(fn: Any) -> Any:
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
+            return result
         except Exception as e:
-            logger.exception(f"Unexpected error in {fn.__name__}")
+            logger.exception("Unhandled error in %s", fn.__name__)
             return {"error": f"Internal error: {e}"}
 
     return wrapper
@@ -125,6 +126,8 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
         type (standard/cloze) but not full template HTML or CSS — use
         `note_type_details` to request full definitions for specific note
         types when you need to inspect or author templates."""
+        sections = include or ["note_types", "decks", "tags", "stats"]
+        logger.info("collection_info sections=%s", ",".join(sections))
         return wrapper.get_collection_info(include, note_type_details)
 
     @mcp.tool()
@@ -165,7 +168,21 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
                 ),
             }
 
-        return wrapper.list_notes(
+        filters = [
+            f
+            for f in [
+                f"deck={deck}" if deck else "",
+                f"tags={tags}" if tags else "",
+                f"type={note_type}" if note_type else "",
+                f"ids={len(ids)}" if ids else "",
+                f"since={modified_since}" if modified_since else "",
+                f"query={query!r}" if query else "",
+            ]
+            if f
+        ]
+        logger.info("list_notes %s limit=%d", " ".join(filters), limit)
+
+        result = wrapper.list_notes(
             ids=ids,
             deck=deck,
             tags=tags,
@@ -175,6 +192,12 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
             fields_mode=fields or "full",
             limit=limit,
         )
+        logger.info(
+            "list_notes returned %d/%d notes",
+            len(result.get("notes", [])),
+            result.get("total", 0),
+        )
+        return result
 
     @mcp.tool()
     @_safe_tool
@@ -200,6 +223,13 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
         At least one of `queries` or `ids` must be provided."""
         if not queries and not ids:
             return {"error": "At least one of queries or ids must be provided."}
+
+        logger.info(
+            "search_notes queries=%d ids=%d top_k=%d",
+            len(queries or []),
+            len(ids or []),
+            top_k,
+        )
 
         if not index.available:
             return {
@@ -242,8 +272,22 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
         if len(notes) > 100:
             return {"error": "Maximum 100 notes per call."}
 
+        creates = sum(1 for n in notes if n.id is None)
+        updates = len(notes) - creates
+        logger.info("upsert_notes count=%d (creates=%d, updates=%d)", len(notes), creates, updates)
+
         note_dicts = [n.model_dump(exclude_none=True) for n in notes]
         results = wrapper.upsert_notes(note_dicts)
+
+        created = sum(1 for r in results if r.get("status") == "created")
+        updated = sum(1 for r in results if r.get("status") == "updated")
+        errors = sum(1 for r in results if r.get("status") == "error")
+        logger.info(
+            "upsert_notes completed: %d created, %d updated, %d errors",
+            created,
+            updated,
+            errors,
+        )
 
         changed_ids = [r["id"] for r in results if r.get("status") in ("created", "updated")]
         if changed_ids:
@@ -272,8 +316,19 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
         if len(note_types) > 10:
             return {"error": "Maximum 10 note types per call."}
 
+        names = [nt.name or f"id={nt.id}" for nt in note_types]
+        logger.info("upsert_note_types count=%d names=%s", len(note_types), ", ".join(names))
+
         nt_dicts = [nt.model_dump(exclude_none=True) for nt in note_types]
         results = _upsert_note_types(wrapper.col, nt_dicts)
+
+        for r in results:
+            status = r.get("status", "unknown")
+            if status == "error":
+                logger.warning(
+                    "upsert_note_types failed for %s: %s", r.get("name", "?"), r["error"]
+                )
+
         return {"results": results}
 
     @mcp.tool()
@@ -286,7 +341,13 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
         if len(ids) > 100:
             return {"error": "Maximum 100 note IDs per call."}
 
+        logger.info("delete_notes requested=%d", len(ids))
         result = wrapper.delete_notes(ids)
+        logger.info(
+            "delete_notes completed: %d deleted, %d not found",
+            len(result["deleted"]),
+            len(result["not_found"]),
+        )
         if result["deleted"]:
             index.on_notes_deleted(result["deleted"])
         return result

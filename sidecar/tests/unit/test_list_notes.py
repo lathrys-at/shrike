@@ -69,20 +69,22 @@ class TestListNotes:
         assert "error" in result
 
     def test_combined_filters(self, wrapper):
-        wrapper.upsert_notes([
-            {
-                "deck": "A",
-                "note_type": "Basic",
-                "fields": {"Front": "Q1", "Back": "A1"},
-                "tags": ["x"],
-            },
-            {
-                "deck": "B",
-                "note_type": "Basic",
-                "fields": {"Front": "Q2", "Back": "A2"},
-                "tags": ["x"],
-            },
-        ])
+        wrapper.upsert_notes(
+            [
+                {
+                    "deck": "A",
+                    "note_type": "Basic",
+                    "fields": {"Front": "Q1", "Back": "A1"},
+                    "tags": ["x"],
+                },
+                {
+                    "deck": "B",
+                    "note_type": "Basic",
+                    "fields": {"Front": "Q2", "Back": "A2"},
+                    "tags": ["x"],
+                },
+            ]
+        )
         result = wrapper.list_notes(deck="A", tags=["x"])
         assert result["total"] == 1
         assert result["notes"][0]["deck"] == "A"

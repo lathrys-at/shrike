@@ -10,17 +10,20 @@ from anki.collection import Collection
 from anki.consts import MODEL_CLOZE
 from anki.errors import NotFoundError
 
-logger = logging.getLogger("shrike")
+logger = logging.getLogger("shrike.collection")
 
 
 class CollectionWrapper:
     def __init__(self, path: str) -> None:
+        logger.debug("Opening collection at %s", path)
         self.col = Collection(path)
         self._closed = False
         atexit.register(self.close)
+        logger.debug("Collection opened successfully")
 
     def close(self) -> None:
         if not self._closed:
+            logger.debug("Closing collection")
             with contextlib.suppress(Exception):
                 self.col.close()
             self._closed = True
@@ -262,6 +265,7 @@ class CollectionWrapper:
             note.tags = note_input["tags"]
 
         self.col.add_note(note, deck_id)
+        logger.debug("Created note %d (type=%s, deck=%s)", note.id, note_type_name, deck_name)
         return {"status": "created", "id": note.id}
 
     def _update_note(self, note_input: dict[str, Any]) -> dict[str, Any]:
@@ -304,6 +308,7 @@ class CollectionWrapper:
                 card_ids = note.card_ids()
                 self.col.set_deck(card_ids, int(target_deck_id))
 
+        logger.debug("Updated note %d", note.id)
         return {"status": "updated", "id": note.id}
 
     def delete_notes(self, ids: list[int]) -> dict[str, Any]:

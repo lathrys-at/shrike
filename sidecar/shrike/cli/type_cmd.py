@@ -6,6 +6,7 @@ import sys
 import click
 
 from shrike.cli import output
+from shrike.cli.output import output_options
 
 
 def _parse_template(value: str) -> dict:
@@ -28,6 +29,7 @@ def type_group() -> None:
 
 
 @type_group.command("list", short_help="List note types")
+@output_options
 @click.pass_context
 def type_list(ctx: click.Context) -> None:
     """List all note types with their fields."""
@@ -52,6 +54,7 @@ def type_list(ctx: click.Context) -> None:
 
 
 @type_group.command("show", short_help="Show note type details")
+@output_options
 @click.argument("name")
 @click.pass_context
 def type_show(ctx: click.Context, name: str) -> None:
@@ -84,6 +87,7 @@ def type_show(ctx: click.Context, name: str) -> None:
 
 
 @type_group.command("create", short_help="Create a new note type")
+@output_options
 @click.option("--name", help="Name for the note type.")
 @click.option("--field", multiple=True, help="Field name (repeatable, ordered).")
 @click.option(
@@ -165,6 +169,7 @@ def type_create(
 
 
 @type_group.command("update", short_help="Update a note type")
+@output_options
 @click.argument("note_type_id", type=int)
 @click.option("--name", help="New name for the note type.")
 @click.option("--css", "css_text", help="New CSS styling.")

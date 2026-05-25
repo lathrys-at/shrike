@@ -6,7 +6,7 @@ from typing import Any
 from anki.collection import Collection
 from anki.consts import MODEL_CLOZE
 
-logger = logging.getLogger("shrike")
+logger = logging.getLogger("shrike.note_types")
 
 
 def upsert_note_types(col: Collection, note_types: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -65,6 +65,13 @@ def _create_note_type(col: Collection, nt_input: dict[str, Any]) -> dict[str, An
 
     changes = col.models.add(notetype)
 
+    logger.debug(
+        "Created note type %r (id=%d, fields=%d, templates=%d)",
+        name,
+        changes.id,
+        len(fields),
+        len(templates),
+    )
     return {
         "status": "created",
         "id": changes.id,
@@ -105,6 +112,7 @@ def _update_note_type(col: Collection, nt_input: dict[str, Any]) -> dict[str, An
 
     col.models.update_dict(notetype)
 
+    logger.debug("Updated note type %r (id=%d)", notetype["name"], nt_id)
     return {
         "status": "updated",
         "id": nt_id,
