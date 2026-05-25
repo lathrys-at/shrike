@@ -15,11 +15,59 @@ class ServerError(Exception):
 
 
 class ShrikeClient:
-    """Thin HTTP client that makes MCP JSON-RPC tool calls to a Shrike server."""
+    """Thin HTTP client that makes MCP JSON-RPC tool calls to a Shrike server.
 
-    def __init__(self, url: str):
+    If *config* is provided and *autostart* is True (the default), the
+    client will automatically launch the daemon on the first connection
+    failure and retry.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        config: dict[str, Any] | None = None,
+        *,
+        autostart: bool = True,
+    ):
         self.url = url
+        self.config = config
+        self.autostart = autostart and config is not None
         self._request_id = 0
+        self._autostarted = False
+
+    def _post(self, payload: dict[str, Any], *, timeout: float = 30.0) -> httpx.Response:
+        """POST to the server, auto-starting the daemon on first failure."""
+        try:
+            return httpx.post(
+                self.url,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=timeout,
+            )
+        except httpx.ConnectError:
+            if self.autostart and not self._autostarted:
+                self._do_autostart()
+                return httpx.post(
+                    self.url,
+                    json=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    timeout=timeout,
+                )
+            raise
+
+    def _do_autostart(self) -> None:
+        """Launch the daemon and update our URL."""
+        from shrike.cli.server_cmd import ensure_server
+
+        assert self.config is not None
+        self.url = ensure_server(self.config)
+        self._autostarted = True
 
     def call(self, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         """Invoke an MCP tool and return the structured result.
@@ -30,9 +78,8 @@ class ShrikeClient:
         """
         self._request_id += 1
         try:
-            resp = httpx.post(
-                self.url,
-                json={
+            resp = self._post(
+                {
                     "jsonrpc": "2.0",
                     "id": self._request_id,
                     "method": "tools/call",
@@ -40,12 +87,7 @@ class ShrikeClient:
                         "name": tool_name,
                         "arguments": arguments or {},
                     },
-                },
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                timeout=30.0,
+                }
             )
         except httpx.ConnectError as err:
             raise click.ClickException(
@@ -71,7 +113,10 @@ class ShrikeClient:
         return content  # type: ignore[no-any-return]
 
     def ping(self) -> bool:
-        """Check if the server is reachable and responding."""
+        """Check if the server is reachable and responding.
+
+        Does NOT auto-start — this is a probe, not an operation.
+        """
         try:
             resp = httpx.post(
                 self.url,
@@ -119,10 +164,55 @@ class ShrikeClient:
         return self.call("search_notes", args)
 
     def upsert_notes(self, notes: list[dict]) -> dict:
-        return self.call("upsert_notes", {"notes": notes})
+        """Upsert notes, transparently batching if over the server limit."""
+        return self._batched_call(
+            "upsert_notes",
+            items=notes,
+            param_key="notes",
+            result_key="results",
+            batch_size=100,
+        )
 
     def upsert_note_types(self, note_types: list[dict]) -> dict:
-        return self.call("upsert_note_types", {"note_types": note_types})
+        """Upsert note types, transparently batching if over the server limit."""
+        return self._batched_call(
+            "upsert_note_types",
+            items=note_types,
+            param_key="note_types",
+            result_key="results",
+            batch_size=10,
+        )
 
     def delete_notes(self, ids: list[int]) -> dict:
-        return self.call("delete_notes", {"ids": ids})
+        """Delete notes, transparently batching if over the server limit."""
+        if len(ids) <= 100:
+            return self.call("delete_notes", {"ids": ids})
+
+        all_deleted: list[int] = []
+        all_not_found: list[int] = []
+        for i in range(0, len(ids), 100):
+            chunk = ids[i : i + 100]
+            result = self.call("delete_notes", {"ids": chunk})
+            all_deleted.extend(result.get("deleted", []))
+            all_not_found.extend(result.get("not_found", []))
+        return {"deleted": all_deleted, "not_found": all_not_found}
+
+    def _batched_call(
+        self,
+        tool_name: str,
+        *,
+        items: list,
+        param_key: str,
+        result_key: str,
+        batch_size: int,
+    ) -> dict:
+        """Split a list of items into batches and merge the results."""
+        if len(items) <= batch_size:
+            return self.call(tool_name, {param_key: items})
+
+        all_results: list = []
+        for i in range(0, len(items), batch_size):
+            chunk = items[i : i + batch_size]
+            result = self.call(tool_name, {param_key: chunk})
+            all_results.extend(result.get(result_key, []))
+        return {result_key: all_results}

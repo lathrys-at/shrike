@@ -68,6 +68,97 @@ def _wait_for_server(url: str, timeout: float = 15.0) -> bool:
     return False
 
 
+def ensure_server(config: dict[str, Any]) -> str:
+    """Start the daemon if it isn't already running. Returns the server URL.
+
+    Uses collection path, host, port, and logging settings from *config*.
+    Raises ``click.ClickException`` if the server cannot be started
+    (e.g. no collection path configured).
+    """
+    from shrike.cli.config import resolve_collection, resolve_url
+
+    url = resolve_url(config)
+    pid = _read_pid()
+    if pid is not None:
+        return url
+
+    # Resolve everything we need to spawn the daemon
+    collection_path = resolve_collection(config)
+    if not collection_path:
+        raise click.ClickException(
+            "Cannot auto-start server: no collection path configured.\n\n"
+            "Provide one with:\n"
+            "  shrike server start --collection /path/to/collection.anki2\n"
+            "  SHRIKE_COLLECTION environment variable\n"
+            "  'collection' key in config file"
+        )
+
+    collection_dir = Path(collection_path).parent
+    collection_dir.mkdir(parents=True, exist_ok=True)
+
+    server_config = config.get("server", {})
+    server_host = server_config.get("host", "127.0.0.1")
+    server_port = server_config.get("port", 8372)
+    url = f"http://{server_host}:{server_port}/mcp"
+
+    log_config = config.get("logging", {})
+    resolved_log_dir = str(Path(log_config.get("dir") or str(DEFAULT_LOG_DIR)).expanduser())
+    resolved_log_level = log_config.get("level", "info")
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    bootstrap_log = Path(resolved_log_dir)
+    bootstrap_log.mkdir(parents=True, exist_ok=True)
+    bootstrap_log_file = open(bootstrap_log / "shrike-bootstrap.log", "a")  # noqa: SIM115
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "shrike.server",
+            "--collection",
+            collection_path,
+            "--port",
+            str(server_port),
+            "--host",
+            server_host,
+            "--log-dir",
+            resolved_log_dir,
+            "--log-level",
+            resolved_log_level,
+        ],
+        stdout=bootstrap_log_file,
+        stderr=bootstrap_log_file,
+        start_new_session=True,
+    )
+
+    PID_FILE.write_text(str(proc.pid))
+    META_FILE.write_text(
+        json.dumps(
+            {
+                "pid": proc.pid,
+                "url": url,
+                "host": server_host,
+                "port": server_port,
+                "collection": collection_path,
+                "log_dir": resolved_log_dir,
+                "log_level": resolved_log_level,
+                "started": datetime.now(UTC).isoformat(),
+            },
+            indent=2,
+        )
+    )
+
+    if not _wait_for_server(url) and proc.poll() is not None:
+        _cleanup_state()
+        log_file = get_log_file(config, log_dir_override=resolved_log_dir)
+        raise click.ClickException(
+            f"Auto-started server exited with code {proc.returncode}.\nCheck log: {log_file}"
+        )
+
+    return url
+
+
 @click.group("server", short_help="Manage the Shrike daemon")
 def server() -> None:
     """Start, stop, and check the status of the Shrike MCP server."""

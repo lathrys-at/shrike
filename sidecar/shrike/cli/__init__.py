@@ -67,7 +67,7 @@ def cli(
     ctx.obj["config_path"] = config_path
     ctx.obj["url"] = server_url
     ctx.obj["json"] = json_output
-    ctx.obj["client"] = ShrikeClient(server_url)
+    ctx.obj["client"] = ShrikeClient(server_url, config=config)
 
     from shrike.cli import output
 
