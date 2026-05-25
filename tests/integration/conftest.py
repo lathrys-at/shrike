@@ -1,19 +1,26 @@
 """Integration test fixtures.
 
-Spins up a dedicated Shrike MCP server per test session, fully isolated
-from any user daemon: own port, own temp collection, own log directory.
+Provides a ``server_factory`` that spins up isolated Shrike MCP servers
+on demand — each with its own port, temp collection, and log directory.
+Test classes request their own server via class-scoped fixtures so no
+test state leaks between classes.
 """
 
 from __future__ import annotations
 
+import json
 import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
+from click.testing import CliRunner
+
+from shrike.cli import cli
 
 
 def _free_port() -> int:
@@ -49,104 +56,32 @@ def _wait_for_server(url: str, timeout: float = 10.0) -> None:
     raise TimeoutError(f"Server at {url} did not become ready within {timeout}s")
 
 
-@pytest.fixture(scope="session")
-def test_dirs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
-    """Create isolated temp directories for the test session.
+class ServerInfo:
+    """Connection details for a running test server."""
 
-    Returns paths for 'root', 'collection', and 'logs'. All are under
-    pytest's session-scoped temp directory (cleaned up automatically).
-    """
-    root = tmp_path_factory.mktemp("shrike")
-    log_dir = root / "logs"
-    log_dir.mkdir()
-    collection_path = root / "collection.anki2"
-    return {
-        "root": root,
-        "collection": collection_path,
-        "logs": log_dir,
-    }
+    def __init__(self, url: str, port: int, collection_path: str, log_dir: str) -> None:
+        self.url = url
+        self.port = port
+        self.collection_path = collection_path
+        self.log_dir = log_dir
 
 
-@pytest.fixture(scope="session")
-def server(test_dirs: dict[str, Path]) -> dict:
-    """Start an isolated Shrike MCP server for the test session.
+class MCPClient:
+    """Thin wrapper that calls MCP tools over HTTP and returns structured results."""
 
-    Uses a random free port, a fresh temp collection, and a dedicated
-    log directory — no interference with any user daemon.
+    def __init__(self, url: str) -> None:
+        self._url = url
 
-    Yields a dict with 'url', 'collection_path', 'log_dir', and 'port'.
-    """
-    port = _free_port()
-    collection_path = str(test_dirs["collection"])
-    log_dir = str(test_dirs["logs"])
-    url = f"http://127.0.0.1:{port}/mcp"
-
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "shrike.server",
-            "--collection",
-            collection_path,
-            "--port",
-            str(port),
-            "--log-dir",
-            log_dir,
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    try:
-        _wait_for_server(url)
-    except TimeoutError:
-        proc.kill()
-        stdout, stderr = proc.communicate(timeout=5)
-        raise RuntimeError(
-            f"Server failed to start.\nstdout: {stdout.decode()}\nstderr: {stderr.decode()}"
-        ) from None
-
-    yield {
-        "url": url,
-        "port": port,
-        "collection_path": collection_path,
-        "log_dir": log_dir,
-    }
-
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-
-
-@pytest.fixture()
-def mcp(server: dict):
-    """Return a callable that invokes an MCP tool and returns the structured result.
-
-    Usage:
-        result = mcp("collection_info", {})
-        result = mcp("upsert_notes", {"notes": [...]})
-    """
-    url = server["url"]
-
-    def call(tool_name: str, arguments: dict | None = None) -> dict:
+    def __call__(self, tool_name: str, arguments: dict | None = None) -> dict:
         resp = httpx.post(
-            url,
+            self._url,
             json={
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "tools/call",
-                "params": {
-                    "name": tool_name,
-                    "arguments": arguments or {},
-                },
+                "params": {"name": tool_name, "arguments": arguments or {}},
             },
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
             timeout=10.0,
         )
         resp.raise_for_status()
@@ -156,4 +91,117 @@ def mcp(server: dict):
         result: dict = body["result"]["structuredContent"]
         return result
 
-    return call
+
+class CLIRunner:
+    """Click test runner pre-configured to target a specific test server."""
+
+    def __init__(self, url: str, config_path: str) -> None:
+        self._runner = CliRunner()
+        self._url = url
+        self._config = config_path
+
+    def invoke(self, args: list[str], **kwargs: Any) -> Any:
+        return self._runner.invoke(
+            cli,
+            ["--config", self._config, "--url", self._url, *args],
+            catch_exceptions=False,
+            **kwargs,
+        )
+
+    def json(self, args: list[str], **kwargs: Any) -> dict:
+        result = self.invoke(["--json", *args], **kwargs)
+        assert result.exit_code == 0, result.output
+        data: dict = json.loads(result.output)
+        return data
+
+
+@pytest.fixture(scope="session")
+def server_factory(tmp_path_factory: pytest.TempPathFactory):
+    """Factory that creates isolated server instances.
+
+    Each call spins up a new server with its own collection, log dir,
+    and random port. All servers are torn down at session end.
+    """
+    processes: list[subprocess.Popen] = []
+
+    def create(name: str = "server") -> ServerInfo:
+        root = tmp_path_factory.mktemp(name)
+        log_dir = root / "logs"
+        log_dir.mkdir()
+        collection_path = str(root / "collection.anki2")
+
+        port = _free_port()
+        url = f"http://127.0.0.1:{port}/mcp"
+
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "shrike.server",
+                "--collection",
+                collection_path,
+                "--port",
+                str(port),
+                "--log-dir",
+                str(log_dir),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        processes.append(proc)
+
+        try:
+            _wait_for_server(url)
+        except TimeoutError:
+            proc.kill()
+            stdout, stderr = proc.communicate(timeout=5)
+            raise RuntimeError(
+                f"Server '{name}' failed to start.\n"
+                f"stdout: {stdout.decode()}\nstderr: {stderr.decode()}"
+            ) from None
+
+        return ServerInfo(url, port, collection_path, str(log_dir))
+
+    yield create
+
+    for proc in processes:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+@pytest.fixture(scope="class")
+def server(server_factory) -> ServerInfo:
+    """Class-scoped server — each test class gets its own fresh collection."""
+    return server_factory("class")
+
+
+@pytest.fixture(scope="class")
+def mcp(server: ServerInfo) -> MCPClient:
+    """MCP tool caller bound to the class's server."""
+    return MCPClient(server.url)
+
+
+@pytest.fixture(scope="class")
+def cli_config(server: ServerInfo, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Isolated config file pointing at the class's server."""
+    config_dir = tmp_path_factory.mktemp("cli-config")
+    config_path = config_dir / "config.yml"
+    config_path.write_text(
+        f"server:\n"
+        f"  host: 127.0.0.1\n"
+        f"  port: {server.port}\n"
+        f"collection: {server.collection_path}\n"
+        f"logging:\n"
+        f"  dir: {server.log_dir}\n"
+    )
+    return config_path
+
+
+@pytest.fixture(scope="class")
+def runner(server: ServerInfo, cli_config: Path) -> CLIRunner:
+    """CLI test runner bound to the class's server."""
+    return CLIRunner(server.url, str(cli_config))

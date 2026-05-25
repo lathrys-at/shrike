@@ -1,68 +1,25 @@
-"""CLI integration tests — exercise every CLI command against a live server."""
+"""CLI integration tests — exercise every CLI command against a live server.
+
+Each test class gets its own isolated server with a fresh collection.
+"""
 
 from __future__ import annotations
 
 import json
 
 import pytest
-from click.testing import CliRunner
 
-from shrike.cli import cli
-
-
-@pytest.fixture(scope="module")
-def cli_config(server, tmp_path_factory):
-    """Create an isolated config file pointing at the test server."""
-    config_dir = tmp_path_factory.mktemp("cli-config")
-    config_path = config_dir / "config.yml"
-    config_path.write_text(
-        f"server:\n"
-        f"  host: 127.0.0.1\n"
-        f"  port: {server['port']}\n"
-        f"collection: {server['collection_path']}\n"
-        f"logging:\n"
-        f"  dir: {server['log_dir']}\n"
-    )
-    return config_path
+pytestmark = pytest.mark.integration
 
 
-@pytest.fixture(scope="module")
-def runner(server, cli_config):
-    """CliRunner that targets the test server with an isolated config."""
-    url = server["url"]
-    config = str(cli_config)
-
-    class ServerRunner:
-        def __init__(self) -> None:
-            self._runner = CliRunner()
-            self._url = url
-            self._config = config
-
-        def invoke(self, args: list[str], **kwargs) -> object:
-            return self._runner.invoke(
-                cli,
-                ["--config", self._config, "--url", self._url, *args],
-                catch_exceptions=False,
-                **kwargs,
-            )
-
-        def json(self, args: list[str], **kwargs) -> dict:
-            result = self.invoke(["--json", *args], **kwargs)
-            assert result.exit_code == 0, result.output
-            return json.loads(result.output)
-
-    return ServerRunner()
-
-
-@pytest.mark.integration
 class TestInfo:
-    def test_info_pretty(self, runner):
+    def test_pretty(self, runner):
         result = runner.invoke(["info"])
         assert result.exit_code == 0
         assert "Basic" in result.output
         assert "Default" in result.output
 
-    def test_info_json(self, runner):
+    def test_json(self, runner):
         data = runner.json(["info"])
         assert "note_types" in data
         assert "decks" in data
@@ -70,194 +27,596 @@ class TestInfo:
         assert "stats" in data
         assert any(nt["name"] == "Basic" for nt in data["note_types"])
 
-    def test_info_decks_only(self, runner):
+    def test_decks_only(self, runner):
         result = runner.invoke(["info", "--decks"])
         assert result.exit_code == 0
         assert "Default" in result.output
 
-    def test_info_types_only(self, runner):
+    def test_types_only(self, runner):
         result = runner.invoke(["info", "--types"])
         assert result.exit_code == 0
         assert "Basic" in result.output
 
-    def test_info_stats_only(self, runner):
+    def test_stats_only(self, runner):
         result = runner.invoke(["info", "--stats"])
         assert result.exit_code == 0
-        assert "Notes" in result.output or "notes" in result.output.lower()
+
+    def test_stats_reflect_notes(self, runner):
+        runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+            ]
+        )
+        data = runner.json(["info"])
+        assert data["stats"]["total_notes"] >= 1
+
+    def test_tags_reflect_notes(self, runner):
+        runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q2",
+                "-f",
+                "Back=A2",
+                "--tags",
+                "mytag",
+            ]
+        )
+        data = runner.json(["info"])
+        assert "mytag" in data["tags"]
 
 
-@pytest.mark.integration
-class TestNoteLifecycle:
-    """Test the full note create -> list -> show -> update -> delete cycle."""
+class TestNoteCreate:
+    """Note creation via CLI — inline fields and JSON stdin."""
 
-    def test_01_list_empty(self, runner):
-        result = runner.invoke(["note", "list", "--deck", "Default"])
-        assert result.exit_code == 0
-
-    def test_02_list_empty_json(self, runner):
-        data = runner.json(["note", "list", "--deck", "Default"])
-        assert data["notes"] == []
-        assert data["total"] == 0
-
-    def test_03_create_note(self, runner):
+    def test_create_pretty(self, runner):
         result = runner.invoke(
             [
                 "note",
                 "create",
                 "--deck",
-                "CLITest",
+                "Test",
                 "--type",
                 "Basic",
                 "-f",
-                "Front=What is CLI testing?",
+                "Front=What is Shrike?",
                 "-f",
-                "Back=Testing commands end-to-end",
+                "Back=An Anki manager",
             ]
         )
         assert result.exit_code == 0
         assert "Created" in result.output
 
-    def test_04_create_note_json(self, runner):
+    def test_create_json(self, runner):
         data = runner.json(
             [
                 "note",
                 "create",
                 "--deck",
-                "CLITest",
+                "Test",
                 "--type",
                 "Basic",
                 "-f",
-                "Front=Second question",
+                "Front=Question",
                 "-f",
-                "Back=Second answer",
+                "Back=Answer",
+            ]
+        )
+        assert data["results"][0]["status"] == "created"
+        assert "id" in data["results"][0]
+
+    def test_create_with_tags(self, runner):
+        data = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Test",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Tagged Q",
+                "-f",
+                "Back=Tagged A",
                 "--tags",
-                "test,cli",
+                "alpha,beta",
             ]
         )
         assert data["results"][0]["status"] == "created"
 
-    def test_05_list_notes(self, runner):
-        data = runner.json(["note", "list", "--deck", "CLITest"])
-        assert data["total"] == 2
-        assert len(data["notes"]) == 2
-
-    def test_06_show_note(self, runner):
-        data = runner.json(["note", "list", "--deck", "CLITest"])
-        note_id = str(data["notes"][0]["id"])
-
-        result = runner.invoke(["note", "show", note_id])
-        assert result.exit_code == 0
-        assert note_id in result.output
-
-    def test_07_show_note_json(self, runner):
-        data = runner.json(["note", "list", "--deck", "CLITest"])
-        note_id = str(data["notes"][0]["id"])
-
+        note_id = str(data["results"][0]["id"])
         note_data = runner.json(["note", "show", note_id])
-        assert "notes" in note_data
-        assert len(note_data["notes"]) == 1
-        assert note_data["notes"][0]["id"] == data["notes"][0]["id"]
+        tags = set(note_data["notes"][0]["tags"])
+        assert "alpha" in tags
+        assert "beta" in tags
 
-    def test_08_update_note(self, runner):
-        data = runner.json(["note", "list", "--deck", "CLITest"])
-        note_id = str(data["notes"][0]["id"])
-
-        result = runner.invoke(
-            [
-                "note",
-                "update",
-                note_id,
-                "-f",
-                "Back=Updated answer",
-            ]
-        )
-        assert result.exit_code == 0
-        assert "Updated" in result.output
-
-    def test_09_update_verified(self, runner):
-        data = runner.json(["note", "list", "--deck", "CLITest"])
-        note_id = str(data["notes"][0]["id"])
-
-        note_data = runner.json(["note", "show", note_id])
-        note = note_data["notes"][0]
-        assert note["content"]["Back"] == "Updated answer"
-
-    def test_10_list_by_tags(self, runner):
-        data = runner.json(["note", "list", "--tags", "test"])
-        assert data["total"] >= 1
-
-    def test_11_delete_note(self, runner):
-        data = runner.json(["note", "list", "--deck", "CLITest"])
-        note_id = str(data["notes"][0]["id"])
-
-        result = runner.invoke(["note", "delete", note_id, "--yes"])
-        assert result.exit_code == 0
-        assert "Deleted" in result.output
-
-    def test_12_delete_note_json(self, runner):
-        data = runner.json(["note", "list", "--deck", "CLITest"])
-        assert data["total"] >= 1
-        note_id = str(data["notes"][0]["id"])
-
-        del_data = runner.json(["note", "delete", note_id, "--yes"])
-        assert len(del_data["deleted"]) >= 1
-
-    def test_13_show_nonexistent(self, runner):
-        result = runner.invoke(["note", "show", "999999999"])
-        assert result.exit_code != 0
-
-    def test_14_create_bulk_stdin(self, runner):
+    def test_create_bulk_stdin(self, runner):
         notes = json.dumps(
             [
                 {
-                    "deck": "CLITest",
+                    "deck": "Test",
                     "note_type": "Basic",
                     "fields": {"Front": f"Bulk Q{i}", "Back": f"Bulk A{i}"},
                 }
-                for i in range(3)
+                for i in range(5)
             ]
         )
         result = runner.invoke(["note", "create", "--json-input"], input=notes)
         assert result.exit_code == 0
 
+        data = runner.json(["note", "list", "--deck", "Test"])
+        assert data["total"] >= 5
 
-@pytest.mark.integration
+    def test_create_auto_creates_deck(self, runner):
+        runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Brand New Deck",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+            ]
+        )
+        data = runner.json(["note", "list", "--deck", "Brand New Deck"])
+        assert data["total"] == 1
+
+
+class TestNoteListAndShow:
+    """Listing and showing notes via CLI."""
+
+    def test_list_empty_deck(self, runner):
+        data = runner.json(["note", "list", "--deck", "Empty"])
+        assert data["notes"] == []
+        assert data["total"] == 0
+
+    def test_list_empty_pretty(self, runner):
+        result = runner.invoke(["note", "list", "--deck", "Empty"])
+        assert result.exit_code == 0
+
+    def test_list_by_deck(self, runner):
+        for i in range(3):
+            runner.json(
+                [
+                    "note",
+                    "create",
+                    "--deck",
+                    "ListDeck",
+                    "--type",
+                    "Basic",
+                    "-f",
+                    f"Front=Q{i}",
+                    "-f",
+                    f"Back=A{i}",
+                ]
+            )
+        data = runner.json(["note", "list", "--deck", "ListDeck"])
+        assert data["total"] == 3
+
+    def test_list_by_tags(self, runner):
+        runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Tagged",
+                "-f",
+                "Back=Note",
+                "--tags",
+                "findme",
+            ]
+        )
+        runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Other",
+                "-f",
+                "Back=Note",
+                "--tags",
+                "other",
+            ]
+        )
+        data = runner.json(["note", "list", "--tags", "findme"])
+        assert data["total"] == 1
+
+    def test_show_pretty(self, runner):
+        created = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Show Q",
+                "-f",
+                "Back=Show A",
+            ]
+        )
+        note_id = str(created["results"][0]["id"])
+        result = runner.invoke(["note", "show", note_id])
+        assert result.exit_code == 0
+        assert note_id in result.output
+        assert "Show Q" in result.output
+
+    def test_show_json(self, runner):
+        created = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=JSON Q",
+                "-f",
+                "Back=JSON A",
+            ]
+        )
+        note_id = str(created["results"][0]["id"])
+        data = runner.json(["note", "show", note_id])
+        assert len(data["notes"]) == 1
+        assert data["notes"][0]["content"]["Front"] == "JSON Q"
+
+    def test_show_nonexistent(self, runner):
+        result = runner.invoke(["note", "show", "999999999"])
+        assert result.exit_code != 0
+
+    def test_list_by_query(self, runner):
+        runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "QueryDeck",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=mitochondria",
+                "-f",
+                "Back=powerhouse",
+            ]
+        )
+        runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "QueryDeck",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=ribosome",
+                "-f",
+                "Back=protein",
+            ]
+        )
+        data = runner.json(["note", "list", "--query", "mitochondria"])
+        assert data["total"] == 1
+
+    def test_list_meta_flag(self, runner):
+        runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "MetaDeck",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+            ]
+        )
+        data = runner.json(["note", "list", "--deck", "MetaDeck", "--meta"])
+        assert data["total"] == 1
+        note = data["notes"][0]
+        assert "content" not in note
+        assert "note_type" in note
+
+    def test_list_since(self, runner):
+        import time
+
+        runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "SinceDeck",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Old",
+                "-f",
+                "Back=Note",
+            ]
+        )
+        time.sleep(1)
+        from datetime import UTC, datetime
+
+        cutoff = datetime.now(UTC).isoformat()
+        time.sleep(1)
+        runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "SinceDeck",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=New",
+                "-f",
+                "Back=Note",
+            ]
+        )
+        data = runner.json(["note", "list", "--deck", "SinceDeck", "--since", cutoff])
+        assert data["total"] == 1
+        assert data["notes"][0]["content"]["Front"] == "New"
+
+
+class TestNoteUpdate:
+    """Updating notes via CLI."""
+
+    def test_update_field(self, runner):
+        created = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Original Q",
+                "-f",
+                "Back=Original A",
+            ]
+        )
+        note_id = str(created["results"][0]["id"])
+
+        result = runner.invoke(["note", "update", note_id, "-f", "Back=Updated A"])
+        assert result.exit_code == 0
+        assert "Updated" in result.output
+
+        data = runner.json(["note", "show", note_id])
+        assert data["notes"][0]["content"]["Back"] == "Updated A"
+        assert data["notes"][0]["content"]["Front"] == "Original Q"
+
+    def test_update_json(self, runner):
+        created = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+            ]
+        )
+        note_id = str(created["results"][0]["id"])
+
+        data = runner.json(["note", "update", note_id, "-f", "Back=New A"])
+        assert data["results"][0]["status"] == "updated"
+
+    def test_update_tags(self, runner):
+        created = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+                "--tags",
+                "old",
+            ]
+        )
+        note_id = str(created["results"][0]["id"])
+
+        data = runner.json(["note", "update", note_id, "--tags", "new,replaced"])
+        assert data["results"][0]["status"] == "updated"
+
+        note = runner.json(["note", "show", note_id])["notes"][0]
+        assert "new" in note["tags"]
+        assert "replaced" in note["tags"]
+        assert "old" not in note["tags"]
+
+    def test_update_deck(self, runner):
+        created = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "OrigDeck",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+            ]
+        )
+        note_id = str(created["results"][0]["id"])
+
+        data = runner.json(["note", "update", note_id, "--deck", "MovedDeck"])
+        assert data["results"][0]["status"] == "updated"
+
+        note = runner.json(["note", "show", note_id])["notes"][0]
+        assert note["deck"] == "MovedDeck"
+
+
+class TestNoteDelete:
+    """Deleting notes via CLI."""
+
+    def test_delete_pretty(self, runner):
+        created = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+            ]
+        )
+        note_id = str(created["results"][0]["id"])
+
+        result = runner.invoke(["note", "delete", note_id, "--yes"])
+        assert result.exit_code == 0
+        assert "Deleted" in result.output
+
+    def test_delete_json(self, runner):
+        created = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+            ]
+        )
+        note_id = str(created["results"][0]["id"])
+
+        data = runner.json(["note", "delete", note_id, "--yes"])
+        assert len(data["deleted"]) == 1
+
+    def test_delete_verified_gone(self, runner):
+        created = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+            ]
+        )
+        note_id = str(created["results"][0]["id"])
+
+        runner.json(["note", "delete", note_id, "--yes"])
+        result = runner.invoke(["note", "show", note_id])
+        assert result.exit_code != 0
+
+    def test_delete_multiple_ids(self, runner):
+        ids = []
+        for i in range(3):
+            created = runner.json(
+                [
+                    "note",
+                    "create",
+                    "--deck",
+                    "Default",
+                    "--type",
+                    "Basic",
+                    "-f",
+                    f"Front=Multi{i}",
+                    "-f",
+                    f"Back=Del{i}",
+                ]
+            )
+            ids.append(str(created["results"][0]["id"]))
+
+        data = runner.json(["note", "delete", *ids, "--yes"])
+        assert len(data["deleted"]) == 3
+
+
 class TestNoteSearch:
     def test_search_stub(self, runner):
         result = runner.invoke(["note", "search", "test query"])
         assert result.exit_code != 0 or "not available" in result.output.lower()
 
 
-@pytest.mark.integration
-class TestTypeLifecycle:
-    def test_01_list_types(self, runner):
+class TestTypeList:
+    """Listing and inspecting note types via CLI."""
+
+    def test_list_pretty(self, runner):
         result = runner.invoke(["type", "list"])
         assert result.exit_code == 0
         assert "Basic" in result.output
+        assert "Cloze" in result.output
 
-    def test_02_list_types_json(self, runner):
+    def test_list_json(self, runner):
         data = runner.json(["type", "list"])
-        assert any(nt["name"] == "Basic" for nt in data)
+        names = {nt["name"] for nt in data}
+        assert "Basic" in names
+        assert "Cloze" in names
 
-    def test_03_show_type(self, runner):
+    def test_show_pretty(self, runner):
         result = runner.invoke(["type", "show", "Basic"])
         assert result.exit_code == 0
         assert "Front" in result.output
         assert "Back" in result.output
 
-    def test_04_show_type_json(self, runner):
+    def test_show_json(self, runner):
         data = runner.json(["type", "show", "Basic"])
         assert data["name"] == "Basic"
         assert "fields" in data
         assert "templates" in data
 
-    def test_05_create_type(self, runner):
+
+class TestTypeCreateAndUpdate:
+    """Creating and modifying note types via CLI."""
+
+    def test_create_pretty(self, runner):
         result = runner.invoke(
             [
                 "type",
                 "create",
                 "--name",
-                "CLITestType",
+                "CLIType",
                 "--field",
                 "Question",
                 "--field",
@@ -269,13 +628,13 @@ class TestTypeLifecycle:
         assert result.exit_code == 0
         assert "Created" in result.output
 
-    def test_06_create_type_json(self, runner):
+    def test_create_json(self, runner):
         data = runner.json(
             [
                 "type",
                 "create",
                 "--name",
-                "CLITestType2",
+                "CLIType2",
                 "--field",
                 "Term",
                 "--field",
@@ -288,37 +647,127 @@ class TestTypeLifecycle:
         )
         assert data["results"][0]["status"] == "created"
 
-    def test_07_show_created_type(self, runner):
-        data = runner.json(["type", "show", "CLITestType"])
-        assert data["name"] == "CLITestType"
-        assert "Question" in data["fields"]
-        assert "Answer" in data["fields"]
-
-    def test_08_update_type(self, runner):
-        data = runner.json(["type", "show", "CLITestType"])
-        type_id = str(data["id"])
-
-        result = runner.invoke(
+    def test_create_then_show(self, runner):
+        runner.invoke(
             [
                 "type",
-                "update",
-                type_id,
-                "--css",
-                ".card { color: red; }",
+                "create",
+                "--name",
+                "Inspectable",
+                "--field",
+                "Q",
+                "--field",
+                "A",
+                "--template",
+                "Card 1:{{Q}}:{{A}}",
             ]
         )
+        data = runner.json(["type", "show", "Inspectable"])
+        assert data["name"] == "Inspectable"
+        assert "Q" in data["fields"]
+        assert "A" in data["fields"]
+
+    def test_update_css(self, runner):
+        runner.invoke(
+            [
+                "type",
+                "create",
+                "--name",
+                "Updatable",
+                "--field",
+                "F",
+                "--template",
+                "Card 1:{{F}}:{{F}}",
+            ]
+        )
+        data = runner.json(["type", "show", "Updatable"])
+        type_id = str(data["id"])
+
+        result = runner.invoke(["type", "update", type_id, "--css", ".card { color: red; }"])
         assert result.exit_code == 0
         assert "Updated" in result.output
 
-    def test_09_update_type_json(self, runner):
-        data = runner.json(["type", "show", "CLITestType"])
+    def test_update_name(self, runner):
+        runner.invoke(
+            [
+                "type",
+                "create",
+                "--name",
+                "BeforeRename",
+                "--field",
+                "F",
+                "--template",
+                "Card 1:{{F}}:{{F}}",
+            ]
+        )
+        data = runner.json(["type", "show", "BeforeRename"])
         type_id = str(data["id"])
 
-        upd = runner.json(["type", "update", type_id, "--name", "CLITestTypeRenamed"])
+        upd = runner.json(["type", "update", type_id, "--name", "AfterRename"])
         assert upd["results"][0]["status"] == "updated"
 
+    def test_create_note_with_custom_type(self, runner):
+        runner.invoke(
+            [
+                "type",
+                "create",
+                "--name",
+                "Vocab",
+                "--field",
+                "Word",
+                "--field",
+                "Meaning",
+                "--template",
+                "Card 1:{{Word}}:{{Meaning}}",
+            ]
+        )
+        data = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Vocab",
+                "-f",
+                "Word=shrike",
+                "-f",
+                "Meaning=A predatory songbird",
+            ]
+        )
+        assert data["results"][0]["status"] == "created"
 
-@pytest.mark.integration
+    def test_update_json_input(self, runner):
+        runner.invoke(
+            [
+                "type",
+                "create",
+                "--name",
+                "JsonUpdatable",
+                "--field",
+                "X",
+                "--field",
+                "Y",
+                "--template",
+                "Card 1:{{X}}:{{Y}}",
+            ]
+        )
+        data = runner.json(["type", "show", "JsonUpdatable"])
+        type_id = str(data["id"])
+
+        json_payload = json.dumps(
+            {
+                "fields": ["X", "Y", "Z"],
+                "templates": [{"name": "Card 1", "front": "{{X}}", "back": "{{Y}} {{Z}}"}],
+            }
+        )
+        upd = runner.json(["type", "update", type_id, "--json-input"], input=json_payload)
+        assert upd["results"][0]["status"] == "updated"
+
+        updated = runner.json(["type", "show", "JsonUpdatable"])
+        assert "Z" in updated["fields"]
+
+
 class TestOutputModes:
     """Test --json, --pretty, --no-pretty across commands."""
 
@@ -334,4 +783,28 @@ class TestOutputModes:
 
     def test_json_pretty_conflict(self, runner):
         result = runner.invoke(["info", "--json", "--pretty"])
+        assert result.exit_code != 0
+
+
+class TestCompletion:
+    """Shell completion script generation."""
+
+    def test_zsh(self, runner):
+        result = runner.invoke(["completion", "zsh"])
+        assert result.exit_code == 0
+        assert "#compdef shrike" in result.output
+
+    def test_bash(self, runner):
+        result = runner.invoke(["completion", "bash"])
+        assert result.exit_code == 0
+        assert "_shrike_completion" in result.output
+
+    def test_fish(self, runner):
+        result = runner.invoke(["completion", "fish"])
+        assert result.exit_code == 0
+        assert "complete" in result.output
+        assert "shrike" in result.output
+
+    def test_invalid_shell(self, runner):
+        result = runner.invoke(["completion", "powershell"])
         assert result.exit_code != 0
