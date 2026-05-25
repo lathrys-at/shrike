@@ -55,8 +55,8 @@ def cli(
       shrike server stop
 
     \b
-    Configuration is read from ~/.config/shrike/config.yml by default.
-    Override with -c/--config or SHRIKE_CONFIG.
+    Configuration file location is platform-dependent (use --help to see
+    the default for your system). Override with -c/--config or SHRIKE_CONFIG.
     """
     ctx.ensure_object(dict)
 

@@ -6,7 +6,9 @@ from typing import Any
 
 import yaml
 
-DEFAULT_CONFIG_PATH = Path("~/.config/shrike/config.yml").expanduser()
+from shrike.paths import config_file, log_dir
+
+DEFAULT_CONFIG_PATH = config_file()
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "collection": None,
@@ -15,7 +17,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "port": 8372,
     },
     "logging": {
-        "dir": "~/.local/state/shrike/logs",
+        "dir": str(log_dir()),
         "level": "info",
         "levels": {},
         "max_bytes": 10485760,

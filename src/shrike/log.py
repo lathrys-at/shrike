@@ -18,7 +18,9 @@ import logging.handlers
 from pathlib import Path
 from typing import Any
 
-DEFAULT_LOG_DIR = Path("~/.local/state/shrike/logs").expanduser()
+from shrike.paths import log_dir as _platform_log_dir
+
+DEFAULT_LOG_DIR = _platform_log_dir()
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 DEFAULT_BACKUP_COUNT = 5
 DEFAULT_LEVEL = "INFO"

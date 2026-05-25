@@ -27,12 +27,14 @@ src/shrike/                       # Python package (src layout)
 ├── collection.py                 # CollectionWrapper — all Anki DB operations
 ├── note_types.py                 # upsert_note_types() — create/update note types
 ├── tools.py                      # Registers 6 MCP tools, Pydantic input models
+├── paths.py                      # Platform-canonical directories (via platformdirs)
 ├── log.py                        # Logging config, log parsing and styling
 ├── index.py                      # VectorIndex stub (search_notes not yet implemented)
 └── cli/
     ├── __init__.py               # Root Click group, global options (--config, --url, --json, --pretty)
     ├── client.py                 # ShrikeClient — HTTP client for MCP JSON-RPC calls
-    ├── config.py                 # YAML config loading/saving (~/.config/shrike/config.yml)
+    ├── config.py                 # YAML config loading/saving
+    ├── completion_cmd.py         # shrike completion {bash,zsh,fish}
     ├── server_cmd.py             # shrike server start/stop/status/logs (daemon management)
     ├── info_cmd.py               # shrike info
     ├── note_cmd.py               # shrike note list/show/create/update/delete/search
@@ -137,14 +139,26 @@ The CLI talks to the MCP server over HTTP — it can target a remote server via 
 
 ### Daemon management
 
-`shrike server start` spawns the server as a background process. State files live in `~/.local/state/shrike/`:
+`shrike server start` spawns the server as a background process. State files live in the platform state directory (see `shrike/paths.py`):
 - `server.pid` — PID file
 - `server.json` — metadata (URL, port, collection path, start time, log dir)
-- `logs/shrike.log` — rotating log file (10 MB, 5 backups)
+
+### Platform directories
+
+All file paths are resolved via `platformdirs` in `shrike/paths.py`:
+
+| Purpose | macOS | Linux (XDG) | Windows |
+|---------|-------|-------------|---------|
+| Config | `~/Library/Application Support/shrike/` | `~/.config/shrike/` | `%APPDATA%\shrike\` |
+| State | `~/Library/Application Support/shrike/` | `~/.local/state/shrike/` | `%LOCALAPPDATA%\shrike\` |
+| Logs | `~/Library/Logs/shrike/` | `~/.local/state/shrike/log/` | `%LOCALAPPDATA%\shrike\Logs\` |
+| Cache | `~/Library/Caches/shrike/` | `~/.cache/shrike/` | `%LOCALAPPDATA%\shrike\Cache\` |
+
+On Linux, XDG env vars (`XDG_CONFIG_HOME`, `XDG_STATE_HOME`, etc.) are respected.
 
 ### Config file
 
-YAML at `~/.config/shrike/config.yml`. Auto-created on first `shrike server start`. Resolution order: config defaults → config values → env vars (`SHRIKE_URL`, `SHRIKE_COLLECTION`) → CLI flags.
+YAML at the platform config directory (`config.yml`). Auto-created on first `shrike server start`. Resolution order: config defaults → config values → env vars (`SHRIKE_URL`, `SHRIKE_COLLECTION`) → CLI flags.
 
 ## Code style and conventions
 

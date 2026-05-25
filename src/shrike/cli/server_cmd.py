@@ -18,8 +18,9 @@ from shrike.cli.client import ShrikeClient
 from shrike.cli.config import resolve_collection, save_config
 from shrike.cli.output import output_options
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
+from shrike.paths import state_dir
 
-STATE_DIR = Path("~/.local/state/shrike").expanduser()
+STATE_DIR = state_dir()
 PID_FILE = STATE_DIR / "server.pid"
 META_FILE = STATE_DIR / "server.json"
 
@@ -177,7 +178,7 @@ def server() -> None:
 @click.option(
     "--log-dir",
     type=click.Path(),
-    help="Directory for log files (default: ~/.local/state/shrike/logs).",
+    help="Directory for log files (default: platform-specific).",
 )
 @click.option(
     "--log-level",

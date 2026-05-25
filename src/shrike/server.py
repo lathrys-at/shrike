@@ -42,7 +42,7 @@ def main() -> None:
     parser.add_argument(
         "--log-dir",
         default=None,
-        help="Directory for log files (default: ~/.local/state/shrike/logs)",
+        help="Directory for log files (default: platform-specific)",
     )
     parser.add_argument(
         "--log-level",
