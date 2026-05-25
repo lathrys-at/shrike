@@ -497,16 +497,16 @@ def server_status(ctx: click.Context) -> None:
     default="shrike",
     help="Which process log to view (default: shrike).",
 )
+@click.option("--stdin", "read_stdin", is_flag=True, help="Read log lines from stdin.")
 @click.pass_context
 def server_logs(
     ctx: click.Context,
     follow: bool,
     lines: int,
     process: str,
+    read_stdin: bool,
 ) -> None:
     """View the server log output.
-
-    Reads from the log file by default, or from stdin if piped.
 
     \b
     Examples:
@@ -515,7 +515,7 @@ def server_logs(
       shrike server logs -n 100
       shrike --json server logs
       shrike --no-pretty server logs
-      cat ~/.local/state/shrike/logs/shrike.log | shrike --json server logs
+      cat shrike.log | shrike server logs --stdin
     """
     json_out: bool = ctx.obj["json"]
     pretty: bool = ctx.obj["pretty"]
@@ -523,9 +523,7 @@ def server_logs(
     if json_out and follow:
         raise click.ClickException("--json and --follow cannot be used together.")
 
-    reading_stdin = not sys.stdin.isatty()
-
-    if reading_stdin:
+    if read_stdin:
         input_lines = sys.stdin.read().splitlines()
         if json_out:
             _emit_json(input_lines)

@@ -1,9 +1,14 @@
+"""Integration test fixtures.
+
+Spins up a dedicated Shrike MCP server per test session, fully isolated
+from any user daemon: own port, own temp collection, own log directory.
+"""
+
 from __future__ import annotations
 
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -45,15 +50,35 @@ def _wait_for_server(url: str, timeout: float = 10.0) -> None:
 
 
 @pytest.fixture(scope="session")
-def server():
-    """Start a Shrike MCP server in a subprocess with a temp collection.
+def test_dirs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """Create isolated temp directories for the test session.
 
-    Yields a dict with 'url' and 'collection_path'. The server is killed
-    on teardown.
+    Returns paths for 'root', 'collection', and 'logs'. All are under
+    pytest's session-scoped temp directory (cleaned up automatically).
+    """
+    root = tmp_path_factory.mktemp("shrike")
+    log_dir = root / "logs"
+    log_dir.mkdir()
+    collection_path = root / "collection.anki2"
+    return {
+        "root": root,
+        "collection": collection_path,
+        "logs": log_dir,
+    }
+
+
+@pytest.fixture(scope="session")
+def server(test_dirs: dict[str, Path]) -> dict:
+    """Start an isolated Shrike MCP server for the test session.
+
+    Uses a random free port, a fresh temp collection, and a dedicated
+    log directory — no interference with any user daemon.
+
+    Yields a dict with 'url', 'collection_path', 'log_dir', and 'port'.
     """
     port = _free_port()
-    tmp_dir = tempfile.mkdtemp(prefix="shrike-test-")
-    collection_path = str(Path(tmp_dir) / "collection.anki2")
+    collection_path = str(test_dirs["collection"])
+    log_dir = str(test_dirs["logs"])
     url = f"http://127.0.0.1:{port}/mcp"
 
     proc = subprocess.Popen(
@@ -65,6 +90,8 @@ def server():
             collection_path,
             "--port",
             str(port),
+            "--log-dir",
+            log_dir,
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -79,7 +106,12 @@ def server():
             f"Server failed to start.\nstdout: {stdout.decode()}\nstderr: {stderr.decode()}"
         ) from None
 
-    yield {"url": url, "collection_path": collection_path}
+    yield {
+        "url": url,
+        "port": port,
+        "collection_path": collection_path,
+        "log_dir": log_dir,
+    }
 
     proc.terminate()
     try:
@@ -90,7 +122,7 @@ def server():
 
 
 @pytest.fixture()
-def mcp(server):
+def mcp(server: dict):
     """Return a callable that invokes an MCP tool and returns the structured result.
 
     Usage:
@@ -121,6 +153,7 @@ def mcp(server):
         body = resp.json()
         if "error" in body:
             raise RuntimeError(f"JSON-RPC error: {body['error']}")
-        return body["result"]["structuredContent"]
+        result: dict = body["result"]["structuredContent"]
+        return result
 
     return call
