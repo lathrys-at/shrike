@@ -192,6 +192,8 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 
 Systematically exercise every `shrike` CLI command against a running server and verify it works end-to-end. At least one command currently fails with an exception traceback. Add integration tests in `tests/integration/` that cover the full CLI surface: `server start/stop/status/logs`, `info`, `note list/show/create/update/delete/search`, `type list/show/create/update`. Fix any broken commands found during the audit.
 
+Note: CLI commands that talk to the server (everything except `server start/stop/status/logs`) should auto-launch the daemon if it isn't already running. This makes the explicit `shrike server start` a convenience, not a prerequisite. Provide a `--no-autostart` flag (or config option) to disable this for users who want manual control. The auto-start needs a collection path, so it must be resolvable from config/env without `--collection` being passed to every command.
+
 ### 2. CLI output UI/UX review
 
 Once all commands work, systematically review the pretty output of each command for readability and visual consistency. Check: table alignment, color usage, error presentation, empty-state messages, `--no-pretty` degradation, `--json` output structure. The goal is compact, scannable output — no decorative noise.
@@ -208,9 +210,13 @@ The MCP tools enforce per-call limits (100 notes, 10 note types) which are appro
 
 Support syncing the collection to both AnkiWeb (ankiweb.net) and self-hosted anki-sync-server instances, configurable in `config.yml`. Add `shrike sync` commands for authentication (store credentials securely), triggering sync, and checking sync status. Both sync targets should work interchangeably.
 
+Sync operations are delegated through the MCP daemon — the CLI sends a sync request to the server, which manages the operation. The daemon already holds the collection lock, so it's the right place to own sync. This means sync commands require the daemon to be running (or auto-start it, per task #1).
+
 ### 6. Sync server lifecycle management
 
 The `anki` Python package provides an entrypoint for the sync server. Add `shrike sync-server start/stop/status` as a separate command group (parallel to `shrike server`) to launch and manage a local sync server instance. This lets users run a self-hosted sync target without needing Anki desktop. Separate PID file and metadata from the MCP server.
+
+The sync server is a child process managed by the MCP daemon, not launched independently by the CLI. The daemon handles forking, PID tracking, and log routing (same pattern we'll use for llama-server). `shrike sync-server start/stop/status` sends commands to the daemon, which manages the actual process. Logs go through the same rotating log infrastructure (`sync-server.log` via `--process sync-server` in `shrike server logs`).
 
 ## What's not yet implemented
 
