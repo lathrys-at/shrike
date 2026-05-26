@@ -1,6 +1,6 @@
 # Anki MCP Server — Tool Interface
 
-Six tools for managing an Anki flashcard collection. The server maintains a local vector index over all note content, enabling semantic search without external API calls. Duplicate detection is handled by the application and surfaced in its own UI — not by the LLM.
+Seven tools for managing an Anki flashcard collection. The server maintains a local vector index over all note content, enabling semantic search without external API calls. Duplicate detection is handled by the application and surfaced in its own UI — not by the LLM.
 
 Notes in Anki have a **note type** that defines their fields (e.g., a "Basic" note type has "Front" and "Back" fields; a "Cloze" note type has "Text" and "Extra"). A note type also defines **card templates** — HTML templates that control how cards are rendered — and **CSS styling** shared across all its cards. A single note produces one or more cards depending on its note type. Notes belong to a **deck** and can have **tags**.
 
@@ -309,5 +309,41 @@ Permanently delete notes and all their associated cards. This cannot be undone.
 {
   "deleted": [1700000000123, 1700000000456],
   "not_found": [9999999999999]   // IDs that didn't match any note
+}
+```
+
+---
+
+## `delete_note_types`
+
+Permanently delete note type definitions. A note type can only be deleted if no notes currently use it — attempting to delete a note type that has notes will return an error for that item.
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `ids` | `integer[]` | **yes** | Note type IDs to delete (1–10). |
+
+### Response
+
+```jsonc
+{
+  "results": [
+    {
+      "status": "deleted",
+      "id": 1234567890,
+      "name": "Old Type"
+    },
+    {
+      "status": "error",
+      "id": 9876543210,
+      "name": "Basic",
+      "error": "Cannot delete: 482 note(s) use this type"
+    },
+    {
+      "status": "not_found",
+      "id": 9999999999999
+    }
+  ]
 }
 ```

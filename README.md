@@ -62,7 +62,7 @@ shrike type create --name "Vocab" --field Word --field Meaning \
   --template 'Card 1:{{Word}}:{{FrontSide}}<hr>{{Meaning}}'
 ```
 
-Pass `--json` for machine-readable output or `--no-pretty` to disable Rich formatting.
+Pass `--json` for machine-readable output or `--no-pretty` to disable Rich formatting. See [`docs/cli-reference.md`](docs/cli-reference.md) for the full command reference.
 
 ### Configuration
 
