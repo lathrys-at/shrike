@@ -26,7 +26,8 @@ src/shrike/                       # Python package (src layout)
 ├── server.py                     # MCP server entry point (argparse, FastMCP)
 ├── collection.py                 # CollectionWrapper — all Anki DB operations
 ├── note_types.py                 # upsert_note_types() — create/update note types
-├── tools.py                      # Registers 6 MCP tools, Pydantic input models
+├── daemon.py                     # Daemon lifecycle — file locks, spawn, shutdown
+├── tools.py                      # Registers 7 MCP tools, Pydantic input models
 ├── paths.py                      # Platform-canonical directories (via platformdirs)
 ├── log.py                        # Logging config, log parsing and styling
 ├── index.py                      # VectorIndex stub (search_notes not yet implemented)
@@ -38,23 +39,25 @@ src/shrike/                       # Python package (src layout)
     ├── server_cmd.py             # shrike server start/stop/status/logs (daemon management)
     ├── info_cmd.py               # shrike info
     ├── note_cmd.py               # shrike note list/show/create/update/delete/search
-    ├── type_cmd.py               # shrike type list/show/create/update
+    ├── type_cmd.py               # shrike type list/show/create/update/delete
     └── output.py                 # Rich formatting, output_options decorator
 tests/
-├── unit/                         # 74 tests — direct CollectionWrapper calls, no server
+├── unit/                         # 93 tests — direct CollectionWrapper calls, no server
 │   ├── conftest.py               # wrapper fixture (temp collection), basic_note fixture
 │   ├── test_collection_info.py
 │   ├── test_list_notes.py
 │   ├── test_upsert_notes.py
 │   ├── test_delete_notes.py
 │   ├── test_note_types.py
+│   ├── test_client_batching.py
 │   └── test_logging.py
-└── integration/                  # 27 tests — real server subprocess + HTTP transport
+└── integration/                  # 103 tests — real server subprocess + HTTP transport
     ├── conftest.py               # server fixture (session-scoped), mcp fixture
-    └── test_tools.py
+    ├── test_tools.py
+    └── test_cli.py
 docs/
 ├── mcp-tools.md                  # Tool documentation (human-readable)
-└── mcp-schema.json               # Full JSON schema for all 6 tools
+└── mcp-schema.json               # Full JSON schema for all 7 tools
 ```
 
 ## Development setup
@@ -108,7 +111,7 @@ The `anki` pip package provides a headless Python API to Anki's SQLite database 
 
 The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `json_response=True`). It listens on `http://127.0.0.1:8372/mcp` by default. All communication is JSON-RPC 2.0: clients POST to the endpoint with `method: "tools/call"` and receive structured JSON responses.
 
-### MCP tools (6 total)
+### MCP tools (7 total)
 
 | Tool | Status | Purpose |
 |------|--------|---------|
@@ -118,6 +121,7 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 | `upsert_notes` | Working | Create or update notes in bulk (1-100) |
 | `upsert_note_types` | Working | Create or update note type definitions (1-10) |
 | `delete_notes` | Working | Permanently delete notes by ID |
+| `delete_note_types` | Working | Delete note types by ID (only if unused) |
 
 Tool input schemas are defined as Pydantic models (`NoteInput`, `NoteTypeInput`, `TemplateInput`) in `tools.py`. The authoritative schema is in `docs/mcp-schema.json`.
 
@@ -130,12 +134,23 @@ shrike [--config PATH] [--url URL] [--json] [--pretty/--no-pretty]
 ├── server start|stop|status|logs
 ├── info [--types] [--decks] [--tags] [--stats] [--type-details NAME]
 ├── note list|show|create|update|delete|search
-└── type list|show|create|update
+└── type list|show|create|update|delete
 ```
 
 The CLI talks to the MCP server over HTTP — it can target a remote server via `--url` or `SHRIKE_URL`.
 
 `--json` and `--pretty/--no-pretty` are global options but also accepted on every leaf command (via the `@output_options` decorator in `output.py`), so both `shrike --json info` and `shrike info --json` work. `--json` implies `--no-pretty`; combining `--json --pretty` is an error.
+
+**Identifier resolution** — `type show`, `type update`, and `type delete` accept either a name or numeric ID. Note commands accept IDs with an optional `#` prefix (e.g., `note show #123`). The `NoteIDType` custom Click type in `output.py` handles `#` stripping. `note show` is sugar for `note list --ids ID`; `type show` is sugar for `type list IDENTIFIER`.
+
+**Output conventions:**
+- Colors: cyan for names/paths/URLs, green for `#ID` identifiers, yellow for tags, dim for labels/headers, no color on plain counts or dates
+- Headers: `"Showing X of Y note(s) in DeckName from /path/to/collection"` pattern
+- Tables: flush-left, no borders, dim underlined column headers (matches `gh` CLI style)
+- Detail views: Rich `Panel` with dim border, bold title
+- Spinners: `output.spinner()` context manager, dots style, no-op when `--no-pretty`
+- Results: `+` (green) for created, `~` (yellow) for updated, `!` (red) for errors
+- Validation errors use `click.UsageError` (shows usage line); runtime errors use `click.ClickException`
 
 ### Daemon management
 
@@ -149,6 +164,10 @@ The CLI talks to the MCP server over HTTP — it can target a remote server via 
 3. SIGKILL / TerminateProcess — last resort for hung processes
 
 Signal handlers (SIGTERM, SIGINT) remain as a secondary path for Unix `kill` commands and Ctrl+C in foreground mode.
+
+**HTTP endpoints** beyond MCP:
+- `GET /status` — returns JSON with pid, url, collection, log_level, log_dir, uptime. Used by `shrike server status` and auto-start health checks.
+- `POST /shutdown` — triggers graceful server shutdown.
 
 State files live in the platform state directory (see `shrike/paths.py`):
 - `server.lock` — exclusive file lock held by the running server
@@ -206,13 +225,15 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 
 ## Roadmap
 
-### v0.1.0 — CLI + MCP Server
+### v0.1.0 — CLI + MCP Server ✓
 
-- CLI integration tests and bug fixes (full command coverage)
-- Daemon auto-start from any CLI command (done)
-- CLI output UI/UX review
-- Tab completion (bash, zsh, fish)
-- Transparent batching in ShrikeClient for large requests
+- CLI integration tests and bug fixes (full command coverage) ✓
+- Daemon auto-start from any CLI command ✓
+- CLI output UI/UX review ✓
+- Tab completion (bash, zsh, fish) ✓
+- Transparent batching in ShrikeClient for large requests ✓
+- `delete_note_types` MCP tool and `type delete` CLI command ✓
+- `/status` HTTP endpoint for health checks ✓
 
 ### v0.2.0 — Semantic Search
 
