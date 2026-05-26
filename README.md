@@ -1,6 +1,6 @@
 # Shrike
 
-An alternative Anki client that runs headless — no GUI, no Qt, no desktop app required. Shrike opens your collection directly through Anki's Python library and gives you programmatic access via a CLI and an MCP server that LLM agents can talk to.
+An alternative Anki command-line client and MCP server. Shrike manages your collection without running Anki's desktop app and provides programmatic access through a CLI and an MCP server for LLM agents.
 
 ## Install
 
@@ -22,9 +22,7 @@ shrike server start --collection /path/to/collection.anki2
 python -m shrike.server --collection /path/to/collection.anki2
 ```
 
-The server listens on `http://127.0.0.1:8372/mcp` and speaks JSON-RPC 2.0. Any MCP client (Claude Desktop, Claude Code, etc.) can connect to it directly.
-
-You don't need to start the server manually — if you run a CLI command and the server isn't up, it auto-starts the daemon for you.
+The server listens on `http://127.0.0.1:8372/mcp` (JSON-RPC 2.0). Any MCP client can connect to it. The CLI auto-starts the daemon if it isn't already running.
 
 ### CLI
 
@@ -64,15 +62,15 @@ shrike type create --name "Vocab" --field Word --field Meaning \
   --template 'Card 1:{{Word}}:{{FrontSide}}<hr>{{Meaning}}'
 ```
 
-All output supports `--json` for machine-readable output and `--pretty/--no-pretty` for controlling Rich formatting.
+Pass `--json` for machine-readable output or `--no-pretty` to disable Rich formatting.
 
 ### Configuration
 
-YAML config at the platform config directory (`~/.config/shrike/config.yml` on Linux, `~/Library/Application Support/shrike/config.yml` on macOS). Environment variables `SHRIKE_URL` and `SHRIKE_COLLECTION` work too. CLI flags override everything.
+YAML config at the platform config directory (`~/.config/shrike/config.yml` on Linux, `~/Library/Application Support/shrike/config.yml` on macOS). Environment variables `SHRIKE_URL` and `SHRIKE_COLLECTION` are also supported. CLI flags take precedence over both.
 
 ## MCP Tools
 
-Shrike exposes seven tools over MCP:
+Shrike exposes the following MCP tools:
 
 - **collection_info** — collection structure, note types, decks, tags, and stats
 - **list_notes** — filter and retrieve notes by deck, tags, type, IDs, or date
