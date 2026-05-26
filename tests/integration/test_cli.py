@@ -13,19 +13,17 @@ pytestmark = pytest.mark.integration
 
 
 class TestInfo:
-    def test_pretty(self, runner):
+    def test_summary_default(self, runner):
         result = runner.invoke(["info"])
         assert result.exit_code == 0
-        assert "Basic" in result.output
-        assert "Default" in result.output
+        assert "Collection" in result.output
+        assert "Notes" in result.output
 
-    def test_json(self, runner):
+    def test_summary_json(self, runner):
         data = runner.json(["info"])
-        assert "note_types" in data
-        assert "decks" in data
-        assert "tags" in data
-        assert "stats" in data
-        assert any(nt["name"] == "Basic" for nt in data["note_types"])
+        assert "summary" in data
+        assert "notes" in data["summary"]
+        assert "cards" in data["summary"]
 
     def test_decks_only(self, runner):
         result = runner.invoke(["info", "--decks"])
@@ -56,7 +54,7 @@ class TestInfo:
                 "Back=A",
             ]
         )
-        data = runner.json(["info"])
+        data = runner.json(["info", "--stats"])
         assert data["stats"]["total_notes"] >= 1
 
     def test_tags_reflect_notes(self, runner):
@@ -76,7 +74,7 @@ class TestInfo:
                 "mytag",
             ]
         )
-        data = runner.json(["info"])
+        data = runner.json(["info", "--tags"])
         assert "mytag" in data["tags"]
 
 
@@ -768,6 +766,112 @@ class TestTypeCreateAndUpdate:
         assert "Z" in updated["fields"]
 
 
+class TestTypeShowByID:
+    """Showing note types by numeric ID."""
+
+    def test_show_by_id_pretty(self, runner):
+        data = runner.json(["type", "list"])
+        basic = next(nt for nt in data if nt["name"] == "Basic")
+        result = runner.invoke(["type", "show", str(basic["id"])])
+        assert result.exit_code == 0
+        assert "Basic" in result.output
+        assert "Front" in result.output
+
+    def test_show_by_id_json(self, runner):
+        data = runner.json(["type", "list"])
+        basic = next(nt for nt in data if nt["name"] == "Basic")
+        shown = runner.json(["type", "show", str(basic["id"])])
+        assert shown["name"] == "Basic"
+        assert "templates" in shown
+
+
+class TestTypeUpdateByName:
+    """Updating note types by name instead of ID."""
+
+    def test_update_by_name(self, runner):
+        runner.invoke(
+            [
+                "type",
+                "create",
+                "--name",
+                "NameUpdatable",
+                "--field",
+                "F",
+                "--template",
+                "Card 1:{{F}}:{{F}}",
+            ]
+        )
+        result = runner.invoke(
+            ["type", "update", "NameUpdatable", "--css", ".card { color: green; }"]
+        )
+        assert result.exit_code == 0
+        assert "Updated" in result.output
+
+        data = runner.json(["type", "show", "NameUpdatable"])
+        assert "color: green" in data["css"]
+
+
+class TestTypeDelete:
+    """Deleting note types by name or ID."""
+
+    def _create_type(self, runner, name):
+        data = runner.json(
+            [
+                "type",
+                "create",
+                "--name",
+                name,
+                "--field",
+                "F",
+                "--template",
+                "Card 1:{{F}}:{{F}}",
+            ]
+        )
+        return data["results"][0]["id"]
+
+    def test_delete_by_name(self, runner):
+        self._create_type(runner, "DeleteByName")
+        data = runner.json(["type", "delete", "DeleteByName", "-y"])
+        assert data["results"][0]["status"] == "deleted"
+
+        types = runner.json(["type", "list"])
+        assert not any(nt["name"] == "DeleteByName" for nt in types)
+
+    def test_delete_by_id(self, runner):
+        nt_id = self._create_type(runner, "DeleteByID")
+        data = runner.json(["type", "delete", str(nt_id), "-y"])
+        assert data["results"][0]["status"] == "deleted"
+
+    def test_delete_type_with_notes_fails(self, runner):
+        runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+            ]
+        )
+        data = runner.json(["type", "delete", "Basic", "-y"])
+        assert data["results"][0]["status"] == "error"
+        assert "note(s) use this type" in data["results"][0]["error"]
+
+    def test_delete_nonexistent_name(self, runner):
+        result = runner.invoke(["type", "delete", "Nonexistent", "-y"])
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
+
+    def test_delete_nonexistent_id(self, runner):
+        result = runner.invoke(["type", "delete", "9999999999", "-y"])
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
+
+
 class TestOutputModes:
     """Test --json, --pretty, --no-pretty across commands."""
 
@@ -775,7 +879,7 @@ class TestOutputModes:
         result = runner.invoke(["--json", "info"])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert "note_types" in data
+        assert "summary" in data
 
     def test_no_pretty(self, runner):
         result = runner.invoke(["--no-pretty", "info"])

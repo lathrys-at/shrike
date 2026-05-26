@@ -26,14 +26,45 @@ mcp = FastMCP(
 )
 
 
-def _register_shutdown_route(
+def _register_custom_routes(
     app: FastMCP,
     wrapper: CollectionWrapper,
     server_lock: ServerLock,
+    *,
+    meta: dict[str, Any],
 ) -> None:
-    """Register the POST /shutdown endpoint for cross-platform clean shutdown."""
+    """Register custom HTTP endpoints on the server."""
     from starlette.requests import Request
     from starlette.responses import JSONResponse
+
+    @app.custom_route("/status", methods=["GET"])
+    async def handle_status(request: Request) -> JSONResponse:
+        import contextlib
+
+        status: dict[str, Any] = {
+            "running": True,
+            "pid": os.getpid(),
+            "url": meta.get("url"),
+            "collection": meta.get("collection"),
+            "log_level": meta.get("log_level"),
+            "log_dir": meta.get("log_dir"),
+        }
+
+        started = meta.get("started", "")
+        if started:
+            with contextlib.suppress(ValueError):
+                start_dt = datetime.fromisoformat(started)
+                delta = datetime.now(UTC) - start_dt
+                hours, remainder = divmod(int(delta.total_seconds()), 3600)
+                minutes, seconds = divmod(remainder, 60)
+                if hours:
+                    status["uptime"] = f"{hours}h {minutes}m"
+                elif minutes:
+                    status["uptime"] = f"{minutes}m {seconds}s"
+                else:
+                    status["uptime"] = f"{seconds}s"
+
+        return JSONResponse(status)
 
     @app.custom_route("/shutdown", methods=["POST"])
     async def handle_shutdown(request: Request) -> JSONResponse:
@@ -99,34 +130,30 @@ def main() -> None:
     # Acquire the daemon lock before touching the collection
     state_dir_override = Path(args.state_dir) if args.state_dir else None
     server_lock = ServerLock(state_dir_override=state_dir_override)
+    server_meta = {
+        "pid": None,
+        "url": f"http://{args.host}:{args.port}/mcp",
+        "host": args.host,
+        "port": args.port,
+        "collection": args.collection,
+        "log_dir": str(log_dir),
+        "log_level": args.log_level or "info",
+        "started": datetime.now(UTC).isoformat(),
+    }
     try:
-        server_lock.acquire(
-            meta={
-                "pid": None,  # will be overwritten after acquire sets it
-                "url": f"http://{args.host}:{args.port}/mcp",
-                "host": args.host,
-                "port": args.port,
-                "collection": args.collection,
-                "log_dir": str(log_dir),
-                "log_level": args.log_level or "info",
-                "started": datetime.now(UTC).isoformat(),
-            }
-        )
+        server_lock.acquire(meta=server_meta)
     except AlreadyRunningError as e:
         logger.error("Cannot start: %s", e)
         sys.exit(1)
 
     logger.info("Opening collection at %s", args.collection)
     wrapper = CollectionWrapper(args.collection)
-    info = wrapper.get_collection_info(include=["note_types", "decks", "stats"])
-    note_count = info.get("stats", {}).get("total_notes", 0)
-    deck_count = len(info.get("decks", []))
-    type_count = len(info.get("note_types", []))
+    summary = wrapper.get_collection_info().get("summary", {})
     logger.info(
         "Collection ready: %d notes, %d decks, %d note types",
-        note_count,
-        deck_count,
-        type_count,
+        summary.get("notes", 0),
+        summary.get("decks", 0),
+        summary.get("note_types", 0),
     )
 
     def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
@@ -141,7 +168,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _signal_shutdown)
 
     register_tools(mcp, wrapper)
-    _register_shutdown_route(mcp, wrapper, server_lock)
+    _register_custom_routes(mcp, wrapper, server_lock, meta=server_meta)
 
     logger.info(
         "Listening on %s:%s (log_dir=%s, log_level=%s)",

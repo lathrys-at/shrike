@@ -7,7 +7,8 @@ from typing import Any
 import click
 
 from shrike.cli import output
-from shrike.cli.output import output_options
+from shrike.cli.config import resolve_collection
+from shrike.cli.output import NOTE_ID, output_options
 
 
 def _parse_field(value: str) -> tuple[str, str]:
@@ -48,7 +49,7 @@ def note() -> None:
     help="Filter by tag (repeatable, comma-separated, ANDed).",
 )
 @click.option("--type", "note_type", help="Filter by note type.")
-@click.option("--ids", multiple=True, type=int, help="Fetch specific note IDs.")
+@click.option("--ids", multiple=True, type=NOTE_ID, help="Fetch specific note IDs.")
 @click.option("--since", "modified_since", help="Notes modified after this date (ISO 8601).")
 @click.option("--query", help="Raw Anki search query.")
 @click.option("--meta", is_flag=True, help="Show only metadata, not field content.")
@@ -77,6 +78,11 @@ def note_list(
     """
     client = ctx.obj["client"]
 
+    if not any([deck, tags, note_type, ids, modified_since, query]):
+        raise click.UsageError(
+            "At least one filter is required: --deck, --tags, --type, --ids, --since, or --query"
+        )
+
     kwargs: dict[str, Any] = {
         "deck": deck,
         "tags": list(tags) or None,
@@ -88,7 +94,8 @@ def note_list(
         "limit": limit,
     }
 
-    result = client.list_notes(**kwargs)
+    with output.spinner("Fetching notes…"):
+        result = client.list_notes(**kwargs)
 
     if ctx.obj["json"]:
         output.emit_json(result)
@@ -101,10 +108,23 @@ def note_list(
         output.console.print("[dim]No notes found.[/dim]")
         return
 
-    if total > len(notes):
-        output.console.print(f"  [dim]Showing {len(notes)} of {total} matching notes[/dim]")
-    else:
-        output.console.print(f"  [dim]{total} note(s)[/dim]")
+    col_path = resolve_collection(ctx.obj["config"]) or "collection"
+
+    filter_parts: list[str] = []
+    if deck:
+        filter_parts.append(f"in [cyan]{deck}[/cyan]")
+    if note_type:
+        filter_parts.append(f"of type [cyan]{note_type}[/cyan]")
+    if tags:
+        filter_parts.append(f"tagged {', '.join(f'[yellow]{t}[/yellow]' for t in tags)}")
+    filter_desc = " ".join(filter_parts)
+    if filter_desc:
+        filter_desc = f" {filter_desc}"
+
+    count = f"{len(notes)} of {total}" if total > len(notes) else str(total)
+    output.console.print(
+        f"[dim]Showing {count} note(s){filter_desc} from [cyan]{col_path}[/cyan][/dim]"
+    )
 
     output.console.print()
 
@@ -120,20 +140,24 @@ def note_list(
 
 @note.command("show", short_help="Show a note by ID")
 @output_options
-@click.argument("note_id", type=int)
+@click.argument("note_id", type=NOTE_ID)
 @click.pass_context
 def note_show(ctx: click.Context, note_id: int) -> None:
-    """Show the full content of a specific note."""
+    """Shorthand for ``note list --ids ID``.
+
+    Errors if the note does not exist.
+    """
     client = ctx.obj["client"]
-    result = client.list_notes(ids=[note_id], fields="full")
+    with output.spinner("Fetching note…"):
+        result = client.list_notes(ids=[note_id], fields="full")
+
+    notes = result.get("notes", [])
+    if not notes:
+        raise click.ClickException(f"Note #{note_id} not found.")
 
     if ctx.obj["json"]:
         output.emit_json(result)
         return
-
-    notes = result.get("notes", [])
-    if not notes:
-        raise click.ClickException(f"Note {note_id} not found.")
 
     output.note_detail(notes[0])
 
@@ -193,11 +217,11 @@ def note_create(
         notes = data
     else:
         if not deck:
-            raise click.ClickException("--deck is required for inline creation.")
+            raise click.UsageError("--deck is required for inline creation.")
         if not note_type:
-            raise click.ClickException("--type is required for inline creation.")
+            raise click.UsageError("--type is required for inline creation.")
         if not field:
-            raise click.ClickException("At least one field is required. Use -f KEY=VALUE.")
+            raise click.UsageError("At least one field is required. Use -f KEY=VALUE.")
 
         fields = dict(_parse_field(f) for f in field)
         note_obj: dict[str, Any] = {
@@ -209,7 +233,8 @@ def note_create(
             note_obj["tags"] = list(tags)
         notes = [note_obj]
 
-    result = client.upsert_notes(notes)
+    with output.spinner("Creating notes…"):
+        result = client.upsert_notes(notes)
 
     if ctx.obj["json"]:
         output.emit_json(result)
@@ -220,7 +245,7 @@ def note_create(
 
 @note.command("update", short_help="Update an existing note")
 @output_options
-@click.argument("note_id", type=int)
+@click.argument("note_id", type=NOTE_ID)
 @click.option(
     "-f",
     "--field",
@@ -266,9 +291,10 @@ def note_update(
         note_obj["deck"] = deck
 
     if len(note_obj) == 1:
-        raise click.ClickException("Nothing to update. Use -f, --tags, or --deck.")
+        raise click.UsageError("Nothing to update. Use -f, --tags, or --deck.")
 
-    result = client.upsert_notes([note_obj])
+    with output.spinner("Updating note…"):
+        result = client.upsert_notes([note_obj])
 
     if ctx.obj["json"]:
         output.emit_json(result)
@@ -279,7 +305,7 @@ def note_update(
 
 @note.command("delete", short_help="Delete notes by ID")
 @output_options
-@click.argument("note_ids", type=int, nargs=-1, required=True)
+@click.argument("note_ids", type=NOTE_ID, nargs=-1, required=True)
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
 @click.pass_context
 def note_delete(ctx: click.Context, note_ids: tuple[int, ...], yes: bool) -> None:
@@ -299,7 +325,8 @@ def note_delete(ctx: click.Context, note_ids: tuple[int, ...], yes: bool) -> Non
             return
 
     client = ctx.obj["client"]
-    result = client.delete_notes(list(note_ids))
+    with output.spinner("Deleting notes…"):
+        result = client.delete_notes(list(note_ids))
 
     if ctx.obj["json"]:
         output.emit_json(result)
@@ -309,9 +336,11 @@ def note_delete(ctx: click.Context, note_ids: tuple[int, ...], yes: bool) -> Non
     not_found = result.get("not_found", [])
 
     if deleted:
-        output.success(f"Deleted {len(deleted)} note(s).")
+        ids_str = ", ".join(f"[green]#{i}[/green]" for i in deleted)
+        output.console.print(f"Deleted {len(deleted)} note(s): {ids_str}")
     if not_found:
-        output.console.print(f"[dim]Not found: {', '.join(str(i) for i in not_found)}[/dim]")
+        ids_str = ", ".join(str(i) for i in not_found)
+        output.console.print(f"[dim]Not found: {ids_str}[/dim]")
 
 
 @note.command("search", short_help="Semantic search over notes")
@@ -320,7 +349,7 @@ def note_delete(ctx: click.Context, note_ids: tuple[int, ...], yes: bool) -> Non
 @click.option(
     "--similar-to",
     multiple=True,
-    type=int,
+    type=NOTE_ID,
     metavar="ID",
     help="Find notes similar to this note ID.",
 )
@@ -351,7 +380,7 @@ def note_search(
       shrike note search "mitochondria" --deck Biochemistry
     """
     if not queries and not similar_to:
-        raise click.ClickException("Provide query strings and/or --similar-to note IDs.")
+        raise click.UsageError("Provide query strings and/or --similar-to note IDs.")
 
     client = ctx.obj["client"]
 
@@ -365,7 +394,8 @@ def note_search(
     if tags:
         kwargs["tags"] = list(tags)
 
-    result = client.search_notes(**kwargs)
+    with output.spinner("Searching notes…"):
+        result = client.search_notes(**kwargs)
 
     if ctx.obj["json"]:
         output.emit_json(result)
@@ -373,7 +403,7 @@ def note_search(
 
     message = result.get("_message")
     if message:
-        output.console.print(f"  [dim]{message}[/dim]")
+        output.console.print(f"[dim]{message}[/dim]")
         return
 
     results = result.get("results", [])
@@ -383,12 +413,12 @@ def note_search(
 
     for group in results:
         source = group.get("source", "")
-        output.console.print(f"\n  [bold]Results for:[/bold] {source}")
+        output.console.print(f"\nResults for: [cyan]{source}[/cyan]")
         matches = group.get("matches", [])
         for m in matches:
             score = m.get("score", 0)
             output.console.print(
-                f"    \\[[cyan]{score:.2f}[/cyan]] [cyan]{m['id']}[/cyan] ({m.get('deck', '')})"
+                f"  \\[{score:.2f}] [green]#{m['id']}[/green] ([cyan]{m.get('deck', '')}[/cyan])"
             )
             content = m.get("content", {})
             if content:

@@ -117,28 +117,23 @@ class ShrikeClient:
 
         Does NOT auto-start — this is a probe, not an operation.
         """
+        return self.server_status() is not None
+
+    def server_status(self) -> dict[str, Any] | None:
+        """Fetch status from the daemon's /status endpoint.
+
+        Returns the status dict, or None if the server is unreachable.
+        Does NOT auto-start.
+        """
+        status_url = self.url.rsplit("/", 1)[0] + "/status"
         try:
-            resp = httpx.post(
-                self.url,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 0,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2025-03-26",
-                        "capabilities": {},
-                        "clientInfo": {"name": "shrike-cli", "version": "0.1.0"},
-                    },
-                },
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                timeout=5.0,
-            )
-            return resp.status_code == 200
+            resp = httpx.get(status_url, timeout=5.0)
+            if resp.status_code == 200:
+                result: dict[str, Any] = resp.json()
+                return result
+            return None
         except (httpx.ConnectError, httpx.TimeoutException):
-            return False
+            return None
 
     # -- Convenience methods --
 
@@ -182,6 +177,10 @@ class ShrikeClient:
             result_key="results",
             batch_size=10,
         )
+
+    def delete_note_types(self, ids: list[int]) -> dict:
+        """Delete note types by ID."""
+        return self.call("delete_note_types", {"ids": ids})
 
     def delete_notes(self, ids: list[int]) -> dict:
         """Delete notes, transparently batching if over the server limit."""

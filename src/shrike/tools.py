@@ -121,12 +121,14 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
         Use this to orient yourself before creating or searching for notes —
         especially to discover which note types, fields, and decks exist.
 
-        With no arguments, returns summaries of everything. Use `include` to
-        request only a subset. Note type summaries include field names and
+        With no arguments, returns a compact summary (counts, dates, path).
+        Use `include` to request specific sections: "summary", "note_types",
+        "decks", "tags", "stats", or "all" for everything. Note type summaries
+        include field names and
         type (standard/cloze) but not full template HTML or CSS — use
         `note_type_details` to request full definitions for specific note
         types when you need to inspect or author templates."""
-        sections = include or ["note_types", "decks", "tags", "stats"]
+        sections = include or ["summary"]
         logger.info("collection_info sections=%s", ",".join(sections))
         return wrapper.get_collection_info(include, note_type_details)
 
@@ -350,4 +352,23 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
         )
         if result["deleted"]:
             index.on_notes_deleted(result["deleted"])
+        return result
+
+    @mcp.tool()
+    @_safe_tool
+    def delete_note_types(ids: list[int]) -> dict[str, Any]:
+        """Delete note type definitions by ID.
+
+        A note type can only be deleted if no notes currently use it.
+        Check use counts via collection_info first."""
+        if len(ids) > 10:
+            return {"error": "Maximum 10 note type IDs per call."}
+
+        logger.info("delete_note_types requested=%d", len(ids))
+        result = wrapper.delete_note_types(ids)
+        statuses: dict[str, int] = {}
+        for r in result["results"]:
+            s = r["status"]
+            statuses[s] = statuses.get(s, 0) + 1
+        logger.info("delete_note_types completed: %s", statuses)
         return result

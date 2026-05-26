@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import sys
 import time
@@ -24,14 +25,44 @@ from shrike.daemon import (
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
 
 
-def _wait_for_server(url: str, timeout: float = 15.0) -> bool:
+def _render_status(status: dict[str, Any]) -> None:
+    """Render the unified server status block used by both start and status."""
+    if not status.get("running", False):
+        output.console.print("[dim]Server is not running.[/dim]")
+        return
+
+    if status.get("responsive") is False:
+        output.console.print("[bold yellow]Server is running but not responding[/bold yellow]")
+    else:
+        output.console.print("[bold green]Server is running[/bold green]")
+    if status.get("url"):
+        output.kv("URL", f"[cyan]{status['url']}[/cyan]")
+    if status.get("pid"):
+        output.kv("PID", f"[cyan]{status['pid']}[/cyan]")
+    if status.get("collection"):
+        output.kv("Collection", f"[cyan]{status['collection']}[/cyan]")
+    if status.get("log_level"):
+        output.kv("Log level", status["log_level"])
+    if status.get("log"):
+        output.kv("Log", f"[cyan]{status['log']}[/cyan]")
+    if status.get("uptime"):
+        output.kv("Uptime", status["uptime"])
+
+
+def _wait_for_server(
+    url: str, timeout: float = 15.0, *, show_spinner: bool = True
+) -> dict[str, Any] | None:
+    """Poll until the daemon responds to /status. Returns the status dict or None."""
     client = ShrikeClient(url, autostart=False)
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if client.ping():
-            return True
-        time.sleep(0.2)
-    return False
+
+    with output.spinner("Starting server…") if show_spinner else contextlib.nullcontext():
+        while time.monotonic() < deadline:
+            status = client.server_status()
+            if status is not None:
+                return status
+            time.sleep(0.2)
+    return None
 
 
 def ensure_server(config: dict[str, Any]) -> str:
@@ -103,7 +134,7 @@ def ensure_server(config: dict[str, Any]) -> str:
         start_new_session=True,
     )
 
-    if not _wait_for_server(url) and proc.poll() is not None:
+    if _wait_for_server(url, show_spinner=False) is None and proc.poll() is not None:
         cleanup_state()
         log_file = get_log_file(config, log_dir_override=resolved_log_dir)
         raise click.ClickException(
@@ -257,28 +288,15 @@ def server_start(
         if not json_out:
             output.console.print(f"  [dim]Config saved to {saved}[/dim]")
 
-    # Wait for server to come up (lock acquired + responding to pings)
-    if not json_out:
-        output.console.print(f"Starting server (PID {proc.pid})...")
-
     log_file = get_log_file(config, log_dir_override=resolved_log_dir)
-    if _wait_for_server(url):
+    status = _wait_for_server(url)
+    if status is not None:
         if json_out:
-            output.emit_json(
-                {
-                    "started": True,
-                    "pid": proc.pid,
-                    "url": url,
-                    "collection": collection_path,
-                    "log": str(log_file),
-                    "log_level": resolved_log_level,
-                }
-            )
+            status["log"] = str(log_file)
+            output.emit_json(status)
         else:
-            output.success(f"Server running at {url}")
-            output.kv("Collection", collection_path, indent=2)
-            output.kv("Log", str(log_file), indent=2)
-            output.kv("Level", resolved_log_level, indent=2)
+            status["log"] = str(log_file)
+            _render_status(status)
     else:
         if proc.poll() is not None:
             cleanup_state()
@@ -310,17 +328,18 @@ def server_stop(ctx: click.Context) -> None:
     """Stop the Shrike MCP server daemon."""
     json_out: bool = ctx.obj["json"]
 
-    if not json_out:
-        if is_server_alive():
-            output.console.print("Stopping server...")
+    if not is_server_alive():
+        if json_out:
+            output.emit_json({"stopped": False, "reason": "not running"})
         else:
-            output.console.print("Server is not running.")
+            output.console.print("[dim]Server is not running.[/dim]")
             if META_FILE.exists():
                 cleanup_state()
                 output.console.print("[dim](cleaned up stale state)[/dim]")
-            return
+        return
 
-    result = stop_server()
+    with output.spinner("Stopping server…"):
+        result = stop_server()
 
     if json_out:
         output.emit_json(result)
@@ -338,32 +357,29 @@ def server_stop(ctx: click.Context) -> None:
 @click.pass_context
 def server_status_cmd(ctx: click.Context) -> None:
     """Check whether the Shrike MCP server is running."""
-    status = server_status()
+    url = ctx.obj["url"]
+    client = ShrikeClient(url, autostart=False)
+    with output.spinner("Checking server…"):
+        status = client.server_status()
+
+        if status is None:
+            status = server_status()
+            if status["running"]:
+                status["responsive"] = False
 
     if ctx.obj["json"]:
         output.emit_json(status)
-        if not status["running"]:
+        if not status.get("running"):
             ctx.exit(1)
         return
 
-    if not status["running"]:
-        output.console.print("[dim]Server is not running.[/dim]")
-        ctx.exit(1)
-        return
-
-    output.console.print("[bold green]Server is running[/bold green]")
-    if status.get("url"):
-        output.kv("URL", status["url"], indent=2)
-    if status.get("pid"):
-        output.kv("PID", status["pid"], indent=2)
-    if status.get("collection"):
-        output.kv("Collection", status["collection"], indent=2)
-    if status.get("log_level"):
-        output.kv("Log level", status["log_level"], indent=2)
     if status.get("log_dir"):
-        output.kv("Log", str(Path(status["log_dir"]) / "shrike.log"), indent=2)
-    if status.get("uptime"):
-        output.kv("Uptime", status["uptime"], indent=2)
+        status["log"] = str(Path(status["log_dir"]) / "shrike.log")
+
+    _render_status(status)
+
+    if not status.get("running"):
+        ctx.exit(1)
 
 
 @server.command("logs", short_help="View server logs")

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 
 class TestCollectionInfo:
-    def test_returns_all_sections_by_default(self, wrapper):
+    def test_returns_summary_by_default(self, wrapper):
         info = wrapper.get_collection_info()
-        assert "note_types" in info
-        assert "decks" in info
-        assert "tags" in info
-        assert "stats" in info
+        assert "summary" in info
+        summary = info["summary"]
+        assert "path" in summary
+        assert "notes" in summary
+        assert "cards" in summary
+        assert "decks" in summary
+        assert "note_types" in summary
 
     def test_include_filters_sections(self, wrapper):
         info = wrapper.get_collection_info(include=["decks"])

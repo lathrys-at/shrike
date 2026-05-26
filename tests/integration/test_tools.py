@@ -16,12 +16,13 @@ pytestmark = pytest.mark.integration
 class TestCollectionInfo:
     """collection_info on an empty collection."""
 
-    def test_returns_all_sections(self, mcp):
+    def test_returns_summary_by_default(self, mcp):
         result = mcp("collection_info")
-        assert "note_types" in result
-        assert "decks" in result
-        assert "tags" in result
-        assert "stats" in result
+        assert "summary" in result
+        summary = result["summary"]
+        assert "path" in summary
+        assert "notes" in summary
+        assert "decks" in summary
 
     def test_include_filters(self, mcp):
         result = mcp("collection_info", {"include": ["stats"]})

@@ -33,9 +33,13 @@ class CollectionWrapper:
         include: list[str] | None = None,
         note_type_details: list[str] | None = None,
     ) -> dict[str, Any]:
-        sections = include or ["note_types", "decks", "tags", "stats"]
+        ALL_SECTIONS = ["summary", "note_types", "decks", "tags", "stats"]
+        sections = ALL_SECTIONS if include and "all" in include else (include or ["summary"])
         detail_names = set(note_type_details or [])
         result: dict[str, Any] = {}
+
+        if "summary" in sections:
+            result["summary"] = self._get_summary()
 
         if "note_types" in sections:
             result["note_types"] = self._get_note_types(detail_names)
@@ -50,6 +54,34 @@ class CollectionWrapper:
             result["stats"] = self._get_stats()
 
         return result
+
+    def _get_summary(self) -> dict[str, Any]:
+        tree = self.col.sched.deck_due_tree()
+        total_due = 0
+        for top in tree.children:
+            self._walk_due(top, total_due_ref := [0])
+            total_due += total_due_ref[0]
+
+        created = datetime.fromtimestamp(self.col.crt, tz=UTC).strftime("%Y-%m-%d")
+        modified = datetime.fromtimestamp(self.col.mod / 1000, tz=UTC).isoformat(timespec="seconds")
+
+        return {
+            "path": self.col.path,
+            "created": created,
+            "modified": modified,
+            "notes": self.col.note_count(),
+            "cards": self.col.card_count(),
+            "decks": len(self.col.decks.all_names_and_ids()),
+            "note_types": len(self.col.models.all()),
+            "tags": len(self.col.tags.all()),
+            "due_today": total_due,
+        }
+
+    @staticmethod
+    def _walk_due(node: Any, total_ref: list[int]) -> None:
+        total_ref[0] += node.review_count + node.learn_count
+        for child in node.children:
+            CollectionWrapper._walk_due(child, total_ref)
 
     def _get_note_types(self, detail_names: set[str]) -> list[dict]:
         note_types = []
@@ -320,3 +352,29 @@ class CollectionWrapper:
             self.col.remove_notes(deleted)
 
         return {"deleted": deleted, "not_found": not_found}
+
+    def delete_note_types(self, ids: list[int]) -> dict[str, Any]:
+        results: list[dict[str, Any]] = []
+        for nt_id in ids:
+            nt = self.col.models.get(nt_id)  # type: ignore[arg-type]
+            if nt is None:
+                results.append({"id": nt_id, "status": "not_found"})
+                continue
+
+            use_count = self.col.models.use_count(nt)
+            if use_count > 0:
+                results.append(
+                    {
+                        "id": nt_id,
+                        "name": nt["name"],
+                        "status": "error",
+                        "error": f"Cannot delete: {use_count} note(s) use this type",
+                    }
+                )
+                continue
+
+            self.col.models.remove(nt_id)  # type: ignore[arg-type]
+            logger.debug("Deleted note type %s (%d)", nt["name"], nt_id)
+            results.append({"id": nt_id, "name": nt["name"], "status": "deleted"})
+
+        return {"results": results}

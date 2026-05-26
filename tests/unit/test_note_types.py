@@ -181,3 +181,51 @@ class TestUpdateNoteType:
         results = upsert_note_types(wrapper.col, [{"id": nt_id, "is_cloze": True}])
         assert results[0]["status"] == "error"
         assert "cannot change" in results[0]["error"].lower()
+
+
+class TestDeleteNoteType:
+    def _create_unused_type(self, wrapper):
+        results = upsert_note_types(
+            wrapper.col,
+            [
+                {
+                    "name": "Deletable",
+                    "fields": ["F"],
+                    "templates": [{"name": "C1", "front": "{{F}}", "back": "{{F}}"}],
+                    "css": "",
+                }
+            ],
+        )
+        return results[0]["id"]
+
+    def test_delete_unused_type(self, wrapper):
+        nt_id = self._create_unused_type(wrapper)
+        result = wrapper.delete_note_types([nt_id])
+        assert result["results"][0]["status"] == "deleted"
+        assert result["results"][0]["name"] == "Deletable"
+
+        info = wrapper.get_collection_info(include=["note_types"])
+        assert not any(nt["id"] == nt_id for nt in info["note_types"])
+
+    def test_delete_type_with_notes_fails(self, wrapper, basic_note):
+        info = wrapper.get_collection_info(include=["note_types"])
+        basic = next(nt for nt in info["note_types"] if nt["name"] == "Basic")
+
+        result = wrapper.delete_note_types([basic["id"]])
+        assert result["results"][0]["status"] == "error"
+        assert "note(s) use this type" in result["results"][0]["error"]
+
+    def test_delete_nonexistent(self, wrapper):
+        result = wrapper.delete_note_types([9999999999])
+        assert result["results"][0]["status"] == "not_found"
+
+    def test_delete_multiple_mixed(self, wrapper, basic_note):
+        nt_id = self._create_unused_type(wrapper)
+        info = wrapper.get_collection_info(include=["note_types"])
+        basic_id = next(nt["id"] for nt in info["note_types"] if nt["name"] == "Basic")
+
+        result = wrapper.delete_note_types([nt_id, basic_id, 9999999999])
+        statuses = {r["id"]: r["status"] for r in result["results"]}
+        assert statuses[nt_id] == "deleted"
+        assert statuses[basic_id] == "error"
+        assert statuses[9999999999] == "not_found"
