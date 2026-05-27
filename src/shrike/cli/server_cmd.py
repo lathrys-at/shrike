@@ -82,18 +82,26 @@ def _render_status(status: dict[str, Any]) -> None:
     if idx:
         state = idx.get("state", "unknown")
         if state == "ready":
-            size = idx.get("size", 0)
-            ndim = idx.get("ndim", "?")
-            output.kv("Index", f"[green]ready[/green] ({size} vectors, {ndim} dims)")
+            output.kv("Index", "[green]ready[/green]")
+            output.kv("Vectors", f"[green]{idx.get('size', 0)}[/green]", indent=2)
+            output.kv("Dimensions", str(idx.get("ndim", "?")), indent=2)
         elif state == "building":
             progress = idx.get("progress", {})
             indexed = progress.get("indexed", 0)
             total = progress.get("total", 0)
-            output.kv("Index", f"[yellow]building[/yellow] ({indexed} / {total} notes)")
+            output.kv("Index", "[yellow]building[/yellow]")
+            output.kv("Progress", f"{indexed} / {total} notes", indent=2)
         elif state == "error":
-            output.kv("Index", f"[red]error[/red] ({idx.get('error', 'unknown')})")
+            output.kv("Index", "[red]error[/red]")
+            output.kv("Error", idx.get("error", "unknown"), indent=2)
+        elif state == "unavailable":
+            output.kv("Index", "[dim]unavailable[/dim]")
         else:
             output.kv("Index", f"[dim]{state}[/dim]")
+        if idx.get("col_mod") is not None:
+            output.kv("Collection mod", str(idx["col_mod"]), indent=2)
+        if idx.get("path"):
+            output.kv("Path", f"[cyan]{idx['path']}[/cyan]", indent=2)
 
 
 def _wait_for_server(
