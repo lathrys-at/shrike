@@ -76,14 +76,16 @@ jobs:
             Darwin-x86_64)  PLATFORM="macos-x64" ;;
             *) echo "Unsupported platform: $(uname -s)-$(uname -m)" && exit 1 ;;
           esac
-          curl -sL "https://github.com/ggml-org/llama.cpp/releases/download/${TAG}/llama-${TAG}-bin-${PLATFORM}.tar.gz" | tar xz -C /opt
-          mv /opt/llama-${TAG} /opt/llama-server
-          echo "/opt/llama-server" >> "$GITHUB_PATH"
+          INSTALL_DIR="${RUNNER_TEMP}/llama-server"
+          curl -sL "https://github.com/ggml-org/llama.cpp/releases/download/${TAG}/llama-${TAG}-bin-${PLATFORM}.tar.gz" | tar xz -C "${RUNNER_TEMP}"
+          mv "${RUNNER_TEMP}/llama-${TAG}" "$INSTALL_DIR"
+          echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+          echo "LLAMA_DIR=$INSTALL_DIR" >> "$GITHUB_ENV"
           llama-server --version || true
       - name: Install dependencies
         run: pip install -e ".[dev]"
       - name: Run embedding tests
         env:
-          LD_LIBRARY_PATH: /opt/llama-server
-          DYLD_LIBRARY_PATH: /opt/llama-server
+          LD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
+          DYLD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
         run: pytest tests/integration -v -m embedding

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+#
+# Run embedding integration tests locally.
+#
+# Downloads llama-server and a small GGUF model into .cache/ (cached
+# across runs), then runs the embedding test suite with the right
+# environment. Everything stays inside the project directory.
+#
+# Usage:
+#   ./scripts/test-embedding.sh           # run embedding tests
+#   ./scripts/test-embedding.sh --fresh   # re-download everything
+#
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CACHE="$ROOT/.cache"
+LLAMA_DIR="$CACHE/llama-server"
+MODEL_DIR="$CACHE/models"
+MODEL_NAME="all-MiniLM-L6-v2-Q4_0.gguf"
+MODEL_URL="https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/$MODEL_NAME"
+
+EXTRA_ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--fresh" ]]; then
+        echo "Cleaning cache..."
+        rm -rf "$LLAMA_DIR" "$MODEL_DIR"
+    else
+        EXTRA_ARGS+=("$arg")
+    fi
+done
+
+# -- llama-server --
+
+if [[ -x "$LLAMA_DIR/llama-server" ]]; then
+    echo "Using cached llama-server"
+else
+    echo "Downloading llama-server..."
+    case "$(uname -s)-$(uname -m)" in
+        Linux-x86_64)   PLATFORM="ubuntu-x64" ;;
+        Linux-aarch64)  PLATFORM="ubuntu-arm64" ;;
+        Darwin-arm64)   PLATFORM="macos-arm64" ;;
+        Darwin-x86_64)  PLATFORM="macos-x64" ;;
+        *) echo "Unsupported platform: $(uname -s)-$(uname -m)" && exit 1 ;;
+    esac
+
+    TAG=$(curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases/latest \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])")
+    echo "  Release: $TAG, platform: $PLATFORM"
+
+    mkdir -p "$CACHE"
+    curl -sL "https://github.com/ggml-org/llama.cpp/releases/download/${TAG}/llama-${TAG}-bin-${PLATFORM}.tar.gz" \
+        | tar xz -C "$CACHE"
+    mv "$CACHE/llama-${TAG}" "$LLAMA_DIR"
+fi
+
+echo "  $(${LLAMA_DIR}/llama-server --version 2>&1 || true)"
+
+# -- Embedding model --
+
+if [[ -f "$MODEL_DIR/$MODEL_NAME" ]]; then
+    echo "Using cached model"
+else
+    echo "Downloading $MODEL_NAME..."
+    mkdir -p "$MODEL_DIR"
+    curl -sL "$MODEL_URL" -o "$MODEL_DIR/$MODEL_NAME"
+fi
+
+echo "  Model: $(du -h "$MODEL_DIR/$MODEL_NAME" | cut -f1) $MODEL_NAME"
+
+# -- Run tests --
+
+export PATH="$LLAMA_DIR:$PATH"
+export LD_LIBRARY_PATH="${LLAMA_DIR}:${LD_LIBRARY_PATH:-}"
+export DYLD_LIBRARY_PATH="${LLAMA_DIR}:${DYLD_LIBRARY_PATH:-}"
+
+echo ""
+echo "Running embedding tests..."
+cd "$ROOT"
+exec python -m pytest tests/integration -v -m embedding "${EXTRA_ARGS[@]}"
