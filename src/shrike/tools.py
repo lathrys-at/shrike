@@ -8,7 +8,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
 from shrike.collection import CollectionWrapper
-from shrike.index import VectorIndex
+from shrike.index import IndexState, VectorIndex
 
 logger = logging.getLogger("shrike.tools")
 
@@ -235,7 +235,37 @@ def register_tools(
             top_k,
         )
 
-        if index is None or not index.available:
+        if index is None or index.state == IndexState.UNAVAILABLE:
+            return {
+                "results": [],
+                "_message": (
+                    "Semantic search is not available. "
+                    "No embedding service is configured. "
+                    "Use list_notes for structured filtering instead."
+                ),
+            }
+
+        if index.state == IndexState.BUILDING:
+            indexed, total = index.build_progress
+            return {
+                "results": [],
+                "_message": (
+                    f"The vector index is building ({indexed}/{total} notes indexed). "
+                    "Try again shortly."
+                ),
+            }
+
+        if index.state == IndexState.ERROR:
+            return {
+                "results": [],
+                "_message": (
+                    "The vector index encountered an error during the last build. "
+                    "It will retry on next server restart. "
+                    "Use list_notes for structured filtering instead."
+                ),
+            }
+
+        if not index.available:
             return {
                 "results": [],
                 "_message": (

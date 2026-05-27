@@ -223,6 +223,14 @@ def main() -> None:
         index = VectorIndex(path=index_dir, embedding_service=embedding_service)
         logger.info("Vector index: %d vectors, %d dims", index.size, index.ndim or 0)
 
+        if index.check_drift(wrapper.col.mod):
+            all_note_ids = list(wrapper.col.find_notes("deck:*"))
+            if all_note_ids:
+                texts = wrapper.note_texts_for_embedding(all_note_ids)
+                index.rebuild_in_background(all_note_ids, texts, wrapper.col.mod)
+            else:
+                logger.info("Collection is empty, skipping index rebuild")
+
     def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
         sig_name = signal.Signals(signum).name
         logger.info("Received %s, shutting down", sig_name)
