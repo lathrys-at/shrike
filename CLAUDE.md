@@ -197,6 +197,34 @@ On Linux, XDG env vars (`XDG_CONFIG_HOME`, `XDG_STATE_HOME`, etc.) are respected
 
 YAML at the platform config directory (`config.yml`). Auto-created on first `shrike server start`. Resolution order: config defaults → config values → env vars (`SHRIKE_URL`, `SHRIKE_COLLECTION`) → CLI flags.
 
+### Vector index and consistency
+
+The vector index is a **derived cache**, not a co-equal store. The Anki collection (SQLite) is always the source of truth. SQLite handles its own crash recovery via WAL/journal, so the collection is self-consistent after any crash. If the index is stale, corrupt, or missing, it can be rebuilt from the collection by re-embedding all notes.
+
+**Consistency model:** the index may lag behind the collection (notes added/modified/deleted without the index being updated), but the collection never lags behind the index. This means search results may be stale, but data operations (upsert, delete, list) are always correct.
+
+**Implementation plan** (not yet built):
+
+1. **Startup reconciliation** — on server start, compare the index state against the collection:
+   - If no index file exists, log a message and start without an index (search returns the "not available" stub). A full build can be triggered via CLI.
+   - If the index exists, compare the set of indexed note IDs against the collection's note IDs. Detect additions (in collection but not index), deletions (in index but not collection), and modifications (compare `note.mod` timestamps against a stored watermark). Patch the delta incrementally.
+   - If the index is corrupt (fails to load), delete it and log a warning. Same as "no index" case.
+
+2. **Watermark tracking** — store a `last_synced_mod` timestamp in the index metadata (`index.meta.json`). On reconciliation, only re-embed notes with `mod > last_synced_mod`. After reconciliation, update the watermark. This makes incremental reconciliation O(changed notes) rather than O(all notes).
+
+3. **Incremental updates during operation** — after `upsert_notes` and `delete_notes` succeed on the collection, update the index in the same call:
+   - `upsert_notes`: re-embed changed notes and call `index.add()` for created/updated IDs.
+   - `delete_notes`: call `index.remove()` for deleted IDs.
+   - If the index update fails, log a warning but don't fail the tool call. The index is a cache — the next startup reconciliation will fix it.
+
+4. **Periodic save** — persist the index to disk periodically (e.g., after every N updates or on a timer) and on graceful shutdown. Crash between saves means at most N updates need re-indexing on next startup — the watermark-based reconciliation handles this automatically.
+
+5. **Full rebuild command** — `shrike index rebuild` CLI command that drops the existing index and re-embeds every note in the collection. Progress reporting via the CLI. Useful for: first-time setup, after a large import, after changing embedding models, or manual recovery.
+
+6. **Index status in `/status`** — extend the status endpoint to report index health: size, staleness (notes in collection vs. notes in index), last reconciliation time, whether a rebuild is recommended.
+
+**Cost considerations:** re-embedding is the expensive operation. A typical collection (1K notes) takes seconds; a large one (10K+) takes minutes. The watermark-based approach minimizes re-embedding to only changed notes. Full rebuilds are rare and user-initiated.
+
 ## Code style and conventions
 
 - **Type annotations** on all functions (enforced by mypy with `disallow_untyped_defs`)
@@ -245,8 +273,12 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 
 - llama-server integration for local embeddings ✓
 - USearch vector index (HNSW) for note content ✓
-- `search_notes` tool becomes functional
+- Wire `search_notes` tool to the vector index
 - Incremental index updates on note create/modify/delete
+- Startup reconciliation (watermark-based, detect drift between collection and index)
+- Periodic index save and graceful shutdown persistence
+- `shrike index rebuild` CLI command for full re-indexing
+- Index status in `/status` endpoint (size, staleness, health)
 - Duplicate detection (similarity threshold, surfaced via CLI)
 - Contextual upsert responses: when the embedding index is available, `upsert_notes` returns tags from the k most similar existing notes (e.g. k=20) ranked by similarity. Raw neighbor data — the server makes no tag suggestions; callers (skill plugins, users) decide what to do with it. Grounds LLM-driven card creation in the collection's existing taxonomy. Same mechanism can later surface other neighbor-derived context (near-duplicates, etc.).
 - Reference skill plugin (Claude custom skill format): encodes pedagogical best practices for LLM-driven card creation — minimum information principle, cloze discipline, prefer existing decks over new ones, tag consistency via contextual upsert data, broad decks with tags over fine-grained deck hierarchies. Keeps opinions in the skill, not the server. Designed for Project-style setups with course materials as context. Initial goal is real-use iteration, not packaging.
