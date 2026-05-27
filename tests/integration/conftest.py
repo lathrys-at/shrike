@@ -274,8 +274,31 @@ def embedding_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(scope="class")
 def embedding_server(server_factory, embedding_model: Path) -> ServerInfo:
-    """Server with embedding service enabled."""
-    return server_factory("embedding", embedding_model=str(embedding_model))
+    """Server with embedding service enabled.
+
+    Verifies the embedding service is actually available after server start.
+    Fails with diagnostics if it isn't (e.g. shared lib issues, model problems).
+    """
+    srv = server_factory("embedding", embedding_model=str(embedding_model))
+
+    status_url = srv.url.rsplit("/", 1)[0] + "/status"
+    resp = httpx.get(status_url, timeout=5.0)
+    status = resp.json()
+    emb = status.get("embedding", {})
+    if not emb.get("available"):
+        log_dir = Path(srv.log_dir)
+        stderr_log = log_dir / "llama-server-stderr.log"
+        stderr_content = stderr_log.read_text() if stderr_log.exists() else "(no stderr log)"
+        server_log = log_dir / "shrike.log"
+        server_content = server_log.read_text() if server_log.exists() else "(no server log)"
+        raise RuntimeError(
+            f"Embedding service not available after server start.\n"
+            f"Status: {status}\n"
+            f"--- llama-server stderr ---\n{stderr_content}\n"
+            f"--- shrike server log ---\n{server_content}"
+        )
+
+    return srv
 
 
 @pytest.fixture(scope="class")
