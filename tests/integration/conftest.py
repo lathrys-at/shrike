@@ -4,11 +4,16 @@ Provides a ``server_factory`` that spins up isolated Shrike MCP servers
 on demand — each with its own port, temp collection, and log directory.
 Test classes request their own server via class-scoped fixtures so no
 test state leaks between classes.
+
+Embedding tests (marked ``@pytest.mark.embedding``) additionally require
+``llama-server`` on PATH and a small GGUF model. The model is downloaded
+once per CI run and cached in the pytest tmp directory.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import socket
 import subprocess
 import sys
@@ -21,6 +26,12 @@ import pytest
 from click.testing import CliRunner
 
 from shrike.cli import cli
+
+EMBEDDING_MODEL_URL = (
+    "https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF"
+    "/resolve/main/all-MiniLM-L6-v2-Q4_0.gguf"
+)
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2-Q4_0.gguf"
 
 
 def _free_port() -> int:
@@ -59,11 +70,20 @@ def _wait_for_server(url: str, timeout: float = 10.0) -> None:
 class ServerInfo:
     """Connection details for a running test server."""
 
-    def __init__(self, url: str, port: int, collection_path: str, log_dir: str) -> None:
+    def __init__(
+        self,
+        url: str,
+        port: int,
+        collection_path: str,
+        log_dir: str,
+        embedding_port: int | None = None,
+    ) -> None:
         self.url = url
         self.port = port
         self.collection_path = collection_path
         self.log_dir = log_dir
+        self.embedding_port = embedding_port
+        self.embedding_url = f"http://127.0.0.1:{embedding_port}" if embedding_port else None
 
 
 class MCPClient:
@@ -121,10 +141,12 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
 
     Each call spins up a new server with its own collection, log dir,
     and random port. All servers are torn down at session end.
+
+    Pass ``embedding_model`` to start with ``--embedding-model``.
     """
     processes: list[subprocess.Popen] = []
 
-    def create(name: str = "server") -> ServerInfo:
+    def create(name: str = "server", *, embedding_model: str | None = None) -> ServerInfo:
         root = tmp_path_factory.mktemp(name)
         log_dir = root / "logs"
         log_dir.mkdir()
@@ -135,27 +157,42 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         port = _free_port()
         url = f"http://127.0.0.1:{port}/mcp"
 
+        cmd = [
+            sys.executable,
+            "-m",
+            "shrike.server",
+            "--collection",
+            collection_path,
+            "--port",
+            str(port),
+            "--log-dir",
+            str(log_dir),
+            "--state-dir",
+            str(state_dir),
+        ]
+
+        embedding_port: int | None = None
+        if embedding_model:
+            embedding_port = _free_port()
+            cmd.extend(
+                [
+                    "--embedding-model",
+                    embedding_model,
+                    "--embedding-port",
+                    str(embedding_port),
+                ]
+            )
+
         proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "shrike.server",
-                "--collection",
-                collection_path,
-                "--port",
-                str(port),
-                "--log-dir",
-                str(log_dir),
-                "--state-dir",
-                str(state_dir),
-            ],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         processes.append(proc)
 
+        timeout = 30.0 if embedding_model else 10.0
         try:
-            _wait_for_server(url)
+            _wait_for_server(url, timeout=timeout)
         except TimeoutError:
             proc.kill()
             stdout, stderr = proc.communicate(timeout=5)
@@ -164,7 +201,7 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
                 f"stdout: {stdout.decode()}\nstderr: {stderr.decode()}"
             ) from None
 
-        return ServerInfo(url, port, collection_path, str(log_dir))
+        return ServerInfo(url, port, collection_path, str(log_dir), embedding_port)
 
     yield create
 
@@ -209,3 +246,39 @@ def cli_config(server: ServerInfo, tmp_path_factory: pytest.TempPathFactory) -> 
 def runner(server: ServerInfo, cli_config: Path) -> CLIRunner:
     """CLI test runner bound to the class's server."""
     return CLIRunner(server.url, str(cli_config))
+
+
+# -- Embedding fixtures --
+
+
+def _has_llama_server() -> bool:
+    return shutil.which("llama-server") is not None
+
+
+requires_llama_server = pytest.mark.skipif(
+    not _has_llama_server(),
+    reason="llama-server not found on PATH",
+)
+
+
+@pytest.fixture(scope="session")
+def embedding_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Download a small embedding model for tests, cached per session."""
+    cache_dir = tmp_path_factory.mktemp("models")
+    model_path = cache_dir / EMBEDDING_MODEL_NAME
+    resp = httpx.get(EMBEDDING_MODEL_URL, follow_redirects=True, timeout=120.0)
+    resp.raise_for_status()
+    model_path.write_bytes(resp.content)
+    return model_path
+
+
+@pytest.fixture(scope="class")
+def embedding_server(server_factory, embedding_model: Path) -> ServerInfo:
+    """Server with embedding service enabled."""
+    return server_factory("embedding", embedding_model=str(embedding_model))
+
+
+@pytest.fixture(scope="class")
+def embedding_mcp(embedding_server: ServerInfo) -> MCPClient:
+    """MCP client bound to the embedding-enabled server."""
+    return MCPClient(embedding_server.url)

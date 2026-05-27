@@ -14,6 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from shrike.collection import CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
+from shrike.embedding import EmbeddingService
 from shrike.log import configure_logging
 from shrike.tools import register_tools
 
@@ -32,6 +33,7 @@ def _register_custom_routes(
     server_lock: ServerLock,
     *,
     meta: dict[str, Any],
+    embedding_service: EmbeddingService | None = None,
 ) -> None:
     """Register custom HTTP endpoints on the server."""
     from starlette.requests import Request
@@ -64,11 +66,16 @@ def _register_custom_routes(
                 else:
                     status["uptime"] = f"{seconds}s"
 
+        if embedding_service:
+            status["embedding"] = embedding_service.health()
+
         return JSONResponse(status)
 
     @app.custom_route("/shutdown", methods=["POST"])
     async def handle_shutdown(request: Request) -> JSONResponse:
         logger.info("Shutdown requested via HTTP from %s", request.client)
+        if embedding_service:
+            embedding_service.stop()
         wrapper.close()
         server_lock.release()
         logger.info("Shutdown complete")
@@ -119,6 +126,35 @@ def main() -> None:
         default=None,
         help="Directory for lock/pid/meta state files (default: platform-specific)",
     )
+    parser.add_argument(
+        "--embedding-model",
+        default=None,
+        help="Path to GGUF embedding model (enables embedding service)",
+    )
+    parser.add_argument(
+        "--embedding-port",
+        type=int,
+        default=None,
+        help="Port for the embedding server (default: 8373)",
+    )
+    parser.add_argument(
+        "--embedding-context-size",
+        type=int,
+        default=None,
+        help="Context size for embedding model",
+    )
+    parser.add_argument(
+        "--embedding-threads",
+        type=int,
+        default=None,
+        help="Number of CPU threads for embedding inference",
+    )
+    parser.add_argument(
+        "--embedding-gpu-layers",
+        type=int,
+        default=None,
+        help="Number of layers to offload to GPU",
+    )
     args = parser.parse_args()
 
     log_dir = configure_logging(
@@ -156,9 +192,28 @@ def main() -> None:
         summary.get("note_types", 0),
     )
 
+    embedding_service: EmbeddingService | None = None
+    if args.embedding_model:
+        embedding_service = EmbeddingService(
+            model=args.embedding_model,
+            host=args.host,
+            port=args.embedding_port or 8373,
+            log_dir=log_dir,
+            context_size=args.embedding_context_size,
+            threads=args.embedding_threads,
+            gpu_layers=args.embedding_gpu_layers,
+        )
+        try:
+            embedding_service.start()
+        except (FileNotFoundError, RuntimeError) as e:
+            logger.error("Failed to start embedding service: %s", e)
+            embedding_service = None
+
     def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
         sig_name = signal.Signals(signum).name
         logger.info("Received %s, shutting down", sig_name)
+        if embedding_service:
+            embedding_service.stop()
         wrapper.close()
         server_lock.release()
         logger.info("Shutdown complete")
@@ -168,7 +223,13 @@ def main() -> None:
     signal.signal(signal.SIGINT, _signal_shutdown)
 
     register_tools(mcp, wrapper)
-    _register_custom_routes(mcp, wrapper, server_lock, meta=server_meta)
+    _register_custom_routes(
+        mcp,
+        wrapper,
+        server_lock,
+        meta=server_meta,
+        embedding_service=embedding_service,
+    )
 
     logger.info(
         "Listening on %s:%s (log_dir=%s, log_level=%s)",
