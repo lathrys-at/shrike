@@ -44,6 +44,7 @@ class VectorIndex:
         self._embedding = embedding_service
         self._index: Any | None = None
         self._ndim: int | None = None
+        self._col_mod: int | None = None
         self._load()
 
     @property
@@ -60,6 +61,14 @@ class VectorIndex:
     def ndim(self) -> int | None:
         return self._ndim
 
+    @property
+    def col_mod(self) -> int | None:
+        return self._col_mod
+
+    @col_mod.setter
+    def col_mod(self, value: int | None) -> None:
+        self._col_mod = value
+
     def _load(self) -> None:
         """Load an existing index from disk, if present."""
         if not self._index_path.exists() or not self._meta_path.exists():
@@ -69,6 +78,7 @@ class VectorIndex:
         try:
             meta = json.loads(self._meta_path.read_text())
             self._ndim = meta["ndim"]
+            self._col_mod = meta.get("col_mod")
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning("Corrupt index metadata at %s: %s", self._meta_path, e)
             return
@@ -186,7 +196,10 @@ class VectorIndex:
 
         self._dir.mkdir(parents=True, exist_ok=True)
         self._index.save(str(self._index_path))
-        self._meta_path.write_text(json.dumps({"ndim": self._ndim}))
+        meta: dict[str, Any] = {"ndim": self._ndim}
+        if self._col_mod is not None:
+            meta["col_mod"] = self._col_mod
+        self._meta_path.write_text(json.dumps(meta))
         logger.debug("Saved vector index: %d vectors to %s", self.size, self._index_path)
 
     def clear(self) -> None:
@@ -201,9 +214,12 @@ class VectorIndex:
 
     def status(self) -> dict[str, Any]:
         """Return index status for diagnostics."""
-        return {
+        info: dict[str, Any] = {
             "available": self.available,
             "size": self.size,
             "ndim": self._ndim,
             "path": str(self._dir),
         }
+        if self._col_mod is not None:
+            info["col_mod"] = self._col_mod
+        return info

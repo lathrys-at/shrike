@@ -250,8 +250,70 @@ def register_tools(
         elif top_k > 50:
             top_k = 50
 
-        search_results = index.search(queries or [], top_k=top_k)
-        return {"results": search_results}
+        exclude_set = set(exclude_ids or [])
+
+        all_query_texts: list[str] = []
+        sources: list[str] = []
+
+        for q in queries or []:
+            all_query_texts.append(q)
+            sources.append(q)
+
+        if ids:
+            note_texts = wrapper.note_texts_for_embedding(ids)
+            for nid, text in zip(ids, note_texts, strict=True):
+                if text:
+                    all_query_texts.append(text)
+                    sources.append(f"note #{nid}")
+                    exclude_set.add(nid)
+
+        if not all_query_texts:
+            return {"results": [], "_message": "No valid queries or note IDs to search."}
+
+        raw_results = index.search(all_query_texts, top_k=top_k + len(exclude_set))
+
+        results: list[dict[str, Any]] = []
+        for source, matches in zip(sources, raw_results, strict=True):
+            enriched: list[dict[str, Any]] = []
+            for m in matches:
+                nid = m["note_id"]
+                if nid in exclude_set:
+                    continue
+
+                try:
+                    note_data = wrapper._note_to_dict(nid, "full")
+                except Exception:
+                    continue
+
+                if deck and note_data.get("deck") != deck:
+                    continue
+                if tags:
+                    note_tags = set(note_data.get("tags", []))
+                    if not all(t in note_tags for t in tags):
+                        continue
+
+                enriched.append(
+                    {
+                        "id": nid,
+                        "score": round(1.0 - m["distance"], 4),
+                        "deck": note_data.get("deck", ""),
+                        "note_type": note_data.get("note_type", ""),
+                        "tags": note_data.get("tags", []),
+                        "content": note_data.get("content", {}),
+                    }
+                )
+
+                if len(enriched) >= top_k:
+                    break
+
+            results.append({"source": source, "matches": enriched})
+
+        logger.info(
+            "search_notes returned %d groups, %d total matches",
+            len(results),
+            sum(len(r["matches"]) for r in results),
+        )
+        return {"results": results}
 
     @mcp.tool()
     @_safe_tool
@@ -286,6 +348,17 @@ def register_tools(
             updated,
             errors,
         )
+
+        if index and index.available:
+            changed_ids = [r["id"] for r in results if r.get("status") in ("created", "updated")]
+            if changed_ids:
+                try:
+                    texts = wrapper.note_texts_for_embedding(changed_ids)
+                    index.add(changed_ids, texts)
+                    index.col_mod = wrapper.col.mod
+                    logger.debug("Index updated: %d vectors added/replaced", len(changed_ids))
+                except Exception:
+                    logger.warning("Failed to update index after upsert", exc_info=True)
 
         return {"results": results}
 
@@ -342,6 +415,15 @@ def register_tools(
             len(result["deleted"]),
             len(result["not_found"]),
         )
+
+        if index and index.available and result["deleted"]:
+            try:
+                removed = index.remove(result["deleted"])
+                index.col_mod = wrapper.col.mod
+                logger.debug("Index updated: %d vectors removed", removed)
+            except Exception:
+                logger.warning("Failed to update index after delete", exc_info=True)
+
         return result
 
     @mcp.tool()

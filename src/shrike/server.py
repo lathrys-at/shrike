@@ -15,7 +15,9 @@ from mcp.server.fastmcp import FastMCP
 from shrike.collection import CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
 from shrike.embedding import EmbeddingService
+from shrike.index import VectorIndex
 from shrike.log import configure_logging
+from shrike.paths import cache_dir
 from shrike.tools import register_tools
 
 logger = logging.getLogger("shrike.server")
@@ -34,6 +36,7 @@ def _register_custom_routes(
     *,
     meta: dict[str, Any],
     embedding_service: EmbeddingService | None = None,
+    index: VectorIndex | None = None,
 ) -> None:
     """Register custom HTTP endpoints on the server."""
     from starlette.requests import Request
@@ -69,11 +72,16 @@ def _register_custom_routes(
         if embedding_service:
             status["embedding"] = embedding_service.health()
 
+        if index:
+            status["index"] = index.status()
+
         return JSONResponse(status)
 
     @app.custom_route("/shutdown", methods=["POST"])
     async def handle_shutdown(request: Request) -> JSONResponse:
         logger.info("Shutdown requested via HTTP from %s", request.client)
+        if index:
+            index.save()
         if embedding_service:
             embedding_service.stop()
         wrapper.close()
@@ -209,9 +217,17 @@ def main() -> None:
             logger.error("Failed to start embedding service: %s", e)
             embedding_service = None
 
+    index: VectorIndex | None = None
+    if embedding_service:
+        index_dir = cache_dir() / "index"
+        index = VectorIndex(path=index_dir, embedding_service=embedding_service)
+        logger.info("Vector index: %d vectors, %d dims", index.size, index.ndim or 0)
+
     def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
         sig_name = signal.Signals(signum).name
         logger.info("Received %s, shutting down", sig_name)
+        if index:
+            index.save()
         if embedding_service:
             embedding_service.stop()
         wrapper.close()
@@ -222,13 +238,14 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _signal_shutdown)
     signal.signal(signal.SIGINT, _signal_shutdown)
 
-    register_tools(mcp, wrapper)
+    register_tools(mcp, wrapper, index=index)
     _register_custom_routes(
         mcp,
         wrapper,
         server_lock,
         meta=server_meta,
         embedding_service=embedding_service,
+        index=index,
     )
 
     logger.info(
