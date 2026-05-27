@@ -17,8 +17,13 @@ def index() -> None:
 
 @index.command("rebuild", short_help="Rebuild the vector index from scratch")
 @output_options
+@click.option(
+    "--background",
+    is_flag=True,
+    help="Start the rebuild and return immediately without waiting.",
+)
 @click.pass_context
-def index_rebuild(ctx: click.Context) -> None:
+def index_rebuild(ctx: click.Context, background: bool) -> None:
     """Drop and rebuild the vector index by re-embedding every note.
 
     The server continues accepting requests during the rebuild.
@@ -27,6 +32,7 @@ def index_rebuild(ctx: click.Context) -> None:
     \b
     Examples:
       shrike index rebuild
+      shrike index rebuild --background
       shrike --json index rebuild
     """
     base_url = ctx.obj["url"].rsplit("/", 1)[0]
@@ -55,7 +61,65 @@ def index_rebuild(ctx: click.Context) -> None:
 
     total = body.get("total") or body.get("progress", {}).get("total", 0)
 
+    if background:
+        if json_out:
+            output.emit_json(body)
+        else:
+            output.console.print(f"Index rebuild started ({total} notes)")
+        return
+
     _poll_progress(base_url, total, json_out=json_out)
+
+
+@index.command("status", short_help="Show index status")
+@output_options
+@click.pass_context
+def index_status(ctx: click.Context) -> None:
+    """Show the current state of the vector index.
+
+    \b
+    Examples:
+      shrike index status
+      shrike --json index status
+    """
+    base_url = ctx.obj["url"].rsplit("/", 1)[0]
+    json_out: bool = ctx.obj["json"]
+
+    with output.spinner("Checking index…"):
+        idx_status = _fetch_index_status(base_url)
+
+    if idx_status is None:
+        raise click.ClickException("Cannot connect to server. Is it running?")
+
+    if json_out:
+        output.emit_json(idx_status)
+        return
+
+    state = idx_status.get("state", "unknown")
+
+    if state == "ready":
+        size = idx_status.get("size", 0)
+        ndim = idx_status.get("ndim", "?")
+        output.console.print("[bold green]Index ready[/bold green]")
+        output.kv("Vectors", f"[green]{size}[/green]")
+        output.kv("Dimensions", str(ndim))
+    elif state == "building":
+        progress = idx_status.get("progress", {})
+        indexed = progress.get("indexed", 0)
+        total = progress.get("total", 0)
+        output.console.print("[bold yellow]Index building[/bold yellow]")
+        output.kv("Progress", f"{indexed} / {total} notes")
+    elif state == "error":
+        output.console.print("[bold red]Index error[/bold red]")
+        output.kv("Error", idx_status.get("error", "unknown"))
+    elif state == "unavailable":
+        output.console.print("[dim]Index unavailable (no embedding service configured)[/dim]")
+    else:
+        output.console.print(f"[dim]Index state: {state}[/dim]")
+
+    if idx_status.get("col_mod") is not None:
+        output.kv("Collection mod", str(idx_status["col_mod"]))
+    output.kv("Path", f"[cyan]{idx_status.get('path', '?')}[/cyan]")
 
 
 def _poll_progress(base_url: str, total: int, *, json_out: bool) -> None:
