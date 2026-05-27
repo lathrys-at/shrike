@@ -81,4 +81,4 @@ export DYLD_LIBRARY_PATH="${LLAMA_DIR}:${DYLD_LIBRARY_PATH:-}"
 echo ""
 echo "Running embedding tests..."
 cd "$ROOT"
-exec python -m pytest tests/integration -v -m embedding "${EXTRA_ARGS[@]}"
+exec python -m pytest tests/integration -v -m embedding ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
