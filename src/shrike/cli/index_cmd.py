@@ -98,28 +98,27 @@ def index_status(ctx: click.Context) -> None:
     state = idx_status.get("state", "unknown")
 
     if state == "ready":
-        size = idx_status.get("size", 0)
-        ndim = idx_status.get("ndim", "?")
-        output.console.print("[bold green]Index ready[/bold green]")
-        output.kv("Vectors", f"[green]{size}[/green]")
-        output.kv("Dimensions", str(ndim))
+        output.kv("Index", "[green]ready[/green]")
+        output.kv("Vectors", f"[green]{idx_status.get('size', 0)}[/green]", indent=2)
+        output.kv("Dimensions", str(idx_status.get("ndim", "?")), indent=2)
     elif state == "building":
         progress = idx_status.get("progress", {})
         indexed = progress.get("indexed", 0)
         total = progress.get("total", 0)
-        output.console.print("[bold yellow]Index building[/bold yellow]")
-        output.kv("Progress", f"{indexed} / {total} notes")
+        output.kv("Index", "[yellow]building[/yellow]")
+        output.kv("Progress", f"{indexed} / {total} notes", indent=2)
     elif state == "error":
-        output.console.print("[bold red]Index error[/bold red]")
-        output.kv("Error", idx_status.get("error", "unknown"))
+        output.kv("Index", "[red]error[/red]")
+        output.kv("Error", idx_status.get("error", "unknown"), indent=2)
     elif state == "unavailable":
-        output.console.print("[dim]Index unavailable (no embedding service configured)[/dim]")
+        output.kv("Index", "[dim]unavailable (no embedding service configured)[/dim]")
     else:
-        output.console.print(f"[dim]Index state: {state}[/dim]")
+        output.kv("Index", f"[dim]{state}[/dim]")
 
     if idx_status.get("col_mod") is not None:
-        output.kv("Collection mod", str(idx_status["col_mod"]))
-    output.kv("Path", f"[cyan]{idx_status.get('path', '?')}[/cyan]")
+        output.kv("Collection mod", str(idx_status["col_mod"]), indent=2)
+    if idx_status.get("path"):
+        output.kv("Path", f"[cyan]{idx_status['path']}[/cyan]", indent=2)
 
 
 def _poll_progress(base_url: str, total: int, *, json_out: bool) -> None:
