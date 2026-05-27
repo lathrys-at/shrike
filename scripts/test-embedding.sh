@@ -44,8 +44,12 @@ else
         *) echo "Unsupported platform: $(uname -s)-$(uname -m)" && exit 1 ;;
     esac
 
-    TAG=$(curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases/latest \
-        | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])")
+    if command -v gh &>/dev/null; then
+        TAG=$(gh api repos/ggml-org/llama.cpp/releases/latest --jq .tag_name)
+    else
+        TAG=$(curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases/latest \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])")
+    fi
     echo "  Release: $TAG, platform: $PLATFORM"
 
     mkdir -p "$CACHE"
