@@ -14,8 +14,9 @@ CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP)
                                       ├──▶ CollectionWrapper (anki.Collection)
                                       │         └──▶ collection.anki2 (SQLite)
                                       │
-                                      └──▶ VectorIndex (stub)
-                                               └──▶ shrike.usearch (future)
+                                      └──▶ VectorIndex (USearch HNSW)
+                                               ├──▶ EmbeddingService (llama-server)
+                                               └──▶ index.usearch + index.meta.json
 ```
 
 ## Project layout
@@ -30,7 +31,8 @@ src/shrike/                       # Python package (src layout)
 ├── tools.py                      # Registers 7 MCP tools, Pydantic input models
 ├── paths.py                      # Platform-canonical directories (via platformdirs)
 ├── log.py                        # Logging config, log parsing and styling
-├── index.py                      # VectorIndex stub (search_notes not yet implemented)
+├── embedding.py                  # EmbeddingService — llama-server subprocess lifecycle
+├── index.py                      # VectorIndex — USearch HNSW index for note embeddings
 └── cli/
     ├── __init__.py               # Root Click group, global options (--config, --url, --json, --pretty)
     ├── client.py                 # ShrikeClient — HTTP client for MCP JSON-RPC calls
@@ -42,7 +44,7 @@ src/shrike/                       # Python package (src layout)
     ├── type_cmd.py               # shrike type list/show/create/update/delete
     └── output.py                 # Rich formatting, output_options decorator
 tests/
-├── unit/                         # 93 tests — direct CollectionWrapper calls, no server
+├── unit/                         # 160 tests — direct calls, no server
 │   ├── conftest.py               # wrapper fixture (temp collection), basic_note fixture
 │   ├── test_collection_info.py
 │   ├── test_list_notes.py
@@ -50,11 +52,15 @@ tests/
 │   ├── test_delete_notes.py
 │   ├── test_note_types.py
 │   ├── test_client_batching.py
-│   └── test_logging.py
-└── integration/                  # 103 tests — real server subprocess + HTTP transport
+│   ├── test_logging.py
+│   ├── test_embedding.py         # EmbeddingService unit tests (mocked subprocess)
+│   ├── test_config.py            # Config loading and embedding args
+│   └── test_index.py             # VectorIndex unit tests (mocked embeddings)
+└── integration/                  # 116 tests — real server subprocess + HTTP transport
     ├── conftest.py               # server fixture (session-scoped), mcp fixture
     ├── test_tools.py
-    └── test_cli.py
+    ├── test_cli.py
+    └── test_embedding.py         # Embedding tests (requires llama-server + GGUF model)
 docs/
 ├── mcp-tools.md                  # Tool documentation (human-readable)
 └── mcp-schema.json               # Full JSON schema for all 7 tools
@@ -117,7 +123,7 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 |------|--------|---------|
 | `collection_info` | Working | Collection structure, note types, decks, tags, stats |
 | `list_notes` | Working | Filter/retrieve notes by deck, tags, type, IDs, date |
-| `search_notes` | Stub | Semantic similarity search (returns "not available" message) |
+| `search_notes` | Stub | Semantic similarity search (index built, tool not yet wired) |
 | `upsert_notes` | Working | Create or update notes in bulk (1-100) |
 | `upsert_note_types` | Working | Create or update note type definitions (1-10) |
 | `delete_notes` | Working | Permanently delete notes by ID |
@@ -237,8 +243,8 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 
 ### v0.2.0 — Semantic Search + Skill Plugin
 
-- llama-server integration for local embeddings
-- USearch vector index (HNSW) for note content
+- llama-server integration for local embeddings ✓
+- USearch vector index (HNSW) for note content ✓
 - `search_notes` tool becomes functional
 - Incremental index updates on note create/modify/delete
 - Duplicate detection (similarity threshold, surfaced via CLI)
@@ -270,7 +276,7 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 
 ## What's not yet implemented
 
-- **Semantic search** (`search_notes`): `index.py` is a stub. Needs llama-server for embeddings and USearch for the vector index.
+- **Semantic search** (`search_notes`): The VectorIndex and EmbeddingService are built, but `search_notes` is not yet wired up. Needs: connect the tool to the index, add incremental index updates on note changes, and build the initial index from existing notes.
 - **Skill plugin**: Not started. Depends on contextual upsert responses from v0.2.0.
 - **Sync**: No sync support yet.
 - **Desktop application**: Not started.

@@ -1,29 +1,209 @@
+"""Vector index for semantic note search.
+
+Wraps a USearch HNSW index with cosine similarity. Note IDs (int64) are
+used directly as index keys so lookups stay O(1) and no separate ID
+mapping is needed.
+
+The index is persisted to disk and can be rebuilt from scratch if the
+file is missing or corrupted. Dimensions are detected from the first
+embedding and stored in metadata alongside the index.
+"""
+
 from __future__ import annotations
 
-from typing import Any
+import json
+import logging
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+
+if TYPE_CHECKING:
+    from shrike.embedding import EmbeddingService
+
+logger = logging.getLogger("shrike.index")
+
+BATCH_SIZE = 64
 
 
 class VectorIndex:
-    """Stub vector index. Returns empty results until embedding service is available."""
+    """HNSW vector index backed by USearch, stored on disk.
 
-    def __init__(self, path: str | None = None):
-        self._available = False
+    The index file lives at ``{path}/index.usearch`` with a sidecar
+    ``{path}/index.meta.json`` tracking the embedding dimensions.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        embedding_service: EmbeddingService | None = None,
+    ) -> None:
+        self._dir = Path(path)
+        self._index_path = self._dir / "index.usearch"
+        self._meta_path = self._dir / "index.meta.json"
+        self._embedding = embedding_service
+        self._index: Any | None = None
+        self._ndim: int | None = None
+        self._load()
 
     @property
     def available(self) -> bool:
-        return self._available
+        return self._index is not None and self._embedding is not None
+
+    @property
+    def size(self) -> int:
+        if self._index is None:
+            return 0
+        return len(self._index)
+
+    @property
+    def ndim(self) -> int | None:
+        return self._ndim
+
+    def _load(self) -> None:
+        """Load an existing index from disk, if present."""
+        if not self._index_path.exists() or not self._meta_path.exists():
+            logger.debug("No existing index at %s", self._dir)
+            return
+
+        try:
+            meta = json.loads(self._meta_path.read_text())
+            self._ndim = meta["ndim"]
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning("Corrupt index metadata at %s: %s", self._meta_path, e)
+            return
+
+        try:
+            from usearch.index import Index
+
+            self._index = Index.restore(str(self._index_path))
+            logger.info(
+                "Loaded vector index: %d vectors, %d dims",
+                len(self._index),  # type: ignore[arg-type]
+                self._ndim,
+            )
+        except Exception as e:
+            logger.warning("Failed to load index from %s: %s", self._index_path, e)
+            self._index = None
+            self._ndim = None
+
+    def _ensure_index(self, ndim: int) -> Any:
+        """Create the USearch index if it doesn't exist yet."""
+        if self._index is not None:
+            return self._index
+
+        from usearch.index import Index
+
+        self._ndim = ndim
+        self._index = Index(ndim=ndim, metric="cos", dtype="f32")
+        self._dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Created new vector index: %d dims", ndim)
+        return self._index
+
+    def add(self, note_ids: list[int], texts: list[str]) -> int:
+        """Embed texts and add them to the index. Returns count added."""
+        if not self._embedding:
+            raise RuntimeError("No embedding service available")
+        if not note_ids:
+            return 0
+        if len(note_ids) != len(texts):
+            raise ValueError("note_ids and texts must have the same length")
+
+        added = 0
+        for i in range(0, len(texts), BATCH_SIZE):
+            batch_ids = note_ids[i : i + BATCH_SIZE]
+            batch_texts = texts[i : i + BATCH_SIZE]
+
+            vectors = self._embedding.embed(batch_texts)
+            vecs_array = np.array(vectors, dtype=np.float32)
+            keys_array = np.array(batch_ids, dtype=np.int64)
+
+            idx = self._ensure_index(vecs_array.shape[1])
+
+            for key in batch_ids:
+                if key in idx:
+                    idx.remove(key)
+
+            idx.add(keys_array, vecs_array)
+            added += len(batch_ids)
+
+        logger.debug("Added %d vectors to index (total: %d)", added, self.size)
+        return added
+
+    def remove(self, note_ids: list[int]) -> int:
+        """Remove vectors by note ID. Returns count removed."""
+        if self._index is None or not note_ids:
+            return 0
+
+        removed = 0
+        for nid in note_ids:
+            if nid in self._index:
+                self._index.remove(nid)
+                removed += 1
+
+        logger.debug("Removed %d vectors from index (total: %d)", removed, self.size)
+        return removed
 
     def search(
         self,
-        queries: list[str] | None = None,
-        ids: list[int] | None = None,
+        texts: list[str],
         top_k: int = 10,
-        **filters: Any,
-    ) -> dict[str, Any]:
-        return {"results": []}
+    ) -> list[list[dict[str, Any]]]:
+        """Embed query texts and return nearest neighbors.
 
-    def on_notes_changed(self, note_ids: list[int]) -> None:
-        pass
+        Returns one result list per query text. Each result is a dict
+        with ``note_id`` (int) and ``distance`` (float, 0 = identical).
+        """
+        if not self.available or not texts:
+            return [[] for _ in texts]
 
-    def on_notes_deleted(self, note_ids: list[int]) -> None:
-        pass
+        vectors = self._embedding.embed(texts)  # type: ignore[union-attr]
+        query_array = np.array(vectors, dtype=np.float32)
+
+        assert self._index is not None
+        results: list[list[dict[str, Any]]] = []
+        for vec in query_array:
+            matches = self._index.search(vec, top_k)
+            result_list: list[dict[str, Any]] = []
+            for key, dist in zip(matches.keys, matches.distances, strict=True):
+                if int(key) == 0 and float(dist) == 0.0 and self.size == 0:
+                    continue
+                result_list.append({"note_id": int(key), "distance": float(dist)})
+            results.append(result_list)
+
+        return results
+
+    def contains(self, note_id: int) -> bool:
+        """Check if a note ID is in the index."""
+        if self._index is None:
+            return False
+        return note_id in self._index
+
+    def save(self) -> None:
+        """Persist the index and metadata to disk."""
+        if self._index is None or self._ndim is None:
+            return
+
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._index.save(str(self._index_path))
+        self._meta_path.write_text(json.dumps({"ndim": self._ndim}))
+        logger.debug("Saved vector index: %d vectors to %s", self.size, self._index_path)
+
+    def clear(self) -> None:
+        """Remove all vectors and delete the index files."""
+        self._index = None
+        self._ndim = None
+        if self._index_path.exists():
+            self._index_path.unlink()
+        if self._meta_path.exists():
+            self._meta_path.unlink()
+        logger.info("Cleared vector index at %s", self._dir)
+
+    def status(self) -> dict[str, Any]:
+        """Return index status for diagnostics."""
+        return {
+            "available": self.available,
+            "size": self.size,
+            "ndim": self._ndim,
+            "path": str(self._dir),
+        }

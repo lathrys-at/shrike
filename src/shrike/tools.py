@@ -102,10 +102,12 @@ def _safe_tool(fn: Any) -> Any:
     return wrapper
 
 
-def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
+def register_tools(
+    mcp: FastMCP,
+    wrapper: CollectionWrapper,
+    index: VectorIndex | None = None,
+) -> None:
     from shrike.note_types import upsert_note_types as _upsert_note_types
-
-    index = VectorIndex()
 
     @mcp.tool()
     @_safe_tool
@@ -233,7 +235,7 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
             top_k,
         )
 
-        if not index.available:
+        if index is None or not index.available:
             return {
                 "results": [],
                 "_message": (
@@ -248,14 +250,8 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
         elif top_k > 50:
             top_k = 50
 
-        return index.search(
-            queries=queries,
-            ids=ids,
-            top_k=top_k,
-            deck=deck,
-            tags=tags,
-            exclude_ids=exclude_ids,
-        )
+        search_results = index.search(queries or [], top_k=top_k)
+        return {"results": search_results}
 
     @mcp.tool()
     @_safe_tool
@@ -290,10 +286,6 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
             updated,
             errors,
         )
-
-        changed_ids = [r["id"] for r in results if r.get("status") in ("created", "updated")]
-        if changed_ids:
-            index.on_notes_changed(changed_ids)
 
         return {"results": results}
 
@@ -350,8 +342,6 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
             len(result["deleted"]),
             len(result["not_found"]),
         )
-        if result["deleted"]:
-            index.on_notes_deleted(result["deleted"])
         return result
 
     @mcp.tool()
