@@ -65,8 +65,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install llama-server
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          TAG=$(curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases/latest | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])")
+          TAG=$(gh api repos/ggml-org/llama.cpp/releases/latest --jq .tag_name)
           case "$(uname -s)-$(uname -m)" in
             Linux-x86_64)   PLATFORM="ubuntu-x64" ;;
             Linux-aarch64)  PLATFORM="ubuntu-arm64" ;;
