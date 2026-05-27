@@ -77,6 +77,36 @@ def _register_custom_routes(
 
         return JSONResponse(status)
 
+    @app.custom_route("/index/rebuild", methods=["POST"])
+    async def handle_index_rebuild(request: Request) -> JSONResponse:
+        if index is None:
+            return JSONResponse({"error": "No embedding service configured"}, status_code=400)
+
+        from shrike.index import IndexState
+
+        if index.state == IndexState.BUILDING:
+            indexed, total = index.build_progress
+            return JSONResponse(
+                {
+                    "status": "already_building",
+                    "progress": {"indexed": indexed, "total": total},
+                }
+            )
+
+        all_note_ids = list(wrapper.col.find_notes("deck:*"))
+        if not all_note_ids:
+            index.rebuild([], [], wrapper.col.mod)
+            return JSONResponse({"status": "complete", "size": 0})
+
+        texts = wrapper.note_texts_for_embedding(all_note_ids)
+        index.rebuild_in_background(all_note_ids, texts, wrapper.col.mod)
+        return JSONResponse(
+            {
+                "status": "started",
+                "total": len(all_note_ids),
+            }
+        )
+
     @app.custom_route("/shutdown", methods=["POST"])
     async def handle_shutdown(request: Request) -> JSONResponse:
         logger.info("Shutdown requested via HTTP from %s", request.client)

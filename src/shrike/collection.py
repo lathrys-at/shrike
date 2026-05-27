@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -353,7 +354,7 @@ class CollectionWrapper:
 
         return {"deleted": deleted, "not_found": not_found}
 
-    def note_texts_for_embedding(self, note_ids: list[int]) -> list[str]:
+    def note_texts_for_embedding(self, note_ids: Sequence[int]) -> list[str]:
         """Return concatenated field text for each note, suitable for embedding.
 
         Notes that don't exist are returned as empty strings (same index position).

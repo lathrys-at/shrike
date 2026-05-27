@@ -78,6 +78,23 @@ def _render_status(status: dict[str, Any]) -> None:
         else:
             output.kv("Embedding", "[dim]unavailable[/dim]")
 
+    idx = status.get("index")
+    if idx:
+        state = idx.get("state", "unknown")
+        if state == "ready":
+            size = idx.get("size", 0)
+            ndim = idx.get("ndim", "?")
+            output.kv("Index", f"[green]ready[/green] ({size} vectors, {ndim} dims)")
+        elif state == "building":
+            progress = idx.get("progress", {})
+            indexed = progress.get("indexed", 0)
+            total = progress.get("total", 0)
+            output.kv("Index", f"[yellow]building[/yellow] ({indexed} / {total} notes)")
+        elif state == "error":
+            output.kv("Index", f"[red]error[/red] ({idx.get('error', 'unknown')})")
+        else:
+            output.kv("Index", f"[dim]{state}[/dim]")
+
 
 def _wait_for_server(
     url: str, timeout: float = 15.0, *, show_spinner: bool = True

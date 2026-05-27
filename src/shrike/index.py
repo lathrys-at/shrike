@@ -16,7 +16,7 @@ import enum
 import json
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -139,7 +139,7 @@ class VectorIndex:
         logger.info("Created new vector index: %d dims", ndim)
         return self._index
 
-    def add(self, note_ids: list[int], texts: list[str]) -> int:
+    def add(self, note_ids: Sequence[int], texts: Sequence[str]) -> int:
         """Embed texts and add them to the index. Returns count added."""
         if not self._embedding:
             raise RuntimeError("No embedding service available")
@@ -153,7 +153,7 @@ class VectorIndex:
             batch_ids = note_ids[i : i + BATCH_SIZE]
             batch_texts = texts[i : i + BATCH_SIZE]
 
-            vectors = self._embedding.embed(batch_texts)
+            vectors = self._embedding.embed(list(batch_texts))
             vecs_array = np.array(vectors, dtype=np.float32)
             keys_array = np.array(batch_ids, dtype=np.int64)
 
@@ -272,8 +272,8 @@ class VectorIndex:
 
     def rebuild(
         self,
-        note_ids: list[int],
-        texts: list[str],
+        note_ids: Sequence[int],
+        texts: Sequence[str],
         col_mod: int,
         *,
         on_progress: Callable[[int, int], None] | None = None,
@@ -313,8 +313,8 @@ class VectorIndex:
 
     def rebuild_in_background(
         self,
-        note_ids: list[int],
-        texts: list[str],
+        note_ids: Sequence[int],
+        texts: Sequence[str],
         col_mod: int,
     ) -> None:
         """Start a full rebuild in a background thread."""
