@@ -203,33 +203,34 @@ The vector index is a **derived cache**, not a co-equal store. The Anki collecti
 
 **Consistency model:** the index may lag behind the collection (notes added/modified/deleted without the index being updated), but the collection never lags behind the index. This means search results may be stale, but data operations (upsert, delete, list) are always correct.
 
+**Drift detection:** the index metadata (`index.meta.json`) stores `col_mod` — the value of `col.mod` (collection-level modification timestamp, milliseconds) at the time the index was last built. On startup, compare `col.mod` against the stored value. If they match, nothing changed — skip reindexing entirely. If they differ, something changed outside our control — trigger a full rebuild. No watermarks, no per-note diffing, no fragile heuristics. Shrike owns the collection most of the time; anything that changed externally (Anki GUI, sync, imports) should force a clean rebuild for correctness. When sync is implemented (v0.3.0), its implications for index maintenance will be revisited.
+
 **Implementation plan** (not yet built):
 
-1. **Startup reconciliation** — on server start, compare the index state against the collection:
-   - If no index file exists, log a message and start without an index (search returns the "not available" stub). A full build can be triggered via CLI.
-   - If the index exists, compare the set of indexed note IDs against the collection's note IDs. Detect additions (in collection but not index), deletions (in index but not collection), and modifications (compare `note.mod` timestamps against a stored watermark). Patch the delta incrementally.
-   - If the index is corrupt (fails to load), delete it and log a warning. Same as "no index" case.
-   - Reconciliation and rebuilds run in a **background thread** so the server starts accepting requests immediately. Search returns a "building" status until the index is ready.
+1. **Startup check** — on server start, compare `col.mod` against the stored value in index metadata:
+   - Match → load the existing index, search is immediately available.
+   - Mismatch → trigger a full rebuild in a background thread. Server starts accepting requests immediately; search returns a "building" status until the rebuild completes.
+   - No index file → same as mismatch, full build in background.
+   - Corrupt index (fails to load) → delete it, log a warning, full build in background.
 
-2. **Watermark tracking** — store a `last_synced_mod` timestamp in the index metadata (`index.meta.json`). On reconciliation, only re-embed notes with `mod > last_synced_mod`. After reconciliation, update the watermark. This makes incremental reconciliation O(changed notes) rather than O(all notes).
-
-3. **Incremental updates during operation** — after `upsert_notes` and `delete_notes` succeed on the collection, update the index in the same call:
+2. **Incremental updates during operation** — after `upsert_notes` and `delete_notes` succeed on the collection, update the index in the same call:
    - `upsert_notes`: re-embed changed notes and call `index.add()` for created/updated IDs.
    - `delete_notes`: call `index.remove()` for deleted IDs.
-   - If the index update fails, log a warning but don't fail the tool call. The index is a cache — the next startup reconciliation will fix it.
+   - Update stored `col_mod` after each successful index update.
+   - If the index update fails, log a warning but don't fail the tool call. The index is a cache — the next startup will detect the `col.mod` mismatch and rebuild.
 
-4. **Periodic save** — persist the index to disk periodically (e.g., after every N updates or on a timer) and on graceful shutdown. Crash between saves means at most N updates need re-indexing on next startup — the watermark-based reconciliation handles this automatically.
+3. **Periodic save** — persist the index to disk periodically (e.g., after every N updates or on a timer) and on graceful shutdown. Crash between saves loses in-memory index updates, but the `col.mod` mismatch on next startup triggers a rebuild automatically.
 
-5. **Full rebuild command** — `shrike index rebuild` CLI command that drops the existing index and re-embeds every note in the collection. Progress reporting via the CLI. Useful for: first-time setup, after a large import, after changing embedding models, or manual recovery.
+4. **Full rebuild command** — `shrike index rebuild` CLI command that drops the existing index and re-embeds every note in the collection. Progress reporting via the CLI. Useful for: first-time setup, after a large import, after changing embedding models, or manual recovery.
 
-6. **Index build state and status reporting** — the index tracks its operational state and exposes it through multiple surfaces:
-   - **States:** `ready` (fully indexed, search works), `building` (reconciliation or rebuild in progress), `unavailable` (no embedding service or no index), `error` (build failed, will retry on next startup).
+5. **Index build state and status reporting** — the index tracks its operational state and exposes it through multiple surfaces:
+   - **States:** `ready` (fully indexed, search works), `building` (rebuild in progress), `unavailable` (no embedding service configured), `error` (build failed, will retry on next startup).
    - **Progress:** during builds, track `indexed_count / total_count` so callers know how far along it is.
-   - **`/status` endpoint:** includes index state, size, progress (if building), staleness (notes in collection vs. index), last reconciliation time, whether a rebuild is recommended.
+   - **`/status` endpoint:** includes index state, size, progress (if building), last build time.
    - **`search_notes` tool:** distinguishes between "no embedding service configured", "index is building (2847/5000 notes indexed, try again shortly)", and "index ready but empty (run `shrike index rebuild`)". Callers get actionable messages, not generic "not available".
    - **`shrike server status` CLI:** shows index state inline with other server info (e.g., `Index: building (2847/5000)` or `Index: ready (5000 vectors, 384 dims)`).
 
-**Cost considerations:** re-embedding is the expensive operation. A typical collection (1K notes) takes seconds; a large one (10K+) takes minutes. The watermark-based approach minimizes re-embedding to only changed notes. Full rebuilds are rare and user-initiated. Background builds mean the server is never blocked — it starts serving immediately and search becomes available as the index warms up.
+**Cost considerations:** full rebuilds are the only reindexing strategy — no incremental reconciliation. A typical collection (1K notes) rebuilds in seconds; a large one (10K+) takes minutes. Rebuilds run in a background thread, so the server is never blocked. During normal operation, incremental updates from `upsert_notes`/`delete_notes` keep the index current without rebuilds.
 
 ## Code style and conventions
 
@@ -281,7 +282,7 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 - USearch vector index (HNSW) for note content ✓
 - Wire `search_notes` tool to the vector index
 - Incremental index updates on note create/modify/delete
-- Startup reconciliation (watermark-based, detect drift between collection and index)
+- Startup drift detection (`col.mod` comparison) and background rebuild
 - Periodic index save and graceful shutdown persistence
 - `shrike index rebuild` CLI command for full re-indexing
 - Index build state machine and progress tracking (ready/building/unavailable/error)
