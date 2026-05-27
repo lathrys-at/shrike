@@ -235,13 +235,15 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 - `delete_note_types` MCP tool and `type delete` CLI command ✓
 - `/status` HTTP endpoint for health checks ✓
 
-### v0.2.0 — Semantic Search
+### v0.2.0 — Semantic Search + Skill Plugin
 
 - llama-server integration for local embeddings
 - USearch vector index (HNSW) for note content
 - `search_notes` tool becomes functional
 - Incremental index updates on note create/modify/delete
 - Duplicate detection (similarity threshold, surfaced via CLI)
+- Contextual upsert responses: when the embedding index is available, `upsert_notes` returns tags from the k most similar existing notes (e.g. k=20) ranked by similarity. Raw neighbor data — the server makes no tag suggestions; callers (skill plugins, users) decide what to do with it. Grounds LLM-driven card creation in the collection's existing taxonomy. Same mechanism can later surface other neighbor-derived context (near-duplicates, etc.).
+- Reference skill plugin (Claude custom skill format): encodes pedagogical best practices for LLM-driven card creation — minimum information principle, cloze discipline, prefer existing decks over new ones, tag consistency via contextual upsert data, broad decks with tags over fine-grained deck hierarchies. Keeps opinions in the skill, not the server. Designed for Project-style setups with course materials as context. Initial goal is real-use iteration, not packaging.
 
 ### v0.3.0 — Sync
 
@@ -258,8 +260,18 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 - Settings UI
 - Duplicate detection alerts in UI
 
+### v0.5.0 — Relay Prototype
+
+- Lightweight relay server: authenticates and forwards MCP JSON-RPC to a user's local Shrike instance
+- Removes the need for Tailscale or similar tunneling tools
+- Motivating use case: "study companion" workflow — student in Claude.ai with course materials in a Project and skill plugin shaping card creation, talking to their local collection via the relay
+- Scope is minimal: auth, forwarding, rate limiting, nothing else
+- Explicitly a prototype to test demand before investing in a hosted solution (which would need sync, multi-tenancy, storage)
+
 ## What's not yet implemented
 
 - **Semantic search** (`search_notes`): `index.py` is a stub. Needs llama-server for embeddings and USearch for the vector index.
+- **Skill plugin**: Not started. Depends on contextual upsert responses from v0.2.0.
 - **Sync**: No sync support yet.
 - **Desktop application**: Not started.
+- **Relay**: Not started.
