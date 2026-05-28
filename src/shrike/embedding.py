@@ -47,6 +47,7 @@ class EmbeddingService:
         context_size: int | None = None,
         threads: int | None = None,
         gpu_layers: int | None = None,
+        llama_server: str | None = None,
     ) -> None:
         self._model = model
         self._host = host
@@ -55,6 +56,7 @@ class EmbeddingService:
         self._context_size = context_size
         self._threads = threads
         self._gpu_layers = gpu_layers
+        self._llama_server_override = llama_server
         self._process: subprocess.Popen[bytes] | None = None
         self._base_url = f"http://{host}:{port}"
 
@@ -69,9 +71,9 @@ class EmbeddingService:
     def _find_llama_server(self) -> str:
         """Locate the llama-server binary.
 
-        Checks LLAMA_SERVER_PATH env var first, then falls back to PATH lookup.
+        Priority: explicit override (--llama-server) > LLAMA_SERVER_PATH env > PATH.
         """
-        env_path = os.environ.get("LLAMA_SERVER_PATH")
+        env_path = self._llama_server_override or os.environ.get("LLAMA_SERVER_PATH")
         if env_path:
             p = Path(env_path)
             if p.is_file() and os.access(p, os.X_OK):

@@ -29,6 +29,8 @@ def _embedding_args(config: dict[str, Any]) -> list[str]:
     """Build CLI args for the embedding service from config."""
     emb = config.get("embedding", {})
     args: list[str] = []
+    if emb.get("llama_server"):
+        args.extend(["--llama-server", str(emb["llama_server"])])
     model = emb.get("model")
     if model:
         args.extend(["--embedding-model", str(model)])
@@ -66,20 +68,21 @@ def _render_status(status: dict[str, Any]) -> None:
     if status.get("uptime"):
         output.kv("Uptime", status["uptime"])
     emb = status.get("embedding")
-    if emb:
-        if emb.get("available"):
-            output.kv("Embedding", "[green]available[/green]")
-            if emb.get("url"):
-                output.kv("URL", f"[cyan]{emb['url']}[/cyan]", indent=2)
-            if emb.get("pid"):
-                output.kv("PID", f"[cyan]{emb['pid']}[/cyan]", indent=2)
-            if emb.get("model"):
-                output.kv("Model", f"[cyan]{emb['model']}[/cyan]", indent=2)
-        else:
-            output.kv("Embedding", "[dim]unavailable[/dim]")
+    if emb and emb.get("available"):
+        output.kv("Embedding", "[green]available[/green]")
+        if emb.get("url"):
+            output.kv("URL", f"[cyan]{emb['url']}[/cyan]", indent=2)
+        if emb.get("pid"):
+            output.kv("PID", f"[cyan]{emb['pid']}[/cyan]", indent=2)
+        if emb.get("model"):
+            output.kv("Model", f"[cyan]{emb['model']}[/cyan]", indent=2)
+    else:
+        output.kv("Embedding", "[dim]not configured[/dim]")
 
     idx = status.get("index")
-    if idx:
+    if not idx:
+        output.kv("Index", "[dim]not configured[/dim]")
+    else:
         state = idx.get("state", "unknown")
         if state == "ready":
             output.kv("Index", "[green]ready[/green]")
