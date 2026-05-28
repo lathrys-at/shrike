@@ -152,6 +152,8 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         log_dir.mkdir()
         state_dir = root / "state"
         state_dir.mkdir()
+        cache_dir = root / "cache"
+        cache_dir.mkdir()
         collection_path = str(root / "collection.anki2")
 
         port = _free_port()
@@ -169,6 +171,8 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
             str(log_dir),
             "--state-dir",
             str(state_dir),
+            "--cache-dir",
+            str(cache_dir),
         ]
 
         embedding_port: int | None = None

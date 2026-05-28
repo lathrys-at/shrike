@@ -165,6 +165,11 @@ def main() -> None:
         help="Directory for lock/pid/meta state files (default: platform-specific)",
     )
     parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Directory for cache files like the vector index (default: platform-specific)",
+    )
+    parser.add_argument(
         "--embedding-model",
         default=None,
         help="Path to GGUF embedding model (enables embedding service)",
@@ -249,7 +254,8 @@ def main() -> None:
 
     index: VectorIndex | None = None
     if embedding_service:
-        index_dir = cache_dir() / "index"
+        cache_base = Path(args.cache_dir) if args.cache_dir else cache_dir()
+        index_dir = cache_base / "index"
         index = VectorIndex(path=index_dir, embedding_service=embedding_service)
         logger.info("Vector index: %d vectors, %d dims", index.size, index.ndim or 0)
 
