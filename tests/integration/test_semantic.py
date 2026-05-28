@@ -134,9 +134,13 @@ CONCEPTS: list[dict[str, Any]] = [
 ]
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="module")
 def collection_server(server_factory, embedding_model):
-    """Server with embedding + a pre-populated 50-note collection."""
+    """Server with embedding + a pre-populated 50-note collection.
+
+    Module-scoped so all test classes share one server and one llama-server
+    process. Tests that create notes must clean up after themselves.
+    """
     srv = server_factory("semantic", embedding_model=str(embedding_model))
 
     status_url = srv.url.rsplit("/", 1)[0] + "/status"
@@ -164,12 +168,12 @@ def collection_server(server_factory, embedding_model):
     return srv
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="module")
 def semantic_mcp(collection_server) -> MCPClient:
     return MCPClient(collection_server.url)
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="module")
 def semantic_cli_config(collection_server, tmp_path_factory):
     config_dir = tmp_path_factory.mktemp("semantic-cli-config")
     config_path = config_dir / "config.yml"
@@ -184,7 +188,7 @@ def semantic_cli_config(collection_server, tmp_path_factory):
     return config_path
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="module")
 def semantic_runner(collection_server, semantic_cli_config) -> CLIRunner:
     return CLIRunner(collection_server.url, str(semantic_cli_config))
 
