@@ -14,13 +14,38 @@ from mcp.server.fastmcp import FastMCP
 
 from shrike.collection import CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
-from shrike.embedding import EmbeddingService
+from shrike.embedding import EmbeddingRuntime
 from shrike.index import VectorIndex
 from shrike.log import configure_logging
 from shrike.paths import cache_dir
 from shrike.tools import register_tools
 
 logger = logging.getLogger("shrike.server")
+
+
+def _collect_for_rebuild(c: Any) -> tuple[list[int], int, list[str]]:
+    """Gather all note ids, the collection mod stamp, and embedding texts.
+
+    Runs on the collection worker thread (receives the live ``Collection``).
+    """
+    note_ids = list(c.find_notes("deck:*"))
+    return note_ids, c.mod, CollectionWrapper.note_texts(c, note_ids)
+
+
+def _maybe_rebuild(
+    index: VectorIndex,
+    model_id: str,
+    col_mod: int,
+    note_ids: list[int],
+    texts: list[str],
+) -> None:
+    """Trigger a background rebuild if the index drifted or the model changed."""
+    if index.check_drift(col_mod, model_id):
+        if note_ids:
+            index.rebuild_in_background(note_ids, texts, col_mod, model_id=model_id)
+        else:
+            logger.info("Collection is empty, skipping index rebuild")
+
 
 mcp = FastMCP(
     "Shrike",
@@ -35,8 +60,8 @@ def _register_custom_routes(
     server_lock: ServerLock,
     *,
     meta: dict[str, Any],
-    embedding_service: EmbeddingService | None = None,
-    index: VectorIndex | None = None,
+    runtime: EmbeddingRuntime,
+    index: VectorIndex,
 ) -> None:
     """Register custom HTTP endpoints on the server."""
     from starlette.requests import Request
@@ -69,20 +94,18 @@ def _register_custom_routes(
                 else:
                     status["uptime"] = f"{seconds}s"
 
-        if embedding_service:
-            status["embedding"] = embedding_service.health()
-
-        if index:
-            status["index"] = index.status()
+        status["embedding"] = runtime.health()
+        status["index"] = index.status()
 
         return JSONResponse(status)
 
     @app.custom_route("/index/rebuild", methods=["POST"])
     async def handle_index_rebuild(request: Request) -> JSONResponse:
-        if index is None:
-            return JSONResponse({"error": "No embedding service configured"}, status_code=400)
-
         from shrike.index import IndexState
+
+        svc = runtime.service
+        if svc is None or not svc.running:
+            return JSONResponse({"error": "Embedding service is not running"}, status_code=400)
 
         if index.state == IndexState.BUILDING:
             indexed, total = index.build_progress
@@ -93,16 +116,13 @@ def _register_custom_routes(
                 }
             )
 
-        def _collect(c: Any) -> tuple[list[int], int, list[str]]:
-            note_ids = list(c.find_notes("deck:*"))
-            return note_ids, c.mod, CollectionWrapper.note_texts(c, note_ids)
-
-        all_note_ids, col_mod, texts = await wrapper.run(_collect)
+        model_id = await asyncio.to_thread(svc.model_fingerprint)
+        all_note_ids, col_mod, texts = await wrapper.run(_collect_for_rebuild)
         if not all_note_ids:
-            index.rebuild([], [], col_mod)
+            index.rebuild([], [], col_mod, model_id=model_id)
             return JSONResponse({"status": "complete", "size": 0})
 
-        index.rebuild_in_background(all_note_ids, texts, col_mod)
+        index.rebuild_in_background(all_note_ids, texts, col_mod, model_id=model_id)
         return JSONResponse(
             {
                 "status": "started",
@@ -110,13 +130,67 @@ def _register_custom_routes(
             }
         )
 
+    @app.custom_route("/embedding/start", methods=["POST"])
+    async def handle_embedding_start(request: Request) -> JSONResponse:
+        if runtime.running:
+            return JSONResponse({"status": "already_running", "embedding": runtime.health()})
+
+        import contextlib
+
+        overrides: dict[str, Any] = {}
+        with contextlib.suppress(Exception):
+            body = await request.json()
+            if isinstance(body, dict):
+                for key in (
+                    "model",
+                    "port",
+                    "context_size",
+                    "threads",
+                    "gpu_layers",
+                    "llama_server",
+                ):
+                    if body.get(key) is not None:
+                        overrides[key] = body[key]
+
+        logger.info("Embedding start requested via HTTP from %s", request.client)
+        try:
+            # Starting llama-server blocks (model load + health wait); run it off
+            # the event loop so other requests keep flowing.
+            svc = await asyncio.to_thread(lambda: runtime.start(**overrides))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except (FileNotFoundError, RuntimeError) as e:
+            logger.error("Failed to start embedding service: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+        model_id = await asyncio.to_thread(svc.model_fingerprint)
+        all_note_ids, col_mod, texts = await wrapper.run(_collect_for_rebuild)
+        _maybe_rebuild(index, model_id, col_mod, all_note_ids, texts)
+
+        return JSONResponse(
+            {
+                "status": "started",
+                "embedding": runtime.health(),
+                "index": index.status(),
+            }
+        )
+
+    @app.custom_route("/embedding/stop", methods=["POST"])
+    async def handle_embedding_stop(request: Request) -> JSONResponse:
+        if not runtime.running:
+            return JSONResponse({"status": "not_running"})
+
+        logger.info("Embedding stop requested via HTTP from %s", request.client)
+        # Persist current vectors before tearing down the embedder.
+        index.save()
+        await asyncio.to_thread(runtime.stop)
+        return JSONResponse({"status": "stopped", "index": index.status()})
+
     @app.custom_route("/shutdown", methods=["POST"])
     async def handle_shutdown(request: Request) -> JSONResponse:
         logger.info("Shutdown requested via HTTP from %s", request.client)
-        if index:
-            index.save()
-        if embedding_service:
-            embedding_service.stop()
+        index.save()
+        runtime.stop()
         wrapper.close()
         server_lock.release()
         logger.info("Shutdown complete")
@@ -206,6 +280,12 @@ def main() -> None:
         default=None,
         help="Number of layers to offload to GPU",
     )
+    parser.add_argument(
+        "--no-embedding",
+        action="store_true",
+        help="Don't start the embedding service at boot even if a model is configured "
+        "(start it later with 'shrike embedding start')",
+    )
     args = parser.parse_args()
 
     log_dir = configure_logging(
@@ -245,51 +325,42 @@ def main() -> None:
         note_types,
     )
 
-    embedding_service: EmbeddingService | None = None
-    if args.embedding_model:
-        embedding_service = EmbeddingService(
-            model=args.embedding_model,
-            host=args.host,
-            port=args.embedding_port or 8373,
-            log_dir=log_dir,
-            context_size=args.embedding_context_size,
-            threads=args.embedding_threads,
-            gpu_layers=args.embedding_gpu_layers,
-            llama_server=args.llama_server,
-        )
+    # The index is always created — it can hold on-disk vectors and report
+    # status even with no embedder. It reports UNAVAILABLE until a service is
+    # attached, so the embedding lifecycle can be cycled at runtime.
+    cache_base = Path(args.cache_dir) if args.cache_dir else cache_dir()
+    index = VectorIndex(path=cache_base / "index")
+    logger.info("Vector index: %d vectors, %d dims", index.size, index.ndim or 0)
+
+    runtime = EmbeddingRuntime(
+        index=index,
+        model=args.embedding_model,
+        host=args.host,
+        port=args.embedding_port or 8373,
+        log_dir=log_dir,
+        context_size=args.embedding_context_size,
+        threads=args.embedding_threads,
+        gpu_layers=args.embedding_gpu_layers,
+        llama_server=args.llama_server,
+    )
+
+    if args.embedding_model and not args.no_embedding:
         try:
-            embedding_service.start()
-        except (FileNotFoundError, RuntimeError) as e:
+            svc = runtime.start()
+        except (FileNotFoundError, RuntimeError, ValueError) as e:
             logger.error("Failed to start embedding service: %s", e)
-            embedding_service = None
-
-    index: VectorIndex | None = None
-    if embedding_service:
-        cache_base = Path(args.cache_dir) if args.cache_dir else cache_dir()
-        index_dir = cache_base / "index"
-        index = VectorIndex(path=index_dir, embedding_service=embedding_service)
-        logger.info("Vector index: %d vectors, %d dims", index.size, index.ndim or 0)
-
-        col_mod = wrapper.run_sync(lambda c: c.mod)
-        if index.check_drift(col_mod):
-
-            def _collect_for_rebuild(c: Any) -> tuple[list[int], list[str]]:
-                note_ids = list(c.find_notes("deck:*"))
-                return note_ids, CollectionWrapper.note_texts(c, note_ids)
-
-            all_note_ids, texts = wrapper.run_sync(_collect_for_rebuild)
-            if all_note_ids:
-                index.rebuild_in_background(all_note_ids, texts, col_mod)
-            else:
-                logger.info("Collection is empty, skipping index rebuild")
+        else:
+            model_id = svc.model_fingerprint()
+            all_note_ids, col_mod, texts = wrapper.run_sync(_collect_for_rebuild)
+            _maybe_rebuild(index, model_id, col_mod, all_note_ids, texts)
+    elif args.no_embedding and args.embedding_model:
+        logger.info("Embedding service disabled at boot (--no-embedding); model configured")
 
     def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
         sig_name = signal.Signals(signum).name
         logger.info("Received %s, shutting down", sig_name)
-        if index:
-            index.save()
-        if embedding_service:
-            embedding_service.stop()
+        index.save()
+        runtime.stop()
         wrapper.close()
         server_lock.release()
         logger.info("Shutdown complete")
@@ -304,7 +375,7 @@ def main() -> None:
         wrapper,
         server_lock,
         meta=server_meta,
-        embedding_service=embedding_service,
+        runtime=runtime,
         index=index,
     )
 

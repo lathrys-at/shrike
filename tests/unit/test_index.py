@@ -312,6 +312,66 @@ class TestDriftDetection:
         assert idx2.check_drift(100) is False
         assert idx2.check_drift(200) is True
 
+    def test_model_change_needs_rebuild(self, index: VectorIndex) -> None:
+        index.rebuild([1], ["a"], col_mod=100, model_id="meta:1:2:3")
+        # Same model + col_mod → no rebuild.
+        assert index.check_drift(100, "meta:1:2:3") is False
+        # Different model → rebuild, even though col_mod matches.
+        assert index.check_drift(100, "meta:9:9:9") is True
+
+    def test_model_id_none_ignored(self, index: VectorIndex) -> None:
+        index.rebuild([1], ["a"], col_mod=100, model_id="meta:1:2:3")
+        # No model_id passed → only col_mod is considered.
+        assert index.check_drift(100) is False
+
+
+class TestModelIdPersistence:
+    def test_model_id_round_trips(self, tmp_path: Path, embedding_service: MagicMock) -> None:
+        path = tmp_path / "index"
+        idx1 = VectorIndex(path, embedding_service=embedding_service)
+        idx1.rebuild([1], ["a"], col_mod=100, model_id="meta:42:384:30522")
+        assert idx1.model_id == "meta:42:384:30522"
+
+        idx2 = VectorIndex(path, embedding_service=embedding_service)
+        assert idx2.model_id == "meta:42:384:30522"
+        assert idx2.check_drift(100, "meta:42:384:30522") is False
+        assert idx2.check_drift(100, "meta:0:0:0") is True
+
+
+class TestSetEmbeddingService:
+    def test_detach_marks_unavailable(self, index: VectorIndex) -> None:
+        index.add([1], ["a"])
+        assert index.state == IndexState.READY
+        index.set_embedding_service(None)
+        assert index.state == IndexState.UNAVAILABLE
+        assert index.available is False
+
+    def test_attach_flips_unavailable_to_ready(
+        self, tmp_path: Path, embedding_service: MagicMock
+    ) -> None:
+        idx = VectorIndex(tmp_path / "index")  # no embedder → UNAVAILABLE
+        assert idx.state == IndexState.UNAVAILABLE
+        idx.set_embedding_service(embedding_service)
+        assert idx.state == IndexState.READY
+
+    def test_attach_does_not_clobber_building(
+        self, index: VectorIndex, embedding_service: MagicMock
+    ) -> None:
+        index._state = IndexState.BUILDING
+        index.set_embedding_service(embedding_service)
+        assert index.state == IndexState.BUILDING
+
+    def test_detached_vectors_survive_reattach(
+        self, index: VectorIndex, embedding_service: MagicMock
+    ) -> None:
+        index.add([1, 2], ["a", "b"])
+        size = index.size
+        index.set_embedding_service(None)
+        assert index.size == size  # vectors kept on detach
+        index.set_embedding_service(embedding_service)
+        assert index.available is True
+        assert index.size == size
+
 
 class TestRebuild:
     def test_rebuild_creates_index(self, index: VectorIndex) -> None:

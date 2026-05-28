@@ -19,11 +19,15 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    from shrike.index import VectorIndex
 
 logger = logging.getLogger("shrike.embedding")
 
@@ -59,6 +63,7 @@ class EmbeddingService:
         self._llama_server_override = llama_server
         self._process: subprocess.Popen[bytes] | None = None
         self._base_url = f"http://{host}:{port}"
+        self._model_name: str | None = None
 
     @property
     def running(self) -> bool:
@@ -147,6 +152,9 @@ class EmbeddingService:
                 f"llama-server failed to become healthy within {HEALTH_TIMEOUT}s (exit code: {rc})"
             )
 
+        # Cache the model's reported name/alias so embed() can pin it.
+        self._model_name = self.model_info().get("id") or Path(self._model).name
+
         logger.info("Embedding service ready (PID %s)", self._process.pid)
 
     def _wait_healthy(self) -> bool:
@@ -218,6 +226,51 @@ class EmbeddingService:
         except (httpx.ConnectError, httpx.TimeoutException):
             return {"available": False, "pid": self._process.pid if self._process else None}
 
+    def model_info(self) -> dict[str, Any]:
+        """Metadata for the loaded model, from llama-server's ``/v1/models``.
+
+        Returns a dict with ``id`` (the model name/alias) and ``meta`` (numeric
+        descriptors such as ``n_params``, ``n_embd``, ``n_vocab``, ``size``).
+        Returns ``{}`` if the service is down or the endpoint/shape is missing
+        (e.g. an older llama.cpp).
+        """
+        if not self.running:
+            return {}
+        try:
+            resp = httpx.get(f"{self._base_url}/v1/models", timeout=5.0)
+            resp.raise_for_status()
+            entries = resp.json().get("data") or []
+            if not entries:
+                return {}
+            entry = entries[0]
+            return {"id": entry.get("id"), "meta": entry.get("meta") or {}}
+        except (httpx.HTTPError, ValueError, KeyError, IndexError):
+            return {}
+
+    def model_fingerprint(self) -> str:
+        """A stable identity for the loaded embedding model.
+
+        Built from llama-server's reported metadata (parameter count, embedding
+        dim, vocab size, training context, tensor byte size) — fast, and it
+        describes the model actually producing vectors. Falls back to the model
+        filename plus on-disk size when llama-server doesn't expose metadata.
+
+        The model *name* is deliberately excluded: it's the weakest signal
+        (renames would force needless rebuilds; same-name re-quantizations would
+        slip through — which the numeric fields catch).
+        """
+        meta = self.model_info().get("meta") or {}
+        fields = ("n_params", "n_embd", "n_vocab", "n_ctx_train", "size")
+        if any(meta.get(f) is not None for f in fields):
+            return "meta:" + ":".join(str(meta.get(f, "")) for f in fields)
+
+        path = Path(self._model)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = -1
+        return f"file:{path.name}:{size}"
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Compute embeddings for a list of texts.
 
@@ -227,9 +280,15 @@ class EmbeddingService:
         if not self.running:
             raise RuntimeError("Embedding service is not running")
 
+        payload: dict[str, Any] = {"input": texts}
+        if self._model_name:
+            # Pin the model so a future external multi-model endpoint resolves
+            # the right one. A single-model llama-server ignores this.
+            payload["model"] = self._model_name
+
         resp = httpx.post(
             f"{self._base_url}/v1/embeddings",
-            json={"input": texts},
+            json=payload,
             timeout=60.0,
         )
         resp.raise_for_status()
@@ -237,3 +296,121 @@ class EmbeddingService:
         data = resp.json()
         results: list[list[float]] = [item["embedding"] for item in data["data"]]
         return results
+
+
+class EmbeddingRuntime:
+    """Owns the embedding service lifecycle and its binding to the vector index.
+
+    Lets the llama-server process be started and stopped while the Shrike server
+    keeps running. It holds the parameters needed to (re)start the service, the
+    current :class:`EmbeddingService` (or ``None`` when stopped), and a reference
+    to the index it attaches/detaches. A lock serializes start/stop so concurrent
+    requests can't spawn two llama-servers.
+
+    Rebuild orchestration is intentionally *not* here — that needs the collection
+    wrapper and lives in the server's request/boot path.
+    """
+
+    def __init__(
+        self,
+        *,
+        index: VectorIndex,
+        model: str | None = None,
+        host: str = DEFAULT_HOST,
+        port: int = DEFAULT_PORT,
+        log_dir: str | Path | None = None,
+        context_size: int | None = None,
+        threads: int | None = None,
+        gpu_layers: int | None = None,
+        llama_server: str | None = None,
+    ) -> None:
+        self._index = index
+        self._model = model
+        self._host = host
+        self._port = port
+        self._log_dir = Path(log_dir) if log_dir else None
+        self._context_size = context_size
+        self._threads = threads
+        self._gpu_layers = gpu_layers
+        self._llama_server = llama_server
+        self._service: EmbeddingService | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def service(self) -> EmbeddingService | None:
+        return self._service
+
+    @property
+    def running(self) -> bool:
+        return self._service is not None and self._service.running
+
+    @property
+    def model(self) -> str | None:
+        return self._model
+
+    def health(self) -> dict[str, Any]:
+        if self._service is None:
+            return {"available": False}
+        return self._service.health()
+
+    def start(
+        self,
+        *,
+        model: str | None = None,
+        port: int | None = None,
+        context_size: int | None = None,
+        threads: int | None = None,
+        gpu_layers: int | None = None,
+        llama_server: str | None = None,
+    ) -> EmbeddingService:
+        """Start the embedding service and attach it to the index.
+
+        Non-``None`` overrides update the stored params (so a later restart
+        reuses them). If the service is already running, returns it unchanged.
+        Raises ``ValueError`` if no model is configured, or
+        ``FileNotFoundError`` / ``RuntimeError`` if llama-server won't start.
+        """
+        with self._lock:
+            if self._service is not None and self._service.running:
+                return self._service
+
+            if model is not None:
+                self._model = model
+            if port is not None:
+                self._port = port
+            if context_size is not None:
+                self._context_size = context_size
+            if threads is not None:
+                self._threads = threads
+            if gpu_layers is not None:
+                self._gpu_layers = gpu_layers
+            if llama_server is not None:
+                self._llama_server = llama_server
+
+            if not self._model:
+                raise ValueError("No embedding model configured")
+
+            svc = EmbeddingService(
+                model=self._model,
+                host=self._host,
+                port=self._port,
+                log_dir=self._log_dir,
+                context_size=self._context_size,
+                threads=self._threads,
+                gpu_layers=self._gpu_layers,
+                llama_server=self._llama_server,
+            )
+            svc.start()
+            self._service = svc
+            self._index.set_embedding_service(svc)
+            return svc
+
+    def stop(self) -> bool:
+        """Detach from the index and stop the service. Returns False if not running."""
+        with self._lock:
+            if self._service is None:
+                return False
+            self._index.set_embedding_service(None)
+            self._service.stop()
+            self._service = None
+            return True

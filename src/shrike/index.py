@@ -57,6 +57,7 @@ class VectorIndex:
         self._index: Any | None = None
         self._ndim: int | None = None
         self._col_mod: int | None = None
+        self._model_id: str | None = None
         self._state = IndexState.UNAVAILABLE if embedding_service is None else IndexState.READY
         self._build_progress: tuple[int, int] = (0, 0)
         self._build_error: str | None = None
@@ -95,6 +96,25 @@ class VectorIndex:
         self._col_mod = value
 
     @property
+    def model_id(self) -> str | None:
+        return self._model_id
+
+    def set_embedding_service(self, service: EmbeddingService | None) -> None:
+        """Attach or detach the embedding service at runtime.
+
+        Detaching (``None``) marks the index ``UNAVAILABLE`` — the on-disk
+        vectors are kept, but search/add can't run without an embedder.
+        Attaching flips ``UNAVAILABLE`` back to ``READY`` so search can resume;
+        a ``BUILDING`` or ``ERROR`` state is left alone (a rebuild, if needed,
+        is the caller's job once the service is up).
+        """
+        self._embedding = service
+        if service is None:
+            self._state = IndexState.UNAVAILABLE
+        elif self._state == IndexState.UNAVAILABLE:
+            self._state = IndexState.READY
+
+    @property
     def build_progress(self) -> tuple[int, int]:
         return self._build_progress
 
@@ -108,6 +128,7 @@ class VectorIndex:
             meta = json.loads(self._meta_path.read_text())
             self._ndim = meta["ndim"]
             self._col_mod = meta.get("col_mod")
+            self._model_id = meta.get("model_id")
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning("Corrupt index metadata at %s: %s", self._meta_path, e)
             return
@@ -232,6 +253,8 @@ class VectorIndex:
         meta: dict[str, Any] = {"ndim": self._ndim}
         if self._col_mod is not None:
             meta["col_mod"] = self._col_mod
+        if self._model_id is not None:
+            meta["model_id"] = self._model_id
         self._meta_path.write_text(json.dumps(meta))
         logger.debug("Saved vector index: %d vectors to %s", self.size, self._index_path)
 
@@ -240,16 +263,19 @@ class VectorIndex:
         with self._lock:
             self._index = None
             self._ndim = None
+            self._model_id = None
         if self._index_path.exists():
             self._index_path.unlink()
         if self._meta_path.exists():
             self._meta_path.unlink()
         logger.info("Cleared vector index at %s", self._dir)
 
-    def check_drift(self, current_col_mod: int) -> bool:
-        """Compare collection mod timestamp against stored value.
+    def check_drift(self, current_col_mod: int, model_id: str | None = None) -> bool:
+        """Compare collection mod timestamp and embedding model against stored values.
 
-        Returns True if the index is stale and a rebuild is needed.
+        Returns True if the index is stale and a rebuild is needed. A change in
+        the embedding model (``model_id``) invalidates every vector — the old
+        embeddings live in a different space — so it forces a full rebuild.
         """
         if self._index is None:
             logger.info("No index loaded, rebuild needed")
@@ -257,6 +283,14 @@ class VectorIndex:
 
         if self._col_mod is None:
             logger.info("No col_mod in index metadata, rebuild needed")
+            return True
+
+        if model_id is not None and self._model_id != model_id:
+            logger.info(
+                "Embedding model changed: stored model_id=%s, current=%s; rebuild needed",
+                self._model_id,
+                model_id,
+            )
             return True
 
         if self._col_mod != current_col_mod:
@@ -276,6 +310,7 @@ class VectorIndex:
         texts: Sequence[str],
         col_mod: int,
         *,
+        model_id: str | None = None,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> None:
         """Full rebuild: clear the index and re-embed all notes."""
@@ -302,6 +337,8 @@ class VectorIndex:
                     on_progress(indexed, total)
 
             self._col_mod = col_mod
+            if model_id is not None:
+                self._model_id = model_id
             self.save()
             self._state = IndexState.READY
             logger.info("Index rebuild complete: %d vectors, %d dims", self.size, self._ndim or 0)
@@ -316,6 +353,8 @@ class VectorIndex:
         note_ids: Sequence[int],
         texts: Sequence[str],
         col_mod: int,
+        *,
+        model_id: str | None = None,
     ) -> None:
         """Start a full rebuild in a background thread."""
         if self._state == IndexState.BUILDING:
@@ -324,7 +363,7 @@ class VectorIndex:
 
         def _run() -> None:
             with contextlib.suppress(Exception):
-                self.rebuild(note_ids, texts, col_mod)
+                self.rebuild(note_ids, texts, col_mod, model_id=model_id)
 
         self._build_thread = threading.Thread(target=_run, name="index-rebuild", daemon=True)
         self._build_thread.start()
@@ -341,6 +380,8 @@ class VectorIndex:
         }
         if self._col_mod is not None:
             info["col_mod"] = self._col_mod
+        if self._model_id is not None:
+            info["model_id"] = self._model_id
         if self._state == IndexState.BUILDING:
             indexed, total = self._build_progress
             info["progress"] = {"indexed": indexed, "total": total}

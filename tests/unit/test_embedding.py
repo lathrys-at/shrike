@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, Mock, patch
 import httpx
 import pytest
 
-from shrike.embedding import EmbeddingService
+from shrike.embedding import EmbeddingRuntime, EmbeddingService
 
 
 @pytest.fixture()
@@ -22,6 +22,14 @@ def svc(tmp_path: Path) -> EmbeddingService:
         port=19999,
         log_dir=tmp_path / "logs",
     )
+
+
+def _set_running(svc: EmbeddingService, pid: int = 123) -> None:
+    """Make a service look like it has a live llama-server subprocess."""
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.pid = pid
+    svc._process = proc
 
 
 class TestInit:
@@ -347,3 +355,146 @@ class TestEmbed:
             pytest.raises(httpx.HTTPStatusError),
         ):
             svc.embed(["hello"])
+
+
+class TestModelInfo:
+    def test_not_running_returns_empty(self, svc: EmbeddingService) -> None:
+        assert svc.model_info() == {}
+
+    def test_parses_v1_models(self, svc: EmbeddingService) -> None:
+        _set_running(svc)
+        mock_resp = Mock()
+        mock_resp.raise_for_status = Mock()
+        mock_resp.json.return_value = {
+            "data": [{"id": "m.gguf", "meta": {"n_embd": 384, "size": 100}}]
+        }
+        with patch("shrike.embedding.httpx.get", return_value=mock_resp):
+            info = svc.model_info()
+        assert info["id"] == "m.gguf"
+        assert info["meta"]["n_embd"] == 384
+
+    def test_empty_data_returns_empty(self, svc: EmbeddingService) -> None:
+        _set_running(svc)
+        mock_resp = Mock()
+        mock_resp.raise_for_status = Mock()
+        mock_resp.json.return_value = {"data": []}
+        with patch("shrike.embedding.httpx.get", return_value=mock_resp):
+            assert svc.model_info() == {}
+
+    def test_http_error_returns_empty(self, svc: EmbeddingService) -> None:
+        _set_running(svc)
+        with patch("shrike.embedding.httpx.get", side_effect=httpx.ConnectError("x")):
+            assert svc.model_info() == {}
+
+
+class TestModelFingerprint:
+    _META = {"n_params": 1, "n_embd": 2, "n_vocab": 3, "n_ctx_train": 4, "size": 5}
+
+    def test_from_meta(self, svc: EmbeddingService) -> None:
+        with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
+            assert svc.model_fingerprint() == "meta:1:2:3:4:5"
+
+    def test_name_excluded(self, svc: EmbeddingService) -> None:
+        # Same numeric meta, different name → identical fingerprint.
+        with patch.object(svc, "model_info", return_value={"id": "A", "meta": self._META}):
+            fp_a = svc.model_fingerprint()
+        with patch.object(svc, "model_info", return_value={"id": "B", "meta": self._META}):
+            fp_b = svc.model_fingerprint()
+        assert fp_a == fp_b
+
+    def test_fallback_to_file_size(self, tmp_path: Path) -> None:
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"x" * 100)
+        svc = EmbeddingService(model=str(model))
+        with patch.object(svc, "model_info", return_value={}):
+            assert svc.model_fingerprint() == "file:model.gguf:100"
+
+    def test_fallback_missing_file(self, svc: EmbeddingService) -> None:
+        with patch.object(svc, "model_info", return_value={}):
+            assert svc.model_fingerprint() == "file:model.gguf:-1"
+
+
+class TestEmbedModelPinning:
+    def _fake_post(self, captured: dict[str, Any]):
+        def post(url: str, json: dict[str, Any], timeout: float) -> Mock:
+            captured["json"] = json
+            r = Mock()
+            r.raise_for_status = Mock()
+            r.json.return_value = {"data": [{"embedding": [0.1]}]}
+            return r
+
+        return post
+
+    def test_pins_model_name(self, svc: EmbeddingService) -> None:
+        _set_running(svc)
+        svc._model_name = "m.gguf"
+        captured: dict[str, Any] = {}
+        with patch("shrike.embedding.httpx.post", side_effect=self._fake_post(captured)):
+            svc.embed(["hi"])
+        assert captured["json"]["model"] == "m.gguf"
+        assert captured["json"]["input"] == ["hi"]
+
+    def test_no_pin_when_name_unknown(self, svc: EmbeddingService) -> None:
+        _set_running(svc)
+        svc._model_name = None
+        captured: dict[str, Any] = {}
+        with patch("shrike.embedding.httpx.post", side_effect=self._fake_post(captured)):
+            svc.embed(["hi"])
+        assert "model" not in captured["json"]
+
+
+class TestEmbeddingRuntime:
+    def test_start_constructs_and_attaches(self) -> None:
+        index = MagicMock()
+        runtime = EmbeddingRuntime(index=index, model="/m.gguf")
+        fake_svc = MagicMock()
+        fake_svc.running = True
+        with patch("shrike.embedding.EmbeddingService", return_value=fake_svc) as ctor:
+            runtime.start()
+        ctor.assert_called_once()
+        fake_svc.start.assert_called_once()
+        index.set_embedding_service.assert_called_once_with(fake_svc)
+        assert runtime.service is fake_svc
+        assert runtime.running is True
+
+    def test_start_no_model_raises(self) -> None:
+        runtime = EmbeddingRuntime(index=MagicMock(), model=None)
+        with pytest.raises(ValueError, match="No embedding model"):
+            runtime.start()
+
+    def test_start_applies_override(self) -> None:
+        runtime = EmbeddingRuntime(index=MagicMock(), model=None)
+        fake_svc = MagicMock()
+        fake_svc.running = True
+        with patch("shrike.embedding.EmbeddingService", return_value=fake_svc):
+            runtime.start(model="/override.gguf")
+        assert runtime.model == "/override.gguf"
+
+    def test_start_noop_if_running(self) -> None:
+        runtime = EmbeddingRuntime(index=MagicMock(), model="/m.gguf")
+        existing = MagicMock()
+        existing.running = True
+        runtime._service = existing
+        with patch("shrike.embedding.EmbeddingService") as ctor:
+            svc = runtime.start()
+        ctor.assert_not_called()
+        assert svc is existing
+
+    def test_stop_detaches_and_stops(self) -> None:
+        index = MagicMock()
+        runtime = EmbeddingRuntime(index=index, model="/m.gguf")
+        fake_svc = MagicMock()
+        fake_svc.running = True
+        runtime._service = fake_svc
+        assert runtime.stop() is True
+        index.set_embedding_service.assert_called_once_with(None)
+        fake_svc.stop.assert_called_once()
+        assert runtime.service is None
+
+    def test_stop_noop_if_not_running(self) -> None:
+        runtime = EmbeddingRuntime(index=MagicMock(), model="/m.gguf")
+        assert runtime.stop() is False
+
+    def test_health_no_service(self) -> None:
+        runtime = EmbeddingRuntime(index=MagicMock())
+        assert runtime.health() == {"available": False}

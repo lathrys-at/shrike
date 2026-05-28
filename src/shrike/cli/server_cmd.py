@@ -11,7 +11,7 @@ import click
 
 from shrike.cli import output
 from shrike.cli.client import ShrikeClient
-from shrike.cli.config import resolve_collection, save_config
+from shrike.cli.config import resolve_collection, resolve_embedding, save_config
 from shrike.cli.output import output_options
 from shrike.daemon import (
     META_FILE,
@@ -25,37 +25,26 @@ from shrike.daemon import (
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
 
 
-def _embedding_args(
-    config: dict[str, Any],
-    *,
-    llama_server_override: str | None = None,
-    model_override: str | None = None,
-    port_override: int | None = None,
-    context_size_override: int | None = None,
-    threads_override: int | None = None,
-    gpu_layers_override: int | None = None,
-) -> list[str]:
-    """Build CLI args for the embedding service from config."""
-    emb = config.get("embedding", {})
+def _embedding_args(resolved: dict[str, Any], *, no_embedding: bool = False) -> list[str]:
+    """Build server CLI args from already-resolved embedding params.
+
+    ``resolved`` comes from ``config.resolve_embedding`` (config → env → flags).
+    """
     args: list[str] = []
-    llama_path = llama_server_override or emb.get("llama_server")
-    if llama_path:
-        args.extend(["--llama-server", str(llama_path)])
-    model = model_override or emb.get("model")
-    if model:
-        args.extend(["--embedding-model", str(model)])
-    port = port_override or emb.get("port")
-    if port:
-        args.extend(["--embedding-port", str(port)])
-    context_size = context_size_override or emb.get("context_size")
-    if context_size:
-        args.extend(["--embedding-context-size", str(context_size)])
-    threads = threads_override or emb.get("threads")
-    if threads:
-        args.extend(["--embedding-threads", str(threads)])
-    gpu_layers = gpu_layers_override or emb.get("gpu_layers")
-    if gpu_layers:
-        args.extend(["--embedding-gpu-layers", str(gpu_layers)])
+    if resolved.get("llama_server"):
+        args.extend(["--llama-server", str(resolved["llama_server"])])
+    if resolved.get("model"):
+        args.extend(["--embedding-model", str(resolved["model"])])
+    if resolved.get("port"):
+        args.extend(["--embedding-port", str(resolved["port"])])
+    if resolved.get("context_size"):
+        args.extend(["--embedding-context-size", str(resolved["context_size"])])
+    if resolved.get("threads"):
+        args.extend(["--embedding-threads", str(resolved["threads"])])
+    if resolved.get("gpu_layers"):
+        args.extend(["--embedding-gpu-layers", str(resolved["gpu_layers"])])
+    if no_embedding:
+        args.append("--no-embedding")
     return args
 
 
@@ -200,7 +189,7 @@ def ensure_server(config: dict[str, Any]) -> str:
             resolved_log_dir,
             "--log-level",
             resolved_log_level,
-            *_embedding_args(config),
+            *_embedding_args(resolve_embedding(config)),
         ],
         stdout=bootstrap_log_file,
         stderr=bootstrap_log_file,
@@ -258,6 +247,12 @@ def server() -> None:
     "--embedding-threads", type=int, help="Number of CPU threads for embedding inference."
 )
 @click.option("--embedding-gpu-layers", type=int, help="Number of layers to offload to GPU.")
+@click.option(
+    "--no-embedding",
+    is_flag=True,
+    help="Start the server without the embedding service even if a model is configured "
+    "(start it later with 'shrike embedding start').",
+)
 @click.pass_context
 def server_start(
     ctx: click.Context,
@@ -273,6 +268,7 @@ def server_start(
     embedding_context_size: int | None,
     embedding_threads: int | None,
     embedding_gpu_layers: int | None,
+    no_embedding: bool,
 ) -> None:
     """Start the Shrike MCP server as a background daemon.
 
@@ -308,6 +304,19 @@ def server_start(
     )
     resolved_log_level = log_level or log_config.get("level", "info")
 
+    # Resolve embedding settings once (config → env → flags) for both the
+    # spawned server args and the config we persist.
+    resolved_embedding = resolve_embedding(
+        config,
+        model=embedding_model,
+        port=embedding_port,
+        context_size=embedding_context_size,
+        threads=embedding_threads,
+        gpu_layers=embedding_gpu_layers,
+        llama_server=llama_server,
+    )
+    embedding_cli_args = _embedding_args(resolved_embedding, no_embedding=no_embedding)
+
     # Check if already running (via lock, not PID)
     if is_server_alive():
         meta = read_server_meta()
@@ -337,15 +346,7 @@ def server_start(
             "--log-level",
             resolved_log_level,
             "--foreground",
-            *_embedding_args(
-                config,
-                llama_server_override=llama_server,
-                model_override=embedding_model,
-                port_override=embedding_port,
-                context_size_override=embedding_context_size,
-                threads_override=embedding_threads,
-                gpu_layers_override=embedding_gpu_layers,
-            ),
+            *embedding_cli_args,
         ]
         from shrike.server import main
 
@@ -374,15 +375,7 @@ def server_start(
             resolved_log_dir,
             "--log-level",
             resolved_log_level,
-            *_embedding_args(
-                config,
-                llama_server_override=llama_server,
-                model_override=embedding_model,
-                port_override=embedding_port,
-                context_size_override=embedding_context_size,
-                threads_override=embedding_threads,
-                gpu_layers_override=embedding_gpu_layers,
-            ),
+            *embedding_cli_args,
         ],
         stdout=bootstrap_log_file,
         stderr=bootstrap_log_file,
@@ -397,6 +390,10 @@ def server_start(
         config["collection"] = collection_path
         config["server"]["host"] = server_host
         config["server"]["port"] = server_port
+        # Remember embedding settings so `shrike embedding start` works later.
+        for key, value in resolved_embedding.items():
+            if value is not None:
+                config.setdefault("embedding", {})[key] = value
         saved = save_config(config, config_path)
         if not json_out:
             output.console.print(f"  [dim]Config saved to {saved}[/dim]")

@@ -31,14 +31,14 @@ src/shrike/                       # Python package (src layout)
 ├── tools.py                      # Registers 7 MCP tools, Pydantic input models
 ├── paths.py                      # Platform-canonical directories (via platformdirs)
 ├── log.py                        # Logging config, log parsing and styling
-├── embedding.py                  # EmbeddingService — llama-server subprocess lifecycle
+├── embedding.py                  # EmbeddingService (llama-server subprocess) + EmbeddingRuntime (start/stop lifecycle)
 ├── index.py                      # VectorIndex — USearch HNSW index for note embeddings
 └── cli/
     ├── __init__.py               # Root Click group, global options (--config, --url, --json, --pretty)
     ├── client.py                 # ShrikeClient — HTTP client for MCP JSON-RPC calls
     ├── config.py                 # YAML config loading/saving
     ├── completion_cmd.py         # shrike completion {bash,zsh,fish}
-    ├── embedding_cmd.py          # shrike embedding status
+    ├── embedding_cmd.py          # shrike embedding status/start/stop
     ├── index_cmd.py              # shrike index rebuild/status
     ├── server_cmd.py             # shrike server start/stop/status/logs (daemon management)
     ├── info_cmd.py               # shrike info
@@ -46,7 +46,7 @@ src/shrike/                       # Python package (src layout)
     ├── type_cmd.py               # shrike type list/show/create/update/delete
     └── output.py                 # Rich formatting, output_options decorator
 tests/
-├── unit/                         # 218 tests — direct calls, no server
+├── unit/                         # 255 tests — direct calls, no server
 │   ├── conftest.py               # wrapper fixture (temp collection), basic_note fixture
 │   ├── test_collection_info.py
 │   ├── test_list_notes.py
@@ -60,7 +60,7 @@ tests/
 │   ├── test_index.py             # VectorIndex unit tests (mocked embeddings)
 │   ├── test_note_embedding_text.py  # CollectionWrapper.note_texts_for_embedding
 │   └── test_tools_search.py     # search_notes, upsert neighbors, delete index updates
-└── integration/                  # 147 tests — real server subprocess + HTTP transport
+└── integration/                  # 153 tests — real server subprocess + HTTP transport
     ├── conftest.py               # server fixture (session-scoped), mcp fixture
     ├── test_tools.py
     ├── test_cli.py
@@ -147,7 +147,7 @@ shrike [--config PATH] [--url URL] [--json] [--pretty/--no-pretty]
 ├── note list|show|create|update|delete|search
 ├── type list|show|create|update|delete
 ├── index rebuild|status
-└── embedding status
+└── embedding status|start|stop
 ```
 
 The CLI talks to the MCP server over HTTP — it can target a remote server via `--url` or `SHRIKE_URL`.
@@ -181,7 +181,9 @@ Signal handlers (SIGTERM, SIGINT) remain as a secondary path for Unix `kill` com
 **HTTP endpoints** beyond MCP:
 - `GET /status` — returns JSON with pid, url, collection, log_level, log_dir, uptime, embedding, index. Used by `shrike server status` and auto-start health checks.
 - `POST /shutdown` — triggers graceful server shutdown.
-- `POST /index/rebuild` — triggers a full index rebuild (returns immediately with status/progress).
+- `POST /index/rebuild` — triggers a full index rebuild (returns immediately with status/progress). Requires the embedding service to be running.
+- `POST /embedding/start` — starts the embedding service (optional JSON body overrides model/port/etc.; falls back to the params the server booted with). Attaches it to the index and triggers a rebuild if the model changed or the index drifted. Returns `started` / `already_running` / a 400 if no model is configured.
+- `POST /embedding/stop` — saves the index, then stops the embedding service and marks the index `unavailable`. The server and collection stay up.
 
 State files live in the platform state directory (see `shrike/paths.py`):
 - `server.lock` — exclusive file lock held by the running server
@@ -203,7 +205,15 @@ On Linux, XDG env vars (`XDG_CONFIG_HOME`, `XDG_STATE_HOME`, etc.) are respected
 
 ### Config file
 
-YAML at the platform config directory (`config.yml`). Auto-created on first `shrike server start`. Resolution order: config defaults → config values → env vars (`SHRIKE_URL`, `SHRIKE_COLLECTION`) → CLI flags.
+YAML at the platform config directory (`config.yml`). Auto-created on first `shrike server start` (the `embedding` section, including the model path, is persisted there too). Resolution order: config defaults → config values → env vars (`SHRIKE_URL`, `SHRIKE_COLLECTION`, `SHRIKE_EMBEDDING_MODEL`, `SHRIKE_EMBEDDING_PORT`, `LLAMA_SERVER_PATH`) → CLI flags. Embedding params follow the same cascade via `config.resolve_embedding()`, shared by `shrike server start` and `shrike embedding start`.
+
+### Embedding service lifecycle
+
+The embedding service (llama-server) can be cycled independently of the Shrike server. `EmbeddingRuntime` (`embedding.py`) owns the current `EmbeddingService` (or `None`), the params needed to (re)start it, and the binding to the index; it serializes start/stop under a lock. The `VectorIndex` is **always** created at boot, even with no embedder — it loads on-disk vectors and reports `unavailable` until a service is attached.
+
+- `shrike server start` starts embedding at boot if a model is configured, unless `--no-embedding` is passed (lets a server run with embedding deliberately off).
+- `shrike embedding start` / `shrike embedding stop` cycle the service on a running server (for llama-server upgrades, model swaps, freeing GPU/RAM). Stopping marks the index `unavailable` but keeps the on-disk vectors; starting re-attaches and rebuilds only if needed.
+- Starting llama-server blocks (model load + health wait), so the HTTP handler runs it via `asyncio.to_thread` to keep the event loop responsive.
 
 ### Vector index and consistency
 
@@ -211,7 +221,9 @@ The vector index is a **derived cache**, not a co-equal store. The Anki collecti
 
 **Consistency model:** the index may lag behind the collection (notes added/modified/deleted without the index being updated), but the collection never lags behind the index. This means search results may be stale, but data operations (upsert, delete, list) are always correct.
 
-**Drift detection:** the index metadata (`index.meta.json`) stores `col_mod` — the value of `col.mod` (collection-level modification timestamp, milliseconds) at the time the index was last built. On startup, compare `col.mod` against the stored value. If they match, nothing changed — skip reindexing entirely. If they differ, something changed outside our control — trigger a full rebuild. No watermarks, no per-note diffing, no fragile heuristics. Shrike owns the collection most of the time; anything that changed externally (Anki GUI, sync, imports) should force a clean rebuild for correctness. When sync is implemented (v0.3.0), its implications for index maintenance will be revisited.
+**Drift detection:** the index metadata (`index.meta.json`) stores `col_mod` — the value of `col.mod` (collection-level modification timestamp, milliseconds) at the time the index was last built — and `model_id`, a fingerprint of the embedding model that produced the vectors. On startup (and whenever the embedding service is attached), compare both against the stored values. If they match, nothing changed — skip reindexing. If `col.mod` differs (something changed outside our control) **or** `model_id` differs (the embedding model changed, so every vector lives in a different space and is invalid), trigger a full rebuild. No watermarks, no per-note diffing, no fragile heuristics. Shrike owns the collection most of the time; anything that changed externally (Anki GUI, sync, imports) should force a clean rebuild for correctness. When sync is implemented (v0.3.0), its implications for index maintenance will be revisited.
+
+**Model fingerprint:** `model_id` comes from llama-server's `GET /v1/models` `meta` block (`n_params`, `n_embd`, `n_vocab`, `n_ctx_train`, `size`) — fast and describes the *loaded* model. It falls back to model filename + on-disk size if that metadata is unavailable. The model *name* is deliberately excluded (it would force needless rebuilds on rename and miss same-name re-quantizations, which the numeric fields catch). `EmbeddingService.embed()` also pins `"model": <id>` in the request body as insurance against a future external multi-model endpoint.
 
 **Implementation:**
 
@@ -223,7 +235,7 @@ The vector index is a **derived cache**, not a co-equal store. The Anki collecti
 
 4. **Full rebuild** — `shrike index rebuild` CLI and `POST /index/rebuild` endpoint. Drops existing index and re-embeds all notes. Progress reporting via CLI and `/status`.
 
-5. **State machine** — states: `ready`, `building` (with progress), `unavailable` (no embedding service), `error` (build failed). Exposed via `/status` endpoint, `search_notes` responses, and `shrike server status` CLI.
+5. **State machine** — states: `ready`, `building` (with progress), `unavailable` (embedding service not running — never configured or stopped), `error` (build failed). Exposed via `/status` endpoint, `search_notes` responses, and `shrike server status` CLI.
 
 **Cost considerations:** full rebuilds are the only reindexing strategy — no incremental reconciliation. A typical collection (1K notes) rebuilds in seconds; a large one (10K+) takes minutes. Rebuilds run in a background thread, so the server is never blocked. During normal operation, incremental updates from `upsert_notes`/`delete_notes` keep the index current without rebuilds.
 
@@ -283,6 +295,7 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 - Index build state machine and progress tracking (ready/building/unavailable/error) ✓
 - Index status in `/status` endpoint and `search_notes` responses (actionable messages) ✓
 - `shrike embedding status` and `shrike index status` CLI commands ✓
+- Embedding service lifecycle ✓: `shrike embedding start` / `shrike embedding stop` cycle llama-server independently of the Shrike server; `shrike server start --no-embedding` boots with it off; the index records the embedding model's fingerprint (`model_id`) and forces a rebuild when the model changes.
 - Contextual upsert responses ✓: `upsert_notes` returns `neighbors` for each created/updated note — the k most similar existing notes as `{id, score, tags}` objects ranked by cosine similarity (defaults: `top_k_neighbors=5`, `neighbor_threshold=0.5`). Same search operation as `search_notes` (which returns `{id, score, tags, content}`), triggered by the upserted note's own content as the query. Neighbors below the threshold are excluded; batch notes are excluded from each other's results. Raw neighbor data — the server makes no tag suggestions; callers decide what to do with it. Grounds LLM-driven card creation in the collection's existing taxonomy and surfaces near-duplicates for investigation.
 - Duplicate detection ✓: threshold-based, using the same similarity infrastructure. High similarity scores in neighbors or search results indicate potential duplicates — callers apply their own threshold. No separate duplicate detection endpoint; `search_notes` and contextual upsert neighbors are the same operation.
 
