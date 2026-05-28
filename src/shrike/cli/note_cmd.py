@@ -52,7 +52,7 @@ def note() -> None:
 @click.option("--ids", multiple=True, type=NOTE_ID, help="Fetch specific note IDs.")
 @click.option("--since", "modified_since", help="Notes modified after this date (ISO 8601).")
 @click.option("--query", help="Raw Anki search query.")
-@click.option("--meta", is_flag=True, help="Show only metadata, not field content.")
+@click.option("--brief", is_flag=True, help="Show only IDs and metadata, not field content.")
 @click.option("--limit", type=int, default=50, help="Max notes to return (default: 50).")
 @click.pass_context
 def note_list(
@@ -63,12 +63,12 @@ def note_list(
     ids: tuple[int, ...],
     modified_since: str | None,
     query: str | None,
-    meta: bool,
+    brief: bool,
     limit: int,
 ) -> None:
     """List notes matching structured filters.
 
-    At least one filter is required. Use --meta for compact output.
+    At least one filter is required. Use --brief for compact output.
 
     \b
     Examples:
@@ -90,7 +90,7 @@ def note_list(
         "ids": list(ids) or None,
         "modified_since": modified_since,
         "query": query,
-        "fields": "meta" if meta else "full",
+        "fields": "meta" if brief else "full",
         "limit": limit,
     }
 
@@ -128,7 +128,7 @@ def note_list(
 
     output.console.print()
 
-    if meta or not any(n.get("content") for n in notes):
+    if brief or not any(n.get("content") for n in notes):
         rows = [output.note_summary_row(n) for n in notes]
         output.table(["ID", "Type", "Deck", "Tags", "Modified"], rows)
     else:
@@ -354,6 +354,9 @@ def note_delete(ctx: click.Context, note_ids: tuple[int, ...], yes: bool) -> Non
     help="Find notes similar to this note ID.",
 )
 @click.option("--top-k", type=int, default=10, help="Results per query (default: 10).")
+@click.option(
+    "--threshold", type=float, default=0.5, help="Minimum similarity score (default: 0.5)."
+)
 @click.option("--deck", help="Restrict search to this deck.")
 @click.option(
     "--tags",
@@ -362,14 +365,17 @@ def note_delete(ctx: click.Context, note_ids: tuple[int, ...], yes: bool) -> Non
     expose_value=True,
     help="Restrict search to notes with these tags.",
 )
+@click.option("--brief", is_flag=True, help="Show only IDs and scores, not full note content.")
 @click.pass_context
 def note_search(
     ctx: click.Context,
     queries: tuple[str, ...],
     similar_to: tuple[int, ...],
     top_k: int,
+    threshold: float,
     deck: str | None,
     tags: tuple[str, ...],
+    brief: bool,
 ) -> None:
     """Semantic similarity search over the collection.
 
@@ -384,7 +390,7 @@ def note_search(
 
     client = ctx.obj["client"]
 
-    kwargs: dict[str, Any] = {"top_k": top_k}
+    kwargs: dict[str, Any] = {"top_k": top_k, "threshold": threshold}
     if queries:
         kwargs["queries"] = list(queries)
     if similar_to:
@@ -417,14 +423,12 @@ def note_search(
         matches = group.get("matches", [])
         for m in matches:
             score = m.get("score", 0)
-            output.console.print(
-                f"  \\[{score:.2f}] [green]#{m['id']}[/green] ([cyan]{m.get('deck', '')}[/cyan])"
-            )
-            content = m.get("content", {})
-            if content:
-                first_field = next(iter(content.values()), "")
-                if len(first_field) > 80:
-                    first_field = first_field[:77] + "..."
-                output.console.print(f"      {first_field}")
+            if brief:
+                output.console.print(
+                    f"  \\[{score:.2f}] [green]#{m['id']}[/green]"
+                    f" ([cyan]{m.get('deck', '')}[/cyan])"
+                )
+            else:
+                output.note_detail(m, subtitle=f"[{score:.2f}]")
 
     output.console.print()

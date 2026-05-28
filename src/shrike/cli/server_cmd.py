@@ -25,21 +25,37 @@ from shrike.daemon import (
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
 
 
-def _embedding_args(config: dict[str, Any]) -> list[str]:
+def _embedding_args(
+    config: dict[str, Any],
+    *,
+    llama_server_override: str | None = None,
+    model_override: str | None = None,
+    port_override: int | None = None,
+    context_size_override: int | None = None,
+    threads_override: int | None = None,
+    gpu_layers_override: int | None = None,
+) -> list[str]:
     """Build CLI args for the embedding service from config."""
     emb = config.get("embedding", {})
     args: list[str] = []
-    model = emb.get("model")
+    llama_path = llama_server_override or emb.get("llama_server")
+    if llama_path:
+        args.extend(["--llama-server", str(llama_path)])
+    model = model_override or emb.get("model")
     if model:
         args.extend(["--embedding-model", str(model)])
-        if emb.get("port"):
-            args.extend(["--embedding-port", str(emb["port"])])
-        if emb.get("context_size"):
-            args.extend(["--embedding-context-size", str(emb["context_size"])])
-        if emb.get("threads"):
-            args.extend(["--embedding-threads", str(emb["threads"])])
-        if emb.get("gpu_layers"):
-            args.extend(["--embedding-gpu-layers", str(emb["gpu_layers"])])
+    port = port_override or emb.get("port")
+    if port:
+        args.extend(["--embedding-port", str(port)])
+    context_size = context_size_override or emb.get("context_size")
+    if context_size:
+        args.extend(["--embedding-context-size", str(context_size)])
+    threads = threads_override or emb.get("threads")
+    if threads:
+        args.extend(["--embedding-threads", str(threads)])
+    gpu_layers = gpu_layers_override or emb.get("gpu_layers")
+    if gpu_layers:
+        args.extend(["--embedding-gpu-layers", str(gpu_layers)])
     return args
 
 
@@ -66,20 +82,21 @@ def _render_status(status: dict[str, Any]) -> None:
     if status.get("uptime"):
         output.kv("Uptime", status["uptime"])
     emb = status.get("embedding")
-    if emb:
-        if emb.get("available"):
-            output.kv("Embedding", "[green]available[/green]")
-            if emb.get("url"):
-                output.kv("URL", f"[cyan]{emb['url']}[/cyan]", indent=2)
-            if emb.get("pid"):
-                output.kv("PID", f"[cyan]{emb['pid']}[/cyan]", indent=2)
-            if emb.get("model"):
-                output.kv("Model", f"[cyan]{emb['model']}[/cyan]", indent=2)
-        else:
-            output.kv("Embedding", "[dim]unavailable[/dim]")
+    if emb and emb.get("available"):
+        output.kv("Embedding", "[green]available[/green]")
+        if emb.get("url"):
+            output.kv("URL", f"[cyan]{emb['url']}[/cyan]", indent=2)
+        if emb.get("pid"):
+            output.kv("PID", f"[cyan]{emb['pid']}[/cyan]", indent=2)
+        if emb.get("model"):
+            output.kv("Model", f"[cyan]{emb['model']}[/cyan]", indent=2)
+    else:
+        output.kv("Embedding", "[dim]not configured[/dim]")
 
     idx = status.get("index")
-    if idx:
+    if not idx:
+        output.kv("Index", "[dim]not configured[/dim]")
+    else:
         state = idx.get("state", "unknown")
         if state == "ready":
             output.kv("Index", "[green]ready[/green]")
@@ -225,6 +242,22 @@ def server() -> None:
     type=click.Choice(["debug", "info", "warning", "error"], case_sensitive=False),
     help="Log level (default: info).",
 )
+@click.option(
+    "--llama-server",
+    type=click.Path(),
+    help="Path to llama-server binary (default: LLAMA_SERVER_PATH env or PATH lookup).",
+)
+@click.option(
+    "--embedding-model",
+    type=click.Path(),
+    help="Path to GGUF embedding model (enables embedding service).",
+)
+@click.option("--embedding-port", type=int, help="Port for the embedding server (default: 8373).")
+@click.option("--embedding-context-size", type=int, help="Context size for embedding model.")
+@click.option(
+    "--embedding-threads", type=int, help="Number of CPU threads for embedding inference."
+)
+@click.option("--embedding-gpu-layers", type=int, help="Number of layers to offload to GPU.")
 @click.pass_context
 def server_start(
     ctx: click.Context,
@@ -234,6 +267,12 @@ def server_start(
     foreground: bool,
     log_dir: str | None,
     log_level: str | None,
+    llama_server: str | None,
+    embedding_model: str | None,
+    embedding_port: int | None,
+    embedding_context_size: int | None,
+    embedding_threads: int | None,
+    embedding_gpu_layers: int | None,
 ) -> None:
     """Start the Shrike MCP server as a background daemon.
 
@@ -298,6 +337,15 @@ def server_start(
             "--log-level",
             resolved_log_level,
             "--foreground",
+            *_embedding_args(
+                config,
+                llama_server_override=llama_server,
+                model_override=embedding_model,
+                port_override=embedding_port,
+                context_size_override=embedding_context_size,
+                threads_override=embedding_threads,
+                gpu_layers_override=embedding_gpu_layers,
+            ),
         ]
         from shrike.server import main
 
@@ -326,7 +374,15 @@ def server_start(
             resolved_log_dir,
             "--log-level",
             resolved_log_level,
-            *_embedding_args(config),
+            *_embedding_args(
+                config,
+                llama_server_override=llama_server,
+                model_override=embedding_model,
+                port_override=embedding_port,
+                context_size_override=embedding_context_size,
+                threads_override=embedding_threads,
+                gpu_layers_override=embedding_gpu_layers,
+            ),
         ],
         stdout=bootstrap_log_file,
         stderr=bootstrap_log_file,

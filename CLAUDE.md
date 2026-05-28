@@ -288,6 +288,7 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 
 ### v0.3.0 — Skill Plugin
 
+- Extract `ShrikeClient` from CLI into a standalone Python client (`shrike.client`) usable outside the CLI — daemon lifecycle, MCP tool calls, server status. CLI becomes a thin layer over this client.
 - Reference skill plugin (Claude custom skill format): encodes pedagogical best practices for LLM-driven card creation — minimum information principle, cloze discipline, prefer existing decks over new ones, tag consistency via contextual upsert data, broad decks with tags over fine-grained deck hierarchies. Keeps opinions in the skill, not the server. Designed for Project-style setups with course materials as context. Initial goal is real-use iteration, not packaging.
 
 ### v0.4.0 — Sync

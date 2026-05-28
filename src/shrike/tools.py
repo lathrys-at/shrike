@@ -209,6 +209,7 @@ def register_tools(
         queries: list[str] | None = None,
         ids: list[int] | None = None,
         top_k: int = 10,
+        threshold: float = 0.5,
         deck: str | None = None,
         tags: list[str] | None = None,
         exclude_ids: list[int] | None = None,
@@ -229,10 +230,11 @@ def register_tools(
             return {"error": "At least one of queries or ids must be provided."}
 
         logger.info(
-            "search_notes queries=%d ids=%d top_k=%d",
+            "search_notes queries=%d ids=%d top_k=%d threshold=%.2f",
             len(queries or []),
             len(ids or []),
             top_k,
+            threshold,
         )
 
         if index is None or index.state == IndexState.UNAVAILABLE:
@@ -310,6 +312,10 @@ def register_tools(
                 if nid in exclude_set:
                     continue
 
+                score = round(1.0 - m["distance"], 3)
+                if score < threshold:
+                    break
+
                 try:
                     note_data = wrapper._note_to_dict(nid, "full")
                 except Exception:
@@ -324,12 +330,8 @@ def register_tools(
 
                 enriched.append(
                     {
-                        "id": nid,
-                        "score": round(1.0 - m["distance"], 3),
-                        "deck": note_data.get("deck", ""),
-                        "note_type": note_data.get("note_type", ""),
-                        "tags": note_data.get("tags", []),
-                        "content": note_data.get("content", {}),
+                        **note_data,
+                        "score": score,
                     }
                 )
 

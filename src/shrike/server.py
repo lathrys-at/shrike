@@ -170,6 +170,11 @@ def main() -> None:
         help="Directory for cache files like the vector index (default: platform-specific)",
     )
     parser.add_argument(
+        "--llama-server",
+        default=None,
+        help="Path to llama-server binary (default: LLAMA_SERVER_PATH env or PATH lookup)",
+    )
+    parser.add_argument(
         "--embedding-model",
         default=None,
         help="Path to GGUF embedding model (enables embedding service)",
@@ -245,6 +250,7 @@ def main() -> None:
             context_size=args.embedding_context_size,
             threads=args.embedding_threads,
             gpu_layers=args.embedding_gpu_layers,
+            llama_server=args.llama_server,
         )
         try:
             embedding_service.start()

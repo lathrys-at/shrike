@@ -7,7 +7,7 @@ packages = ["src/shrike"]
 
 [project]
 name = "shrike"
-version = "0.2.0"
+version = "0.2.1"
 description = "MCP server for Anki collection management"
 requires-python = ">=3.11"
 license = "AGPL-3.0-or-later"

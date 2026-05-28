@@ -171,11 +171,13 @@ def note_type_table(note_types: list[dict[str, Any]], col_path: str) -> None:
     table(["ID", "Name", "Kind", "Fields"], rows)
 
 
-def note_detail(note: dict[str, Any]) -> None:
+def note_detail(note: dict[str, Any], *, subtitle: str | None = None) -> None:
     """Render a full note with all its fields."""
     header = Text()
     header.append("Note ", style="bold")
     header.append(f"#{note['id']}", style="green")
+    if subtitle:
+        header.append(f"  {subtitle}", style="dim")
 
     lines: list[str] = []
     lines.append(f"[dim]Type:[/dim] [cyan]{note.get('note_type', '')}[/cyan]")

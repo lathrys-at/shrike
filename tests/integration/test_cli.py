@@ -337,7 +337,7 @@ class TestNoteListAndShow:
                 "Back=A",
             ]
         )
-        data = runner.json(["note", "list", "--deck", "MetaDeck", "--meta"])
+        data = runner.json(["note", "list", "--deck", "MetaDeck", "--brief"])
         assert data["total"] == 1
         note = data["notes"][0]
         assert "content" not in note
