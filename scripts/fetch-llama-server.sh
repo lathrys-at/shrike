@@ -72,4 +72,4 @@ echo "  Model: $(du -h "$MODEL_DIR/$MODEL_NAME" | cut -f1) $MODEL_NAME" >&2
 # -- Output for eval or copy-paste --
 
 echo "export PATH=\"$LLAMA_DIR:\$PATH\""
-echo "export LLAMA_MODEL=\"$MODEL_DIR/$MODEL_NAME\""
+echo "export SHRIKE_EMBEDDING_MODEL=\"$MODEL_DIR/$MODEL_NAME\""

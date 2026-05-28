@@ -29,6 +29,8 @@ def _embedding_args(config: dict[str, Any]) -> list[str]:
     """Build CLI args for the embedding service from config."""
     emb = config.get("embedding", {})
     args: list[str] = []
+    if emb.get("llama_server"):
+        args.extend(["--llama-server", str(emb["llama_server"])])
     model = emb.get("model")
     if model:
         args.extend(["--embedding-model", str(model)])
