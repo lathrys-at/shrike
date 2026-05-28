@@ -5,38 +5,38 @@ from datetime import UTC, datetime
 
 
 class TestListNotes:
-    def test_by_id(self, wrapper, basic_note):
-        result = wrapper.list_notes(ids=[basic_note])
+    async def test_by_id(self, wrapper, basic_note):
+        result = await wrapper.list_notes(ids=[basic_note])
         assert result["total"] == 1
         note = result["notes"][0]
         assert note["id"] == basic_note
         assert note["content"]["Front"] == "What is 2+2?"
         assert note["content"]["Back"] == "4"
 
-    def test_by_deck(self, wrapper, basic_note):
-        result = wrapper.list_notes(deck="Test")
+    async def test_by_deck(self, wrapper, basic_note):
+        result = await wrapper.list_notes(deck="Test")
         assert result["total"] == 1
         assert result["notes"][0]["deck"] == "Test"
 
-    def test_by_tags(self, wrapper, basic_note):
-        result = wrapper.list_notes(tags=["math"])
+    async def test_by_tags(self, wrapper, basic_note):
+        result = await wrapper.list_notes(tags=["math"])
         assert result["total"] == 1
 
-    def test_by_tags_exclude(self, wrapper, basic_note):
-        result = wrapper.list_notes(tags=["-math"], deck="Test")
+    async def test_by_tags_exclude(self, wrapper, basic_note):
+        result = await wrapper.list_notes(tags=["-math"], deck="Test")
         assert result["total"] == 0
 
-    def test_by_note_type(self, wrapper, basic_note):
-        result = wrapper.list_notes(note_type="Basic")
+    async def test_by_note_type(self, wrapper, basic_note):
+        result = await wrapper.list_notes(note_type="Basic")
         assert result["total"] == 1
 
-    def test_no_match(self, wrapper, basic_note):
-        result = wrapper.list_notes(deck="Nonexistent")
+    async def test_no_match(self, wrapper, basic_note):
+        result = await wrapper.list_notes(deck="Nonexistent")
         assert result["total"] == 0
         assert result["notes"] == []
 
-    def test_meta_fields_mode(self, wrapper, basic_note):
-        result = wrapper.list_notes(ids=[basic_note], fields_mode="meta")
+    async def test_meta_fields_mode(self, wrapper, basic_note):
+        result = await wrapper.list_notes(ids=[basic_note], fields_mode="meta")
         note = result["notes"][0]
         assert "content" not in note
         assert "id" in note
@@ -45,7 +45,7 @@ class TestListNotes:
         assert "tags" in note
         assert "modified" in note
 
-    def test_limit(self, wrapper):
+    async def test_limit(self, wrapper):
         # Create 5 notes
         notes = [
             {
@@ -55,24 +55,24 @@ class TestListNotes:
             }
             for i in range(5)
         ]
-        wrapper.upsert_notes(notes)
+        await wrapper.upsert_notes(notes)
 
-        result = wrapper.list_notes(deck="Test", limit=3)
+        result = await wrapper.list_notes(deck="Test", limit=3)
         assert result["total"] == 5
         assert len(result["notes"]) == 3
         assert result["limit"] == 3
 
-    def test_nonexistent_id_skipped(self, wrapper):
-        result = wrapper.list_notes(ids=[9999999999999])
+    async def test_nonexistent_id_skipped(self, wrapper):
+        result = await wrapper.list_notes(ids=[9999999999999])
         assert result["total"] == 0
         assert result["notes"] == []
 
-    def test_requires_at_least_one_filter(self, wrapper):
-        result = wrapper.list_notes()
+    async def test_requires_at_least_one_filter(self, wrapper):
+        result = await wrapper.list_notes()
         assert "error" in result
 
-    def test_combined_filters(self, wrapper):
-        wrapper.upsert_notes(
+    async def test_combined_filters(self, wrapper):
+        await wrapper.upsert_notes(
             [
                 {
                     "deck": "A",
@@ -88,18 +88,18 @@ class TestListNotes:
                 },
             ]
         )
-        result = wrapper.list_notes(deck="A", tags=["x"])
+        result = await wrapper.list_notes(deck="A", tags=["x"])
         assert result["total"] == 1
         assert result["notes"][0]["deck"] == "A"
 
-    def test_note_has_modified_timestamp(self, wrapper, basic_note):
-        result = wrapper.list_notes(ids=[basic_note])
+    async def test_note_has_modified_timestamp(self, wrapper, basic_note):
+        result = await wrapper.list_notes(ids=[basic_note])
         note = result["notes"][0]
         assert "modified" in note
         assert "T" in note["modified"]  # ISO 8601 format
 
-    def test_modified_since_filters_old_notes(self, wrapper):
-        wrapper.upsert_notes(
+    async def test_modified_since_filters_old_notes(self, wrapper):
+        await wrapper.upsert_notes(
             [
                 {
                     "deck": "Test",
@@ -111,7 +111,7 @@ class TestListNotes:
         time.sleep(1)
         cutoff = datetime.now(UTC).isoformat()
         time.sleep(1)
-        wrapper.upsert_notes(
+        await wrapper.upsert_notes(
             [
                 {
                     "deck": "Test",
@@ -121,18 +121,18 @@ class TestListNotes:
             ]
         )
 
-        result = wrapper.list_notes(modified_since=cutoff)
+        result = await wrapper.list_notes(modified_since=cutoff)
         assert result["total"] == 1
         assert result["notes"][0]["content"]["Front"] == "New"
 
-    def test_modified_since_no_matches(self, wrapper, basic_note):
+    async def test_modified_since_no_matches(self, wrapper, basic_note):
         time.sleep(1)
         future = datetime.now(UTC).isoformat()
-        result = wrapper.list_notes(modified_since=future)
+        result = await wrapper.list_notes(modified_since=future)
         assert result["total"] == 0
 
-    def test_modified_since_with_deck_filter(self, wrapper):
-        wrapper.upsert_notes(
+    async def test_modified_since_with_deck_filter(self, wrapper):
+        await wrapper.upsert_notes(
             [
                 {
                     "deck": "A",
@@ -147,17 +147,17 @@ class TestListNotes:
             ]
         )
         past = "2000-01-01T00:00:00+00:00"
-        result = wrapper.list_notes(deck="A", modified_since=past)
+        result = await wrapper.list_notes(deck="A", modified_since=past)
         assert result["total"] == 1
         assert result["notes"][0]["deck"] == "A"
 
-    def test_modified_since_naive_datetime(self, wrapper, basic_note):
+    async def test_modified_since_naive_datetime(self, wrapper, basic_note):
         past = "2000-01-01T00:00:00"
-        result = wrapper.list_notes(modified_since=past)
+        result = await wrapper.list_notes(modified_since=past)
         assert result["total"] >= 1
 
-    def test_query_raw_anki_search(self, wrapper):
-        wrapper.upsert_notes(
+    async def test_query_raw_anki_search(self, wrapper):
+        await wrapper.upsert_notes(
             [
                 {
                     "deck": "Test",
@@ -171,12 +171,12 @@ class TestListNotes:
                 },
             ]
         )
-        result = wrapper.list_notes(query="mitochondria")
+        result = await wrapper.list_notes(query="mitochondria")
         assert result["total"] == 1
         assert "mitochondria" in result["notes"][0]["content"]["Front"]
 
-    def test_query_combined_with_deck(self, wrapper):
-        wrapper.upsert_notes(
+    async def test_query_combined_with_deck(self, wrapper):
+        await wrapper.upsert_notes(
             [
                 {
                     "deck": "Biology",
@@ -190,12 +190,12 @@ class TestListNotes:
                 },
             ]
         )
-        result = wrapper.list_notes(deck="Biology", query="cell")
+        result = await wrapper.list_notes(deck="Biology", query="cell")
         assert result["total"] == 1
         assert result["notes"][0]["deck"] == "Biology"
 
-    def test_ids_combined_with_deck_filter(self, wrapper):
-        results = wrapper.upsert_notes(
+    async def test_ids_combined_with_deck_filter(self, wrapper):
+        results = await wrapper.upsert_notes(
             [
                 {
                     "deck": "A",
@@ -213,12 +213,12 @@ class TestListNotes:
         id_in_b = results[1]["id"]
 
         # Both IDs, but restricted to deck A — only one should match
-        result = wrapper.list_notes(ids=[id_in_a, id_in_b], deck="A")
+        result = await wrapper.list_notes(ids=[id_in_a, id_in_b], deck="A")
         assert result["total"] == 1
         assert result["notes"][0]["id"] == id_in_a
 
-    def test_ids_combined_with_tags_filter(self, wrapper):
-        results = wrapper.upsert_notes(
+    async def test_ids_combined_with_tags_filter(self, wrapper):
+        results = await wrapper.upsert_notes(
             [
                 {
                     "deck": "Test",
@@ -237,6 +237,6 @@ class TestListNotes:
         id1 = results[0]["id"]
         id2 = results[1]["id"]
 
-        result = wrapper.list_notes(ids=[id1, id2], tags=["target"])
+        result = await wrapper.list_notes(ids=[id1, id2], tags=["target"])
         assert result["total"] == 1
         assert result["notes"][0]["id"] == id1

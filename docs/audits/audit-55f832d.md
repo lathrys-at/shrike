@@ -13,8 +13,9 @@ The theme: lock down the trust boundary and serialize the one shared mutable res
 
 ## Suggested priority order
 
-1. **3.3** (false-failure upsert) and **2.1** (`collection_info` contract) — correctness bugs affecting users/LLM today; small fixes.
-2. **3.1** (collection lock) — quiet corruption risk; small, clearly-correct fix.
+1. **3.3** (false-failure upsert) and **2.1** (`collection_info` contract) — correctness bugs affecting users/LLM today; small fixes. ✅ done
+2. **7.1** (nested-deck double-count) — confirmed counting bug. ✅ done
+3. **3.1** (serialized collection access) — corrected on second pass (no active race), then formalized: `CollectionWrapper` is now an async object with single-worker-thread serialization + backend thread affinity. ✅ done
 3. **1.2** (enable DNS-rebinding protection) and the non-loopback guard in **1.1** — small config changes, real local hardening.
 4. **1.1 (auth) / 1.3 (credential storage)** — design decisions to make *before* writing relay/sync code, not after.
 5. **3.2, 2.3** — responsiveness/correctness polish.
@@ -78,8 +79,8 @@ The roadmap calls for accepting and storing AnkiWeb / sync-server credentials. T
 **Where:** `tools.py:133` (`sections = include or ["summary"]`) and `tools.py:126` docstring (correct) vs. `docs/mcp-tools.md:13` ("returns everything") and `docs/mcp-schema.json` description ("With no arguments, returns summaries of everything") — both human docs are stale. Separately, the `include` parameter docs (`mcp-tools.md:21`) omit the valid values `"summary"` and `"all"` that the code accepts (`collection.py:37–38`).
 
 **Action items:**
-- [ ] Decide the intended no-arg default, then make code, docstring, `docs/mcp-tools.md`, and `docs/mcp-schema.json` all agree.
-- [ ] Document `"summary"` and `"all"` as valid `include` values.
+- [x] Decide the intended no-arg default, then make code, docstring, `docs/mcp-tools.md`, and `docs/mcp-schema.json` all agree. (No-arg default is `["summary"]`; human docs corrected to match the code/docstring.)
+- [x] Document `"summary"` and `"all"` as valid `include` values.
 
 ### 2.2 [LOW] Undocumented `search_notes` parameters
 
@@ -109,12 +110,16 @@ The roadmap calls for accepting and storing AnkiWeb / sync-server credentials. T
 
 > Dispatch note: FastMCP runs **sync** tool functions inline on the event-loop thread (`func_metadata.py` non-async branch calls `fn(**kwargs)` directly), so tool calls are effectively *serialized* — that rules out tool-vs-tool collection corruption. The remaining concurrency risk is the background rebuild thread (3.1).
 
-### 3.1 [MEDIUM] Background rebuild thread races the request thread on the Anki collection
+### 3.1 [DONE — formalized via async serialization] Collection access was not thread-safe by construction
 
-`rebuild_in_background` spawns a daemon thread (`index.py:329`) that calls `wrapper.note_texts_for_embedding(...)` → `col.get_note(...)` (`collection.py:357–371`) while the event-loop thread can simultaneously service an `upsert_notes`/`delete_notes` calling `col.add_note` / `col.remove_notes`. Two threads touching one `anki.Collection`, which is not thread-safe (single Rust backend handle + DBProxy). Reachable: startup drift triggers a background rebuild (`server.py:268–272`) and the server accepts tool calls immediately. The vector-index `self._lock` does not cover the collection reads done to *feed* the index.
+**Correction (second pass):** the original claim — that the background rebuild thread races the request thread on the collection — was **inaccurate**. On re-tracing: `rebuild_in_background` (`index.py`) never touches the collection; it only consumes the `(ids, texts)` already gathered. Those gathering reads (`find_notes` + `note_texts_for_embedding`) run on the *calling* thread (startup main thread, or the event-loop thread for `/index/rebuild`) **before** the daemon thread is spawned. Combined with the dispatch note above (sync tools ran inline on the event-loop thread, so they were already serialized), there was **no active data race** in the shipped code.
+
+What remained true is that the invariant — "only one thread ever touches `anki.Collection`" — was *implicit* and easy to violate as the roadmap adds concurrency (async tools, sync, the relay). Rather than leave it to convention, it is now **enforced structurally**.
+
+**Resolution (implemented):** `CollectionWrapper` owns a single dedicated worker thread (`ThreadPoolExecutor(max_workers=1)`); the collection is opened on, and every operation is dispatched to, that one thread. Public operations are now `async` (`await wrapper.list_notes(...)`, etc.), scheduled via `run_in_executor`, so the event loop stays responsive while the collection is busy; `run_sync`/`close` provide synchronous entry points for the startup/shutdown paths. The MCP tools and custom routes were converted to `await` the wrapper. This gives true serialization *and* single-thread affinity for the Rust backend, eliminating the entire class of concern by construction rather than guarding individual methods with a lock.
 
 **Action items:**
-- [ ] Serialize all `anki.Collection` access behind a single `threading.RLock` owned by `CollectionWrapper` (wrap the public read/write methods).
+- [x] Serialize all `anki.Collection` access through a single owner thread (chose a dedicated worker thread + async API over a `threading.RLock`, per the discussion above — it adds thread affinity and keeps the event loop non-blocking).
 
 ### 3.2 [LOW–MEDIUM] Blocking I/O inside async custom routes
 
@@ -130,8 +135,8 @@ The roadmap calls for accepting and storing AnkiWeb / sync-server credentials. T
 **Where:** `tools.py:394–405`. If `note_texts_for_embedding` raises, `texts` is never bound; the `except` swallows it, then `_attach_neighbors(..., texts, ...)` raises `NameError`, which escapes to `_safe_tool` and returns `{"error": ...}`. The notes were **already written** to the collection (`collection.upsert_notes` ran first), so the client is told the upsert failed when it succeeded — and may retry, creating duplicates.
 
 **Action items:**
-- [ ] Move `_attach_neighbors` inside the `try` (or initialize `texts = []` and guard).
-- [ ] Ensure index-maintenance failures never convert a successful collection mutation into an error response (matches the documented best-effort index model).
+- [x] Move `_attach_neighbors` inside the `try` (or initialize `texts = []` and guard).
+- [x] Ensure index-maintenance failures never convert a successful collection mutation into an error response (matches the documented best-effort index model).
 
 ### 3.4 [LOW] Deprecated `asyncio.get_event_loop()` in shutdown handler
 
@@ -199,8 +204,8 @@ Anki's `deck_due_tree()` returns nodes whose `new_count`/`review_count`/`learn_c
 **Verified empirically** on a temp collection: parent deck `Lang` (2 own notes) + child `Lang::Japanese` (3 notes). The parent node reports `new=5` (rolled up), the child `new=3`; the recursive sum yields **8 for 5 actual cards**. So `summary.due_today`, `stats.cards_due_today`, and `stats.new_cards` are all inflated whenever nested decks exist. The per-deck `decks_summary` entries are individually correct — only the grand totals are wrong.
 
 **Action items:**
-- [ ] Compute totals from top-level nodes only (each `tree.children` node already includes its descendants): `sum(top.new_count for top in tree.children)`, etc. Don't recurse for the total.
-- [ ] Add a unit test with a nested deck asserting the totals match the real card count (the suite currently has no nested-deck due-count coverage).
+- [x] Compute totals from top-level nodes only (each `tree.children` node already includes its descendants): `sum(top.new_count for top in tree.children)`, etc. Don't recurse for the total.
+- [x] Add a unit test with a nested deck asserting the totals match the real card count (`test_collection_info.py::test_nested_decks_not_double_counted`).
 
 ### 7.2 [MEDIUM] First-run config auto-save drops the embedding model (and logging) settings
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 from typing import Any
 
@@ -90,6 +91,18 @@ class NoteTypeInput(BaseModel):
 
 
 def _safe_tool(fn: Any) -> Any:
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await fn(*args, **kwargs)
+            except Exception as e:
+                logger.exception("Unhandled error in %s", fn.__name__)
+                return {"error": f"Internal error: {e}"}
+
+        return async_wrapper
+
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
@@ -111,7 +124,7 @@ def register_tools(
 
     @mcp.tool()
     @_safe_tool
-    def collection_info(
+    async def collection_info(
         include: list[str] | None = None,
         note_type_details: list[str] | None = None,
     ) -> dict[str, Any]:
@@ -132,11 +145,11 @@ def register_tools(
         types when you need to inspect or author templates."""
         sections = include or ["summary"]
         logger.info("collection_info sections=%s", ",".join(sections))
-        return wrapper.get_collection_info(include, note_type_details)
+        return await wrapper.get_collection_info(include, note_type_details)
 
     @mcp.tool()
     @_safe_tool
-    def list_notes(
+    async def list_notes(
         ids: list[int] | None = None,
         deck: str | None = None,
         tags: list[str] | None = None,
@@ -186,7 +199,7 @@ def register_tools(
         ]
         logger.info("list_notes %s limit=%d", " ".join(filters), limit)
 
-        result = wrapper.list_notes(
+        result = await wrapper.list_notes(
             ids=ids,
             deck=deck,
             tags=tags,
@@ -205,7 +218,7 @@ def register_tools(
 
     @mcp.tool()
     @_safe_tool
-    def search_notes(
+    async def search_notes(
         queries: list[str] | None = None,
         ids: list[int] | None = None,
         top_k: int = 10,
@@ -292,7 +305,7 @@ def register_tools(
             sources.append(q)
 
         if ids:
-            note_texts = wrapper.note_texts_for_embedding(ids)
+            note_texts = await wrapper.note_texts_for_embedding(ids)
             for nid, text in zip(ids, note_texts, strict=True):
                 if text:
                     all_query_texts.append(text)
@@ -317,7 +330,7 @@ def register_tools(
                     break
 
                 try:
-                    note_data = wrapper._note_to_dict(nid, "full")
+                    note_data = await wrapper.note_to_dict(nid, "full")
                 except Exception:
                     continue
 
@@ -349,7 +362,7 @@ def register_tools(
 
     @mcp.tool()
     @_safe_tool
-    def upsert_notes(
+    async def upsert_notes(
         notes: list[NoteInput],
         top_k_neighbors: int = 5,
         neighbor_threshold: float = 0.5,
@@ -379,7 +392,7 @@ def register_tools(
         logger.info("upsert_notes count=%d (creates=%d, updates=%d)", len(notes), creates, updates)
 
         note_dicts = [n.model_dump(exclude_none=True) for n in notes]
-        results = wrapper.upsert_notes(note_dicts)
+        results = await wrapper.upsert_notes(note_dicts)
 
         created = sum(1 for r in results if r.get("status") == "created")
         updated = sum(1 for r in results if r.get("status") == "updated")
@@ -394,19 +407,25 @@ def register_tools(
         if index and index.available:
             changed_ids = [r["id"] for r in results if r.get("status") in ("created", "updated")]
             if changed_ids:
+                # Index maintenance is best-effort: the notes are already
+                # committed to the collection, so a failure here must never
+                # turn a successful upsert into an error response. Keep the
+                # neighbor lookup inside this try for the same reason —
+                # otherwise an embedding failure leaves `texts` unbound.
                 try:
-                    texts = wrapper.note_texts_for_embedding(changed_ids)
+                    texts = await wrapper.note_texts_for_embedding(changed_ids)
                     index.add(changed_ids, texts)
-                    index.col_mod = wrapper.col.mod
+                    index.col_mod = await wrapper.run(lambda c: c.mod)
                     logger.debug("Index updated: %d vectors added/replaced", len(changed_ids))
+                    await _attach_neighbors(
+                        results, changed_ids, texts, top_k_neighbors, neighbor_threshold
+                    )
                 except Exception:
                     logger.warning("Failed to update index after upsert", exc_info=True)
 
-                _attach_neighbors(results, changed_ids, texts, top_k_neighbors, neighbor_threshold)
-
         return {"results": results}
 
-    def _attach_neighbors(
+    async def _attach_neighbors(
         results: list[dict[str, Any]],
         changed_ids: list[int],
         texts: list[str],
@@ -430,7 +449,7 @@ def register_tools(
                     if neighbor_id in exclude_set:
                         continue
                     try:
-                        note_data = wrapper._note_to_dict(neighbor_id, "meta")
+                        note_data = await wrapper.note_to_dict(neighbor_id, "meta")
                     except Exception:
                         continue
                     neighbors.append(
@@ -452,7 +471,7 @@ def register_tools(
 
     @mcp.tool()
     @_safe_tool
-    def upsert_note_types(note_types: list[NoteTypeInput]) -> dict[str, Any]:
+    async def upsert_note_types(note_types: list[NoteTypeInput]) -> dict[str, Any]:
         """Create or update note type definitions (1-10 per call).
 
         A note type defines the schema for notes: its fields, card templates
@@ -475,7 +494,7 @@ def register_tools(
         logger.info("upsert_note_types count=%d names=%s", len(note_types), ", ".join(names))
 
         nt_dicts = [nt.model_dump(exclude_none=True) for nt in note_types]
-        results = _upsert_note_types(wrapper.col, nt_dicts)
+        results = await wrapper.run(lambda c: _upsert_note_types(c, nt_dicts))
 
         for r in results:
             status = r.get("status", "unknown")
@@ -488,7 +507,7 @@ def register_tools(
 
     @mcp.tool()
     @_safe_tool
-    def delete_notes(ids: list[int]) -> dict[str, Any]:
+    async def delete_notes(ids: list[int]) -> dict[str, Any]:
         """Permanently delete notes and all their associated cards.
 
         This cannot be undone. Use list_notes or search_notes first to
@@ -497,7 +516,7 @@ def register_tools(
             return {"error": "Maximum 100 note IDs per call."}
 
         logger.info("delete_notes requested=%d", len(ids))
-        result = wrapper.delete_notes(ids)
+        result = await wrapper.delete_notes(ids)
         logger.info(
             "delete_notes completed: %d deleted, %d not found",
             len(result["deleted"]),
@@ -507,7 +526,7 @@ def register_tools(
         if index and index.available and result["deleted"]:
             try:
                 removed = index.remove(result["deleted"])
-                index.col_mod = wrapper.col.mod
+                index.col_mod = await wrapper.run(lambda c: c.mod)
                 logger.debug("Index updated: %d vectors removed", removed)
             except Exception:
                 logger.warning("Failed to update index after delete", exc_info=True)
@@ -516,7 +535,7 @@ def register_tools(
 
     @mcp.tool()
     @_safe_tool
-    def delete_note_types(ids: list[int]) -> dict[str, Any]:
+    async def delete_note_types(ids: list[int]) -> dict[str, Any]:
         """Delete note type definitions by ID.
 
         A note type can only be deleted if no notes currently use it.
@@ -525,7 +544,7 @@ def register_tools(
             return {"error": "Maximum 10 note type IDs per call."}
 
         logger.info("delete_note_types requested=%d", len(ids))
-        result = wrapper.delete_note_types(ids)
+        result = await wrapper.delete_note_types(ids)
         statuses: dict[str, int] = {}
         for r in result["results"]:
             s = r["status"]

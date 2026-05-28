@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import atexit
 import contextlib
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeVar
 
 from anki.collection import Collection
 from anki.consts import MODEL_CLOZE
@@ -13,26 +15,86 @@ from anki.errors import NotFoundError
 
 logger = logging.getLogger("shrike.collection")
 
+T = TypeVar("T")
+
 
 class CollectionWrapper:
+    """Serializes every access to the underlying ``anki.Collection``.
+
+    The Anki collection is not safe for concurrent use, and its SQLite-backed
+    state is happiest when touched from a single thread. This wrapper owns one
+    dedicated worker thread and funnels all collection operations through it,
+    so concurrent callers (event-loop tasks, custom HTTP routes, the startup
+    path) are serialized rather than racing.
+
+    Operations are exposed as ``async`` methods: awaiting one schedules the
+    work on the worker thread and yields control, keeping the event loop
+    responsive while the collection is busy. ``run_sync`` and ``close`` provide
+    synchronous entry points for the startup and shutdown paths where no event
+    loop is running.
+    """
+
+    # Assigned on the worker thread in ``_open``; declared here for the type
+    # checker. Never mutate or call methods on it outside the worker thread.
+    col: Collection
+
     def __init__(self, path: str) -> None:
-        logger.debug("Opening collection at %s", path)
-        self.col = Collection(path)
+        self._path = path
         self._closed = False
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shrike-collection")
+        # Open on the worker thread so the backend is owned by the same thread
+        # that will service every subsequent operation.
+        self._executor.submit(self._open).result()
         atexit.register(self.close)
+
+    def _open(self) -> None:
+        logger.debug("Opening collection at %s", self._path)
+        self.col = Collection(self._path)
         logger.debug("Collection opened successfully")
 
-    def close(self) -> None:
-        if not self._closed:
-            logger.debug("Closing collection")
-            with contextlib.suppress(Exception):
-                self.col.close()
-            self._closed = True
+    # -- execution primitives ------------------------------------------------
 
-    def get_collection_info(
+    async def run(self, fn: Callable[[Collection], T]) -> T:
+        """Run ``fn(col)`` on the worker thread and await the result.
+
+        The escape hatch for collection operations that don't have a dedicated
+        method here (e.g. note-type edits, reading ``col.mod``). All access is
+        serialized through the same single worker thread.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, fn, self.col)
+
+    def run_sync(self, fn: Callable[[Collection], T]) -> T:
+        """Run ``fn(col)`` on the worker thread, blocking until it returns.
+
+        For the startup and shutdown paths, which run before/after the event
+        loop and so cannot ``await``. Still routes through the worker thread,
+        preserving single-thread ownership of the collection.
+        """
+        return self._executor.submit(fn, self.col).result()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        logger.debug("Closing collection")
+        with contextlib.suppress(Exception):
+            self._executor.submit(lambda _c: self.col.close(), None).result()
+        self._executor.shutdown(wait=True)
+
+    # -- collection info -----------------------------------------------------
+
+    async def get_collection_info(
         self,
         include: list[str] | None = None,
         note_type_details: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return await self.run(lambda _c: self._get_collection_info(include, note_type_details))
+
+    def _get_collection_info(
+        self,
+        include: list[str] | None,
+        note_type_details: list[str] | None,
     ) -> dict[str, Any]:
         ALL_SECTIONS = ["summary", "note_types", "decks", "tags", "stats"]
         sections = ALL_SECTIONS if include and "all" in include else (include or ["summary"])
@@ -58,10 +120,10 @@ class CollectionWrapper:
 
     def _get_summary(self) -> dict[str, Any]:
         tree = self.col.sched.deck_due_tree()
-        total_due = 0
-        for top in tree.children:
-            self._walk_due(top, total_due_ref := [0])
-            total_due += total_due_ref[0]
+        # Top-level node counts are already rolled up to include their
+        # subdecks, so the collection total is the sum over top-level decks
+        # only. Recursing into children would double-count nested decks.
+        total_due = sum(top.review_count + top.learn_count for top in tree.children)
 
         created = datetime.fromtimestamp(self.col.crt, tz=UTC).strftime("%Y-%m-%d")
         modified = datetime.fromtimestamp(self.col.mod / 1000, tz=UTC).isoformat(timespec="seconds")
@@ -77,12 +139,6 @@ class CollectionWrapper:
             "tags": len(self.col.tags.all()),
             "due_today": total_due,
         }
-
-    @staticmethod
-    def _walk_due(node: Any, total_ref: list[int]) -> None:
-        total_ref[0] += node.review_count + node.learn_count
-        for child in node.children:
-            CollectionWrapper._walk_due(child, total_ref)
 
     def _get_note_types(self, detail_names: set[str]) -> list[dict]:
         note_types = []
@@ -122,18 +178,19 @@ class CollectionWrapper:
     def _get_stats(self) -> dict[str, Any]:
         tree = self.col.sched.deck_due_tree()
 
-        total_due = 0
-        total_new = 0
+        # Top-level node counts already include their subdecks, so collection
+        # totals sum over top-level decks only. The per-deck summary below
+        # walks every node — each node's count is its own rolled-up total.
+        total_due = sum(top.review_count + top.learn_count for top in tree.children)
+        total_new = sum(top.new_count for top in tree.children)
+
         decks_summary: dict[str, dict] = {}
 
         def walk(node: Any, prefix: str = "") -> None:
-            nonlocal total_due, total_new
             name = node.name
             if prefix:
                 name = f"{prefix}::{node.name}"
             due = node.review_count + node.learn_count
-            total_due += due
-            total_new += node.new_count
 
             note_ids = self.col.find_notes(f'"deck:{name}"')
             decks_summary[name] = {
@@ -154,7 +211,34 @@ class CollectionWrapper:
             "decks_summary": decks_summary,
         }
 
-    def list_notes(
+    # -- list / read ---------------------------------------------------------
+
+    async def list_notes(
+        self,
+        *,
+        ids: list[int] | None = None,
+        deck: str | None = None,
+        tags: list[str] | None = None,
+        note_type: str | None = None,
+        modified_since: str | None = None,
+        query: str | None = None,
+        fields_mode: str = "full",
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return await self.run(
+            lambda _c: self._list_notes(
+                ids=ids,
+                deck=deck,
+                tags=tags,
+                note_type=note_type,
+                modified_since=modified_since,
+                query=query,
+                fields_mode=fields_mode,
+                limit=limit,
+            )
+        )
+
+    def _list_notes(
         self,
         *,
         ids: list[int] | None = None,
@@ -222,6 +306,9 @@ class CollectionWrapper:
                 continue
         return {"notes": notes, "total": len(notes), "limit": limit}
 
+    async def note_to_dict(self, nid: int, fields_mode: str) -> dict[str, Any]:
+        return await self.run(lambda _c: self._note_to_dict(nid, fields_mode))
+
     def _note_to_dict(self, nid: int, fields_mode: str) -> dict[str, Any]:
         note = self.col.get_note(nid)  # type: ignore[arg-type]
         notetype = self.col.models.get(note.mid)
@@ -244,7 +331,12 @@ class CollectionWrapper:
 
         return result
 
-    def upsert_notes(self, notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # -- upsert / delete -----------------------------------------------------
+
+    async def upsert_notes(self, notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return await self.run(lambda _c: self._upsert_notes(notes))
+
+    def _upsert_notes(self, notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         results = []
         for i, note_input in enumerate(notes):
             try:
@@ -344,7 +436,10 @@ class CollectionWrapper:
         logger.debug("Updated note %d", note.id)
         return {"status": "updated", "id": note.id}
 
-    def delete_notes(self, ids: list[int]) -> dict[str, Any]:
+    async def delete_notes(self, ids: list[int]) -> dict[str, Any]:
+        return await self.run(lambda _c: self._delete_notes(ids))
+
+    def _delete_notes(self, ids: list[int]) -> dict[str, Any]:
         existing = set(self.col.find_notes(f"nid:{','.join(str(i) for i in ids)}"))
         not_found = [i for i in ids if i not in existing]
         deleted = list(existing)
@@ -354,15 +449,22 @@ class CollectionWrapper:
 
         return {"deleted": deleted, "not_found": not_found}
 
-    def note_texts_for_embedding(self, note_ids: Sequence[int]) -> list[str]:
+    # -- embedding text ------------------------------------------------------
+
+    async def note_texts_for_embedding(self, note_ids: Sequence[int]) -> list[str]:
         """Return concatenated field text for each note, suitable for embedding.
 
         Notes that don't exist are returned as empty strings (same index position).
         """
+        return await self.run(lambda c: self.note_texts(c, note_ids))
+
+    @staticmethod
+    def note_texts(col: Collection, note_ids: Sequence[int]) -> list[str]:
+        """Concatenated field text for each note id. Must run on the worker thread."""
         texts: list[str] = []
         for nid in note_ids:
             try:
-                note = self.col.get_note(nid)  # type: ignore[arg-type]
+                note = col.get_note(nid)  # type: ignore[arg-type]
             except NotFoundError:
                 texts.append("")
                 continue
@@ -370,7 +472,12 @@ class CollectionWrapper:
             texts.append("\n".join(parts))
         return texts
 
-    def delete_note_types(self, ids: list[int]) -> dict[str, Any]:
+    # -- note types ----------------------------------------------------------
+
+    async def delete_note_types(self, ids: list[int]) -> dict[str, Any]:
+        return await self.run(lambda _c: self._delete_note_types(ids))
+
+    def _delete_note_types(self, ids: list[int]) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
         for nt_id in ids:
             nt = self.col.models.get(nt_id)  # type: ignore[arg-type]

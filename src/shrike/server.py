@@ -93,13 +93,16 @@ def _register_custom_routes(
                 }
             )
 
-        all_note_ids = list(wrapper.col.find_notes("deck:*"))
+        def _collect(c: Any) -> tuple[list[int], int, list[str]]:
+            note_ids = list(c.find_notes("deck:*"))
+            return note_ids, c.mod, CollectionWrapper.note_texts(c, note_ids)
+
+        all_note_ids, col_mod, texts = await wrapper.run(_collect)
         if not all_note_ids:
-            index.rebuild([], [], wrapper.col.mod)
+            index.rebuild([], [], col_mod)
             return JSONResponse({"status": "complete", "size": 0})
 
-        texts = wrapper.note_texts_for_embedding(all_note_ids)
-        index.rebuild_in_background(all_note_ids, texts, wrapper.col.mod)
+        index.rebuild_in_background(all_note_ids, texts, col_mod)
         return JSONResponse(
             {
                 "status": "started",
@@ -232,12 +235,14 @@ def main() -> None:
 
     logger.info("Opening collection at %s", args.collection)
     wrapper = CollectionWrapper(args.collection)
-    summary = wrapper.get_collection_info().get("summary", {})
+    notes, decks, note_types = wrapper.run_sync(
+        lambda c: (c.note_count(), len(c.decks.all_names_and_ids()), len(c.models.all()))
+    )
     logger.info(
         "Collection ready: %d notes, %d decks, %d note types",
-        summary.get("notes", 0),
-        summary.get("decks", 0),
-        summary.get("note_types", 0),
+        notes,
+        decks,
+        note_types,
     )
 
     embedding_service: EmbeddingService | None = None
@@ -265,11 +270,16 @@ def main() -> None:
         index = VectorIndex(path=index_dir, embedding_service=embedding_service)
         logger.info("Vector index: %d vectors, %d dims", index.size, index.ndim or 0)
 
-        if index.check_drift(wrapper.col.mod):
-            all_note_ids = list(wrapper.col.find_notes("deck:*"))
+        col_mod = wrapper.run_sync(lambda c: c.mod)
+        if index.check_drift(col_mod):
+
+            def _collect_for_rebuild(c: Any) -> tuple[list[int], list[str]]:
+                note_ids = list(c.find_notes("deck:*"))
+                return note_ids, CollectionWrapper.note_texts(c, note_ids)
+
+            all_note_ids, texts = wrapper.run_sync(_collect_for_rebuild)
             if all_note_ids:
-                texts = wrapper.note_texts_for_embedding(all_note_ids)
-                index.rebuild_in_background(all_note_ids, texts, wrapper.col.mod)
+                index.rebuild_in_background(all_note_ids, texts, col_mod)
             else:
                 logger.info("Collection is empty, skipping index rebuild")
 
