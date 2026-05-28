@@ -16,6 +16,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8372,
     },
+    "embedding": {
+        "model": None,
+        "port": 8373,
+        "context_size": None,
+        "threads": None,
+        "gpu_layers": None,
+    },
     "logging": {
         "dir": str(log_dir()),
         "level": "info",
@@ -109,6 +116,7 @@ def _deep_copy_defaults() -> dict[str, Any]:
     return {
         "collection": DEFAULT_CONFIG["collection"],
         "server": dict(DEFAULT_CONFIG["server"]),  # type: ignore[arg-type]
+        "embedding": dict(DEFAULT_CONFIG["embedding"]),  # type: ignore[arg-type]
         "logging": logging_defaults,
     }
 

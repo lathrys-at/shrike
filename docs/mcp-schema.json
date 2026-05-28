@@ -108,11 +108,23 @@
   },
   {
     "name": "upsert_notes",
-    "description": "Create or update notes in bulk (1–100 per call). If a note object includes an `id`, the existing note is updated; if `id` is absent, a new note is created.\n\nFor new notes, `deck`, `note_type`, and `fields` are required. For updates, only `id` and the properties being changed are needed — omitted properties are left unchanged.\n\nDuplicate detection is handled by the application and surfaced in its own UI, not controlled through this tool.",
+    "description": "Create or update notes in bulk (1–100 per call). If a note object includes an `id`, the existing note is updated; if `id` is absent, a new note is created.\n\nFor new notes, `deck`, `note_type`, and `fields` are required. For updates, only `id` and the properties being changed are needed — omitted properties are left unchanged.\n\nWhen a vector index is available, each result includes `neighbors`: the most similar existing notes ranked by cosine similarity, filtered to those above `neighbor_threshold` (default 0.5) and capped at `top_k_neighbors` (default 5). Use these for tag consistency (adopt tags from nearby notes), detecting near-duplicates (high scores suggest overlap), or understanding where a new note sits in the collection. Neighbors include note ID, similarity score, and tags — use list_notes or search_notes to inspect content if needed.",
     "inputSchema": {
       "type": "object",
       "required": ["notes"],
       "properties": {
+        "top_k_neighbors": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20,
+          "description": "Maximum number of similar-note neighbors to return per result. Default 5. Set to 0 to disable neighbor lookup."
+        },
+        "neighbor_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Minimum cosine similarity score for a neighbor to be included. Default 0.5. Higher values return only very similar notes."
+        },
         "notes": {
           "type": "array",
           "minItems": 1,
@@ -226,6 +238,23 @@
           "minItems": 1,
           "maxItems": 100,
           "description": "Note IDs to delete. All cards belonging to these notes are also deleted."
+        }
+      }
+    }
+  },
+  {
+    "name": "delete_note_types",
+    "description": "Delete note type definitions by ID. A note type can only be deleted if no notes currently use it. Check use counts via collection_info first.",
+    "inputSchema": {
+      "type": "object",
+      "required": ["ids"],
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 1,
+          "maxItems": 10,
+          "description": "Note type IDs to delete. Fails for any note type that still has notes using it."
         }
       }
     }

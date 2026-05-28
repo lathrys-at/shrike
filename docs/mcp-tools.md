@@ -1,6 +1,6 @@
 # Anki MCP Server — Tool Interface
 
-Seven tools for managing an Anki flashcard collection. The server maintains a local vector index over all note content, enabling semantic search without external API calls. Duplicate detection is handled by the application and surfaced in its own UI — not by the LLM.
+Seven tools for managing an Anki flashcard collection. The server maintains a local vector index over all note content, enabling semantic search and contextual neighbor suggestions without external API calls.
 
 Notes in Anki have a **note type** that defines their fields (e.g., a "Basic" note type has "Front" and "Back" fields; a "Cloze" note type has "Text" and "Extra"). A note type also defines **card templates** — HTML templates that control how cards are rendered — and **CSS styling** shared across all its cards. A single note produces one or more cards depending on its note type. Notes belong to a **deck** and can have **tags**.
 
@@ -168,13 +168,15 @@ Create or update notes in bulk. If a note object includes an `id`, the existing 
 
 When creating notes, `deck`, `note_type`, and `fields` are required. When updating, only `id` and the properties being changed need to be provided — omitted properties are left unchanged.
 
-The application independently checks new notes for semantic similarity against the collection and surfaces duplicate warnings in its own UI. This tool does not perform or control duplicate detection.
+When a vector index is available, each result includes `neighbors`: the most similar existing notes ranked by cosine similarity. Use these for tag consistency (adopt tags from nearby notes), detecting near-duplicates (high scores suggest overlap), or understanding where a new note sits in the collection.
 
 ### Parameters
 
 | Name | Type | Required | Description |
 |---|---|---|---|
 | `notes` | `object[]` | **yes** | Array of note objects (1–100). See note schema below. |
+| `top_k_neighbors` | `integer` | no | Maximum neighbors per result. Default `5`. Set to `0` to disable. |
+| `neighbor_threshold` | `number` | no | Minimum cosine similarity for a neighbor. Default `0.5`. Higher values return only very similar notes. |
 
 #### Note object schema
 
@@ -193,11 +195,19 @@ The application independently checks new notes for semantic similarity against t
   "results": [
     {
       "status": "created",
-      "id": 1700000000789
+      "id": 1700000000789,
+      "neighbors": [               // present when vector index is available
+        {
+          "id": 1700000000456,
+          "score": 0.82,
+          "tags": ["metabolism", "chapter-18"]
+        }
+      ]
     },
     {
       "status": "updated",
-      "id": 1700000000123
+      "id": 1700000000123,
+      "neighbors": [{ "id": 1700000000001, "score": 0.71, "tags": ["verb"] }]
     },
     {
       "status": "error",

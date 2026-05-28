@@ -25,6 +25,24 @@ from shrike.daemon import (
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
 
 
+def _embedding_args(config: dict[str, Any]) -> list[str]:
+    """Build CLI args for the embedding service from config."""
+    emb = config.get("embedding", {})
+    args: list[str] = []
+    model = emb.get("model")
+    if model:
+        args.extend(["--embedding-model", str(model)])
+        if emb.get("port"):
+            args.extend(["--embedding-port", str(emb["port"])])
+        if emb.get("context_size"):
+            args.extend(["--embedding-context-size", str(emb["context_size"])])
+        if emb.get("threads"):
+            args.extend(["--embedding-threads", str(emb["threads"])])
+        if emb.get("gpu_layers"):
+            args.extend(["--embedding-gpu-layers", str(emb["gpu_layers"])])
+    return args
+
+
 def _render_status(status: dict[str, Any]) -> None:
     """Render the unified server status block used by both start and status."""
     if not status.get("running", False):
@@ -47,6 +65,43 @@ def _render_status(status: dict[str, Any]) -> None:
         output.kv("Log", f"[cyan]{status['log']}[/cyan]")
     if status.get("uptime"):
         output.kv("Uptime", status["uptime"])
+    emb = status.get("embedding")
+    if emb:
+        if emb.get("available"):
+            output.kv("Embedding", "[green]available[/green]")
+            if emb.get("url"):
+                output.kv("URL", f"[cyan]{emb['url']}[/cyan]", indent=2)
+            if emb.get("pid"):
+                output.kv("PID", f"[cyan]{emb['pid']}[/cyan]", indent=2)
+            if emb.get("model"):
+                output.kv("Model", f"[cyan]{emb['model']}[/cyan]", indent=2)
+        else:
+            output.kv("Embedding", "[dim]unavailable[/dim]")
+
+    idx = status.get("index")
+    if idx:
+        state = idx.get("state", "unknown")
+        if state == "ready":
+            output.kv("Index", "[green]ready[/green]")
+            output.kv("Vectors", f"[green]{idx.get('size', 0)}[/green]", indent=2)
+            output.kv("Dimensions", str(idx.get("ndim", "?")), indent=2)
+        elif state == "building":
+            progress = idx.get("progress", {})
+            indexed = progress.get("indexed", 0)
+            total = progress.get("total", 0)
+            output.kv("Index", "[yellow]building[/yellow]")
+            output.kv("Progress", f"{indexed} / {total} notes", indent=2)
+        elif state == "error":
+            output.kv("Index", "[red]error[/red]")
+            output.kv("Error", idx.get("error", "unknown"), indent=2)
+        elif state == "unavailable":
+            output.kv("Index", "[dim]unavailable[/dim]")
+        else:
+            output.kv("Index", f"[dim]{state}[/dim]")
+        if idx.get("col_mod") is not None:
+            output.kv("Collection mod", str(idx["col_mod"]), indent=2)
+        if idx.get("path"):
+            output.kv("Path", f"[cyan]{idx['path']}[/cyan]", indent=2)
 
 
 def _wait_for_server(
@@ -128,6 +183,7 @@ def ensure_server(config: dict[str, Any]) -> str:
             resolved_log_dir,
             "--log-level",
             resolved_log_level,
+            *_embedding_args(config),
         ],
         stdout=bootstrap_log_file,
         stderr=bootstrap_log_file,
@@ -270,6 +326,7 @@ def server_start(
             resolved_log_dir,
             "--log-level",
             resolved_log_level,
+            *_embedding_args(config),
         ],
         stdout=bootstrap_log_file,
         stderr=bootstrap_log_file,

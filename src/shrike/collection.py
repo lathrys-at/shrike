@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -352,6 +353,22 @@ class CollectionWrapper:
             self.col.remove_notes(deleted)
 
         return {"deleted": deleted, "not_found": not_found}
+
+    def note_texts_for_embedding(self, note_ids: Sequence[int]) -> list[str]:
+        """Return concatenated field text for each note, suitable for embedding.
+
+        Notes that don't exist are returned as empty strings (same index position).
+        """
+        texts: list[str] = []
+        for nid in note_ids:
+            try:
+                note = self.col.get_note(nid)  # type: ignore[arg-type]
+            except NotFoundError:
+                texts.append("")
+                continue
+            parts = [f"{k}: {v}" for k, v in zip(note.keys(), note.values(), strict=False) if v]
+            texts.append("\n".join(parts))
+        return texts
 
     def delete_note_types(self, ids: list[int]) -> dict[str, Any]:
         results: list[dict[str, Any]] = []

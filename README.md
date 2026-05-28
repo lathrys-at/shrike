@@ -98,7 +98,7 @@ mypy src/shrike/
 ## Roadmap
 
 - **v0.1.0** — CLI and MCP server *(done)*
-- **v0.2.0** — Semantic search via local embeddings (llama-server + USearch), contextual upsert responses (neighbor tags for taxonomy grounding), reference skill plugin for LLM-driven card creation
+- **v0.2.0** — Semantic search via local embeddings (llama-server + USearch), index consistency and crash recovery, contextual upsert responses (neighbor tags for taxonomy grounding), reference skill plugin for LLM-driven card creation
 - **v0.3.0** — AnkiWeb and self-hosted sync support
 - **v0.4.0** — Desktop application (Tauri)
 - **v0.5.0** — Relay prototype for remote access without tunneling (auth + forwarding to local instance)
