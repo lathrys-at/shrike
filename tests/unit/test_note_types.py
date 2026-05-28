@@ -4,7 +4,7 @@ from shrike.note_types import upsert_note_types
 
 
 class TestCreateNoteType:
-    def test_create_standard(self, wrapper):
+    async def test_create_standard(self, wrapper):
         results = upsert_note_types(
             wrapper.col,
             [
@@ -28,14 +28,16 @@ class TestCreateNoteType:
         assert isinstance(results[0]["id"], int)
 
         # Verify it appears in collection_info
-        info = wrapper.get_collection_info(include=["note_types"], note_type_details=["Custom"])
+        info = await wrapper.get_collection_info(
+            include=["note_types"], note_type_details=["Custom"]
+        )
         custom = next(nt for nt in info["note_types"] if nt["name"] == "Custom")
         assert custom["fields"] == ["Term", "Definition"]
         assert custom["type"] == "standard"
         assert len(custom["templates"]) == 1
         assert custom["css"] == ".card { font-size: 20px; }"
 
-    def test_create_cloze(self, wrapper):
+    async def test_create_cloze(self, wrapper):
         results = upsert_note_types(
             wrapper.col,
             [
@@ -56,11 +58,11 @@ class TestCreateNoteType:
         )
         assert results[0]["status"] == "created"
 
-        info = wrapper.get_collection_info(include=["note_types"])
+        info = await wrapper.get_collection_info(include=["note_types"])
         my_cloze = next(nt for nt in info["note_types"] if nt["name"] == "My Cloze")
         assert my_cloze["type"] == "cloze"
 
-    def test_create_multiple_templates(self, wrapper):
+    async def test_create_multiple_templates(self, wrapper):
         results = upsert_note_types(
             wrapper.col,
             [
@@ -85,11 +87,13 @@ class TestCreateNoteType:
         )
         assert results[0]["status"] == "created"
 
-        info = wrapper.get_collection_info(include=["note_types"], note_type_details=["Vocab"])
+        info = await wrapper.get_collection_info(
+            include=["note_types"], note_type_details=["Vocab"]
+        )
         vocab = next(nt for nt in info["note_types"] if nt["name"] == "Vocab")
         assert len(vocab["templates"]) == 2
 
-    def test_create_duplicate_name_fails(self, wrapper):
+    async def test_create_duplicate_name_fails(self, wrapper):
         results = upsert_note_types(
             wrapper.col,
             [
@@ -104,11 +108,11 @@ class TestCreateNoteType:
         assert results[0]["status"] == "error"
         assert "already exists" in results[0]["error"].lower()
 
-    def test_create_missing_required_fields(self, wrapper):
+    async def test_create_missing_required_fields(self, wrapper):
         results = upsert_note_types(wrapper.col, [{"name": "Incomplete"}])
         assert results[0]["status"] == "error"
 
-    def test_can_create_notes_with_new_type(self, wrapper):
+    async def test_can_create_notes_with_new_type(self, wrapper):
         upsert_note_types(
             wrapper.col,
             [
@@ -120,7 +124,7 @@ class TestCreateNoteType:
                 }
             ],
         )
-        results = wrapper.upsert_notes(
+        results = await wrapper.upsert_notes(
             [
                 {
                     "deck": "Test",
@@ -147,25 +151,27 @@ class TestUpdateNoteType:
         )
         return results[0]["id"]
 
-    def test_update_name(self, wrapper):
+    async def test_update_name(self, wrapper):
         nt_id = self._create_custom_type(wrapper)
         results = upsert_note_types(wrapper.col, [{"id": nt_id, "name": "Renamed"}])
         assert results[0]["status"] == "updated"
         assert results[0]["name"] == "Renamed"
 
-    def test_update_css(self, wrapper):
+    async def test_update_css(self, wrapper):
         nt_id = self._create_custom_type(wrapper)
         upsert_note_types(wrapper.col, [{"id": nt_id, "css": ".card { color: red; }"}])
-        info = wrapper.get_collection_info(include=["note_types"], note_type_details=["Editable"])
+        info = await wrapper.get_collection_info(
+            include=["note_types"], note_type_details=["Editable"]
+        )
         editable = next(nt for nt in info["note_types"] if nt["id"] == nt_id)
         assert "color: red" in editable["css"]
 
-    def test_update_nonexistent(self, wrapper):
+    async def test_update_nonexistent(self, wrapper):
         results = upsert_note_types(wrapper.col, [{"id": 9999999999, "name": "Nope"}])
         assert results[0]["status"] == "error"
         assert "not found" in results[0]["error"].lower()
 
-    def test_cannot_change_cloze_type(self, wrapper):
+    async def test_cannot_change_cloze_type(self, wrapper):
         results = upsert_note_types(
             wrapper.col,
             [
@@ -198,33 +204,33 @@ class TestDeleteNoteType:
         )
         return results[0]["id"]
 
-    def test_delete_unused_type(self, wrapper):
+    async def test_delete_unused_type(self, wrapper):
         nt_id = self._create_unused_type(wrapper)
-        result = wrapper.delete_note_types([nt_id])
+        result = await wrapper.delete_note_types([nt_id])
         assert result["results"][0]["status"] == "deleted"
         assert result["results"][0]["name"] == "Deletable"
 
-        info = wrapper.get_collection_info(include=["note_types"])
+        info = await wrapper.get_collection_info(include=["note_types"])
         assert not any(nt["id"] == nt_id for nt in info["note_types"])
 
-    def test_delete_type_with_notes_fails(self, wrapper, basic_note):
-        info = wrapper.get_collection_info(include=["note_types"])
+    async def test_delete_type_with_notes_fails(self, wrapper, basic_note):
+        info = await wrapper.get_collection_info(include=["note_types"])
         basic = next(nt for nt in info["note_types"] if nt["name"] == "Basic")
 
-        result = wrapper.delete_note_types([basic["id"]])
+        result = await wrapper.delete_note_types([basic["id"]])
         assert result["results"][0]["status"] == "error"
         assert "note(s) use this type" in result["results"][0]["error"]
 
-    def test_delete_nonexistent(self, wrapper):
-        result = wrapper.delete_note_types([9999999999])
+    async def test_delete_nonexistent(self, wrapper):
+        result = await wrapper.delete_note_types([9999999999])
         assert result["results"][0]["status"] == "not_found"
 
-    def test_delete_multiple_mixed(self, wrapper, basic_note):
+    async def test_delete_multiple_mixed(self, wrapper, basic_note):
         nt_id = self._create_unused_type(wrapper)
-        info = wrapper.get_collection_info(include=["note_types"])
+        info = await wrapper.get_collection_info(include=["note_types"])
         basic_id = next(nt["id"] for nt in info["note_types"] if nt["name"] == "Basic")
 
-        result = wrapper.delete_note_types([nt_id, basic_id, 9999999999])
+        result = await wrapper.delete_note_types([nt_id, basic_id, 9999999999])
         statuses = {r["id"]: r["status"] for r in result["results"]}
         assert statuses[nt_id] == "deleted"
         assert statuses[basic_id] == "error"
