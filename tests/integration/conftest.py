@@ -146,7 +146,12 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
     """
     processes: list[subprocess.Popen] = []
 
-    def create(name: str = "server", *, embedding_model: str | None = None) -> ServerInfo:
+    def create(
+        name: str = "server",
+        *,
+        embedding_model: str | None = None,
+        extra_args: list[str] | None = None,
+    ) -> ServerInfo:
         root = tmp_path_factory.mktemp(name)
         log_dir = root / "logs"
         log_dir.mkdir()
@@ -186,6 +191,9 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
                     str(embedding_port),
                 ]
             )
+
+        if extra_args:
+            cmd.extend(extra_args)
 
         proc = subprocess.Popen(
             cmd,
