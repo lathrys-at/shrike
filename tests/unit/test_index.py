@@ -15,7 +15,6 @@ NDIM = 8
 
 def _fake_embed(texts: list[str]) -> list[list[float]]:
     """Deterministic fake embeddings based on text hash."""
-    rng = np.random.default_rng(42)
     vecs = []
     for text in texts:
         seed = hash(text) % (2**31)
@@ -105,9 +104,7 @@ class TestAdd:
         index.add([1], ["hello"])
         assert index.ndim == NDIM
 
-    def test_calls_embed_service(
-        self, index: VectorIndex, embedding_service: MagicMock
-    ) -> None:
+    def test_calls_embed_service(self, index: VectorIndex, embedding_service: MagicMock) -> None:
         index.add([1, 2], ["hello", "world"])
         embedding_service.embed.assert_called_once_with(["hello", "world"])
 
@@ -196,9 +193,7 @@ class TestPersistence:
         assert idx.size == 0
         assert idx.ndim is None
 
-    def test_clear_removes_files(
-        self, tmp_path: Path, embedding_service: MagicMock
-    ) -> None:
+    def test_clear_removes_files(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
         idx = VectorIndex(path, embedding_service=embedding_service)
         idx.add([1], ["hello"])
@@ -211,9 +206,7 @@ class TestPersistence:
         assert not (path / "index.usearch").exists()
         assert not (path / "index.meta.json").exists()
 
-    def test_search_after_load(
-        self, tmp_path: Path, embedding_service: MagicMock
-    ) -> None:
+    def test_search_after_load(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
         idx1 = VectorIndex(path, embedding_service=embedding_service)
         idx1.add([1, 2], ["hello", "world"])
@@ -223,9 +216,7 @@ class TestPersistence:
         results = idx2.search(["hello"], top_k=1)
         assert results[0][0]["note_id"] == 1
 
-    def test_col_mod_persisted(
-        self, tmp_path: Path, embedding_service: MagicMock
-    ) -> None:
+    def test_col_mod_persisted(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
         idx1 = VectorIndex(path, embedding_service=embedding_service)
         idx1.add([1], ["hello"])
@@ -310,9 +301,7 @@ class TestDriftDetection:
         index.col_mod = 100
         assert index.check_drift(200) is True
 
-    def test_drift_after_save_and_load(
-        self, tmp_path: Path, embedding_service: MagicMock
-    ) -> None:
+    def test_drift_after_save_and_load(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
         idx1 = VectorIndex(path, embedding_service=embedding_service)
         idx1.add([1], ["a"])
@@ -340,9 +329,7 @@ class TestRebuild:
         assert not index.contains(1)
         assert index.contains(10)
 
-    def test_rebuild_saves_to_disk(
-        self, tmp_path: Path, embedding_service: MagicMock
-    ) -> None:
+    def test_rebuild_saves_to_disk(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
         idx = VectorIndex(path, embedding_service=embedding_service)
         idx.rebuild([1], ["a"], col_mod=100)
