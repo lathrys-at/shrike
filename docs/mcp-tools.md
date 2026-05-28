@@ -190,6 +190,8 @@ When creating notes, `deck`, `note_type`, and `fields` are required. When updati
 
 When a vector index is available, each result includes `neighbors`: the most similar existing notes ranked by cosine similarity. Use these for tag consistency (adopt tags from nearby notes), detecting near-duplicates (high scores suggest overlap), or understanding where a new note sits in the collection.
 
+If the index update fails transiently (for example, the embedding service is briefly unavailable), the notes are still saved but `neighbors` is omitted. Each affected result is flagged with `neighbors_unavailable: true`, and the response carries a top-level `_message` naming the IDs to retry. The exact same neighbor data is reproducible afterward with `search_notes` keyed on the note ID (`search_notes(ids=[<note id>])`) — it embeds the same note text against the same index, so the result is identical to what would have been attached here.
+
 ### Parameters
 
 | Name | Type | Required | Description |
@@ -235,6 +237,21 @@ When a vector index is available, each result includes `neighbors`: the most sim
       "error": "Note type 'Basicc' not found"
     }
   ]
+}
+```
+
+When the index update fails transiently, saved notes carry `neighbors_unavailable` instead of `neighbors`, and the response adds a top-level `_message`:
+
+```jsonc
+{
+  "results": [
+    {
+      "status": "created",
+      "id": 1700000000789,
+      "neighbors_unavailable": true   // index hiccup — neighbors not computed
+    }
+  ],
+  "_message": "Notes were saved, but the vector index update failed, so neighbors could not be computed. Retry with search_notes(ids=[1700000000789]) to fetch the same neighbor data."
 }
 ```
 

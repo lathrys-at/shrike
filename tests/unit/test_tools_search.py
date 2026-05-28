@@ -222,6 +222,18 @@ class TestUpsertNeighbors:
         result = _upsert(mcp_app, [BASIC_NOTE])
         assert result["results"][0]["status"] == "created"
 
+    def test_neighbor_failure_flags_retry(self, wrapper, mock_index, mcp_app):
+        """A neighbor-search hiccup flags the result and hints the retry path."""
+        mock_index.search.side_effect = RuntimeError("embedding service down")
+        result = _upsert(mcp_app, [BASIC_NOTE])
+        r = result["results"][0]
+        nid = r["id"]
+        assert r["status"] == "created"
+        assert "neighbors" not in r
+        assert r["neighbors_unavailable"] is True
+        assert "_message" in result
+        assert f"search_notes(ids=[{nid}])" in result["_message"]
+
     def test_neighbors_on_update(self, wrapper, mock_index, mcp_app, basic_note):
         other = _seed(wrapper, [BASIC_NOTE])[0]["id"]
         mock_index.search.return_value = [[{"note_id": other, "distance": 0.3}]]
@@ -283,3 +295,20 @@ class TestUpsertIndexUpdate:
         mock_index.add.side_effect = RuntimeError("embed failed")
         result = _upsert(mcp_app, [BASIC_NOTE])
         assert result["results"][0]["status"] == "created"
+
+    def test_index_add_failure_flags_retry(self, wrapper, mock_index, mcp_app):
+        """An index.add hiccup also flags neighbors_unavailable and hints retry."""
+        mock_index.add.side_effect = RuntimeError("embed failed")
+        result = _upsert(mcp_app, [BASIC_NOTE])
+        r = result["results"][0]
+        assert r["neighbors_unavailable"] is True
+        assert f"search_notes(ids=[{r['id']}])" in result["_message"]
+
+    def test_no_retry_hint_on_success(self, wrapper, mock_index, mcp_app):
+        """Successful neighbor computation carries no retry flag or message."""
+        mock_index.search.return_value = [[]]
+        result = _upsert(mcp_app, [BASIC_NOTE])
+        r = result["results"][0]
+        assert "neighbors" in r
+        assert "neighbors_unavailable" not in r
+        assert "_message" not in result

@@ -383,7 +383,15 @@ def register_tools(
         tags from nearby notes), detecting near-duplicates (high scores
         suggest overlap), or understanding where a new note sits in the
         collection. Neighbors include note ID, similarity score, and tags —
-        use list_notes or search_notes to inspect content if needed."""
+        use list_notes or search_notes to inspect content if needed.
+
+        If the index update fails transiently (e.g. the embedding service is
+        briefly unavailable), the notes are still saved but `neighbors` is
+        omitted. Each affected result is flagged `neighbors_unavailable: true`
+        and the response carries a top-level `_message`. Recover the exact same
+        neighbor data afterward with search_notes(ids=[<note id>]) — it embeds
+        the same note text against the same index, so the result is identical
+        to what would have been attached here."""
         if len(notes) > 100:
             return {"error": "Maximum 100 notes per call."}
 
@@ -412,16 +420,50 @@ def register_tools(
                 # turn a successful upsert into an error response. Keep the
                 # neighbor lookup inside this try for the same reason —
                 # otherwise an embedding failure leaves `texts` unbound.
+                neighbors_ok = False
                 try:
                     texts = await wrapper.note_texts_for_embedding(changed_ids)
                     index.add(changed_ids, texts)
                     index.col_mod = await wrapper.run(lambda c: c.mod)
                     logger.debug("Index updated: %d vectors added/replaced", len(changed_ids))
-                    await _attach_neighbors(
+                    neighbors_ok = await _attach_neighbors(
                         results, changed_ids, texts, top_k_neighbors, neighbor_threshold
                     )
                 except Exception:
                     logger.warning("Failed to update index after upsert", exc_info=True)
+
+                if not neighbors_ok:
+                    # Notes are saved, but neighbors could not be computed
+                    # (transient index/embedding hiccup). Flag each affected
+                    # result and point the caller at the recovery path: the
+                    # exact same neighbor data is reproducible via a similarity
+                    # search keyed on the note's own ID. We only reach here when
+                    # the index was available, so search_notes(ids=...) is a
+                    # viable retry.
+                    pending = [
+                        r["id"]
+                        for r in results
+                        if r.get("status") in ("created", "updated") and "neighbors" not in r
+                    ]
+                    for r in results:
+                        if r.get("id") in pending:
+                            r["neighbors_unavailable"] = True
+                    if pending:
+                        logger.info(
+                            "Neighbors unavailable for %d note(s); caller can retry via "
+                            "search_notes(ids=%s)",
+                            len(pending),
+                            pending,
+                        )
+                        return {
+                            "results": results,
+                            "_message": (
+                                "Notes were saved, but the vector index update failed, "
+                                "so neighbors could not be computed. Retry with "
+                                f"search_notes(ids={pending}) to fetch the same "
+                                "neighbor data."
+                            ),
+                        }
 
         return {"results": results}
 
@@ -431,8 +473,13 @@ def register_tools(
         texts: list[str],
         top_k: int,
         threshold: float,
-    ) -> None:
-        """Search for similar notes and attach neighbors to each upsert result."""
+    ) -> bool:
+        """Search for similar notes and attach neighbors to each upsert result.
+
+        Returns True if the neighbor search completed (each created/updated
+        result now carries a `neighbors` list, possibly empty), False if it
+        failed — in which case the caller should signal a retry.
+        """
         assert index is not None
         try:
             exclude_set = set(changed_ids)
@@ -466,8 +513,10 @@ def register_tools(
             for r in results:
                 if r.get("status") in ("created", "updated") and r.get("id") in id_to_neighbors:
                     r["neighbors"] = id_to_neighbors[r["id"]]
+            return True
         except Exception:
             logger.warning("Failed to compute neighbors after upsert", exc_info=True)
+            return False
 
     @mcp.tool()
     @_safe_tool
