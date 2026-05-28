@@ -68,6 +68,19 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
     if server_out:
         output["server"] = server_out
 
+    # Persist embedding settings so `shrike embedding start` can find the model
+    # after a server start that configured one (also avoids dropping the model
+    # on first-run auto-save).
+    emb = config.get("embedding", {})
+    if emb.get("model"):
+        emb_out: dict[str, Any] = {"model": emb["model"]}
+        if emb.get("port") and emb["port"] != 8373:
+            emb_out["port"] = emb["port"]
+        for key in ("context_size", "threads", "gpu_layers", "llama_server"):
+            if emb.get(key):
+                emb_out[key] = emb[key]
+        output["embedding"] = emb_out
+
     with open(filepath, "w") as f:
         f.write("# Shrike configuration\n")
         f.write("# See: https://github.com/lathrys-at/shrike\n\n")
@@ -75,6 +88,45 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
             yaml.dump(output, f, default_flow_style=False, sort_keys=False)
 
     return filepath
+
+
+def resolve_embedding(
+    config: dict[str, Any],
+    *,
+    model: str | None = None,
+    port: int | None = None,
+    context_size: int | None = None,
+    threads: int | None = None,
+    gpu_layers: int | None = None,
+    llama_server: str | None = None,
+) -> dict[str, Any]:
+    """Resolve embedding parameters via the config → env → flag cascade.
+
+    Flag overrides win, then environment variables, then config values. This is
+    the same precedence ``shrike server start`` uses for the collection path.
+    Environment variables: ``SHRIKE_EMBEDDING_MODEL``, ``SHRIKE_EMBEDDING_PORT``,
+    and ``LLAMA_SERVER_PATH`` (binary). Paths are user-expanded.
+    """
+    emb = config.get("embedding", {})
+
+    env_port = os.environ.get("SHRIKE_EMBEDDING_PORT")
+    resolved: dict[str, Any] = {
+        "model": model or os.environ.get("SHRIKE_EMBEDDING_MODEL") or emb.get("model"),
+        "llama_server": (
+            llama_server or os.environ.get("LLAMA_SERVER_PATH") or emb.get("llama_server")
+        ),
+        "port": port or (int(env_port) if env_port else None) or emb.get("port"),
+        "context_size": context_size or emb.get("context_size"),
+        "threads": threads or emb.get("threads"),
+        "gpu_layers": gpu_layers or emb.get("gpu_layers"),
+    }
+
+    if resolved["model"]:
+        resolved["model"] = os.path.expanduser(str(resolved["model"]))
+    if resolved["llama_server"]:
+        resolved["llama_server"] = os.path.expanduser(str(resolved["llama_server"]))
+
+    return resolved
 
 
 def resolve_url(config: dict[str, Any], url_override: str | None = None) -> str:

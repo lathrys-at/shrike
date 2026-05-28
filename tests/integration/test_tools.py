@@ -716,10 +716,13 @@ class TestStatusEndpoint:
         assert "uptime" in body
 
     def test_status_no_embedding_without_model(self, server):
+        # Embedding and index are always reported now; without a model the
+        # embedding is unavailable and the index reports the unavailable state.
         status_url = server.url.rsplit("/", 1)[0] + "/status"
         resp = httpx.get(status_url, timeout=5.0)
         body = resp.json()
-        assert "embedding" not in body
+        assert body["embedding"] == {"available": False}
+        assert body["index"]["state"] == "unavailable"
 
 
 class TestHttpShutdown:

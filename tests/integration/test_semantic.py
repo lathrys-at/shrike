@@ -611,3 +611,160 @@ class TestServerStatusWithIndex:
         data = semantic_runner.json(["server", "status"])
         assert "embedding" in data
         assert data["embedding"]["available"] is True
+
+
+# ---------------------------------------------------------------------------
+# Embedding service lifecycle — start/stop independently of the server
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingLifecycle:
+    """Stop and start the embedding service while the server keeps running."""
+
+    @pytest.fixture(scope="class")
+    def lifecycle_server(self, server_factory, embedding_model) -> ServerInfo:
+        """A dedicated embedding-enabled server (mutated by these tests)."""
+        srv = server_factory("emb-lifecycle", embedding_model=str(embedding_model))
+        mcp = MCPClient(srv.url)
+        mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "deck": "Bio",
+                        "note_type": "Basic",
+                        "fields": {
+                            "Front": "What is a mitochondrion?",
+                            "Back": "An organelle that produces ATP",
+                        },
+                        "tags": ["cell-biology"],
+                    },
+                    {
+                        "deck": "Bio",
+                        "note_type": "Basic",
+                        "fields": {
+                            "Front": "What is ATP synthase?",
+                            "Back": "Enzyme that synthesizes ATP from a proton gradient",
+                        },
+                        "tags": ["cell-biology"],
+                    },
+                ]
+            },
+        )
+        # Populate the index from the seeded collection (an empty-at-boot server
+        # does no rebuild, so incremental upserts alone leave it empty).
+        httpx.post(f"{_base_url(srv)}/index/rebuild", timeout=30.0)
+        _wait_for_index_ready(srv)
+        return srv
+
+    def test_stop_then_start_cycle(self, lifecycle_server: ServerInfo) -> None:
+        base = _base_url(lifecycle_server)
+        mcp = MCPClient(lifecycle_server.url)
+
+        # Searchable to begin with.
+        before = mcp("search_notes", {"queries": ["mitochondria ATP energy"], "top_k": 5})
+        assert before["results"][0]["matches"]
+
+        # Stop: embedding unavailable, index marked unavailable, search degrades.
+        resp = httpx.post(f"{base}/embedding/stop", timeout=30.0)
+        assert resp.json()["status"] == "stopped"
+        status = httpx.get(f"{base}/status", timeout=5.0).json()
+        assert status["embedding"]["available"] is False
+        assert status["index"]["state"] == "unavailable"
+
+        degraded = mcp("search_notes", {"queries": ["mitochondria"], "top_k": 5})
+        assert degraded["results"] == []
+        assert "not running" in degraded["_message"].lower()
+
+        # Stopping again is a no-op.
+        assert httpx.post(f"{base}/embedding/stop", timeout=10.0).json()["status"] == "not_running"
+
+        # Start again (server reuses its own configured model — empty body).
+        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
+        assert resp.json()["status"] == "started"
+        _wait_for_index_ready(lifecycle_server)
+
+        after = mcp("search_notes", {"queries": ["mitochondria ATP energy"], "top_k": 5})
+        assert after["results"][0]["matches"]
+
+    def test_start_when_running_is_idempotent(self, lifecycle_server: ServerInfo) -> None:
+        base = _base_url(lifecycle_server)
+        httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
+        _wait_for_index_ready(lifecycle_server)
+        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=30.0)
+        assert resp.json()["status"] == "already_running"
+
+    def test_status_exposes_meta_model_id(self, lifecycle_server: ServerInfo) -> None:
+        base = _base_url(lifecycle_server)
+        httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
+        _wait_for_index_ready(lifecycle_server)
+        idx = httpx.get(f"{base}/status", timeout=5.0).json()["index"]
+        # Proves the fingerprint came from llama-server's /v1/models meta block,
+        # not the file-size fallback.
+        assert idx.get("model_id", "").startswith("meta:")
+
+    def test_cli_stop_and_start(
+        self,
+        lifecycle_server: ServerInfo,
+        embedding_model,
+        tmp_path_factory: pytest.TempPathFactory,
+    ) -> None:
+        base = _base_url(lifecycle_server)
+        httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
+        _wait_for_index_ready(lifecycle_server)
+
+        cfg_dir = tmp_path_factory.mktemp("emb-lifecycle-cli")
+        cfg = cfg_dir / "config.yml"
+        cfg.write_text(
+            f"server:\n  host: 127.0.0.1\n  port: {lifecycle_server.port}\n"
+            f"collection: {lifecycle_server.collection_path}\n"
+            f"logging:\n  dir: {lifecycle_server.log_dir}\n"
+        )
+        runner = CLIRunner(lifecycle_server.url, str(cfg))
+
+        stopped = runner.invoke(["embedding", "stop"])
+        assert stopped.exit_code == 0, stopped.output
+        assert "stopped" in stopped.output.lower()
+
+        # Pass explicit model + port so they match how this test server was launched.
+        started = runner.invoke(
+            [
+                "embedding",
+                "start",
+                "--embedding-model",
+                str(embedding_model),
+                "--embedding-port",
+                str(lifecycle_server.embedding_port),
+                "--background",
+            ]
+        )
+        assert started.exit_code == 0, started.output
+        _wait_for_index_ready(lifecycle_server)
+
+
+class TestNoEmbeddingBoot:
+    """A server can boot with embedding off though a model is configured."""
+
+    @pytest.fixture(scope="class")
+    def no_embedding_server(self, server_factory, embedding_model) -> ServerInfo:
+        return server_factory(
+            "no-embedding",
+            embedding_model=str(embedding_model),
+            extra_args=["--no-embedding"],
+        )
+
+    def test_boots_without_embedding(self, no_embedding_server: ServerInfo) -> None:
+        status = httpx.get(f"{_base_url(no_embedding_server)}/status", timeout=5.0).json()
+        assert status["embedding"]["available"] is False
+        assert status["index"]["state"] == "unavailable"
+
+    def test_start_uses_configured_model(self, no_embedding_server: ServerInfo) -> None:
+        base = _base_url(no_embedding_server)
+        # Empty body: the server starts with the model it was configured with at
+        # boot, even though --no-embedding skipped auto-start. The POST returns
+        # only once llama-server is healthy, so embedding is available right away
+        # (the collection is empty, so there's nothing to index).
+        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
+        assert resp.json()["status"] == "started"
+        status = httpx.get(f"{base}/status", timeout=5.0).json()
+        assert status["embedding"]["available"] is True

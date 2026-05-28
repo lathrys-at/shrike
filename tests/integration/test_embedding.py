@@ -111,6 +111,7 @@ class TestEmbeddingServiceViaShrike:
         svc = EmbeddingService.__new__(EmbeddingService)
         svc._base_url = embedding_server.embedding_url
         svc._model = "test"
+        svc._model_name = None
         svc._process = type("FakeProc", (), {"poll": lambda self: None})()
 
         result = svc.embed(["hello", "world"])
@@ -124,6 +125,7 @@ class TestEmbeddingServiceViaShrike:
         svc = EmbeddingService.__new__(EmbeddingService)
         svc._base_url = embedding_server.embedding_url
         svc._model = "test"
+        svc._model_name = None
         svc._process = type("FakeProc", (), {"poll": lambda self: None})()
 
         r1 = svc.embed(["a single sentence"])

@@ -254,9 +254,9 @@ def register_tools(
             return {
                 "results": [],
                 "_message": (
-                    "Semantic search is not available. "
-                    "No embedding service is configured. "
-                    "Use list_notes for structured filtering instead."
+                    "Semantic search is not available — the embedding service is not "
+                    "running. Start it with 'shrike embedding start', or use list_notes "
+                    "for structured filtering instead."
                 ),
             }
 
