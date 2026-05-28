@@ -8,7 +8,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
 from shrike.collection import CollectionWrapper
-from shrike.index import VectorIndex
+from shrike.index import IndexState, VectorIndex
 
 logger = logging.getLogger("shrike.tools")
 
@@ -102,10 +102,12 @@ def _safe_tool(fn: Any) -> Any:
     return wrapper
 
 
-def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
+def register_tools(
+    mcp: FastMCP,
+    wrapper: CollectionWrapper,
+    index: VectorIndex | None = None,
+) -> None:
     from shrike.note_types import upsert_note_types as _upsert_note_types
-
-    index = VectorIndex()
 
     @mcp.tool()
     @_safe_tool
@@ -233,6 +235,36 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
             top_k,
         )
 
+        if index is None or index.state == IndexState.UNAVAILABLE:
+            return {
+                "results": [],
+                "_message": (
+                    "Semantic search is not available. "
+                    "No embedding service is configured. "
+                    "Use list_notes for structured filtering instead."
+                ),
+            }
+
+        if index.state == IndexState.BUILDING:
+            indexed, total = index.build_progress
+            return {
+                "results": [],
+                "_message": (
+                    f"The vector index is building ({indexed}/{total} notes indexed). "
+                    "Try again shortly."
+                ),
+            }
+
+        if index.state == IndexState.ERROR:
+            return {
+                "results": [],
+                "_message": (
+                    "The vector index encountered an error during the last build. "
+                    "It will retry on next server restart. "
+                    "Use list_notes for structured filtering instead."
+                ),
+            }
+
         if not index.available:
             return {
                 "results": [],
@@ -248,18 +280,78 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
         elif top_k > 50:
             top_k = 50
 
-        return index.search(
-            queries=queries,
-            ids=ids,
-            top_k=top_k,
-            deck=deck,
-            tags=tags,
-            exclude_ids=exclude_ids,
+        exclude_set = set(exclude_ids or [])
+
+        all_query_texts: list[str] = []
+        sources: list[str] = []
+
+        for q in queries or []:
+            all_query_texts.append(q)
+            sources.append(q)
+
+        if ids:
+            note_texts = wrapper.note_texts_for_embedding(ids)
+            for nid, text in zip(ids, note_texts, strict=True):
+                if text:
+                    all_query_texts.append(text)
+                    sources.append(f"note #{nid}")
+                    exclude_set.add(nid)
+
+        if not all_query_texts:
+            return {"results": [], "_message": "No valid queries or note IDs to search."}
+
+        raw_results = index.search(all_query_texts, top_k=top_k + len(exclude_set))
+
+        results: list[dict[str, Any]] = []
+        for source, matches in zip(sources, raw_results, strict=True):
+            enriched: list[dict[str, Any]] = []
+            for m in matches:
+                nid = m["note_id"]
+                if nid in exclude_set:
+                    continue
+
+                try:
+                    note_data = wrapper._note_to_dict(nid, "full")
+                except Exception:
+                    continue
+
+                if deck and note_data.get("deck") != deck:
+                    continue
+                if tags:
+                    note_tags = set(note_data.get("tags", []))
+                    if not all(t in note_tags for t in tags):
+                        continue
+
+                enriched.append(
+                    {
+                        "id": nid,
+                        "score": round(1.0 - m["distance"], 3),
+                        "deck": note_data.get("deck", ""),
+                        "note_type": note_data.get("note_type", ""),
+                        "tags": note_data.get("tags", []),
+                        "content": note_data.get("content", {}),
+                    }
+                )
+
+                if len(enriched) >= top_k:
+                    break
+
+            results.append({"source": source, "matches": enriched})
+
+        logger.info(
+            "search_notes returned %d groups, %d total matches",
+            len(results),
+            sum(len(r["matches"]) for r in results),
         )
+        return {"results": results}
 
     @mcp.tool()
     @_safe_tool
-    def upsert_notes(notes: list[NoteInput]) -> dict[str, Any]:
+    def upsert_notes(
+        notes: list[NoteInput],
+        top_k_neighbors: int = 5,
+        neighbor_threshold: float = 0.5,
+    ) -> dict[str, Any]:
         """Create or update notes in bulk (1-100 per call).
 
         If a note object includes an `id`, the existing note is updated;
@@ -269,8 +361,14 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
         updates, only `id` and the properties being changed are needed —
         omitted properties are left unchanged.
 
-        Duplicate detection is handled by the application and surfaced in
-        its own UI, not controlled through this tool."""
+        When a vector index is available, each result includes `neighbors`:
+        the most similar existing notes ranked by cosine similarity, filtered
+        to those above `neighbor_threshold` (default 0.5) and capped at
+        `top_k_neighbors` (default 5). Use these for tag consistency (adopt
+        tags from nearby notes), detecting near-duplicates (high scores
+        suggest overlap), or understanding where a new note sits in the
+        collection. Neighbors include note ID, similarity score, and tags —
+        use list_notes or search_notes to inspect content if needed."""
         if len(notes) > 100:
             return {"error": "Maximum 100 notes per call."}
 
@@ -291,11 +389,64 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
             errors,
         )
 
-        changed_ids = [r["id"] for r in results if r.get("status") in ("created", "updated")]
-        if changed_ids:
-            index.on_notes_changed(changed_ids)
+        if index and index.available:
+            changed_ids = [r["id"] for r in results if r.get("status") in ("created", "updated")]
+            if changed_ids:
+                try:
+                    texts = wrapper.note_texts_for_embedding(changed_ids)
+                    index.add(changed_ids, texts)
+                    index.col_mod = wrapper.col.mod
+                    logger.debug("Index updated: %d vectors added/replaced", len(changed_ids))
+                except Exception:
+                    logger.warning("Failed to update index after upsert", exc_info=True)
+
+                _attach_neighbors(results, changed_ids, texts, top_k_neighbors, neighbor_threshold)
 
         return {"results": results}
+
+    def _attach_neighbors(
+        results: list[dict[str, Any]],
+        changed_ids: list[int],
+        texts: list[str],
+        top_k: int,
+        threshold: float,
+    ) -> None:
+        """Search for similar notes and attach neighbors to each upsert result."""
+        assert index is not None
+        try:
+            exclude_set = set(changed_ids)
+            raw_results = index.search(texts, top_k=top_k + len(exclude_set))
+
+            id_to_neighbors: dict[int, list[dict[str, Any]]] = {}
+            for nid, matches in zip(changed_ids, raw_results, strict=True):
+                neighbors: list[dict[str, Any]] = []
+                for m in matches:
+                    score = round(1.0 - m["distance"], 3)
+                    if score < threshold:
+                        break
+                    neighbor_id = m["note_id"]
+                    if neighbor_id in exclude_set:
+                        continue
+                    try:
+                        note_data = wrapper._note_to_dict(neighbor_id, "meta")
+                    except Exception:
+                        continue
+                    neighbors.append(
+                        {
+                            "id": neighbor_id,
+                            "score": score,
+                            "tags": note_data.get("tags", []),
+                        }
+                    )
+                    if len(neighbors) >= top_k:
+                        break
+                id_to_neighbors[nid] = neighbors
+
+            for r in results:
+                if r.get("status") in ("created", "updated") and r.get("id") in id_to_neighbors:
+                    r["neighbors"] = id_to_neighbors[r["id"]]
+        except Exception:
+            logger.warning("Failed to compute neighbors after upsert", exc_info=True)
 
     @mcp.tool()
     @_safe_tool
@@ -350,8 +501,15 @@ def register_tools(mcp: FastMCP, wrapper: CollectionWrapper) -> None:
             len(result["deleted"]),
             len(result["not_found"]),
         )
-        if result["deleted"]:
-            index.on_notes_deleted(result["deleted"])
+
+        if index and index.available and result["deleted"]:
+            try:
+                removed = index.remove(result["deleted"])
+                index.col_mod = wrapper.col.mod
+                logger.debug("Index updated: %d vectors removed", removed)
+            except Exception:
+                logger.warning("Failed to update index after delete", exc_info=True)
+
         return result
 
     @mcp.tool()

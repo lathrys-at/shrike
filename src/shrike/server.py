@@ -14,7 +14,10 @@ from mcp.server.fastmcp import FastMCP
 
 from shrike.collection import CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
+from shrike.embedding import EmbeddingService
+from shrike.index import VectorIndex
 from shrike.log import configure_logging
+from shrike.paths import cache_dir
 from shrike.tools import register_tools
 
 logger = logging.getLogger("shrike.server")
@@ -32,6 +35,8 @@ def _register_custom_routes(
     server_lock: ServerLock,
     *,
     meta: dict[str, Any],
+    embedding_service: EmbeddingService | None = None,
+    index: VectorIndex | None = None,
 ) -> None:
     """Register custom HTTP endpoints on the server."""
     from starlette.requests import Request
@@ -64,11 +69,51 @@ def _register_custom_routes(
                 else:
                     status["uptime"] = f"{seconds}s"
 
+        if embedding_service:
+            status["embedding"] = embedding_service.health()
+
+        if index:
+            status["index"] = index.status()
+
         return JSONResponse(status)
+
+    @app.custom_route("/index/rebuild", methods=["POST"])
+    async def handle_index_rebuild(request: Request) -> JSONResponse:
+        if index is None:
+            return JSONResponse({"error": "No embedding service configured"}, status_code=400)
+
+        from shrike.index import IndexState
+
+        if index.state == IndexState.BUILDING:
+            indexed, total = index.build_progress
+            return JSONResponse(
+                {
+                    "status": "already_building",
+                    "progress": {"indexed": indexed, "total": total},
+                }
+            )
+
+        all_note_ids = list(wrapper.col.find_notes("deck:*"))
+        if not all_note_ids:
+            index.rebuild([], [], wrapper.col.mod)
+            return JSONResponse({"status": "complete", "size": 0})
+
+        texts = wrapper.note_texts_for_embedding(all_note_ids)
+        index.rebuild_in_background(all_note_ids, texts, wrapper.col.mod)
+        return JSONResponse(
+            {
+                "status": "started",
+                "total": len(all_note_ids),
+            }
+        )
 
     @app.custom_route("/shutdown", methods=["POST"])
     async def handle_shutdown(request: Request) -> JSONResponse:
         logger.info("Shutdown requested via HTTP from %s", request.client)
+        if index:
+            index.save()
+        if embedding_service:
+            embedding_service.stop()
         wrapper.close()
         server_lock.release()
         logger.info("Shutdown complete")
@@ -119,6 +164,40 @@ def main() -> None:
         default=None,
         help="Directory for lock/pid/meta state files (default: platform-specific)",
     )
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Directory for cache files like the vector index (default: platform-specific)",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        default=None,
+        help="Path to GGUF embedding model (enables embedding service)",
+    )
+    parser.add_argument(
+        "--embedding-port",
+        type=int,
+        default=None,
+        help="Port for the embedding server (default: 8373)",
+    )
+    parser.add_argument(
+        "--embedding-context-size",
+        type=int,
+        default=None,
+        help="Context size for embedding model",
+    )
+    parser.add_argument(
+        "--embedding-threads",
+        type=int,
+        default=None,
+        help="Number of CPU threads for embedding inference",
+    )
+    parser.add_argument(
+        "--embedding-gpu-layers",
+        type=int,
+        default=None,
+        help="Number of layers to offload to GPU",
+    )
     args = parser.parse_args()
 
     log_dir = configure_logging(
@@ -156,9 +235,45 @@ def main() -> None:
         summary.get("note_types", 0),
     )
 
+    embedding_service: EmbeddingService | None = None
+    if args.embedding_model:
+        embedding_service = EmbeddingService(
+            model=args.embedding_model,
+            host=args.host,
+            port=args.embedding_port or 8373,
+            log_dir=log_dir,
+            context_size=args.embedding_context_size,
+            threads=args.embedding_threads,
+            gpu_layers=args.embedding_gpu_layers,
+        )
+        try:
+            embedding_service.start()
+        except (FileNotFoundError, RuntimeError) as e:
+            logger.error("Failed to start embedding service: %s", e)
+            embedding_service = None
+
+    index: VectorIndex | None = None
+    if embedding_service:
+        cache_base = Path(args.cache_dir) if args.cache_dir else cache_dir()
+        index_dir = cache_base / "index"
+        index = VectorIndex(path=index_dir, embedding_service=embedding_service)
+        logger.info("Vector index: %d vectors, %d dims", index.size, index.ndim or 0)
+
+        if index.check_drift(wrapper.col.mod):
+            all_note_ids = list(wrapper.col.find_notes("deck:*"))
+            if all_note_ids:
+                texts = wrapper.note_texts_for_embedding(all_note_ids)
+                index.rebuild_in_background(all_note_ids, texts, wrapper.col.mod)
+            else:
+                logger.info("Collection is empty, skipping index rebuild")
+
     def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
         sig_name = signal.Signals(signum).name
         logger.info("Received %s, shutting down", sig_name)
+        if index:
+            index.save()
+        if embedding_service:
+            embedding_service.stop()
         wrapper.close()
         server_lock.release()
         logger.info("Shutdown complete")
@@ -167,8 +282,15 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _signal_shutdown)
     signal.signal(signal.SIGINT, _signal_shutdown)
 
-    register_tools(mcp, wrapper)
-    _register_custom_routes(mcp, wrapper, server_lock, meta=server_meta)
+    register_tools(mcp, wrapper, index=index)
+    _register_custom_routes(
+        mcp,
+        wrapper,
+        server_lock,
+        meta=server_meta,
+        embedding_service=embedding_service,
+        index=index,
+    )
 
     logger.info(
         "Listening on %s:%s (log_dir=%s, log_level=%s)",

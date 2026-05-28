@@ -696,6 +696,32 @@ class TestValidation:
         assert result["notes"] == []
 
 
+class TestStatusEndpoint:
+    """Verify the GET /status endpoint."""
+
+    def test_status_returns_running(self, server):
+        status_url = server.url.rsplit("/", 1)[0] + "/status"
+        resp = httpx.get(status_url, timeout=5.0)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["running"] is True
+        assert "pid" in body
+        assert "url" in body
+        assert "collection" in body
+
+    def test_status_has_uptime(self, server):
+        status_url = server.url.rsplit("/", 1)[0] + "/status"
+        resp = httpx.get(status_url, timeout=5.0)
+        body = resp.json()
+        assert "uptime" in body
+
+    def test_status_no_embedding_without_model(self, server):
+        status_url = server.url.rsplit("/", 1)[0] + "/status"
+        resp = httpx.get(status_url, timeout=5.0)
+        body = resp.json()
+        assert "embedding" not in body
+
+
 class TestHttpShutdown:
     """Verify the POST /shutdown endpoint cleanly stops the server."""
 

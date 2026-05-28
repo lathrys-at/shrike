@@ -14,8 +14,9 @@ CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP)
                                       ├──▶ CollectionWrapper (anki.Collection)
                                       │         └──▶ collection.anki2 (SQLite)
                                       │
-                                      └──▶ VectorIndex (stub)
-                                               └──▶ shrike.usearch (future)
+                                      └──▶ VectorIndex (USearch HNSW)
+                                               ├──▶ EmbeddingService (llama-server)
+                                               └──▶ index.usearch + index.meta.json
 ```
 
 ## Project layout
@@ -30,19 +31,22 @@ src/shrike/                       # Python package (src layout)
 ├── tools.py                      # Registers 7 MCP tools, Pydantic input models
 ├── paths.py                      # Platform-canonical directories (via platformdirs)
 ├── log.py                        # Logging config, log parsing and styling
-├── index.py                      # VectorIndex stub (search_notes not yet implemented)
+├── embedding.py                  # EmbeddingService — llama-server subprocess lifecycle
+├── index.py                      # VectorIndex — USearch HNSW index for note embeddings
 └── cli/
     ├── __init__.py               # Root Click group, global options (--config, --url, --json, --pretty)
     ├── client.py                 # ShrikeClient — HTTP client for MCP JSON-RPC calls
     ├── config.py                 # YAML config loading/saving
     ├── completion_cmd.py         # shrike completion {bash,zsh,fish}
+    ├── embedding_cmd.py          # shrike embedding status
+    ├── index_cmd.py              # shrike index rebuild/status
     ├── server_cmd.py             # shrike server start/stop/status/logs (daemon management)
     ├── info_cmd.py               # shrike info
     ├── note_cmd.py               # shrike note list/show/create/update/delete/search
     ├── type_cmd.py               # shrike type list/show/create/update/delete
     └── output.py                 # Rich formatting, output_options decorator
 tests/
-├── unit/                         # 93 tests — direct CollectionWrapper calls, no server
+├── unit/                         # 218 tests — direct calls, no server
 │   ├── conftest.py               # wrapper fixture (temp collection), basic_note fixture
 │   ├── test_collection_info.py
 │   ├── test_list_notes.py
@@ -50,11 +54,18 @@ tests/
 │   ├── test_delete_notes.py
 │   ├── test_note_types.py
 │   ├── test_client_batching.py
-│   └── test_logging.py
-└── integration/                  # 103 tests — real server subprocess + HTTP transport
+│   ├── test_logging.py
+│   ├── test_embedding.py         # EmbeddingService unit tests (mocked subprocess)
+│   ├── test_config.py            # Config loading and embedding args
+│   ├── test_index.py             # VectorIndex unit tests (mocked embeddings)
+│   ├── test_note_embedding_text.py  # CollectionWrapper.note_texts_for_embedding
+│   └── test_tools_search.py     # search_notes, upsert neighbors, delete index updates
+└── integration/                  # 147 tests — real server subprocess + HTTP transport
     ├── conftest.py               # server fixture (session-scoped), mcp fixture
     ├── test_tools.py
-    └── test_cli.py
+    ├── test_cli.py
+    ├── test_embedding.py         # Embedding tests (requires llama-server + GGUF model)
+    └── test_semantic.py          # Semantic search, neighbors, index CLI (requires llama-server)
 docs/
 ├── mcp-tools.md                  # Tool documentation (human-readable)
 └── mcp-schema.json               # Full JSON schema for all 7 tools
@@ -117,8 +128,8 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 |------|--------|---------|
 | `collection_info` | Working | Collection structure, note types, decks, tags, stats |
 | `list_notes` | Working | Filter/retrieve notes by deck, tags, type, IDs, date |
-| `search_notes` | Stub | Semantic similarity search (returns "not available" message) |
-| `upsert_notes` | Working | Create or update notes in bulk (1-100) |
+| `search_notes` | Working | Semantic similarity search over note embeddings |
+| `upsert_notes` | Working | Create or update notes in bulk (1-100), returns similar neighbors |
 | `upsert_note_types` | Working | Create or update note type definitions (1-10) |
 | `delete_notes` | Working | Permanently delete notes by ID |
 | `delete_note_types` | Working | Delete note types by ID (only if unused) |
@@ -134,7 +145,9 @@ shrike [--config PATH] [--url URL] [--json] [--pretty/--no-pretty]
 ├── server start|stop|status|logs
 ├── info [--types] [--decks] [--tags] [--stats] [--type-details NAME]
 ├── note list|show|create|update|delete|search
-└── type list|show|create|update|delete
+├── type list|show|create|update|delete
+├── index rebuild|status
+└── embedding status
 ```
 
 The CLI talks to the MCP server over HTTP — it can target a remote server via `--url` or `SHRIKE_URL`.
@@ -166,8 +179,9 @@ The CLI talks to the MCP server over HTTP — it can target a remote server via 
 Signal handlers (SIGTERM, SIGINT) remain as a secondary path for Unix `kill` commands and Ctrl+C in foreground mode.
 
 **HTTP endpoints** beyond MCP:
-- `GET /status` — returns JSON with pid, url, collection, log_level, log_dir, uptime. Used by `shrike server status` and auto-start health checks.
+- `GET /status` — returns JSON with pid, url, collection, log_level, log_dir, uptime, embedding, index. Used by `shrike server status` and auto-start health checks.
 - `POST /shutdown` — triggers graceful server shutdown.
+- `POST /index/rebuild` — triggers a full index rebuild (returns immediately with status/progress).
 
 State files live in the platform state directory (see `shrike/paths.py`):
 - `server.lock` — exclusive file lock held by the running server
@@ -190,6 +204,28 @@ On Linux, XDG env vars (`XDG_CONFIG_HOME`, `XDG_STATE_HOME`, etc.) are respected
 ### Config file
 
 YAML at the platform config directory (`config.yml`). Auto-created on first `shrike server start`. Resolution order: config defaults → config values → env vars (`SHRIKE_URL`, `SHRIKE_COLLECTION`) → CLI flags.
+
+### Vector index and consistency
+
+The vector index is a **derived cache**, not a co-equal store. The Anki collection (SQLite) is always the source of truth. SQLite handles its own crash recovery via WAL/journal, so the collection is self-consistent after any crash. If the index is stale, corrupt, or missing, it can be rebuilt from the collection by re-embedding all notes.
+
+**Consistency model:** the index may lag behind the collection (notes added/modified/deleted without the index being updated), but the collection never lags behind the index. This means search results may be stale, but data operations (upsert, delete, list) are always correct.
+
+**Drift detection:** the index metadata (`index.meta.json`) stores `col_mod` — the value of `col.mod` (collection-level modification timestamp, milliseconds) at the time the index was last built. On startup, compare `col.mod` against the stored value. If they match, nothing changed — skip reindexing entirely. If they differ, something changed outside our control — trigger a full rebuild. No watermarks, no per-note diffing, no fragile heuristics. Shrike owns the collection most of the time; anything that changed externally (Anki GUI, sync, imports) should force a clean rebuild for correctness. When sync is implemented (v0.3.0), its implications for index maintenance will be revisited.
+
+**Implementation:**
+
+1. **Startup check** — on server start, compare `col.mod` against the stored value in index metadata. Match → load existing index. Mismatch, missing, or corrupt → full rebuild in a background thread. Server starts accepting requests immediately; `search_notes` returns actionable status messages ("building 2847/5000 notes, try again shortly") until ready.
+
+2. **Incremental updates** — after `upsert_notes` and `delete_notes` succeed on the collection, the index is updated in the same call (`index.add()` / `index.remove()`). Stored `col_mod` is updated after each successful index update. Index update failures log a warning but don't fail the tool call — the next startup detects the `col.mod` mismatch and rebuilds.
+
+3. **Periodic save** — index persists to disk periodically and on graceful shutdown. Crash between saves loses in-memory updates, but the `col.mod` mismatch on next startup triggers a rebuild automatically.
+
+4. **Full rebuild** — `shrike index rebuild` CLI and `POST /index/rebuild` endpoint. Drops existing index and re-embeds all notes. Progress reporting via CLI and `/status`.
+
+5. **State machine** — states: `ready`, `building` (with progress), `unavailable` (no embedding service), `error` (build failed). Exposed via `/status` endpoint, `search_notes` responses, and `shrike server status` CLI.
+
+**Cost considerations:** full rebuilds are the only reindexing strategy — no incremental reconciliation. A typical collection (1K notes) rebuilds in seconds; a large one (10K+) takes minutes. Rebuilds run in a background thread, so the server is never blocked. During normal operation, incremental updates from `upsert_notes`/`delete_notes` keep the index current without rebuilds.
 
 ## Code style and conventions
 
@@ -235,17 +271,26 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 - `delete_note_types` MCP tool and `type delete` CLI command ✓
 - `/status` HTTP endpoint for health checks ✓
 
-### v0.2.0 — Semantic Search + Skill Plugin
+### v0.2.0 — Semantic Search ✓
 
-- llama-server integration for local embeddings
-- USearch vector index (HNSW) for note content
-- `search_notes` tool becomes functional
-- Incremental index updates on note create/modify/delete
-- Duplicate detection (similarity threshold, surfaced via CLI)
-- Contextual upsert responses: when the embedding index is available, `upsert_notes` returns tags from the k most similar existing notes (e.g. k=20) ranked by similarity. Raw neighbor data — the server makes no tag suggestions; callers (skill plugins, users) decide what to do with it. Grounds LLM-driven card creation in the collection's existing taxonomy. Same mechanism can later surface other neighbor-derived context (near-duplicates, etc.).
+- llama-server integration for local embeddings ✓
+- USearch vector index (HNSW) for note content ✓
+- Wire `search_notes` tool to the vector index ✓
+- Incremental index updates on note create/modify/delete ✓
+- Startup drift detection (`col.mod` comparison) and background rebuild ✓
+- Periodic index save and graceful shutdown persistence ✓
+- `shrike index rebuild` CLI command for full re-indexing ✓
+- Index build state machine and progress tracking (ready/building/unavailable/error) ✓
+- Index status in `/status` endpoint and `search_notes` responses (actionable messages) ✓
+- `shrike embedding status` and `shrike index status` CLI commands ✓
+- Contextual upsert responses ✓: `upsert_notes` returns `neighbors` for each created/updated note — the k most similar existing notes as `{id, score, tags}` objects ranked by cosine similarity (defaults: `top_k_neighbors=5`, `neighbor_threshold=0.5`). Same search operation as `search_notes` (which returns `{id, score, tags, content}`), triggered by the upserted note's own content as the query. Neighbors below the threshold are excluded; batch notes are excluded from each other's results. Raw neighbor data — the server makes no tag suggestions; callers decide what to do with it. Grounds LLM-driven card creation in the collection's existing taxonomy and surfaces near-duplicates for investigation.
+- Duplicate detection ✓: threshold-based, using the same similarity infrastructure. High similarity scores in neighbors or search results indicate potential duplicates — callers apply their own threshold. No separate duplicate detection endpoint; `search_notes` and contextual upsert neighbors are the same operation.
+
+### v0.3.0 — Skill Plugin
+
 - Reference skill plugin (Claude custom skill format): encodes pedagogical best practices for LLM-driven card creation — minimum information principle, cloze discipline, prefer existing decks over new ones, tag consistency via contextual upsert data, broad decks with tags over fine-grained deck hierarchies. Keeps opinions in the skill, not the server. Designed for Project-style setups with course materials as context. Initial goal is real-use iteration, not packaging.
 
-### v0.3.0 — Sync
+### v0.4.0 — Sync
 
 - AnkiWeb sync (auth, trigger, status)
 - Self-hosted anki-sync-server support
@@ -253,14 +298,14 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 - Sync server lifecycle management (`shrike sync-server start/stop/status`)
 - Credential storage
 
-### v0.4.0 — Desktop Application
+### v0.5.0 — Desktop Application
 
 - Tauri shell wrapping the Python process
 - System tray / menu bar
 - Settings UI
 - Duplicate detection alerts in UI
 
-### v0.5.0 — Relay Prototype
+### v0.6.0 — Relay Prototype
 
 - Lightweight relay server: authenticates and forwards MCP JSON-RPC to a user's local Shrike instance
 - Removes the need for Tailscale or similar tunneling tools
@@ -270,8 +315,7 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 
 ## What's not yet implemented
 
-- **Semantic search** (`search_notes`): `index.py` is a stub. Needs llama-server for embeddings and USearch for the vector index.
-- **Skill plugin**: Not started. Depends on contextual upsert responses from v0.2.0.
+- **Skill plugin**: Not started. Depends on contextual upsert responses from v0.2.0 (now complete).
 - **Sync**: No sync support yet.
 - **Desktop application**: Not started.
 - **Relay**: Not started.
