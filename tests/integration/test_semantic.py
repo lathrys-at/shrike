@@ -327,7 +327,12 @@ class TestSearchNotes:
 
     def test_result_shape(self, semantic_mcp, collection_server):
         _wait_for_index_ready(collection_server)
-        result = semantic_mcp("search_notes", {"queries": ["algorithm"], "top_k": 3})
+        # Use a descriptive multi-word query: a bare single word like
+        # "algorithm" embeds too thinly to clear the default 0.5 threshold
+        # against this collection, leaving no matches to inspect.
+        result = semantic_mcp(
+            "search_notes", {"queries": ["Big-O notation algorithm complexity"], "top_k": 3}
+        )
         match = result["results"][0]["matches"][0]
         assert "id" in match
         assert "score" in match
