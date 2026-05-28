@@ -1,7 +1,7 @@
 [
   {
     "name": "collection_info",
-    "description": "Get the structure and summary statistics of the Anki collection. Returns available note types with their field names, deck names with note counts, all tags in use, and scheduling statistics (cards due, new cards, per-deck summaries). Use this to orient yourself before creating or searching for notes — especially to discover which note types, fields, and decks exist.\n\nWith no arguments, returns summaries of everything. Use `include` to request only a subset. Note type summaries include field names and type (standard/cloze) but not full template HTML or CSS — use `note_type_details` to request full definitions for specific note types when you need to inspect or author templates.",
+    "description": "Get the structure and summary statistics of the Anki collection. Returns available note types with their field names, deck names with note counts, all tags in use, and scheduling statistics (cards due, new cards, per-deck summaries). Use this to orient yourself before creating or searching for notes — especially to discover which note types, fields, and decks exist.\n\nWith no arguments, returns a compact summary (counts, dates, collection path). Use `include` to request specific sections, or \"all\" for everything. Note type summaries include field names and type (standard/cloze) but not full template HTML or CSS — use `note_type_details` to request full definitions for specific note types when you need to inspect or author templates.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -9,9 +9,9 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["note_types", "decks", "tags", "stats"]
+            "enum": ["summary", "note_types", "decks", "tags", "stats", "all"]
           },
-          "description": "Subset of info to return. Any combination of \"note_types\" (note types and their fields), \"decks\" (deck hierarchy with note counts), \"tags\" (all tags in use), \"stats\" (card counts, due counts, per-deck summaries). Omit to return all four."
+          "description": "Sections to return. Any combination of \"summary\" (counts, dates, path), \"note_types\" (note types and their fields), \"decks\" (deck hierarchy with note counts), \"tags\" (all tags in use), \"stats\" (card counts, due counts, per-deck summaries), or \"all\" for everything. Defaults to [\"summary\"]."
         },
         "note_type_details": {
           "type": "array",

@@ -10,7 +10,7 @@ Notes in Anki have a **note type** that defines their fields (e.g., a "Basic" no
 
 Return the structure of the Anki collection: available note types with their fields, deck names, tags, and summary statistics. Use this to orient yourself before creating or searching for notes — especially to discover which note types, fields, and decks exist.
 
-Called with no arguments, returns everything (note type summaries, decks, tags, and stats). Use the `include` parameter to request only a subset.
+Called with no arguments, returns a compact summary (counts, dates, and collection path). Use the `include` parameter to request specific sections — or `"all"` for everything.
 
 Note type summaries include field names and type (standard/cloze) but not full template HTML or CSS. To inspect or modify templates, request full details with `note_type_details`.
 
@@ -18,10 +18,30 @@ Note type summaries include field names and type (standard/cloze) but not full t
 
 | Name | Type | Required | Description |
 |---|---|---|---|
-| `include` | `string[]` | no | Subset of info to return. Any combination of `"note_types"`, `"decks"`, `"tags"`, `"stats"`. Defaults to all four. |
+| `include` | `string[]` | no | Sections to return. Any combination of `"summary"`, `"note_types"`, `"decks"`, `"tags"`, `"stats"`, or `"all"`. Defaults to `["summary"]`. |
 | `note_type_details` | `string[]` | no | List of note type names to return full definitions for, including card templates (HTML) and CSS. Omit to return only summaries. |
 
 ### Response
+
+The default (no `include`) returns only the `summary` section:
+
+```jsonc
+{
+  "summary": {
+    "path": "/path/to/collection.anki2",
+    "created": "2024-01-15",
+    "modified": "2026-05-20T14:32:00Z",
+    "notes": 3847,
+    "cards": 4521,
+    "decks": 12,
+    "note_types": 5,
+    "tags": 38,
+    "due_today": 74
+  }
+}
+```
+
+Requesting `include: ["all"]` (or specific sections) adds them:
 
 ```jsonc
 {
@@ -170,6 +190,8 @@ When creating notes, `deck`, `note_type`, and `fields` are required. When updati
 
 When a vector index is available, each result includes `neighbors`: the most similar existing notes ranked by cosine similarity. Use these for tag consistency (adopt tags from nearby notes), detecting near-duplicates (high scores suggest overlap), or understanding where a new note sits in the collection.
 
+If the index update fails transiently (for example, the embedding service is briefly unavailable), the notes are still saved but `neighbors` is omitted. Each affected result is flagged with `neighbors_unavailable: true`, and the response carries a top-level `_message` naming the IDs to retry. The exact same neighbor data is reproducible afterward with `search_notes` keyed on the note ID (`search_notes(ids=[<note id>])`) — it embeds the same note text against the same index, so the result is identical to what would have been attached here.
+
 ### Parameters
 
 | Name | Type | Required | Description |
@@ -215,6 +237,21 @@ When a vector index is available, each result includes `neighbors`: the most sim
       "error": "Note type 'Basicc' not found"
     }
   ]
+}
+```
+
+When the index update fails transiently, saved notes carry `neighbors_unavailable` instead of `neighbors`, and the response adds a top-level `_message`:
+
+```jsonc
+{
+  "results": [
+    {
+      "status": "created",
+      "id": 1700000000789,
+      "neighbors_unavailable": true   // index hiccup — neighbors not computed
+    }
+  ],
+  "_message": "Notes were saved, but the vector index update failed, so neighbors could not be computed. Retry with search_notes(ids=[1700000000789]) to fetch the same neighbor data."
 }
 ```
 

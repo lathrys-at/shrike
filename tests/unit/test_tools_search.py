@@ -23,6 +23,11 @@ BASIC_NOTE = {
 }
 
 
+def _seed(wrapper, notes):
+    """Seed notes synchronously via the wrapper's worker thread."""
+    return wrapper.run_sync(lambda _c: wrapper._upsert_notes(notes))
+
+
 def _call(mcp: FastMCP, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
     _, structured = asyncio.run(mcp.call_tool(name, args or {}))
     return structured
@@ -97,8 +102,8 @@ class TestSearchNotesResults:
         assert matches[0]["score"] == 0.9
 
     def test_id_query(self, wrapper, mock_index, mcp_app, basic_note):
-        other = wrapper.upsert_notes(
-            [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Q", "Back": "A"}}]
+        other = _seed(
+            wrapper, [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Q", "Back": "A"}}]
         )[0]["id"]
         mock_index.search.return_value = [[{"note_id": other, "distance": 0.2}]]
         result = _call(mcp_app, "search_notes", {"ids": [basic_note]})
@@ -106,8 +111,8 @@ class TestSearchNotesResults:
         assert result["results"][0]["source"] == f"note #{basic_note}"
 
     def test_exclude_ids(self, wrapper, mock_index, mcp_app, basic_note):
-        other = wrapper.upsert_notes(
-            [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Q", "Back": "A"}}]
+        other = _seed(
+            wrapper, [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Q", "Back": "A"}}]
         )[0]["id"]
         mock_index.search.return_value = [
             [
@@ -151,7 +156,7 @@ class TestSearchNotesResults:
 
 class TestUpsertNeighbors:
     def test_neighbors_attached_on_create(self, wrapper, mock_index, mcp_app):
-        existing = wrapper.upsert_notes([BASIC_NOTE])[0]["id"]
+        existing = _seed(wrapper, [BASIC_NOTE])[0]["id"]
         mock_index.search.return_value = [[{"note_id": existing, "distance": 0.2}]]
         result = _upsert(mcp_app, [BASIC_NOTE])
         r = result["results"][0]
@@ -162,28 +167,28 @@ class TestUpsertNeighbors:
         assert r["neighbors"][0]["score"] == 0.8
 
     def test_neighbors_have_tags(self, wrapper, mock_index, mcp_app):
-        existing = wrapper.upsert_notes([{**BASIC_NOTE, "tags": ["science", "physics"]}])[0]["id"]
+        existing = _seed(wrapper, [{**BASIC_NOTE, "tags": ["science", "physics"]}])[0]["id"]
         mock_index.search.return_value = [[{"note_id": existing, "distance": 0.1}]]
         result = _upsert(mcp_app, [BASIC_NOTE])
         neighbors = result["results"][0]["neighbors"]
         assert set(neighbors[0]["tags"]) == {"science", "physics"}
 
     def test_threshold_filters_low_scores(self, wrapper, mock_index, mcp_app):
-        existing = wrapper.upsert_notes([BASIC_NOTE])[0]["id"]
+        existing = _seed(wrapper, [BASIC_NOTE])[0]["id"]
         mock_index.search.return_value = [[{"note_id": existing, "distance": 0.8}]]
         result = _upsert(mcp_app, [BASIC_NOTE], neighbor_threshold=0.5)
         neighbors = result["results"][0].get("neighbors", [])
         assert len(neighbors) == 0
 
     def test_default_threshold_filters_irrelevant(self, wrapper, mock_index, mcp_app):
-        existing = wrapper.upsert_notes([BASIC_NOTE])[0]["id"]
+        existing = _seed(wrapper, [BASIC_NOTE])[0]["id"]
         mock_index.search.return_value = [[{"note_id": existing, "distance": 0.7}]]
         result = _upsert(mcp_app, [BASIC_NOTE])
         neighbors = result["results"][0].get("neighbors", [])
         assert len(neighbors) == 0
 
     def test_custom_threshold(self, wrapper, mock_index, mcp_app):
-        existing = wrapper.upsert_notes([BASIC_NOTE])[0]["id"]
+        existing = _seed(wrapper, [BASIC_NOTE])[0]["id"]
         mock_index.search.return_value = [[{"note_id": existing, "distance": 0.15}]]
         result = _upsert(mcp_app, [BASIC_NOTE], neighbor_threshold=0.9)
         neighbors = result["results"][0].get("neighbors", [])
@@ -192,9 +197,9 @@ class TestUpsertNeighbors:
     def test_top_k_limits_neighbors(self, wrapper, mock_index, mcp_app):
         ids = []
         for i in range(5):
-            nid = wrapper.upsert_notes([{**BASIC_NOTE, "fields": {"Front": f"E{i}", "Back": "A"}}])[
-                0
-            ]["id"]
+            nid = _seed(wrapper, [{**BASIC_NOTE, "fields": {"Front": f"E{i}", "Back": "A"}}])[0][
+                "id"
+            ]
             ids.append(nid)
         mock_index.search.return_value = [[{"note_id": nid, "distance": 0.1} for nid in ids]]
         result = _upsert(mcp_app, [BASIC_NOTE], top_k_neighbors=2)
@@ -217,8 +222,20 @@ class TestUpsertNeighbors:
         result = _upsert(mcp_app, [BASIC_NOTE])
         assert result["results"][0]["status"] == "created"
 
+    def test_neighbor_failure_flags_retry(self, wrapper, mock_index, mcp_app):
+        """A neighbor-search hiccup flags the result and hints the retry path."""
+        mock_index.search.side_effect = RuntimeError("embedding service down")
+        result = _upsert(mcp_app, [BASIC_NOTE])
+        r = result["results"][0]
+        nid = r["id"]
+        assert r["status"] == "created"
+        assert "neighbors" not in r
+        assert r["neighbors_unavailable"] is True
+        assert "_message" in result
+        assert f"search_notes(ids=[{nid}])" in result["_message"]
+
     def test_neighbors_on_update(self, wrapper, mock_index, mcp_app, basic_note):
-        other = wrapper.upsert_notes([BASIC_NOTE])[0]["id"]
+        other = _seed(wrapper, [BASIC_NOTE])[0]["id"]
         mock_index.search.return_value = [[{"note_id": other, "distance": 0.3}]]
         result = _upsert(mcp_app, [{"id": basic_note, "fields": {"Front": "Updated"}}])
         r = result["results"][0]
@@ -278,3 +295,20 @@ class TestUpsertIndexUpdate:
         mock_index.add.side_effect = RuntimeError("embed failed")
         result = _upsert(mcp_app, [BASIC_NOTE])
         assert result["results"][0]["status"] == "created"
+
+    def test_index_add_failure_flags_retry(self, wrapper, mock_index, mcp_app):
+        """An index.add hiccup also flags neighbors_unavailable and hints retry."""
+        mock_index.add.side_effect = RuntimeError("embed failed")
+        result = _upsert(mcp_app, [BASIC_NOTE])
+        r = result["results"][0]
+        assert r["neighbors_unavailable"] is True
+        assert f"search_notes(ids=[{r['id']}])" in result["_message"]
+
+    def test_no_retry_hint_on_success(self, wrapper, mock_index, mcp_app):
+        """Successful neighbor computation carries no retry flag or message."""
+        mock_index.search.return_value = [[]]
+        result = _upsert(mcp_app, [BASIC_NOTE])
+        r = result["results"][0]
+        assert "neighbors" in r
+        assert "neighbors_unavailable" not in r
+        assert "_message" not in result
