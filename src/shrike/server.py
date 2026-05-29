@@ -47,11 +47,13 @@ def _maybe_rebuild(
             logger.info("Collection is empty, skipping index rebuild")
 
 
-mcp = FastMCP(
-    "Shrike",
-    stateless_http=True,
-    json_response=True,
-)
+def create_mcp() -> FastMCP:
+    """Build a fresh FastMCP app.
+
+    Constructed per-process inside ``main()`` rather than as an import-time
+    global so the server is testable and re-usable in-process.
+    """
+    return FastMCP("Shrike", stateless_http=True, json_response=True)
 
 
 def _register_custom_routes(
@@ -369,6 +371,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _signal_shutdown)
     signal.signal(signal.SIGINT, _signal_shutdown)
 
+    mcp = create_mcp()
     register_tools(mcp, wrapper, index=index)
     _register_custom_routes(
         mcp,
