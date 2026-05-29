@@ -96,7 +96,9 @@ def _register_custom_routes(
                 else:
                     status["uptime"] = f"{seconds}s"
 
-        status["embedding"] = runtime.health()
+        # health() probes llama-server over HTTP; run it off the event loop so a
+        # slow/hung embedding server can't stall request handling.
+        status["embedding"] = await asyncio.to_thread(runtime.health)
         status["index"] = index.status()
 
         return JSONResponse(status)
@@ -201,7 +203,7 @@ def _register_custom_routes(
             await asyncio.sleep(0.1)
             os._exit(0)
 
-        asyncio.get_event_loop().create_task(_exit_after_response())
+        asyncio.create_task(_exit_after_response())
         return JSONResponse({"status": "ok", "pid": os.getpid()})
 
 

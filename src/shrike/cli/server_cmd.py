@@ -57,7 +57,9 @@ def _render_status(status: dict[str, Any]) -> None:
         if emb.get("model"):
             output.kv("Model", f"[cyan]{emb['model']}[/cyan]", indent=2)
     else:
-        output.kv("Embedding", "[dim]not configured[/dim]")
+        labels = {"failed": "[red]failed to start[/red]", "stopped": "[dim]stopped[/dim]"}
+        state = str((emb or {}).get("state") or "")
+        output.kv("Embedding", labels.get(state, "[dim]not configured[/dim]"))
 
     idx = status.get("index")
     if not idx:

@@ -167,4 +167,9 @@ def _render_embedding(emb: dict[str, Any]) -> None:
         if emb.get("model"):
             output.kv("Model", f"[cyan]{emb['model']}[/cyan]", indent=2)
     else:
-        output.kv("Embedding", "[dim]unavailable[/dim]")
+        labels = {
+            "failed": "[red]failed to start[/red]",
+            "stopped": "[dim]stopped[/dim]",
+            "not_configured": "[dim]not configured[/dim]",
+        }
+        output.kv("Embedding", labels.get(str(emb.get("state") or ""), "[dim]unavailable[/dim]"))

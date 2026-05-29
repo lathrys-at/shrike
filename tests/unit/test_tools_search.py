@@ -45,6 +45,7 @@ def mock_index():
     idx.build_progress = (0, 0)
     idx.search = MagicMock(return_value=[])
     idx.col_mod = 0
+    idx.size = 100
     return idx
 
 
