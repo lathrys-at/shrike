@@ -10,9 +10,9 @@ from typing import Any
 import click
 
 from shrike.cli import output
-from shrike.cli.client import ShrikeClient
-from shrike.cli.config import resolve_collection, resolve_embedding, save_config
+from shrike.cli.config import embedding_args, resolve_collection, resolve_embedding, save_config
 from shrike.cli.output import output_options
+from shrike.client import ShrikeClient
 from shrike.daemon import (
     META_FILE,
     STATE_DIR,
@@ -23,29 +23,6 @@ from shrike.daemon import (
     stop_server,
 )
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
-
-
-def _embedding_args(resolved: dict[str, Any], *, no_embedding: bool = False) -> list[str]:
-    """Build server CLI args from already-resolved embedding params.
-
-    ``resolved`` comes from ``config.resolve_embedding`` (config → env → flags).
-    """
-    args: list[str] = []
-    if resolved.get("llama_server"):
-        args.extend(["--llama-server", str(resolved["llama_server"])])
-    if resolved.get("model"):
-        args.extend(["--embedding-model", str(resolved["model"])])
-    if resolved.get("port"):
-        args.extend(["--embedding-port", str(resolved["port"])])
-    if resolved.get("context_size"):
-        args.extend(["--embedding-context-size", str(resolved["context_size"])])
-    if resolved.get("threads"):
-        args.extend(["--embedding-threads", str(resolved["threads"])])
-    if resolved.get("gpu_layers"):
-        args.extend(["--embedding-gpu-layers", str(resolved["gpu_layers"])])
-    if no_embedding:
-        args.append("--no-embedding")
-    return args
 
 
 def _render_status(status: dict[str, Any]) -> None:
@@ -124,86 +101,6 @@ def _wait_for_server(
                 return status
             time.sleep(0.2)
     return None
-
-
-def ensure_server(config: dict[str, Any]) -> str:
-    """Start the daemon if it isn't already running. Returns the server URL.
-
-    Uses collection path, host, port, and logging settings from *config*.
-    Raises ``click.ClickException`` if the server cannot be started
-    (e.g. no collection path configured).
-    """
-    from shrike.cli.config import resolve_collection, resolve_url
-
-    url = resolve_url(config)
-
-    if is_server_alive():
-        meta = read_server_meta()
-        if meta:
-            return str(meta.get("url", url))
-        return url
-
-    # Clean up any stale state from a crashed server
-    cleanup_state()
-
-    collection_path = resolve_collection(config)
-    if not collection_path:
-        raise click.ClickException(
-            "Cannot auto-start server: no collection path configured.\n\n"
-            "Provide one with:\n"
-            "  shrike server start --collection /path/to/collection.anki2\n"
-            "  SHRIKE_COLLECTION environment variable\n"
-            "  'collection' key in config file"
-        )
-
-    collection_dir = Path(collection_path).parent
-    collection_dir.mkdir(parents=True, exist_ok=True)
-
-    server_config = config.get("server", {})
-    server_host = server_config.get("host", "127.0.0.1")
-    server_port = server_config.get("port", 8372)
-    url = f"http://{server_host}:{server_port}/mcp"
-
-    log_config = config.get("logging", {})
-    resolved_log_dir = str(Path(log_config.get("dir") or str(DEFAULT_LOG_DIR)).expanduser())
-    resolved_log_level = log_config.get("level", "info")
-
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-
-    bootstrap_log = Path(resolved_log_dir)
-    bootstrap_log.mkdir(parents=True, exist_ok=True)
-    bootstrap_log_file = open(bootstrap_log / "shrike-bootstrap.log", "a")  # noqa: SIM115
-
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "shrike.server",
-            "--collection",
-            collection_path,
-            "--port",
-            str(server_port),
-            "--host",
-            server_host,
-            "--log-dir",
-            resolved_log_dir,
-            "--log-level",
-            resolved_log_level,
-            *_embedding_args(resolve_embedding(config)),
-        ],
-        stdout=bootstrap_log_file,
-        stderr=bootstrap_log_file,
-        start_new_session=True,
-    )
-
-    if _wait_for_server(url, show_spinner=False) is None and proc.poll() is not None:
-        cleanup_state()
-        log_file = get_log_file(config, log_dir_override=resolved_log_dir)
-        raise click.ClickException(
-            f"Auto-started server exited with code {proc.returncode}.\nCheck log: {log_file}"
-        )
-
-    return url
 
 
 @click.group("server", short_help="Manage the Shrike daemon")
@@ -315,7 +212,7 @@ def server_start(
         gpu_layers=embedding_gpu_layers,
         llama_server=llama_server,
     )
-    embedding_cli_args = _embedding_args(resolved_embedding, no_embedding=no_embedding)
+    embedding_cli_args = embedding_args(resolved_embedding, no_embedding=no_embedding)
 
     # Check if already running (via lock, not PID)
     if is_server_alive():
@@ -358,29 +255,31 @@ def server_start(
 
     bootstrap_log = Path(resolved_log_dir)
     bootstrap_log.mkdir(parents=True, exist_ok=True)
-    bootstrap_log_file = open(bootstrap_log / "shrike-bootstrap.log", "a")  # noqa: SIM115
 
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "shrike.server",
-            "--collection",
-            collection_path,
-            "--port",
-            str(server_port),
-            "--host",
-            server_host,
-            "--log-dir",
-            resolved_log_dir,
-            "--log-level",
-            resolved_log_level,
-            *embedding_cli_args,
-        ],
-        stdout=bootstrap_log_file,
-        stderr=bootstrap_log_file,
-        start_new_session=True,
-    )
+    # Close our copy of the bootstrap log handle right after spawn — the child
+    # keeps its own dup'd fd, so this no longer leaks for the CLI's lifetime.
+    with open(bootstrap_log / "shrike-bootstrap.log", "a") as bootstrap_log_file:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "shrike.server",
+                "--collection",
+                collection_path,
+                "--port",
+                str(server_port),
+                "--host",
+                server_host,
+                "--log-dir",
+                resolved_log_dir,
+                "--log-level",
+                resolved_log_level,
+                *embedding_cli_args,
+            ],
+            stdout=bootstrap_log_file,
+            stderr=bootstrap_log_file,
+            start_new_session=True,
+        )
 
     json_out: bool = ctx.obj["json"]
 
