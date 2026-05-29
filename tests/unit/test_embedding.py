@@ -511,7 +511,9 @@ class TestEmbeddingRuntime:
         runtime = EmbeddingRuntime(index=MagicMock(), model="/m.gguf")
         fake_svc = MagicMock()
         fake_svc.start.side_effect = RuntimeError("boom")
-        with patch("shrike.embedding.EmbeddingService", return_value=fake_svc):
-            with pytest.raises(RuntimeError):
-                runtime.start()
+        with (
+            patch("shrike.embedding.EmbeddingService", return_value=fake_svc),
+            pytest.raises(RuntimeError),
+        ):
+            runtime.start()
         assert runtime.state == "failed"
