@@ -20,7 +20,9 @@ class TestUpsertNotesBatching:
             {"deck": "D", "note_type": "Basic", "fields": {"Front": f"Q{i}", "Back": f"A{i}"}}
             for i in range(5)
         ]
-        mock_response = {"results": [{"status": "created", "id": i} for i in range(5)]}
+        mock_response = {
+            "results": [{"status": "created", "id": i, "name": f"T{i}"} for i in range(5)]
+        }
 
         with patch.object(client, "_call", return_value=mock_response) as mock_call:
             result = client.upsert_notes(notes)
@@ -45,7 +47,9 @@ class TestUpsertNotesBatching:
             call_count += 1
             chunk = args["notes"]
             chunks_received.append(len(chunk))
-            return {"results": [{"status": "created", "id": i} for i in range(len(chunk))]}
+            return {
+                "results": [{"status": "created", "id": i, "name": "T"} for i in range(len(chunk))]
+            }
 
         with patch.object(client, "_call", side_effect=fake_call):
             result = client.upsert_notes(notes)
@@ -58,7 +62,9 @@ class TestUpsertNotesBatching:
 class TestUpsertNoteTypesBatching:
     def test_small_batch_single_call(self, client):
         types = [{"name": f"T{i}", "fields": ["F"], "templates": [], "css": ""} for i in range(5)]
-        mock_response = {"results": [{"status": "created", "id": i} for i in range(5)]}
+        mock_response = {
+            "results": [{"status": "created", "id": i, "name": f"T{i}"} for i in range(5)]
+        }
 
         with patch.object(client, "_call", return_value=mock_response) as mock_call:
             result = client.upsert_note_types(types)
@@ -77,7 +83,9 @@ class TestUpsertNoteTypesBatching:
             call_count += 1
             chunk = args["note_types"]
             chunks_received.append(len(chunk))
-            return {"results": [{"status": "created", "id": i} for i in range(len(chunk))]}
+            return {
+                "results": [{"status": "created", "id": i, "name": "T"} for i in range(len(chunk))]
+            }
 
         with patch.object(client, "_call", side_effect=fake_call):
             result = client.upsert_note_types(types)

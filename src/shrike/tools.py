@@ -25,12 +25,23 @@ from shrike.schemas import (
 logger = logging.getLogger("shrike.tools")
 
 
-def _safe_tool(fn: Any) -> Any:
-    """Wrap a tool so unhandled exceptions return an error payload.
+class ToolInputError(Exception):
+    """A tool was called with invalid arguments.
 
-    The returned ``{"error": ...}`` dict is coerced by FastMCP into the tool's
-    declared response model (every response model defaults all non-error fields),
-    so the catch-all stays valid against the generated ``outputSchema``.
+    Surfaced to the caller as an MCP ``isError`` result (so the client raises
+    ``ServerError``), but logged without a traceback — it's the caller's mistake,
+    not a server bug.
+    """
+
+
+def _safe_tool(fn: Any) -> Any:
+    """Wrap a tool to log unhandled exceptions, then re-raise.
+
+    A re-raised exception becomes an MCP ``isError`` result (FastMCP converts
+    it), which the client surfaces as a ``ServerError``. Tools therefore never
+    embed an ``error`` field in a success payload — protocol errors live in the
+    protocol, and response models stay clean. ``ToolInputError`` (expected bad
+    input) re-raises quietly; anything else logs with a traceback.
 
     The wrapped function's docstring is dedented with ``inspect.cleandoc`` so the
     tool description FastMCP advertises to clients has no source indentation.
@@ -43,9 +54,11 @@ def _safe_tool(fn: Any) -> Any:
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             try:
                 return await fn(*args, **kwargs)
-            except Exception as e:
+            except ToolInputError:
+                raise
+            except Exception:
                 logger.exception("Unhandled error in %s", fn.__name__)
-                return {"error": f"Internal error: {e}"}
+                raise
 
         async_wrapper.__doc__ = cleaned_doc
         return async_wrapper
@@ -53,11 +66,12 @@ def _safe_tool(fn: Any) -> Any:
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
-            result = fn(*args, **kwargs)
-            return result
-        except Exception as e:
+            return fn(*args, **kwargs)
+        except ToolInputError:
+            raise
+        except Exception:
             logger.exception("Unhandled error in %s", fn.__name__)
-            return {"error": f"Internal error: {e}"}
+            raise
 
     wrapper.__doc__ = cleaned_doc
     return wrapper
@@ -74,27 +88,29 @@ def register_tools(
     @_safe_tool
     async def collection_info(
         include: Annotated[
-            list[Literal["summary", "note_types", "decks", "tags", "stats", "all"]] | None,
+            list[Literal["summary", "note_types", "decks", "tags", "stats", "all"]],
             Field(
+                default_factory=list,
                 description=(
                     'Sections to return. Any combination of "summary" (counts, dates, '
                     'path), "note_types" (note types and their fields), "decks" (deck '
                     'hierarchy with note counts), "tags" (all tags in use), "stats" (card '
                     'counts, due counts, per-deck summaries), or "all" for everything. '
                     'Defaults to ["summary"].'
-                )
+                ),
             ),
-        ] = None,
+        ],
         note_type_details: Annotated[
-            list[str] | None,
+            list[str],
             Field(
+                default_factory=list,
                 description=(
                     "List of note type names to return full definitions for, including "
                     "card template HTML and CSS styling. Omit to return only summaries "
                     "(field names and type)."
-                )
+                ),
             ),
-        ] = None,
+        ],
     ) -> CollectionInfo:
         """Get the structure and summary statistics of the Anki collection.
 
@@ -119,9 +135,10 @@ def register_tools(
     @mcp.tool()
     @_safe_tool
     async def list_notes(
+        *,
         ids: Annotated[
-            list[int] | None, Field(description="Specific note IDs to retrieve.")
-        ] = None,
+            list[int], Field(default_factory=list, description="Specific note IDs to retrieve.")
+        ],
         deck: Annotated[
             str | None,
             Field(
@@ -132,15 +149,16 @@ def register_tools(
             ),
         ] = None,
         tags: Annotated[
-            list[str] | None,
+            list[str],
             Field(
+                default_factory=list,
                 description=(
                     'Filter to notes having all of these tags. Prefix with "-" to '
                     'exclude (e.g., ["-leech", "verb"] matches notes tagged "verb" '
                     'but not "leech").'
-                )
+                ),
             ),
-        ] = None,
+        ],
         note_type: Annotated[
             str | None,
             Field(description='Filter to notes using this note type (e.g., "Basic", "Cloze").'),
@@ -191,11 +209,9 @@ def register_tools(
         large result sets. The response includes `total` (full match count);
         if more notes matched than `limit` allows, narrow your filters."""
         if not any([ids, deck, tags, note_type, modified_since, query]):
-            return ListNotesResponse(
-                error=(
-                    "At least one filter (ids, deck, tags, note_type,"
-                    " modified_since, or query) must be provided."
-                )
+            raise ToolInputError(
+                "At least one filter (ids, deck, tags, note_type,"
+                " modified_since, or query) must be provided."
             )
 
         filters = [
@@ -213,9 +229,9 @@ def register_tools(
         logger.info("list_notes %s limit=%d", " ".join(filters), limit)
 
         result = await wrapper.list_notes(
-            ids=ids,
+            ids=ids or None,
             deck=deck,
-            tags=tags,
+            tags=tags or None,
             note_type=note_type,
             modified_since=modified_since,
             query=query,
@@ -232,19 +248,24 @@ def register_tools(
     @mcp.tool()
     @_safe_tool
     async def search_notes(
+        *,
         queries: Annotated[
-            list[str] | None,
-            Field(description="Natural-language search strings, each matched independently."),
-        ] = None,
-        ids: Annotated[
-            list[int] | None,
+            list[str],
             Field(
+                default_factory=list,
+                description="Natural-language search strings, each matched independently.",
+            ),
+        ],
+        ids: Annotated[
+            list[int],
+            Field(
+                default_factory=list,
                 description=(
                     "Note IDs to use as search anchors — returns notes semantically "
                     "similar to these existing notes. Source notes are excluded from results."
-                )
+                ),
             ),
-        ] = None,
+        ],
         top_k: Annotated[
             int,
             Field(ge=1, le=50, description="Maximum results per query or source ID. Default 10."),
@@ -262,13 +283,19 @@ def register_tools(
             Field(description="Restrict search to notes in this deck (includes child decks)."),
         ] = None,
         tags: Annotated[
-            list[str] | None,
-            Field(description="Restrict search to notes matching all of these tags."),
-        ] = None,
+            list[str],
+            Field(
+                default_factory=list,
+                description="Restrict search to notes matching all of these tags.",
+            ),
+        ],
         exclude_ids: Annotated[
-            list[int] | None,
-            Field(description="Additional note IDs to exclude from results."),
-        ] = None,
+            list[int],
+            Field(
+                default_factory=list,
+                description="Additional note IDs to exclude from results.",
+            ),
+        ],
     ) -> SearchResponse:
         """Semantic similarity search over the Anki collection.
 
@@ -283,7 +310,7 @@ def register_tools(
 
         At least one of `queries` or `ids` must be provided."""
         if not queries and not ids:
-            return SearchResponse(error="At least one of queries or ids must be provided.")
+            raise ToolInputError("At least one of queries or ids must be provided.")
 
         logger.info(
             "search_notes queries=%d ids=%d top_k=%d threshold=%.2f",

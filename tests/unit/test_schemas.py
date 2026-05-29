@@ -3,38 +3,52 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
 from shrike import schemas
 from shrike.schemas import (
-    CollectionInfo,
-    DeleteNotesResponse,
-    DeleteNoteTypesResponse,
+    DeleteNoteTypeResult,
     ListNotesResponse,
     SearchMatch,
     SearchResponse,
     ServerStatus,
+    UpsertNoteError,
+    UpsertNoteOk,
+    UpsertNoteResult,
     UpsertNotesResponse,
-    UpsertNoteTypesResponse,
 )
 
-# Every tool response model — each must accept a bare {"error": ...} payload so
-# the _safe_tool catch-all dict can be coerced by FastMCP into the declared type.
-TOOL_RESPONSE_MODELS = [
-    CollectionInfo,
-    ListNotesResponse,
-    SearchResponse,
-    UpsertNotesResponse,
-    UpsertNoteTypesResponse,
-    DeleteNotesResponse,
-    DeleteNoteTypesResponse,
-]
+
+def test_result_union_discriminates_on_status() -> None:
+    """A result dict resolves to the variant matching its status, with required fields."""
+    ok = TypeAdapter(UpsertNoteResult).validate_python({"status": "created", "id": 1})
+    assert isinstance(ok, UpsertNoteOk)
+    assert ok.id == 1 and ok.neighbors == [] and ok.neighbors_unavailable is False
+
+    err = TypeAdapter(UpsertNoteResult).validate_python(
+        {"status": "error", "index": 2, "error": "bad"}
+    )
+    assert isinstance(err, UpsertNoteError)
+    assert err.index == 2 and err.error == "bad"
 
 
-@pytest.mark.parametrize("model", TOOL_RESPONSE_MODELS)
-def test_error_only_payload_validates(model) -> None:
-    """A {"error": ...} dict must validate into every tool response model."""
-    obj = model.model_validate({"error": "Internal error: boom"})
-    assert obj.error == "Internal error: boom"
+def test_result_union_rejects_illegal_mix() -> None:
+    """The success variant requires `id`; an error-shaped payload can't masquerade as it."""
+    with pytest.raises(ValidationError):
+        TypeAdapter(UpsertNoteResult).validate_python({"status": "created", "error": "x"})
+
+
+def test_delete_result_union_variants() -> None:
+    ta = TypeAdapter(DeleteNoteTypeResult)
+    assert ta.validate_python({"status": "deleted", "id": 1, "name": "T"}).name == "T"
+    assert ta.validate_python({"status": "not_found", "id": 2}).id == 2
+    assert ta.validate_python({"status": "error", "id": 3, "name": "T", "error": "in use"}).error
+
+
+def test_response_models_have_no_error_field() -> None:
+    """Whole-call failures use MCP isError, so response models carry no `error`."""
+    for model in (ListNotesResponse, SearchResponse, UpsertNotesResponse):
+        assert "error" not in model.model_fields
 
 
 def test_list_notes_response_parses_notes() -> None:

@@ -151,8 +151,8 @@ class ShrikeClient:
         no typed wrapper.
 
         Raises:
-            ServerError: the tool returned an error (structured ``error`` field,
-                an MCP ``isError`` result, or a JSON-RPC error).
+            ServerError: the tool failed — an MCP ``isError`` result (bad input
+                or an unhandled exception) or a JSON-RPC error.
             ServerHTTPError: the server returned a non-2xx status.
             ServerUnreachableError: the server could not be reached.
         """
@@ -172,13 +172,12 @@ class ShrikeClient:
 
         result = body.get("result", {})
         if result.get("isError"):
-            # Tool execution or input-validation error: the message lives in the
-            # text content, not structuredContent.
+            # Tool failure: the message lives in the text content. Tools no
+            # longer embed an error field in structuredContent — failures are
+            # MCP isError results.
             raise ServerError(_error_text(result.get("content")) or "Tool returned an error")
 
         content = result.get("structuredContent", {})
-        if isinstance(content, dict) and content.get("error"):
-            raise ServerError(content["error"])
         return content if isinstance(content, dict) else {}
 
     def _post_mcp(self, payload: dict[str, Any], *, timeout: float = 30.0) -> httpx.Response:

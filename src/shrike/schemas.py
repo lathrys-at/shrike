@@ -17,6 +17,8 @@ Design rules:
 
 from __future__ import annotations
 
+from typing import Annotated, Literal
+
 from pydantic import BaseModel, Field
 
 # ============================================================================
@@ -177,7 +179,76 @@ class Stats(BaseModel):
 
 
 # ============================================================================
+# Per-item result variants (discriminated unions on `status`)
+#
+# Each tool reports per-item outcomes as a precise variant — a success carries
+# its real fields, an error carries its own — so the schema (and the LLM) sees
+# exactly which fields accompany each status, with no optional soup. Whole-call
+# failures are NOT modeled here: they surface as MCP ``isError`` results.
+# ============================================================================
+
+
+class UpsertNoteOk(BaseModel):
+    status: Literal["created", "updated"]
+    id: int
+    neighbors: list[Neighbor] = []
+    neighbors_unavailable: bool = False
+
+
+class UpsertNoteError(BaseModel):
+    status: Literal["error"]
+    index: int
+    error: str
+
+
+UpsertNoteResult = Annotated[UpsertNoteOk | UpsertNoteError, Field(discriminator="status")]
+
+
+class NoteTypeOk(BaseModel):
+    status: Literal["created", "updated"]
+    id: int
+    name: str
+
+
+class NoteTypeError(BaseModel):
+    status: Literal["error"]
+    index: int
+    error: str
+
+
+NoteTypeResult = Annotated[NoteTypeOk | NoteTypeError, Field(discriminator="status")]
+
+
+class NoteTypeDeleted(BaseModel):
+    status: Literal["deleted"]
+    id: int
+    name: str
+
+
+class NoteTypeNotFound(BaseModel):
+    status: Literal["not_found"]
+    id: int
+
+
+class NoteTypeDeleteError(BaseModel):
+    status: Literal["error"]
+    id: int
+    name: str
+    error: str
+
+
+DeleteNoteTypeResult = Annotated[
+    NoteTypeDeleted | NoteTypeNotFound | NoteTypeDeleteError,
+    Field(discriminator="status"),
+]
+
+
+# ============================================================================
 # Tool response models
+#
+# No ``error`` field: a whole-call failure (bad input, unhandled exception) is
+# an MCP ``isError`` result, which the client raises on. ``message`` is a
+# genuine optional advisory (e.g. index-building notice, neighbor-retry hint).
 # ============================================================================
 
 
@@ -187,14 +258,12 @@ class CollectionInfo(BaseModel):
     decks: list[DeckInfo] | None = None
     tags: list[str] | None = None
     stats: Stats | None = None
-    error: str | None = None
 
 
 class ListNotesResponse(BaseModel):
     notes: list[Note] = []
     total: int = 0
-    limit: int = 0
-    error: str | None = None
+    limit: int = 50
 
 
 class SearchResultGroup(BaseModel):
@@ -205,53 +274,24 @@ class SearchResultGroup(BaseModel):
 class SearchResponse(BaseModel):
     results: list[SearchResultGroup] = []
     message: str | None = None
-    error: str | None = None
-
-
-class UpsertNoteResult(BaseModel):
-    status: str
-    id: int | None = None
-    index: int | None = None
-    error: str | None = None
-    neighbors: list[Neighbor] | None = None
-    neighbors_unavailable: bool | None = None
 
 
 class UpsertNotesResponse(BaseModel):
     results: list[UpsertNoteResult] = []
     message: str | None = None
-    error: str | None = None
-
-
-class NoteTypeResult(BaseModel):
-    status: str
-    id: int | None = None
-    name: str | None = None
-    index: int | None = None
-    error: str | None = None
 
 
 class UpsertNoteTypesResponse(BaseModel):
     results: list[NoteTypeResult] = []
-    error: str | None = None
 
 
 class DeleteNotesResponse(BaseModel):
     deleted: list[int] = []
     not_found: list[int] = []
-    error: str | None = None
-
-
-class DeleteNoteTypeResult(BaseModel):
-    id: int
-    name: str | None = None
-    status: str
-    error: str | None = None
 
 
 class DeleteNoteTypesResponse(BaseModel):
     results: list[DeleteNoteTypeResult] = []
-    error: str | None = None
 
 
 # ============================================================================

@@ -87,8 +87,10 @@ class TestSearchNotesStates:
         assert "not available" in result["message"]
 
     def test_requires_queries_or_ids(self, mcp_app):
-        result = _call(mcp_app, "search_notes", {})
-        assert "error" in result
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="queries or ids"):
+            _call(mcp_app, "search_notes", {})
 
 
 class TestSearchNotesResults:
@@ -230,7 +232,8 @@ class TestUpsertNeighbors:
 
     def test_no_neighbors_without_index(self, mcp_no_index):
         result = _upsert(mcp_no_index, [BASIC_NOTE])
-        assert result["results"][0]["neighbors"] is None
+        # No embedding service: the success variant carries an empty neighbor list.
+        assert result["results"][0]["neighbors"] == []
 
     def test_neighbor_failure_doesnt_fail_upsert(self, wrapper, mock_index, mcp_app):
         mock_index.search.side_effect = RuntimeError("embedding service down")
@@ -244,7 +247,7 @@ class TestUpsertNeighbors:
         r = result["results"][0]
         nid = r["id"]
         assert r["status"] == "created"
-        assert r["neighbors"] is None
+        assert r["neighbors"] == []
         assert r["neighbors_unavailable"] is True
         assert f"search_notes(ids=[{nid}])" in result["message"]
 
@@ -266,7 +269,8 @@ class TestUpsertNeighbors:
         err = [r for r in result["results"] if r.get("status") == "error"]
         assert len(ok) == 1
         assert len(err) == 1
-        assert err[0]["neighbors"] is None
+        # The error variant has no neighbors field at all (discriminated union).
+        assert "neighbors" not in err[0]
 
 
 class TestDeleteIndexUpdate:
@@ -324,5 +328,5 @@ class TestUpsertIndexUpdate:
         result = _upsert(mcp_app, [BASIC_NOTE])
         r = result["results"][0]
         assert r["neighbors"] == []
-        assert r["neighbors_unavailable"] is None
+        assert r["neighbors_unavailable"] is False
         assert result["message"] is None

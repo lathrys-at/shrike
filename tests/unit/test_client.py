@@ -31,9 +31,9 @@ class TestCall:
         with patch("shrike.client.httpx.post", return_value=_resp(200, body)):
             assert c._call("t") == {"ok": 1}
 
-    def test_tool_error_in_content(self) -> None:
+    def test_is_error_result_raises(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
-        body = {"result": {"structuredContent": {"error": "bad note"}}}
+        body = {"result": {"isError": True, "content": [{"type": "text", "text": "bad note"}]}}
         with (
             patch("shrike.client.httpx.post", return_value=_resp(200, body)),
             pytest.raises(ServerError, match="bad note"),

@@ -620,16 +620,16 @@ class TestSearchNotesStub:
         assert result["message"]
 
     def test_requires_queries_or_ids(self, mcp):
-        result = mcp("search_notes", {})
-        assert result["error"]
+        with pytest.raises(RuntimeError, match="queries or ids"):
+            mcp("search_notes", {})
 
 
 class TestValidation:
     """Input validation errors reported over transport."""
 
     def test_list_notes_requires_filter(self, mcp):
-        result = mcp("list_notes", {})
-        assert "error" in result
+        with pytest.raises(RuntimeError, match="filter"):
+            mcp("list_notes", {})
 
     def test_upsert_notes_missing_deck(self, mcp):
         result = mcp(
