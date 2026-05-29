@@ -106,11 +106,9 @@ def embedding_start(
         return
 
     idx = data.index
-    building = idx is not None and idx.state == "building"
 
-    if building and not background:
-        total = idx.progress.total if idx and idx.progress else 0
-        _poll_progress(client, total, json_out=json_out)
+    if idx.state == "building" and not background:
+        _poll_progress(client, idx.progress.total, json_out=json_out)
         if not json_out:
             _render_embedding(client.embedding_status())
         return
@@ -119,8 +117,8 @@ def embedding_start(
         output.emit_json(data)
     else:
         output.success("Embedding service started.")
-        _render_embedding(data.embedding or EmbeddingStatus())
-        if building:
+        _render_embedding(data.embedding)
+        if idx.state == "building":
             output.console.print("[dim]Index rebuild started in the background.[/dim]")
 
 

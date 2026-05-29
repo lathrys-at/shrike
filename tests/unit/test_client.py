@@ -89,7 +89,10 @@ class TestCustomEndpoints:
 
         def req(method, url, *, json=None, timeout=None):  # type: ignore[no-untyped-def]
             captured["json"] = json
-            return _resp(200, {"status": "started"})
+            return _resp(
+                200,
+                {"status": "started", "embedding": {}, "index": {"state": "unavailable"}},
+            )
 
         with patch("shrike.client.httpx.request", side_effect=req):
             c.embedding_start(model="/m.gguf", port=None, threads=4)

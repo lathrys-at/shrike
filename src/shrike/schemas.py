@@ -7,9 +7,16 @@ them, and ``scripts/gen_schema.py`` generates ``docs/mcp-schema.json`` from them
 
 Design rules:
 
-- **Every tool response model has all fields defaulted**, so a bare
-  ``Model(error=...)`` is valid and FastMCP can coerce the ``_safe_tool``
-  catch-all dict (``{"error": ...}``) into the declared return type.
+- **Make illegal states unrepresentable.** When a field's presence is
+  *correlated* with another (a hidden state — "you get progress only while
+  building", "an error carries a message, a success carries an id"), model it as
+  a discriminated union of precise variants, not one bag of optionals. A bare
+  ``X | None`` is reserved for *independent* optionality — a datum that may
+  genuinely be absent on its own (e.g. ``col_mod`` before the index is built, a
+  field omitted from a partial update).
+- Whole-call failures are not modeled here at all: tools raise, and the failure
+  surfaces as an MCP ``isError`` result the client raises on. No response model
+  carries an ``error`` field.
 - Models tolerate unknown keys (Pydantic's default ``extra="ignore"``) so a
   newer server adding a field doesn't break an older client.
 - No imports from the rest of ``shrike`` — keep this leaf-level to avoid cycles.
@@ -38,6 +45,11 @@ class TemplateInput(BaseModel):
 
 
 class NoteInput(BaseModel):
+    # A partial upsert input: ``None`` means "omitted" — absent on create, or
+    # "leave unchanged" on update. Create-time requirements (deck/note_type/
+    # fields) are enforced by the tool with field-specific messages, which read
+    # better than a union-match failure, so this stays one partial model rather
+    # than a NoteCreate | NoteUpdate union.
     id: int | None = Field(
         default=None,
         description="Note ID. Present = update existing note, absent = create new note.",
@@ -73,6 +85,8 @@ class NoteInput(BaseModel):
 
 
 class NoteTypeInput(BaseModel):
+    # Partial upsert input, same convention as NoteInput: ``None`` = omitted /
+    # leave unchanged; create-time requirements enforced by the tool.
     id: int | None = Field(
         default=None,
         description="Note type ID. Present = update, absent = create.",
@@ -115,6 +129,7 @@ class Note(BaseModel):
     deck: str
     tags: list[str] = []
     modified: str
+    # Independent projection: present in "full" mode, omitted in "meta" mode.
     content: dict[str, str] | None = None
 
 
@@ -143,6 +158,9 @@ class NoteTypeInfo(BaseModel):
     id: int
     fields: list[str] = []
     type: str = "standard"
+    # Detail fields: present only for note types named in collection_info's
+    # `note_type_details`. A single response can mix summary and detailed note
+    # types, so these are genuinely per-item optional (not a whole-model state).
     templates: list[TemplateInfo] | None = None
     css: str | None = None
 
@@ -253,6 +271,9 @@ DeleteNoteTypeResult = Annotated[
 
 
 class CollectionInfo(BaseModel):
+    # Each section is an independent, caller-selected slice: you get exactly the
+    # sections named in `include`. None = "not requested", so the optionality is
+    # real and uncorrelated (any subset is valid).
     summary: Summary | None = None
     note_types: list[NoteTypeInfo] | None = None
     decks: list[DeckInfo] | None = None
@@ -300,6 +321,14 @@ class DeleteNoteTypesResponse(BaseModel):
 
 
 class EmbeddingStatus(BaseModel):
+    """Embedding service health, assembled from ``EmbeddingRuntime.health()``.
+
+    These optionals are independent, not a state machine: ``state`` is always
+    set; ``pid``/``url``/``model`` depend on whether a service object exists; and
+    ``available`` reflects a /health probe that can fail even while the process
+    runs. They don't collapse into a clean discriminated union.
+    """
+
     available: bool = False
     state: str | None = None
     pid: int | None = None
@@ -312,24 +341,55 @@ class IndexProgress(BaseModel):
     total: int = 0
 
 
-class IndexStatus(BaseModel):
-    state: str | None = None
+class _IndexBase(BaseModel):
+    """On-disk index contents, shared across build states.
+
+    ``ndim``/``path``/``col_mod``/``model_id`` are independently optional —
+    absent until the index has vectors / has been built — regardless of state.
+    """
+
     available: bool = False
     size: int = 0
     ndim: int | None = None
     path: str | None = None
     col_mod: int | None = None
     model_id: str | None = None
-    progress: IndexProgress | None = None
-    error: str | None = None
+
+
+class IndexUnavailable(_IndexBase):
+    state: Literal["unavailable"] = "unavailable"
+
+
+class IndexBuilding(_IndexBase):
+    state: Literal["building"]
+    progress: IndexProgress
+
+
+class IndexReady(_IndexBase):
+    state: Literal["ready"]
+
+
+class IndexErrored(_IndexBase):
+    state: Literal["error"]
+    error: str
+
+
+# Discriminated on build state: `progress` lives only on building, `error` only
+# on the errored variant — no "maybe-progress, maybe-error" bag.
+IndexStatus = Annotated[
+    IndexUnavailable | IndexBuilding | IndexReady | IndexErrored,
+    Field(discriminator="state"),
+]
 
 
 class ServerStatus(BaseModel):
-    """The /status response, and the degraded shape daemon.server_status() yields.
+    """The /status response, and the degraded shape the CLI synthesizes from
+    ``daemon.server_status()`` when the server is alive but not yet responsive.
 
-    ``embedding`` and ``index`` are absent when synthesized from local daemon
-    state (server alive but not yet responsive); ``responsive`` and ``log`` are
-    filled in by the CLI rather than the server.
+    The optionals are independent because the model aggregates two sources: a
+    full /status payload (carries ``embedding``/``index``) versus a local daemon
+    probe (carries neither, plus ``responsive=False``). ``responsive`` and
+    ``log`` are filled in by the CLI, not the server.
     """
 
     running: bool = False
@@ -346,33 +406,77 @@ class ServerStatus(BaseModel):
     index: IndexStatus | None = None
 
 
-class IndexRebuildResponse(BaseModel):
-    status: str
-    total: int | None = None
-    size: int | None = None
-    progress: IndexProgress | None = None
-    error: str | None = None
+# -- custom-endpoint responses (discriminated on `status`) -------------------
+# Each route returns one well-defined shape per status, so the fields that
+# accompany a status are required on that variant rather than optional on a
+# shared bag. (HTTP error responses surface as ServerHTTPError, not as a variant.)
 
 
-class EmbeddingStartResponse(BaseModel):
-    status: str
-    embedding: EmbeddingStatus | None = None
-    index: IndexStatus | None = None
-    error: str | None = None
+class IndexRebuildStarted(BaseModel):
+    status: Literal["started"]
+    total: int
 
 
-class EmbeddingStopResponse(BaseModel):
-    status: str
-    index: IndexStatus | None = None
+class IndexRebuildComplete(BaseModel):
+    status: Literal["complete"]
+    size: int
+
+
+class IndexRebuildAlreadyBuilding(BaseModel):
+    status: Literal["already_building"]
+    progress: IndexProgress
+
+
+IndexRebuildResponse = Annotated[
+    IndexRebuildStarted | IndexRebuildComplete | IndexRebuildAlreadyBuilding,
+    Field(discriminator="status"),
+]
+
+
+class EmbeddingStarted(BaseModel):
+    status: Literal["started"]
+    embedding: EmbeddingStatus
+    index: IndexStatus
+
+
+class EmbeddingAlreadyRunning(BaseModel):
+    status: Literal["already_running"]
+    embedding: EmbeddingStatus
+
+
+EmbeddingStartResponse = Annotated[
+    EmbeddingStarted | EmbeddingAlreadyRunning,
+    Field(discriminator="status"),
+]
+
+
+class EmbeddingStopped(BaseModel):
+    status: Literal["stopped"]
+    index: IndexStatus
+
+
+class EmbeddingNotRunning(BaseModel):
+    status: Literal["not_running"]
+
+
+EmbeddingStopResponse = Annotated[
+    EmbeddingStopped | EmbeddingNotRunning,
+    Field(discriminator="status"),
+]
 
 
 class ShutdownResponse(BaseModel):
     status: str
-    pid: int | None = None
+    pid: int
 
 
 class StopResponse(BaseModel):
-    """Result of stopping the local daemon (daemon.stop_server)."""
+    """Result of stopping the local daemon (``daemon.stop_server``).
+
+    ``pid``/``forced`` accompany a stop; ``reason`` accompanies a no-op. Kept as
+    one small model (rather than a union) because pydantic discriminators don't
+    take a bool, and the only consumer is ``ShrikeClient.stop``.
+    """
 
     stopped: bool = False
     reason: str | None = None

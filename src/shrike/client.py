@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from pydantic import TypeAdapter
 
 from shrike import daemon
 from shrike.schemas import (
@@ -39,6 +40,7 @@ from shrike.schemas import (
     EmbeddingStopResponse,
     IndexRebuildResponse,
     IndexStatus,
+    IndexUnavailable,
     ListNotesResponse,
     NoteInput,
     NoteTypeInput,
@@ -49,6 +51,12 @@ from shrike.schemas import (
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
 )
+
+# Discriminated-union responses are Annotated aliases, not BaseModel subclasses,
+# so they're validated through a TypeAdapter rather than ``.model_validate``.
+_INDEX_REBUILD_ADAPTER: TypeAdapter[IndexRebuildResponse] = TypeAdapter(IndexRebuildResponse)
+_EMBEDDING_START_ADAPTER: TypeAdapter[EmbeddingStartResponse] = TypeAdapter(EmbeddingStartResponse)
+_EMBEDDING_STOP_ADAPTER: TypeAdapter[EmbeddingStopResponse] = TypeAdapter(EmbeddingStopResponse)
 
 # -- Exceptions --------------------------------------------------------------
 
@@ -363,24 +371,25 @@ class ShrikeClient:
         return ServerStatus.model_validate(self._request("GET", "/status", timeout=5.0))
 
     def index_status(self) -> IndexStatus:
-        return self.status().index or IndexStatus()
+        idx = self.status().index
+        return idx if idx is not None else IndexUnavailable()
 
     def embedding_status(self) -> EmbeddingStatus:
         return self.status().embedding or EmbeddingStatus()
 
     def index_rebuild(self) -> IndexRebuildResponse:
-        return IndexRebuildResponse.model_validate(
+        return _INDEX_REBUILD_ADAPTER.validate_python(
             self._request("POST", "/index/rebuild", timeout=30.0)
         )
 
     def embedding_start(self, **overrides: Any) -> EmbeddingStartResponse:
         body = {k: v for k, v in overrides.items() if v is not None}
-        return EmbeddingStartResponse.model_validate(
+        return _EMBEDDING_START_ADAPTER.validate_python(
             self._request("POST", "/embedding/start", json=body, timeout=120.0)
         )
 
     def embedding_stop(self) -> EmbeddingStopResponse:
-        return EmbeddingStopResponse.model_validate(
+        return _EMBEDDING_STOP_ADAPTER.validate_python(
             self._request("POST", "/embedding/stop", timeout=30.0)
         )
 

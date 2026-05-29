@@ -66,23 +66,18 @@ def _render_status(status: ServerStatus) -> None:
     if idx is None:
         output.kv("Index", "[dim]not configured[/dim]")
     else:
-        state = idx.state or "unknown"
-        if state == "ready":
+        if idx.state == "ready":
             output.kv("Index", "[green]ready[/green]")
             output.kv("Vectors", f"[green]{idx.size}[/green]", indent=2)
             output.kv("Dimensions", str(idx.ndim if idx.ndim is not None else "?"), indent=2)
-        elif state == "building":
-            indexed = idx.progress.indexed if idx.progress else 0
-            total = idx.progress.total if idx.progress else 0
+        elif idx.state == "building":
             output.kv("Index", "[yellow]building[/yellow]")
-            output.kv("Progress", f"{indexed} / {total} notes", indent=2)
-        elif state == "error":
+            output.kv("Progress", f"{idx.progress.indexed} / {idx.progress.total} notes", indent=2)
+        elif idx.state == "error":
             output.kv("Index", "[red]error[/red]")
-            output.kv("Error", idx.error or "unknown", indent=2)
-        elif state == "unavailable":
-            output.kv("Index", "[dim]unavailable[/dim]")
+            output.kv("Error", idx.error, indent=2)
         else:
-            output.kv("Index", f"[dim]{state}[/dim]")
+            output.kv("Index", "[dim]unavailable[/dim]")
         if idx.col_mod is not None:
             output.kv("Collection mod", str(idx.col_mod), indent=2)
         if idx.path:
