@@ -48,7 +48,7 @@ src/shrike/                       # Python package (src layout)
     ├── type_cmd.py               # shrike type list/show/create/update/delete
     └── output.py                 # Rich formatting, output_options decorator
 tests/
-├── unit/                         # 290 tests — direct calls, no server
+├── unit/                         # 289 tests — direct calls, no server
 │   ├── conftest.py               # wrapper fixture (temp collection), basic_note fixture
 │   ├── test_collection_info.py
 │   ├── test_list_notes.py
@@ -69,8 +69,8 @@ tests/
     ├── test_embedding.py         # Embedding tests (requires llama-server + GGUF model)
     └── test_semantic.py          # Semantic search, neighbors, index CLI (requires llama-server)
 docs/
-├── mcp-tools.md                  # Tool documentation (human-readable)
-└── mcp-schema.json               # Generated input+output JSON schema for all 7 tools (scripts/gen_schema.py)
+└── mcp-tools.md                  # Tool documentation (human-readable; machine schema is served
+                                  # live by the server and defined in shrike/schemas.py)
 ```
 
 ## Development setup
@@ -136,7 +136,7 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 | `delete_notes` | Working | Permanently delete notes by ID |
 | `delete_note_types` | Working | Delete note types by ID (only if unused) |
 
-Every tool request and response shape — plus the server-status shapes — is a Pydantic model in `shrike/schemas.py` (the single source of truth). Tool functions in `tools.py` return the response models, so FastMCP emits an `outputSchema` for each tool. The standalone `ShrikeClient` exposes a typed per-tool method for each (e.g. `list_notes(...) -> ListNotesResponse`) that validates the wire response into the model; `ShrikeClient._call()` is the untyped escape hatch. `docs/mcp-schema.json` is **generated** from these models by `scripts/gen_schema.py` and guarded by a CI drift check (`--check`) plus `tests/unit/test_schema_doc.py` — never hand-edit it.
+Every tool request and response shape — plus the server-status shapes — is a Pydantic model in `shrike/schemas.py` (the single source of truth). Tool functions in `tools.py` return the response models, so FastMCP emits an `outputSchema` for each tool, and `_safe_tool` runs each docstring through `inspect.cleandoc` so the advertised descriptions carry no source indentation. The standalone `ShrikeClient` exposes a typed per-tool method for each (e.g. `list_notes(...) -> ListNotesResponse`) that validates the wire response into the model; `ShrikeClient._call()` is the untyped escape hatch. There is no checked-in schema file: the authoritative machine schema is whatever the running server advertises via `tools/list`, derived from these models. `docs/mcp-tools.md` is the human-readable companion.
 
 Input bounds (e.g. `limit` 1–200, `top_k` 1–50, batch sizes ≤100/≤10) are declared as `Annotated[..., Field(ge=, le=, min_length=, max_length=)]` on the tool params, so FastMCP **rejects** out-of-range input with a validation error rather than silently clamping. The wire response carries `message` (not `_message`) for non-error advisories (e.g. index-building notices, neighbor-retry hints).
 

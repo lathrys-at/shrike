@@ -18,13 +18,11 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
       - name: Ruff check
-        run: ruff check src/shrike/ tests/ scripts/
+        run: ruff check src/shrike/ tests/
       - name: Ruff format check
-        run: ruff format --check src/shrike/ tests/ scripts/
+        run: ruff format --check src/shrike/ tests/
       - name: Mypy
         run: mypy src/shrike/
-      - name: MCP schema is up to date
-        run: python scripts/gen_schema.py --check
 
   unit:
     name: Unit tests

@@ -31,7 +31,12 @@ def _safe_tool(fn: Any) -> Any:
     The returned ``{"error": ...}`` dict is coerced by FastMCP into the tool's
     declared response model (every response model defaults all non-error fields),
     so the catch-all stays valid against the generated ``outputSchema``.
+
+    The wrapped function's docstring is dedented with ``inspect.cleandoc`` so the
+    tool description FastMCP advertises to clients has no source indentation.
     """
+    cleaned_doc = inspect.cleandoc(fn.__doc__) if fn.__doc__ else None
+
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
@@ -42,6 +47,7 @@ def _safe_tool(fn: Any) -> Any:
                 logger.exception("Unhandled error in %s", fn.__name__)
                 return {"error": f"Internal error: {e}"}
 
+        async_wrapper.__doc__ = cleaned_doc
         return async_wrapper
 
     @functools.wraps(fn)
@@ -53,6 +59,7 @@ def _safe_tool(fn: Any) -> Any:
             logger.exception("Unhandled error in %s", fn.__name__)
             return {"error": f"Internal error: {e}"}
 
+    wrapper.__doc__ = cleaned_doc
     return wrapper
 
 

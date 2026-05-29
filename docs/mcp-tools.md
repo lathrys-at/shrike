@@ -2,7 +2,7 @@
 
 Seven tools for managing an Anki flashcard collection. The server maintains a local vector index over all note content, enabling semantic search and contextual neighbor suggestions without external API calls.
 
-The full machine-readable input/output JSON schema lives in [`mcp-schema.json`](mcp-schema.json). That file is **generated** from the Pydantic models in `shrike/schemas.py` by `scripts/gen_schema.py` (CI fails if it drifts) — never edit it by hand. This document is the human-readable companion.
+This document is the human-readable reference. The machine-readable schema each tool advertises (input and output) is generated at runtime by the server from the Pydantic models in `shrike/schemas.py` — that module is the single source of truth.
 
 Notes in Anki have a **note type** that defines their fields (e.g., a "Basic" note type has "Front" and "Back" fields; a "Cloze" note type has "Text" and "Extra"). A note type also defines **card templates** — HTML templates that control how cards are rendered — and **CSS styling** shared across all its cards. A single note produces one or more cards depending on its note type. Notes belong to a **deck** and can have **tags**.
 
