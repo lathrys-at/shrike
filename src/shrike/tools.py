@@ -3,94 +3,35 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from shrike.collection import CollectionWrapper
 from shrike.index import IndexState, VectorIndex
+from shrike.schemas import (
+    CollectionInfo,
+    DeleteNotesResponse,
+    DeleteNoteTypesResponse,
+    ListNotesResponse,
+    NoteInput,
+    NoteTypeInput,
+    SearchResponse,
+    UpsertNotesResponse,
+    UpsertNoteTypesResponse,
+)
 
 logger = logging.getLogger("shrike.tools")
 
 
-class TemplateInput(BaseModel):
-    name: str = Field(description="Template name (e.g., 'Recognition', 'Recall').")
-    front: str = Field(description="Front side HTML. Use {{FieldName}} to insert field values.")
-    back: str = Field(
-        description=(
-            "Back side HTML. Use {{FieldName}} for fields and "
-            "{{FrontSide}} to insert the rendered front side."
-        )
-    )
-
-
-class NoteInput(BaseModel):
-    id: int | None = Field(
-        default=None,
-        description="Note ID. Present = update existing note, absent = create new note.",
-    )
-    deck: str | None = Field(
-        default=None,
-        description=(
-            'Target deck (e.g., "Japanese::Vocabulary"). '
-            "Required for new notes. On update, moves the note to this deck."
-        ),
-    )
-    note_type: str | None = Field(
-        default=None,
-        description=(
-            'Note type (e.g., "Basic", "Cloze"). '
-            "Required for new notes. Cannot be changed on update."
-        ),
-    )
-    fields: dict[str, str] | None = Field(
-        default=None,
-        description=(
-            "Field key-value pairs matching the note type's field names. "
-            "Required for new notes. On update, only specified fields are modified."
-        ),
-    )
-    tags: list[str] | None = Field(
-        default=None,
-        description=(
-            "Tags for the note. On create, these are the note's tags. "
-            "On update, replaces all existing tags."
-        ),
-    )
-
-
-class NoteTypeInput(BaseModel):
-    id: int | None = Field(
-        default=None,
-        description="Note type ID. Present = update, absent = create.",
-    )
-    name: str | None = Field(
-        default=None,
-        description="Name for the note type. Required for new note types.",
-    )
-    fields: list[str] | None = Field(
-        default=None,
-        description=(
-            "Ordered list of field names. Required for new note types. "
-            "On update, replaces the full field list."
-        ),
-    )
-    templates: list[TemplateInput] | None = Field(
-        default=None,
-        description="Card templates. Required for new note types.",
-    )
-    css: str | None = Field(
-        default=None,
-        description="CSS styling shared across all cards. Required for new note types.",
-    )
-    is_cloze: bool | None = Field(
-        default=None,
-        description="If true, this is a cloze deletion note type. Cannot be changed on update.",
-    )
-
-
 def _safe_tool(fn: Any) -> Any:
+    """Wrap a tool so unhandled exceptions return an error payload.
+
+    The returned ``{"error": ...}`` dict is coerced by FastMCP into the tool's
+    declared response model (every response model defaults all non-error fields),
+    so the catch-all stays valid against the generated ``outputSchema``.
+    """
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
@@ -125,9 +66,29 @@ def register_tools(
     @mcp.tool()
     @_safe_tool
     async def collection_info(
-        include: list[str] | None = None,
-        note_type_details: list[str] | None = None,
-    ) -> dict[str, Any]:
+        include: Annotated[
+            list[Literal["summary", "note_types", "decks", "tags", "stats", "all"]] | None,
+            Field(
+                description=(
+                    'Sections to return. Any combination of "summary" (counts, dates, '
+                    'path), "note_types" (note types and their fields), "decks" (deck '
+                    'hierarchy with note counts), "tags" (all tags in use), "stats" (card '
+                    'counts, due counts, per-deck summaries), or "all" for everything. '
+                    'Defaults to ["summary"].'
+                )
+            ),
+        ] = None,
+        note_type_details: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "List of note type names to return full definitions for, including "
+                    "card template HTML and CSS styling. Omit to return only summaries "
+                    "(field names and type)."
+                )
+            ),
+        ] = None,
+    ) -> CollectionInfo:
         """Get the structure and summary statistics of the Anki collection.
 
         Returns available note types with their field names, deck names with
@@ -143,22 +104,72 @@ def register_tools(
         type (standard/cloze) but not full template HTML or CSS — use
         `note_type_details` to request full definitions for specific note
         types when you need to inspect or author templates."""
-        sections = include or ["summary"]
-        logger.info("collection_info sections=%s", ",".join(sections))
-        return await wrapper.get_collection_info(include, note_type_details)
+        include_list: list[str] | None = [str(s) for s in include] if include else None
+        logger.info("collection_info sections=%s", ",".join(include_list or ["summary"]))
+        result = await wrapper.get_collection_info(include_list, note_type_details)
+        return CollectionInfo.model_validate(result)
 
     @mcp.tool()
     @_safe_tool
     async def list_notes(
-        ids: list[int] | None = None,
-        deck: str | None = None,
-        tags: list[str] | None = None,
-        note_type: str | None = None,
-        modified_since: str | None = None,
-        query: str | None = None,
-        fields: str | None = None,
-        limit: int = 50,
-    ) -> dict[str, Any]:
+        ids: Annotated[
+            list[int] | None, Field(description="Specific note IDs to retrieve.")
+        ] = None,
+        deck: Annotated[
+            str | None,
+            Field(
+                description=(
+                    'Filter to notes in this deck. Use "::" for nested decks '
+                    '(e.g., "Japanese::Vocabulary"). Includes child decks.'
+                )
+            ),
+        ] = None,
+        tags: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    'Filter to notes having all of these tags. Prefix with "-" to '
+                    'exclude (e.g., ["-leech", "verb"] matches notes tagged "verb" '
+                    'but not "leech").'
+                )
+            ),
+        ] = None,
+        note_type: Annotated[
+            str | None,
+            Field(description='Filter to notes using this note type (e.g., "Basic", "Cloze").'),
+        ] = None,
+        modified_since: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "ISO 8601 date or datetime. Only return notes modified after this "
+                    'time (e.g., "2026-05-01" or "2026-05-01T14:00:00Z").'
+                )
+            ),
+        ] = None,
+        query: Annotated[
+            str | None,
+            Field(
+                description=(
+                    'Raw Anki search query for advanced filtering (e.g., "is:due", '
+                    '"prop:ivl>=30"). Combined with other filters via AND.'
+                )
+            ),
+        ] = None,
+        fields: Annotated[
+            Literal["full", "meta"] | None,
+            Field(
+                description=(
+                    '"full" (default) returns all field content. "meta" returns only '
+                    "note ID, note type, deck, tags, and modification time — useful for "
+                    "large result sets."
+                )
+            ),
+        ] = None,
+        limit: Annotated[
+            int, Field(ge=1, le=200, description="Maximum notes to return. Default 50.")
+        ] = 50,
+    ) -> ListNotesResponse:
         """Retrieve notes matching structured filters.
 
         Filter by deck, tags, note type, note IDs, or modification date.
@@ -172,18 +183,13 @@ def register_tools(
         are ANDed together. Use `fields: "meta"` to return only metadata for
         large result sets. The response includes `total` (full match count);
         if more notes matched than `limit` allows, narrow your filters."""
-        if limit < 1:
-            limit = 1
-        elif limit > 200:
-            limit = 200
-
         if not any([ids, deck, tags, note_type, modified_since, query]):
-            return {
-                "error": (
+            return ListNotesResponse(
+                error=(
                     "At least one filter (ids, deck, tags, note_type,"
                     " modified_since, or query) must be provided."
-                ),
-            }
+                )
+            )
 
         filters = [
             f
@@ -214,19 +220,49 @@ def register_tools(
             len(result.get("notes", [])),
             result.get("total", 0),
         )
-        return result
+        return ListNotesResponse.model_validate(result)
 
     @mcp.tool()
     @_safe_tool
     async def search_notes(
-        queries: list[str] | None = None,
-        ids: list[int] | None = None,
-        top_k: int = 10,
-        threshold: float = 0.5,
-        deck: str | None = None,
-        tags: list[str] | None = None,
-        exclude_ids: list[int] | None = None,
-    ) -> dict[str, Any]:
+        queries: Annotated[
+            list[str] | None,
+            Field(description="Natural-language search strings, each matched independently."),
+        ] = None,
+        ids: Annotated[
+            list[int] | None,
+            Field(
+                description=(
+                    "Note IDs to use as search anchors — returns notes semantically "
+                    "similar to these existing notes. Source notes are excluded from results."
+                )
+            ),
+        ] = None,
+        top_k: Annotated[
+            int,
+            Field(ge=1, le=50, description="Maximum results per query or source ID. Default 10."),
+        ] = 10,
+        threshold: Annotated[
+            float,
+            Field(
+                ge=0.0,
+                le=1.0,
+                description="Minimum similarity score for a match to be included. Default 0.5.",
+            ),
+        ] = 0.5,
+        deck: Annotated[
+            str | None,
+            Field(description="Restrict search to notes in this deck (includes child decks)."),
+        ] = None,
+        tags: Annotated[
+            list[str] | None,
+            Field(description="Restrict search to notes matching all of these tags."),
+        ] = None,
+        exclude_ids: Annotated[
+            list[int] | None,
+            Field(description="Additional note IDs to exclude from results."),
+        ] = None,
+    ) -> SearchResponse:
         """Semantic similarity search over the Anki collection.
 
         Accepts natural-language query strings, note IDs (to find
@@ -240,7 +276,7 @@ def register_tools(
 
         At least one of `queries` or `ids` must be provided."""
         if not queries and not ids:
-            return {"error": "At least one of queries or ids must be provided."}
+            return SearchResponse(error="At least one of queries or ids must be provided.")
 
         logger.info(
             "search_notes queries=%d ids=%d top_k=%d threshold=%.2f",
@@ -251,49 +287,40 @@ def register_tools(
         )
 
         if index is None or index.state == IndexState.UNAVAILABLE:
-            return {
-                "results": [],
-                "_message": (
+            return SearchResponse(
+                message=(
                     "Semantic search is not available — the embedding service is not "
                     "running. Start it with 'shrike embedding start', or use list_notes "
                     "for structured filtering instead."
-                ),
-            }
+                )
+            )
 
         if index.state == IndexState.BUILDING:
             indexed, total = index.build_progress
-            return {
-                "results": [],
-                "_message": (
+            return SearchResponse(
+                message=(
                     f"The vector index is building ({indexed}/{total} notes indexed). "
                     "Try again shortly."
-                ),
-            }
+                )
+            )
 
         if index.state == IndexState.ERROR:
-            return {
-                "results": [],
-                "_message": (
+            return SearchResponse(
+                message=(
                     "The vector index encountered an error during the last build. "
                     "It will retry on next server restart. "
                     "Use list_notes for structured filtering instead."
-                ),
-            }
+                )
+            )
 
         if not index.available:
-            return {
-                "results": [],
-                "_message": (
+            return SearchResponse(
+                message=(
                     "Semantic search is not available. "
                     "The vector index has not been built. "
                     "Use list_notes for structured filtering instead."
-                ),
-            }
-
-        if top_k < 1:
-            top_k = 1
-        elif top_k > 50:
-            top_k = 50
+                )
+            )
 
         exclude_set = set(exclude_ids or [])
 
@@ -313,7 +340,7 @@ def register_tools(
                     exclude_set.add(nid)
 
         if not all_query_texts:
-            return {"results": [], "_message": "No valid queries or note IDs to search."}
+            return SearchResponse(message="No valid queries or note IDs to search.")
 
         # Over-fetch to cover excluded ids. When a deck/tag filter is set, the
         # filtering happens post-hoc, so widen the window aggressively — otherwise
@@ -369,15 +396,39 @@ def register_tools(
             len(results),
             sum(len(r["matches"]) for r in results),
         )
-        return {"results": results}
+        return SearchResponse.model_validate({"results": results})
 
     @mcp.tool()
     @_safe_tool
     async def upsert_notes(
-        notes: list[NoteInput],
-        top_k_neighbors: int = 5,
-        neighbor_threshold: float = 0.5,
-    ) -> dict[str, Any]:
+        notes: Annotated[
+            list[NoteInput],
+            Field(
+                min_length=1,
+                max_length=100,
+                description="Array of note objects to create or update.",
+            ),
+        ],
+        top_k_neighbors: Annotated[
+            int,
+            Field(
+                ge=0,
+                le=20,
+                description=(
+                    "Maximum similar-note neighbors to return per result. Default 5. "
+                    "Set to 0 to disable neighbor lookup."
+                ),
+            ),
+        ] = 5,
+        neighbor_threshold: Annotated[
+            float,
+            Field(
+                ge=0.0,
+                le=1.0,
+                description="Minimum cosine similarity for a neighbor to be included. Default 0.5.",
+            ),
+        ] = 0.5,
+    ) -> UpsertNotesResponse:
         """Create or update notes in bulk (1-100 per call).
 
         If a note object includes an `id`, the existing note is updated;
@@ -399,13 +450,10 @@ def register_tools(
         If the index update fails transiently (e.g. the embedding service is
         briefly unavailable), the notes are still saved but `neighbors` is
         omitted. Each affected result is flagged `neighbors_unavailable: true`
-        and the response carries a top-level `_message`. Recover the exact same
+        and the response carries a top-level `message`. Recover the exact same
         neighbor data afterward with search_notes(ids=[<note id>]) — it embeds
         the same note text against the same index, so the result is identical
         to what would have been attached here."""
-        if len(notes) > 100:
-            return {"error": "Maximum 100 notes per call."}
-
         creates = sum(1 for n in notes if n.id is None)
         updates = len(notes) - creates
         logger.info("upsert_notes count=%d (creates=%d, updates=%d)", len(notes), creates, updates)
@@ -466,17 +514,19 @@ def register_tools(
                             len(pending),
                             pending,
                         )
-                        return {
-                            "results": results,
-                            "_message": (
-                                "Notes were saved, but the vector index update failed, "
-                                "so neighbors could not be computed. Retry with "
-                                f"search_notes(ids={pending}) to fetch the same "
-                                "neighbor data."
-                            ),
-                        }
+                        return UpsertNotesResponse.model_validate(
+                            {
+                                "results": results,
+                                "message": (
+                                    "Notes were saved, but the vector index update failed, "
+                                    "so neighbors could not be computed. Retry with "
+                                    f"search_notes(ids={pending}) to fetch the same "
+                                    "neighbor data."
+                                ),
+                            }
+                        )
 
-        return {"results": results}
+        return UpsertNotesResponse.model_validate({"results": results})
 
     async def _attach_neighbors(
         results: list[dict[str, Any]],
@@ -536,7 +586,16 @@ def register_tools(
 
     @mcp.tool()
     @_safe_tool
-    async def upsert_note_types(note_types: list[NoteTypeInput]) -> dict[str, Any]:
+    async def upsert_note_types(
+        note_types: Annotated[
+            list[NoteTypeInput],
+            Field(
+                min_length=1,
+                max_length=10,
+                description="Array of note type definitions to create or update.",
+            ),
+        ],
+    ) -> UpsertNoteTypesResponse:
         """Create or update note type definitions (1-10 per call).
 
         A note type defines the schema for notes: its fields, card templates
@@ -552,9 +611,6 @@ def register_tools(
 
         Note: removing fields from an existing note type deletes that
         field's data from all notes of that type."""
-        if len(note_types) > 10:
-            return {"error": "Maximum 10 note types per call."}
-
         names = [nt.name or f"id={nt.id}" for nt in note_types]
         logger.info("upsert_note_types count=%d names=%s", len(note_types), ", ".join(names))
 
@@ -568,18 +624,24 @@ def register_tools(
                     "upsert_note_types failed for %s: %s", r.get("name", "?"), r["error"]
                 )
 
-        return {"results": results}
+        return UpsertNoteTypesResponse.model_validate({"results": results})
 
     @mcp.tool()
     @_safe_tool
-    async def delete_notes(ids: list[int]) -> dict[str, Any]:
+    async def delete_notes(
+        ids: Annotated[
+            list[int],
+            Field(
+                min_length=1,
+                max_length=100,
+                description="Note IDs to delete. Their cards are deleted too.",
+            ),
+        ],
+    ) -> DeleteNotesResponse:
         """Permanently delete notes and all their associated cards.
 
         This cannot be undone. Use list_notes or search_notes first to
         verify which notes will be deleted."""
-        if len(ids) > 100:
-            return {"error": "Maximum 100 note IDs per call."}
-
         logger.info("delete_notes requested=%d", len(ids))
         result = await wrapper.delete_notes(ids)
         logger.info(
@@ -596,18 +658,24 @@ def register_tools(
             except Exception:
                 logger.warning("Failed to update index after delete", exc_info=True)
 
-        return result
+        return DeleteNotesResponse.model_validate(result)
 
     @mcp.tool()
     @_safe_tool
-    async def delete_note_types(ids: list[int]) -> dict[str, Any]:
+    async def delete_note_types(
+        ids: Annotated[
+            list[int],
+            Field(
+                min_length=1,
+                max_length=10,
+                description="Note type IDs to delete. Fails for any note type still in use.",
+            ),
+        ],
+    ) -> DeleteNoteTypesResponse:
         """Delete note type definitions by ID.
 
         A note type can only be deleted if no notes currently use it.
         Check use counts via collection_info first."""
-        if len(ids) > 10:
-            return {"error": "Maximum 10 note type IDs per call."}
-
         logger.info("delete_note_types requested=%d", len(ids))
         result = await wrapper.delete_note_types(ids)
         statuses: dict[str, int] = {}
@@ -615,4 +683,4 @@ def register_tools(
             s = r["status"]
             statuses[s] = statuses.get(s, 0) + 1
         logger.info("delete_note_types completed: %s", statuses)
-        return result
+        return DeleteNoteTypesResponse.model_validate(result)
