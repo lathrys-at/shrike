@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 import click
 
 from shrike.cli import output
@@ -9,6 +7,7 @@ from shrike.cli.config import resolve_embedding
 from shrike.cli.index_cmd import _poll_progress
 from shrike.cli.output import output_options
 from shrike.client import ShrikeClient
+from shrike.schemas import EmbeddingStatus
 
 
 @click.group("embedding", short_help="Manage the embedding service")
@@ -99,19 +98,17 @@ def embedding_start(
     with output.spinner("Starting embedding service…"):
         data = client.embedding_start(**resolved)
 
-    if data.get("status") == "already_running":
+    if data.status == "already_running":
         if json_out:
             output.emit_json(data)
         else:
             output.console.print("[dim]Embedding service is already running.[/dim]")
         return
 
-    idx = data.get("index", {})
-    building = idx.get("state") == "building"
+    idx = data.index
 
-    if building and not background:
-        total = idx.get("progress", {}).get("total", 0)
-        _poll_progress(client, total, json_out=json_out)
+    if idx.state == "building" and not background:
+        _poll_progress(client, idx.progress.total, json_out=json_out)
         if not json_out:
             _render_embedding(client.embedding_status())
         return
@@ -120,8 +117,8 @@ def embedding_start(
         output.emit_json(data)
     else:
         output.success("Embedding service started.")
-        _render_embedding(data.get("embedding", {}))
-        if building:
+        _render_embedding(data.embedding)
+        if idx.state == "building":
             output.console.print("[dim]Index rebuild started in the background.[/dim]")
 
 
@@ -150,26 +147,26 @@ def embedding_stop(ctx: click.Context) -> None:
         output.emit_json(data)
         return
 
-    if data.get("status") == "stopped":
+    if data.status == "stopped":
         output.success("Embedding service stopped.")
     else:
         output.console.print("[dim]Embedding service is not running.[/dim]")
 
 
-def _render_embedding(emb: dict[str, Any]) -> None:
+def _render_embedding(emb: EmbeddingStatus) -> None:
     """Render the embedding status block (shared by status and start)."""
-    if emb.get("available"):
+    if emb.available:
         output.kv("Embedding", "[green]available[/green]")
-        if emb.get("url"):
-            output.kv("URL", f"[cyan]{emb['url']}[/cyan]", indent=2)
-        if emb.get("pid"):
-            output.kv("PID", f"[cyan]{emb['pid']}[/cyan]", indent=2)
-        if emb.get("model"):
-            output.kv("Model", f"[cyan]{emb['model']}[/cyan]", indent=2)
+        if emb.url:
+            output.kv("URL", f"[cyan]{emb.url}[/cyan]", indent=2)
+        if emb.pid:
+            output.kv("PID", f"[cyan]{emb.pid}[/cyan]", indent=2)
+        if emb.model:
+            output.kv("Model", f"[cyan]{emb.model}[/cyan]", indent=2)
     else:
         labels = {
             "failed": "[red]failed to start[/red]",
             "stopped": "[dim]stopped[/dim]",
             "not_configured": "[dim]not configured[/dim]",
         }
-        output.kv("Embedding", labels.get(str(emb.get("state") or ""), "[dim]unavailable[/dim]"))
+        output.kv("Embedding", labels.get(emb.state or "", "[dim]unavailable[/dim]"))

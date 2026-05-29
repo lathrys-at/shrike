@@ -41,10 +41,9 @@ class TestCollectionInfo:
             include=["note_types"], note_type_details=["Basic"]
         )
         basic = next(nt for nt in info["note_types"] if nt["name"] == "Basic")
-        assert "templates" in basic
-        assert "css" in basic
-        assert len(basic["templates"]) >= 1
-        tmpl = basic["templates"][0]
+        assert "css" in basic["detail"]
+        assert len(basic["detail"]["templates"]) >= 1
+        tmpl = basic["detail"]["templates"][0]
         assert "front" in tmpl
         assert "back" in tmpl
         assert "name" in tmpl
@@ -52,8 +51,7 @@ class TestCollectionInfo:
     async def test_note_type_details_omitted_by_default(self, wrapper):
         info = await wrapper.get_collection_info(include=["note_types"])
         basic = next(nt for nt in info["note_types"] if nt["name"] == "Basic")
-        assert "templates" not in basic
-        assert "css" not in basic
+        assert "detail" not in basic
 
     async def test_default_deck_present(self, wrapper):
         info = await wrapper.get_collection_info(include=["decks"])

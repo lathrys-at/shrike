@@ -602,7 +602,7 @@ class TestTypeList:
         data = runner.json(["type", "show", "Basic"])
         assert data["name"] == "Basic"
         assert "fields" in data
-        assert "templates" in data
+        assert "templates" in data["detail"]
 
 
 class TestTypeCreateAndUpdate:
@@ -782,7 +782,7 @@ class TestTypeShowByID:
         basic = next(nt for nt in data if nt["name"] == "Basic")
         shown = runner.json(["type", "show", str(basic["id"])])
         assert shown["name"] == "Basic"
-        assert "templates" in shown
+        assert "templates" in shown["detail"]
 
 
 class TestTypeUpdateByName:
@@ -808,7 +808,7 @@ class TestTypeUpdateByName:
         assert "Updated" in result.output
 
         data = runner.json(["type", "show", "NameUpdatable"])
-        assert "color: green" in data["css"]
+        assert "color: green" in data["detail"]["css"]
 
 
 class TestTypeDelete:
