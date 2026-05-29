@@ -40,7 +40,6 @@ from shrike.schemas import (
     EmbeddingStopResponse,
     IndexRebuildResponse,
     IndexStatus,
-    IndexUnavailable,
     ListNotesResponse,
     NoteInput,
     NoteTypeInput,
@@ -57,6 +56,7 @@ from shrike.schemas import (
 _INDEX_REBUILD_ADAPTER: TypeAdapter[IndexRebuildResponse] = TypeAdapter(IndexRebuildResponse)
 _EMBEDDING_START_ADAPTER: TypeAdapter[EmbeddingStartResponse] = TypeAdapter(EmbeddingStartResponse)
 _EMBEDDING_STOP_ADAPTER: TypeAdapter[EmbeddingStopResponse] = TypeAdapter(EmbeddingStopResponse)
+_STOP_ADAPTER: TypeAdapter[StopResponse] = TypeAdapter(StopResponse)
 
 # -- Exceptions --------------------------------------------------------------
 
@@ -371,11 +371,10 @@ class ShrikeClient:
         return ServerStatus.model_validate(self._request("GET", "/status", timeout=5.0))
 
     def index_status(self) -> IndexStatus:
-        idx = self.status().index
-        return idx if idx is not None else IndexUnavailable()
+        return self.status().index
 
     def embedding_status(self) -> EmbeddingStatus:
-        return self.status().embedding or EmbeddingStatus()
+        return self.status().embedding
 
     def index_rebuild(self) -> IndexRebuildResponse:
         return _INDEX_REBUILD_ADAPTER.validate_python(
@@ -441,7 +440,7 @@ class ShrikeClient:
 
     def stop(self, timeout: float = 5.0) -> StopResponse:
         """Stop the local daemon (HTTP → SIGTERM → SIGKILL). Delegates to daemon."""
-        return StopResponse.model_validate(daemon.stop_server(timeout=timeout))
+        return _STOP_ADAPTER.validate_python(daemon.stop_server(timeout=timeout))
 
     def wait_until_ready(self, timeout: float = 15.0) -> ServerStatus | None:
         """Poll ``/status`` until the daemon responds. Returns status or None."""

@@ -113,8 +113,12 @@ def test_upsert_response_neighbor_shape() -> None:
     assert r.neighbors[0].score == 0.8
 
 
-def test_server_status_tolerates_degraded_daemon_dict() -> None:
-    """The degraded daemon.server_status() shape (no embedding/index) parses."""
+def test_server_status_models_the_responsive_payload() -> None:
+    """ServerStatus is exactly a responding server's /status report.
+
+    embedding/index are required — the "not running" / "unresponsive" connection
+    states are the CLI's concern, not optionals smuggled into this model.
+    """
     status = ServerStatus.model_validate(
         {
             "running": True,
@@ -123,13 +127,17 @@ def test_server_status_tolerates_degraded_daemon_dict() -> None:
             "collection": "/c.anki2",
             "log_level": "info",
             "log_dir": "/logs",
-            "started": "2026-01-01T00:00:00+00:00",
             "uptime": "5s",
+            "embedding": {"state": "not_configured"},
+            "index": {"state": "unavailable"},
         }
     )
-    assert status.running is True
-    assert status.embedding is None
-    assert status.index is None
+    assert status.pid == 123
+    assert status.embedding.state == "not_configured"
+    assert status.index.state == "unavailable"
+
+    with pytest.raises(ValidationError):
+        ServerStatus.model_validate({"running": True, "pid": 1})  # missing embedding/index
 
 
 def test_schemas_module_has_no_shrike_imports() -> None:

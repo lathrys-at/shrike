@@ -91,7 +91,11 @@ class TestCustomEndpoints:
             captured["json"] = json
             return _resp(
                 200,
-                {"status": "started", "embedding": {}, "index": {"state": "unavailable"}},
+                {
+                    "status": "started",
+                    "embedding": {"state": "not_configured"},
+                    "index": {"state": "unavailable"},
+                },
             )
 
         with patch("shrike.client.httpx.request", side_effect=req):
@@ -105,11 +109,20 @@ class TestCustomEndpoints:
 
     def test_index_status_extracts_section(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
-        with patch(
-            "shrike.client.httpx.request",
-            return_value=_resp(200, {"index": {"state": "ready"}}),
-        ):
-            assert c.index_status().state == "ready"
+        status = {
+            "running": True,
+            "pid": 1,
+            "url": "u",
+            "collection": "c",
+            "log_level": "info",
+            "log_dir": "/l",
+            "embedding": {"state": "not_configured"},
+            "index": {"state": "ready", "size": 5, "ndim": 384},
+        }
+        with patch("shrike.client.httpx.request", return_value=_resp(200, status)):
+            idx = c.index_status()
+            assert idx.state == "ready"
+            assert idx.size == 5
 
 
 class TestLifecycle:

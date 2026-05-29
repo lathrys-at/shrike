@@ -345,20 +345,27 @@ class DeleteNoteTypesResponse(BaseModel):
 # ============================================================================
 
 
-class EmbeddingStatus(BaseModel):
-    """Embedding service health, assembled from ``EmbeddingRuntime.health()``.
+class EmbeddingRunning(BaseModel):
+    """A live embedding service. ``url``/``model`` are absent only if the
+    /health probe failed while the process was up (then ``available`` is False);
+    that probe-dependence is genuine independent optionality."""
 
-    These optionals are independent, not a state machine: ``state`` is always
-    set; ``pid``/``url``/``model`` depend on whether a service object exists; and
-    ``available`` reflects a /health probe that can fail even while the process
-    runs. They don't collapse into a clean discriminated union.
-    """
-
+    state: Literal["running"] = "running"
     available: bool = False
-    state: str | None = None
     pid: int | None = None
     url: str | None = None
     model: str | None = None
+
+
+class EmbeddingDown(BaseModel):
+    """No live service — never started, stopped, or failed to start. Carries no
+    pid/url/model, so the down states can't masquerade as running."""
+
+    state: Literal["stopped", "failed", "not_configured"]
+    available: Literal[False] = False
+
+
+EmbeddingStatus = Annotated[EmbeddingRunning | EmbeddingDown, Field(discriminator="state")]
 
 
 class IndexProgress(BaseModel):
@@ -408,27 +415,27 @@ IndexStatus = Annotated[
 
 
 class ServerStatus(BaseModel):
-    """The /status response, and the degraded shape the CLI synthesizes from
-    ``daemon.server_status()`` when the server is alive but not yet responsive.
+    """A responding server's self-report from ``GET /status``.
 
-    The optionals are independent because the model aggregates two sources: a
-    full /status payload (carries ``embedding``/``index``) versus a local daemon
-    probe (carries neither, plus ``responsive=False``). ``responsive`` and
-    ``log`` are filled in by the CLI, not the server.
+    This models exactly one thing — what a live, responsive server reports — so
+    its fields are required (a server that answers always knows its pid, url,
+    collection, and embedding/index state). The "not running" and "running but
+    unresponsive" cases are *connection* states the client/CLI determine from
+    the daemon lock, not server payloads, so they're handled there rather than
+    smuggled in here as optionals. ``uptime`` is best-effort (omitted if the
+    start time can't be parsed); ``log`` is filled in by the CLI.
     """
 
-    running: bool = False
-    responsive: bool | None = None
-    pid: int | None = None
-    url: str | None = None
-    collection: str | None = None
-    log_level: str | None = None
-    log_dir: str | None = None
-    log: str | None = None
-    started: str | None = None
+    running: Literal[True] = True
+    pid: int
+    url: str
+    collection: str
+    log_level: str
+    log_dir: str
     uptime: str | None = None
-    embedding: EmbeddingStatus | None = None
-    index: IndexStatus | None = None
+    log: str | None = None
+    embedding: EmbeddingStatus
+    index: IndexStatus
 
 
 # -- custom-endpoint responses (discriminated on `status`) -------------------
@@ -495,15 +502,22 @@ class ShutdownResponse(BaseModel):
     pid: int
 
 
-class StopResponse(BaseModel):
-    """Result of stopping the local daemon (``daemon.stop_server``).
+class StopSucceeded(BaseModel):
+    """The daemon was stopped. ``pid`` is None only if the pid file was
+    unreadable; ``forced`` is True if a graceful stop timed out into a kill."""
 
-    ``pid``/``forced`` accompany a stop; ``reason`` accompanies a no-op. Kept as
-    one small model (rather than a union) because pydantic discriminators don't
-    take a bool, and the only consumer is ``ShrikeClient.stop``.
-    """
-
-    stopped: bool = False
-    reason: str | None = None
+    stopped: Literal[True] = True
     pid: int | None = None
-    forced: bool | None = None
+    forced: bool = False
+
+
+class StopFailed(BaseModel):
+    """Nothing to stop — the daemon wasn't running."""
+
+    stopped: Literal[False] = False
+    reason: str
+
+
+# Discriminated on the bool ``stopped``: a success carries pid/forced, a no-op
+# carries the reason. (daemon.stop_server is the source.)
+StopResponse = Annotated[StopSucceeded | StopFailed, Field(discriminator="stopped")]
