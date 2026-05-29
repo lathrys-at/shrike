@@ -3,12 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 import click
-import httpx
 
 from shrike.cli import output
 from shrike.cli.config import resolve_embedding
 from shrike.cli.index_cmd import _poll_progress
 from shrike.cli.output import output_options
+from shrike.client import ShrikeClient
 
 
 @click.group("embedding", short_help="Manage the embedding service")
@@ -27,14 +27,11 @@ def embedding_status(ctx: click.Context) -> None:
       shrike embedding status
       shrike --json embedding status
     """
-    base_url = ctx.obj["url"].rsplit("/", 1)[0]
+    client: ShrikeClient = ctx.obj["client"]
     json_out: bool = ctx.obj["json"]
 
     with output.spinner("Checking embedding service…"):
-        emb_status = _fetch_embedding_status(base_url)
-
-    if emb_status is None:
-        raise click.ClickException("Cannot connect to server. Is it running?")
+        emb_status = client.embedding_status()
 
     if json_out:
         output.emit_json(emb_status)
@@ -86,7 +83,7 @@ def embedding_start(
       shrike embedding start --background
     """
     config = ctx.obj["config"]
-    base_url = ctx.obj["url"].rsplit("/", 1)[0]
+    client: ShrikeClient = ctx.obj["client"]
     json_out: bool = ctx.obj["json"]
 
     resolved = resolve_embedding(
@@ -98,26 +95,9 @@ def embedding_start(
         gpu_layers=gpu_layers,
         llama_server=llama_server,
     )
-    if not resolved.get("model"):
-        raise click.UsageError(
-            "No embedding model configured. Provide --embedding-model, set "
-            "SHRIKE_EMBEDDING_MODEL, or add embedding.model to your config."
-        )
-
-    body = {k: v for k, v in resolved.items() if v is not None}
 
     with output.spinner("Starting embedding service…"):
-        try:
-            resp = httpx.post(f"{base_url}/embedding/start", json=body, timeout=120.0)
-        except httpx.ConnectError as err:
-            raise click.ClickException("Cannot connect to server. Is it running?") from err
-        except httpx.TimeoutException as err:
-            raise click.ClickException("Timed out starting the embedding service.") from err
-
-    if resp.status_code >= 400:
-        raise click.ClickException(resp.json().get("error", "Failed to start embedding service"))
-
-    data = resp.json()
+        data = client.embedding_start(**resolved)
 
     if data.get("status") == "already_running":
         if json_out:
@@ -131,11 +111,9 @@ def embedding_start(
 
     if building and not background:
         total = idx.get("progress", {}).get("total", 0)
-        _poll_progress(base_url, total, json_out=json_out)
+        _poll_progress(client, total, json_out=json_out)
         if not json_out:
-            emb = _fetch_embedding_status(base_url)
-            if emb:
-                _render_embedding(emb)
+            _render_embedding(client.embedding_status())
         return
 
     if json_out:
@@ -162,16 +140,12 @@ def embedding_stop(ctx: click.Context) -> None:
       shrike embedding stop
       shrike --json embedding stop
     """
-    base_url = ctx.obj["url"].rsplit("/", 1)[0]
+    client: ShrikeClient = ctx.obj["client"]
     json_out: bool = ctx.obj["json"]
 
     with output.spinner("Stopping embedding service…"):
-        try:
-            resp = httpx.post(f"{base_url}/embedding/stop", timeout=30.0)
-        except httpx.ConnectError as err:
-            raise click.ClickException("Cannot connect to server. Is it running?") from err
+        data = client.embedding_stop()
 
-    data = resp.json()
     if json_out:
         output.emit_json(data)
         return
@@ -193,16 +167,9 @@ def _render_embedding(emb: dict[str, Any]) -> None:
         if emb.get("model"):
             output.kv("Model", f"[cyan]{emb['model']}[/cyan]", indent=2)
     else:
-        output.kv("Embedding", "[dim]unavailable[/dim]")
-
-
-def _fetch_embedding_status(base_url: str) -> dict[str, Any] | None:
-    """Fetch just the embedding portion of /status."""
-    try:
-        resp = httpx.get(f"{base_url}/status", timeout=5.0)
-        if resp.status_code == 200:
-            data: dict[str, Any] = resp.json()
-            return data.get("embedding")
-    except (httpx.ConnectError, httpx.TimeoutException):
-        pass
-    return None
+        labels = {
+            "failed": "[red]failed to start[/red]",
+            "stopped": "[dim]stopped[/dim]",
+            "not_configured": "[dim]not configured[/dim]",
+        }
+        output.kv("Embedding", labels.get(str(emb.get("state") or ""), "[dim]unavailable[/dim]"))

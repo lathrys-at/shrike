@@ -335,6 +335,9 @@ class EmbeddingRuntime:
         self._llama_server = llama_server
         self._service: EmbeddingService | None = None
         self._lock = threading.Lock()
+        # Tracks why the service isn't running, so status can distinguish a
+        # deliberate stop from a failed start or a missing model.
+        self._last_start_failed = False
 
     @property
     def service(self) -> EmbeddingService | None:
@@ -348,10 +351,23 @@ class EmbeddingRuntime:
     def model(self) -> str | None:
         return self._model
 
+    @property
+    def state(self) -> str:
+        """One of ``running``/``failed``/``not_configured``/``stopped``."""
+        if self.running:
+            return "running"
+        if self._last_start_failed:
+            return "failed"
+        if not self._model:
+            return "not_configured"
+        return "stopped"
+
     def health(self) -> dict[str, Any]:
-        if self._service is None:
-            return {"available": False}
-        return self._service.health()
+        info: dict[str, Any] = (
+            {"available": False} if self._service is None else self._service.health()
+        )
+        info["state"] = self.state
+        return info
 
     def start(
         self,
@@ -400,7 +416,12 @@ class EmbeddingRuntime:
                 gpu_layers=self._gpu_layers,
                 llama_server=self._llama_server,
             )
-            svc.start()
+            try:
+                svc.start()
+            except Exception:
+                self._last_start_failed = True
+                raise
+            self._last_start_failed = False
             self._service = svc
             self._index.set_embedding_service(svc)
             return svc
@@ -413,4 +434,5 @@ class EmbeddingRuntime:
             self._index.set_embedding_service(None)
             self._service.stop()
             self._service = None
+            self._last_start_failed = False
             return True

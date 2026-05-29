@@ -315,7 +315,17 @@ def register_tools(
         if not all_query_texts:
             return {"results": [], "_message": "No valid queries or note IDs to search."}
 
-        raw_results = index.search(all_query_texts, top_k=top_k + len(exclude_set))
+        # Over-fetch to cover excluded ids. When a deck/tag filter is set, the
+        # filtering happens post-hoc, so widen the window aggressively — otherwise
+        # a deck-scoped search whose nearest neighbors sit outside the deck can
+        # silently under-return. (Heuristic: still possible to under-return if the
+        # in-scope notes rank very deep; documented in docs/mcp-tools.md.)
+        fetch_k = top_k + len(exclude_set)
+        if deck or tags:
+            fetch_k = max(fetch_k, top_k * 10)
+            if index.size:
+                fetch_k = min(fetch_k, index.size)
+        raw_results = index.search(all_query_texts, top_k=fetch_k)
 
         results: list[dict[str, Any]] = []
         for source, matches in zip(sources, raw_results, strict=True):
@@ -332,6 +342,7 @@ def register_tools(
                 try:
                     note_data = await wrapper.note_to_dict(nid, "full")
                 except Exception:
+                    logger.debug("search_notes: skipping unreadable note %s", nid, exc_info=True)
                     continue
 
                 if deck and note_data.get("deck") != deck:
@@ -498,6 +509,11 @@ def register_tools(
                     try:
                         note_data = await wrapper.note_to_dict(neighbor_id, "meta")
                     except Exception:
+                        logger.debug(
+                            "neighbor lookup: skipping unreadable note %s",
+                            neighbor_id,
+                            exc_info=True,
+                        )
                         continue
                     neighbors.append(
                         {

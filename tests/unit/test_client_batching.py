@@ -6,12 +6,12 @@ from unittest.mock import patch
 
 import pytest
 
-from shrike.cli.client import ShrikeClient
+from shrike.client import ShrikeClient
 
 
 @pytest.fixture()
 def client():
-    return ShrikeClient("http://fake:9999/mcp", config=None, autostart=False)
+    return ShrikeClient("http://fake:9999/mcp", autostart=False)
 
 
 class TestUpsertNotesBatching:

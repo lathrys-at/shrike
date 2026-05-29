@@ -721,7 +721,8 @@ class TestStatusEndpoint:
         status_url = server.url.rsplit("/", 1)[0] + "/status"
         resp = httpx.get(status_url, timeout=5.0)
         body = resp.json()
-        assert body["embedding"] == {"available": False}
+        assert body["embedding"]["available"] is False
+        assert body["embedding"]["state"] == "not_configured"
         assert body["index"]["state"] == "unavailable"
 
 

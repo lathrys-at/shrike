@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from shrike.paths import config_file, log_dir
+from shrike.paths import config_file
+from shrike.paths import log_dir as _default_log_dir
+
+if TYPE_CHECKING:
+    from shrike.client import ServerSpec
 
 DEFAULT_CONFIG_PATH = config_file()
 
@@ -24,7 +28,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "gpu_layers": None,
     },
     "logging": {
-        "dir": str(log_dir()),
+        "dir": str(_default_log_dir()),
         "level": "info",
         "levels": {},
         "max_bytes": 10485760,
@@ -127,6 +131,68 @@ def resolve_embedding(
         resolved["llama_server"] = os.path.expanduser(str(resolved["llama_server"]))
 
     return resolved
+
+
+def embedding_args(resolved: dict[str, Any], *, no_embedding: bool = False) -> list[str]:
+    """Build server CLI args from already-resolved embedding params.
+
+    ``resolved`` comes from :func:`resolve_embedding` (config → env → flags).
+    """
+    args: list[str] = []
+    if resolved.get("llama_server"):
+        args.extend(["--llama-server", str(resolved["llama_server"])])
+    if resolved.get("model"):
+        args.extend(["--embedding-model", str(resolved["model"])])
+    if resolved.get("port"):
+        args.extend(["--embedding-port", str(resolved["port"])])
+    if resolved.get("context_size"):
+        args.extend(["--embedding-context-size", str(resolved["context_size"])])
+    if resolved.get("threads"):
+        args.extend(["--embedding-threads", str(resolved["threads"])])
+    if resolved.get("gpu_layers"):
+        args.extend(["--embedding-gpu-layers", str(resolved["gpu_layers"])])
+    if no_embedding:
+        args.append("--no-embedding")
+    return args
+
+
+def build_server_spec(
+    config: dict[str, Any],
+    *,
+    collection: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    log_dir: str | None = None,
+    log_level: str | None = None,
+    no_embedding: bool = False,
+    embedding_overrides: dict[str, Any] | None = None,
+) -> ServerSpec | None:
+    """Resolve a launch spec for the local daemon, or None if no collection.
+
+    Centralizes config → env → flag resolution so callers (CLI commands, the
+    auto-start client) hand a fully-formed, config-agnostic spec to the client.
+    """
+    from shrike.client import ServerSpec
+
+    coll = resolve_collection(config, collection)
+    if not coll:
+        return None
+
+    server = config.get("server", {})
+    log_config = config.get("logging", {})
+    resolved_log_dir = str(
+        Path(log_dir or log_config.get("dir") or str(_default_log_dir())).expanduser()
+    )
+    resolved_emb = resolve_embedding(config, **(embedding_overrides or {}))
+
+    return ServerSpec(
+        collection=coll,
+        host=host or server.get("host", "127.0.0.1"),
+        port=port or server.get("port", 8372),
+        log_dir=resolved_log_dir,
+        log_level=log_level or log_config.get("level", "info"),
+        embedding_args=embedding_args(resolved_emb, no_embedding=no_embedding),
+    )
 
 
 def resolve_url(config: dict[str, Any], url_override: str | None = None) -> str:

@@ -497,4 +497,23 @@ class TestEmbeddingRuntime:
 
     def test_health_no_service(self) -> None:
         runtime = EmbeddingRuntime(index=MagicMock())
-        assert runtime.health() == {"available": False}
+        health = runtime.health()
+        assert health["available"] is False
+        assert health["state"] == "not_configured"
+
+    def test_state_transitions(self) -> None:
+        # No model → not_configured.
+        assert EmbeddingRuntime(index=MagicMock()).state == "not_configured"
+        # Model present but not started → stopped.
+        assert EmbeddingRuntime(index=MagicMock(), model="/m.gguf").state == "stopped"
+
+    def test_state_failed_after_start_error(self) -> None:
+        runtime = EmbeddingRuntime(index=MagicMock(), model="/m.gguf")
+        fake_svc = MagicMock()
+        fake_svc.start.side_effect = RuntimeError("boom")
+        with (
+            patch("shrike.embedding.EmbeddingService", return_value=fake_svc),
+            pytest.raises(RuntimeError),
+        ):
+            runtime.start()
+        assert runtime.state == "failed"
