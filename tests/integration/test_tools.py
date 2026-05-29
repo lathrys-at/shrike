@@ -26,15 +26,15 @@ class TestCollectionInfo:
 
     def test_include_filters(self, mcp):
         result = mcp("collection_info", {"include": ["stats"]})
-        assert "stats" in result
-        assert "note_types" not in result
-        assert "decks" not in result
+        assert result["stats"] is not None
+        assert result["note_types"] is None
+        assert result["decks"] is None
 
     def test_include_multiple(self, mcp):
         result = mcp("collection_info", {"include": ["decks", "tags"]})
-        assert "decks" in result
-        assert "tags" in result
-        assert "note_types" not in result
+        assert result["decks"] is not None
+        assert result["tags"] is not None
+        assert result["note_types"] is None
 
     def test_note_type_details(self, mcp):
         result = mcp(
@@ -199,7 +199,7 @@ class TestNoteLifecycle:
         note_id = result["results"][0]["id"]
         listed = mcp("list_notes", {"ids": [note_id], "fields": "meta"})
         note = listed["notes"][0]
-        assert "content" not in note
+        assert note["content"] is None
         assert note["note_type"] == "Basic"
         assert note["deck"] == "Meta"
 
@@ -385,39 +385,14 @@ class TestListNotesAdvanced:
         assert result["total"] == 1
         assert "mitochondria" in result["notes"][0]["content"]["Front"]
 
-    def test_limit_clamped_to_max(self, mcp):
-        mcp(
-            "upsert_notes",
-            {
-                "notes": [
-                    {
-                        "deck": "Clamp",
-                        "note_type": "Basic",
-                        "fields": {"Front": f"Q{i}", "Back": f"A{i}"},
-                    }
-                    for i in range(3)
-                ]
-            },
-        )
-        result = mcp("list_notes", {"deck": "Clamp", "limit": 999})
-        assert result["limit"] == 200
-        assert result["total"] == 3
+    def test_limit_over_max_rejected(self, mcp):
+        # limit is schema-constrained (1-200); out-of-range is rejected.
+        with pytest.raises(RuntimeError, match="less than or equal to 200"):
+            mcp("list_notes", {"deck": "Clamp", "limit": 999})
 
-    def test_limit_clamped_to_min(self, mcp):
-        mcp(
-            "upsert_notes",
-            {
-                "notes": [
-                    {
-                        "deck": "ClampMin",
-                        "note_type": "Basic",
-                        "fields": {"Front": "Q", "Back": "A"},
-                    }
-                ]
-            },
-        )
-        result = mcp("list_notes", {"deck": "ClampMin", "limit": -5})
-        assert result["limit"] == 1
+    def test_limit_below_min_rejected(self, mcp):
+        with pytest.raises(RuntimeError, match="greater than or equal to 1"):
+            mcp("list_notes", {"deck": "ClampMin", "limit": -5})
 
 
 class TestBulkOperations:
@@ -642,11 +617,11 @@ class TestSearchNotesStub:
     def test_returns_stub_message(self, mcp):
         result = mcp("search_notes", {"queries": ["anything"]})
         assert result["results"] == []
-        assert "_message" in result
+        assert result["message"]
 
     def test_requires_queries_or_ids(self, mcp):
         result = mcp("search_notes", {})
-        assert "error" in result
+        assert result["error"]
 
 
 class TestValidation:
@@ -758,41 +733,38 @@ class TestBatchLimits:
     """Verify the server enforces maximum batch sizes."""
 
     def test_upsert_notes_over_100_rejected(self, mcp):
-        result = mcp(
-            "upsert_notes",
-            {
-                "notes": [
-                    {
-                        "deck": "Batch",
-                        "note_type": "Basic",
-                        "fields": {"Front": f"Q{i}", "Back": f"A{i}"},
-                    }
-                    for i in range(101)
-                ]
-            },
-        )
-        assert "error" in result
-        assert "100" in result["error"]
+        with pytest.raises(RuntimeError, match="at most 100"):
+            mcp(
+                "upsert_notes",
+                {
+                    "notes": [
+                        {
+                            "deck": "Batch",
+                            "note_type": "Basic",
+                            "fields": {"Front": f"Q{i}", "Back": f"A{i}"},
+                        }
+                        for i in range(101)
+                    ]
+                },
+            )
 
     def test_upsert_note_types_over_10_rejected(self, mcp):
-        result = mcp(
-            "upsert_note_types",
-            {
-                "note_types": [
-                    {
-                        "name": f"Type{i}",
-                        "fields": ["F"],
-                        "templates": [{"name": "C", "front": "{{F}}", "back": "{{F}}"}],
-                        "css": "",
-                    }
-                    for i in range(11)
-                ]
-            },
-        )
-        assert "error" in result
-        assert "10" in result["error"]
+        with pytest.raises(RuntimeError, match="at most 10"):
+            mcp(
+                "upsert_note_types",
+                {
+                    "note_types": [
+                        {
+                            "name": f"Type{i}",
+                            "fields": ["F"],
+                            "templates": [{"name": "C", "front": "{{F}}", "back": "{{F}}"}],
+                            "css": "",
+                        }
+                        for i in range(11)
+                    ]
+                },
+            )
 
     def test_delete_notes_over_100_rejected(self, mcp):
-        result = mcp("delete_notes", {"ids": list(range(101))})
-        assert "error" in result
-        assert "100" in result["error"]
+        with pytest.raises(RuntimeError, match="at most 100"):
+            mcp("delete_notes", {"ids": list(range(101))})

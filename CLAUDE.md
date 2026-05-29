@@ -28,14 +28,16 @@ src/shrike/                       # Python package (src layout)
 ├── collection.py                 # CollectionWrapper — all Anki DB operations
 ├── note_types.py                 # upsert_note_types() — create/update note types
 ├── daemon.py                     # Daemon lifecycle — file locks, spawn, shutdown
-├── tools.py                      # Registers 7 MCP tools, Pydantic input models
+├── tools.py                      # Registers 7 MCP tools; returns response models (emits outputSchema)
+├── schemas.py                    # Pydantic models — single source of truth for every tool request/response + status shape
+├── client.py                     # ShrikeClient — standalone HTTP client; typed per-tool methods, daemon lifecycle
 ├── paths.py                      # Platform-canonical directories (via platformdirs)
 ├── log.py                        # Logging config, log parsing and styling
 ├── embedding.py                  # EmbeddingService (llama-server subprocess) + EmbeddingRuntime (start/stop lifecycle)
 ├── index.py                      # VectorIndex — USearch HNSW index for note embeddings
 └── cli/
     ├── __init__.py               # Root Click group, global options (--config, --url, --json, --pretty)
-    ├── client.py                 # ShrikeClient — HTTP client for MCP JSON-RPC calls
+    ├── client.py                 # Re-export shim → shrike.client (keeps imports working)
     ├── config.py                 # YAML config loading/saving
     ├── completion_cmd.py         # shrike completion {bash,zsh,fish}
     ├── embedding_cmd.py          # shrike embedding status/start/stop
@@ -46,7 +48,7 @@ src/shrike/                       # Python package (src layout)
     ├── type_cmd.py               # shrike type list/show/create/update/delete
     └── output.py                 # Rich formatting, output_options decorator
 tests/
-├── unit/                         # 255 tests — direct calls, no server
+├── unit/                         # 290 tests — direct calls, no server
 │   ├── conftest.py               # wrapper fixture (temp collection), basic_note fixture
 │   ├── test_collection_info.py
 │   ├── test_list_notes.py
@@ -68,7 +70,7 @@ tests/
     └── test_semantic.py          # Semantic search, neighbors, index CLI (requires llama-server)
 docs/
 ├── mcp-tools.md                  # Tool documentation (human-readable)
-└── mcp-schema.json               # Full JSON schema for all 7 tools
+└── mcp-schema.json               # Generated input+output JSON schema for all 7 tools (scripts/gen_schema.py)
 ```
 
 ## Development setup
@@ -134,7 +136,9 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 | `delete_notes` | Working | Permanently delete notes by ID |
 | `delete_note_types` | Working | Delete note types by ID (only if unused) |
 
-Tool input schemas are defined as Pydantic models (`NoteInput`, `NoteTypeInput`, `TemplateInput`) in `tools.py`. The authoritative schema is in `docs/mcp-schema.json`.
+Every tool request and response shape — plus the server-status shapes — is a Pydantic model in `shrike/schemas.py` (the single source of truth). Tool functions in `tools.py` return the response models, so FastMCP emits an `outputSchema` for each tool. The standalone `ShrikeClient` exposes a typed per-tool method for each (e.g. `list_notes(...) -> ListNotesResponse`) that validates the wire response into the model; `ShrikeClient._call()` is the untyped escape hatch. `docs/mcp-schema.json` is **generated** from these models by `scripts/gen_schema.py` and guarded by a CI drift check (`--check`) plus `tests/unit/test_schema_doc.py` — never hand-edit it.
+
+Input bounds (e.g. `limit` 1–200, `top_k` 1–50, batch sizes ≤100/≤10) are declared as `Annotated[..., Field(ge=, le=, min_length=, max_length=)]` on the tool params, so FastMCP **rejects** out-of-range input with a validation error rather than silently clamping. The wire response carries `message` (not `_message`) for non-error advisories (e.g. index-building notices, neighbor-retry hints).
 
 ### CLI structure
 

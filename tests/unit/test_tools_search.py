@@ -68,23 +68,23 @@ class TestSearchNotesStates:
         mock_index.state = IndexState.UNAVAILABLE
         result = _call(mcp_app, "search_notes", {"queries": ["test"]})
         assert result["results"] == []
-        assert "not available" in result["_message"]
+        assert "not available" in result["message"]
 
     def test_building_returns_progress(self, mcp_app, mock_index):
         mock_index.state = IndexState.BUILDING
         mock_index.build_progress = (50, 100)
         result = _call(mcp_app, "search_notes", {"queries": ["test"]})
-        assert "50/100" in result["_message"]
+        assert "50/100" in result["message"]
 
     def test_error_returns_message(self, mcp_app, mock_index):
         mock_index.state = IndexState.ERROR
         result = _call(mcp_app, "search_notes", {"queries": ["test"]})
-        assert "error" in result["_message"]
+        assert "error" in result["message"]
 
     def test_no_index_returns_message(self, mcp_no_index):
         result = _call(mcp_no_index, "search_notes", {"queries": ["test"]})
         assert result["results"] == []
-        assert "not available" in result["_message"]
+        assert "not available" in result["message"]
 
     def test_requires_queries_or_ids(self, mcp_app):
         result = _call(mcp_app, "search_notes", {})
@@ -142,11 +142,13 @@ class TestSearchNotesResults:
         assert "content" in match
         assert match["content"]["Front"] == "What is 2+2?"
 
-    def test_top_k_clamped(self, mcp_app, mock_index):
+    def test_top_k_out_of_range_rejected(self, mcp_app, mock_index):
+        """top_k is schema-constrained (ge=1, le=50); out-of-range is rejected."""
+        from mcp.server.fastmcp.exceptions import ToolError
+
         mock_index.search.return_value = [[]]
-        _call(mcp_app, "search_notes", {"queries": ["test"], "top_k": 0})
-        args = mock_index.search.call_args
-        assert args[1]["top_k"] >= 1
+        with pytest.raises(ToolError):
+            _call(mcp_app, "search_notes", {"queries": ["test"], "top_k": 0})
 
     def test_deck_filter_overfetches(self, mcp_app, mock_index):
         """With a deck filter, search over-fetches a wider window (2.3)."""
@@ -228,7 +230,7 @@ class TestUpsertNeighbors:
 
     def test_no_neighbors_without_index(self, mcp_no_index):
         result = _upsert(mcp_no_index, [BASIC_NOTE])
-        assert "neighbors" not in result["results"][0]
+        assert result["results"][0]["neighbors"] is None
 
     def test_neighbor_failure_doesnt_fail_upsert(self, wrapper, mock_index, mcp_app):
         mock_index.search.side_effect = RuntimeError("embedding service down")
@@ -242,10 +244,9 @@ class TestUpsertNeighbors:
         r = result["results"][0]
         nid = r["id"]
         assert r["status"] == "created"
-        assert "neighbors" not in r
+        assert r["neighbors"] is None
         assert r["neighbors_unavailable"] is True
-        assert "_message" in result
-        assert f"search_notes(ids=[{nid}])" in result["_message"]
+        assert f"search_notes(ids=[{nid}])" in result["message"]
 
     def test_neighbors_on_update(self, wrapper, mock_index, mcp_app, basic_note):
         other = _seed(wrapper, [BASIC_NOTE])[0]["id"]
@@ -265,7 +266,7 @@ class TestUpsertNeighbors:
         err = [r for r in result["results"] if r.get("status") == "error"]
         assert len(ok) == 1
         assert len(err) == 1
-        assert "neighbors" not in err[0]
+        assert err[0]["neighbors"] is None
 
 
 class TestDeleteIndexUpdate:
@@ -315,13 +316,13 @@ class TestUpsertIndexUpdate:
         result = _upsert(mcp_app, [BASIC_NOTE])
         r = result["results"][0]
         assert r["neighbors_unavailable"] is True
-        assert f"search_notes(ids=[{r['id']}])" in result["_message"]
+        assert f"search_notes(ids=[{r['id']}])" in result["message"]
 
     def test_no_retry_hint_on_success(self, wrapper, mock_index, mcp_app):
         """Successful neighbor computation carries no retry flag or message."""
         mock_index.search.return_value = [[]]
         result = _upsert(mcp_app, [BASIC_NOTE])
         r = result["results"][0]
-        assert "neighbors" in r
-        assert "neighbors_unavailable" not in r
-        assert "_message" not in result
+        assert r["neighbors"] == []
+        assert r["neighbors_unavailable"] is None
+        assert result["message"] is None

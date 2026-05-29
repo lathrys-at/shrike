@@ -22,11 +22,14 @@ class TestUpsertNotesBatching:
         ]
         mock_response = {"results": [{"status": "created", "id": i} for i in range(5)]}
 
-        with patch.object(client, "call", return_value=mock_response) as mock_call:
+        with patch.object(client, "_call", return_value=mock_response) as mock_call:
             result = client.upsert_notes(notes)
 
-        mock_call.assert_called_once_with("upsert_notes", {"notes": notes})
-        assert len(result["results"]) == 5
+        mock_call.assert_called_once_with(
+            "upsert_notes",
+            {"notes": notes, "top_k_neighbors": 5, "neighbor_threshold": 0.5},
+        )
+        assert len(result.results) == 5
 
     def test_large_batch_split_into_chunks(self, client):
         notes = [
@@ -44,12 +47,12 @@ class TestUpsertNotesBatching:
             chunks_received.append(len(chunk))
             return {"results": [{"status": "created", "id": i} for i in range(len(chunk))]}
 
-        with patch.object(client, "call", side_effect=fake_call):
+        with patch.object(client, "_call", side_effect=fake_call):
             result = client.upsert_notes(notes)
 
         assert call_count == 3
         assert chunks_received == [100, 100, 50]
-        assert len(result["results"]) == 250
+        assert len(result.results) == 250
 
 
 class TestUpsertNoteTypesBatching:
@@ -57,11 +60,11 @@ class TestUpsertNoteTypesBatching:
         types = [{"name": f"T{i}", "fields": ["F"], "templates": [], "css": ""} for i in range(5)]
         mock_response = {"results": [{"status": "created", "id": i} for i in range(5)]}
 
-        with patch.object(client, "call", return_value=mock_response) as mock_call:
+        with patch.object(client, "_call", return_value=mock_response) as mock_call:
             result = client.upsert_note_types(types)
 
         mock_call.assert_called_once_with("upsert_note_types", {"note_types": types})
-        assert len(result["results"]) == 5
+        assert len(result.results) == 5
 
     def test_large_batch_split_into_chunks(self, client):
         types = [{"name": f"T{i}", "fields": ["F"], "templates": [], "css": ""} for i in range(25)]
@@ -76,12 +79,12 @@ class TestUpsertNoteTypesBatching:
             chunks_received.append(len(chunk))
             return {"results": [{"status": "created", "id": i} for i in range(len(chunk))]}
 
-        with patch.object(client, "call", side_effect=fake_call):
+        with patch.object(client, "_call", side_effect=fake_call):
             result = client.upsert_note_types(types)
 
         assert call_count == 3
         assert chunks_received == [10, 10, 5]
-        assert len(result["results"]) == 25
+        assert len(result.results) == 25
 
 
 class TestDeleteNotesBatching:
@@ -89,11 +92,11 @@ class TestDeleteNotesBatching:
         ids = list(range(50))
         mock_response = {"deleted": ids, "not_found": []}
 
-        with patch.object(client, "call", return_value=mock_response) as mock_call:
+        with patch.object(client, "_call", return_value=mock_response) as mock_call:
             result = client.delete_notes(ids)
 
         mock_call.assert_called_once_with("delete_notes", {"ids": ids})
-        assert result["deleted"] == ids
+        assert result.deleted == ids
 
     def test_large_batch_split_into_chunks(self, client):
         ids = list(range(250))
@@ -106,12 +109,12 @@ class TestDeleteNotesBatching:
             chunk_ids = args["ids"]
             return {"deleted": chunk_ids, "not_found": []}
 
-        with patch.object(client, "call", side_effect=fake_call):
+        with patch.object(client, "_call", side_effect=fake_call):
             result = client.delete_notes(ids)
 
         assert call_count == 3
-        assert len(result["deleted"]) == 250
-        assert result["not_found"] == []
+        assert len(result.deleted) == 250
+        assert result.not_found == []
 
     def test_large_batch_merges_not_found(self, client):
         ids = list(range(150))
@@ -120,8 +123,8 @@ class TestDeleteNotesBatching:
             chunk_ids = args["ids"]
             return {"deleted": chunk_ids[:-1], "not_found": [chunk_ids[-1]]}
 
-        with patch.object(client, "call", side_effect=fake_call):
+        with patch.object(client, "_call", side_effect=fake_call):
             result = client.delete_notes(ids)
 
-        assert len(result["deleted"]) == 148
-        assert len(result["not_found"]) == 2
+        assert len(result.deleted) == 148
+        assert len(result.not_found) == 2

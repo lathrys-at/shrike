@@ -2,6 +2,8 @@
 
 Seven tools for managing an Anki flashcard collection. The server maintains a local vector index over all note content, enabling semantic search and contextual neighbor suggestions without external API calls.
 
+The full machine-readable input/output JSON schema lives in [`mcp-schema.json`](mcp-schema.json). That file is **generated** from the Pydantic models in `shrike/schemas.py` by `scripts/gen_schema.py` (CI fails if it drifts) — never edit it by hand. This document is the human-readable companion.
+
 Notes in Anki have a **note type** that defines their fields (e.g., a "Basic" note type has "Front" and "Back" fields; a "Cloze" note type has "Text" and "Extra"). A note type also defines **card templates** — HTML templates that control how cards are rendered — and **CSS styling** shared across all its cards. A single note produces one or more cards depending on its note type. Notes belong to a **deck** and can have **tags**.
 
 ---
@@ -193,7 +195,7 @@ When creating notes, `deck`, `note_type`, and `fields` are required. When updati
 
 When a vector index is available, each result includes `neighbors`: the most similar existing notes ranked by cosine similarity. Use these for tag consistency (adopt tags from nearby notes), detecting near-duplicates (high scores suggest overlap), or understanding where a new note sits in the collection.
 
-If the index update fails transiently (for example, the embedding service is briefly unavailable), the notes are still saved but `neighbors` is omitted. Each affected result is flagged with `neighbors_unavailable: true`, and the response carries a top-level `_message` naming the IDs to retry. The exact same neighbor data is reproducible afterward with `search_notes` keyed on the note ID (`search_notes(ids=[<note id>])`) — it embeds the same note text against the same index, so the result is identical to what would have been attached here.
+If the index update fails transiently (for example, the embedding service is briefly unavailable), the notes are still saved but `neighbors` is omitted. Each affected result is flagged with `neighbors_unavailable: true`, and the response carries a top-level `message` naming the IDs to retry. The exact same neighbor data is reproducible afterward with `search_notes` keyed on the note ID (`search_notes(ids=[<note id>])`) — it embeds the same note text against the same index, so the result is identical to what would have been attached here.
 
 ### Parameters
 
@@ -243,7 +245,7 @@ If the index update fails transiently (for example, the embedding service is bri
 }
 ```
 
-When the index update fails transiently, saved notes carry `neighbors_unavailable` instead of `neighbors`, and the response adds a top-level `_message`:
+When the index update fails transiently, saved notes carry `neighbors_unavailable` instead of `neighbors`, and the response adds a top-level `message`:
 
 ```jsonc
 {
@@ -254,7 +256,7 @@ When the index update fails transiently, saved notes carry `neighbors_unavailabl
       "neighbors_unavailable": true   // index hiccup — neighbors not computed
     }
   ],
-  "_message": "Notes were saved, but the vector index update failed, so neighbors could not be computed. Retry with search_notes(ids=[1700000000789]) to fetch the same neighbor data."
+  "message": "Notes were saved, but the vector index update failed, so neighbors could not be computed. Retry with search_notes(ids=[1700000000789]) to fetch the same neighbor data."
 }
 ```
 
