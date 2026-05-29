@@ -20,21 +20,21 @@ def _resolve_note_type(client: object, identifier: str) -> tuple[int, str]:
 
     assert isinstance(client, ShrikeClient)
     result = client.collection_info(include=["note_types"])
-    note_types = result.get("note_types", [])
+    note_types = result.note_types or []
 
     cleaned = identifier.lstrip("#")
     if cleaned.isdigit():
         nt_id = int(cleaned)
-        match = next((nt for nt in note_types if nt["id"] == nt_id), None)
+        match = next((nt for nt in note_types if nt.id == nt_id), None)
         if match is None:
             raise click.ClickException(f"Note type with ID {nt_id} not found.")
-        return match["id"], match["name"]
+        return match.id, match.name
 
-    match = next((nt for nt in note_types if nt["name"] == identifier), None)
+    match = next((nt for nt in note_types if nt.name == identifier), None)
     if match is None:
-        available = ", ".join(nt["name"] for nt in note_types)
+        available = ", ".join(nt.name for nt in note_types)
         raise click.ClickException(f"Note type '{identifier}' not found. Available: {available}")
-    return match["id"], match["name"]
+    return match.id, match.name
 
 
 def _parse_template(value: str) -> dict:
@@ -84,14 +84,14 @@ def type_list(ctx: click.Context, identifier: str | None) -> None:
                 note_type_details=[nt_name],
             )
 
-        note_types = result.get("note_types", [])
-        match = next((nt for nt in note_types if nt["id"] == nt_id), None)
+        note_types = result.note_types or []
+        match = next((nt for nt in note_types if nt.id == nt_id), None)
 
         if ctx.obj["json"]:
             output.emit_json(match)
             return
 
-        if not match or match.get("templates") is None:
+        if not match or match.templates is None:
             raise click.ClickException(f"Note type '{identifier}' not found.")
 
         output.note_type_detail(match)
@@ -101,10 +101,10 @@ def type_list(ctx: click.Context, identifier: str | None) -> None:
         result = client.collection_info(include=["note_types"])
 
     if ctx.obj["json"]:
-        output.emit_json(result.get("note_types", []))
+        output.emit_json(result.note_types or [])
         return
 
-    note_types = result.get("note_types", [])
+    note_types = result.note_types or []
     if not note_types:
         output.console.print("[dim]No note types found.[/dim]")
         return
@@ -196,15 +196,14 @@ def type_create(
         output.emit_json(result)
         return
 
-    for r in result.get("results", []):
-        status = r.get("status")
-        if status == "created":
+    for r in result.results:
+        if r.status == "created":
             output.console.print(
-                f"[green]+[/green] Created note type [cyan]{r.get('name', '')}[/cyan]"
-                f" ([green]#{r.get('id', '')}[/green])"
+                f"[green]+[/green] Created note type [cyan]{r.name or ''}[/cyan]"
+                f" ([green]#{r.id}[/green])"
             )
-        elif status == "error":
-            output.error(r.get("error", "Unknown error"))
+        elif r.status == "error":
+            output.error(r.error or "Unknown error")
 
 
 @type_group.command("update", short_help="Update a note type")
@@ -264,15 +263,14 @@ def type_update(
         output.emit_json(result)
         return
 
-    for r in result.get("results", []):
-        status = r.get("status")
-        if status == "updated":
+    for r in result.results:
+        if r.status == "updated":
             output.console.print(
-                f"[yellow]~[/yellow] Updated note type [cyan]{r.get('name', '')}[/cyan]"
-                f" ([green]#{r.get('id', '')}[/green])"
+                f"[yellow]~[/yellow] Updated note type [cyan]{r.name or ''}[/cyan]"
+                f" ([green]#{r.id}[/green])"
             )
-        elif status == "error":
-            output.error(r.get("error", "Unknown error"))
+        elif r.status == "error":
+            output.error(r.error or "Unknown error")
 
 
 @type_group.command("delete", short_help="Delete note types")
@@ -306,18 +304,16 @@ def type_delete(ctx: click.Context, identifiers: tuple[str, ...], yes: bool) -> 
         output.emit_json(result)
         return
 
-    for r in result.get("results", []):
-        status = r.get("status")
-        if status == "deleted":
+    for r in result.results:
+        if r.status == "deleted":
             output.console.print(
-                f"Deleted note type [cyan]{r.get('name', '')}[/cyan]"
-                f" ([green]#{r.get('id', '')}[/green])"
+                f"Deleted note type [cyan]{r.name or ''}[/cyan] ([green]#{r.id}[/green])"
             )
-        elif status == "not_found":
-            output.console.print(f"[dim]Not found: #{r.get('id', '')}[/dim]")
-        elif status == "error":
+        elif r.status == "not_found":
+            output.console.print(f"[dim]Not found: #{r.id}[/dim]")
+        elif r.status == "error":
             output.console.print(
-                f"[bold red]![/bold red] [cyan]{r.get('name', '')}[/cyan]"
-                f" ([green]#{r.get('id', '')}[/green]):"
-                f" [red]{r.get('error', 'Unknown error')}[/red]"
+                f"[bold red]![/bold red] [cyan]{r.name or ''}[/cyan]"
+                f" ([green]#{r.id}[/green]):"
+                f" [red]{r.error or 'Unknown error'}[/red]"
             )

@@ -5,7 +5,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 import click
 
@@ -23,76 +22,77 @@ from shrike.daemon import (
     stop_server,
 )
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
+from shrike.schemas import ServerStatus
 
 
-def _render_status(status: dict[str, Any]) -> None:
+def _render_status(status: ServerStatus) -> None:
     """Render the unified server status block used by both start and status."""
-    if not status.get("running", False):
+    if not status.running:
         output.console.print("[dim]Server is not running.[/dim]")
         return
 
-    if status.get("responsive") is False:
+    if status.responsive is False:
         output.console.print("[bold yellow]Server is running but not responding[/bold yellow]")
     else:
         output.console.print("[bold green]Server is running[/bold green]")
-    if status.get("url"):
-        output.kv("URL", f"[cyan]{status['url']}[/cyan]")
-    if status.get("pid"):
-        output.kv("PID", f"[cyan]{status['pid']}[/cyan]")
-    if status.get("collection"):
-        output.kv("Collection", f"[cyan]{status['collection']}[/cyan]")
-    if status.get("log_level"):
-        output.kv("Log level", status["log_level"])
-    if status.get("log"):
-        output.kv("Log", f"[cyan]{status['log']}[/cyan]")
-    if status.get("uptime"):
-        output.kv("Uptime", status["uptime"])
-    emb = status.get("embedding")
-    if emb and emb.get("available"):
+    if status.url:
+        output.kv("URL", f"[cyan]{status.url}[/cyan]")
+    if status.pid:
+        output.kv("PID", f"[cyan]{status.pid}[/cyan]")
+    if status.collection:
+        output.kv("Collection", f"[cyan]{status.collection}[/cyan]")
+    if status.log_level:
+        output.kv("Log level", status.log_level)
+    if status.log:
+        output.kv("Log", f"[cyan]{status.log}[/cyan]")
+    if status.uptime:
+        output.kv("Uptime", status.uptime)
+
+    emb = status.embedding
+    if emb and emb.available:
         output.kv("Embedding", "[green]available[/green]")
-        if emb.get("url"):
-            output.kv("URL", f"[cyan]{emb['url']}[/cyan]", indent=2)
-        if emb.get("pid"):
-            output.kv("PID", f"[cyan]{emb['pid']}[/cyan]", indent=2)
-        if emb.get("model"):
-            output.kv("Model", f"[cyan]{emb['model']}[/cyan]", indent=2)
+        if emb.url:
+            output.kv("URL", f"[cyan]{emb.url}[/cyan]", indent=2)
+        if emb.pid:
+            output.kv("PID", f"[cyan]{emb.pid}[/cyan]", indent=2)
+        if emb.model:
+            output.kv("Model", f"[cyan]{emb.model}[/cyan]", indent=2)
     else:
         labels = {"failed": "[red]failed to start[/red]", "stopped": "[dim]stopped[/dim]"}
-        state = str((emb or {}).get("state") or "")
+        state = (emb.state if emb else "") or ""
         output.kv("Embedding", labels.get(state, "[dim]not configured[/dim]"))
 
-    idx = status.get("index")
-    if not idx:
+    idx = status.index
+    if idx is None:
         output.kv("Index", "[dim]not configured[/dim]")
     else:
-        state = idx.get("state", "unknown")
+        state = idx.state or "unknown"
         if state == "ready":
             output.kv("Index", "[green]ready[/green]")
-            output.kv("Vectors", f"[green]{idx.get('size', 0)}[/green]", indent=2)
-            output.kv("Dimensions", str(idx.get("ndim", "?")), indent=2)
+            output.kv("Vectors", f"[green]{idx.size}[/green]", indent=2)
+            output.kv("Dimensions", str(idx.ndim if idx.ndim is not None else "?"), indent=2)
         elif state == "building":
-            progress = idx.get("progress", {})
-            indexed = progress.get("indexed", 0)
-            total = progress.get("total", 0)
+            indexed = idx.progress.indexed if idx.progress else 0
+            total = idx.progress.total if idx.progress else 0
             output.kv("Index", "[yellow]building[/yellow]")
             output.kv("Progress", f"{indexed} / {total} notes", indent=2)
         elif state == "error":
             output.kv("Index", "[red]error[/red]")
-            output.kv("Error", idx.get("error", "unknown"), indent=2)
+            output.kv("Error", idx.error or "unknown", indent=2)
         elif state == "unavailable":
             output.kv("Index", "[dim]unavailable[/dim]")
         else:
             output.kv("Index", f"[dim]{state}[/dim]")
-        if idx.get("col_mod") is not None:
-            output.kv("Collection mod", str(idx["col_mod"]), indent=2)
-        if idx.get("path"):
-            output.kv("Path", f"[cyan]{idx['path']}[/cyan]", indent=2)
+        if idx.col_mod is not None:
+            output.kv("Collection mod", str(idx.col_mod), indent=2)
+        if idx.path:
+            output.kv("Path", f"[cyan]{idx.path}[/cyan]", indent=2)
 
 
 def _wait_for_server(
     url: str, timeout: float = 15.0, *, show_spinner: bool = True
-) -> dict[str, Any] | None:
-    """Poll until the daemon responds to /status. Returns the status dict or None."""
+) -> ServerStatus | None:
+    """Poll until the daemon responds to /status. Returns the status or None."""
     client = ShrikeClient(url, autostart=False)
     deadline = time.monotonic() + timeout
 
@@ -302,11 +302,10 @@ def server_start(
     log_file = get_log_file(config, log_dir_override=resolved_log_dir)
     status = _wait_for_server(url)
     if status is not None:
+        status.log = str(log_file)
         if json_out:
-            status["log"] = str(log_file)
             output.emit_json(status)
         else:
-            status["log"] = str(log_file)
             _render_status(status)
     else:
         if proc.poll() is not None:
@@ -374,22 +373,22 @@ def server_status_cmd(ctx: click.Context) -> None:
         status = client.server_status()
 
         if status is None:
-            status = server_status()
-            if status["running"]:
-                status["responsive"] = False
+            status = ServerStatus.model_validate(server_status())
+            if status.running:
+                status.responsive = False
 
     if ctx.obj["json"]:
         output.emit_json(status)
-        if not status.get("running"):
+        if not status.running:
             ctx.exit(1)
         return
 
-    if status.get("log_dir"):
-        status["log"] = str(Path(status["log_dir"]) / "shrike.log")
+    if status.log_dir:
+        status.log = str(Path(status.log_dir) / "shrike.log")
 
     _render_status(status)
 
-    if not status.get("running"):
+    if not status.running:
         ctx.exit(1)
 
 

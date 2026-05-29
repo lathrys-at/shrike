@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
-
 import click
 
 from shrike.cli import output
 from shrike.cli.output import output_options
+from shrike.schemas import DeckInfo, NoteTypeInfo, Stats, Summary
 
 
 @click.command("info", short_help="Show collection summary")
@@ -64,59 +63,59 @@ def info(
         output.emit_json(result)
         return
 
-    summary = result.get("summary", {})
-    col_path = summary.get("path", "collection")
+    col_path = result.summary.path if result.summary else "collection"
 
     if not has_detail_flags:
-        _render_summary(summary)
+        if result.summary:
+            _render_summary(result.summary)
         return
 
     printed = False
-    if "note_types" in result:
-        _render_note_types(result["note_types"], col_path)
+    if result.note_types is not None:
+        _render_note_types(result.note_types, col_path)
         printed = True
-    if "decks" in result:
+    if result.decks is not None:
         if printed:
             output.console.print()
-        _render_decks(result["decks"], col_path)
+        _render_decks(result.decks, col_path)
         printed = True
-    if "tags" in result:
+    if result.tags is not None:
         if printed:
             output.console.print()
-        _render_tags(result["tags"], col_path)
+        _render_tags(result.tags, col_path)
         printed = True
-    if "stats" in result:
+    if result.stats is not None:
         if printed:
             output.console.print()
-        _render_stats(result["stats"], col_path)
+        _render_stats(result.stats, col_path)
 
 
-def _render_summary(summary: dict[str, Any]) -> None:
-    output.kv("Collection", f"[cyan]{summary.get('path', '')}[/cyan]")
-    output.kv("Created", summary.get("created", ""))
-    output.kv("Modified", summary.get("modified", ""))
-    output.kv("Notes", summary.get("notes", 0))
-    output.kv("Cards", summary.get("cards", 0))
-    output.kv("Decks", summary.get("decks", 0))
-    output.kv("Note types", summary.get("note_types", 0))
-    output.kv("Tags", summary.get("tags", 0))
-    output.kv("Due today", summary.get("due_today", 0))
+def _render_summary(summary: Summary) -> None:
+    output.kv("Collection", f"[cyan]{summary.path}[/cyan]")
+    output.kv("Created", summary.created)
+    output.kv("Modified", summary.modified)
+    output.kv("Notes", summary.notes)
+    output.kv("Cards", summary.cards)
+    output.kv("Decks", summary.decks)
+    output.kv("Note types", summary.note_types)
+    output.kv("Tags", summary.tags)
+    output.kv("Due today", summary.due_today)
 
 
-def _render_note_types(note_types: list[dict[str, Any]], col_path: str) -> None:
+def _render_note_types(note_types: list[NoteTypeInfo], col_path: str) -> None:
     output.note_type_table(note_types, col_path)
 
     for nt in note_types:
-        if nt.get("templates") is not None or nt.get("css") is not None:
+        if nt.templates is not None or nt.css is not None:
             output.console.print()
             output.note_type_detail(nt)
 
 
-def _render_decks(decks: list[dict[str, Any]], col_path: str) -> None:
+def _render_decks(decks: list[DeckInfo], col_path: str) -> None:
     count = len(decks)
     output.console.print(f"Showing {count} decks in [cyan]{col_path}[/cyan]")
     output.console.print()
-    rows = [[f"[cyan]{d['name']}[/cyan]", str(d.get("note_count", 0))] for d in decks]
+    rows = [[f"[cyan]{d.name}[/cyan]", str(d.note_count)] for d in decks]
     output.table(["Name", "Notes"], rows)
 
 
@@ -128,19 +127,18 @@ def _render_tags(tags: list[str], col_path: str) -> None:
     output.table(["Name"], rows)
 
 
-def _render_stats(stats: dict[str, Any], col_path: str) -> None:
+def _render_stats(stats: Stats, col_path: str) -> None:
     output.console.print(f"Showing statistics for [cyan]{col_path}[/cyan]")
     output.console.print()
-    output.kv("Notes", stats.get("total_notes", 0))
-    output.kv("Cards", stats.get("total_cards", 0))
-    output.kv("Due today", stats.get("cards_due_today", 0))
-    output.kv("New cards", stats.get("new_cards", 0))
+    output.kv("Notes", stats.total_notes)
+    output.kv("Cards", stats.total_cards)
+    output.kv("Due today", stats.cards_due_today)
+    output.kv("New cards", stats.new_cards)
 
-    decks_summary = stats.get("decks_summary", {})
-    if decks_summary:
+    if stats.decks_summary:
         output.console.print()
         rows = [
-            [f"[cyan]{name}[/cyan]", str(d.get("notes", 0)), str(d.get("due", 0))]
-            for name, d in decks_summary.items()
+            [f"[cyan]{name}[/cyan]", str(d.notes), str(d.due)]
+            for name, d in stats.decks_summary.items()
         ]
         output.table(["Deck", "Notes", "Due"], rows)

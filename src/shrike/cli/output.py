@@ -6,10 +6,13 @@ from contextlib import contextmanager
 from typing import Any
 
 import click
+from pydantic import BaseModel
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+
+from shrike.schemas import Note, NoteTypeInfo, SearchMatch, UpsertNoteResult
 
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
@@ -109,9 +112,22 @@ def output_options(fn: Any) -> Any:
     return fn
 
 
+def _to_jsonable(data: Any) -> Any:
+    """Recursively convert Pydantic models to JSON-ready dicts, dropping nulls.
+
+    ``exclude_none`` keeps CLI ``--json`` output close to the pre-typed shape
+    (only set keys appear), independent of the MCP wire which carries nulls.
+    """
+    if isinstance(data, BaseModel):
+        return data.model_dump(mode="json", exclude_none=True)
+    if isinstance(data, list):
+        return [_to_jsonable(item) for item in data]
+    return data
+
+
 def emit_json(data: Any) -> None:
-    """Print data as formatted JSON."""
-    console.print_json(json.dumps(data, ensure_ascii=False))
+    """Print data as formatted JSON. Accepts Pydantic models, lists, or plain data."""
+    console.print_json(json.dumps(_to_jsonable(data), ensure_ascii=False))
 
 
 def table(headers: list[str], rows: list[list[str]]) -> None:
@@ -140,57 +156,56 @@ def kv(label: str, value: Any, indent: int = 0) -> None:
     console.print(f"{prefix}[dim]{label}:[/dim] {value}")
 
 
-def note_summary_row(note: dict[str, Any]) -> list[str]:
-    """Format a note dict as a table row."""
-    tags = ", ".join(note.get("tags", []))
-    modified = note.get("modified", "")
+def note_summary_row(note: Note) -> list[str]:
+    """Format a note as a table row."""
+    tags = ", ".join(note.tags)
+    modified = note.modified
     if "T" in modified:
         modified = modified.split("T")[0]
     return [
-        f"[green]#{note['id']}[/green]",
-        note.get("note_type", ""),
-        note.get("deck", ""),
+        f"[green]#{note.id}[/green]",
+        note.note_type,
+        note.deck,
         tags,
         modified,
     ]
 
 
-def note_type_table(note_types: list[dict[str, Any]], col_path: str) -> None:
+def note_type_table(note_types: list[NoteTypeInfo], col_path: str) -> None:
     """Render a note types table with header. Shared by 'type list' and 'info --types'."""
     console.print(f"[dim]Showing {len(note_types)} note type(s) in [cyan]{col_path}[/cyan][/dim]")
     console.print()
     rows = [
         [
-            f"[green]#{nt.get('id', '')}[/green]",
-            f"[cyan]{nt['name']}[/cyan]",
-            f"[dim]{nt.get('type', 'standard')}[/dim]",
-            ", ".join(nt.get("fields", [])),
+            f"[green]#{nt.id}[/green]",
+            f"[cyan]{nt.name}[/cyan]",
+            f"[dim]{nt.type}[/dim]",
+            ", ".join(nt.fields),
         ]
         for nt in note_types
     ]
     table(["ID", "Name", "Kind", "Fields"], rows)
 
 
-def note_detail(note: dict[str, Any], *, subtitle: str | None = None) -> None:
+def note_detail(note: Note | SearchMatch, *, subtitle: str | None = None) -> None:
     """Render a full note with all its fields."""
     header = Text()
     header.append("Note ", style="bold")
-    header.append(f"#{note['id']}", style="green")
+    header.append(f"#{note.id}", style="green")
     if subtitle:
         header.append(f"  {subtitle}", style="dim")
 
     lines: list[str] = []
-    lines.append(f"[dim]Type:[/dim] [cyan]{note.get('note_type', '')}[/cyan]")
-    lines.append(f"[dim]Deck:[/dim] [cyan]{note.get('deck', '')}[/cyan]")
-    if note.get("tags"):
-        tags = " ".join(f"[yellow]{t}[/yellow]" for t in note["tags"])
+    lines.append(f"[dim]Type:[/dim] [cyan]{note.note_type}[/cyan]")
+    lines.append(f"[dim]Deck:[/dim] [cyan]{note.deck}[/cyan]")
+    if note.tags:
+        tags = " ".join(f"[yellow]{t}[/yellow]" for t in note.tags)
         lines.append(f"[dim]Tags:[/dim] {tags}")
-    lines.append(f"[dim]Modified:[/dim] {note.get('modified', '')}")
+    lines.append(f"[dim]Modified:[/dim] {note.modified}")
 
-    content = note.get("content", {})
-    if content:
+    if note.content:
         lines.append("")
-        for field_name, value in content.items():
+        for field_name, value in note.content.items():
             lines.append(f"[cyan]{field_name}[/cyan]")
             for line in str(value).splitlines():
                 lines.append(f"  {line}")
@@ -206,31 +221,29 @@ def note_detail(note: dict[str, Any], *, subtitle: str | None = None) -> None:
     )
 
 
-def note_type_detail(nt: dict[str, Any]) -> None:
+def note_type_detail(nt: NoteTypeInfo) -> None:
     """Render a full note type definition."""
     header = Text()
     header.append("Note Type ", style="bold")
-    header.append(nt["name"], style="cyan")
+    header.append(nt.name, style="cyan")
 
     lines: list[str] = []
-    lines.append(f"[dim]ID:[/dim] [green]#{nt.get('id', '')}[/green]")
-    lines.append(f"[dim]Type:[/dim] {nt.get('type', 'standard')}")
-    lines.append(f"[dim]Fields:[/dim] {', '.join(nt.get('fields', []))}")
+    lines.append(f"[dim]ID:[/dim] [green]#{nt.id}[/green]")
+    lines.append(f"[dim]Type:[/dim] {nt.type}")
+    lines.append(f"[dim]Fields:[/dim] {', '.join(nt.fields)}")
 
-    templates = nt.get("templates", [])
-    if templates:
+    if nt.templates:
         lines.append("")
         lines.append("[bold]Templates[/bold]")
-        for tmpl in templates:
-            lines.append(f"  [cyan]{tmpl['name']}[/cyan]")
-            _append_template_field(lines, "Front", tmpl["front"])
-            _append_template_field(lines, "Back", tmpl["back"])
+        for tmpl in nt.templates:
+            lines.append(f"  [cyan]{tmpl.name}[/cyan]")
+            _append_template_field(lines, "Front", tmpl.front)
+            _append_template_field(lines, "Back", tmpl.back)
 
-    css = nt.get("css")
-    if css is not None:
+    if nt.css is not None:
         lines.append("")
         lines.append("[bold]CSS[/bold]")
-        for css_line in css.splitlines():
+        for css_line in nt.css.splitlines():
             lines.append(f"  {css_line}")
 
     console.print(
@@ -244,16 +257,15 @@ def note_type_detail(nt: dict[str, Any]) -> None:
     )
 
 
-def result_status(results: list[dict[str, Any]]) -> None:
-    """Render a list of upsert/delete results."""
+def result_status(results: list[UpsertNoteResult]) -> None:
+    """Render a list of upsert results."""
     for r in results:
-        status = r.get("status", "unknown")
-        if status == "created":
-            console.print(f"[green]+[/green] Created note [green]#{r['id']}[/green]")
-        elif status == "updated":
-            console.print(f"[yellow]~[/yellow] Updated note [green]#{r['id']}[/green]")
-        elif status == "error":
-            console.print(f"[bold red]![/bold red] [red]{r.get('error', 'Unknown error')}[/red]")
+        if r.status == "created":
+            console.print(f"[green]+[/green] Created note [green]#{r.id}[/green]")
+        elif r.status == "updated":
+            console.print(f"[yellow]~[/yellow] Updated note [green]#{r.id}[/green]")
+        elif r.status == "error":
+            console.print(f"[bold red]![/bold red] [red]{r.error or 'Unknown error'}[/red]")
         else:
             console.print(str(r))
 

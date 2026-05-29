@@ -101,8 +101,8 @@ def note_list(
         output.emit_json(result)
         return
 
-    notes = result.get("notes", [])
-    total = result.get("total", len(notes))
+    notes = result.notes
+    total = result.total
 
     if not notes:
         output.console.print("[dim]No notes found.[/dim]")
@@ -128,7 +128,7 @@ def note_list(
 
     output.console.print()
 
-    if brief or not any(n.get("content") for n in notes):
+    if brief or not any(n.content for n in notes):
         rows = [output.note_summary_row(n) for n in notes]
         output.table(["ID", "Type", "Deck", "Tags", "Modified"], rows)
     else:
@@ -151,7 +151,7 @@ def note_show(ctx: click.Context, note_id: int) -> None:
     with output.spinner("Fetching note…"):
         result = client.list_notes(ids=[note_id], fields="full")
 
-    notes = result.get("notes", [])
+    notes = result.notes
     if not notes:
         raise click.ClickException(f"Note #{note_id} not found.")
 
@@ -240,7 +240,7 @@ def note_create(
         output.emit_json(result)
         return
 
-    output.result_status(result.get("results", []))
+    output.result_status(result.results)
 
 
 @note.command("update", short_help="Update an existing note")
@@ -300,7 +300,7 @@ def note_update(
         output.emit_json(result)
         return
 
-    output.result_status(result.get("results", []))
+    output.result_status(result.results)
 
 
 @note.command("delete", short_help="Delete notes by ID")
@@ -332,8 +332,8 @@ def note_delete(ctx: click.Context, note_ids: tuple[int, ...], yes: bool) -> Non
         output.emit_json(result)
         return
 
-    deleted = result.get("deleted", [])
-    not_found = result.get("not_found", [])
+    deleted = result.deleted
+    not_found = result.not_found
 
     if deleted:
         ids_str = ", ".join(f"[green]#{i}[/green]" for i in deleted)
@@ -407,28 +407,22 @@ def note_search(
         output.emit_json(result)
         return
 
-    message = result.get("_message")
-    if message:
-        output.console.print(f"[dim]{message}[/dim]")
+    if result.message:
+        output.console.print(f"[dim]{result.message}[/dim]")
         return
 
-    results = result.get("results", [])
-    if not results:
+    if not result.results:
         output.console.print("[dim]No results.[/dim]")
         return
 
-    for group in results:
-        source = group.get("source", "")
-        output.console.print(f"\nResults for: [cyan]{source}[/cyan]")
-        matches = group.get("matches", [])
-        for m in matches:
-            score = m.get("score", 0)
+    for group in result.results:
+        output.console.print(f"\nResults for: [cyan]{group.source}[/cyan]")
+        for m in group.matches:
             if brief:
                 output.console.print(
-                    f"  \\[{score:.2f}] [green]#{m['id']}[/green]"
-                    f" ([cyan]{m.get('deck', '')}[/cyan])"
+                    f"  \\[{m.score:.2f}] [green]#{m.id}[/green] ([cyan]{m.deck}[/cyan])"
                 )
             else:
-                output.note_detail(m, subtitle=f"[{score:.2f}]")
+                output.note_detail(m, subtitle=f"[{m.score:.2f}]")
 
     output.console.print()
