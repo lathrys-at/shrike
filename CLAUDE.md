@@ -231,7 +231,7 @@ The vector index is a **derived cache**, not a co-equal store. The Anki collecti
 
 2. **Incremental updates** — after `upsert_notes` and `delete_notes` succeed on the collection, the index is updated in the same call (`index.add()` / `index.remove()`). Stored `col_mod` is updated after each successful index update. Index update failures log a warning but don't fail the tool call — the next startup detects the `col.mod` mismatch and rebuilds.
 
-3. **Periodic save** — index persists to disk periodically and on graceful shutdown. Crash between saves loses in-memory updates, but the `col.mod` mismatch on next startup triggers a rebuild automatically.
+3. **Shutdown save** — the index persists to disk on graceful shutdown (signal handler and `POST /shutdown`) and at the end of a rebuild; there is no periodic timer. A hard kill / crash between saves discards in-memory incremental updates, but the `col.mod` mismatch on next startup triggers a full rebuild automatically — correctness is preserved, at the cost of a re-embed. (A debounced periodic save is a possible future optimization.)
 
 4. **Full rebuild** — `shrike index rebuild` CLI and `POST /index/rebuild` endpoint. Drops existing index and re-embeds all notes. Progress reporting via CLI and `/status`.
 
@@ -290,7 +290,7 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 - Wire `search_notes` tool to the vector index ✓
 - Incremental index updates on note create/modify/delete ✓
 - Startup drift detection (`col.mod` comparison) and background rebuild ✓
-- Periodic index save and graceful shutdown persistence ✓
+- Index persistence on graceful shutdown and after rebuild ✓ (no periodic timer; crash forces a rebuild via `col.mod` drift)
 - `shrike index rebuild` CLI command for full re-indexing ✓
 - Index build state machine and progress tracking (ready/building/unavailable/error) ✓
 - Index status in `/status` endpoint and `search_notes` responses (actionable messages) ✓

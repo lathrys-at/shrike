@@ -313,6 +313,9 @@ class CollectionWrapper:
         note = self.col.get_note(nid)  # type: ignore[arg-type]
         notetype = self.col.models.get(note.mid)
 
+        # Anki permits per-card decks; a note's cards can live in different
+        # decks. We report the first card's deck — adequate for Shrike's
+        # one-deck-per-note model, but it does not represent split-deck notes.
         cards = note.cards()
         deck_id = cards[0].did if cards else None
         deck_obj = self.col.decks.get(deck_id) if deck_id else None

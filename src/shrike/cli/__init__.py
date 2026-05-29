@@ -1,14 +1,29 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import click
 
-from shrike.cli.client import ShrikeClient
-from shrike.cli.config import DEFAULT_CONFIG_PATH, load_config, resolve_url
+from shrike.cli.config import DEFAULT_CONFIG_PATH, build_server_spec, load_config, resolve_url
+from shrike.client import ShrikeClient, ShrikeError
 
 
-@click.group()
+class ShrikeGroup(click.Group):
+    """Root group that turns library ``ShrikeError``s into clean CLI errors.
+
+    Keeps the standalone client free of ``click`` while giving the CLI a single
+    place to render server/connection failures (instead of tracebacks).
+    """
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except ShrikeError as err:
+            raise click.ClickException(str(err)) from err
+
+
+@click.group(cls=ShrikeGroup)
 @click.option(
     "-c",
     "--config",
@@ -63,11 +78,16 @@ def cli(
     config = load_config(config_path)
     server_url = resolve_url(config, url)
 
+    # The client auto-starts a local daemon from this spec on connection
+    # failure. None (no collection configured) disables auto-start — e.g. when
+    # targeting a remote server.
+    spec = build_server_spec(config)
+
     ctx.obj["config"] = config
     ctx.obj["config_path"] = config_path
     ctx.obj["url"] = server_url
     ctx.obj["json"] = json_output
-    ctx.obj["client"] = ShrikeClient(server_url, config=config)
+    ctx.obj["client"] = ShrikeClient(server_url, spec=spec)
 
     from shrike.cli import output
 

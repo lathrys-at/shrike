@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from shrike.cli.config import DEFAULT_CONFIG, load_config, resolve_embedding, save_config
-from shrike.cli.server_cmd import _embedding_args
+from shrike.cli.config import embedding_args as _embedding_args
 
 
 class TestEmbeddingConfig:

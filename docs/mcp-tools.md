@@ -148,11 +148,14 @@ Results can be filtered by deck or tags to narrow the search space.
 | `queries` | `string[]` | no | Natural-language search strings. Each is embedded and matched against the collection independently. |
 | `ids` | `integer[]` | no | Note IDs to use as search anchors — finds notes semantically similar to these. Source notes are automatically excluded from results. |
 | `top_k` | `integer` | no | Maximum results per query or source ID. Default `10`, max `50`. |
+| `threshold` | `number` | no | Minimum cosine similarity (0–1) for a match. Default `0.5`. Results scoring below it are dropped. |
 | `deck` | `string` | no | Restrict search to notes in this deck (includes child decks). |
 | `tags` | `string[]` | no | Restrict search to notes matching all of these tags. |
 | `exclude_ids` | `integer[]` | no | Additional note IDs to exclude from results. |
 
 At least one of `queries` or `ids` must be provided.
+
+`deck`/`tags` are applied after the vector search over a widened candidate window. This covers the common case, but if the in-scope notes rank very deep in the overall similarity ranking a deck/tag-filtered search may still return fewer than `top_k`; widen with a higher `top_k` if needed.
 
 ### Response
 

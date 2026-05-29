@@ -45,6 +45,7 @@ def mock_index():
     idx.build_progress = (0, 0)
     idx.search = MagicMock(return_value=[])
     idx.col_mod = 0
+    idx.size = 100
     return idx
 
 
@@ -146,6 +147,18 @@ class TestSearchNotesResults:
         _call(mcp_app, "search_notes", {"queries": ["test"], "top_k": 0})
         args = mock_index.search.call_args
         assert args[1]["top_k"] >= 1
+
+    def test_deck_filter_overfetches(self, mcp_app, mock_index):
+        """With a deck filter, search over-fetches a wider window (2.3)."""
+        mock_index.search.return_value = [[]]
+        _call(mcp_app, "search_notes", {"queries": ["test"], "deck": "D", "top_k": 5})
+        assert mock_index.search.call_args[1]["top_k"] >= 50  # >= top_k * 10
+
+    def test_no_overfetch_without_filter(self, mcp_app, mock_index):
+        """Without deck/tag filters, the window is just top_k (+ excludes)."""
+        mock_index.search.return_value = [[]]
+        _call(mcp_app, "search_notes", {"queries": ["test"], "top_k": 5})
+        assert mock_index.search.call_args[1]["top_k"] == 5
 
     def test_score_rounded_to_3_decimals(self, wrapper, mock_index, mcp_app, basic_note):
         mock_index.search.return_value = [[{"note_id": basic_note, "distance": 0.12345}]]
