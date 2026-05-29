@@ -1,262 +1,1417 @@
 [
   {
     "name": "collection_info",
-    "description": "Get the structure and summary statistics of the Anki collection. Returns available note types with their field names, deck names with note counts, all tags in use, and scheduling statistics (cards due, new cards, per-deck summaries). Use this to orient yourself before creating or searching for notes — especially to discover which note types, fields, and decks exist.\n\nWith no arguments, returns a compact summary (counts, dates, collection path). Use `include` to request specific sections, or \"all\" for everything. Note type summaries include field names and type (standard/cloze) but not full template HTML or CSS — use `note_type_details` to request full definitions for specific note types when you need to inspect or author templates.",
+    "description": "Get the structure and summary statistics of the Anki collection.\n\n        Returns available note types with their field names, deck names with\n        note counts, all tags in use, and scheduling statistics.\n\n        Use this to orient yourself before creating or searching for notes —\n        especially to discover which note types, fields, and decks exist.\n\n        With no arguments, returns a compact summary (counts, dates, path).\n        Use `include` to request specific sections: \"summary\", \"note_types\",\n        \"decks\", \"tags\", \"stats\", or \"all\" for everything. Note type summaries\n        include field names and\n        type (standard/cloze) but not full template HTML or CSS — use\n        `note_type_details` to request full definitions for specific note\n        types when you need to inspect or author templates.",
     "inputSchema": {
-      "type": "object",
       "properties": {
         "include": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": ["summary", "note_types", "decks", "tags", "stats", "all"]
-          },
-          "description": "Sections to return. Any combination of \"summary\" (counts, dates, path), \"note_types\" (note types and their fields), \"decks\" (deck hierarchy with note counts), \"tags\" (all tags in use), \"stats\" (card counts, due counts, per-deck summaries), or \"all\" for everything. Defaults to [\"summary\"]."
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "summary",
+                  "note_types",
+                  "decks",
+                  "tags",
+                  "stats",
+                  "all"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Sections to return. Any combination of \"summary\" (counts, dates, path), \"note_types\" (note types and their fields), \"decks\" (deck hierarchy with note counts), \"tags\" (all tags in use), \"stats\" (card counts, due counts, per-deck summaries), or \"all\" for everything. Defaults to [\"summary\"].",
+          "title": "Include"
         },
         "note_type_details": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "List of note type names to return full definitions for, including card template HTML and CSS styling (e.g., [\"Basic\", \"Japanese Vocabulary\"]). Omit to return only summaries (field names and type)."
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "List of note type names to return full definitions for, including card template HTML and CSS styling. Omit to return only summaries (field names and type).",
+          "title": "Note Type Details"
         }
-      }
+      },
+      "title": "collection_infoArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "DeckInfo": {
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "note_count": {
+              "default": 0,
+              "title": "Note Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "name",
+            "id"
+          ],
+          "title": "DeckInfo",
+          "type": "object"
+        },
+        "DeckStat": {
+          "properties": {
+            "notes": {
+              "default": 0,
+              "title": "Notes",
+              "type": "integer"
+            },
+            "due": {
+              "default": 0,
+              "title": "Due",
+              "type": "integer"
+            }
+          },
+          "title": "DeckStat",
+          "type": "object"
+        },
+        "NoteTypeInfo": {
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "fields": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Fields",
+              "type": "array"
+            },
+            "type": {
+              "default": "standard",
+              "title": "Type",
+              "type": "string"
+            },
+            "templates": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/TemplateInfo"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Templates"
+            },
+            "css": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Css"
+            }
+          },
+          "required": [
+            "name",
+            "id"
+          ],
+          "title": "NoteTypeInfo",
+          "type": "object"
+        },
+        "Stats": {
+          "properties": {
+            "total_notes": {
+              "default": 0,
+              "title": "Total Notes",
+              "type": "integer"
+            },
+            "total_cards": {
+              "default": 0,
+              "title": "Total Cards",
+              "type": "integer"
+            },
+            "cards_due_today": {
+              "default": 0,
+              "title": "Cards Due Today",
+              "type": "integer"
+            },
+            "new_cards": {
+              "default": 0,
+              "title": "New Cards",
+              "type": "integer"
+            },
+            "decks_summary": {
+              "additionalProperties": {
+                "$ref": "#/$defs/DeckStat"
+              },
+              "default": {},
+              "title": "Decks Summary",
+              "type": "object"
+            }
+          },
+          "title": "Stats",
+          "type": "object"
+        },
+        "Summary": {
+          "properties": {
+            "path": {
+              "title": "Path",
+              "type": "string"
+            },
+            "created": {
+              "title": "Created",
+              "type": "string"
+            },
+            "modified": {
+              "title": "Modified",
+              "type": "string"
+            },
+            "notes": {
+              "title": "Notes",
+              "type": "integer"
+            },
+            "cards": {
+              "title": "Cards",
+              "type": "integer"
+            },
+            "decks": {
+              "title": "Decks",
+              "type": "integer"
+            },
+            "note_types": {
+              "title": "Note Types",
+              "type": "integer"
+            },
+            "tags": {
+              "title": "Tags",
+              "type": "integer"
+            },
+            "due_today": {
+              "title": "Due Today",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "path",
+            "created",
+            "modified",
+            "notes",
+            "cards",
+            "decks",
+            "note_types",
+            "tags",
+            "due_today"
+          ],
+          "title": "Summary",
+          "type": "object"
+        },
+        "TemplateInfo": {
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "front": {
+              "title": "Front",
+              "type": "string"
+            },
+            "back": {
+              "title": "Back",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "front",
+            "back"
+          ],
+          "title": "TemplateInfo",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Summary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "note_types": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/NoteTypeInfo"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note Types"
+        },
+        "decks": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/DeckInfo"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decks"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tags"
+        },
+        "stats": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Stats"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "title": "CollectionInfo",
+      "type": "object"
     }
   },
   {
     "name": "list_notes",
-    "description": "Retrieve notes matching structured filters — by deck, tags, note type, note IDs, or modification date. Returns note metadata and field content.\n\nUse this for precise lookups: fetching specific notes by ID, listing a deck's contents, or filtering by exact criteria. For conceptual or fuzzy queries (\"cards about mitochondrial membrane potential\"), use search_notes instead.\n\nAt least one filter must be provided. Combine filters freely — they are ANDed together. Use `fields: \"meta\"` to return only metadata for large result sets. The response includes `total` (full match count); if more notes matched than `limit` allows, narrow your filters rather than attempting to retrieve all of them.",
+    "description": "Retrieve notes matching structured filters.\n\n        Filter by deck, tags, note type, note IDs, or modification date.\n        Returns note metadata and field content.\n\n        Use this for precise lookups: fetching specific notes by ID, listing\n        a deck's contents, or filtering by exact criteria. For conceptual or\n        fuzzy queries, use search_notes instead.\n\n        At least one filter must be provided. Combine filters freely — they\n        are ANDed together. Use `fields: \"meta\"` to return only metadata for\n        large result sets. The response includes `total` (full match count);\n        if more notes matched than `limit` allows, narrow your filters.",
     "inputSchema": {
-      "type": "object",
       "properties": {
         "ids": {
-          "type": "array",
-          "items": { "type": "integer" },
-          "description": "Specific note IDs to retrieve."
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Specific note IDs to retrieve.",
+          "title": "Ids"
         },
         "deck": {
-          "type": "string",
-          "description": "Filter to notes in this deck. Use \"::\" for nested decks (e.g., \"Japanese::Vocabulary\"). Includes child decks."
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter to notes in this deck. Use \"::\" for nested decks (e.g., \"Japanese::Vocabulary\"). Includes child decks.",
+          "title": "Deck"
         },
         "tags": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Filter to notes having all of these tags. Prefix with \"-\" to exclude (e.g., [\"-leech\", \"verb\"] matches notes tagged \"verb\" but not \"leech\")."
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter to notes having all of these tags. Prefix with \"-\" to exclude (e.g., [\"-leech\", \"verb\"] matches notes tagged \"verb\" but not \"leech\").",
+          "title": "Tags"
         },
         "note_type": {
-          "type": "string",
-          "description": "Filter to notes using this note type (e.g., \"Basic\", \"Cloze\")."
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter to notes using this note type (e.g., \"Basic\", \"Cloze\").",
+          "title": "Note Type"
         },
         "modified_since": {
-          "type": "string",
-          "description": "ISO 8601 date or datetime. Only return notes modified after this time (e.g., \"2026-05-01\" or \"2026-05-01T14:00:00Z\")."
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ISO 8601 date or datetime. Only return notes modified after this time (e.g., \"2026-05-01\" or \"2026-05-01T14:00:00Z\").",
+          "title": "Modified Since"
         },
         "query": {
-          "type": "string",
-          "description": "Raw Anki search query for advanced filtering (e.g., \"is:due\", \"prop:ivl>=30\", \"rated:7\"). Combined with other filters via AND. Syntax: https://docs.ankiweb.net/searching.html"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Raw Anki search query for advanced filtering (e.g., \"is:due\", \"prop:ivl>=30\"). Combined with other filters via AND.",
+          "title": "Query"
         },
         "fields": {
-          "type": "string",
-          "enum": ["full", "meta"],
-          "description": "\"full\" (default) returns all field content. \"meta\" returns only note ID, note type, deck, tags, and modification time — useful for large result sets."
+          "anyOf": [
+            {
+              "enum": [
+                "full",
+                "meta"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "\"full\" (default) returns all field content. \"meta\" returns only note ID, note type, deck, tags, and modification time — useful for large result sets.",
+          "title": "Fields"
         },
         "limit": {
-          "type": "integer",
-          "minimum": 1,
+          "default": 50,
+          "description": "Maximum notes to return. Default 50.",
           "maximum": 200,
-          "description": "Maximum notes to return. Default 50."
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
         }
-      }
+      },
+      "title": "list_notesArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "Note": {
+          "description": "A note as returned by list_notes (mirrors CollectionWrapper._note_to_dict).",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "note_type": {
+              "title": "Note Type",
+              "type": "string"
+            },
+            "deck": {
+              "title": "Deck",
+              "type": "string"
+            },
+            "tags": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Tags",
+              "type": "array"
+            },
+            "modified": {
+              "title": "Modified",
+              "type": "string"
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Content"
+            }
+          },
+          "required": [
+            "id",
+            "note_type",
+            "deck",
+            "modified"
+          ],
+          "title": "Note",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "notes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Note"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "total": {
+          "default": 0,
+          "title": "Total",
+          "type": "integer"
+        },
+        "limit": {
+          "default": 0,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "title": "ListNotesResponse",
+      "type": "object"
     }
   },
   {
     "name": "search_notes",
-    "description": "Semantic similarity search over the Anki collection. Accepts natural-language query strings, note IDs (to find conceptually similar notes), or both. Returns the top matches ranked by similarity score.\n\nUse this for conceptual queries that keyword search cannot handle: finding cards about a topic, checking if a concept is already covered before creating new cards, identifying related or near-duplicate notes, or exploring thematic clusters in the collection. Read the returned content and reason about overlap in natural language — don't rely on numeric scores for decision-making.\n\nAt least one of `queries` or `ids` must be provided. Each query string and each source ID produces its own ranked result list.",
+    "description": "Semantic similarity search over the Anki collection.\n\n        Accepts natural-language query strings, note IDs (to find\n        conceptually similar notes), or both. Returns the top matches\n        ranked by similarity score.\n\n        Use this for conceptual queries that keyword search cannot handle:\n        finding cards about a topic, checking if a concept is already\n        covered before creating new cards, or exploring thematic clusters\n        in the collection.\n\n        At least one of `queries` or `ids` must be provided.",
     "inputSchema": {
-      "type": "object",
       "properties": {
         "queries": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Natural-language search strings. Each is independently matched against the collection (e.g., [\"electron transport chain regulation\", \"citric acid cycle inhibitors\"])."
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Natural-language search strings, each matched independently.",
+          "title": "Queries"
         },
         "ids": {
-          "type": "array",
-          "items": { "type": "integer" },
-          "description": "Note IDs to use as search anchors — returns notes semantically similar to these existing notes. Source notes are automatically excluded from results."
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Note IDs to use as search anchors — returns notes semantically similar to these existing notes. Source notes are excluded from results.",
+          "title": "Ids"
         },
         "top_k": {
-          "type": "integer",
-          "minimum": 1,
+          "default": 10,
+          "description": "Maximum results per query or source ID. Default 10.",
           "maximum": 50,
-          "description": "Maximum results per query or source ID. Default 10."
+          "minimum": 1,
+          "title": "Top K",
+          "type": "integer"
+        },
+        "threshold": {
+          "default": 0.5,
+          "description": "Minimum similarity score for a match to be included. Default 0.5.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
         },
         "deck": {
-          "type": "string",
-          "description": "Restrict search to notes in this deck (includes child decks)."
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Restrict search to notes in this deck (includes child decks).",
+          "title": "Deck"
         },
         "tags": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Restrict search to notes matching all of these tags."
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Restrict search to notes matching all of these tags.",
+          "title": "Tags"
         },
         "exclude_ids": {
-          "type": "array",
-          "items": { "type": "integer" },
-          "description": "Additional note IDs to exclude from results (source notes from `ids` are already excluded automatically)."
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Additional note IDs to exclude from results.",
+          "title": "Exclude Ids"
         }
-      }
+      },
+      "title": "search_notesArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "SearchMatch": {
+          "description": "A search result: a note plus its similarity score.",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "note_type": {
+              "title": "Note Type",
+              "type": "string"
+            },
+            "deck": {
+              "title": "Deck",
+              "type": "string"
+            },
+            "tags": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Tags",
+              "type": "array"
+            },
+            "modified": {
+              "title": "Modified",
+              "type": "string"
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Content"
+            },
+            "score": {
+              "title": "Score",
+              "type": "number"
+            }
+          },
+          "required": [
+            "id",
+            "note_type",
+            "deck",
+            "modified",
+            "score"
+          ],
+          "title": "SearchMatch",
+          "type": "object"
+        },
+        "SearchResultGroup": {
+          "properties": {
+            "source": {
+              "title": "Source",
+              "type": "string"
+            },
+            "matches": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/SearchMatch"
+              },
+              "title": "Matches",
+              "type": "array"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "title": "SearchResultGroup",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "results": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SearchResultGroup"
+          },
+          "title": "Results",
+          "type": "array"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "title": "SearchResponse",
+      "type": "object"
     }
   },
   {
     "name": "upsert_notes",
-    "description": "Create or update notes in bulk (1–100 per call). If a note object includes an `id`, the existing note is updated; if `id` is absent, a new note is created.\n\nFor new notes, `deck`, `note_type`, and `fields` are required. For updates, only `id` and the properties being changed are needed — omitted properties are left unchanged.\n\nWhen a vector index is available, each result includes `neighbors`: the most similar existing notes ranked by cosine similarity, filtered to those above `neighbor_threshold` (default 0.5) and capped at `top_k_neighbors` (default 5). Use these for tag consistency (adopt tags from nearby notes), detecting near-duplicates (high scores suggest overlap), or understanding where a new note sits in the collection. Neighbors include note ID, similarity score, and tags — use list_notes or search_notes to inspect content if needed.",
+    "description": "Create or update notes in bulk (1-100 per call).\n\n        If a note object includes an `id`, the existing note is updated;\n        if `id` is absent, a new note is created.\n\n        For new notes, `deck`, `note_type`, and `fields` are required. For\n        updates, only `id` and the properties being changed are needed —\n        omitted properties are left unchanged.\n\n        When a vector index is available, each result includes `neighbors`:\n        the most similar existing notes ranked by cosine similarity, filtered\n        to those above `neighbor_threshold` (default 0.5) and capped at\n        `top_k_neighbors` (default 5). Use these for tag consistency (adopt\n        tags from nearby notes), detecting near-duplicates (high scores\n        suggest overlap), or understanding where a new note sits in the\n        collection. Neighbors include note ID, similarity score, and tags —\n        use list_notes or search_notes to inspect content if needed.\n\n        If the index update fails transiently (e.g. the embedding service is\n        briefly unavailable), the notes are still saved but `neighbors` is\n        omitted. Each affected result is flagged `neighbors_unavailable: true`\n        and the response carries a top-level `message`. Recover the exact same\n        neighbor data afterward with search_notes(ids=[<note id>]) — it embeds\n        the same note text against the same index, so the result is identical\n        to what would have been attached here.",
     "inputSchema": {
-      "type": "object",
-      "required": ["notes"],
-      "properties": {
-        "top_k_neighbors": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 20,
-          "description": "Maximum number of similar-note neighbors to return per result. Default 5. Set to 0 to disable neighbor lookup."
-        },
-        "neighbor_threshold": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "description": "Minimum cosine similarity score for a neighbor to be included. Default 0.5. Higher values return only very similar notes."
-        },
-        "notes": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 100,
-          "items": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "integer",
-                "description": "Note ID. Present = update existing note, absent = create new note."
-              },
-              "deck": {
-                "type": "string",
-                "description": "Target deck (e.g., \"Japanese::Vocabulary\"). Required for new notes. On update, moves the note to this deck."
-              },
-              "note_type": {
-                "type": "string",
-                "description": "Note type (e.g., \"Basic\", \"Cloze\"). Required for new notes. Cannot be changed on update."
-              },
-              "fields": {
-                "type": "object",
-                "additionalProperties": { "type": "string" },
-                "description": "Field key-value pairs matching the note type's field names (e.g., {\"Front\": \"食べる\", \"Back\": \"to eat\"}). Required for new notes. On update, only specified fields are modified; unspecified fields are unchanged."
-              },
-              "tags": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Tags for the note. On create, these are the note's tags. On update, replaces all existing tags — include any existing tags you want to keep."
-              }
+      "$defs": {
+        "NoteInput": {
+          "properties": {
+            "id": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Note ID. Present = update existing note, absent = create new note.",
+              "title": "Id"
+            },
+            "deck": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Target deck (e.g., \"Japanese::Vocabulary\"). Required for new notes. On update, moves the note to this deck.",
+              "title": "Deck"
+            },
+            "note_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Note type (e.g., \"Basic\", \"Cloze\"). Required for new notes. Cannot be changed on update.",
+              "title": "Note Type"
+            },
+            "fields": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Field key-value pairs matching the note type's field names. Required for new notes. On update, only specified fields are modified.",
+              "title": "Fields"
+            },
+            "tags": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Tags for the note. On create, these are the note's tags. On update, replaces all existing tags.",
+              "title": "Tags"
             }
           },
-          "description": "Array of note objects to create or update."
+          "title": "NoteInput",
+          "type": "object"
         }
-      }
+      },
+      "properties": {
+        "notes": {
+          "description": "Array of note objects to create or update.",
+          "items": {
+            "$ref": "#/$defs/NoteInput"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Notes",
+          "type": "array"
+        },
+        "top_k_neighbors": {
+          "default": 5,
+          "description": "Maximum similar-note neighbors to return per result. Default 5. Set to 0 to disable neighbor lookup.",
+          "maximum": 20,
+          "minimum": 0,
+          "title": "Top K Neighbors",
+          "type": "integer"
+        },
+        "neighbor_threshold": {
+          "default": 0.5,
+          "description": "Minimum cosine similarity for a neighbor to be included. Default 0.5.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Neighbor Threshold",
+          "type": "number"
+        }
+      },
+      "required": [
+        "notes"
+      ],
+      "title": "upsert_notesArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "Neighbor": {
+          "description": "A similar note attached to an upsert result.",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "score": {
+              "title": "Score",
+              "type": "number"
+            },
+            "tags": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Tags",
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "score"
+          ],
+          "title": "Neighbor",
+          "type": "object"
+        },
+        "UpsertNoteResult": {
+          "properties": {
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "id": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Id"
+            },
+            "index": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Index"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Error"
+            },
+            "neighbors": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/Neighbor"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Neighbors"
+            },
+            "neighbors_unavailable": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Neighbors Unavailable"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "title": "UpsertNoteResult",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "results": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UpsertNoteResult"
+          },
+          "title": "Results",
+          "type": "array"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "title": "UpsertNotesResponse",
+      "type": "object"
     }
   },
   {
     "name": "upsert_note_types",
-    "description": "Create or update note type definitions (1–10 per call). A note type defines the schema for notes: its fields, card templates (front/back HTML), and shared CSS styling.\n\nIf a note type object includes an `id`, the existing note type is updated; if `id` is absent, a new note type is created. For new note types, `name`, `fields`, `templates`, and `css` are required.\n\nCard templates use Anki's replacement syntax: `{{FieldName}}` inserts a field value, `{{FrontSide}}` on the back template inserts the rendered front side. Cloze note types use `{{cloze:FieldName}}`.\n\nNote: removing fields from an existing note type deletes that field's data from all notes of that type.",
+    "description": "Create or update note type definitions (1-10 per call).\n\n        A note type defines the schema for notes: its fields, card templates\n        (front/back HTML), and shared CSS styling.\n\n        If a note type object includes an `id`, the existing note type is\n        updated; if `id` is absent, a new note type is created. For new note\n        types, `name`, `fields`, `templates`, and `css` are required.\n\n        Card templates use Anki's replacement syntax: {{FieldName}} inserts\n        a field value, {{FrontSide}} on the back template inserts the\n        rendered front side. Cloze note types use {{cloze:FieldName}}.\n\n        Note: removing fields from an existing note type deletes that\n        field's data from all notes of that type.",
     "inputSchema": {
-      "type": "object",
-      "required": ["note_types"],
-      "properties": {
-        "note_types": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 10,
-          "items": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "integer",
-                "description": "Note type ID. Present = update existing note type, absent = create new one."
-              },
-              "name": {
-                "type": "string",
-                "description": "Name for the note type (e.g., \"Japanese Vocabulary\"). Required for new note types."
-              },
-              "fields": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Ordered list of field names (e.g., [\"Word\", \"Reading\", \"Meaning\"]). Required for new note types. On update, replaces the full field list. Removing fields deletes that field's data from all existing notes of this type."
-              },
-              "templates": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "required": ["name", "front", "back"],
-                  "properties": {
-                    "name": {
-                      "type": "string",
-                      "description": "Template name (e.g., \"Recognition\", \"Recall\")."
-                    },
-                    "front": {
-                      "type": "string",
-                      "description": "Front side HTML. Use {{FieldName}} to insert field values."
-                    },
-                    "back": {
-                      "type": "string",
-                      "description": "Back side HTML. Use {{FieldName}} for fields and {{FrontSide}} to insert the rendered front side."
-                    }
-                  }
+      "$defs": {
+        "NoteTypeInput": {
+          "properties": {
+            "id": {
+              "anyOf": [
+                {
+                  "type": "integer"
                 },
-                "description": "Card templates. Each template produces one card per note (except cloze types, where cards are generated from cloze deletions). Required for new note types."
-              },
-              "css": {
-                "type": "string",
-                "description": "CSS styling shared across all cards of this note type. Required for new note types."
-              },
-              "is_cloze": {
-                "type": "boolean",
-                "description": "If true, this is a cloze deletion note type. Templates should use {{cloze:FieldName}}. Default false. Cannot be changed on update."
-              }
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Note type ID. Present = update, absent = create.",
+              "title": "Id"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Name for the note type. Required for new note types.",
+              "title": "Name"
+            },
+            "fields": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Ordered list of field names. Required for new note types. On update, replaces the full field list.",
+              "title": "Fields"
+            },
+            "templates": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/TemplateInput"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Card templates. Required for new note types.",
+              "title": "Templates"
+            },
+            "css": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "CSS styling shared across all cards. Required for new note types.",
+              "title": "Css"
+            },
+            "is_cloze": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "If true, this is a cloze deletion note type. Cannot be changed on update.",
+              "title": "Is Cloze"
             }
           },
-          "description": "Array of note type definitions to create or update."
+          "title": "NoteTypeInput",
+          "type": "object"
+        },
+        "TemplateInput": {
+          "properties": {
+            "name": {
+              "description": "Template name (e.g., 'Recognition', 'Recall').",
+              "title": "Name",
+              "type": "string"
+            },
+            "front": {
+              "description": "Front side HTML. Use {{FieldName}} to insert field values.",
+              "title": "Front",
+              "type": "string"
+            },
+            "back": {
+              "description": "Back side HTML. Use {{FieldName}} for fields and {{FrontSide}} to insert the rendered front side.",
+              "title": "Back",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "front",
+            "back"
+          ],
+          "title": "TemplateInput",
+          "type": "object"
         }
-      }
+      },
+      "properties": {
+        "note_types": {
+          "description": "Array of note type definitions to create or update.",
+          "items": {
+            "$ref": "#/$defs/NoteTypeInput"
+          },
+          "maxItems": 10,
+          "minItems": 1,
+          "title": "Note Types",
+          "type": "array"
+        }
+      },
+      "required": [
+        "note_types"
+      ],
+      "title": "upsert_note_typesArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "NoteTypeResult": {
+          "properties": {
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "id": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Id"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "index": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Index"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Error"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "title": "NoteTypeResult",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "results": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NoteTypeResult"
+          },
+          "title": "Results",
+          "type": "array"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "title": "UpsertNoteTypesResponse",
+      "type": "object"
     }
   },
   {
     "name": "delete_notes",
-    "description": "Permanently delete notes and all their associated cards. This cannot be undone. Use list_notes or search_notes first to verify which notes will be deleted.",
+    "description": "Permanently delete notes and all their associated cards.\n\n        This cannot be undone. Use list_notes or search_notes first to\n        verify which notes will be deleted.",
     "inputSchema": {
-      "type": "object",
-      "required": ["ids"],
       "properties": {
         "ids": {
-          "type": "array",
-          "items": { "type": "integer" },
-          "minItems": 1,
+          "description": "Note IDs to delete. Their cards are deleted too.",
+          "items": {
+            "type": "integer"
+          },
           "maxItems": 100,
-          "description": "Note IDs to delete. All cards belonging to these notes are also deleted."
+          "minItems": 1,
+          "title": "Ids",
+          "type": "array"
         }
-      }
+      },
+      "required": [
+        "ids"
+      ],
+      "title": "delete_notesArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "deleted": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "title": "Deleted",
+          "type": "array"
+        },
+        "not_found": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "title": "Not Found",
+          "type": "array"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "title": "DeleteNotesResponse",
+      "type": "object"
     }
   },
   {
     "name": "delete_note_types",
-    "description": "Delete note type definitions by ID. A note type can only be deleted if no notes currently use it. Check use counts via collection_info first.",
+    "description": "Delete note type definitions by ID.\n\n        A note type can only be deleted if no notes currently use it.\n        Check use counts via collection_info first.",
     "inputSchema": {
-      "type": "object",
-      "required": ["ids"],
       "properties": {
         "ids": {
-          "type": "array",
-          "items": { "type": "integer" },
-          "minItems": 1,
+          "description": "Note type IDs to delete. Fails for any note type still in use.",
+          "items": {
+            "type": "integer"
+          },
           "maxItems": 10,
-          "description": "Note type IDs to delete. Fails for any note type that still has notes using it."
+          "minItems": 1,
+          "title": "Ids",
+          "type": "array"
         }
-      }
+      },
+      "required": [
+        "ids"
+      ],
+      "title": "delete_note_typesArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "DeleteNoteTypeResult": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Error"
+            }
+          },
+          "required": [
+            "id",
+            "status"
+          ],
+          "title": "DeleteNoteTypeResult",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "results": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DeleteNoteTypeResult"
+          },
+          "title": "Results",
+          "type": "array"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "title": "DeleteNoteTypesResponse",
+      "type": "object"
     }
   }
 ]
