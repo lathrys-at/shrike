@@ -9,6 +9,10 @@ can be used as a library outside the CLI. Callers that want to auto-start a
 local daemon pass a :class:`ServerSpec` describing how to launch it; resolving
 that spec from config/env/flags is the caller's concern (the CLI does it).
 
+Tool and status methods return the Pydantic models from :mod:`shrike.schemas`
+(the wire contract's single source of truth). The untyped escape hatch is
+:meth:`ShrikeClient._call`, for tools not yet wrapped in a typed method.
+
 Errors are raised as typed exceptions (:class:`ShrikeError` subclasses); the CLI
 translates them into user-facing messages.
 """
@@ -18,6 +22,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,6 +30,25 @@ from typing import Any
 import httpx
 
 from shrike import daemon
+from shrike.schemas import (
+    CollectionInfo,
+    DeleteNotesResponse,
+    DeleteNoteTypesResponse,
+    EmbeddingStartResponse,
+    EmbeddingStatus,
+    EmbeddingStopResponse,
+    IndexRebuildResponse,
+    IndexStatus,
+    ListNotesResponse,
+    NoteInput,
+    NoteTypeInput,
+    SearchResponse,
+    ServerStatus,
+    ShutdownResponse,
+    StopResponse,
+    UpsertNotesResponse,
+    UpsertNoteTypesResponse,
+)
 
 # -- Exceptions --------------------------------------------------------------
 
@@ -79,6 +103,15 @@ class ServerSpec:
         return f"http://{self.host}:{self.port}/mcp"
 
 
+def _error_text(content: Any) -> str | None:
+    """Extract the first text payload from an MCP content list, if any."""
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                return str(item["text"])
+    return None
+
+
 # -- Client ------------------------------------------------------------------
 
 
@@ -109,11 +142,17 @@ class ShrikeClient:
 
     # -- MCP tool calls ------------------------------------------------------
 
-    def call(self, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Invoke an MCP tool and return its structured result.
+    def _call(self, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Invoke an MCP tool and return its raw structured result.
+
+        This is the untyped escape hatch — the typed convenience methods
+        (``list_notes``, ``search_notes``, …) wrap it and validate the result
+        into a response model. Reach for ``_call`` directly only when a tool has
+        no typed wrapper.
 
         Raises:
-            ServerError: the tool returned an error response.
+            ServerError: the tool returned an error (structured ``error`` field,
+                an MCP ``isError`` result, or a JSON-RPC error).
             ServerHTTPError: the server returned a non-2xx status.
             ServerUnreachableError: the server could not be reached.
         """
@@ -132,10 +171,15 @@ class ShrikeClient:
             raise ServerError(f"Server error: {body['error']}")
 
         result = body.get("result", {})
+        if result.get("isError"):
+            # Tool execution or input-validation error: the message lives in the
+            # text content, not structuredContent.
+            raise ServerError(_error_text(result.get("content")) or "Tool returned an error")
+
         content = result.get("structuredContent", {})
-        if isinstance(content, dict) and "error" in content:
+        if isinstance(content, dict) and content.get("error"):
             raise ServerError(content["error"])
-        return content  # type: ignore[no-any-return]
+        return content if isinstance(content, dict) else {}
 
     def _post_mcp(self, payload: dict[str, Any], *, timeout: float = 30.0) -> httpx.Response:
         """POST to the MCP endpoint, auto-starting the daemon on first failure."""
@@ -154,10 +198,152 @@ class ShrikeClient:
         except httpx.TimeoutException as err:
             raise ServerUnreachableError(f"Request to {self.url} timed out") from err
 
+    # -- Typed tool wrappers -------------------------------------------------
+
+    def collection_info(
+        self,
+        include: list[str] | None = None,
+        note_type_details: list[str] | None = None,
+    ) -> CollectionInfo:
+        args: dict[str, Any] = {}
+        if include:
+            args["include"] = include
+        if note_type_details:
+            args["note_type_details"] = note_type_details
+        return CollectionInfo.model_validate(self._call("collection_info", args))
+
+    def list_notes(
+        self,
+        *,
+        ids: list[int] | None = None,
+        deck: str | None = None,
+        tags: list[str] | None = None,
+        note_type: str | None = None,
+        modified_since: str | None = None,
+        query: str | None = None,
+        fields: str | None = None,
+        limit: int = 50,
+    ) -> ListNotesResponse:
+        args: dict[str, Any] = {"limit": limit}
+        for key, value in (
+            ("ids", ids),
+            ("deck", deck),
+            ("tags", tags),
+            ("note_type", note_type),
+            ("modified_since", modified_since),
+            ("query", query),
+            ("fields", fields),
+        ):
+            if value is not None:
+                args[key] = value
+        return ListNotesResponse.model_validate(self._call("list_notes", args))
+
+    def search_notes(
+        self,
+        *,
+        queries: list[str] | None = None,
+        ids: list[int] | None = None,
+        top_k: int = 10,
+        threshold: float = 0.5,
+        deck: str | None = None,
+        tags: list[str] | None = None,
+        exclude_ids: list[int] | None = None,
+    ) -> SearchResponse:
+        args: dict[str, Any] = {"top_k": top_k, "threshold": threshold}
+        for key, value in (
+            ("queries", queries),
+            ("ids", ids),
+            ("deck", deck),
+            ("tags", tags),
+            ("exclude_ids", exclude_ids),
+        ):
+            if value is not None:
+                args[key] = value
+        return SearchResponse.model_validate(self._call("search_notes", args))
+
+    def upsert_notes(
+        self,
+        notes: Sequence[NoteInput | dict[str, Any]],
+        *,
+        top_k_neighbors: int = 5,
+        neighbor_threshold: float = 0.5,
+    ) -> UpsertNotesResponse:
+        """Upsert notes, transparently batching if over the server limit."""
+        payload = [_as_dict(n) for n in notes]
+        merged = self._batched_call(
+            "upsert_notes",
+            items=payload,
+            param_key="notes",
+            result_key="results",
+            batch_size=100,
+            extra={
+                "top_k_neighbors": top_k_neighbors,
+                "neighbor_threshold": neighbor_threshold,
+            },
+        )
+        return UpsertNotesResponse.model_validate(merged)
+
+    def upsert_note_types(
+        self, note_types: Sequence[NoteTypeInput | dict[str, Any]]
+    ) -> UpsertNoteTypesResponse:
+        payload = [_as_dict(nt) for nt in note_types]
+        merged = self._batched_call(
+            "upsert_note_types",
+            items=payload,
+            param_key="note_types",
+            result_key="results",
+            batch_size=10,
+        )
+        return UpsertNoteTypesResponse.model_validate(merged)
+
+    def delete_note_types(self, ids: list[int]) -> DeleteNoteTypesResponse:
+        return DeleteNoteTypesResponse.model_validate(self._call("delete_note_types", {"ids": ids}))
+
+    def delete_notes(self, ids: list[int]) -> DeleteNotesResponse:
+        """Delete notes, transparently batching if over the server limit."""
+        if len(ids) <= 100:
+            return DeleteNotesResponse.model_validate(self._call("delete_notes", {"ids": ids}))
+
+        all_deleted: list[int] = []
+        all_not_found: list[int] = []
+        for i in range(0, len(ids), 100):
+            chunk = ids[i : i + 100]
+            result = self._call("delete_notes", {"ids": chunk})
+            all_deleted.extend(result.get("deleted", []))
+            all_not_found.extend(result.get("not_found", []))
+        return DeleteNotesResponse(deleted=all_deleted, not_found=all_not_found)
+
+    def _batched_call(
+        self,
+        tool_name: str,
+        *,
+        items: list[Any],
+        param_key: str,
+        result_key: str,
+        batch_size: int,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Split a list of items into batches and merge the results."""
+        extra = extra or {}
+        if len(items) <= batch_size:
+            return self._call(tool_name, {param_key: items, **extra})
+
+        all_results: list[Any] = []
+        message: str | None = None
+        for i in range(0, len(items), batch_size):
+            chunk = items[i : i + batch_size]
+            result = self._call(tool_name, {param_key: chunk, **extra})
+            all_results.extend(result.get(result_key, []))
+            message = result.get("message") or message
+        merged: dict[str, Any] = {result_key: all_results}
+        if message:
+            merged["message"] = message
+        return merged
+
     # -- Custom HTTP endpoints ----------------------------------------------
 
-    def server_status(self) -> dict[str, Any] | None:
-        """Probe ``GET /status``. Returns the status dict, or None if unreachable.
+    def server_status(self) -> ServerStatus | None:
+        """Probe ``GET /status``. Returns the status, or None if unreachable.
 
         A non-raising liveness probe — does NOT auto-start.
         """
@@ -166,38 +352,41 @@ class ShrikeClient:
         except (httpx.ConnectError, httpx.TimeoutException):
             return None
         if resp.status_code == 200:
-            data: dict[str, Any] = resp.json()
-            return data
+            return ServerStatus.model_validate(resp.json())
         return None
 
     def ping(self) -> bool:
         """True if the server responds to ``/status``. Does not auto-start."""
         return self.server_status() is not None
 
-    def status(self) -> dict[str, Any]:
+    def status(self) -> ServerStatus:
         """``GET /status`` — raises if unreachable."""
-        return self._request("GET", "/status", timeout=5.0)
+        return ServerStatus.model_validate(self._request("GET", "/status", timeout=5.0))
 
-    def index_status(self) -> dict[str, Any]:
-        idx = self.status().get("index")
-        return idx if isinstance(idx, dict) else {}
+    def index_status(self) -> IndexStatus:
+        return self.status().index or IndexStatus()
 
-    def embedding_status(self) -> dict[str, Any]:
-        emb = self.status().get("embedding")
-        return emb if isinstance(emb, dict) else {}
+    def embedding_status(self) -> EmbeddingStatus:
+        return self.status().embedding or EmbeddingStatus()
 
-    def index_rebuild(self) -> dict[str, Any]:
-        return self._request("POST", "/index/rebuild", timeout=30.0)
+    def index_rebuild(self) -> IndexRebuildResponse:
+        return IndexRebuildResponse.model_validate(
+            self._request("POST", "/index/rebuild", timeout=30.0)
+        )
 
-    def embedding_start(self, **overrides: Any) -> dict[str, Any]:
+    def embedding_start(self, **overrides: Any) -> EmbeddingStartResponse:
         body = {k: v for k, v in overrides.items() if v is not None}
-        return self._request("POST", "/embedding/start", json=body, timeout=120.0)
+        return EmbeddingStartResponse.model_validate(
+            self._request("POST", "/embedding/start", json=body, timeout=120.0)
+        )
 
-    def embedding_stop(self) -> dict[str, Any]:
-        return self._request("POST", "/embedding/stop", timeout=30.0)
+    def embedding_stop(self) -> EmbeddingStopResponse:
+        return EmbeddingStopResponse.model_validate(
+            self._request("POST", "/embedding/stop", timeout=30.0)
+        )
 
-    def shutdown(self) -> dict[str, Any]:
-        return self._request("POST", "/shutdown", timeout=5.0)
+    def shutdown(self) -> ShutdownResponse:
+        return ShutdownResponse.model_validate(self._request("POST", "/shutdown", timeout=5.0))
 
     def _request(
         self,
@@ -242,11 +431,11 @@ class ShrikeClient:
         """True if a local daemon currently holds the server lock."""
         return daemon.is_server_alive()
 
-    def stop(self, timeout: float = 5.0) -> dict[str, Any]:
+    def stop(self, timeout: float = 5.0) -> StopResponse:
         """Stop the local daemon (HTTP → SIGTERM → SIGKILL). Delegates to daemon."""
-        return daemon.stop_server(timeout=timeout)
+        return StopResponse.model_validate(daemon.stop_server(timeout=timeout))
 
-    def wait_until_ready(self, timeout: float = 15.0) -> dict[str, Any] | None:
+    def wait_until_ready(self, timeout: float = 15.0) -> ServerStatus | None:
         """Poll ``/status`` until the daemon responds. Returns status or None."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -320,80 +509,9 @@ class ShrikeClient:
                 start_new_session=True,
             )
 
-    # -- Convenience tool wrappers ------------------------------------------
 
-    def collection_info(
-        self,
-        include: list[str] | None = None,
-        note_type_details: list[str] | None = None,
-    ) -> dict[str, Any]:
-        args: dict[str, Any] = {}
-        if include:
-            args["include"] = include
-        if note_type_details:
-            args["note_type_details"] = note_type_details
-        return self.call("collection_info", args)
-
-    def list_notes(self, **kwargs: Any) -> dict[str, Any]:
-        args = {k: v for k, v in kwargs.items() if v is not None}
-        return self.call("list_notes", args)
-
-    def search_notes(self, **kwargs: Any) -> dict[str, Any]:
-        args = {k: v for k, v in kwargs.items() if v is not None}
-        return self.call("search_notes", args)
-
-    def upsert_notes(self, notes: list[dict]) -> dict[str, Any]:
-        """Upsert notes, transparently batching if over the server limit."""
-        return self._batched_call(
-            "upsert_notes",
-            items=notes,
-            param_key="notes",
-            result_key="results",
-            batch_size=100,
-        )
-
-    def upsert_note_types(self, note_types: list[dict]) -> dict[str, Any]:
-        return self._batched_call(
-            "upsert_note_types",
-            items=note_types,
-            param_key="note_types",
-            result_key="results",
-            batch_size=10,
-        )
-
-    def delete_note_types(self, ids: list[int]) -> dict[str, Any]:
-        return self.call("delete_note_types", {"ids": ids})
-
-    def delete_notes(self, ids: list[int]) -> dict[str, Any]:
-        """Delete notes, transparently batching if over the server limit."""
-        if len(ids) <= 100:
-            return self.call("delete_notes", {"ids": ids})
-
-        all_deleted: list[int] = []
-        all_not_found: list[int] = []
-        for i in range(0, len(ids), 100):
-            chunk = ids[i : i + 100]
-            result = self.call("delete_notes", {"ids": chunk})
-            all_deleted.extend(result.get("deleted", []))
-            all_not_found.extend(result.get("not_found", []))
-        return {"deleted": all_deleted, "not_found": all_not_found}
-
-    def _batched_call(
-        self,
-        tool_name: str,
-        *,
-        items: list,
-        param_key: str,
-        result_key: str,
-        batch_size: int,
-    ) -> dict[str, Any]:
-        """Split a list of items into batches and merge the results."""
-        if len(items) <= batch_size:
-            return self.call(tool_name, {param_key: items})
-
-        all_results: list = []
-        for i in range(0, len(items), batch_size):
-            chunk = items[i : i + batch_size]
-            result = self.call(tool_name, {param_key: chunk})
-            all_results.extend(result.get(result_key, []))
-        return {result_key: all_results}
+def _as_dict(item: NoteInput | NoteTypeInput | dict[str, Any]) -> dict[str, Any]:
+    """Normalize a request item (model or dict) to a JSON-RPC argument dict."""
+    if isinstance(item, NoteInput | NoteTypeInput):
+        return item.model_dump(exclude_none=True)
+    return item
