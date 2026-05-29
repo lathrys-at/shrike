@@ -39,17 +39,19 @@ def index_rebuild(ctx: click.Context, background: bool) -> None:
 
     body = client.index_rebuild()
 
-    if body.get("status") == "complete":
+    if body.status == "complete":
         if json_out:
             output.emit_json(body)
         else:
             output.console.print("[dim]Collection is empty, nothing to index.[/dim]")
         return
 
-    if body.get("status") == "already_building" and not json_out:
-        output.console.print("[dim]Index rebuild already in progress.[/dim]")
-
-    total = body.get("total") or body.get("progress", {}).get("total", 0)
+    if body.status == "already_building":
+        if not json_out:
+            output.console.print("[dim]Index rebuild already in progress.[/dim]")
+        total = body.progress.total
+    else:  # started
+        total = body.total
 
     if background:
         if json_out:
@@ -82,30 +84,25 @@ def index_status(ctx: click.Context) -> None:
         output.emit_json(idx_status)
         return
 
-    state = idx_status.get("state", "unknown")
-
-    if state == "ready":
+    if idx_status.state == "ready":
+        ndim = idx_status.ndim if idx_status.ndim is not None else "?"
         output.kv("Index", "[green]ready[/green]")
-        output.kv("Vectors", f"[green]{idx_status.get('size', 0)}[/green]", indent=2)
-        output.kv("Dimensions", str(idx_status.get("ndim", "?")), indent=2)
-    elif state == "building":
-        progress = idx_status.get("progress", {})
-        indexed = progress.get("indexed", 0)
-        total = progress.get("total", 0)
+        output.kv("Vectors", f"[green]{idx_status.size}[/green]", indent=2)
+        output.kv("Dimensions", str(ndim), indent=2)
+    elif idx_status.state == "building":
+        p = idx_status.progress
         output.kv("Index", "[yellow]building[/yellow]")
-        output.kv("Progress", f"{indexed} / {total} notes", indent=2)
-    elif state == "error":
+        output.kv("Progress", f"{p.indexed} / {p.total} notes", indent=2)
+    elif idx_status.state == "error":
         output.kv("Index", "[red]error[/red]")
-        output.kv("Error", idx_status.get("error", "unknown"), indent=2)
-    elif state == "unavailable":
-        output.kv("Index", "[dim]unavailable (no embedding service configured)[/dim]")
+        output.kv("Error", idx_status.error, indent=2)
     else:
-        output.kv("Index", f"[dim]{state}[/dim]")
+        output.kv("Index", "[dim]unavailable (no embedding service configured)[/dim]")
 
-    if idx_status.get("col_mod") is not None:
-        output.kv("Collection mod", str(idx_status["col_mod"]), indent=2)
-    if idx_status.get("path"):
-        output.kv("Path", f"[cyan]{idx_status['path']}[/cyan]", indent=2)
+    if idx_status.col_mod is not None:
+        output.kv("Collection mod", str(idx_status.col_mod), indent=2)
+    if idx_status.path:
+        output.kv("Path", f"[cyan]{idx_status.path}[/cyan]", indent=2)
 
 
 def _poll_progress(client: ShrikeClient, total: int, *, json_out: bool) -> None:
@@ -117,31 +114,27 @@ def _poll_progress(client: ShrikeClient, total: int, *, json_out: bool) -> None:
     with output.console.status("", spinner="dots") as status:
         while True:
             full = client.server_status()
-            idx_status = full.get("index") if full else None
+            idx_status = full.index if full else None
             if idx_status is None:
                 status.update("Indexing…")
                 time.sleep(0.5)
                 continue
 
-            state = idx_status.get("state", "")
-            if state == "ready":
+            if idx_status.state == "ready":
                 break
-
-            if state == "error":
-                raise click.ClickException(
-                    f"Index rebuild failed: {idx_status.get('error', 'unknown error')}"
-                )
-
-            progress = idx_status.get("progress", {})
-            indexed = progress.get("indexed", 0)
-            total = progress.get("total", total)
-            status.update(f"Indexing… {indexed} / {total} notes")
+            if idx_status.state == "error":
+                raise click.ClickException(f"Index rebuild failed: {idx_status.error}")
+            if idx_status.state == "building":
+                total = idx_status.progress.total
+                status.update(f"Indexing… {idx_status.progress.indexed} / {total} notes")
+            else:
+                status.update("Indexing…")
             time.sleep(0.5)
 
-    full = client.server_status() or {}
-    idx_status = full.get("index", {})
-    size = idx_status.get("size", 0)
-    ndim = idx_status.get("ndim", "?")
+    full = client.server_status()
+    idx_status = full.index if full else None
+    size = idx_status.size if idx_status else 0
+    ndim = idx_status.ndim if idx_status and idx_status.ndim is not None else "?"
     output.console.print(f"Index ready: [green]{size}[/green] notes, {ndim} dims")
 
 
@@ -149,17 +142,16 @@ def _poll_progress_json(client: ShrikeClient) -> None:
     """Poll and emit final JSON when done."""
     while True:
         full = client.server_status()
-        idx_status = full.get("index") if full else None
+        idx_status = full.index if full else None
         if idx_status is None:
             time.sleep(0.5)
             continue
 
-        state = idx_status.get("state", "")
-        if state == "ready":
-            output.emit_json({"status": "complete", **idx_status})
+        if idx_status.state == "ready":
+            output.emit_json({"status": "complete", **idx_status.model_dump(exclude_none=True)})
             return
-        if state == "error":
-            output.emit_json({"status": "error", **idx_status})
+        if idx_status.state == "error":
+            output.emit_json({"status": "error", **idx_status.model_dump(exclude_none=True)})
             raise SystemExit(1)
 
         time.sleep(0.5)

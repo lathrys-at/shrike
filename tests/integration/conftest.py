@@ -108,8 +108,18 @@ class MCPClient:
         body = resp.json()
         if "error" in body:
             raise RuntimeError(f"JSON-RPC error: {body['error']}")
-        result: dict = body["result"]["structuredContent"]
-        return result
+        result = body["result"]
+        if result.get("isError"):
+            # Input-validation / execution errors carry text content, not
+            # structuredContent — surface the message so tests can assert on it.
+            content = result.get("content") or []
+            text = next(
+                (c.get("text") for c in content if isinstance(c, dict) and c.get("text")),
+                "tool error",
+            )
+            raise RuntimeError(text)
+        structured: dict = result["structuredContent"]
+        return structured
 
 
 class CLIRunner:

@@ -29,16 +29,16 @@ class TestCall:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
         body = {"result": {"structuredContent": {"ok": 1}}}
         with patch("shrike.client.httpx.post", return_value=_resp(200, body)):
-            assert c.call("t") == {"ok": 1}
+            assert c._call("t") == {"ok": 1}
 
-    def test_tool_error_in_content(self) -> None:
+    def test_is_error_result_raises(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
-        body = {"result": {"structuredContent": {"error": "bad note"}}}
+        body = {"result": {"isError": True, "content": [{"type": "text", "text": "bad note"}]}}
         with (
             patch("shrike.client.httpx.post", return_value=_resp(200, body)),
             pytest.raises(ServerError, match="bad note"),
         ):
-            c.call("t")
+            c._call("t")
 
     def test_jsonrpc_error(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
@@ -46,7 +46,7 @@ class TestCall:
             patch("shrike.client.httpx.post", return_value=_resp(200, {"error": {"code": -1}})),
             pytest.raises(ServerError),
         ):
-            c.call("t")
+            c._call("t")
 
     def test_http_error_raises_typed(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
@@ -54,7 +54,7 @@ class TestCall:
             patch("shrike.client.httpx.post", return_value=_resp(500, {})),
             pytest.raises(ServerHTTPError) as ei,
         ):
-            c.call("t")
+            c._call("t")
         assert ei.value.status_code == 500
 
     def test_unreachable(self) -> None:
@@ -63,7 +63,7 @@ class TestCall:
             patch("shrike.client.httpx.post", side_effect=httpx.ConnectError("down")),
             pytest.raises(ServerUnreachableError),
         ):
-            c.call("t")
+            c._call("t")
 
 
 class TestCustomEndpoints:
@@ -89,7 +89,14 @@ class TestCustomEndpoints:
 
         def req(method, url, *, json=None, timeout=None):  # type: ignore[no-untyped-def]
             captured["json"] = json
-            return _resp(200, {"status": "started"})
+            return _resp(
+                200,
+                {
+                    "status": "started",
+                    "embedding": {"state": "not_configured"},
+                    "index": {"state": "unavailable"},
+                },
+            )
 
         with patch("shrike.client.httpx.request", side_effect=req):
             c.embedding_start(model="/m.gguf", port=None, threads=4)
@@ -102,11 +109,20 @@ class TestCustomEndpoints:
 
     def test_index_status_extracts_section(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
-        with patch(
-            "shrike.client.httpx.request",
-            return_value=_resp(200, {"index": {"state": "ready"}}),
-        ):
-            assert c.index_status() == {"state": "ready"}
+        status = {
+            "running": True,
+            "pid": 1,
+            "url": "u",
+            "collection": "c",
+            "log_level": "info",
+            "log_dir": "/l",
+            "embedding": {"state": "not_configured"},
+            "index": {"state": "ready", "size": 5, "ndim": 384},
+        }
+        with patch("shrike.client.httpx.request", return_value=_resp(200, status)):
+            idx = c.index_status()
+            assert idx.state == "ready"
+            assert idx.size == 5
 
 
 class TestLifecycle:
@@ -118,7 +134,7 @@ class TestLifecycle:
     def test_stop_delegates_to_daemon(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
         with patch("shrike.client.daemon.stop_server", return_value={"stopped": True}) as m:
-            assert c.stop() == {"stopped": True}
+            assert c.stop().stopped is True
             m.assert_called_once()
 
     def test_ensure_running_returns_when_already_alive(self) -> None:
@@ -183,6 +199,6 @@ class TestLifecycle:
             patch("shrike.client.httpx.post", side_effect=post),
             patch.object(ShrikeClient, "ensure_running", return_value=spec.url) as er,
         ):
-            assert c.call("t") == {"ok": 1}
+            assert c._call("t") == {"ok": 1}
         er.assert_called_once()
         assert calls["n"] == 2
