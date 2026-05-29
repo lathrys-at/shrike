@@ -91,7 +91,7 @@ def type_list(ctx: click.Context, identifier: str | None) -> None:
             output.emit_json(match)
             return
 
-        if not match or match.templates is None:
+        if not match or match.detail is None:
             raise click.ClickException(f"Note type '{identifier}' not found.")
 
         output.note_type_detail(match)

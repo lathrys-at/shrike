@@ -34,8 +34,8 @@ class TestCreateNoteType:
         custom = next(nt for nt in info["note_types"] if nt["name"] == "Custom")
         assert custom["fields"] == ["Term", "Definition"]
         assert custom["type"] == "standard"
-        assert len(custom["templates"]) == 1
-        assert custom["css"] == ".card { font-size: 20px; }"
+        assert len(custom["detail"]["templates"]) == 1
+        assert custom["detail"]["css"] == ".card { font-size: 20px; }"
 
     async def test_create_cloze(self, wrapper):
         results = upsert_note_types(
@@ -91,7 +91,7 @@ class TestCreateNoteType:
             include=["note_types"], note_type_details=["Vocab"]
         )
         vocab = next(nt for nt in info["note_types"] if nt["name"] == "Vocab")
-        assert len(vocab["templates"]) == 2
+        assert len(vocab["detail"]["templates"]) == 2
 
     async def test_create_duplicate_name_fails(self, wrapper):
         results = upsert_note_types(
@@ -164,7 +164,7 @@ class TestUpdateNoteType:
             include=["note_types"], note_type_details=["Editable"]
         )
         editable = next(nt for nt in info["note_types"] if nt["id"] == nt_id)
-        assert "color: red" in editable["css"]
+        assert "color: red" in editable["detail"]["css"]
 
     async def test_update_nonexistent(self, wrapper):
         results = upsert_note_types(wrapper.col, [{"id": 9999999999, "name": "Nope"}])

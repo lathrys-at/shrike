@@ -53,15 +53,18 @@ Requesting `include: ["all"]` (or specific sections) adds them:
       "id": 1234567890,
       "fields": ["Front", "Back"],
       "type": "standard",          // "standard" or "cloze"
-      // included only when requested via note_type_details:
-      "templates": [
-        {
-          "name": "Card 1",
-          "front": "{{Front}}",
-          "back": "{{FrontSide}}<hr id=answer>{{Back}}"
-        }
-      ],
-      "css": ".card { font-family: arial; font-size: 20px; text-align: center; }"
+      // present only when requested via note_type_details; null otherwise.
+      // templates and css always travel together, so they're grouped here:
+      "detail": {
+        "templates": [
+          {
+            "name": "Card 1",
+            "front": "{{Front}}",
+            "back": "{{FrontSide}}<hr id=answer>{{Back}}"
+          }
+        ],
+        "css": ".card { font-family: arial; font-size: 20px; text-align: center; }"
+      }
     }
   ],
   "decks": [

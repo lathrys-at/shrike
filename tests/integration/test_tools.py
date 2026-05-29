@@ -42,8 +42,8 @@ class TestCollectionInfo:
             {"include": ["note_types"], "note_type_details": ["Basic"]},
         )
         basic = next(nt for nt in result["note_types"] if nt["name"] == "Basic")
-        assert "templates" in basic
-        assert "css" in basic
+        assert basic["detail"]["templates"]
+        assert "css" in basic["detail"]
 
     def test_default_note_types(self, mcp):
         result = mcp("collection_info", {"include": ["note_types"]})
@@ -512,8 +512,8 @@ class TestNoteTypeLifecycle:
         )
         nt = next(nt for nt in info["note_types"] if nt["name"] == "Custom")
         assert nt["fields"] == ["Term", "Definition", "Example"]
-        assert len(nt["templates"]) == 1
-        assert "font-family" in nt["css"]
+        assert len(nt["detail"]["templates"]) == 1
+        assert "font-family" in nt["detail"]["css"]
 
     def test_create_note_with_custom_type(self, mcp):
         mcp(
@@ -570,7 +570,7 @@ class TestNoteTypeLifecycle:
             {"include": ["note_types"], "note_type_details": ["Styled"]},
         )
         nt = next(nt for nt in info["note_types"] if nt["name"] == "Styled")
-        assert "color: red" in nt["css"]
+        assert "color: red" in nt["detail"]["css"]
 
     def test_update_name(self, mcp):
         created = mcp(

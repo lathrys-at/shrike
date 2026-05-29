@@ -10,10 +10,28 @@ Design rules:
 - **Make illegal states unrepresentable.** When a field's presence is
   *correlated* with another (a hidden state — "you get progress only while
   building", "an error carries a message, a success carries an id"), model it as
-  a discriminated union of precise variants, not one bag of optionals. A bare
-  ``X | None`` is reserved for *independent* optionality — a datum that may
-  genuinely be absent on its own (e.g. ``col_mod`` before the index is built, a
-  field omitted from a partial update).
+  a discriminated union, not one bag of optionals. The pattern is a type alias::
+
+      class Foo(BaseModel):
+          status: Literal["foo"]
+          ...
+      class Bar(BaseModel):
+          status: Literal["bar"]
+          ...
+      Thing = Annotated[Foo | Bar, Field(discriminator="status")]
+
+  Each variant is a ``BaseModel`` with a ``Literal`` discriminator field, and the
+  union is an ``Annotated[... , Field(discriminator=...)]`` alias. Prefer this
+  everywhere a set of fields travels together under a tag. Two fields that always
+  appear or vanish as a pair are the same smell at smaller scale — group them
+  into a nested sub-model (``detail: Detail | None``) rather than two optionals.
+  Because the alias is not a ``BaseModel``, validate it with
+  ``TypeAdapter(Thing).validate_python(...)`` (a model field typed as ``Thing``
+  validates automatically).
+- A bare ``X | None`` is reserved for *independent* optionality — a datum that
+  may genuinely be absent on its own, uncorrelated with any other field (e.g.
+  ``col_mod`` before the index is built, a field omitted from a partial update).
+  Annotate why, so the next reader knows it isn't laziness.
 - Whole-call failures are not modeled here at all: tools raise, and the failure
   surfaces as an MCP ``isError`` result the client raises on. No response model
   carries an ``error`` field.
@@ -153,16 +171,23 @@ class TemplateInfo(BaseModel):
     back: str
 
 
+class NoteTypeDetail(BaseModel):
+    """Full template/CSS definition — the two always travel together."""
+
+    templates: list[TemplateInfo]
+    css: str
+
+
 class NoteTypeInfo(BaseModel):
     name: str
     id: int
     fields: list[str] = []
     type: str = "standard"
-    # Detail fields: present only for note types named in collection_info's
-    # `note_type_details`. A single response can mix summary and detailed note
-    # types, so these are genuinely per-item optional (not a whole-model state).
-    templates: list[TemplateInfo] | None = None
-    css: str | None = None
+    # Grouped (not two correlated optionals): the full definition is present only
+    # for note types named in collection_info's `note_type_details`. A single
+    # response can mix summary (detail=None) and detailed entries, so this is
+    # genuine independent optionality at the model level.
+    detail: NoteTypeDetail | None = None
 
 
 class DeckInfo(BaseModel):

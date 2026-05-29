@@ -150,15 +150,17 @@ class CollectionWrapper:
                 "type": "cloze" if nt.get("type") == MODEL_CLOZE else "standard",
             }
             if nt["name"] in detail_names:
-                entry["templates"] = [
-                    {
-                        "name": t["name"],
-                        "front": t["qfmt"],
-                        "back": t["afmt"],
-                    }
-                    for t in nt["tmpls"]
-                ]
-                entry["css"] = nt.get("css", "")
+                entry["detail"] = {
+                    "templates": [
+                        {
+                            "name": t["name"],
+                            "front": t["qfmt"],
+                            "back": t["afmt"],
+                        }
+                        for t in nt["tmpls"]
+                    ],
+                    "css": nt.get("css", ""),
+                }
             note_types.append(entry)
         return note_types
 

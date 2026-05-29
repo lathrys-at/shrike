@@ -106,7 +106,7 @@ def _render_note_types(note_types: list[NoteTypeInfo], col_path: str) -> None:
     output.note_type_table(note_types, col_path)
 
     for nt in note_types:
-        if nt.templates is not None or nt.css is not None:
+        if nt.detail is not None:
             output.console.print()
             output.note_type_detail(nt)
 

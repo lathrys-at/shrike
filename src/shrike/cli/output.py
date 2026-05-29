@@ -232,18 +232,17 @@ def note_type_detail(nt: NoteTypeInfo) -> None:
     lines.append(f"[dim]Type:[/dim] {nt.type}")
     lines.append(f"[dim]Fields:[/dim] {', '.join(nt.fields)}")
 
-    if nt.templates:
+    if nt.detail is not None:
         lines.append("")
         lines.append("[bold]Templates[/bold]")
-        for tmpl in nt.templates:
+        for tmpl in nt.detail.templates:
             lines.append(f"  [cyan]{tmpl.name}[/cyan]")
             _append_template_field(lines, "Front", tmpl.front)
             _append_template_field(lines, "Back", tmpl.back)
 
-    if nt.css is not None:
         lines.append("")
         lines.append("[bold]CSS[/bold]")
-        for css_line in nt.css.splitlines():
+        for css_line in nt.detail.css.splitlines():
             lines.append(f"  {css_line}")
 
     console.print(
