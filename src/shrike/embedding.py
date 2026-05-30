@@ -144,6 +144,11 @@ class EmbeddingService:
             stdout=subprocess.DEVNULL,
             stderr=stderr_target,
         )
+        # The child dup'd the stderr fd at spawn and writes to it for its whole
+        # life; the parent never does, so close our copy rather than leak it for
+        # the server's lifetime.
+        if stderr_target is not subprocess.DEVNULL:
+            stderr_target.close()
 
         if not self._wait_healthy():
             rc = self._process.poll()

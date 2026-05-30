@@ -362,6 +362,9 @@ class VectorIndex:
             return
 
         def _run() -> None:
+            # rebuild() already logs the failure and records IndexState.ERROR;
+            # suppress here only to keep the daemon thread from dumping a
+            # traceback for an error that's already been handled and surfaced.
             with contextlib.suppress(Exception):
                 self.rebuild(note_ids, texts, col_mod, model_id=model_id)
 

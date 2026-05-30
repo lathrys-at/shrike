@@ -121,7 +121,7 @@ At least one filter (`ids`, `deck`, `tags`, `note_type`, `modified_since`, or `q
     {
       "id": 1700000000123,
       "note_type": "Basic",
-      "deck": "Japanese::Vocabulary",
+      "deck": "Japanese::Vocabulary",   // first card's deck (see note below)
       "tags": ["verb", "chapter-3"],
       "modified": "2026-05-20T14:32:00Z",
       // included when fields: "full" (default)
@@ -135,6 +135,8 @@ At least one filter (`ids`, `deck`, `tags`, `note_type`, `modified_since`, or `q
   "limit": 50
 }
 ```
+
+Anki permits per-card decks, so a single note's cards can live in different decks. `deck` reports the **first card's deck** — Shrike treats notes as belonging to one deck, so split-deck notes are represented by that first card only.
 
 ---
 

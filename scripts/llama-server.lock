@@ -1,0 +1,14 @@
+# Pinned llama.cpp release, shared by scripts/fetch-llama-server.sh and CI.
+#
+# We pin a known tag and verify a per-platform SHA256 instead of pulling
+# `releases/latest` unverified — a release could be re-tagged or a mirror
+# tampered with. To bump: run `scripts/update-llama-lock.sh [TAG]` (defaults to
+# the latest release) and commit the result.
+#
+# Shell-sourceable: KEY=VALUE, no spaces. Platform keys use underscores because
+# `ubuntu-x64` isn't a valid shell variable name.
+LLAMA_TAG=b9415
+SHA256_ubuntu_x64=df22e2447cd16dc2ae039d6dccd3b734efac109e315fa61ec8e1d5000bcbee00
+SHA256_ubuntu_arm64=bf01d2ce3ea74402c757fa992388ef10987a6cdc0231b0c43353c1e5722ae22c
+SHA256_macos_arm64=edf417cd8dd148fd423ea758953caa43376df98d8f027b7748ea0399a9a8023f
+SHA256_macos_x64=7c07ab8bb59e249340ed15afe03d5f164521242942a406661d6c499efc186a84

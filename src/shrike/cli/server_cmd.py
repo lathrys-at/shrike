@@ -102,6 +102,12 @@ def server() -> None:
 )
 @click.option("--port", type=int, help="Port to listen on (default: 8372).")
 @click.option("--host", help="Host to bind to (default: 127.0.0.1).")
+@click.option(
+    "--allow-remote",
+    is_flag=True,
+    help="Permit binding to a non-loopback host. Endpoints are unauthenticated, "
+    "so this exposes the full collection API to the network.",
+)
 @click.option("--foreground", is_flag=True, help="Run in the foreground instead of daemonizing.")
 @click.option(
     "--log-dir",
@@ -141,6 +147,7 @@ def server_start(
     collection: str | None,
     port: int | None,
     host: str | None,
+    allow_remote: bool,
     foreground: bool,
     log_dir: str | None,
     log_level: str | None,
@@ -198,6 +205,7 @@ def server_start(
         llama_server=llama_server,
     )
     embedding_cli_args = embedding_args(resolved_embedding, no_embedding=no_embedding)
+    remote_args = ["--allow-remote"] if allow_remote else []
 
     # Check if already running (via lock, not PID)
     if is_server_alive():
@@ -228,6 +236,7 @@ def server_start(
             "--log-level",
             resolved_log_level,
             "--foreground",
+            *remote_args,
             *embedding_cli_args,
         ]
         from shrike.server import main
@@ -259,6 +268,7 @@ def server_start(
                 resolved_log_dir,
                 "--log-level",
                 resolved_log_level,
+                *remote_args,
                 *embedding_cli_args,
             ],
             stdout=bootstrap_log_file,
@@ -274,6 +284,8 @@ def server_start(
         config["collection"] = collection_path
         config["server"]["host"] = server_host
         config["server"]["port"] = server_port
+        if allow_remote:
+            config["server"]["allow_remote"] = True
         # Remember embedding settings so `shrike embedding start` works later.
         for key, value in resolved_embedding.items():
             if value is not None:

@@ -100,6 +100,7 @@ class ServerSpec:
     collection: str
     host: str = "127.0.0.1"
     port: int = 8372
+    allow_remote: bool = False
     log_dir: str | None = None
     log_level: str = "info"
     state_dir: str | None = None
@@ -496,6 +497,8 @@ class ShrikeClient:
             "--log-level",
             spec.log_level,
         ]
+        if spec.allow_remote:
+            cmd.append("--allow-remote")
         if spec.log_dir:
             cmd += ["--log-dir", spec.log_dir]
         if spec.state_dir:
