@@ -253,16 +253,20 @@ def register_tools(
             list[str],
             Field(
                 default_factory=list,
-                description="Natural-language search strings, each matched independently.",
+                max_length=50,
+                description="Natural-language search strings, each matched independently "
+                "(max 50 per call).",
             ),
         ],
         ids: Annotated[
             list[int],
             Field(
                 default_factory=list,
+                max_length=50,
                 description=(
                     "Note IDs to use as search anchors — returns notes semantically "
-                    "similar to these existing notes. Source notes are excluded from results."
+                    "similar to these existing notes. Source notes are excluded from results "
+                    "(max 50 per call)."
                 ),
             ),
         ],

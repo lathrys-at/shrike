@@ -152,6 +152,22 @@ class TestSearchNotesResults:
         with pytest.raises(ToolError):
             _call(mcp_app, "search_notes", {"queries": ["test"], "top_k": 0})
 
+    def test_too_many_queries_rejected(self, mcp_app, mock_index):
+        """queries is capped at 50 (schema max_length) to bound embedding load."""
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        mock_index.search.return_value = [[]]
+        with pytest.raises(ToolError):
+            _call(mcp_app, "search_notes", {"queries": [f"q{i}" for i in range(51)]})
+
+    def test_too_many_ids_rejected(self, mcp_app, mock_index):
+        """ids (search anchors) is likewise capped at 50."""
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        mock_index.search.return_value = [[]]
+        with pytest.raises(ToolError):
+            _call(mcp_app, "search_notes", {"ids": list(range(51))})
+
     def test_deck_filter_overfetches(self, mcp_app, mock_index):
         """With a deck filter, search over-fetches a wider window (2.3)."""
         mock_index.search.return_value = [[]]

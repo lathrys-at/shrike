@@ -177,7 +177,7 @@ Breadth is genuinely good: ~365 tests (218 unit / 147 integration), real-server 
 **Action items:**
 - [x] Add `pytest-cov` and a coverage gate so untested-branch regressions are visible. (`[tool.coverage]` in `pyproject.toml` with `branch=true`, `fail_under=70`; a `coverage` CI job runs unit + non-embedding integration under `coverage run --parallel-mode`, with a `coverage_subprocess.pth` + `COVERAGE_PROCESS_START` so the `python -m shrike.server` subprocess is counted too — combined coverage measured ~73%.)
 - [x] Test daemon failure paths: `stop_server` SIGTERM→SIGKILL escalation (`daemon.py:221–238`), stale-state cleanup, autostart-on-ConnectError retry (`client.py:50–62`). (`tests/unit/test_daemon.py` covers the HTTP→SIGTERM→SIGKILL ladder and stale-state cleanup; the autostart-on-ConnectError retry was already covered by `test_client.py::test_call_autostarts_then_retries`.)
-- [ ] Add a concurrency test: fire upserts while a background rebuild thread runs (covers 3.1).
+- [x] Add a concurrency test: fire upserts while a background rebuild thread runs (covers 3.1). (`tests/unit/test_collection_concurrency.py`: concurrent async upserts all apply; a background reader thread — standing in for the rebuild gather — racing async writers stays consistent with no exceptions; interleaved reads/writes only ever observe valid intermediate counts.)
 - [x] Test the 3.3 error path: simulate `note_texts_for_embedding` raising and assert the upsert still reports `created`/`updated`. (`test_tools_search.py::test_note_texts_failure_doesnt_fail_upsert` — mutation-verified: reverting the in-`try` fix makes it fail.)
 - [x] Test `search_notes` deck/tag under-return (2.3): assert result counts when nearest neighbors are filtered out. (`test_tools_search.py::test_deck_filter_returns_deep_in_scope_match` asserts a deep in-deck hit is still returned; `test_deck_filter_overfetches` guards the widened window. Mutation-verified.)
 - [~] After 1.1/1.2 land, add tests for rejected Origin/Host and missing-token responses. *(Origin/Host done — `tests/integration/test_security.py` asserts 403 on forged Origin, 421 on forged Host, and a refused cross-origin `/shutdown`. Missing-token tests wait on the auth layer.)*
@@ -226,8 +226,8 @@ Anki's `deck_due_tree()` returns nodes whose `new_count`/`review_count`/`learn_c
 Correctness is not at risk — `col.mod` drift detection forces a rebuild after any non-graceful exit, so the index self-heals. But: (a) the roadmap doc is inaccurate, and (b) every hard kill / crash / power loss discards all in-memory incremental updates and forces a **full re-embed of the whole collection** on next start (minutes for large collections), even though the data was fine.
 
 **Action items:**
-- [ ] Either implement a real periodic/debounced save (e.g., mark dirty on `add`/`remove`, flush on a timer or after N changes), or
-- [ ] Correct CLAUDE.md to say persistence is shutdown-only and rebuild-on-crash is the accepted cost.
+- [ ] Either implement a real periodic/debounced save (e.g., mark dirty on `add`/`remove`, flush on a timer or after N changes), or *(deferred — chose the doc-correction option below; a debounced save remains a possible future optimization, tied to §7.7)*
+- [x] Correct CLAUDE.md to say persistence is shutdown-only and rebuild-on-crash is the accepted cost. (Done: CLAUDE.md now states "no periodic timer; crash forces a rebuild via `col.mod` drift" in both the consistency section and the v0.2.0 roadmap line — no remaining claim that periodic save is implemented.)
 
 ### 7.4 [MEDIUM] llama-server is orphaned on a hard kill
 
@@ -265,7 +265,7 @@ CLAUDE.md calls `docs/mcp-schema.json` "the authoritative schema," but it's a se
 `upsert_notes`/`delete_notes`/`list_notes.limit`/`top_k` are all capped, but `search_notes.queries`, `search_notes.ids`, and `note_texts_for_embedding(ids)` are not. A client can submit thousands of query strings, each triggering an embedding call — a cheap DoS against the embedding server. Fine under local trust; a hardening item for the relay.
 
 **Action items:**
-- [ ] Cap `queries` and `ids` lengths in `search_notes` (and document the cap), consistent with the other tools.
+- [x] Cap `queries` and `ids` lengths in `search_notes` (and document the cap), consistent with the other tools. (Both capped at `max_length=50` on the tool params, so FastMCP rejects oversized input; documented in `docs/mcp-tools.md` and the param descriptions. Tests assert 51 queries / 51 ids are rejected.)
 
 ### 7.9 [LOW] Embedding start failure is reported as "not configured"
 
