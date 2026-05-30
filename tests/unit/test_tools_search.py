@@ -164,6 +164,30 @@ class TestSearchNotesResults:
         _call(mcp_app, "search_notes", {"queries": ["test"], "top_k": 5})
         assert mock_index.search.call_args[1]["top_k"] == 5
 
+    def test_deck_filter_returns_deep_in_scope_match(
+        self, wrapper, mock_index, mcp_app, basic_note
+    ):
+        """An in-deck note ranked behind out-of-deck neighbors is still returned
+        — the widened window must not silently under-return (audit 2.3).
+
+        ``basic_note`` is in deck "Test"; the nearest neighbor here is in another
+        deck and ranks ahead of it. A deck-scoped search must skip past the
+        out-of-deck hit and still surface the in-deck one.
+        """
+        other = _seed(
+            wrapper,
+            [{"deck": "Other", "note_type": "Basic", "fields": {"Front": "O", "Back": "A"}}],
+        )[0]["id"]
+        mock_index.search.return_value = [
+            [
+                {"note_id": other, "distance": 0.05},
+                {"note_id": basic_note, "distance": 0.20},
+            ]
+        ]
+        result = _call(mcp_app, "search_notes", {"queries": ["q"], "deck": "Test"})
+        matches = result["results"][0]["matches"]
+        assert [m["id"] for m in matches] == [basic_note]
+
     def test_score_rounded_to_3_decimals(self, wrapper, mock_index, mcp_app, basic_note):
         mock_index.search.return_value = [[{"note_id": basic_note, "distance": 0.12345}]]
         result = _call(mcp_app, "search_notes", {"queries": ["test"]})
@@ -319,6 +343,26 @@ class TestUpsertIndexUpdate:
         mock_index.add.side_effect = RuntimeError("embed failed")
         result = _upsert(mcp_app, [BASIC_NOTE])
         r = result["results"][0]
+        assert r["neighbors_unavailable"] is True
+        assert f"search_notes(ids=[{r['id']}])" in result["message"]
+
+    def test_note_texts_failure_doesnt_fail_upsert(self, wrapper, mock_index, mcp_app):
+        """If note_texts_for_embedding raises, the already-committed notes must
+        still report created — not a NameError-driven false failure (audit 3.3).
+
+        Before the fix, an exception here left `texts` unbound and the later
+        neighbor-attach raised NameError, surfacing as a whole-call error even
+        though the upsert had succeeded.
+        """
+
+        async def boom(_ids):
+            raise RuntimeError("embedding text build failed")
+
+        wrapper.note_texts_for_embedding = boom
+        result = _upsert(mcp_app, [BASIC_NOTE])
+        r = result["results"][0]
+        assert r["status"] == "created"
+        assert r["neighbors"] == []
         assert r["neighbors_unavailable"] is True
         assert f"search_notes(ids=[{r['id']}])" in result["message"]
 
