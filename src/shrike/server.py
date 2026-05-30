@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
+import ipaddress
 import logging
 import os
 import signal
 import sys
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import (
+    TransportSecurityMiddleware,
+    TransportSecuritySettings,
+)
 
 from shrike.collection import CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
@@ -47,13 +54,62 @@ def _maybe_rebuild(
             logger.info("Collection is empty, skipping index rebuild")
 
 
-def create_mcp() -> FastMCP:
+# Host/Origin values accepted when the server is bound to a loopback address.
+# The port is wildcarded (`:*`) so any port the user picked is allowed; matching
+# is exact on the host part, which is what stops DNS-rebinding (a page on
+# ``evil.com`` resolving to 127.0.0.1 still sends ``Host: evil.com``).
+_LOOPBACK_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+_LOOPBACK_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+
+
+def _is_loopback(host: str) -> bool:
+    """True if *host* names the loopback interface (so binding is browser-safe)."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _build_transport_security(host: str) -> TransportSecuritySettings | None:
+    """DNS-rebinding / CSRF protection for a loopback bind.
+
+    Returns settings that allow only loopback Host/Origin headers when bound to a
+    loopback address, or ``None`` for a non-loopback bind — there is no fixed set
+    of valid external Host values to allow-list, so a deliberately remote server
+    is left to the (roadmap) auth layer rather than to header validation.
+    """
+    if not _is_loopback(host):
+        return None
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=list(_LOOPBACK_HOSTS),
+        allowed_origins=list(_LOOPBACK_ORIGINS),
+    )
+
+
+def create_mcp(
+    *,
+    host: str,
+    port: int,
+    transport_security: TransportSecuritySettings | None,
+) -> FastMCP:
     """Build a fresh FastMCP app.
 
     Constructed per-process inside ``main()`` rather than as an import-time
-    global so the server is testable and re-usable in-process.
+    global so the server is testable and re-usable in-process. ``host``/``port``
+    and ``transport_security`` are passed at construction so the MCP endpoint's
+    DNS-rebinding protection matches the address actually bound.
     """
-    return FastMCP("Shrike", stateless_http=True, json_response=True)
+    return FastMCP(
+        "Shrike",
+        stateless_http=True,
+        json_response=True,
+        host=host,
+        port=port,
+        transport_security=transport_security,
+    )
 
 
 def _register_custom_routes(
@@ -64,12 +120,37 @@ def _register_custom_routes(
     meta: dict[str, Any],
     runtime: EmbeddingRuntime,
     index: VectorIndex,
+    security: TransportSecuritySettings | None,
 ) -> None:
-    """Register custom HTTP endpoints on the server."""
+    """Register custom HTTP endpoints on the server.
+
+    The custom routes bypass the MCP transport middleware, so they get the same
+    Host/Origin validation applied here via ``_guard`` — otherwise a browser page
+    could drive ``/shutdown`` etc. through a no-preflight POST.
+    """
     from starlette.requests import Request
-    from starlette.responses import JSONResponse
+    from starlette.responses import JSONResponse, Response
+
+    security_mw = TransportSecurityMiddleware(security)
+
+    def _guard(
+        handler: Callable[[Request], Awaitable[Response]],
+    ) -> Callable[[Request], Awaitable[Response]]:
+        @functools.wraps(handler)
+        async def wrapped(request: Request) -> Response:
+            # is_post=False: validate Host/Origin only. Content-Type is not
+            # enforced here because several endpoints are intentionally bodyless
+            # POSTs (/shutdown, /index/rebuild, /embedding/stop). A no-op when
+            # security is None (non-loopback bind).
+            rejection = await security_mw.validate_request(request, is_post=False)
+            if rejection is not None:
+                return rejection
+            return await handler(request)
+
+        return wrapped
 
     @app.custom_route("/status", methods=["GET"])
+    @_guard
     async def handle_status(request: Request) -> JSONResponse:
         import contextlib
 
@@ -104,6 +185,7 @@ def _register_custom_routes(
         return JSONResponse(status)
 
     @app.custom_route("/index/rebuild", methods=["POST"])
+    @_guard
     async def handle_index_rebuild(request: Request) -> JSONResponse:
         from shrike.index import IndexState
 
@@ -135,6 +217,7 @@ def _register_custom_routes(
         )
 
     @app.custom_route("/embedding/start", methods=["POST"])
+    @_guard
     async def handle_embedding_start(request: Request) -> JSONResponse:
         if runtime.running:
             return JSONResponse({"status": "already_running", "embedding": runtime.health()})
@@ -180,6 +263,7 @@ def _register_custom_routes(
         )
 
     @app.custom_route("/embedding/stop", methods=["POST"])
+    @_guard
     async def handle_embedding_stop(request: Request) -> JSONResponse:
         if not runtime.running:
             return JSONResponse({"status": "not_running"})
@@ -191,6 +275,7 @@ def _register_custom_routes(
         return JSONResponse({"status": "stopped", "index": index.status()})
 
     @app.custom_route("/shutdown", methods=["POST"])
+    @_guard
     async def handle_shutdown(request: Request) -> JSONResponse:
         logger.info("Shutdown requested via HTTP from %s", request.client)
         index.save()
@@ -224,6 +309,13 @@ def main() -> None:
         "--host",
         default="127.0.0.1",
         help="Host to bind to (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Permit binding to a non-loopback host. Every endpoint is "
+        "unauthenticated, so this exposes the full collection API to the "
+        "network — only use it behind your own auth/network controls.",
     )
     parser.add_argument(
         "--log-dir",
@@ -298,6 +390,26 @@ def main() -> None:
         log_level_override=args.log_level,
     )
 
+    # Refuse non-loopback binds unless explicitly opted in: every endpoint is
+    # unauthenticated, so a non-loopback host hands the full collection API to
+    # anyone on the network. Fail fast, before touching the collection.
+    if not _is_loopback(args.host):
+        if not args.allow_remote:
+            logger.error(
+                "Refusing to bind to non-loopback host %s without --allow-remote. "
+                "All endpoints are unauthenticated; binding to the network would "
+                "expose full collection access (read, write, delete, shutdown) to "
+                "anyone who can reach the port.",
+                args.host,
+            )
+            sys.exit(1)
+        logger.warning(
+            "Binding to non-loopback host %s with --allow-remote: all endpoints are "
+            "UNAUTHENTICATED. The entire collection API is reachable by anyone on the "
+            "network. Put your own auth/network controls in front of it.",
+            args.host,
+        )
+
     # Acquire the daemon lock before touching the collection
     state_dir_override = Path(args.state_dir) if args.state_dir else None
     server_lock = ServerLock(state_dir_override=state_dir_override)
@@ -336,10 +448,12 @@ def main() -> None:
     index = VectorIndex(path=cache_base / "index")
     logger.info("Vector index: %d vectors, %d dims", index.size, index.ndim or 0)
 
+    # llama-server stays on loopback regardless of the MCP bind host — there is
+    # never a reason to expose the embedding backend to the network.
     runtime = EmbeddingRuntime(
         index=index,
         model=args.embedding_model,
-        host=args.host,
+        host="127.0.0.1",
         port=args.embedding_port or 8373,
         log_dir=log_dir,
         context_size=args.embedding_context_size,
@@ -373,7 +487,8 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _signal_shutdown)
     signal.signal(signal.SIGINT, _signal_shutdown)
 
-    mcp = create_mcp()
+    transport_security = _build_transport_security(args.host)
+    mcp = create_mcp(host=args.host, port=args.port, transport_security=transport_security)
     register_tools(mcp, wrapper, index=index)
     _register_custom_routes(
         mcp,
@@ -382,6 +497,7 @@ def main() -> None:
         meta=server_meta,
         runtime=runtime,
         index=index,
+        security=transport_security,
     )
 
     logger.info(
@@ -391,8 +507,6 @@ def main() -> None:
         log_dir,
         args.log_level or "info",
     )
-    mcp.settings.host = args.host
-    mcp.settings.port = args.port
     mcp.run(transport="streamable-http")
 
 

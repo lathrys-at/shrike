@@ -189,6 +189,7 @@ def build_server_spec(
         collection=coll,
         host=host or server.get("host", "127.0.0.1"),
         port=port or server.get("port", 8372),
+        allow_remote=bool(server.get("allow_remote", False)),
         log_dir=resolved_log_dir,
         log_level=log_level or log_config.get("level", "info"),
         embedding_args=embedding_args(resolved_emb, no_embedding=no_embedding),

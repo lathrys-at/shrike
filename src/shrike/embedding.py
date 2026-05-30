@@ -135,15 +135,22 @@ class EmbeddingService:
             self._port,
         )
 
-        stderr_target: int | Any = subprocess.DEVNULL
-        if self._log_dir:
-            stderr_target = open(self._log_dir / "llama-server-stderr.log", "a")  # noqa: SIM115
+        stderr_file = (
+            open(self._log_dir / "llama-server-stderr.log", "a")  # noqa: SIM115
+            if self._log_dir
+            else None
+        )
 
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=stderr_target,
+            stderr=stderr_file or subprocess.DEVNULL,
         )
+        # The child dup'd the stderr fd at spawn and writes to it for its whole
+        # life; the parent never does, so close our copy rather than leak it for
+        # the server's lifetime.
+        if stderr_file is not None:
+            stderr_file.close()
 
         if not self._wait_healthy():
             rc = self._process.poll()
