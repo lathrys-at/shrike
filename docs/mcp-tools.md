@@ -152,8 +152,8 @@ Results can be filtered by deck or tags to narrow the search space.
 
 | Name | Type | Required | Description |
 |---|---|---|---|
-| `queries` | `string[]` | no | Natural-language search strings. Each is embedded and matched against the collection independently. |
-| `ids` | `integer[]` | no | Note IDs to use as search anchors — finds notes semantically similar to these. Source notes are automatically excluded from results. |
+| `queries` | `string[]` | no | Natural-language search strings. Each is embedded and matched against the collection independently. Max 50 per call. |
+| `ids` | `integer[]` | no | Note IDs to use as search anchors — finds notes semantically similar to these. Source notes are automatically excluded from results. Max 50 per call. |
 | `top_k` | `integer` | no | Maximum results per query or source ID. Default `10`, max `50`. |
 | `threshold` | `number` | no | Minimum cosine similarity (0–1) for a match. Default `0.5`. Results scoring below it are dropped. |
 | `deck` | `string` | no | Restrict search to notes in this deck (includes child decks). |
