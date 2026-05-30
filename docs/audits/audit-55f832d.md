@@ -176,10 +176,10 @@ Breadth is genuinely good: ~365 tests (218 unit / 147 integration), real-server 
 
 **Action items:**
 - [x] Add `pytest-cov` and a coverage gate so untested-branch regressions are visible. (`[tool.coverage]` in `pyproject.toml` with `branch=true`, `fail_under=70`; a `coverage` CI job runs unit + non-embedding integration under `coverage run --parallel-mode`, with a `coverage_subprocess.pth` + `COVERAGE_PROCESS_START` so the `python -m shrike.server` subprocess is counted too — combined coverage measured ~73%.)
-- [ ] Test daemon failure paths: `stop_server` SIGTERM→SIGKILL escalation (`daemon.py:221–238`), stale-state cleanup, autostart-on-ConnectError retry (`client.py:50–62`).
+- [x] Test daemon failure paths: `stop_server` SIGTERM→SIGKILL escalation (`daemon.py:221–238`), stale-state cleanup, autostart-on-ConnectError retry (`client.py:50–62`). (`tests/unit/test_daemon.py` covers the HTTP→SIGTERM→SIGKILL ladder and stale-state cleanup; the autostart-on-ConnectError retry was already covered by `test_client.py::test_call_autostarts_then_retries`.)
 - [ ] Add a concurrency test: fire upserts while a background rebuild thread runs (covers 3.1).
-- [ ] Test the 3.3 error path: simulate `note_texts_for_embedding` raising and assert the upsert still reports `created`/`updated`.
-- [ ] Test `search_notes` deck/tag under-return (2.3): assert result counts when nearest neighbors are filtered out.
+- [x] Test the 3.3 error path: simulate `note_texts_for_embedding` raising and assert the upsert still reports `created`/`updated`. (`test_tools_search.py::test_note_texts_failure_doesnt_fail_upsert` — mutation-verified: reverting the in-`try` fix makes it fail.)
+- [x] Test `search_notes` deck/tag under-return (2.3): assert result counts when nearest neighbors are filtered out. (`test_tools_search.py::test_deck_filter_returns_deep_in_scope_match` asserts a deep in-deck hit is still returned; `test_deck_filter_overfetches` guards the widened window. Mutation-verified.)
 - [~] After 1.1/1.2 land, add tests for rejected Origin/Host and missing-token responses. *(Origin/Host done — `tests/integration/test_security.py` asserts 403 on forged Origin, 421 on forged Host, and a refused cross-origin `/shutdown`. Missing-token tests wait on the auth layer.)*
 
 ---
