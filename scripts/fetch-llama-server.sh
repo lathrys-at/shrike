@@ -13,12 +13,33 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CACHE="$ROOT/.cache"
 LLAMA_DIR="$CACHE/llama-server"
 MODEL_DIR="$CACHE/models"
 MODEL_NAME="all-MiniLM-L6-v2-Q4_0.gguf"
 MODEL_URL="https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/$MODEL_NAME"
+
+# Pinned llama.cpp tag + per-platform checksums (shared with CI).
+# shellcheck source=scripts/llama-server.lock
+source "$SCRIPT_DIR/llama-server.lock"
+
+# Fail unless $1 hashes to $2. Portable across Linux (sha256sum) and macOS (shasum).
+verify_sha256() {
+    local file="$1" expected="$2" actual
+    if command -v sha256sum &>/dev/null; then
+        actual=$(sha256sum "$file" | awk '{print $1}')
+    else
+        actual=$(shasum -a 256 "$file" | awk '{print $1}')
+    fi
+    if [[ "$actual" != "$expected" ]]; then
+        echo "Checksum mismatch for $(basename "$file")" >&2
+        echo "  expected: $expected" >&2
+        echo "  actual:   $actual" >&2
+        exit 1
+    fi
+}
 
 for arg in "$@"; do
     if [[ "$arg" == "--fresh" ]]; then
@@ -32,7 +53,7 @@ done
 if [[ -x "$LLAMA_DIR/llama-server" ]]; then
     echo "Using cached llama-server" >&2
 else
-    echo "Downloading llama-server..." >&2
+    echo "Downloading llama-server $LLAMA_TAG..." >&2
     case "$(uname -s)-$(uname -m)" in
         Linux-x86_64)   PLATFORM="ubuntu-x64" ;;
         Linux-aarch64)  PLATFORM="ubuntu-arm64" ;;
@@ -41,18 +62,22 @@ else
         *) echo "Unsupported platform: $(uname -s)-$(uname -m)" >&2 && exit 1 ;;
     esac
 
-    if command -v gh &>/dev/null; then
-        TAG=$(gh api repos/ggml-org/llama.cpp/releases/latest --jq .tag_name)
-    else
-        TAG=$(curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases/latest \
-            | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])")
+    # Look up the pinned checksum for this platform (lock keys use underscores).
+    sha_var="SHA256_${PLATFORM//-/_}"
+    expected="${!sha_var:-}"
+    if [[ -z "$expected" ]]; then
+        echo "No pinned SHA256 for platform '$PLATFORM' in llama-server.lock" >&2 && exit 1
     fi
-    echo "  Release: $TAG, platform: $PLATFORM" >&2
+    echo "  Release: $LLAMA_TAG, platform: $PLATFORM" >&2
 
     mkdir -p "$CACHE"
-    curl -sL "https://github.com/ggml-org/llama.cpp/releases/download/${TAG}/llama-${TAG}-bin-${PLATFORM}.tar.gz" \
-        | tar xz -C "$CACHE"
-    mv "$CACHE/llama-${TAG}" "$LLAMA_DIR"
+    TARBALL="$CACHE/llama-${LLAMA_TAG}-bin-${PLATFORM}.tar.gz"
+    curl -sL "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-bin-${PLATFORM}.tar.gz" \
+        -o "$TARBALL"
+    verify_sha256 "$TARBALL" "$expected"
+    tar xz -C "$CACHE" -f "$TARBALL"
+    rm -f "$TARBALL"
+    mv "$CACHE/llama-${LLAMA_TAG}" "$LLAMA_DIR"
 fi
 
 echo "  $(${LLAMA_DIR}/llama-server --version 2>&1 || true)" >&2

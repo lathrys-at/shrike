@@ -45,6 +45,22 @@ markers = [
     "embedding: tests that require llama-server and a GGUF model",
 ]
 
+[tool.coverage.run]
+# parallel + the coverage_subprocess.pth hook let us capture the server, which
+# the integration suite runs as a `python -m shrike.server` subprocess. Without
+# this, ~all of server.py/daemon.py would read as uncovered.
+source = ["shrike"]
+branch = true
+parallel = true
+concurrency = ["thread"]
+
+[tool.coverage.report]
+show_missing = true
+# Ratchet: bump this up as coverage climbs; never lower it just to make CI pass.
+# Measured ~73% on the unit + non-embedding integration suite (embedding-gated
+# CLI paths aren't counted in CI); the buffer absorbs platform/timing variance.
+fail_under = 70
+
 [tool.mypy]
 python_version = "3.12"
 warn_return_any = true

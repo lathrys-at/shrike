@@ -16,10 +16,10 @@ The theme: lock down the trust boundary and serialize the one shared mutable res
 1. **3.3** (false-failure upsert) and **2.1** (`collection_info` contract) — correctness bugs affecting users/LLM today; small fixes. ✅ done
 2. **7.1** (nested-deck double-count) — confirmed counting bug. ✅ done
 3. **3.1** (serialized collection access) — corrected on second pass (no active race), then formalized: `CollectionWrapper` is now an async object with single-worker-thread serialization + backend thread affinity. ✅ done
-3. **1.2** (enable DNS-rebinding protection) and the non-loopback guard in **1.1** — small config changes, real local hardening.
+3. **1.2** (enable DNS-rebinding protection) and the non-loopback guard in **1.1** — small config changes, real local hardening. ✅ done
 4. **1.1 (auth) / 1.3 (credential storage)** — design decisions to make *before* writing relay/sync code, not after.
-5. **3.2, 2.3** — responsiveness/correctness polish.
-6. Everything in §4–§6 as cleanup, with `pytest-cov` + the stale `requirements.txt` being the highest-value of those.
+5. **3.2, 2.3** — responsiveness/correctness polish. ✅ done
+6. Everything in §4–§6 as cleanup, with `pytest-cov` + the stale `requirements.txt` being the highest-value of those. ✅ mostly done (`pytest-cov` gate, `requirements.txt`, py.typed, hatch version, factory, supply-chain pin all landed; remaining §4–§6 items are the N+1 query perf, test-coverage additions, and relay-gated hardening).
 
 ---
 
@@ -36,11 +36,11 @@ Every endpoint is unauthenticated. Anyone who can open a TCP connection to the p
 **Why it's roadmap-critical:** v0.6's relay explicitly forwards MCP JSON-RPC to "a user's local Shrike instance." If the relay reaches Shrike over anything but a loopback/authenticated channel, this is a remote unauthenticated total-control hole.
 
 **Action items:**
-- [ ] When `host` is not a loopback address, refuse to start unless an explicit `--allow-remote` (or similar) flag is set, and log a loud warning.
-- [ ] Keep llama-server bound to `127.0.0.1` regardless of the MCP host — there is no reason to expose it.
-- [ ] Design (before relay): require a bearer token / shared secret for all endpoints when bound non-locally. Build on the MCP SDK's auth framework (`mcp.server.auth`, OAuth 2.0 + PKCE) rather than rolling your own.
-- [ ] Put the auth check in middleware so the custom routes (`/shutdown` etc.) are covered too (they currently bypass middleware — see 1.2).
-- [ ] Auth-gate `/shutdown` and `/index/rebuild` (state-changing) even in the local model if any browser-reachable surface ever exists.
+- [x] When `host` is not a loopback address, refuse to start unless an explicit `--allow-remote` (or similar) flag is set, and log a loud warning. (`server.py` `_is_loopback` + the guard in `main()`; `--allow-remote` threaded through the CLI `server start`, `ServerSpec`, and `build_server_spec`. Refusal exits 1; allow-remote logs a loud unauthenticated-exposure warning.)
+- [x] Keep llama-server bound to `127.0.0.1` regardless of the MCP host — there is no reason to expose it. (`EmbeddingRuntime` is now constructed with a hard-coded `host="127.0.0.1"`, no longer inheriting `args.host`.)
+- [ ] Design (before relay): require a bearer token / shared secret for all endpoints when bound non-locally. Build on the MCP SDK's auth framework (`mcp.server.auth`, OAuth 2.0 + PKCE) rather than rolling your own. *(Still roadmap — the non-loopback path is gated behind `--allow-remote` with a warning until this lands.)*
+- [x] Put the auth check in middleware so the custom routes (`/shutdown` etc.) are covered too (they currently bypass middleware — see 1.2). *(The Host/Origin half is done — `_guard` in `_register_custom_routes` wraps every custom route with the SDK's `TransportSecurityMiddleware.validate_request`. The bearer-token half waits on the auth design above.)*
+- [ ] Auth-gate `/shutdown` and `/index/rebuild` (state-changing) even in the local model if any browser-reachable surface ever exists. *(Roadmap — depends on the auth layer; CSRF/DNS-rebinding on these routes is now closed via the Host/Origin guard.)*
 
 ### 1.2 [HIGH] DNS-rebinding / CSRF protection is available but disabled
 
@@ -49,8 +49,8 @@ Every endpoint is unauthenticated. Anyone who can open a TCP connection to the p
 The MCP SDK has built-in Origin/Host validation precisely to stop DNS-rebinding (a malicious website the user is browsing scripting requests to `http://127.0.0.1:8372`). It's off by default and Shrike never turns it on. So a web page open in the user's browser can drive the MCP endpoint and, more easily, `POST /shutdown` (a no-body POST is a CORS "simple request" — no preflight). For a tool whose whole value is sitting on localhost next to a browser, this is a concrete local-attacker path.
 
 **Action items:**
-- [ ] Pass `TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=[...], allowed_origins=[...])` to FastMCP. Allow only the expected `127.0.0.1:<port>`/`localhost:<port>` Host values and reject cross-origin `Origin` headers.
-- [ ] Add equivalent Host/Origin checks for the custom Starlette routes (in middleware or each handler) since they don't go through the MCP middleware.
+- [x] Pass `TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=[...], allowed_origins=[...])` to FastMCP. Allow only the expected `127.0.0.1:<port>`/`localhost:<port>` Host values and reject cross-origin `Origin` headers. (`_build_transport_security(host)` builds loopback-only Host/Origin allow-lists and is passed into `create_mcp(...)`. The installed MCP SDK also now auto-enables this for loopback by default, but Shrike sets it explicitly so it matches the *actually bound* host rather than the construction-time placeholder.)
+- [x] Add equivalent Host/Origin checks for the custom Starlette routes (in middleware or each handler) since they don't go through the MCP middleware. (`_guard` decorator wraps `/status`, `/index/rebuild`, `/embedding/start`, `/embedding/stop`, `/shutdown` with the same `TransportSecurityMiddleware` validation. Validated by `tests/integration/test_security.py`: forged `Origin` → 403, forged `Host` → 421, and a cross-origin `POST /shutdown` is refused without killing the server.)
 
 ### 1.3 [HIGH — design now] Sync credential storage (v0.4.0)
 
@@ -66,7 +66,7 @@ The roadmap calls for accepting and storing AnkiWeb / sync-server credentials. T
 
 **Action items:**
 - [ ] `GET /status` returns absolute collection path, log dir, PID, uptime to any caller (`server.py:49–78`). Gate behind auth (1.1) and/or trim before remote exposure.
-- [ ] `_safe_tool` returns `f"Internal error: {e}"` to the client (`tools.py:100`), and per-item errors return `str(e)` (`collection.py:259`) — can leak filesystem paths/internals. Sanitize (log full detail, return a generic message + error id) before the relay ships.
+- [~] `_safe_tool` returns `f"Internal error: {e}"` to the client (`tools.py:100`), and per-item errors return `str(e)` (`collection.py:259`) — can leak filesystem paths/internals. Sanitize (log full detail, return a generic message + error id) before the relay ships. *(Partial: `_safe_tool` no longer formats its own string — it `logger.exception(...)`s the full detail and re-raises, so logging is covered. The raised message still reaches the client and per-item errors still return `str(e)`; the generic-message + error-id sanitization is the relay-time remainder.)*
 
 ---
 
@@ -87,22 +87,22 @@ The roadmap calls for accepting and storing AnkiWeb / sync-server credentials. T
 `search_notes` accepts `threshold` (`tools.py:212`) and `exclude_ids` (`tools.py:215`); `docs/mcp-tools.md` parameter table lists neither.
 
 **Action items:**
-- [ ] Add `threshold` and `exclude_ids` to the `search_notes` parameter docs (and schema if missing).
+- [x] Add `threshold` and `exclude_ids` to the `search_notes` parameter docs (and schema if missing). *(Prior commit: both are in the `search_notes` parameter table in `docs/mcp-tools.md`, and present in the live FastMCP schema.)*
 
 ### 2.3 [MEDIUM] `search_notes` deck/tag filtering can silently under-return
 
 **Where:** `tools.py:305–339`. The index is queried for `top_k + len(exclude_set)` results, then `deck`/`tags` filters are applied *post hoc* (`tools.py:324–328`), with the loop stopping at `len(enriched) >= top_k`. The over-fetch only compensates for excludes, not for deck/tag filtering. If the nearest neighbors are mostly outside the requested deck, you can get far fewer than `top_k` matches even when plenty exist deeper in the ranking — looking like "no results" for a deck-scoped semantic search.
 
 **Action items:**
-- [ ] Over-fetch more aggressively when `deck`/`tags` are set (multiple of `top_k`, or loop widening the window until satisfied), or push deck/tag constraints into the index query.
-- [ ] If the heuristic is kept, document the limitation.
+- [x] Over-fetch more aggressively when `deck`/`tags` are set (multiple of `top_k`, or loop widening the window until satisfied), or push deck/tag constraints into the index query. *(Prior commit: `search_notes` widens the window to `max(top_k + excludes, top_k * 10)`, capped at index size, when `deck`/`tags` are set.)*
+- [x] If the heuristic is kept, document the limitation. *(Prior commit: `docs/mcp-tools.md` notes that deeply-ranked in-scope notes can still under-return; widen with a higher `top_k`.)*
 
 ### 2.4 [LOW] `_note_to_dict` reports only the first card's deck
 
 **Where:** `collection.py:229–232` (`cards[0].did`). A note whose cards live in different decks reports just one.
 
 **Action items:**
-- [ ] Document the assumption (or handle multi-deck notes) since Anki permits per-card decks.
+- [x] Document the assumption (or handle multi-deck notes) since Anki permits per-card decks. (Documented: a code comment at `collection.py:_note_to_dict`, and a user-facing note in `docs/mcp-tools.md` — `deck` is the first card's deck; Shrike treats notes as single-deck.)
 
 ---
 
@@ -125,10 +125,12 @@ What remained true is that the invariant — "only one thread ever touches `anki
 
 `GET /status` calls `embedding_service.health()` → synchronous `httpx.get(timeout=2.0)` (`embedding.py:211`) on the event-loop thread; a slow/hung embedding server stalls all request handling up to 2s. `POST /index/rebuild` runs `find_notes("deck:*")` + `note_texts_for_embedding` over the whole collection synchronously before returning (`server.py:96–101`). Both handlers are `async def`, so the blocking is on the loop.
 
+> **Update (prior commit): the loop-blocking concern is resolved**, via `to_thread` / the collection worker thread rather than the literal bullets below. `GET /status` now does `await asyncio.to_thread(runtime.health)`; `POST /index/rebuild` gathers ids+texts via `await wrapper.run(_collect_for_rebuild)` (on the dedicated collection thread) before kicking the background rebuild. The event loop no longer blocks. The remaining nuances are cosmetic.
+
 **Action items:**
-- [ ] Use an async httpx client (`await`) for the health probe.
-- [ ] Move the "gather all note ids + texts" work for rebuild into the background thread; have the route return immediately.
-- [ ] Use `asyncio.to_thread` for any unavoidable sync collection access in async handlers.
+- [x] Use an async httpx client (`await`) for the health probe. *(Addressed differently: the sync probe runs via `asyncio.to_thread`, so the loop isn't blocked. A native async client would drop the extra thread but isn't required.)*
+- [x] Move the "gather all note ids + texts" work for rebuild into the background thread; have the route return immediately. *(The gather runs off the event loop on the collection worker thread (`await wrapper.run(...)`); the route then returns once the background rebuild is launched. Loop stays responsive.)*
+- [x] Use `asyncio.to_thread` for any unavoidable sync collection access in async handlers. *(Done — custom routes use `asyncio.to_thread` / `await wrapper.run(...)`.)*
 
 ### 3.3 [MEDIUM — bites in error path] `upsert_notes` reports false failure when embedding throws
 
@@ -143,27 +145,27 @@ What remained true is that the invariant — "only one thread ever touches `anki
 **Where:** `server.py:125`, inside a running coroutine — deprecated in 3.12.
 
 **Action items:**
-- [ ] Replace with `asyncio.get_running_loop()`.
+- [x] Replace with `asyncio.get_running_loop()`. *(Prior commit: the shutdown handler was rewritten to `asyncio.create_task` + `asyncio.sleep`; no `get_event_loop()` remains.)*
 
 ### 3.5 [LOW] Intentionally leaked log file handles
 
 **Where:** `server_cmd.py:186,360` and `embedding.py:135` open log files (`# noqa: SIM115`) handed to `subprocess.Popen` and never closed; the bootstrap log handle leaks for the CLI process lifetime.
 
 **Action items:**
-- [ ] Review file-handle lifetime for spawn log targets; close handles that outlive their need.
+- [x] Review file-handle lifetime for spawn log targets; close handles that outlive their need. (Reviewed: the CLI bootstrap-log handles (`client._spawn`, `server_cmd` daemon spawn) use `with open(...)`; `_tail_follow` closes in `finally`. The last leak — `embedding.py`'s llama-server stderr handle — is now closed in the parent right after `Popen` (the child keeps its dup'd fd).)
 
 ---
 
 ## 4. Python / code-quality
 
 **Action items:**
-- [ ] Promote `wrapper._note_to_dict` (called across module boundary from `tools.py:320,433`) to a public method — matters more once the client is extracted into a library (v0.3.0).
-- [ ] Construct FastMCP inside `main()`/a factory rather than as an import-time module global mutated in `main()` (`server.py:25`) — improves testability/in-process reuse.
-- [ ] Fix or delete the stale `requirements.txt`: it's missing `usearch`, `numpy`, `filelock`, `platformdirs` and has looser pins than `pyproject.toml` — a `pip install -r requirements.txt` yields a broken install.
-- [ ] Use Hatch dynamic version (`[tool.hatch.version] path = "src/shrike/__init__.py"`) so `pyproject.toml` and `__init__.py` versions stay in lockstep.
-- [ ] Add `src/shrike/py.typed` (and include in the wheel) since typing is enforced and `shrike.client` is slated to ship as a library.
-- [ ] Log the swallowed per-item failures in search/neighbor loops (`tools.py:321,434`, `index.py:326`) at `debug` instead of silently dropping.
-- [ ] Add `tests/` to the CI lint job (`test.yml:21` currently lints only `src/shrike/`, despite commit messages claiming `tests/` is linted).
+- [x] Promote `wrapper._note_to_dict` (called across module boundary from `tools.py:320,433`) to a public method — matters more once the client is extracted into a library (v0.3.0). *(Prior commit: public async `CollectionWrapper.note_to_dict` exists.)*
+- [x] Construct FastMCP inside `main()`/a factory rather than as an import-time module global mutated in `main()` (`server.py:25`) — improves testability/in-process reuse. *(Prior commit: `create_mcp()` factory, now also taking host/port/transport_security.)*
+- [x] Fix or delete the stale `requirements.txt`: it's missing `usearch`, `numpy`, `filelock`, `platformdirs` and has looser pins than `pyproject.toml` — a `pip install -r requirements.txt` yields a broken install. *(Prior commit: `requirements.txt` deleted; `pyproject.toml` is the single source.)*
+- [x] Use Hatch dynamic version (`[tool.hatch.version] path = "src/shrike/__init__.py"`) so `pyproject.toml` and `__init__.py` versions stay in lockstep. *(Prior commit: `[tool.hatch.version]` configured.)*
+- [x] Add `src/shrike/py.typed` (and include in the wheel) since typing is enforced and `shrike.client` is slated to ship as a library. *(Prior commit: `py.typed` present; `packages = ["src/shrike"]` ships it.)*
+- [x] Log the swallowed per-item failures in search/neighbor loops (`tools.py:321,434`, `index.py:326`) at `debug` instead of silently dropping. (Done: `search_notes`/neighbor per-note lookups log at `debug` with `exc_info`; index-maintenance failures log at `warning`. The one remaining `contextlib.suppress` in `index.rebuild_in_background._run` is over an error that `rebuild()` already logs at `error` and records as `IndexState.ERROR` — commented to say so.)
+- [x] Add `tests/` to the CI lint job (`test.yml:21` currently lints only `src/shrike/`, despite commit messages claiming `tests/` is linted). *(Prior commit: CI runs `ruff check src/shrike/ tests/` and `ruff format --check src/shrike/ tests/`.)*
 - [ ] Consider date-filtering server-side for `list_notes`/info queries: `_get_decks`/`_get_stats` run a `find_notes` per deck (`collection.py:112,138`), and `list_notes` with only `modified_since` loads every note via `get_note` (`collection.py:208`) — N+1 over the collection. Fine at hundreds of notes; noticeable at tens of thousands.
 
 ---
@@ -173,12 +175,12 @@ What remained true is that the invariant — "only one thread ever touches `anki
 Breadth is genuinely good: ~365 tests (218 unit / 147 integration), real-server HTTP integration tests, semantic tests gated behind a llama-server fixture, multi-OS + arm CI matrix.
 
 **Action items:**
-- [ ] Add `pytest-cov` and a coverage gate so untested-branch regressions are visible.
+- [x] Add `pytest-cov` and a coverage gate so untested-branch regressions are visible. (`[tool.coverage]` in `pyproject.toml` with `branch=true`, `fail_under=70`; a `coverage` CI job runs unit + non-embedding integration under `coverage run --parallel-mode`, with a `coverage_subprocess.pth` + `COVERAGE_PROCESS_START` so the `python -m shrike.server` subprocess is counted too — combined coverage measured ~73%.)
 - [ ] Test daemon failure paths: `stop_server` SIGTERM→SIGKILL escalation (`daemon.py:221–238`), stale-state cleanup, autostart-on-ConnectError retry (`client.py:50–62`).
 - [ ] Add a concurrency test: fire upserts while a background rebuild thread runs (covers 3.1).
 - [ ] Test the 3.3 error path: simulate `note_texts_for_embedding` raising and assert the upsert still reports `created`/`updated`.
 - [ ] Test `search_notes` deck/tag under-return (2.3): assert result counts when nearest neighbors are filtered out.
-- [ ] After 1.1/1.2 land, add tests for rejected Origin/Host and missing-token responses.
+- [~] After 1.1/1.2 land, add tests for rejected Origin/Host and missing-token responses. *(Origin/Host done — `tests/integration/test_security.py` asserts 403 on forged Origin, 421 on forged Host, and a refused cross-origin `/shutdown`. Missing-token tests wait on the auth layer.)*
 
 ---
 
@@ -187,7 +189,7 @@ Breadth is genuinely good: ~365 tests (218 unit / 147 integration), real-server 
 Clean: `.gitignore` correctly excludes `.cache/`, caches, `.DS_Store`; the llama binaries and GGUF model on disk are **not** tracked (verified). Only `scripts/fetch-llama-server.sh` is committed.
 
 **Action items:**
-- [ ] `fetch-llama-server.sh` (`scripts/fetch-llama-server.sh:53`) and the CI equivalent (`test.yml:80`) download release tarballs over HTTPS with no checksum/signature verification and always take `releases/latest`. Pin a known release tag + verify a SHA256 for supply-chain hygiene.
+- [x] `fetch-llama-server.sh` (`scripts/fetch-llama-server.sh:53`) and the CI equivalent (`test.yml:80`) download release tarballs over HTTPS with no checksum/signature verification and always take `releases/latest`. Pin a known release tag + verify a SHA256 for supply-chain hygiene. (Done: tag + per-platform SHA256 pinned in `scripts/llama-server.lock`, sourced by both the script and the CI embedding job, which now download to a file and verify the checksum before extracting. `scripts/update-llama-lock.sh [TAG]` regenerates the lock; no more unverified `releases/latest`.)
 
 ---
 
@@ -214,8 +216,8 @@ Anki's `deck_due_tree()` returns nodes whose `new_count`/`review_count`/`learn_c
 `shrike server start --embedding-model X` uses the model for that run but `save_config` never persists `embedding.*` (or `logging.*`). So the auto-created `config.yml` omits the model, and the next bare `shrike server start` comes up with **no embedding service and no semantic search**, silently. The user must hand-edit `config.yml` or pass `--embedding-model` every time.
 
 **Action items:**
-- [ ] Persist the embedding settings (at least `model`, and any explicitly-set port/threads/gpu_layers) in `save_config` when provided.
-- [ ] Decide whether logging overrides should round-trip too, or document that they're file-only.
+- [x] Persist the embedding settings (at least `model`, and any explicitly-set port/threads/gpu_layers) in `save_config` when provided. *(Prior commit: `save_config` writes `embedding.model` plus non-default `port`/`context_size`/`threads`/`gpu_layers`/`llama_server`; `shrike server start` seeds them on first-run auto-save.)*
+- [x] Decide whether logging overrides should round-trip too, or document that they're file-only. (Decided: file-only — documented in CLAUDE.md's "Config file" section. `save_config` does not write `logging.*`.)
 
 ### 7.3 [MEDIUM] CLAUDE.md claims "Periodic index save" is done, but it isn't implemented
 
@@ -242,14 +244,14 @@ If the shrike server is `SIGKILL`ed — including by its **own** force-kill path
 **Where:** `client.py:100` calls `resp.raise_for_status()` but `call()` only catches `ConnectError`/`TimeoutException` (`client.py:92–98`). A 4xx/5xx (server 500, or — once 1.2 lands — a DNS-rebinding/auth rejection) raises `httpx.HTTPStatusError` that escapes to the CLI as an unhandled traceback instead of a clean `ClickException`.
 
 **Action items:**
-- [ ] Catch `HTTPStatusError` in `call()` and surface a friendly message (status + hint), especially anticipating auth/Origin rejections.
+- [x] Catch `HTTPStatusError` in `call()` and surface a friendly message (status + hint), especially anticipating auth/Origin rejections. *(Prior commit: `_call`/`_request` go through `_raise_for_status`, raising a typed `ServerHTTPError` the CLI renders cleanly.)*
 
 ### 7.6 [LOW] `docs/mcp-schema.json` is hand-maintained and already drifting
 
 CLAUDE.md calls `docs/mcp-schema.json` "the authoritative schema," but it's a separate hand-written artifact from the FastMCP-generated schema the client actually receives. It has already drifted (root cause of 2.1, and `threshold`/`exclude_ids` missing per 2.2).
 
 **Action items:**
-- [ ] Generate the schema from the live server (`tools/list`) in CI and fail on diff, or stop hand-maintaining it and point docs at the generated output.
+- [x] Generate the schema from the live server (`tools/list`) in CI and fail on diff, or stop hand-maintaining it and point docs at the generated output. (Resolved via the second option: `docs/mcp-schema.json` was deleted; the authoritative schema is whatever the running server advertises, and CLAUDE.md / `docs/mcp-tools.md` say so. No hand-maintained artifact left to drift.)
 
 ### 7.7 [LOW] HNSW update churn accumulates soft-deleted vectors
 
@@ -270,7 +272,7 @@ CLAUDE.md calls `docs/mcp-schema.json` "the authoritative schema," but it's a se
 **Where:** `server.py:257–259` sets `embedding_service = None` when `start()` fails, so `/status` and `shrike server status` render "Embedding: not configured" (`server_cmd.py:94`) even though it *was* configured and *failed*. Misleading when debugging a bad model path or an occupied port.
 
 **Action items:**
-- [ ] Distinguish "not configured" from "configured but failed to start" in the status output / `/status` payload.
+- [x] Distinguish "not configured" from "configured but failed to start" in the status output / `/status` payload. *(Prior commit: `EmbeddingRuntime.state` returns `running`/`failed`/`not_configured`/`stopped`, surfaced via `health()`.)*
 
 ### 7.10 [INFO — design + legal, for the roadmap]
 

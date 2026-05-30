@@ -92,6 +92,26 @@ pytest tests/unit -v                           # Unit tests (fast, no server)
 pytest tests/integration -v -m integration     # Integration tests (starts a server)
 ```
 
+#### Coverage
+
+CI enforces a coverage gate (`fail_under` in `[tool.coverage.report]`). The
+integration suite runs the server as a `python -m shrike.server` subprocess, so
+reproducing the real number locally needs subprocess coverage enabled — install
+the hook once, then run both suites under `coverage` and combine:
+
+```bash
+SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
+echo 'import coverage; coverage.process_startup()' > "$SITE/coverage_subprocess.pth"
+
+export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
+coverage run --parallel-mode -m pytest tests/unit -q
+coverage run --parallel-mode -m pytest tests/integration -q -m "integration and not embedding"
+coverage combine && coverage report      # exits non-zero below fail_under
+```
+
+A plain `pytest tests/unit --cov=shrike` reads ~18 points lower because it can't
+see the server subprocess — use the combined flow above when checking the gate.
+
 ### Linting
 
 ```bash
@@ -211,7 +231,7 @@ On Linux, XDG env vars (`XDG_CONFIG_HOME`, `XDG_STATE_HOME`, etc.) are respected
 
 ### Config file
 
-YAML at the platform config directory (`config.yml`). Auto-created on first `shrike server start` (the `embedding` section, including the model path, is persisted there too). Resolution order: config defaults → config values → env vars (`SHRIKE_URL`, `SHRIKE_COLLECTION`, `SHRIKE_EMBEDDING_MODEL`, `SHRIKE_EMBEDDING_PORT`, `LLAMA_SERVER_PATH`) → CLI flags. Embedding params follow the same cascade via `config.resolve_embedding()`, shared by `shrike server start` and `shrike embedding start`.
+YAML at the platform config directory (`config.yml`). Auto-created on first `shrike server start` (the `embedding` section, including the model path, is persisted there too). Resolution order: config defaults → config values → env vars (`SHRIKE_URL`, `SHRIKE_COLLECTION`, `SHRIKE_EMBEDDING_MODEL`, `SHRIKE_EMBEDDING_PORT`, `LLAMA_SERVER_PATH`) → CLI flags. Embedding params follow the same cascade via `config.resolve_embedding()`, shared by `shrike server start` and `shrike embedding start`. `save_config` persists `collection`, non-default `server.*`, and `embedding.*`; **logging overrides are read from config but not written by auto-save** — set `logging.level` / `logging.dir` in `config.yml` directly.
 
 ### Embedding service lifecycle
 
