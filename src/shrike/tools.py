@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from shrike.collection import CollectionWrapper
-from shrike.index import IndexState, VectorIndex
+from shrike.index import IndexSaver, IndexState, VectorIndex
 from shrike.schemas import (
     CollectionInfo,
     DeleteNotesResponse,
@@ -81,6 +81,7 @@ def register_tools(
     mcp: FastMCP,
     wrapper: CollectionWrapper,
     index: VectorIndex | None = None,
+    saver: IndexSaver | None = None,
 ) -> None:
     from shrike.note_types import upsert_note_types as _upsert_note_types
 
@@ -526,6 +527,11 @@ def register_tools(
                     neighbors_ok = await _attach_neighbors(
                         results, changed_ids, texts, top_k_neighbors, neighbor_threshold
                     )
+                    # Schedule a debounced flush so a hard kill while idle
+                    # doesn't force a full re-embed. Non-blocking and last in
+                    # the try: it must not mask the neighbors attached above.
+                    if saver is not None:
+                        saver.request_save()
                 except Exception:
                     logger.warning("Failed to update index after upsert", exc_info=True)
 
@@ -692,6 +698,8 @@ def register_tools(
             try:
                 removed = index.remove(result["deleted"])
                 index.col_mod = await wrapper.run(lambda c: c.mod)
+                if saver is not None:
+                    saver.request_save()
                 logger.debug("Index updated: %d vectors removed", removed)
             except Exception:
                 logger.warning("Failed to update index after delete", exc_info=True)

@@ -22,7 +22,12 @@ from mcp.server.transport_security import (
 from shrike.collection import CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
 from shrike.embedding import EmbeddingRuntime
-from shrike.index import VectorIndex
+from shrike.index import (
+    DEFAULT_SAVE_DELAY,
+    DEFAULT_SAVE_THRESHOLD,
+    IndexSaver,
+    VectorIndex,
+)
 from shrike.log import configure_logging
 from shrike.paths import cache_dir, state_dir
 from shrike.tools import register_tools
@@ -120,6 +125,7 @@ def _register_custom_routes(
     meta: dict[str, Any],
     runtime: EmbeddingRuntime,
     index: VectorIndex,
+    saver: IndexSaver,
     security: TransportSecuritySettings | None,
 ) -> None:
     """Register custom HTTP endpoints on the server.
@@ -216,6 +222,25 @@ def _register_custom_routes(
             }
         )
 
+    @app.custom_route("/index/save", methods=["POST"])
+    @_guard
+    async def handle_index_save(request: Request) -> JSONResponse:
+        from shrike.index import IndexState
+
+        # Refuse mid-rebuild: a save here would persist a partial index with a
+        # stale col_mod, and rebuild() saves at its own end anyway.
+        if index.state == IndexState.BUILDING:
+            indexed, total = index.build_progress
+            return JSONResponse(
+                {"status": "building", "progress": {"indexed": indexed, "total": total}}
+            )
+        if index.ndim is None:
+            return JSONResponse({"status": "empty"})
+
+        pending = index.pending_changes
+        await asyncio.to_thread(index.save)
+        return JSONResponse({"status": "saved", "size": index.size, "pending": pending})
+
     @app.custom_route("/embedding/start", methods=["POST"])
     @_guard
     async def handle_embedding_start(request: Request) -> JSONResponse:
@@ -278,7 +303,8 @@ def _register_custom_routes(
     @_guard
     async def handle_shutdown(request: Request) -> JSONResponse:
         logger.info("Shutdown requested via HTTP from %s", request.client)
-        index.save()
+        # aclose cancels the pending debounce timer and flushes if dirty.
+        await saver.aclose()
         runtime.stop()
         wrapper.close()
         server_lock.release()
@@ -341,6 +367,20 @@ def main() -> None:
         "--cache-dir",
         default=None,
         help="Directory for cache files like the vector index (default: platform-specific)",
+    )
+    parser.add_argument(
+        "--index-save-delay",
+        type=float,
+        default=None,
+        help="Seconds of idle after the last index change before flushing it to "
+        f"disk (default: {DEFAULT_SAVE_DELAY:g})",
+    )
+    parser.add_argument(
+        "--index-save-threshold",
+        type=int,
+        default=None,
+        help="Unsaved index changes that force an immediate flush regardless of "
+        f"idle time (default: {DEFAULT_SAVE_THRESHOLD})",
     )
     parser.add_argument(
         "--llama-server",
@@ -448,6 +488,19 @@ def main() -> None:
     index = VectorIndex(path=cache_base / "index")
     logger.info("Vector index: %d vectors, %d dims", index.size, index.ndim or 0)
 
+    # Debounced persistence: incremental edits flush after a quiet period (or a
+    # burst cap), so an idle server that's hard-killed reloads without a full
+    # re-embed. The save itself runs off the event loop.
+    saver = IndexSaver(
+        index,
+        delay=(args.index_save_delay if args.index_save_delay is not None else DEFAULT_SAVE_DELAY),
+        threshold=(
+            args.index_save_threshold
+            if args.index_save_threshold is not None
+            else DEFAULT_SAVE_THRESHOLD
+        ),
+    )
+
     # llama-server stays on loopback regardless of the MCP bind host — there is
     # never a reason to expose the embedding backend to the network.
     resolved_state_dir = state_dir_override or state_dir()
@@ -491,7 +544,7 @@ def main() -> None:
 
     transport_security = _build_transport_security(args.host)
     mcp = create_mcp(host=args.host, port=args.port, transport_security=transport_security)
-    register_tools(mcp, wrapper, index=index)
+    register_tools(mcp, wrapper, index=index, saver=saver)
     _register_custom_routes(
         mcp,
         wrapper,
@@ -499,6 +552,7 @@ def main() -> None:
         meta=server_meta,
         runtime=runtime,
         index=index,
+        saver=saver,
         security=transport_security,
     )
 

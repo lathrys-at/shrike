@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import contextlib
 import logging
+from collections import defaultdict
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -164,18 +165,49 @@ class CollectionWrapper:
             note_types.append(entry)
         return note_types
 
+    def _note_counts_by_deck(self) -> dict[str, int]:
+        """Note count per deck (including subdecks), in a single pass.
+
+        Mirrors ``find_notes("deck:NAME")`` without running a query per deck: a
+        note counts toward a deck when any of its cards sits in that deck or a
+        descendant. A card parked in a filtered deck counts toward *both* the
+        filtered deck (``did``) and its original deck (``odid``), matching
+        Anki's ``deck:`` search — verified against ``find_notes`` for nested,
+        multi-deck, and filtered cases.
+        """
+        id_to_name = {d.id: d.name for d in self.col.decks.all_names_and_ids()}
+
+        db = self.col.db
+        assert db is not None  # always present on an open collection
+        nids_by_deck: dict[int, set[int]] = defaultdict(set)
+        for nid, did, odid in db.all("select nid, did, odid from cards"):
+            nids_by_deck[did].add(nid)
+            if odid:
+                nids_by_deck[odid].add(nid)
+
+        # Roll each deck's notes up into itself and every ancestor (by name
+        # prefix), so a parent's count includes all its subdecks' notes.
+        rolled: dict[str, set[int]] = defaultdict(set)
+        for did, nids in nids_by_deck.items():
+            name = id_to_name.get(did)
+            if name is None:
+                continue
+            parts = name.split("::")
+            for i in range(1, len(parts) + 1):
+                rolled["::".join(parts[:i])] |= nids
+
+        return {name: len(rolled.get(name, set())) for name in id_to_name.values()}
+
     def _get_decks(self) -> list[dict]:
-        decks = []
-        for name_id in self.col.decks.all_names_and_ids():
-            note_ids = self.col.find_notes(f'"deck:{name_id.name}"')
-            decks.append(
-                {
-                    "name": name_id.name,
-                    "id": name_id.id,
-                    "note_count": len(note_ids),
-                }
-            )
-        return decks
+        counts = self._note_counts_by_deck()
+        return [
+            {
+                "name": name_id.name,
+                "id": name_id.id,
+                "note_count": counts.get(name_id.name, 0),
+            }
+            for name_id in self.col.decks.all_names_and_ids()
+        ]
 
     def _get_stats(self) -> dict[str, Any]:
         tree = self.col.sched.deck_due_tree()
@@ -186,6 +218,7 @@ class CollectionWrapper:
         total_due = sum(top.review_count + top.learn_count for top in tree.children)
         total_new = sum(top.new_count for top in tree.children)
 
+        note_counts = self._note_counts_by_deck()
         decks_summary: dict[str, dict] = {}
 
         def walk(node: Any, prefix: str = "") -> None:
@@ -194,9 +227,8 @@ class CollectionWrapper:
                 name = f"{prefix}::{node.name}"
             due = node.review_count + node.learn_count
 
-            note_ids = self.col.find_notes(f'"deck:{name}"')
             decks_summary[name] = {
-                "notes": len(note_ids),
+                "notes": note_counts.get(name, 0),
                 "due": due,
             }
             for child in node.children:
@@ -291,7 +323,13 @@ class CollectionWrapper:
             mod_cutoff = int(dt.timestamp())
 
         if mod_cutoff is not None:
-            note_ids = [nid for nid in note_ids if self.col.get_note(nid).mod >= mod_cutoff]
+            # Intersect with one indexed query against the notes table rather
+            # than loading every candidate note via get_note (an N+1 over the
+            # match set). ``notes.mod`` is the same value as ``Note.mod``.
+            db = self.col.db
+            assert db is not None  # always present on an open collection
+            recent = set(db.list("select id from notes where mod >= ?", mod_cutoff))
+            note_ids = [nid for nid in note_ids if nid in recent]
 
         total = len(note_ids)
         note_ids = note_ids[:limit]

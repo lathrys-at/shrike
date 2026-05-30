@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
-from shrike.index import IndexState, VectorIndex
+from shrike.index import DEFAULT_SAVE_THRESHOLD, IndexSaver, IndexState, VectorIndex
 
 NDIM = 8
 
@@ -225,6 +226,108 @@ class TestPersistence:
 
         idx2 = VectorIndex(path, embedding_service=embedding_service)
         assert idx2.col_mod == 1234567890
+
+
+class TestDirtyTracking:
+    def test_add_increments_pending(self, index: VectorIndex) -> None:
+        index.add([1, 2, 3], ["a", "b", "c"])
+        assert index.pending_changes == 3
+
+    def test_remove_counts_toward_pending(self, index: VectorIndex) -> None:
+        index.add([1, 2], ["a", "b"])
+        assert index.pending_changes == 2
+        index.remove([1])
+        assert index.pending_changes == 3
+
+    def test_save_resets_pending(self, index: VectorIndex) -> None:
+        index.add([1, 2, 3], ["a", "b", "c"])
+        index.save()
+        assert index.pending_changes == 0
+        index.add([4], ["d"])
+        assert index.pending_changes == 1
+
+    def test_rebuild_leaves_index_clean(self, index: VectorIndex) -> None:
+        # rebuild() saves at the end, so the counter is reset even though its
+        # per-batch add() calls incremented it.
+        index.rebuild([1, 2, 3], ["a", "b", "c"], col_mod=100)
+        assert index.pending_changes == 0
+
+
+class TestIndexSaver:
+    """The debounced, off-thread persistence wrapper used by the server."""
+
+    def _idx_path(self, tmp_path: Path) -> Path:
+        return tmp_path / "index" / "index.usearch"
+
+    async def test_flushes_on_burst(self, tmp_path: Path, embedding_service: MagicMock) -> None:
+        # threshold reached → immediate flush, no waiting for the idle delay.
+        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        saver = IndexSaver(idx, delay=999.0, threshold=3)
+        idx.add([1, 2, 3], ["a", "b", "c"])
+        idx.col_mod = 555
+        saver.request_save()
+        await saver.aclose()  # drains the in-flight save task
+
+        assert self._idx_path(tmp_path).exists()
+        assert idx.pending_changes == 0
+        reloaded = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        assert reloaded.size == 3
+        assert reloaded.col_mod == 555
+
+    async def test_debounces_then_flushes_when_idle(
+        self, tmp_path: Path, embedding_service: MagicMock
+    ) -> None:
+        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        saver = IndexSaver(idx, delay=0.05, threshold=999)
+        idx.add([1], ["a"])
+        idx.col_mod = 1
+        saver.request_save()
+        # Below the burst threshold, so nothing is written until the idle timer.
+        assert not self._idx_path(tmp_path).exists()
+
+        await asyncio.sleep(0.12)
+        if saver._task is not None:
+            await saver._task
+        assert self._idx_path(tmp_path).exists()
+
+    async def test_new_change_resets_the_idle_timer(
+        self, tmp_path: Path, embedding_service: MagicMock
+    ) -> None:
+        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        saver = IndexSaver(idx, delay=0.1, threshold=999)
+        idx.add([1], ["a"])
+        saver.request_save()
+        await asyncio.sleep(0.05)  # half the delay
+        idx.add([2], ["b"])
+        saver.request_save()  # resets the timer
+        await asyncio.sleep(0.07)  # past the *first* deadline, before the reset one
+        assert not self._idx_path(tmp_path).exists()
+
+    async def test_aclose_flushes_pending_immediately(
+        self, tmp_path: Path, embedding_service: MagicMock
+    ) -> None:
+        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        saver = IndexSaver(idx, delay=999.0, threshold=999)
+        idx.add([1], ["a"])
+        idx.col_mod = 9
+        saver.request_save()  # arms a long timer; no burst
+        await saver.aclose()  # shutdown path: flush now without waiting
+
+        assert self._idx_path(tmp_path).exists()
+        assert idx.pending_changes == 0
+
+    async def test_aclose_is_noop_when_clean(
+        self, tmp_path: Path, embedding_service: MagicMock
+    ) -> None:
+        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        saver = IndexSaver(idx)
+        await saver.aclose()  # nothing added — must not error or write
+        assert not self._idx_path(tmp_path).exists()
+
+    def test_default_threshold(self, tmp_path: Path, embedding_service: MagicMock) -> None:
+        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        saver = IndexSaver(idx)
+        assert saver._threshold == DEFAULT_SAVE_THRESHOLD
 
 
 class TestContains:

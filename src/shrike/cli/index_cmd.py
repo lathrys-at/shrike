@@ -63,6 +63,47 @@ def index_rebuild(ctx: click.Context, background: bool) -> None:
     _poll_progress(client, total, json_out=json_out)
 
 
+@index.command("save", short_help="Persist the vector index to disk now")
+@output_options
+@click.pass_context
+def index_save(ctx: click.Context) -> None:
+    """Flush the in-memory vector index to disk immediately.
+
+    The index is saved automatically — after a quiet period following edits, on
+    a large batch of changes, and on graceful shutdown — so this is rarely
+    needed. Use it to force a checkpoint: before a risky operation, or to
+    capture recent edits without stopping the server.
+
+    \b
+    Examples:
+      shrike index save
+      shrike --json index save
+    """
+    client: ShrikeClient = ctx.obj["client"]
+    json_out: bool = ctx.obj["json"]
+
+    with output.spinner("Saving index…"):
+        body = client.index_save()
+
+    if json_out:
+        output.emit_json(body)
+        return
+
+    if body.status == "saved":
+        if body.size == 0 and body.pending == 0:
+            output.console.print("[dim]Nothing to save — the index is empty.[/dim]")
+        else:
+            pending = f" ([yellow]{body.pending}[/yellow] pending)" if body.pending else ""
+            output.console.print(f"Index saved: [green]{body.size}[/green] vectors{pending}")
+    elif body.status == "empty":
+        output.console.print("[dim]No index to save — none has been built yet.[/dim]")
+    else:  # building
+        p = body.progress
+        output.console.print(
+            f"[yellow]Index is building[/yellow] ({p.indexed} / {p.total} notes); not saved."
+        )
+
+
 @index.command("status", short_help="Show index status")
 @output_options
 @click.pass_context

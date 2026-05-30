@@ -11,6 +11,7 @@ embedding and stored in metadata alongside the index.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import enum
 import json
@@ -28,6 +29,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger("shrike.index")
 
 BATCH_SIZE = 64
+
+# Defaults for the debounced index flush (see IndexSaver). Persistence is
+# otherwise shutdown- and rebuild-only; the flush bounds how much incremental
+# work an ungraceful exit (SIGKILL, crash, power loss) discards. Correctness
+# never depends on it — a col_mod mismatch on next startup still forces a full
+# rebuild — but flushing shortly after edits lets a then-idle server survive a
+# hard kill without re-embedding the whole collection.
+DEFAULT_SAVE_DELAY = 60.0  # seconds of idle since the last change before a flush
+DEFAULT_SAVE_THRESHOLD = 100  # unsaved changes that force an immediate flush
 
 
 class IndexState(enum.Enum):
@@ -62,6 +72,7 @@ class VectorIndex:
         self._build_progress: tuple[int, int] = (0, 0)
         self._build_error: str | None = None
         self._build_thread: threading.Thread | None = None
+        self._dirty = 0  # incremental add/remove ops since the last save
         self._lock = threading.Lock()
         self._load()
 
@@ -86,6 +97,11 @@ class VectorIndex:
     @property
     def ndim(self) -> int | None:
         return self._ndim
+
+    @property
+    def pending_changes(self) -> int:
+        """Unsaved incremental add/remove operations since the last save."""
+        return self._dirty
 
     @property
     def col_mod(self) -> int | None:
@@ -188,6 +204,7 @@ class VectorIndex:
                 idx.add(keys_array, vecs_array)
             added += len(batch_ids)
 
+        self._dirty += added
         logger.debug("Added %d vectors to index (total: %d)", added, self.size)
         return added
 
@@ -203,6 +220,7 @@ class VectorIndex:
                     self._index.remove(nid)
                     removed += 1
 
+        self._dirty += removed
         logger.debug("Removed %d vectors from index (total: %d)", removed, self.size)
         return removed
 
@@ -248,14 +266,19 @@ class VectorIndex:
             return
 
         self._dir.mkdir(parents=True, exist_ok=True)
-        with self._lock:
-            self._index.save(str(self._index_path))
         meta: dict[str, Any] = {"ndim": self._ndim}
         if self._col_mod is not None:
             meta["col_mod"] = self._col_mod
         if self._model_id is not None:
             meta["model_id"] = self._model_id
-        self._meta_path.write_text(json.dumps(meta))
+        # Whole save under the lock so concurrent callers (a debounced save on a
+        # worker thread, the signal-handler save, /embedding/stop, a manual
+        # /index/save) can't interleave the index write with the metadata write
+        # and leave a torn meta.json. Both files are small; the lock is brief.
+        with self._lock:
+            self._index.save(str(self._index_path))
+            self._meta_path.write_text(json.dumps(meta))
+            self._dirty = 0
         logger.debug("Saved vector index: %d vectors to %s", self.size, self._index_path)
 
     def clear(self) -> None:
@@ -391,3 +414,89 @@ class VectorIndex:
         if self._state == IndexState.ERROR and self._build_error:
             info["error"] = self._build_error
         return info
+
+
+class IndexSaver:
+    """Debounced, off-thread persistence for a :class:`VectorIndex`.
+
+    Incremental edits don't each hit the disk. Callers invoke
+    :meth:`request_save` after every change, and the index is flushed:
+
+    - ``delay`` seconds after the *last* change (idle debounce) — so a handful
+      of edits followed by a pause are persisted promptly without forcing a
+      write on every single edit, and
+    - immediately once ``threshold`` unsaved changes accumulate (a burst cap),
+      so sustained churn that never goes idle can't grow the unsaved delta —
+      and the matching re-embed window on a crash — without bound.
+
+    Lives on the event loop (uses ``loop.call_later``), but the disk write runs
+    in a worker thread so the loop never blocks on I/O. ``request_save`` and the
+    timer callback must run on the loop thread; ``aclose`` is the shutdown path.
+    """
+
+    def __init__(
+        self,
+        index: VectorIndex,
+        *,
+        delay: float = DEFAULT_SAVE_DELAY,
+        threshold: int = DEFAULT_SAVE_THRESHOLD,
+    ) -> None:
+        self._index = index
+        self._delay = delay
+        self._threshold = threshold
+        self._handle: asyncio.TimerHandle | None = None
+        self._task: asyncio.Task[None] | None = None
+
+    def request_save(self) -> None:
+        """Note that the index changed; (re)arm the debounce, flush on burst.
+
+        Cheap and non-blocking — safe to call after every incremental edit.
+        """
+        # Restart the idle timer: the flush fires `delay` after the last change.
+        self._arm()
+        # Burst cap: don't let unsaved changes pile up unbounded.
+        if self._index.pending_changes >= self._threshold:
+            self._flush_now()
+
+    def _arm(self) -> None:
+        self._cancel_timer()
+        loop = asyncio.get_running_loop()
+        self._handle = loop.call_later(self._delay, self._on_timer)
+
+    def _on_timer(self) -> None:
+        self._handle = None
+        self._flush_now()
+
+    def _flush_now(self) -> None:
+        if self._index.pending_changes <= 0:
+            return
+        # Coalesce: if a save is already in flight, let it finish — any changes
+        # made meanwhile keep pending_changes > 0 and will re-arm via the next
+        # request_save (or the still-armed idle timer).
+        if self._task is not None and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._run_save())
+
+    async def _run_save(self) -> None:
+        try:
+            await asyncio.to_thread(self._index.save)
+        except Exception:
+            logger.warning("Debounced index save failed", exc_info=True)
+
+    def _cancel_timer(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
+
+    async def aclose(self) -> None:
+        """Cancel any pending timer and flush now if dirty (graceful shutdown).
+
+        A no-op write when nothing is pending — the on-disk index (and its
+        ``col_mod``) is already current, so reload needs no rebuild.
+        """
+        self._cancel_timer()
+        if self._task is not None and not self._task.done():
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._task
+        if self._index.pending_changes > 0:
+            await asyncio.to_thread(self._index.save)

@@ -577,6 +577,20 @@ class TestNoteSearch:
         assert result.exit_code != 0 or "not available" in result.output.lower()
 
 
+class TestIndexSave:
+    """`shrike index save` against a server with no embedding/index configured."""
+
+    def test_save_empty_json(self, runner):
+        data = runner.json(["index", "save"])
+        # No embedding service → no index has been built, nothing to persist.
+        assert data["status"] == "empty"
+
+    def test_save_empty_pretty(self, runner):
+        result = runner.invoke(["index", "save"])
+        assert result.exit_code == 0
+        assert "no index" in result.output.lower()
+
+
 class TestTypeList:
     """Listing and inspecting note types via CLI."""
 

@@ -188,6 +188,10 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
             str(state_dir),
             "--cache-dir",
             str(cache_dir),
+            # Short debounce so any test that waits on a live index flush (rather
+            # than shutdown persistence) doesn't sit on the 60s production default.
+            "--index-save-delay",
+            "5",
         ]
 
         embedding_port: int | None = None

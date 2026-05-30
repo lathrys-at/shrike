@@ -465,6 +465,27 @@ IndexRebuildResponse = Annotated[
 ]
 
 
+class IndexSaved(BaseModel):
+    status: Literal["saved"]
+    size: int
+    pending: int  # incremental changes flushed by this save (0 if already current)
+
+
+class IndexSaveEmpty(BaseModel):
+    status: Literal["empty"]  # no index built yet — nothing to persist
+
+
+class IndexSaveBuilding(BaseModel):
+    status: Literal["building"]  # a rebuild is in progress; refused to avoid a partial save
+    progress: IndexProgress
+
+
+IndexSaveResponse = Annotated[
+    IndexSaved | IndexSaveEmpty | IndexSaveBuilding,
+    Field(discriminator="status"),
+]
+
+
 class EmbeddingStarted(BaseModel):
     status: Literal["started"]
     embedding: EmbeddingStatus
