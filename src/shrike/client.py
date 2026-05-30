@@ -39,6 +39,7 @@ from shrike.schemas import (
     EmbeddingStatus,
     EmbeddingStopResponse,
     IndexRebuildResponse,
+    IndexSaveResponse,
     IndexStatus,
     ListNotesResponse,
     NoteInput,
@@ -54,6 +55,7 @@ from shrike.schemas import (
 # Discriminated-union responses are Annotated aliases, not BaseModel subclasses,
 # so they're validated through a TypeAdapter rather than ``.model_validate``.
 _INDEX_REBUILD_ADAPTER: TypeAdapter[IndexRebuildResponse] = TypeAdapter(IndexRebuildResponse)
+_INDEX_SAVE_ADAPTER: TypeAdapter[IndexSaveResponse] = TypeAdapter(IndexSaveResponse)
 _EMBEDDING_START_ADAPTER: TypeAdapter[EmbeddingStartResponse] = TypeAdapter(EmbeddingStartResponse)
 _EMBEDDING_STOP_ADAPTER: TypeAdapter[EmbeddingStopResponse] = TypeAdapter(EmbeddingStopResponse)
 _STOP_ADAPTER: TypeAdapter[StopResponse] = TypeAdapter(StopResponse)
@@ -106,6 +108,7 @@ class ServerSpec:
     state_dir: str | None = None
     cache_dir: str | None = None
     embedding_args: list[str] = field(default_factory=list)
+    index_args: list[str] = field(default_factory=list)
 
     @property
     def url(self) -> str:
@@ -382,6 +385,11 @@ class ShrikeClient:
             self._request("POST", "/index/rebuild", timeout=30.0)
         )
 
+    def index_save(self) -> IndexSaveResponse:
+        return _INDEX_SAVE_ADAPTER.validate_python(
+            self._request("POST", "/index/save", timeout=30.0)
+        )
+
     def embedding_start(self, **overrides: Any) -> EmbeddingStartResponse:
         body = {k: v for k, v in overrides.items() if v is not None}
         return _EMBEDDING_START_ADAPTER.validate_python(
@@ -505,6 +513,7 @@ class ShrikeClient:
             cmd += ["--state-dir", spec.state_dir]
         if spec.cache_dir:
             cmd += ["--cache-dir", spec.cache_dir]
+        cmd += spec.index_args
         cmd += spec.embedding_args
 
         daemon.STATE_DIR.mkdir(parents=True, exist_ok=True)

@@ -178,7 +178,7 @@ shrike [--config PATH] [--url URL] [--json] [--pretty/--no-pretty]
 ├── info [--types] [--decks] [--tags] [--stats] [--type-details NAME]
 ├── note list|show|create|update|delete|search
 ├── type list|show|create|update|delete
-├── index rebuild|status
+├── index rebuild|status|save
 └── embedding status|start|stop
 ```
 
@@ -214,6 +214,7 @@ Signal handlers (SIGTERM, SIGINT) remain as a secondary path for Unix `kill` com
 - `GET /status` — returns JSON with pid, url, collection, log_level, log_dir, uptime, embedding, index. Used by `shrike server status` and auto-start health checks.
 - `POST /shutdown` — triggers graceful server shutdown.
 - `POST /index/rebuild` — triggers a full index rebuild (returns immediately with status/progress). Requires the embedding service to be running.
+- `POST /index/save` — forces an immediate flush of the in-memory index to disk (off the event loop). Returns `saved` (with `size` and the `pending` count it flushed), `empty` (no index built yet), or `building` (refused mid-rebuild). Backs `shrike index save`; the index also saves automatically (debounced flush + shutdown).
 - `POST /embedding/start` — starts the embedding service (optional JSON body overrides model/port/etc.; falls back to the params the server booted with). Attaches it to the index and triggers a rebuild if the model changed or the index drifted. Returns `started` / `already_running` / a 400 if no model is configured.
 - `POST /embedding/stop` — saves the index, then stops the embedding service and marks the index `unavailable`. The server and collection stay up.
 
@@ -237,7 +238,7 @@ On Linux, XDG env vars (`XDG_CONFIG_HOME`, `XDG_STATE_HOME`, etc.) are respected
 
 ### Config file
 
-YAML at the platform config directory (`config.yml`). Auto-created on first `shrike server start` (the `embedding` section, including the model path, is persisted there too). Resolution order: config defaults → config values → env vars (`SHRIKE_URL`, `SHRIKE_COLLECTION`, `SHRIKE_EMBEDDING_MODEL`, `SHRIKE_EMBEDDING_PORT`, `LLAMA_SERVER_PATH`) → CLI flags. Embedding params follow the same cascade via `config.resolve_embedding()`, shared by `shrike server start` and `shrike embedding start`. `save_config` persists `collection`, non-default `server.*`, and `embedding.*`; **logging overrides are read from config but not written by auto-save** — set `logging.level` / `logging.dir` in `config.yml` directly.
+YAML at the platform config directory (`config.yml`). Auto-created on first `shrike server start` (the `embedding` section, including the model path, is persisted there too). Resolution order: config defaults → config values → env vars (`SHRIKE_URL`, `SHRIKE_COLLECTION`, `SHRIKE_EMBEDDING_MODEL`, `SHRIKE_EMBEDDING_PORT`, `LLAMA_SERVER_PATH`, `SHRIKE_CACHE_DIR`, `SHRIKE_INDEX_SAVE_DELAY`, `SHRIKE_INDEX_SAVE_THRESHOLD`) → CLI flags. Embedding params follow the same cascade via `config.resolve_embedding()`, shared by `shrike server start` and `shrike embedding start`; the index cache dir and flush tuning follow it via `config.resolve_cache_dir()` / `config.resolve_index_save()`. `save_config` persists `collection`, `cache_dir`, non-default `server.*`, `embedding.*`, and any set `index.save_delay` / `index.save_threshold`; **logging overrides are read from config but not written by auto-save** — set `logging.level` / `logging.dir` in `config.yml` directly. The `index.*` flush knobs and `cache_dir` resolve to `None` in config, meaning "use the server's built-in defaults" (`IndexSaver`'s 60s/100 and the platform cache dir) — the numeric defaults live in `shrike.index`, not duplicated in config.
 
 ### Embedding service lifecycle
 
@@ -264,7 +265,7 @@ The vector index is a **derived cache**, not a co-equal store. The Anki collecti
 
 2. **Incremental updates** — after `upsert_notes` and `delete_notes` succeed on the collection, the index is updated in the same call (`index.add()` / `index.remove()`). Stored `col_mod` is updated after each successful index update. Index update failures log a warning but don't fail the tool call — the next startup detects the `col.mod` mismatch and rebuilds.
 
-3. **Shutdown save** — the index persists to disk on graceful shutdown (signal handler and `POST /shutdown`) and at the end of a rebuild; there is no periodic timer. A hard kill / crash between saves discards in-memory incremental updates, but the `col.mod` mismatch on next startup triggers a full rebuild automatically — correctness is preserved, at the cost of a re-embed. (A debounced periodic save is a possible future optimization.)
+3. **Persistence** — the index is saved to disk on graceful shutdown (signal handler and `POST /shutdown`), at the end of a rebuild, and via a **debounced flush** during normal operation. `IndexSaver` (in `index.py`) owns the debounce: the upsert/delete tools call `saver.request_save()` after each incremental update (once `col_mod` is set), and the index is written either **`save_delay` seconds after the last change** (idle debounce, default 60s) **or immediately once `save_threshold` unsaved changes accumulate** (burst cap, default 100), whichever comes first. The save runs off the event loop (`asyncio.to_thread`); the debounce timer is `loop.call_later`, so there is no background timer *thread* and no fixed-interval polling — the flush is driven by edit activity. This bounds how much incremental work a hard kill / crash discards: once a flush lands and the server goes idle, the on-disk index (and its `col_mod`) are current, so it reloads without a rebuild. For edits since the last flush, the `col.mod` mismatch on next startup still triggers a full rebuild — correctness is preserved either way, at the cost of a re-embed. `save_delay`/`save_threshold` are configurable (config `index.*`, env, `--index-save-*` flags); the cache location is `cache_dir`/`SHRIKE_CACHE_DIR`/`--cache-dir`. (Tombstone compaction is unnecessary on the pinned USearch — see the index code comments.)
 
 4. **Full rebuild** — `shrike index rebuild` CLI and `POST /index/rebuild` endpoint. Drops existing index and re-embeds all notes. Progress reporting via CLI and `/status`.
 
@@ -323,7 +324,7 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 - Wire `search_notes` tool to the vector index ✓
 - Incremental index updates on note create/modify/delete ✓
 - Startup drift detection (`col.mod` comparison) and background rebuild ✓
-- Index persistence on graceful shutdown and after rebuild ✓ (no periodic timer; crash forces a rebuild via `col.mod` drift)
+- Index persistence on graceful shutdown, after rebuild, and via a count-based flush every N incremental edits ✓ (no time-based timer; a crash mid-burst still self-heals via `col.mod` drift)
 - `shrike index rebuild` CLI command for full re-indexing ✓
 - Index build state machine and progress tracking (ready/building/unavailable/error) ✓
 - Index status in `/status` endpoint and `search_notes` responses (actionable messages) ✓

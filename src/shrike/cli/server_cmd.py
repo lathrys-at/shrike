@@ -9,7 +9,15 @@ from pathlib import Path
 import click
 
 from shrike.cli import output
-from shrike.cli.config import embedding_args, resolve_collection, resolve_embedding, save_config
+from shrike.cli.config import (
+    embedding_args,
+    index_args,
+    resolve_cache_dir,
+    resolve_collection,
+    resolve_embedding,
+    resolve_index_save,
+    save_config,
+)
 from shrike.cli.output import output_options
 from shrike.client import ShrikeClient
 from shrike.daemon import (
@@ -120,6 +128,21 @@ def server() -> None:
     help="Log level (default: info).",
 )
 @click.option(
+    "--cache-dir",
+    type=click.Path(),
+    help="Directory for the vector index and other caches (default: platform-specific).",
+)
+@click.option(
+    "--index-save-delay",
+    type=float,
+    help="Seconds of idle after the last index change before flushing to disk (default: 60).",
+)
+@click.option(
+    "--index-save-threshold",
+    type=int,
+    help="Unsaved index changes that force an immediate flush (default: 100).",
+)
+@click.option(
     "--llama-server",
     type=click.Path(),
     help="Path to llama-server binary (default: LLAMA_SERVER_PATH env or PATH lookup).",
@@ -151,6 +174,9 @@ def server_start(
     foreground: bool,
     log_dir: str | None,
     log_level: str | None,
+    cache_dir: str | None,
+    index_save_delay: float | None,
+    index_save_threshold: int | None,
     llama_server: str | None,
     embedding_model: str | None,
     embedding_port: int | None,
@@ -207,6 +233,15 @@ def server_start(
     embedding_cli_args = embedding_args(resolved_embedding, no_embedding=no_embedding)
     remote_args = ["--allow-remote"] if allow_remote else []
 
+    # Resolve cache dir + index-flush tuning (config → env → flags) for the
+    # spawned server args and the config we persist.
+    resolved_cache_dir = resolve_cache_dir(config, cache_dir)
+    resolved_index_save = resolve_index_save(
+        config, save_delay=index_save_delay, save_threshold=index_save_threshold
+    )
+    cache_args = ["--cache-dir", resolved_cache_dir] if resolved_cache_dir else []
+    index_save_args = index_args(resolved_index_save)
+
     # Check if already running (via lock, not PID)
     if is_server_alive():
         meta = read_server_meta()
@@ -237,6 +272,8 @@ def server_start(
             resolved_log_level,
             "--foreground",
             *remote_args,
+            *cache_args,
+            *index_save_args,
             *embedding_cli_args,
         ]
         from shrike.server import main
@@ -269,6 +306,8 @@ def server_start(
                 "--log-level",
                 resolved_log_level,
                 *remote_args,
+                *cache_args,
+                *index_save_args,
                 *embedding_cli_args,
             ],
             stdout=bootstrap_log_file,
@@ -290,6 +329,11 @@ def server_start(
         for key, value in resolved_embedding.items():
             if value is not None:
                 config.setdefault("embedding", {})[key] = value
+        if resolved_cache_dir:
+            config["cache_dir"] = resolved_cache_dir
+        for key, value in resolved_index_save.items():
+            if value is not None:
+                config.setdefault("index", {})[key] = value
         saved = save_config(config, config_path)
         if not json_out:
             output.console.print(f"  [dim]Config saved to {saved}[/dim]")

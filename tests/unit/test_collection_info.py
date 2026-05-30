@@ -63,6 +63,47 @@ class TestCollectionInfo:
         test_deck = next(d for d in info["decks"] if d["name"] == "Test")
         assert test_deck["note_count"] == 1
 
+    async def test_deck_note_counts_match_find_notes(self, wrapper):
+        """The single-pass note-count rollup that replaces the per-deck
+        find_notes query must agree with find_notes("deck:NAME") across nested
+        decks and cards parked in a filtered deck (the odid path)."""
+        notes = (
+            [
+                {"deck": "Lang", "note_type": "Basic", "fields": {"Front": f"p{i}", "Back": "x"}}
+                for i in range(2)
+            ]
+            + [
+                {
+                    "deck": "Lang::Japanese",
+                    "note_type": "Basic",
+                    "fields": {"Front": f"c{i}", "Back": "x"},
+                }
+                for i in range(3)
+            ]
+            + [{"deck": "Other", "note_type": "Basic", "fields": {"Front": "o", "Back": "x"}}]
+        )
+        await wrapper.upsert_notes(notes)
+
+        # Park every card in a filtered deck: cards get did=Filt, odid=original,
+        # which Anki's deck: search attributes to *both* decks.
+        def make_filtered(c):
+            fid = c.decks.new_filtered("Filt")
+            c.sched.rebuild_filtered_deck(fid)
+
+        await wrapper.run(make_filtered)
+
+        info = await wrapper.get_collection_info(include=["decks"])
+        by_name = {d["name"]: d["note_count"] for d in info["decks"]}
+
+        for name, count in by_name.items():
+            expected = await wrapper.run(lambda c, n=name: len(c.find_notes(f'"deck:{n}"')))
+            assert count == expected, f"{name}: rollup={count} find_notes={expected}"
+
+        # Sanity: the nested rollup and the filtered deck are both non-trivial.
+        assert by_name["Lang"] == 5
+        assert by_name["Lang::Japanese"] == 3
+        assert by_name["Filt"] == 6
+
     async def test_tags_empty_initially(self, wrapper):
         info = await wrapper.get_collection_info(include=["tags"])
         assert info["tags"] == []

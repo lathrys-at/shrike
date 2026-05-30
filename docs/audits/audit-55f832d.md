@@ -19,7 +19,8 @@ The theme: lock down the trust boundary and serialize the one shared mutable res
 3. **1.2** (enable DNS-rebinding protection) and the non-loopback guard in **1.1** — small config changes, real local hardening. ✅ done
 4. **1.1 (auth) / 1.3 (credential storage)** — design decisions to make *before* writing relay/sync code, not after.
 5. **3.2, 2.3** — responsiveness/correctness polish. ✅ done
-6. Everything in §4–§6 as cleanup, with `pytest-cov` + the stale `requirements.txt` being the highest-value of those. ✅ mostly done (`pytest-cov` gate, `requirements.txt`, py.typed, hatch version, factory, supply-chain pin all landed; remaining §4–§6 items are the N+1 query perf, test-coverage additions, and relay-gated hardening).
+6. Everything in §4–§6 as cleanup, with `pytest-cov` + the stale `requirements.txt` being the highest-value of those. ✅ mostly done (`pytest-cov` gate, `requirements.txt`, py.typed, hatch version, factory, supply-chain pin, and the §4 N+1 query perf all landed; remaining §4–§6 items are relay-gated hardening — §1.4 error sanitization / `/status` trim — and the §1.1/§1.3 auth + credential-storage designs).
+7. **§4** (N+1 query perf), **§7.3** (debounced index flush + configurable `cache_dir`/flush tuning), **§7.7** (verified moot on pinned USearch) — the low-priority "D" cleanup batch. ✅ done.
 
 ---
 
@@ -166,7 +167,7 @@ What remained true is that the invariant — "only one thread ever touches `anki
 - [x] Add `src/shrike/py.typed` (and include in the wheel) since typing is enforced and `shrike.client` is slated to ship as a library. *(Prior commit: `py.typed` present; `packages = ["src/shrike"]` ships it.)*
 - [x] Log the swallowed per-item failures in search/neighbor loops (`tools.py:321,434`, `index.py:326`) at `debug` instead of silently dropping. (Done: `search_notes`/neighbor per-note lookups log at `debug` with `exc_info`; index-maintenance failures log at `warning`. The one remaining `contextlib.suppress` in `index.rebuild_in_background._run` is over an error that `rebuild()` already logs at `error` and records as `IndexState.ERROR` — commented to say so.)
 - [x] Add `tests/` to the CI lint job (`test.yml:21` currently lints only `src/shrike/`, despite commit messages claiming `tests/` is linted). *(Prior commit: CI runs `ruff check src/shrike/ tests/` and `ruff format --check src/shrike/ tests/`.)*
-- [ ] Consider date-filtering server-side for `list_notes`/info queries: `_get_decks`/`_get_stats` run a `find_notes` per deck (`collection.py:112,138`), and `list_notes` with only `modified_since` loads every note via `get_note` (`collection.py:208`) — N+1 over the collection. Fine at hundreds of notes; noticeable at tens of thousands.
+- [x] Consider date-filtering server-side for `list_notes`/info queries: `_get_decks`/`_get_stats` run a `find_notes` per deck (`collection.py:112,138`), and `list_notes` with only `modified_since` loads every note via `get_note` (`collection.py:208`) — N+1 over the collection. Fine at hundreds of notes; noticeable at tens of thousands. *(Done. `list_notes` + `modified_since` now intersects the match set with a single `select id from notes where mod >= ?` query instead of an N+1 `get_note` loop. `_get_decks`/`_get_stats` share `CollectionWrapper._note_counts_by_deck()`, which derives every deck's note count in one `select nid, did, odid from cards` pass with a name-prefix rollup — verified to match `find_notes("deck:NAME")` across nested, multi-deck, and filtered-deck cases incl. the `odid` path, in `test_collection_info.py::test_deck_note_counts_match_find_notes`.)*
 
 ---
 
@@ -226,8 +227,8 @@ Anki's `deck_due_tree()` returns nodes whose `new_count`/`review_count`/`learn_c
 Correctness is not at risk — `col.mod` drift detection forces a rebuild after any non-graceful exit, so the index self-heals. But: (a) the roadmap doc is inaccurate, and (b) every hard kill / crash / power loss discards all in-memory incremental updates and forces a **full re-embed of the whole collection** on next start (minutes for large collections), even though the data was fine.
 
 **Action items:**
-- [ ] Either implement a real periodic/debounced save (e.g., mark dirty on `add`/`remove`, flush on a timer or after N changes), or *(deferred — chose the doc-correction option below; a debounced save remains a possible future optimization, tied to §7.7)*
-- [x] Correct CLAUDE.md to say persistence is shutdown-only and rebuild-on-crash is the accepted cost. (Done: CLAUDE.md now states "no periodic timer; crash forces a rebuild via `col.mod` drift" in both the consistency section and the v0.2.0 roadmap line — no remaining claim that periodic save is implemented.)
+- [x] Either implement a real periodic/debounced save (e.g., mark dirty on `add`/`remove`, flush on a timer or after N changes), or *(Done — implemented a debounced flush. `VectorIndex` tracks a `_dirty` counter (incremented by `add`/`remove`, reset by `save`); `IndexSaver` wraps it with a `loop.call_later` idle debounce: the upsert/delete tools call `saver.request_save()` after updating `col_mod`, and the index is written `save_delay` seconds after the last change (default 60s) or immediately once `save_threshold` unsaved changes accumulate (default 100), whichever first. The write runs off the event loop (`asyncio.to_thread`); `aclose()` is the graceful-shutdown flush. This handles the "make a few notes, then stop" case (idle debounce) and sustained churn (burst cap) without a fixed-interval timer thread. `save_delay`/`save_threshold`/`cache_dir` ride the config→env→flag cascade. Tested in `test_index.py::TestIndexSaver`/`TestDirtyTracking` and `test_config.py`.)*
+- [x] Correct CLAUDE.md to say persistence is shutdown-only and rebuild-on-crash is the accepted cost. *(Superseded by the count-based flush above; the CLAUDE.md consistency section + v0.2.0 roadmap line now describe the flush accurately and still note that mid-burst crashes self-heal via `col.mod` drift.)* (Done: CLAUDE.md now states "no periodic timer; crash forces a rebuild via `col.mod` drift" in both the consistency section and the v0.2.0 roadmap line — no remaining claim that periodic save is implemented.)
 
 ### 7.4 [MEDIUM] llama-server is orphaned on a hard kill
 
@@ -253,12 +254,17 @@ CLAUDE.md calls `docs/mcp-schema.json` "the authoritative schema," but it's a se
 **Action items:**
 - [x] Generate the schema from the live server (`tools/list`) in CI and fail on diff, or stop hand-maintaining it and point docs at the generated output. (Resolved via the second option: `docs/mcp-schema.json` was deleted; the authoritative schema is whatever the running server advertises, and CLAUDE.md / `docs/mcp-tools.md` say so. No hand-maintained artifact left to drift.)
 
-### 7.7 [LOW] HNSW update churn accumulates soft-deleted vectors
+### 7.7 [LOW — closed: not reproducible on the pinned USearch] HNSW update churn accumulates soft-deleted vectors
 
 **Where:** `index.add` does `remove`-then-`add` for existing keys (`index.py:163–167`); USearch HNSW `remove` is a soft delete. A long-running server with heavy update churn accumulates tombstones, gradually degrading search quality and inflating the file until the next full rebuild.
 
+**Finding (2026-05-30, verified empirically against the installed `usearch` 2.25.3):** the tombstone bloat does **not** occur.
+- The update path (`remove` key, then `add` same key) **reuses the slot**: after 20× full re-add of 1000 vectors, `size`, `capacity`, and `serialized_length` were byte-identical to a clean index.
+- Rolling churn (4000 keys removed over the run, 1200 live) produced an index matching a freshly-built same-size index almost exactly (serial 484872 vs 485552).
+- `capacity` grows geometrically with logical size, not with tombstones, so it is **not** a usable bloat signal anyway.
+
 **Action items:**
-- [ ] Periodically compact/rebuild (tie into 7.3's dirty-tracking, or rebuild after a churn threshold). Low priority until real usage shows churn.
+- [x] Periodically compact/rebuild (tie into 7.3's dirty-tracking, or rebuild after a churn threshold). Low priority until real usage shows churn. *(Closed as won't-fix-with-evidence: no compaction implemented because there is nothing to compact on `usearch` 2.25.3 — adding dead machinery would contradict the no-speculative-code house style. The §7.3 dirty-tracking it would have hooked into now exists, so if a future USearch upgrade reintroduces tombstone growth, re-run the churn test and gate a compaction pass on `_dirty`. A note documents the verification in the index code's vicinity / project memory.)*
 
 ### 7.8 [LOW — relay-relevant] Unbounded `queries`/`ids` in semantic operations
 

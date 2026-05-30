@@ -247,6 +247,17 @@ class TestIndexBuild:
         assert "embedding" in body
         assert body["embedding"]["available"] is True
 
+    def test_save_endpoint(self, collection_server):
+        _wait_for_index_ready(collection_server)
+        base = _base_url(collection_server)
+        resp = httpx.post(f"{base}/index/save", timeout=30.0)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "saved"
+        assert body["size"] >= 50
+        # Built at boot, no edits since, so nothing was pending to flush.
+        assert body["pending"] == 0
+
 
 # ---------------------------------------------------------------------------
 # search_notes MCP tool
@@ -529,6 +540,18 @@ class TestIndexCLI:
     def test_index_rebuild_json(self, semantic_runner, collection_server):
         data = semantic_runner.json(["index", "rebuild", "--background"])
         assert "status" in data or "total" in data
+
+    def test_index_save_json(self, semantic_runner, collection_server):
+        _wait_for_index_ready(collection_server)
+        data = semantic_runner.json(["index", "save"])
+        assert data["status"] == "saved"
+        assert data["size"] >= 50
+
+    def test_index_save_pretty(self, semantic_runner, collection_server):
+        _wait_for_index_ready(collection_server)
+        result = semantic_runner.invoke(["index", "save"])
+        assert result.exit_code == 0
+        assert "saved" in result.output.lower()
 
 
 class TestEmbeddingCLI:

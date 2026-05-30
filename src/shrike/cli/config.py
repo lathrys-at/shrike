@@ -16,6 +16,11 @@ DEFAULT_CONFIG_PATH = config_file()
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "collection": None,
+    # Vector-index cache location and flush tuning. ``None`` means "let the
+    # server pick" — the platform cache dir, and the IndexSaver defaults
+    # (60s idle / 100-change burst). Kept None here so config.py needn't import
+    # the heavy index module just to know the numbers.
+    "cache_dir": None,
     "server": {
         "host": "127.0.0.1",
         "port": 8372,
@@ -26,6 +31,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "context_size": None,
         "threads": None,
         "gpu_layers": None,
+    },
+    "index": {
+        "save_delay": None,
+        "save_threshold": None,
     },
     "logging": {
         "dir": str(_default_log_dir()),
@@ -62,6 +71,8 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
     output: dict[str, Any] = {}
     if config.get("collection"):
         output["collection"] = config["collection"]
+    if config.get("cache_dir"):
+        output["cache_dir"] = config["cache_dir"]
 
     server = config.get("server", {})
     server_out: dict[str, Any] = {}
@@ -84,6 +95,11 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
             if emb.get(key):
                 emb_out[key] = emb[key]
         output["embedding"] = emb_out
+
+    idx = config.get("index", {})
+    idx_out = {k: idx[k] for k in ("save_delay", "save_threshold") if idx.get(k) is not None}
+    if idx_out:
+        output["index"] = idx_out
 
     with open(filepath, "w") as f:
         f.write("# Shrike configuration\n")
@@ -133,6 +149,64 @@ def resolve_embedding(
     return resolved
 
 
+def resolve_cache_dir(config: dict[str, Any], cache_dir_override: str | None = None) -> str | None:
+    """Vector-index cache directory via flag → env → config.
+
+    ``None`` means "use the platform default" (the server resolves it). Env var:
+    ``SHRIKE_CACHE_DIR``. Paths are user-expanded.
+    """
+    if cache_dir_override:
+        return os.path.expanduser(cache_dir_override)
+    env = os.environ.get("SHRIKE_CACHE_DIR")
+    if env:
+        return os.path.expanduser(env)
+    cfg = config.get("cache_dir")
+    if cfg:
+        return os.path.expanduser(str(cfg))
+    return None
+
+
+def resolve_index_save(
+    config: dict[str, Any],
+    *,
+    save_delay: float | None = None,
+    save_threshold: int | None = None,
+) -> dict[str, Any]:
+    """Resolve index-flush tuning via flag → env → config.
+
+    Each value is ``None`` when unset, leaving the server to apply its own
+    default (idle debounce / burst cap). Env vars: ``SHRIKE_INDEX_SAVE_DELAY``,
+    ``SHRIKE_INDEX_SAVE_THRESHOLD``.
+    """
+    idx = config.get("index", {})
+    env_delay = os.environ.get("SHRIKE_INDEX_SAVE_DELAY")
+    env_threshold = os.environ.get("SHRIKE_INDEX_SAVE_THRESHOLD")
+
+    delay = save_delay
+    if delay is None and env_delay:
+        delay = float(env_delay)
+    if delay is None:
+        delay = idx.get("save_delay")
+
+    threshold = save_threshold
+    if threshold is None and env_threshold:
+        threshold = int(env_threshold)
+    if threshold is None:
+        threshold = idx.get("save_threshold")
+
+    return {"save_delay": delay, "save_threshold": threshold}
+
+
+def index_args(resolved: dict[str, Any]) -> list[str]:
+    """Build server CLI args from resolved index-flush params (see resolve_index_save)."""
+    args: list[str] = []
+    if resolved.get("save_delay") is not None:
+        args.extend(["--index-save-delay", str(resolved["save_delay"])])
+    if resolved.get("save_threshold") is not None:
+        args.extend(["--index-save-threshold", str(resolved["save_threshold"])])
+    return args
+
+
 def embedding_args(resolved: dict[str, Any], *, no_embedding: bool = False) -> list[str]:
     """Build server CLI args from already-resolved embedding params.
 
@@ -164,8 +238,10 @@ def build_server_spec(
     port: int | None = None,
     log_dir: str | None = None,
     log_level: str | None = None,
+    cache_dir: str | None = None,
     no_embedding: bool = False,
     embedding_overrides: dict[str, Any] | None = None,
+    index_save_overrides: dict[str, Any] | None = None,
 ) -> ServerSpec | None:
     """Resolve a launch spec for the local daemon, or None if no collection.
 
@@ -184,6 +260,7 @@ def build_server_spec(
         Path(log_dir or log_config.get("dir") or str(_default_log_dir())).expanduser()
     )
     resolved_emb = resolve_embedding(config, **(embedding_overrides or {}))
+    resolved_index = resolve_index_save(config, **(index_save_overrides or {}))
 
     return ServerSpec(
         collection=coll,
@@ -192,7 +269,9 @@ def build_server_spec(
         allow_remote=bool(server.get("allow_remote", False)),
         log_dir=resolved_log_dir,
         log_level=log_level or log_config.get("level", "info"),
+        cache_dir=resolve_cache_dir(config, cache_dir),
         embedding_args=embedding_args(resolved_emb, no_embedding=no_embedding),
+        index_args=index_args(resolved_index),
     )
 
 
@@ -234,8 +313,10 @@ def _deep_copy_defaults() -> dict[str, Any]:
     logging_defaults["levels"] = dict(logging_defaults.get("levels", {}))
     return {
         "collection": DEFAULT_CONFIG["collection"],
+        "cache_dir": DEFAULT_CONFIG["cache_dir"],
         "server": dict(DEFAULT_CONFIG["server"]),  # type: ignore[arg-type]
         "embedding": dict(DEFAULT_CONFIG["embedding"]),  # type: ignore[arg-type]
+        "index": dict(DEFAULT_CONFIG["index"]),  # type: ignore[arg-type]
         "logging": logging_defaults,
     }
 
