@@ -24,7 +24,7 @@ from shrike.daemon import AlreadyRunningError, ServerLock
 from shrike.embedding import EmbeddingRuntime
 from shrike.index import VectorIndex
 from shrike.log import configure_logging
-from shrike.paths import cache_dir
+from shrike.paths import cache_dir, state_dir
 from shrike.tools import register_tools
 
 logger = logging.getLogger("shrike.server")
@@ -450,6 +450,7 @@ def main() -> None:
 
     # llama-server stays on loopback regardless of the MCP bind host — there is
     # never a reason to expose the embedding backend to the network.
+    resolved_state_dir = state_dir_override or state_dir()
     runtime = EmbeddingRuntime(
         index=index,
         model=args.embedding_model,
@@ -460,6 +461,7 @@ def main() -> None:
         threads=args.embedding_threads,
         gpu_layers=args.embedding_gpu_layers,
         llama_server=args.llama_server,
+        pid_file=resolved_state_dir / "embedding.pid",
     )
 
     if args.embedding_model and not args.no_embedding:

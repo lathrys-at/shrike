@@ -132,3 +132,51 @@ class TestEmbeddingServiceViaShrike:
         r2 = svc.embed(["another sentence", "and one more", "three total"])
         assert len(r1[0]) == len(r2[0])
         assert len(r1[0]) == len(r2[1])
+
+
+class TestOrphanReaping:
+    """A llama-server orphaned by an unclean shutdown is reaped on next start."""
+
+    def test_start_reaps_orphaned_llama_server(self, embedding_model, tmp_path):
+        import socket
+
+        from shrike.embedding import EmbeddingService, _pid_alive, _port_in_use
+
+        # Pick a free port for both services to contend over.
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        pid_file = tmp_path / "embedding.pid"
+
+        # A: the "previous" server. We start it, then abandon it WITHOUT calling
+        # stop() — simulating a SIGKILLed Shrike server that left llama-server
+        # orphaned and holding the port.
+        a = EmbeddingService(
+            model=str(embedding_model), port=port, log_dir=tmp_path / "a", pid_file=pid_file
+        )
+        a.start()
+        orphan = a._process
+        assert _pid_alive(orphan.pid)
+        assert _port_in_use("127.0.0.1", port)
+        assert pid_file.read_text() == str(orphan.pid)
+
+        # B: a fresh server on the SAME port + pid_file. It must reap A's orphan
+        # and come up healthy — a port collision would otherwise fail the start.
+        b = EmbeddingService(
+            model=str(embedding_model), port=port, log_dir=tmp_path / "b", pid_file=pid_file
+        )
+        try:
+            b.start()
+            assert b.running
+            assert b.health()["available"] is True
+            assert b._process.pid != orphan.pid
+            assert pid_file.read_text() == str(b._process.pid)
+
+            # The reap terminated A's process. Check via A's own Popen handle —
+            # .wait() also reaps the zombie (here the orphan's parent is pytest,
+            # not init, so os.kill(pid, 0) would otherwise still see a zombie).
+            assert orphan.wait(timeout=5) is not None
+        finally:
+            b.stop()
+            if a.running:
+                a.stop()

@@ -517,3 +517,202 @@ class TestEmbeddingRuntime:
         ):
             runtime.start()
         assert runtime.state == "failed"
+
+
+class TestProcessHelpers:
+    """Low-level helpers behind orphan reaping."""
+
+    def test_pid_alive_for_current_process(self) -> None:
+        from shrike.embedding import _pid_alive
+
+        assert _pid_alive(os.getpid()) is True
+
+    def test_pid_alive_false_for_nonexistent(self) -> None:
+        from shrike.embedding import _pid_alive
+
+        # An implausibly high PID that won't exist.
+        assert _pid_alive(2_147_483_646) is False
+
+    def test_pid_alive_false_for_nonpositive(self) -> None:
+        from shrike.embedding import _pid_alive
+
+        assert _pid_alive(0) is False
+        assert _pid_alive(-1) is False
+
+    def test_port_in_use_detects_listener(self) -> None:
+        import socket
+
+        from shrike.embedding import _port_in_use
+
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen()
+        port = sock.getsockname()[1]
+        try:
+            assert _port_in_use("127.0.0.1", port) is True
+        finally:
+            sock.close()
+        assert _port_in_use("127.0.0.1", port) is False
+
+
+class TestPidFileLifecycle:
+    def test_pid_file_written_on_start(self, tmp_path: Path) -> None:
+        pid_file = tmp_path / "embedding.pid"
+        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 54321
+
+        with (
+            patch.object(svc, "_find_llama_server", return_value="/bin/llama-server"),
+            patch("shrike.embedding.subprocess.Popen", return_value=mock_proc),
+            patch.object(svc, "_wait_healthy", return_value=True),
+            patch.object(svc, "_reap_orphan"),
+        ):
+            svc.start()
+
+        assert pid_file.read_text() == "54321"
+
+    def test_pid_file_removed_on_stop(self, tmp_path: Path) -> None:
+        pid_file = tmp_path / "embedding.pid"
+        pid_file.write_text("54321")
+        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.pid = 54321
+        svc._process = proc
+
+        with patch("shrike.embedding.os.kill"):
+            svc.stop()
+
+        assert not pid_file.exists()
+
+    def test_pid_file_removed_when_already_exited(self, tmp_path: Path) -> None:
+        pid_file = tmp_path / "embedding.pid"
+        pid_file.write_text("54321")
+        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
+        proc = MagicMock()
+        proc.poll.return_value = 0
+        proc.returncode = 0
+        proc.pid = 54321
+        svc._process = proc
+
+        svc.stop()
+        assert not pid_file.exists()
+
+    def test_no_pid_file_is_noop(self, tmp_path: Path) -> None:
+        # A service without a pid_file must never write/read/raise.
+        svc = EmbeddingService(model="/m.gguf", port=19998)
+        svc._reap_orphan()
+        svc._write_pid_file()
+        svc._clear_pid_file()
+
+    def test_start_reaps_before_spawning(self, tmp_path: Path) -> None:
+        pid_file = tmp_path / "embedding.pid"
+        pid_file.write_text("99999")
+        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 111
+
+        with (
+            patch.object(svc, "_find_llama_server", return_value="/bin/llama-server"),
+            patch("shrike.embedding.subprocess.Popen", return_value=mock_proc),
+            patch.object(svc, "_wait_healthy", return_value=True),
+            patch.object(svc, "_reap_orphan") as reap,
+        ):
+            svc.start()
+
+        reap.assert_called_once()
+        assert pid_file.read_text() == "111"
+
+
+class TestReapOrphan:
+    def test_reaps_when_alive_and_port_held(self, tmp_path: Path) -> None:
+        pid_file = tmp_path / "embedding.pid"
+        pid_file.write_text("99999")
+        svc = EmbeddingService(model="/m.gguf", host="127.0.0.1", port=19998, pid_file=pid_file)
+
+        killed: list[tuple[int, int]] = []
+        # Port held during the reap check, then free after the kill.
+        port_states = iter([True, False])
+
+        def record_kill(pid: int, sig: int) -> None:
+            killed.append((pid, sig))
+
+        with (
+            patch("shrike.embedding._pid_alive", return_value=True),
+            patch("shrike.embedding._port_in_use", side_effect=lambda h, p: next(port_states)),
+            patch("shrike.embedding.os.kill", side_effect=record_kill),
+        ):
+            svc._reap_orphan()
+
+        assert (99999, signal.SIGTERM) in killed
+        assert not pid_file.exists()
+
+    def test_escalates_to_sigkill_if_port_stays_held(self, tmp_path: Path) -> None:
+        pid_file = tmp_path / "embedding.pid"
+        pid_file.write_text("99999")
+        svc = EmbeddingService(model="/m.gguf", host="127.0.0.1", port=19998, pid_file=pid_file)
+
+        killed: list[int] = []
+
+        with (
+            patch("shrike.embedding._pid_alive", return_value=True),
+            patch("shrike.embedding._port_in_use", return_value=True),  # never frees
+            patch("shrike.embedding.SHUTDOWN_TIMEOUT", 0.05),
+            patch("shrike.embedding.time.sleep", lambda *_: None),
+            patch("shrike.embedding.os.kill", side_effect=lambda pid, sig: killed.append(sig)),
+        ):
+            svc._reap_orphan()
+
+        assert signal.SIGTERM in killed
+        assert signal.SIGKILL in killed
+
+    def test_no_reap_when_port_free(self, tmp_path: Path) -> None:
+        pid_file = tmp_path / "embedding.pid"
+        pid_file.write_text("99999")
+        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
+
+        with (
+            patch("shrike.embedding._pid_alive", return_value=True),
+            patch("shrike.embedding._port_in_use", return_value=False),
+            patch("shrike.embedding.os.kill") as kill,
+        ):
+            svc._reap_orphan()
+
+        kill.assert_not_called()
+        # A stale file is still cleaned even when there's nothing to reap.
+        assert not pid_file.exists()
+
+    def test_no_reap_when_pid_dead(self, tmp_path: Path) -> None:
+        pid_file = tmp_path / "embedding.pid"
+        pid_file.write_text("99999")
+        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
+
+        with (
+            patch("shrike.embedding._pid_alive", return_value=False),
+            patch("shrike.embedding._port_in_use", return_value=True),
+            patch("shrike.embedding.os.kill") as kill,
+        ):
+            svc._reap_orphan()
+
+        kill.assert_not_called()
+        assert not pid_file.exists()
+
+    def test_garbage_pid_file_is_cleaned(self, tmp_path: Path) -> None:
+        pid_file = tmp_path / "embedding.pid"
+        pid_file.write_text("not-a-pid")
+        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
+
+        with patch("shrike.embedding.os.kill") as kill:
+            svc._reap_orphan()  # must not raise
+
+        kill.assert_not_called()
+        assert not pid_file.exists()
+
+    def test_missing_pid_file_is_noop(self, tmp_path: Path) -> None:
+        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=tmp_path / "absent.pid")
+        with patch("shrike.embedding.os.kill") as kill:
+            svc._reap_orphan()
+        kill.assert_not_called()

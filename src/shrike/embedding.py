@@ -17,6 +17,7 @@ import contextlib
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -38,6 +39,26 @@ HEALTH_POLL_INTERVAL = 0.25
 SHUTDOWN_TIMEOUT = 5.0
 
 
+def _pid_alive(pid: int) -> bool:
+    """True if a process with this PID currently exists."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True  # exists (e.g. owned by another user)
+    return True
+
+
+def _port_in_use(host: str, port: int) -> bool:
+    """True if something is accepting connections on host:port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, port)) == 0
+
+
 class EmbeddingService:
     """Manages a llama-server subprocess for computing embeddings."""
 
@@ -52,6 +73,7 @@ class EmbeddingService:
         threads: int | None = None,
         gpu_layers: int | None = None,
         llama_server: str | None = None,
+        pid_file: str | Path | None = None,
     ) -> None:
         self._model = model
         self._host = host
@@ -61,6 +83,9 @@ class EmbeddingService:
         self._threads = threads
         self._gpu_layers = gpu_layers
         self._llama_server_override = llama_server
+        # PID file: records the llama-server PID so a later start can reap an
+        # orphan left by an unclean Shrike shutdown (it survives a parent SIGKILL).
+        self._pid_file = Path(pid_file) if pid_file else None
         self._process: subprocess.Popen[bytes] | None = None
         self._base_url = f"http://{host}:{port}"
         self._model_name: str | None = None
@@ -116,6 +141,65 @@ class EmbeddingService:
             cmd.extend(["--log-file", str(self._log_dir / "llama-server.log")])
         return cmd
 
+    def _write_pid_file(self) -> None:
+        """Record the running llama-server PID for orphan reaping."""
+        if self._pid_file is None or self._process is None:
+            return
+        with contextlib.suppress(OSError):
+            self._pid_file.parent.mkdir(parents=True, exist_ok=True)
+            self._pid_file.write_text(str(self._process.pid))
+
+    def _clear_pid_file(self) -> None:
+        if self._pid_file is None:
+            return
+        with contextlib.suppress(OSError):
+            self._pid_file.unlink()
+
+    def _reap_orphan(self) -> None:
+        """Kill a llama-server left over from a prior unclean shutdown.
+
+        ``stop()`` removes the PID file, so a recorded PID that is still alive
+        *and* holding our port is an orphan — e.g. the Shrike server was
+        SIGKILLed (including by its own force-kill path) before it could stop the
+        child, which then reparents to init and keeps the port. We require both
+        signals (alive and on our port) so a recycled PID can't make us kill an
+        unrelated process.
+        """
+        if self._pid_file is None or not self._pid_file.exists():
+            return
+        try:
+            pid = int(self._pid_file.read_text().strip())
+        except (ValueError, OSError):
+            self._clear_pid_file()
+            return
+        if _pid_alive(pid) and _port_in_use(self._host, self._port):
+            logger.warning(
+                "Reaping orphaned llama-server (PID %s) holding port %s", pid, self._port
+            )
+            self._terminate_pid(pid)
+        self._clear_pid_file()
+
+    def _terminate_pid(self, pid: int) -> None:
+        """SIGTERM, then SIGKILL, a stale PID — waiting for the port to free."""
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGTERM)
+        if self._wait_port_free(SHUTDOWN_TIMEOUT):
+            return
+        logger.warning("Orphan llama-server (PID %s) ignored SIGTERM, sending SIGKILL", pid)
+        sig = signal.SIGTERM if sys.platform == "win32" else signal.SIGKILL
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, sig)
+        self._wait_port_free(2.0)
+
+    def _wait_port_free(self, timeout: float) -> bool:
+        """Block until our port is free, or *timeout* elapses. Returns freeness."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not _port_in_use(self._host, self._port):
+                return True
+            time.sleep(0.1)
+        return not _port_in_use(self._host, self._port)
+
     def start(self) -> None:
         """Spawn llama-server and wait for it to become healthy."""
         if self.running:
@@ -127,6 +211,10 @@ class EmbeddingService:
 
         if self._log_dir:
             self._log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Clear out any orphan from a prior unclean shutdown before we try to
+        # bind the same port.
+        self._reap_orphan()
 
         logger.info(
             "Starting llama-server: model=%s, host=%s, port=%s",
@@ -151,6 +239,7 @@ class EmbeddingService:
         # the server's lifetime.
         if stderr_file is not None:
             stderr_file.close()
+        self._write_pid_file()
 
         if not self._wait_healthy():
             rc = self._process.poll()
@@ -193,6 +282,7 @@ class EmbeddingService:
                 self._process.returncode,
             )
             self._process = None
+            self._clear_pid_file()
             return
 
         logger.info("Stopping embedding service (PID %s)", pid)
@@ -216,6 +306,7 @@ class EmbeddingService:
 
         logger.info("Embedding service stopped (PID %s)", pid)
         self._process = None
+        self._clear_pid_file()
 
     def health(self) -> dict[str, Any]:
         """Return health status suitable for inclusion in /status responses."""
@@ -330,6 +421,7 @@ class EmbeddingRuntime:
         threads: int | None = None,
         gpu_layers: int | None = None,
         llama_server: str | None = None,
+        pid_file: str | Path | None = None,
     ) -> None:
         self._index = index
         self._model = model
@@ -340,6 +432,7 @@ class EmbeddingRuntime:
         self._threads = threads
         self._gpu_layers = gpu_layers
         self._llama_server = llama_server
+        self._pid_file = Path(pid_file) if pid_file else None
         self._service: EmbeddingService | None = None
         self._lock = threading.Lock()
         # Tracks why the service isn't running, so status can distinguish a
@@ -422,6 +515,7 @@ class EmbeddingRuntime:
                 threads=self._threads,
                 gpu_layers=self._gpu_layers,
                 llama_server=self._llama_server,
+                pid_file=self._pid_file,
             )
             try:
                 svc.start()

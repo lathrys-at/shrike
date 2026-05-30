@@ -236,8 +236,8 @@ Correctness is not at risk — `col.mod` drift detection forces a rebuild after 
 If the shrike server is `SIGKILL`ed — including by its **own** force-kill path (`daemon.py:_force_kill` → SIGKILL when graceful stop times out) — `stop()` never runs and llama-server is reparented to init and keeps running, holding port 8373. On the next start, the health check may then talk to / collide with the stale process.
 
 **Action items:**
-- [ ] On Linux, set `PR_SET_PDEATHSIG` (via `preexec_fn` or `prctl`) so the child dies with the parent; on macOS/Windows, detect and kill a stale llama-server on startup (by recorded PID or by probing the embedding port).
-- [ ] Consider recording the llama-server PID in state so a later `shrike server stop` / startup can reap an orphan.
+- [x] On Linux, set `PR_SET_PDEATHSIG` (via `preexec_fn` or `prctl`) so the child dies with the parent; on macOS/Windows, detect and kill a stale llama-server on startup (by recorded PID or by probing the embedding port). (Implemented the **cross-platform detect-and-reap-on-startup** path for *all* platforms, and deliberately **not** `PR_SET_PDEATHSIG`: the parent-death signal fires on the death of the *thread* that spawned the child, and `EmbeddingService.start()` runs via `asyncio.to_thread`, so a reclaimed pool thread could kill a healthy llama-server. `EmbeddingService._reap_orphan` reaps before binding — it reads the recorded PID and only kills it when it's both alive *and* holding our port, so a recycled PID can't trigger a wrong-process kill. SIGTERM→SIGKILL with a port-free wait.)
+- [x] Consider recording the llama-server PID in state so a later `shrike server stop` / startup can reap an orphan. (`EmbeddingService` writes `<state-dir>/embedding.pid` after spawn and removes it on clean stop; `EmbeddingRuntime`/`server.py` thread the path through. A present-and-alive PID file on startup is the orphan signal.)
 
 ### 7.5 [LOW–MEDIUM] `ShrikeClient.call()` doesn't handle HTTP error status
 
