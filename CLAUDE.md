@@ -48,7 +48,7 @@ src/shrike/                       # Python package (src layout)
     ├── type_cmd.py               # shrike type list/show/create/update/delete
     └── output.py                 # Rich formatting, output_options decorator
 tests/
-├── unit/                         # 286 tests — direct calls, no server
+├── unit/                         # 326 tests — direct calls, no server
 │   ├── conftest.py               # wrapper fixture (temp collection), basic_note fixture
 │   ├── test_collection_info.py
 │   ├── test_list_notes.py
@@ -61,12 +61,16 @@ tests/
 │   ├── test_config.py            # Config loading and embedding args
 │   ├── test_index.py             # VectorIndex unit tests (mocked embeddings)
 │   ├── test_note_embedding_text.py  # CollectionWrapper.note_texts_for_embedding
-│   └── test_tools_search.py     # search_notes, upsert neighbors, delete index updates
-└── integration/                  # 153 tests — real server subprocess + HTTP transport
+│   ├── test_tools_search.py     # search_notes, upsert neighbors, delete index updates
+│   ├── test_server_security.py  # loopback guard + transport-security helpers
+│   ├── test_daemon.py           # stop_server HTTP→SIGTERM→SIGKILL escalation
+│   └── test_collection_concurrency.py  # single-worker-thread serialization
+└── integration/                  # 159 tests — real server subprocess + HTTP transport
     ├── conftest.py               # server fixture (session-scoped), mcp fixture
     ├── test_tools.py
     ├── test_cli.py
-    ├── test_embedding.py         # Embedding tests (requires llama-server + GGUF model)
+    ├── test_security.py          # custom-route Host/Origin guard + non-loopback refusal
+    ├── test_embedding.py         # Embedding tests + orphan reaping (requires llama-server + GGUF model)
     └── test_semantic.py          # Semantic search, neighbors, index CLI (requires llama-server)
 docs/
 └── mcp-tools.md                  # Tool documentation (human-readable; machine schema is served
@@ -120,7 +124,7 @@ ruff format --check src/shrike/    # Format check
 mypy src/shrike/                   # Type check
 ```
 
-All three must pass cleanly. CI runs them in a `lint` job alongside `unit` and `integration` jobs.
+All three must pass cleanly. CI (`.github/workflows/test.yml`) runs, on every PR (Linux x64 only): a `lint` job, a `test` job (unit + non-embedding integration under the coverage gate), and an `embedding` job. macOS and ARM run the full integration suite on **push to `main`** (the `cross-platform` job, gated on `github.event_name == 'push'`) — Actions minutes are limited, and macOS bills at 10×, so the expensive lanes only run at merge time.
 
 ### Running the server manually
 
@@ -143,6 +147,8 @@ The `anki` pip package provides a headless Python API to Anki's SQLite database 
 ### MCP transport
 
 The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `json_response=True`). It listens on `http://127.0.0.1:8372/mcp` by default. All communication is JSON-RPC 2.0: clients POST to the endpoint with `method: "tools/call"` and receive structured JSON responses.
+
+**Trust boundary.** Every endpoint is unauthenticated, so the server binds loopback only; binding a non-loopback host requires `--allow-remote` (it refuses to start otherwise, with a loud warning) and llama-server stays pinned to `127.0.0.1` regardless. For loopback binds, DNS-rebinding/CSRF protection is on: `_build_transport_security()` allow-lists only loopback `Host`/`Origin` values, applied to the MCP endpoint *and* — via the `_guard` wrapper in `_register_custom_routes` — to the custom routes (`/status`, `/shutdown`, `/index/rebuild`, `/embedding/*`), which bypass MCP middleware. Bearer-token auth for remote use is deferred to the v0.4/v0.6 roadmap.
 
 ### MCP tools (7 total)
 
