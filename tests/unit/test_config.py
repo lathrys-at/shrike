@@ -11,7 +11,9 @@ from shrike.cli.config import (
     resolve_cache_dir,
     resolve_embedding,
     resolve_index_save,
+    resolve_transport,
     save_config,
+    transport_args,
 )
 from shrike.cli.config import embedding_args as _embedding_args
 
@@ -299,6 +301,62 @@ class TestSaveConfigCacheAndIndex:
         assert "cache_dir" not in text
 
 
+class TestResolveTransport:
+    def test_defaults_empty(self) -> None:
+        r = resolve_transport({})
+        assert r == {
+            "allowed_hosts": [],
+            "allowed_origins": [],
+            "no_dns_rebinding_protection": False,
+        }
+
+    def test_flags_win(self) -> None:
+        r = resolve_transport(
+            {"server": {"allowed_hosts": ["from.config"]}},
+            allowed_hosts=["from.flag"],
+            no_dns_rebinding_protection=True,
+        )
+        assert r["allowed_hosts"] == ["from.flag"]
+        assert r["no_dns_rebinding_protection"] is True
+
+    def test_env_over_config(self, monkeypatch) -> None:
+        monkeypatch.setenv("SHRIKE_ALLOWED_HOSTS", "a.ts.net, b.ts.net")
+        monkeypatch.setenv("SHRIKE_NO_DNS_REBINDING_PROTECTION", "true")
+        r = resolve_transport({"server": {"allowed_hosts": ["cfg"]}})
+        assert r["allowed_hosts"] == ["a.ts.net", "b.ts.net"]
+        assert r["no_dns_rebinding_protection"] is True
+
+    def test_config_fallback(self) -> None:
+        r = resolve_transport(
+            {"server": {"allowed_hosts": ["host.ts.net"], "no_dns_rebinding_protection": True}}
+        )
+        assert r["allowed_hosts"] == ["host.ts.net"]
+        assert r["no_dns_rebinding_protection"] is True
+
+
+class TestTransportArgs:
+    def test_empty(self) -> None:
+        assert transport_args(resolve_transport({})) == []
+
+    def test_builds_flags(self) -> None:
+        args = transport_args(
+            {
+                "allowed_hosts": ["h1", "h2"],
+                "allowed_origins": ["https://o1"],
+                "no_dns_rebinding_protection": True,
+            }
+        )
+        assert args == [
+            "--allowed-host",
+            "h1",
+            "--allowed-host",
+            "h2",
+            "--allowed-origin",
+            "https://o1",
+            "--no-dns-rebinding-protection",
+        ]
+
+
 @pytest.fixture(autouse=True)
 def _clean_embedding_env(monkeypatch) -> None:
     """Keep resolve tests independent of the ambient environment."""
@@ -311,5 +369,8 @@ def _clean_embedding_env(monkeypatch) -> None:
         "SHRIKE_CACHE_DIR",
         "SHRIKE_INDEX_SAVE_DELAY",
         "SHRIKE_INDEX_SAVE_THRESHOLD",
+        "SHRIKE_ALLOWED_HOSTS",
+        "SHRIKE_ALLOWED_ORIGINS",
+        "SHRIKE_NO_DNS_REBINDING_PROTECTION",
     ):
         monkeypatch.delenv(var, raising=False)

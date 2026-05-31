@@ -26,6 +26,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "server": {
         "host": "127.0.0.1",
         "port": 8372,
+        # Transport-security additions. ``allowed_hosts``/``allowed_origins`` are
+        # extra trusted Host/Origin values beyond loopback (a reverse-proxy or
+        # VPN hostname); ``no_dns_rebinding_protection`` disables the guard for
+        # network-is-the-boundary deployments (behind Caddy / on a tailnet).
+        "allowed_hosts": [],
+        "allowed_origins": [],
+        "no_dns_rebinding_protection": False,
     },
     "embedding": {
         "model": None,
@@ -90,6 +97,14 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
         server_out["host"] = server["host"]
     if server.get("port") and server["port"] != 8372:
         server_out["port"] = server["port"]
+    if server.get("allow_remote"):
+        server_out["allow_remote"] = True
+    if server.get("allowed_hosts"):
+        server_out["allowed_hosts"] = list(server["allowed_hosts"])
+    if server.get("allowed_origins"):
+        server_out["allowed_origins"] = list(server["allowed_origins"])
+    if server.get("no_dns_rebinding_protection"):
+        server_out["no_dns_rebinding_protection"] = True
     if server_out:
         output["server"] = server_out
 
@@ -235,6 +250,51 @@ def resolve_index_save(
     return {"save_delay": delay, "save_threshold": threshold}
 
 
+def resolve_transport(
+    config: dict[str, Any],
+    *,
+    allowed_hosts: list[str] | None = None,
+    allowed_origins: list[str] | None = None,
+    no_dns_rebinding_protection: bool | None = None,
+) -> dict[str, Any]:
+    """Resolve transport-security settings via flag → env → config.
+
+    ``allowed_hosts``/``allowed_origins`` are *additive* trusted Host/Origin
+    values (beyond loopback); ``no_dns_rebinding_protection`` disables the guard
+    entirely (the network-is-the-boundary deployment). Env vars:
+    ``SHRIKE_ALLOWED_HOSTS`` / ``SHRIKE_ALLOWED_ORIGINS`` (comma-separated) and
+    ``SHRIKE_NO_DNS_REBINDING_PROTECTION`` (truthy: 1/true/yes/on).
+    """
+    server = config.get("server", {})
+
+    def _env_list(name: str) -> list[str] | None:
+        raw = os.environ.get(name)
+        if raw is None:
+            return None
+        return [v.strip() for v in raw.split(",") if v.strip()]
+
+    hosts = allowed_hosts or _env_list("SHRIKE_ALLOWED_HOSTS") or server.get("allowed_hosts") or []
+    origins = (
+        allowed_origins
+        or _env_list("SHRIKE_ALLOWED_ORIGINS")
+        or server.get("allowed_origins")
+        or []
+    )
+
+    if no_dns_rebinding_protection is None:
+        env_flag = os.environ.get("SHRIKE_NO_DNS_REBINDING_PROTECTION")
+        if env_flag is not None:
+            no_dns_rebinding_protection = env_flag.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            no_dns_rebinding_protection = bool(server.get("no_dns_rebinding_protection", False))
+
+    return {
+        "allowed_hosts": list(hosts),
+        "allowed_origins": list(origins),
+        "no_dns_rebinding_protection": no_dns_rebinding_protection,
+    }
+
+
 def index_args(resolved: dict[str, Any]) -> list[str]:
     """Build server CLI args from resolved index-flush params (see resolve_index_save)."""
     args: list[str] = []
@@ -242,6 +302,18 @@ def index_args(resolved: dict[str, Any]) -> list[str]:
         args.extend(["--index-save-delay", str(resolved["save_delay"])])
     if resolved.get("save_threshold") is not None:
         args.extend(["--index-save-threshold", str(resolved["save_threshold"])])
+    return args
+
+
+def transport_args(resolved: dict[str, Any]) -> list[str]:
+    """Build server CLI args from resolved transport params (see resolve_transport)."""
+    args: list[str] = []
+    for host in resolved.get("allowed_hosts") or []:
+        args.extend(["--allowed-host", str(host)])
+    for origin in resolved.get("allowed_origins") or []:
+        args.extend(["--allowed-origin", str(origin)])
+    if resolved.get("no_dns_rebinding_protection"):
+        args.append("--no-dns-rebinding-protection")
     return args
 
 
@@ -284,6 +356,7 @@ def build_server_spec(
     no_embedding: bool = False,
     embedding_overrides: dict[str, Any] | None = None,
     index_save_overrides: dict[str, Any] | None = None,
+    transport_overrides: dict[str, Any] | None = None,
 ) -> ServerSpec | None:
     """Resolve a launch spec for the local daemon, or None if no collection.
 
@@ -303,12 +376,16 @@ def build_server_spec(
     )
     resolved_emb = resolve_embedding(config, **(embedding_overrides or {}))
     resolved_index = resolve_index_save(config, **(index_save_overrides or {}))
+    resolved_transport = resolve_transport(config, **(transport_overrides or {}))
 
     return ServerSpec(
         collection=coll,
         host=host or server.get("host", "127.0.0.1"),
         port=port or server.get("port", 8372),
         allow_remote=bool(server.get("allow_remote", False)),
+        allowed_hosts=resolved_transport["allowed_hosts"],
+        allowed_origins=resolved_transport["allowed_origins"],
+        no_dns_rebinding_protection=resolved_transport["no_dns_rebinding_protection"],
         log_dir=resolved_log_dir,
         log_level=log_level or log_config.get("level", "info"),
         cache_dir=resolve_cache_dir(config, cache_dir),
