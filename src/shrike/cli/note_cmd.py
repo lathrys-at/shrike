@@ -303,6 +303,46 @@ def note_update(
     output.result_status(result.results)
 
 
+@note.command("tag", short_help="Replace tags on one or more notes")
+@output_options
+@click.argument("note_ids", type=NOTE_ID, nargs=-1, required=True)
+@click.option(
+    "--set",
+    "set_tags",
+    multiple=True,
+    required=True,
+    callback=_parse_comma_separated,
+    expose_value=True,
+    help="New tag set, replacing existing tags (repeatable, comma-separated). "
+    'Pass --set "" to clear all tags.',
+)
+@click.pass_context
+def note_tag(ctx: click.Context, note_ids: tuple[int, ...], set_tags: tuple[str, ...]) -> None:
+    """Replace the tags on each given note with the same new set.
+
+    Tags are fully replaced, not merged — the notes end up with exactly the tags
+    you pass (and nothing else). Fields and decks are untouched.
+
+    \b
+    Examples:
+      shrike note tag 170000123 --set world-war-2,history
+      shrike note tag 170000123 170000456 --set needs-review
+      shrike note tag 170000123 --set ""        # clear all tags
+    """
+    client = ctx.obj["client"]
+    tags = list(set_tags)
+    notes = [{"id": nid, "tags": tags} for nid in note_ids]
+
+    with output.spinner("Tagging notes…"):
+        result = client.upsert_notes(notes)
+
+    if ctx.obj["json"]:
+        output.emit_json(result)
+        return
+
+    output.result_status(result.results)
+
+
 @note.command("delete", short_help="Delete notes by ID")
 @output_options
 @click.argument("note_ids", type=NOTE_ID, nargs=-1, required=True)

@@ -103,12 +103,16 @@ the real fact it states), never a bare keyword. Run exactly:
 - MCP — `search_notes(queries=["<claim of card A>", "<claim of card B>", …])`
 - CLI — `shrike note search "<claim A>" "<claim B>" … --json`
 
-One query per distinct concept (or per cluster of related drafts) is enough — not
-one per card when several share a topic — but fire them **together in that one
-call**, never one at a time. A single word pulls back noise and misses
-paraphrases; the real claim finds the note that already states it. *Example:*
-drafted card *"What is the speed of light in a vacuum?"* → query
-`light travels at 3×10⁸ m/s in vacuum`, **not** `light`.
+This search is the **one** place a pre-existing version gets caught — there's no
+post-write net — so phrase each query as the *exact intention of the card you
+intend to create*, not its topic; if a duplicate ever slips through, the query
+didn't carry the card's intent, and that's what to sharpen. One query per
+distinct concept (or per cluster of related drafts) is enough — not one per card
+when several share a topic — but fire them **together in that one call**, never
+one at a time. A single word pulls back noise and misses paraphrases; the real
+claim finds the note that already states it. *Example:* drafted card *"What is
+the speed of light in a vacuum?"* → query `light travels at 3×10⁸ m/s in
+vacuum`, **not** `light`.
 
 **Read the returned content and judge overlap yourself.** Do not decide from the
 score alone: a 0.7 can be a close paraphrase of your card *or* an unrelated fact
@@ -155,17 +159,20 @@ job here is **tag consistency**, not a second duplicate hunt: these are the
 closest notes in the collection, so their tags are the best evidence for
 whether you tagged yours to match the established vocabulary. If the neighborhood
 is tagged `pharmacology`, `antibiotics` and you used `antibiotic`, align to the
-existing form (adjust with a quick `note update` on the tags if you drifted).
+existing form (adjust with a quick `note update --tags` — or `note tag <ids>
+--set …` to re-tag several at once — if you drifted; both fully replace the tag
+set, so include the tags you want to keep).
 
-You already guarded against duplicates in the step-3 pre-check, so **don't
-re-audit the neighbor scores and don't run fresh searches afterward** — that's
-the redundant, score-fixated behavior to avoid. **And a successful write is
-confirmation, not a maybe:** when the upsert returns success, every note is in
-the collection exactly as you sent it, each with its id in the response. Don't
-`list` or `show` the notes back to check they saved — the success already says
-so. (Backstop only: if a neighbor surfaces a near-identical note your
-draft-phrased query missed, resolve it — delete the one you just made, or improve
-the original.)
+You already guarded against duplicates in the step-3 pre-check, so this step is
+**only about tags**: read the neighbors' tags, decide whether to align or add
+tags to the notes you just created, and stop there. **Don't re-audit the neighbor
+scores, don't run fresh searches, and don't go looking at or editing other
+notes** — that score-fixated re-checking is the behavior to avoid. **And a
+successful write is confirmation, not a maybe:** when the upsert returns success,
+every note is in the collection exactly as you sent it, each with its id in the
+response — don't `list` or `show` them back to check they saved; the success
+already says so. The neighbors are evidence for one decision only: did you tag
+your new notes to match the established vocabulary?
 
 If a result says `neighbors_unavailable` (a transient index hiccup), the notes
 *were* saved; the response tells you how to refetch the same data with
@@ -286,3 +293,13 @@ material truly needs a new type, say so and let the user decide. Never delete a
 note without the user's say-so, with one narrow exception: a duplicate **you
 created moments ago in this same session** and have confirmed against the
 original — clean up your own mess, but nothing pre-existing.
+
+**When something looks off, raise it — don't act on it silently, and don't bury
+it.** Searching the collection will sometimes turn up more than you went looking
+for: a possible duplicate you're unsure about, an existing note that looks wrong
+or contradicts your source material, a near-identical pair, a tag or deck that
+seems misfiled, an oddly low or high similarity score you can't explain. None of
+that is yours to quietly fix or quietly ignore. Note it and surface it to the
+user — briefly, in your report — and let them decide what to do. Your job is to
+add good cards; flagging the discrepancies you happen to notice along the way is
+part of that, chasing them down and "correcting" the collection is not.

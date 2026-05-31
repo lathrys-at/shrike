@@ -483,6 +483,53 @@ class TestNoteUpdate:
         assert note["deck"] == "MovedDeck"
 
 
+class TestNoteTag:
+    """Bulk tag-replace via CLI."""
+
+    def _make(self, runner, tags):
+        created = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+                "--tags",
+                tags,
+            ]
+        )
+        return str(created["results"][0]["id"])
+
+    def test_tag_replaces_across_multiple_notes(self, runner):
+        id1 = self._make(runner, "old1")
+        id2 = self._make(runner, "old2")
+
+        data = runner.json(["note", "tag", id1, id2, "--set", "shared,history"])
+        assert all(r["status"] == "updated" for r in data["results"])
+
+        for note_id in (id1, id2):
+            tags = runner.json(["note", "show", note_id])["notes"][0]["tags"]
+            assert sorted(tags) == ["history", "shared"]
+
+    def test_tag_clears_with_empty_set(self, runner):
+        note_id = self._make(runner, "keep,me")
+
+        runner.json(["note", "tag", note_id, "--set", ""])
+
+        tags = runner.json(["note", "show", note_id])["notes"][0]["tags"]
+        assert tags == []
+
+    def test_tag_requires_set(self, runner):
+        note_id = self._make(runner, "x")
+        result = runner.invoke(["note", "tag", note_id])
+        assert result.exit_code != 0
+
+
 class TestNoteDelete:
     """Deleting notes via CLI."""
 

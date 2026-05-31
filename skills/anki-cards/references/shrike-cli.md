@@ -101,6 +101,16 @@ Only the fields you pass change; `--tags` **replaces** all tags (include the one
 you want to keep). Use this to improve a note that already covers a fact, rather
 than creating a parallel one.
 
+## `shrike note tag` — re-tag notes in bulk
+
+```
+shrike note tag NOTE_IDS... --set a,b
+```
+Replaces the tags on every listed note with the same set (`--set ""` clears).
+Like `note update --tags` but across several notes at once, and it touches
+nothing but tags. Handy when you've created a batch and want to align them all to
+the neighborhood's vocabulary in one call.
+
 ## `shrike note delete` — remove notes
 
 ```
