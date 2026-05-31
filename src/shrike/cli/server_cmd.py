@@ -16,7 +16,9 @@ from shrike.cli.config import (
     resolve_collection,
     resolve_embedding,
     resolve_index_save,
+    resolve_transport,
     save_config,
+    transport_args,
 )
 from shrike.cli.output import output_options
 from shrike.client import ShrikeClient
@@ -116,6 +118,27 @@ def server() -> None:
     help="Permit binding to a non-loopback host. Endpoints are unauthenticated, "
     "so this exposes the full collection API to the network.",
 )
+@click.option(
+    "--allowed-host",
+    "allowed_host",
+    multiple=True,
+    help="Additional Host header to trust beyond loopback (repeatable) — e.g. a "
+    "reverse-proxy or Tailscale hostname. 'host:port' matches exactly; bare host, any port.",
+)
+@click.option(
+    "--allowed-origin",
+    "allowed_origin",
+    multiple=True,
+    help="Additional Origin header to trust beyond loopback (repeatable). Most "
+    "native MCP clients send none (always allowed); add only if a browser client 403s.",
+)
+@click.option(
+    "--no-dns-rebinding-protection",
+    is_flag=True,
+    help="Disable Host/Origin validation entirely, on any bind. For deployments "
+    "where the network is the trust boundary (behind a reverse proxy, on a VPN/tailnet, "
+    "firewalled). Endpoints stay unauthenticated.",
+)
 @click.option("--foreground", is_flag=True, help="Run in the foreground instead of daemonizing.")
 @click.option(
     "--log-dir",
@@ -185,6 +208,9 @@ def server_start(
     port: int | None,
     host: str | None,
     allow_remote: bool,
+    allowed_host: tuple[str, ...],
+    allowed_origin: tuple[str, ...],
+    no_dns_rebinding_protection: bool,
     foreground: bool,
     log_dir: str | None,
     log_level: str | None,
@@ -251,6 +277,16 @@ def server_start(
     embedding_cli_args = embedding_args(resolved_embedding, no_embedding=no_embedding)
     remote_args = ["--allow-remote"] if allow_remote else []
 
+    # Resolve transport-security additions (config → env → flags) for the spawned
+    # server args and the config we persist.
+    resolved_transport = resolve_transport(
+        config,
+        allowed_hosts=list(allowed_host) or None,
+        allowed_origins=list(allowed_origin) or None,
+        no_dns_rebinding_protection=no_dns_rebinding_protection or None,
+    )
+    transport_cli_args = transport_args(resolved_transport)
+
     # Resolve cache dir + index-flush tuning (config → env → flags) for the
     # spawned server args and the config we persist.
     resolved_cache_dir = resolve_cache_dir(config, cache_dir)
@@ -290,6 +326,7 @@ def server_start(
             resolved_log_level,
             "--foreground",
             *remote_args,
+            *transport_cli_args,
             *cache_args,
             *index_save_args,
             *embedding_cli_args,
@@ -324,6 +361,7 @@ def server_start(
                 "--log-level",
                 resolved_log_level,
                 *remote_args,
+                *transport_cli_args,
                 *cache_args,
                 *index_save_args,
                 *embedding_cli_args,
@@ -343,6 +381,12 @@ def server_start(
         config["server"]["port"] = server_port
         if allow_remote:
             config["server"]["allow_remote"] = True
+        if resolved_transport["allowed_hosts"]:
+            config["server"]["allowed_hosts"] = resolved_transport["allowed_hosts"]
+        if resolved_transport["allowed_origins"]:
+            config["server"]["allowed_origins"] = resolved_transport["allowed_origins"]
+        if resolved_transport["no_dns_rebinding_protection"]:
+            config["server"]["no_dns_rebinding_protection"] = True
         # Remember embedding settings so `shrike embedding start` works later.
         for key, value in resolved_embedding.items():
             if value is not None:
