@@ -132,7 +132,6 @@ def _parse_author_stream(stdout: str) -> tuple[str, dict[str, Any]]:
     text = ""
     parts: list[str] = []
     tool_calls = in_tok = out_tok = cache_tok = num_turns = 0
-    cost = 0.0
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -155,7 +154,6 @@ def _parse_author_stream(stdout: str) -> tuple[str, dict[str, Any]]:
         elif ev.get("type") == "result":
             text = ev.get("result", "") or text
             num_turns = ev.get("num_turns") or num_turns
-            cost = ev.get("total_cost_usd") or cost
     if not text:
         text = "\n".join(p for p in parts if p).strip()
     return text, {
@@ -165,7 +163,6 @@ def _parse_author_stream(stdout: str) -> tuple[str, dict[str, Any]]:
         "output_tokens": out_tok,
         "cache_read_tokens": cache_tok,
         "total_tokens": in_tok + out_tok,
-        "cost_usd": cost,
     }
 
 
@@ -204,7 +201,7 @@ def _author(config: str, sid: str, model: str, thinking: int) -> tuple[str, dict
     stats.update(model=model, thinking=thinking, duration_s=round(time.monotonic() - t0, 1))
     _log(
         f"author done in {stats['duration_s']:.0f}s — {stats['tool_calls']} tools, "
-        f"{stats['num_turns']} turns, {stats['total_tokens']:,} tokens, ${stats['cost_usd']:.4f}"
+        f"{stats['num_turns']} turns, {stats['total_tokens']:,} tokens"
     )
     return text, stats
 

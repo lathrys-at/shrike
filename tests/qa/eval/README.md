@@ -20,9 +20,9 @@ Manual — not part of `pytest`/CI. (The pure grader has its own quick test:
 | `runs/` | Per-run artifacts (gitignored): `baseline.json`, `transcript.txt`, `author_stats.json`, `run.json`, `grading.json`, `report.md`. |
 
 Each graded cell also prints an **author line** — tool calls, turns, and token
-counts (in / out / cache) with cost — parsed from the author's `claude -p`
-stream by `run.py` (`author_stats.json`). It's the quickest read on what a config
-costs: e.g. whether thinking buys better cards at the price of more output tokens.
+counts (in / out / cache) — parsed from the author's `claude -p` stream by
+`run.py` (`author_stats.json`). It's the quickest read on what a config spends:
+e.g. whether thinking buys better cards at the price of more output tokens.
 
 ## Matrix
 
