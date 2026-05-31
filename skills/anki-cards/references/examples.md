@@ -73,6 +73,36 @@ Front: What is the approximate resting membrane potential of a typical neuron?
 Back:  About −70 mV.
 ```
 
+### The cue that answers itself (restatement)
+
+A subtler version of the same failure: the front asks for "the significance" or
+"the importance" of something, and the back just rephrases the question. Nothing
+is recalled — the cue already contains the shape of the answer.
+
+**Before** — the back restates the front:
+
+```
+Front: What was the significance of the Battle of Midway?
+Back:  It was a turning point in the Pacific theatre.
+```
+
+"What was the significance?" → "it was significant" tests nothing: you can't get
+it wrong, so you learn nothing. The fix is **not** to pad the back with facts the
+source never gave (carrier losses, dates you'd be inventing) — it's to turn the
+real fact the material *does* contain into a cue whose answer you must produce:
+
+**After** — the answer is a specific thing to retrieve, not a paraphrase:
+
+```
+Front: Which 1942 naval battle was the turning point of the Pacific theatre?
+Back:  The Battle of Midway.
+```
+
+Same single fact from the same source sentence, flipped so the cue is a real
+question. When the material is genuinely thin ("X was a turning point" and no
+more), the recall-worthy content is that event↔significance pairing — test
+*that* directly; don't manufacture detail to fill a back.
+
 ### Sharpening an ambiguous cue
 
 **Before** — the front maps to dozens of answers, so you can't grade it
