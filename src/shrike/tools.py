@@ -324,6 +324,12 @@ def register_tools(
             top_k,
             threshold,
         )
+        # Query text only at DEBUG — useful for seeing *how* a caller searched
+        # (e.g. eval of search-query quality), but noisy/PII-ish for INFO.
+        if queries:
+            logger.debug("search_notes query strings: %s", queries)
+        if ids:
+            logger.debug("search_notes source ids: %s", ids)
 
         if index is None or index.state == IndexState.UNAVAILABLE:
             return SearchResponse(
