@@ -27,7 +27,7 @@ from typing import Any
 
 import yaml
 from grade import DEFAULT_DUP_THRESHOLD, grade_run, summarize
-from judge import DEFAULT_JUDGE_MODEL, run_judge
+from judge import DEFAULT_JUDGE_MODEL, DEFAULT_JUDGE_THINKING, run_judge
 from prompts import SHRIKE_BIN, baseline_prompt, with_skill_prompt
 
 HERE = Path(__file__).resolve().parent
@@ -204,7 +204,12 @@ def cmd_grade(args: argparse.Namespace) -> int:
     judge: dict[str, Any] | None = None
     if not args.no_judge:
         judge = run_judge(
-            scn, _read_prompt_md(args.scenario), created, observed, model=args.judge_model
+            scn,
+            _read_prompt_md(args.scenario),
+            created,
+            observed,
+            model=args.judge_model,
+            thinking_tokens=args.judge_thinking,
         )
         grading["judge"] = judge
 
@@ -309,6 +314,12 @@ def main() -> int:
         "--judge-model",
         default=DEFAULT_JUDGE_MODEL,
         help=f"model alias for the advisory LLM judge (default: {DEFAULT_JUDGE_MODEL})",
+    )
+    sg.add_argument(
+        "--judge-thinking",
+        type=int,
+        default=DEFAULT_JUDGE_THINKING,
+        help=f"judge MAX_THINKING_TOKENS (default: {DEFAULT_JUDGE_THINKING}; 0 off)",
     )
     sg.add_argument(
         "--no-judge",

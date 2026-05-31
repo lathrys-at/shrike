@@ -37,14 +37,26 @@ tests/qa/eval/run.py --repeats 1 --configs with_skill
 
 # 3x depth on two scenarios, mechanical only (fast, no judge):
 tests/qa/eval/run.py --scenarios 01,03 --repeats 3 --no-judge
+
+# plain Haiku with no reasoning, to compare against the thinking default:
+tests/qa/eval/run.py --author-thinking 0
 ```
 
 Per cell it resets the fixture, waits for the index, snapshots the baseline,
 spawns the cold author (`claude -p --model haiku`, the deliberately-weak model
 the eval measures), grades + judges, and at the end writes `report.md`. Flags:
 `--scenarios`, `--configs` (`with_skill`/`baseline`), `--repeats` (depth),
-`--author-model`, `--judge-model` (default `sonnet`), `--no-judge`,
-`--keep-going`. The author runs under `--dangerously-skip-permissions` — safe
+`--author-model`, `--author-thinking`, `--judge-model` (default `sonnet`),
+`--judge-thinking`, `--no-judge`, `--keep-going`.
+
+**Extended thinking is on by default** — author `8000` tokens, judge `4000`
+(`MAX_THINKING_TOKENS`); `0` disables. Haiku 4.5 is weak but *can* reason, and
+card design (type choice, dedup, cue framing) is reasoning work, so letting it
+think is the cheap lever before reaching for a stronger author. `haiku`,
+`haiku --author-thinking 0`, and `--author-model sonnet` are distinct configs;
+each batch records which it was in `runs/<batch>/config.json`.
+
+The author runs under `--dangerously-skip-permissions` — safe
 because the QA collection is a disposable fixture rebuilt every cell, but it's an
 autonomous agent loop, so run it deliberately.
 

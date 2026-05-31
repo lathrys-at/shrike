@@ -29,6 +29,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -37,7 +38,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from judge import DEFAULT_JUDGE_MODEL
+from judge import DEFAULT_JUDGE_MODEL, DEFAULT_JUDGE_THINKING
 from prompts import SHRIKE_BIN, baseline_prompt, with_skill_prompt
 
 HERE = Path(__file__).resolve().parent
@@ -48,6 +49,9 @@ PY = sys.executable
 
 ALL_SCENARIOS = ["01", "02", "03", "04", "05", "06"]
 DEFAULT_AUTHOR_MODEL = "haiku"
+# Author thinking is on by default: the weak model benefits most from reasoning
+# through the type/dedup/cue decisions. Generous budget — it's a multi-turn agent.
+DEFAULT_AUTHOR_THINKING = 8000
 INDEX_TIMEOUT = 180.0
 AUTHOR_TIMEOUT = 900.0
 
@@ -119,13 +123,15 @@ def _wait_index_ready(timeout: float = INDEX_TIMEOUT) -> None:
     raise SystemExit(f"index not ready within {timeout:.0f}s")
 
 
-def _author(config: str, sid: str, model: str) -> str:
-    """Spawn the cold author agent and return its final report (stdout)."""
+def _author(config: str, sid: str, model: str, thinking: int) -> str:
+    """Spawn the cold author agent and return its final report (stdout).
+    ``thinking`` sets the author's MAX_THINKING_TOKENS budget (0 disables)."""
     user = _read_prompt_md(sid)
     builder = with_skill_prompt if config == "with_skill" else baseline_prompt
     prompt = builder(user)
-    _log(f"author: claude -p --model {model} ({config} {sid})…")
+    _log(f"author: claude -p --model {model} (thinking={thinking}) ({config} {sid})…")
     t0 = time.monotonic()
+    env = {**os.environ, "MAX_THINKING_TOKENS": str(max(thinking, 0))}
     proc = subprocess.run(
         [
             "claude",
@@ -140,6 +146,7 @@ def _author(config: str, sid: str, model: str) -> str:
         text=True,
         cwd=str(ROOT),
         timeout=AUTHOR_TIMEOUT,
+        env=env,
     )
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
@@ -152,7 +159,14 @@ def _baseline(run_dir: Path) -> None:
     subprocess.run([PY, str(HARNESS), "baseline", "--out", str(run_dir)], check=True, cwd=str(HERE))
 
 
-def _grade(sid: str, run_dir: Path, transcript: Path, judge_model: str, no_judge: bool) -> None:
+def _grade(
+    sid: str,
+    run_dir: Path,
+    transcript: Path,
+    judge_model: str,
+    judge_thinking: int,
+    no_judge: bool,
+) -> None:
     cmd = [
         PY,
         str(HARNESS),
@@ -167,7 +181,7 @@ def _grade(sid: str, run_dir: Path, transcript: Path, judge_model: str, no_judge
     if no_judge:
         cmd.append("--no-judge")
     else:
-        cmd += ["--judge-model", judge_model]
+        cmd += ["--judge-model", judge_model, "--judge-thinking", str(judge_thinking)]
     subprocess.run(cmd, check=True, cwd=str(HERE))
 
 
@@ -184,7 +198,19 @@ def main() -> int:
     p.add_argument("--repeats", type=int, default=1, help="runs per cell (depth)")
     p.add_argument("--batch", default=None, help="batch name (default: timestamp)")
     p.add_argument("--author-model", default=DEFAULT_AUTHOR_MODEL)
+    p.add_argument(
+        "--author-thinking",
+        type=int,
+        default=DEFAULT_AUTHOR_THINKING,
+        help=f"author MAX_THINKING_TOKENS (default: {DEFAULT_AUTHOR_THINKING}; 0 off)",
+    )
     p.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
+    p.add_argument(
+        "--judge-thinking",
+        type=int,
+        default=DEFAULT_JUDGE_THINKING,
+        help=f"judge thinking budget (default: {DEFAULT_JUDGE_THINKING}; 0 off)",
+    )
     p.add_argument("--no-judge", action="store_true")
     p.add_argument("--keep-going", action="store_true", help="continue after a cell errors")
     args = p.parse_args()
@@ -196,10 +222,31 @@ def main() -> int:
     batch = HERE / "runs" / batch_name
 
     cells = [(s, c, r) for s in scenarios for c in configs for r in range(1, args.repeats + 1)]
+    judge_desc = "off" if args.no_judge else f"{args.judge_model}/think={args.judge_thinking}"
     _log(
         f"batch {batch_name}: {len(cells)} cells "
         f"({len(scenarios)} scenarios × {len(configs)} configs × {args.repeats} repeats), "
-        f"author={args.author_model}, judge={'off' if args.no_judge else args.judge_model}"
+        f"author={args.author_model}/think={args.author_thinking}, judge={judge_desc}"
+    )
+
+    # Drop a self-documenting record of the config that produced this batch, so a
+    # haiku vs haiku+thinking vs sonnet run is never ambiguous after the fact.
+    batch.mkdir(parents=True, exist_ok=True)
+    (batch / "config.json").write_text(
+        json.dumps(
+            {
+                "batch": batch_name,
+                "started": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S"),
+                "scenarios": scenarios,
+                "configs": configs,
+                "repeats": args.repeats,
+                "author_model": args.author_model,
+                "author_thinking": args.author_thinking,
+                "judge_model": None if args.no_judge else args.judge_model,
+                "judge_thinking": None if args.no_judge else args.judge_thinking,
+            },
+            indent=2,
+        )
     )
 
     errors = 0
@@ -210,10 +257,10 @@ def main() -> int:
             _reset_fixture()
             _wait_index_ready()
             _baseline(run_dir)
-            report_text = _author(config, sid, args.author_model)
+            report_text = _author(config, sid, args.author_model, args.author_thinking)
             transcript = run_dir / "transcript.txt"
             transcript.write_text(report_text)
-            _grade(sid, run_dir, transcript, args.judge_model, args.no_judge)
+            _grade(sid, run_dir, transcript, args.judge_model, args.judge_thinking, args.no_judge)
         except (SystemExit, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             errors += 1
             _log(f"!! cell {sid} {config} r{rep} failed: {e}")

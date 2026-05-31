@@ -14,11 +14,15 @@ unit-testable; this module is the one that shells out.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from typing import Any
 
 DEFAULT_JUDGE_MODEL = "sonnet"
+# A modest thinking budget: the judge is a single-turn read of a handful of
+# cards, not a multi-step agent — enough to reason through the rubric, no more.
+DEFAULT_JUDGE_THINKING = 4000
 
 _INSTRUCTIONS = """\
 You are grading Anki flashcards that a *weaker* AI model created from a user's
@@ -114,12 +118,15 @@ def run_judge(
     created: list[dict[str, Any]],
     observed: dict[str, Any] | None = None,
     model: str = DEFAULT_JUDGE_MODEL,
+    thinking_tokens: int = DEFAULT_JUDGE_THINKING,
     timeout: float = 300.0,
 ) -> dict[str, Any]:
     """Run the advisory judge via ``claude -p``. Always returns a dict; failure
     modes (``error``/``unparsed``) are encoded in ``verdict`` rather than raised,
-    so a flaky judge never sinks a run's mechanical grade."""
+    so a flaky judge never sinks a run's mechanical grade. ``thinking_tokens``
+    sets the judge's extended-thinking budget (``MAX_THINKING_TOKENS``); 0 off."""
     prompt = build_judge_prompt(scenario, user_request, created, observed)
+    env = {**os.environ, "MAX_THINKING_TOKENS": str(max(thinking_tokens, 0))}
     try:
         proc = subprocess.run(
             ["claude", "-p", "--model", model, "--output-format", "json"],
@@ -127,17 +134,20 @@ def run_judge(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired:
-        return {"model": model, "verdict": "error", "error": f"timeout after {timeout:.0f}s"}
+        result = {"model": model, "verdict": "error", "error": f"timeout after {timeout:.0f}s"}
     except FileNotFoundError:
-        return {"model": model, "verdict": "error", "error": "claude CLI not found on PATH"}
-
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout).strip()[:500] or f"exit {proc.returncode}"
-        return {"model": model, "verdict": "error", "error": err}
-
-    return _parse_result(proc.stdout, model)
+        result = {"model": model, "verdict": "error", "error": "claude CLI not found on PATH"}
+    else:
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout).strip()[:500] or f"exit {proc.returncode}"
+            result = {"model": model, "verdict": "error", "error": err}
+        else:
+            result = _parse_result(proc.stdout, model)
+    result["thinking"] = thinking_tokens
+    return result
 
 
 def _parse_result(stdout: str, model: str) -> dict[str, Any]:
