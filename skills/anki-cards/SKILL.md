@@ -134,9 +134,15 @@ material, not a count of new cards.
 
 Put each surviving draft in the **closest existing deck**, and tag it with terms
 drawn from the vocabulary your searches surfaced. Express the fine-grained topic
-as a *tag*, not as a new sub-deck (see "Prefer existing structure" below). Only
-propose a new deck or a new tag when nothing existing fits — and when you do,
-flag it explicitly in your report so the user can veto it.
+as a *tag*, not a new sub-deck — broad decks organized by tags beat deep trees:
+Anki schedules review per deck, so a thicket like
+`Chemistry::Elements::Alkali-Metals::Sodium` fragments your reviews into tiny
+sessions. And reuse the collection's existing tag forms rather than coining a
+parallel — tags rot into synonym sets (`econ`, `economics`, `economy`) that
+splinter a collection so no single tag finds everything; the neighbor and search
+data already show you the established term. Only propose a new deck or tag when
+nothing existing fits — and when you do, flag it explicitly in your report so the
+user can veto it.
 
 ### 5. Write, then align tags with the neighbors
 
@@ -149,17 +155,14 @@ is tagged `pharmacology`, `antibiotics` and you used `antibiotic`, align to the
 existing form (adjust with a quick `note update` on the tags if you drifted).
 
 You already guarded against duplicates in the step-3 pre-check, so **don't
-re-audit the neighbor scores** — that's the redundant, score-fixated behavior to
-avoid, and you don't run fresh searches afterward either. **And a successful
-write is a guarantee, not a maybe** — when the upsert returns success, every note
-is already in the collection exactly as you sent it: same fields, same deck, same
-tags, each with its id handed back in the response. There is nothing to verify.
-Don't `list` or `show` the notes back to confirm they saved or that the fields
-took — the success *is* the confirmation, and re-fetching what you just wrote
-tells you nothing it didn't already promise. (The neighbors are keyed on the
-note's full content, so on the rare chance a near-identical one surfaces that
-your draft-phrased query missed, resolve it — delete the one you just made,
-improve the original — but that's a backstop, not the point of this step.)
+re-audit the neighbor scores and don't run fresh searches afterward** — that's
+the redundant, score-fixated behavior to avoid. **And a successful write is
+confirmation, not a maybe:** when the upsert returns success, every note is in
+the collection exactly as you sent it, each with its id in the response. Don't
+`list` or `show` the notes back to check they saved — the success already says
+so. (Backstop only: if a neighbor surfaces a near-identical note your
+draft-phrased query missed, resolve it — delete the one you just made, or improve
+the original.)
 
 If a result says `neighbors_unavailable` (a transient index hiccup), the notes
 *were* saved; the response tells you how to refetch the same data with
@@ -213,15 +216,13 @@ exist in this collection — you saw them in step 1. If the ideal type isn't
 present, adapt (a one-way Q/A is almost always available as a fallback) and tell
 the user if the material would genuinely be better served by a type they don't
 have. And if the user *asked* for a specific kind of card — "make cloze cards
-for the cranial nerves" — honor it for the cards you do create, but still apply
-every standard below; their request fixes the type, it doesn't license sloppy
-cards. **It also doesn't override the step-3 dedup check:** "make cloze cards" is
-not licence to re-make a fact that already exists as a Basic card (or any other
-form) — a different format is still a duplicate (see step 3). When a
-requested-format card lands on a fact the collection already covers, treat it as
-covered: flag it, and offer to convert or replace the existing note rather than
-adding a format-parallel beside it. If the requested type truly fights the
-material, build the good version and explain why.
+for the cranial nerves" — honor it, but still apply every standard below; their
+request fixes the type, not the right to be sloppy. **It doesn't override the
+step-3 dedup check either:** "make cloze cards" is no licence to re-make a fact
+that already exists in another format — a different format is still a duplicate
+(see step 3), so flag it and offer to convert or replace the existing note rather
+than adding a parallel. If the requested type truly fights the material, build
+the good version and explain why.
 
 ## Writing the card well
 
@@ -260,19 +261,6 @@ filler, and keep it to one or a few deletions per note — hiding five things in
 one sentence turns recall back into recognition. Each deletion should be
 answerable on its own from the rest of the sentence; don't cloze a word that
 grammar alone gives away.
-
-**Prefer existing structure over inventing new.** Before adding a deck or a tag,
-use what's there. Broad decks organized by tags beat deep deck trees: Anki
-schedules and mixes review per deck, so a thicket like
-`Chemistry::Elements::Alkali-Metals::Sodium` fragments your reviews into tiny
-sessions and is tedious to maintain. Put the card in the nearest existing deck
-and let a *tag* carry the finer topic. Create a new deck only for a genuinely new
-subject area with no home in the collection.
-
-**Reuse the collection's vocabulary.** Tags rot into synonym sets — `econ`,
-`economics`, `economy` — that splinter a collection so no single tag finds
-everything. The neighbor and search data show you what similar notes are already
-tagged; adopt those terms instead of coining a parallel one.
 
 **Keep formatting light and consistent.** Match the field conventions of the note
 type you're filling. Don't leak the answer into the front (a giveaway in the
