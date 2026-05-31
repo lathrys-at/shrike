@@ -38,6 +38,17 @@ Start the server as a background daemon. The collection path can come from `--co
 | `--foreground` | Run in the foreground instead of daemonizing. |
 | `--log-dir PATH` | Directory for log files (default: platform-specific). |
 | `--log-level` | `debug`, `info`, `warning`, or `error` (default: `info`). |
+| `--embedding-model PATH` | Path to a GGUF embedding model. Enables semantic search. |
+| `--embedding-port INTEGER` | Port for the embedding server (default: 8373). |
+| `--embedding-context-size INTEGER` | Context size for the embedding model. |
+| `--embedding-threads INTEGER` | CPU threads for embedding inference. |
+| `--embedding-gpu-layers INTEGER` | Layers to offload to the GPU. |
+| `--embedding-pooling` | llama-server pooling type: `mean`, `last`, `cls`, or `none`. Defaults to the model's GGUF setting. Set `last` for last-token models (Jina v5, Qwen3-Embedding), whose metadata omits it; changing it forces an index rebuild. |
+| `--embedding-arg TOKENS` | Extra `llama-server` flag passed through verbatim, repeatable and `shlex`-split (e.g. `--embedding-arg='--flash-attn'`). For runtime-only flags; Shrike-owned flags (`--model`/`--host`/`--port`/`--embeddings`) are rejected, and any change forces an index rebuild. Vector-affecting flags belong in typed settings like `--embedding-pooling`. |
+| `--llama-server PATH` | Path to the `llama-server` binary (default: `LLAMA_SERVER_PATH` or `PATH`). |
+| `--no-embedding` | Start without the embedding service even if a model is configured. |
+
+The embedding flags above are also accepted by `shrike embedding start`, which cycles the service on an already-running server.
 
 ### `shrike server stop`
 

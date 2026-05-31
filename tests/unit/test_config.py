@@ -60,6 +60,7 @@ class TestEmbeddingArgs:
             "context_size": 2048,
             "threads": 4,
             "gpu_layers": 33,
+            "pooling": "last",
             "llama_server": "/bin/llama-server",
         }
         args = _embedding_args(resolved)
@@ -68,9 +69,32 @@ class TestEmbeddingArgs:
         assert "--embedding-context-size" in args
         assert "--embedding-threads" in args
         assert "--embedding-gpu-layers" in args
+        assert "--embedding-pooling" in args
         assert "--llama-server" in args
         assert "/m.gguf" in args
         assert "2048" in args
+
+    def test_pooling(self) -> None:
+        args = _embedding_args({"model": "/m.gguf", "pooling": "last"})
+        assert args[-2:] == ["--embedding-pooling", "last"]
+
+    def test_no_pooling_omits_flag(self) -> None:
+        assert "--embedding-pooling" not in _embedding_args({"model": "/m.gguf"})
+        assert "--embedding-pooling" not in _embedding_args({"model": "/m.gguf", "pooling": None})
+
+    def test_extra_args_one_flag_per_token(self) -> None:
+        args = _embedding_args(
+            {"model": "/m.gguf", "extra_args": ["--flash-attn", "--ubatch-size 256"]}
+        )
+        # Each raw entry is emitted as its own --embedding-arg (split happens
+        # later, in the embedding service).
+        assert args.count("--embedding-arg") == 2
+        assert "--flash-attn" in args
+        assert "--ubatch-size 256" in args
+
+    def test_no_extra_args_emits_nothing(self) -> None:
+        assert "--embedding-arg" not in _embedding_args({"model": "/m.gguf"})
+        assert "--embedding-arg" not in _embedding_args({"model": "/m.gguf", "extra_args": []})
 
     def test_no_embedding_flag(self) -> None:
         assert "--no-embedding" in _embedding_args({"model": "/m.gguf"}, no_embedding=True)
@@ -111,6 +135,42 @@ class TestResolveEmbedding:
         resolved = resolve_embedding({"embedding": {}})
         assert resolved["model"] is None
 
+    def test_pooling_from_config(self) -> None:
+        resolved = resolve_embedding({"embedding": {"pooling": "last"}})
+        assert resolved["pooling"] == "last"
+
+    def test_pooling_env_overrides_config(self, monkeypatch) -> None:
+        monkeypatch.setenv("SHRIKE_EMBEDDING_POOLING", "cls")
+        resolved = resolve_embedding({"embedding": {"pooling": "last"}})
+        assert resolved["pooling"] == "cls"
+
+    def test_pooling_flag_wins(self, monkeypatch) -> None:
+        monkeypatch.setenv("SHRIKE_EMBEDDING_POOLING", "cls")
+        resolved = resolve_embedding({"embedding": {"pooling": "mean"}}, pooling="last")
+        assert resolved["pooling"] == "last"
+
+    def test_pooling_defaults_none(self) -> None:
+        assert resolve_embedding({"embedding": {}})["pooling"] is None
+
+    def test_extra_args_from_config(self) -> None:
+        resolved = resolve_embedding({"embedding": {"extra_args": ["--flash-attn"]}})
+        assert resolved["extra_args"] == ["--flash-attn"]
+
+    def test_extra_args_env_shlex_split(self, monkeypatch) -> None:
+        monkeypatch.setenv("SHRIKE_EMBEDDING_ARGS", "--flash-attn --ubatch-size 256")
+        resolved = resolve_embedding({"embedding": {"extra_args": ["--cfg"]}})
+        assert resolved["extra_args"] == ["--flash-attn", "--ubatch-size", "256"]
+
+    def test_extra_args_flag_wins(self, monkeypatch) -> None:
+        monkeypatch.setenv("SHRIKE_EMBEDDING_ARGS", "--env")
+        resolved = resolve_embedding(
+            {"embedding": {"extra_args": ["--cfg"]}}, extra_args=["--flag"]
+        )
+        assert resolved["extra_args"] == ["--flag"]
+
+    def test_extra_args_defaults_empty(self) -> None:
+        assert resolve_embedding({"embedding": {}})["extra_args"] == []
+
     def test_paths_expanded(self, monkeypatch) -> None:
         monkeypatch.delenv("SHRIKE_EMBEDDING_MODEL", raising=False)
         resolved = resolve_embedding({"embedding": {"model": "~/m.gguf"}})
@@ -127,6 +187,24 @@ class TestSaveConfigEmbedding:
         reloaded = load_config(path)
         assert reloaded["embedding"]["model"] == "/m.gguf"
         assert reloaded["embedding"]["threads"] == 8
+
+    def test_persists_pooling(self, tmp_path) -> None:
+        config = load_config(tmp_path / "none.yml")
+        config["collection"] = "/c.anki2"
+        config["embedding"]["model"] = "/m.gguf"
+        config["embedding"]["pooling"] = "last"
+        path = save_config(config, tmp_path / "config.yml")
+        reloaded = load_config(path)
+        assert reloaded["embedding"]["pooling"] == "last"
+
+    def test_persists_extra_args(self, tmp_path) -> None:
+        config = load_config(tmp_path / "none.yml")
+        config["collection"] = "/c.anki2"
+        config["embedding"]["model"] = "/m.gguf"
+        config["embedding"]["extra_args"] = ["--flash-attn", "--ubatch-size 256"]
+        path = save_config(config, tmp_path / "config.yml")
+        reloaded = load_config(path)
+        assert reloaded["embedding"]["extra_args"] == ["--flash-attn", "--ubatch-size 256"]
 
     def test_omits_embedding_when_no_model(self, tmp_path) -> None:
         config = load_config(tmp_path / "none.yml")
@@ -227,6 +305,8 @@ def _clean_embedding_env(monkeypatch) -> None:
     for var in (
         "SHRIKE_EMBEDDING_MODEL",
         "SHRIKE_EMBEDDING_PORT",
+        "SHRIKE_EMBEDDING_POOLING",
+        "SHRIKE_EMBEDDING_ARGS",
         "LLAMA_SERVER_PATH",
         "SHRIKE_CACHE_DIR",
         "SHRIKE_INDEX_SAVE_DELAY",

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import shlex
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +33,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "context_size": None,
         "threads": None,
         "gpu_layers": None,
+        # llama-server pooling type (mean|last|cls|none). None means "use the
+        # model's GGUF default" — required as `last` for last-token models
+        # (Jina v5, Qwen3-Embedding) whose metadata omits it.
+        "pooling": None,
+        # Generic llama-server arg passthrough — a list of raw token strings
+        # appended verbatim (e.g. ["--flash-attn", "--ubatch-size 256"]). For
+        # runtime-only flags; vector-affecting flags belong in typed settings.
+        "extra_args": [],
     },
     "index": {
         "save_delay": None,
@@ -91,7 +101,15 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
         emb_out: dict[str, Any] = {"model": emb["model"]}
         if emb.get("port") and emb["port"] != 8373:
             emb_out["port"] = emb["port"]
-        for key in ("context_size", "threads", "gpu_layers", "llama_server"):
+        persisted_keys = (
+            "context_size",
+            "threads",
+            "gpu_layers",
+            "pooling",
+            "extra_args",
+            "llama_server",
+        )
+        for key in persisted_keys:
             if emb.get(key):
                 emb_out[key] = emb[key]
         output["embedding"] = emb_out
@@ -110,6 +128,21 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
     return filepath
 
 
+def _resolve_extra_args(flag_args: Sequence[str] | None, emb: dict[str, Any]) -> list[str]:
+    """Passthrough token strings via flag → env → config (flag wins).
+
+    The CLI flag is a list of raw entries; the ``SHRIKE_EMBEDDING_ARGS`` env var
+    is one shlex-split string. Each entry stays a raw token string here — the
+    embedding service shlex-splits and guardrails them at command-build time.
+    """
+    if flag_args:
+        return list(flag_args)
+    env = os.environ.get("SHRIKE_EMBEDDING_ARGS")
+    if env:
+        return shlex.split(env)
+    return list(emb.get("extra_args") or [])
+
+
 def resolve_embedding(
     config: dict[str, Any],
     *,
@@ -118,6 +151,8 @@ def resolve_embedding(
     context_size: int | None = None,
     threads: int | None = None,
     gpu_layers: int | None = None,
+    pooling: str | None = None,
+    extra_args: Sequence[str] | None = None,
     llama_server: str | None = None,
 ) -> dict[str, Any]:
     """Resolve embedding parameters via the config → env → flag cascade.
@@ -125,7 +160,8 @@ def resolve_embedding(
     Flag overrides win, then environment variables, then config values. This is
     the same precedence ``shrike server start`` uses for the collection path.
     Environment variables: ``SHRIKE_EMBEDDING_MODEL``, ``SHRIKE_EMBEDDING_PORT``,
-    and ``LLAMA_SERVER_PATH`` (binary). Paths are user-expanded.
+    ``SHRIKE_EMBEDDING_POOLING``, ``SHRIKE_EMBEDDING_ARGS`` (shlex-split
+    passthrough), and ``LLAMA_SERVER_PATH`` (binary). Paths are user-expanded.
     """
     emb = config.get("embedding", {})
 
@@ -139,6 +175,8 @@ def resolve_embedding(
         "context_size": context_size or emb.get("context_size"),
         "threads": threads or emb.get("threads"),
         "gpu_layers": gpu_layers or emb.get("gpu_layers"),
+        "pooling": (pooling or os.environ.get("SHRIKE_EMBEDDING_POOLING") or emb.get("pooling")),
+        "extra_args": _resolve_extra_args(extra_args, emb),
     }
 
     if resolved["model"]:
@@ -225,6 +263,10 @@ def embedding_args(resolved: dict[str, Any], *, no_embedding: bool = False) -> l
         args.extend(["--embedding-threads", str(resolved["threads"])])
     if resolved.get("gpu_layers"):
         args.extend(["--embedding-gpu-layers", str(resolved["gpu_layers"])])
+    if resolved.get("pooling"):
+        args.extend(["--embedding-pooling", str(resolved["pooling"])])
+    for token in resolved.get("extra_args") or []:
+        args.extend(["--embedding-arg", str(token)])
     if no_embedding:
         args.append("--no-embedding")
     return args
@@ -311,11 +353,14 @@ def resolve_collection(
 def _deep_copy_defaults() -> dict[str, Any]:
     logging_defaults = dict(DEFAULT_CONFIG["logging"])  # type: ignore[arg-type]
     logging_defaults["levels"] = dict(logging_defaults.get("levels", {}))
+    embedding_defaults = dict(DEFAULT_CONFIG["embedding"])  # type: ignore[arg-type]
+    # Fresh list so a caller mutating extra_args can't poison the module default.
+    embedding_defaults["extra_args"] = list(embedding_defaults.get("extra_args", []))
     return {
         "collection": DEFAULT_CONFIG["collection"],
         "cache_dir": DEFAULT_CONFIG["cache_dir"],
         "server": dict(DEFAULT_CONFIG["server"]),  # type: ignore[arg-type]
-        "embedding": dict(DEFAULT_CONFIG["embedding"]),  # type: ignore[arg-type]
+        "embedding": embedding_defaults,
         "index": dict(DEFAULT_CONFIG["index"]),  # type: ignore[arg-type]
         "logging": logging_defaults,
     }

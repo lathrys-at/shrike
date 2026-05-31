@@ -171,6 +171,13 @@ class VectorIndex:
         from usearch.index import Index
 
         self._ndim = ndim
+        # "cos" is scale-invariant — it divides by vector norms per distance
+        # computation, so unnormalized embeddings rank and score identically to
+        # normalized ones (verified on usearch 2.25.3). That makes llama-server's
+        # --embd-normalize moot here; normalization is deliberately *not* a typed
+        # setting. If the metric ever changes to one that isn't scale-invariant
+        # (l2sq, ip), normalization becomes vector-affecting and must be typed +
+        # folded into model_id like pooling.
         self._index = Index(ndim=ndim, metric="cos", dtype="f32")
         self._dir.mkdir(parents=True, exist_ok=True)
         logger.info("Created new vector index: %d dims", ndim)

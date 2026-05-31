@@ -119,6 +119,48 @@ class TestBuildCommand:
         cmd = svc._build_command("/bin/ls")
         assert "--log-file" not in cmd
 
+    def test_pooling_flag(self) -> None:
+        svc = EmbeddingService(model="/m.gguf", pooling="last")
+        cmd = svc._build_command("/bin/ls")
+        assert "--pooling" in cmd
+        assert cmd[cmd.index("--pooling") + 1] == "last"
+
+    def test_no_pooling_omits_flag(self) -> None:
+        svc = EmbeddingService(model="/m.gguf")
+        assert "--pooling" not in svc._build_command("/bin/ls")
+
+    def test_extra_args_appended_and_split(self) -> None:
+        # Raw entries are shlex-split and appended verbatim, in order, last.
+        svc = EmbeddingService(model="/m.gguf", extra_args=["--flash-attn", "--ubatch-size 256"])
+        cmd = svc._build_command("/bin/ls")
+        assert cmd[-3:] == ["--flash-attn", "--ubatch-size", "256"]
+
+    def test_extra_args_reject_reserved_flags(self) -> None:
+        # Shrike-owned flags are stripped (with their value), the rest survive.
+        svc = EmbeddingService(
+            model="/m.gguf",
+            extra_args=["--host 0.0.0.0", "--port 1", "--model /evil", "--embeddings", "--keep"],
+        )
+        cmd = svc._build_command("/bin/ls")
+        # --host's contract value is still loopback; the override didn't leak in.
+        assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
+        assert "0.0.0.0" not in cmd
+        assert "/evil" not in cmd
+        assert cmd.count("--embeddings") == 1  # only Shrike's own
+        assert cmd[-1] == "--keep"  # the one non-reserved passthrough token
+
+    def test_extra_args_reject_equals_form(self) -> None:
+        svc = EmbeddingService(model="/m.gguf", extra_args=["--host=0.0.0.0", "--ok"])
+        cmd = svc._build_command("/bin/ls")
+        assert "--host=0.0.0.0" not in cmd
+        assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
+        assert cmd[-1] == "--ok"
+
+    def test_no_extra_args_appends_nothing(self) -> None:
+        svc = EmbeddingService(model="/m.gguf", port=9000)
+        # Identical to the minimal command — passthrough is empty.
+        assert svc._build_command("/bin/llama-server")[-1] == "--embeddings"
+
 
 class TestStart:
     def test_start_spawns_and_waits(self, svc: EmbeddingService) -> None:
@@ -413,6 +455,52 @@ class TestModelFingerprint:
         with patch.object(svc, "model_info", return_value={}):
             assert svc.model_fingerprint() == "file:model.gguf:-1"
 
+    def test_pooling_folded_in(self) -> None:
+        svc = EmbeddingService(model="/m.gguf", pooling="last")
+        with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
+            assert svc.model_fingerprint() == "meta:1:2:3:4:5:pool=last"
+
+    def test_pooling_changes_fingerprint(self) -> None:
+        # Different pooling on the same model → different identity → rebuild.
+        mean = EmbeddingService(model="/m.gguf", pooling="mean")
+        last = EmbeddingService(model="/m.gguf", pooling="last")
+        with (
+            patch.object(mean, "model_info", return_value={"id": "m", "meta": self._META}),
+            patch.object(last, "model_info", return_value={"id": "m", "meta": self._META}),
+        ):
+            assert mean.model_fingerprint() != last.model_fingerprint()
+
+    def test_unset_pooling_matches_legacy(self, svc: EmbeddingService) -> None:
+        # No pooling set → fingerprint unchanged from before the feature existed.
+        with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
+            assert svc.model_fingerprint() == "meta:1:2:3:4:5"
+
+    def test_extra_args_folded_in(self) -> None:
+        svc = EmbeddingService(model="/m.gguf", extra_args=["--flash-attn"])
+        with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
+            assert svc.model_fingerprint() == "meta:1:2:3:4:5:args=--flash-attn"
+
+    def test_extra_args_change_fingerprint(self) -> None:
+        a = EmbeddingService(model="/m.gguf", extra_args=["--flash-attn"])
+        b = EmbeddingService(model="/m.gguf", extra_args=["--ubatch-size 256"])
+        with (
+            patch.object(a, "model_info", return_value={"id": "m", "meta": self._META}),
+            patch.object(b, "model_info", return_value={"id": "m", "meta": self._META}),
+        ):
+            assert a.model_fingerprint() != b.model_fingerprint()
+
+    def test_reserved_extra_args_excluded_from_fingerprint(self) -> None:
+        # A stripped reserved flag never reaches llama-server, so it must not
+        # appear in the fingerprint (and thus can't force a needless rebuild).
+        svc = EmbeddingService(model="/m.gguf", extra_args=["--host 0.0.0.0"])
+        with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
+            assert svc.model_fingerprint() == "meta:1:2:3:4:5"
+
+    def test_pooling_and_extra_args_both_folded(self) -> None:
+        svc = EmbeddingService(model="/m.gguf", pooling="last", extra_args=["--flash-attn"])
+        with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
+            assert svc.model_fingerprint() == "meta:1:2:3:4:5:pool=last:args=--flash-attn"
+
 
 class TestEmbedModelPinning:
     def _fake_post(self, captured: dict[str, Any]):
@@ -469,6 +557,14 @@ class TestEmbeddingRuntime:
         with patch("shrike.embedding.EmbeddingService", return_value=fake_svc):
             runtime.start(model="/override.gguf")
         assert runtime.model == "/override.gguf"
+
+    def test_start_passes_extra_args_to_service(self) -> None:
+        runtime = EmbeddingRuntime(index=MagicMock(), model="/m.gguf", extra_args=["--flash-attn"])
+        fake_svc = MagicMock()
+        fake_svc.running = True
+        with patch("shrike.embedding.EmbeddingService", return_value=fake_svc) as ctor:
+            runtime.start()
+        assert ctor.call_args.kwargs["extra_args"] == ["--flash-attn"]
 
     def test_start_noop_if_running(self) -> None:
         runtime = EmbeddingRuntime(index=MagicMock(), model="/m.gguf")
