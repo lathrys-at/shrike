@@ -1,0 +1,98 @@
+# Machine-readable eval spec for the QA scenarios.
+#
+# The PROMPT for each scenario is read from its narrative file
+# (../scenarios/<id>-*.md, the fenced block under "## Prompt") — this file is the
+# single source for the *grading*, not the prompts, so the two can't drift.
+#
+# `assert` keys (all optional; grade.py implements each as a deterministic check
+# against the run's note-delta + agent transcript):
+#   decks_subset: [..]        every new note's deck must be in this set
+#   new_decks_max: N          at most N decks created that didn't exist at baseline
+#   new_decks_min: N          at least N new decks (the "new deck is correct" case)
+#   note_types_subset: [..]   every new note uses one of these note types
+#   note_types_include: [..]  at least one new note uses each listed type
+#   new_cards: [min, max]     number of notes created, inclusive range
+#   duplicates_max: N         at most N new notes that near-duplicate a PRE-EXISTING
+#                             note (nearest pre-existing cosine >= dup_threshold)
+#   tags_include: [..]        union of new-note tags includes each of these
+#   tags_forbidden: [..]      union of new-note tags includes NONE of these
+#   report_mentions_new_deck: true   agent transcript flags a newly-created deck
+#
+# `judge` is the rubric handed to the advisory LLM grader (qualitative only).
+
+dup_threshold: 0.85 # nearest pre-existing cosine >= this counts as a duplicate
+
+scenarios:
+  - id: "01"
+    needs_embeddings: true
+    assert:
+      decks_subset: [Biology]
+      new_decks_max: 0
+      note_types_subset: [Basic, Cloze]
+      new_cards: [3, 7]
+      duplicates_max: 0
+    judge: >
+      Did it choose the card type per fact appropriately — cloze with a SEPARATE
+      deletion per chamber for the four-chambers set, an ordered cloze (or atomic
+      steps) for the blood-flow sequence, and one-way Q/A for the SA-node and
+      ventricle-wall facts? Are the cards atomic and recall-framed (not bloated,
+      not yes/no)?
+
+  - id: "02"
+    needs_embeddings: true
+    assert:
+      new_cards: [0, 1] # all three facts already exist; ~zero new cards
+      duplicates_max: 0
+    judge: >
+      Did it SEARCH first, recognize the existing mitochondria/ATP, inner-membrane,
+      and citric-acid-cycle coverage, and avoid creating duplicates (skip or
+      update) — rather than blindly creating parallel cards? Did it reason from
+      the matched content, not just a score?
+
+  - id: "03"
+    needs_embeddings: true
+    assert:
+      decks_subset: [History]
+      new_decks_max: 0
+      note_types_include: [Cloze] # honored the cloze request
+      new_cards: [1, 2] # only Napoleon (1804) is genuinely new
+      duplicates_max: 0 # must not duplicate the 3 existing facts
+    judge: >
+      Did it honor the cloze request (cloze notes, one disciplined deletion each,
+      not over-clozed) WHILE catching that the 1789 French-Revolution, Bastille,
+      and 1776 US-independence facts already exist (skip/flag), and creating only
+      the genuinely-new Napoleon 1804 fact?
+
+  - id: "04"
+    needs_embeddings: true
+    assert:
+      decks_subset: [Spanish]
+      new_decks_max: 0
+      note_types_include: ["Basic (and reversed card)"]
+      new_cards: [3, 5]
+    judge: >
+      Did it pick a REVERSED note type for the vocabulary (so each word is
+      reviewable both directions), matching the existing Spanish deck, rather than
+      one-way Q/A or a newly-invented type? Tags consistent with the vocab set?
+
+  - id: "05"
+    needs_embeddings: true
+    assert:
+      decks_subset: [History]
+      new_decks_max: 0
+      tags_include: [world-war-2]
+      tags_forbidden: [wwii, ww2, world-war-ii, "world war 2", ww-2]
+      new_cards: [2, 4]
+    judge: >
+      Did it adopt the EXISTING `world-war-2` tag rather than coining a synonym
+      (wwii/ww2/etc.)? Are the Midway and Yalta cards well-formed and in History?
+
+  - id: "06"
+    needs_embeddings: false
+    assert:
+      new_decks_min: 1
+      report_mentions_new_deck: true
+    judge: >
+      Did it recognize that NO existing deck fits music theory, create a new broad
+      deck (flat, not deep), and explicitly FLAG that new deck in its report for
+      the user — rather than forcing the cards into an ill-fitting existing deck?
