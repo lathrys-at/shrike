@@ -239,7 +239,10 @@ def cmd_grade(args: argparse.Namespace) -> int:
     if judge is not None:
         verdict = judge.get("verdict", "?")
         detail = judge.get("rubric") or judge.get("error") or judge.get("raw", "")
-        print(f"    judge[{judge.get('model')}]: {verdict} — {str(detail)[:200]}")
+        print(
+            f"    judge[{judge.get('model')} think={judge.get('thinking')}]: "
+            f"{verdict} — {str(detail)[:200]}"
+        )
         for issue in judge.get("issues", [])[:4]:
             print(f"      issue: {issue}")
     if observed:
