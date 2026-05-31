@@ -43,6 +43,14 @@ leaving out facts that weren't in the source. But do flag a card that is weak on
 its own terms — the answer telegraphed by the question, or a back that merely
 restates the front.
 
+A `<reference_solution>` is given below — **one** acceptable form for this
+scenario, not the only one. Grade against the rubric and that reference: credit
+any structure that satisfies the rubric even when it differs from the reference
+(atomic Q/A where the reference shows cloze, a different-but-valid phrasing), and
+reserve your flags for genuine deviations from the expected structure and
+quality, not for your own stylistic preferences. Don't invent requirements that
+neither the rubric nor the reference states.
+
 Anki cloze mechanics, so you don't misread them: within one note, deletions with
 DISTINCT indices — {{c1::…}}, {{c2::…}}, {{c3::…}} — each generate a SEPARATE
 card that hides only its own deletion and shows the rest. Distinct indices are
@@ -88,6 +96,8 @@ def build_judge_prompt(
     observed: dict[str, Any] | None = None,
 ) -> str:
     rubric = (scenario.get("judge") or "").strip() or "(no rubric provided)"
+    reference = (scenario.get("expect") or "").strip()
+    ref_block = f"<reference_solution>\n{reference}\n</reference_solution>\n\n" if reference else ""
     if created:
         blocks = []
         for i, n in enumerate(created, 1):
@@ -105,6 +115,7 @@ def build_judge_prompt(
         f"{_INSTRUCTIONS}\n\n"
         f"<study_material>\n{user_request}\n</study_material>\n\n"
         f"<rubric>\n{rubric}\n</rubric>\n\n"
+        f"{ref_block}"
         f'<agent_behavior note="objective server-log trace — what it did, not what it said">\n'
         f"{_format_behavior(observed or {})}\n</agent_behavior>\n\n"
         f"<cards_created>\n{cards_block}\n</cards_created>\n\n"
