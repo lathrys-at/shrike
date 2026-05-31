@@ -159,6 +159,20 @@ def server() -> None:
 )
 @click.option("--embedding-gpu-layers", type=int, help="Number of layers to offload to GPU.")
 @click.option(
+    "--embedding-pooling",
+    type=click.Choice(["mean", "last", "cls", "none"], case_sensitive=False),
+    help="llama-server pooling type. Set 'last' for last-token models "
+    "(Jina v5, Qwen3-Embedding) whose GGUF omits it.",
+)
+@click.option(
+    "--embedding-arg",
+    "embedding_arg",
+    multiple=True,
+    help="Extra llama-server flag passed through verbatim, repeatable and "
+    "shlex-split (e.g. --embedding-arg='--flash-attn'). Runtime-only flags; "
+    "Shrike-owned flags are rejected.",
+)
+@click.option(
     "--no-embedding",
     is_flag=True,
     help="Start the server without the embedding service even if a model is configured "
@@ -183,6 +197,8 @@ def server_start(
     embedding_context_size: int | None,
     embedding_threads: int | None,
     embedding_gpu_layers: int | None,
+    embedding_pooling: str | None,
+    embedding_arg: tuple[str, ...],
     no_embedding: bool,
 ) -> None:
     """Start the Shrike MCP server as a background daemon.
@@ -228,6 +244,8 @@ def server_start(
         context_size=embedding_context_size,
         threads=embedding_threads,
         gpu_layers=embedding_gpu_layers,
+        pooling=embedding_pooling,
+        extra_args=list(embedding_arg) or None,
         llama_server=llama_server,
     )
     embedding_cli_args = embedding_args(resolved_embedding, no_embedding=no_embedding)

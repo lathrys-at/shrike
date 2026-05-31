@@ -56,6 +56,21 @@ def embedding_status(ctx: click.Context) -> None:
 )
 @click.option("--embedding-gpu-layers", "gpu_layers", type=int, help="Layers to offload to GPU.")
 @click.option(
+    "--embedding-pooling",
+    "pooling",
+    type=click.Choice(["mean", "last", "cls", "none"], case_sensitive=False),
+    help="llama-server pooling type. Set 'last' for last-token models "
+    "(Jina v5, Qwen3-Embedding) whose GGUF omits it.",
+)
+@click.option(
+    "--embedding-arg",
+    "extra_args",
+    multiple=True,
+    help="Extra llama-server flag passed through verbatim, repeatable and "
+    "shlex-split (e.g. --embedding-arg='--flash-attn'). Runtime-only flags; "
+    "Shrike-owned flags are rejected.",
+)
+@click.option(
     "--background", is_flag=True, help="Return immediately without waiting for any index rebuild."
 )
 @click.pass_context
@@ -67,6 +82,8 @@ def embedding_start(
     context_size: int | None,
     threads: int | None,
     gpu_layers: int | None,
+    pooling: str | None,
+    extra_args: tuple[str, ...],
     background: bool,
 ) -> None:
     """Start the embedding service on a running server.
@@ -92,6 +109,8 @@ def embedding_start(
         context_size=context_size,
         threads=threads,
         gpu_layers=gpu_layers,
+        pooling=pooling,
+        extra_args=list(extra_args) or None,
         llama_server=llama_server,
     )
 

@@ -259,6 +259,8 @@ def _register_custom_routes(
                     "context_size",
                     "threads",
                     "gpu_layers",
+                    "pooling",
+                    "extra_args",
                     "llama_server",
                 ):
                     if body.get(key) is not None:
@@ -417,6 +419,25 @@ def main() -> None:
         help="Number of layers to offload to GPU",
     )
     parser.add_argument(
+        "--embedding-pooling",
+        default=None,
+        choices=["mean", "last", "cls", "none"],
+        help="llama-server pooling type. Set 'last' for last-token models "
+        "(Jina v5, Qwen3-Embedding) whose GGUF omits it; otherwise the model's "
+        "stored default is used.",
+    )
+    parser.add_argument(
+        "--embedding-arg",
+        action="append",
+        default=None,
+        metavar="TOKENS",
+        help="Extra llama-server flag(s) to pass through verbatim, repeatable "
+        "(e.g. --embedding-arg='--flash-attn'). Each value is shlex-split; "
+        "Shrike-owned flags (--model/--host/--port/--embeddings) are rejected. "
+        "For runtime-only flags — vector-affecting flags belong in typed "
+        "settings like --embedding-pooling.",
+    )
+    parser.add_argument(
         "--no-embedding",
         action="store_true",
         help="Don't start the embedding service at boot even if a model is configured "
@@ -513,6 +534,8 @@ def main() -> None:
         context_size=args.embedding_context_size,
         threads=args.embedding_threads,
         gpu_layers=args.embedding_gpu_layers,
+        pooling=args.embedding_pooling,
+        extra_args=args.embedding_arg,
         llama_server=args.llama_server,
         pid_file=resolved_state_dir / "embedding.pid",
     )

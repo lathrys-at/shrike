@@ -16,12 +16,14 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import shlex
 import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +39,16 @@ DEFAULT_HOST = "127.0.0.1"
 HEALTH_TIMEOUT = 30.0
 HEALTH_POLL_INTERVAL = 0.25
 SHUTDOWN_TIMEOUT = 5.0
+
+# llama-server flags Shrike owns; a generic passthrough (``--embedding-arg``)
+# must not override them. ``--host`` is a security boundary — the embedding
+# backend is deliberately pinned to loopback (audit §1.1) — so a passthrough
+# can't be allowed to re-bind it. ``--embedding`` is llama.cpp's alias for
+# ``--embeddings``.
+_RESERVED_FLAGS = frozenset({"--model", "-m", "--host", "--port", "--embeddings", "--embedding"})
+# Of the reserved flags, those that consume a following value token (so a
+# rejected ``--host 0.0.0.0`` drops the value too, not just the flag).
+_RESERVED_VALUE_FLAGS = frozenset({"--model", "-m", "--host", "--port"})
 
 
 def _pid_alive(pid: int) -> bool:
@@ -72,6 +84,8 @@ class EmbeddingService:
         context_size: int | None = None,
         threads: int | None = None,
         gpu_layers: int | None = None,
+        pooling: str | None = None,
+        extra_args: Sequence[str] | None = None,
         llama_server: str | None = None,
         pid_file: str | Path | None = None,
     ) -> None:
@@ -82,6 +96,9 @@ class EmbeddingService:
         self._context_size = context_size
         self._threads = threads
         self._gpu_layers = gpu_layers
+        self._pooling = pooling
+        # Raw passthrough token strings (each shlex-split at command-build time).
+        self._extra_args = list(extra_args) if extra_args else []
         self._llama_server_override = llama_server
         # PID file: records the llama-server PID so a later start can reap an
         # orphan left by an unclean Shrike shutdown (it survives a parent SIGKILL).
@@ -120,6 +137,42 @@ class EmbeddingService:
             "llama-server not found. Install llama.cpp or set LLAMA_SERVER_PATH."
         )
 
+    def _passthrough_tokens(self, *, warn: bool = False) -> list[str]:
+        """Resolve ``extra_args`` to llama-server tokens, dropping reserved flags.
+
+        Each raw entry is shlex-split (so ``"--ubatch-size 256"`` becomes two
+        tokens), then any attempt to set a Shrike-owned flag (see
+        ``_RESERVED_FLAGS``) is stripped — including a separate value token for
+        value-taking flags. ``warn`` logs each rejection (set only on the
+        command-build path, so the fingerprint can reuse this silently).
+        """
+        raw: list[str] = []
+        for entry in self._extra_args:
+            raw.extend(shlex.split(entry))
+
+        result: list[str] = []
+        i = 0
+        while i < len(raw):
+            tok = raw[i]
+            flag = tok.split("=", 1)[0]
+            if flag in _RESERVED_FLAGS:
+                if warn:
+                    logger.warning(
+                        "Ignoring reserved llama-server flag %r passed via --embedding-arg; "
+                        "Shrike controls it (use a typed setting for vector-affecting flags).",
+                        flag,
+                    )
+                # Drop a separate value token for `--host 0.0.0.0`, but not the
+                # self-contained `--host=0.0.0.0` form.
+                if flag in _RESERVED_VALUE_FLAGS and "=" not in tok and i + 1 < len(raw):
+                    i += 2
+                else:
+                    i += 1
+                continue
+            result.append(tok)
+            i += 1
+        return result
+
     def _build_command(self, binary: str) -> list[str]:
         cmd = [
             binary,
@@ -137,8 +190,17 @@ class EmbeddingService:
             cmd.extend(["--threads", str(self._threads)])
         if self._gpu_layers is not None:
             cmd.extend(["--gpu-layers", str(self._gpu_layers)])
+        if self._pooling is not None:
+            # Override the GGUF's stored pooling type. Required for last-token
+            # models (Jina v5, Qwen3-Embedding) whose metadata omits it —
+            # without this, llama-server defaults to mean and produces wrong
+            # embeddings.
+            cmd.extend(["--pooling", self._pooling])
         if self._log_dir:
             cmd.extend(["--log-file", str(self._log_dir / "llama-server.log")])
+        # Generic passthrough last, so a user can't shadow Shrike's own args by
+        # ordering (and reserved flags are stripped regardless).
+        cmd.extend(self._passthrough_tokens(warn=True))
         return cmd
 
     def _write_pid_file(self) -> None:
@@ -356,18 +418,38 @@ class EmbeddingService:
         The model *name* is deliberately excluded: it's the weakest signal
         (renames would force needless rebuilds; same-name re-quantizations would
         slip through — which the numeric fields catch).
+
+        An explicit pooling type is folded in: it isn't in the model metadata,
+        but changing it changes every vector, so it must invalidate the index.
+        Left out when ``pooling`` is unset, so an index built before this setting
+        existed still matches (the GGUF's own pooling is unchanged).
+
+        The generic ``--embedding-arg`` passthrough is also folded in, under a
+        conservative policy: *any* change to it forces a rebuild. Shrike can't
+        tell a vector-affecting flag from a perf-only one in an opaque token bag,
+        so it trades the occasional needless re-embed for never silently mixing
+        vector spaces. (Vector-affecting flags should be typed settings — like
+        ``--embedding-pooling`` — not buried in the passthrough.) Reserved flags
+        are excluded because they never reach llama-server.
         """
         meta = self.model_info().get("meta") or {}
         fields = ("n_params", "n_embd", "n_vocab", "n_ctx_train", "size")
         if any(meta.get(f) is not None for f in fields):
-            return "meta:" + ":".join(str(meta.get(f, "")) for f in fields)
+            base = "meta:" + ":".join(str(meta.get(f, "")) for f in fields)
+        else:
+            path = Path(self._model)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = -1
+            base = f"file:{path.name}:{size}"
 
-        path = Path(self._model)
-        try:
-            size = path.stat().st_size
-        except OSError:
-            size = -1
-        return f"file:{path.name}:{size}"
+        if self._pooling:
+            base = f"{base}:pool={self._pooling}"
+        passthrough = self._passthrough_tokens()
+        if passthrough:
+            base = f"{base}:args={' '.join(passthrough)}"
+        return base
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Compute embeddings for a list of texts.
@@ -420,6 +502,8 @@ class EmbeddingRuntime:
         context_size: int | None = None,
         threads: int | None = None,
         gpu_layers: int | None = None,
+        pooling: str | None = None,
+        extra_args: Sequence[str] | None = None,
         llama_server: str | None = None,
         pid_file: str | Path | None = None,
     ) -> None:
@@ -431,6 +515,8 @@ class EmbeddingRuntime:
         self._context_size = context_size
         self._threads = threads
         self._gpu_layers = gpu_layers
+        self._pooling = pooling
+        self._extra_args = list(extra_args) if extra_args else []
         self._llama_server = llama_server
         self._pid_file = Path(pid_file) if pid_file else None
         self._service: EmbeddingService | None = None
@@ -477,6 +563,8 @@ class EmbeddingRuntime:
         context_size: int | None = None,
         threads: int | None = None,
         gpu_layers: int | None = None,
+        pooling: str | None = None,
+        extra_args: Sequence[str] | None = None,
         llama_server: str | None = None,
     ) -> EmbeddingService:
         """Start the embedding service and attach it to the index.
@@ -500,6 +588,10 @@ class EmbeddingRuntime:
                 self._threads = threads
             if gpu_layers is not None:
                 self._gpu_layers = gpu_layers
+            if pooling is not None:
+                self._pooling = pooling
+            if extra_args is not None:
+                self._extra_args = list(extra_args)
             if llama_server is not None:
                 self._llama_server = llama_server
 
@@ -514,6 +606,8 @@ class EmbeddingRuntime:
                 context_size=self._context_size,
                 threads=self._threads,
                 gpu_layers=self._gpu_layers,
+                pooling=self._pooling,
+                extra_args=self._extra_args,
                 llama_server=self._llama_server,
                 pid_file=self._pid_file,
             )
