@@ -17,7 +17,12 @@ Manual — not part of `pytest`/CI. (The pure grader has its own quick test:
 | `prompts.py` | Canonical `with_skill` / `baseline` agent prompts (so runs are comparable). |
 | `harness.py` | Glue CLI: `prompt`, `baseline`, `grade` (mechanical + judge), `report`. Talks to the running server. |
 | `run.py` | **Automated runner**: loops `scenario × config × repeat`, resets the fixture, spawns the cold author via `claude -p`, grades + judges, writes the report. The hands-free counterpart to driving `harness.py` by hand. |
-| `runs/` | Per-run artifacts (gitignored): `baseline.json`, `transcript.txt`, `run.json`, `grading.json`, `report.md`. |
+| `runs/` | Per-run artifacts (gitignored): `baseline.json`, `transcript.txt`, `author_stats.json`, `run.json`, `grading.json`, `report.md`. |
+
+Each graded cell also prints an **author line** — tool calls, turns, and token
+counts (in / out / cache) with cost — parsed from the author's `claude -p`
+stream by `run.py` (`author_stats.json`). It's the quickest read on what a config
+costs: e.g. whether thinking buys better cards at the price of more output tokens.
 
 ## Matrix
 

@@ -37,6 +37,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from judge import DEFAULT_JUDGE_MODEL, DEFAULT_JUDGE_THINKING
 from prompts import SHRIKE_BIN, baseline_prompt, with_skill_prompt
@@ -123,8 +124,53 @@ def _wait_index_ready(timeout: float = INDEX_TIMEOUT) -> None:
     raise SystemExit(f"index not ready within {timeout:.0f}s")
 
 
-def _author(config: str, sid: str, model: str, thinking: int) -> str:
-    """Spawn the cold author agent and return its final report (stdout).
+def _parse_author_stream(stdout: str) -> tuple[str, dict[str, Any]]:
+    """Parse the author's ``--output-format stream-json`` NDJSON into (final
+    report text, run stats). Tool calls are counted from ``tool_use`` content
+    blocks; tokens are summed per-turn from each assistant event's usage; turns
+    and cost come from the terminal ``result`` event."""
+    text = ""
+    parts: list[str] = []
+    tool_calls = in_tok = out_tok = cache_tok = num_turns = 0
+    cost = 0.0
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("type") == "assistant":
+            msg = ev.get("message", {})
+            for b in msg.get("content", []):
+                if b.get("type") == "tool_use":
+                    tool_calls += 1
+                elif b.get("type") == "text":
+                    parts.append(b.get("text", ""))
+            u = msg.get("usage", {}) or {}
+            in_tok += u.get("input_tokens", 0)
+            out_tok += u.get("output_tokens", 0)
+            cache_tok += u.get("cache_read_input_tokens", 0)
+        elif ev.get("type") == "result":
+            text = ev.get("result", "") or text
+            num_turns = ev.get("num_turns") or num_turns
+            cost = ev.get("total_cost_usd") or cost
+    if not text:
+        text = "\n".join(p for p in parts if p).strip()
+    return text, {
+        "tool_calls": tool_calls,
+        "num_turns": num_turns,
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
+        "cache_read_tokens": cache_tok,
+        "total_tokens": in_tok + out_tok,
+        "cost_usd": cost,
+    }
+
+
+def _author(config: str, sid: str, model: str, thinking: int) -> tuple[str, dict[str, Any]]:
+    """Spawn the cold author agent; return (final report, run stats).
     ``thinking`` sets the author's MAX_THINKING_TOKENS budget (0 disables)."""
     user = _read_prompt_md(sid)
     builder = with_skill_prompt if config == "with_skill" else baseline_prompt
@@ -140,6 +186,9 @@ def _author(config: str, sid: str, model: str, thinking: int) -> str:
             model,
             "--dangerously-skip-permissions",
             "--no-session-persistence",
+            "--output-format",
+            "stream-json",
+            "--verbose",
         ],
         input=prompt,
         capture_output=True,
@@ -151,8 +200,13 @@ def _author(config: str, sid: str, model: str, thinking: int) -> str:
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
         raise SystemExit(f"author claude -p failed (exit {proc.returncode})")
-    _log(f"author done in {time.monotonic() - t0:.0f}s")
-    return proc.stdout
+    text, stats = _parse_author_stream(proc.stdout)
+    stats.update(model=model, thinking=thinking, duration_s=round(time.monotonic() - t0, 1))
+    _log(
+        f"author done in {stats['duration_s']:.0f}s — {stats['tool_calls']} tools, "
+        f"{stats['num_turns']} turns, {stats['total_tokens']:,} tokens, ${stats['cost_usd']:.4f}"
+    )
+    return text, stats
 
 
 def _baseline(run_dir: Path) -> None:
@@ -257,9 +311,12 @@ def main() -> int:
             _reset_fixture()
             _wait_index_ready()
             _baseline(run_dir)
-            report_text = _author(config, sid, args.author_model, args.author_thinking)
+            report_text, author_stats = _author(
+                config, sid, args.author_model, args.author_thinking
+            )
             transcript = run_dir / "transcript.txt"
             transcript.write_text(report_text)
+            (run_dir / "author_stats.json").write_text(json.dumps(author_stats, indent=2))
             _grade(sid, run_dir, transcript, args.judge_model, args.judge_thinking, args.no_judge)
         except (SystemExit, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             errors += 1

@@ -184,6 +184,10 @@ def cmd_grade(args: argparse.Namespace) -> int:
         )
 
     transcript = Path(args.transcript).read_text() if args.transcript else ""
+    # Author run stats (tokens / tool calls), written by run.py from the author's
+    # stream-json. Absent in the manual flow, where the author isn't run by us.
+    author_path = run_dir / "author_stats.json"
+    author = json.loads(author_path.read_text()) if author_path.exists() else None
     run = {
         "scenario_id": args.scenario,
         "config": run_dir.parent.name,
@@ -191,6 +195,7 @@ def cmd_grade(args: argparse.Namespace) -> int:
         "baseline": baseline,
         "created_notes": created,
         "observed": observed,
+        "author": author,
         "transcript": transcript,
     }
     (run_dir / "run.json").write_text(json.dumps(run, indent=2))
@@ -221,6 +226,16 @@ def cmd_grade(args: argparse.Namespace) -> int:
     for r in results:
         if not r["passed"]:
             print(f"    ✗ {r['text']} — {r['evidence']}")
+    if author:
+        cost = author.get("cost_usd")
+        cost_s = f"${cost:.4f}" if isinstance(cost, int | float) else "$?"
+        print(
+            f"    author[{author.get('model')} think={author.get('thinking')}]: "
+            f"{author.get('tool_calls')} tool calls · {author.get('num_turns')} turns · "
+            f"{author.get('total_tokens', 0):,} tokens "
+            f"({author.get('input_tokens', 0):,} in + {author.get('output_tokens', 0):,} out, "
+            f"{author.get('cache_read_tokens', 0):,} cache) · {cost_s}"
+        )
     if judge is not None:
         verdict = judge.get("verdict", "?")
         detail = judge.get("rubric") or judge.get("error") or judge.get("raw", "")
