@@ -13,6 +13,7 @@ It is **not** part of `pytest`. Nothing here runs in CI.
 | `collection.json` | yes | The fixture corpus — decks, note types, notes, tags. The source of truth. |
 | `build_collection.py` | yes | Generates a fresh `collection.anki2` from the corpus, via Shrike's own write path. |
 | `config.yml` | yes | Portable server knobs (ports, fast index flush, debug logging). No paths. |
+| `scenarios/` | yes | Hand-run skill test scenarios — prompt + expected outcome, one `.md` each. See `scenarios/README.md`. |
 | `run/` | **no** (gitignored) | Everything mutable: the built `working.anki2`, the vector index cache, and logs. Recreated on each launch. |
 
 There is no binary collection in git: the JSON corpus is the fixture, rebuilt
