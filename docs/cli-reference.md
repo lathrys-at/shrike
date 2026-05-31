@@ -195,6 +195,20 @@ shrike note update 1779749914797 --tags newtag,kept-tag
 shrike note update 1779749914797 --deck "Other::Deck"
 ```
 
+### `shrike note tag <NOTE_IDS>... --set TEXT`
+
+Replace the tags on one or more notes with the same new set. Tags are fully replaced, not merged — each note ends up with exactly the tags you pass. Fields and decks are untouched. Backed by a single batched `upsert_notes` call.
+
+| Option | Description |
+|---|---|
+| `--set TEXT` | New tag set, replacing existing tags. Required. Repeatable and comma-separated. Pass `--set ""` to clear all tags. |
+
+```bash
+shrike note tag 1779749914797 --set world-war-2,history
+shrike note tag 1779749914797 1779749914798 --set needs-review
+shrike note tag 1779749914797 --set ""        # clear all tags
+```
+
 ### `shrike note delete <NOTE_IDS>...`
 
 Permanently delete notes and their cards. Prompts for confirmation unless `--yes` is passed.
