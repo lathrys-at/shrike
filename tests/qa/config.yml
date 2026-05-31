@@ -1,0 +1,25 @@
+# Shrike QA harness — portable config only.
+#
+# Run-specific paths (collection, cache dir, log dir) are NOT set here — config
+# paths resolve against the current working directory, not this file, so they're
+# unsafe to commit. scripts/launch-qa-server.sh passes them as absolute flags
+# instead. Machine-specific embedding paths come from the environment:
+#   SHRIKE_EMBEDDING_MODEL=/path/to/embedding-model.gguf
+#   LLAMA_SERVER_PATH=/path/to/llama-server     # or on PATH
+#
+# See: https://github.com/lathrys-at/shrike
+
+server:
+  port: 8372          # default port, so plain `shrike note …` hits the QA server
+
+embedding:
+  port: 8373
+
+index:
+  # Tight flush so manual QA observes persistence quickly and restarts are cheap
+  # to reason about (the production defaults are 60s idle / 100-change burst).
+  save_delay: 2
+  save_threshold: 5
+
+logging:
+  level: debug        # verbose by default — you're here to watch what it does
