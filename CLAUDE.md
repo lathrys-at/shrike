@@ -341,6 +341,7 @@ Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, lo
 
 - Extract `ShrikeClient` from CLI into a standalone Python client (`shrike.client`) usable outside the CLI — daemon lifecycle, MCP tool calls, server status. CLI becomes a thin layer over this client.
 - Reference skill plugin (Claude custom skill format): encodes pedagogical best practices for LLM-driven card creation — minimum information principle, cloze discipline, prefer existing decks over new ones, tag consistency via contextual upsert data, broad decks with tags over fine-grained deck hierarchies. Keeps opinions in the skill, not the server. Designed for Project-style setups with course materials as context. Initial goal is real-use iteration, not packaging.
+- **Additive/subtractive tag editing** (planned): `upsert_notes` currently treats `tags` as a full *replace*. Add a tag mode (add/remove tags without resending the whole set or touching field content) plus a `shrike note tag <ids> --add/--remove` CLI. Makes the skill's "align a new note's tags to its neighborhood" step a clean targeted op instead of a full re-send. Skill works without it; this is the clean version. *(Do before the full skill QA run.)*
 
 ### v0.4.0 — Sync
 

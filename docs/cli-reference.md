@@ -35,9 +35,16 @@ Start the server as a background daemon. The collection path can come from `--co
 | `--collection PATH` | Path to the Anki collection file (`collection.anki2`). |
 | `--port INTEGER` | Port to listen on (default: 8372). |
 | `--host TEXT` | Host to bind to (default: `127.0.0.1`). |
+| `--allow-remote` | Permit binding to a non-loopback host. Every endpoint is unauthenticated, so this exposes the full collection API to the network — only behind your own auth/network controls. |
+| `--allowed-host TEXT` | Additional `Host` header to trust beyond loopback (repeatable). For a reverse-proxy or VPN hostname; a proxy forwards `name:port`, so use the `name:*` port-wildcard form. |
+| `--allowed-origin TEXT` | Additional `Origin` header to trust beyond loopback (repeatable). Native MCP clients usually send none (always allowed); add one only if a browser client is rejected with 403. |
+| `--no-dns-rebinding-protection` | Disable `Host`/`Origin` validation entirely, on any bind — for deployments where the network is the trust boundary (behind a reverse proxy, on a VPN/tailnet, firewalled). Endpoints stay unauthenticated. |
 | `--foreground` | Run in the foreground instead of daemonizing. |
 | `--log-dir PATH` | Directory for log files (default: platform-specific). |
 | `--log-level` | `debug`, `info`, `warning`, or `error` (default: `info`). |
+| `--cache-dir PATH` | Directory for the vector index and other caches (default: platform-specific). |
+| `--index-save-delay FLOAT` | Seconds of idle after the last index change before flushing to disk (default: 60). |
+| `--index-save-threshold INTEGER` | Unsaved index changes that force an immediate flush (default: 100). |
 | `--embedding-model PATH` | Path to a GGUF embedding model. Enables semantic search. |
 | `--embedding-port INTEGER` | Port for the embedding server (default: 8373). |
 | `--embedding-context-size INTEGER` | Context size for the embedding model. |
@@ -115,13 +122,13 @@ List notes matching structured filters. At least one filter is required.
 | `--ids ID` | Fetch specific note IDs. Repeatable. |
 | `--since TEXT` | Notes modified after this date (ISO 8601). |
 | `--query TEXT` | Raw [Anki search query](https://docs.ankiweb.net/searching.html). |
-| `--meta` | Show only metadata (ID, type, deck, tags, modified), not field content. |
+| `--brief` | Show only IDs and metadata (type, deck, tags, modified), not field content. |
 | `--limit INTEGER` | Max notes to return (default: 50). |
 
 ```bash
 shrike note list --deck "Japanese::Vocabulary"
 shrike note list --tags verb,chapter-3
-shrike note list --type Cloze --meta --limit 20
+shrike note list --type Cloze --brief --limit 20
 shrike note list --since 2026-05-01
 shrike note list --query "is:due prop:ivl>=30"
 ```
@@ -203,14 +210,16 @@ shrike note delete 1779749914797 1779749914798 --yes
 
 ### `shrike note search [QUERIES]...`
 
-Semantic similarity search over the collection. Accepts text queries, note IDs to find similar notes, or both. Not yet implemented — returns a stub message.
+Semantic similarity search over the collection. Accepts text queries, note IDs to find similar notes, or both. Requires the embedding service and a built index. Pass `--json` to get the similarity scores.
 
 | Option | Description |
 |---|---|
 | `--similar-to ID` | Find notes similar to this note ID. Repeatable. |
 | `--top-k INTEGER` | Results per query (default: 10). |
+| `--threshold FLOAT` | Minimum similarity score, 0–1 (default: 0.5). Matches below it are dropped. |
 | `--deck TEXT` | Restrict search to this deck. |
 | `--tags TEXT` | Restrict search to notes with these tags. Repeatable and comma-separated. |
+| `--brief` | Show only IDs and scores, not full note content. |
 
 ```bash
 shrike note search "electron transport chain"
@@ -320,6 +329,53 @@ Delete note types by name or ID. A note type can only be deleted if no notes use
 shrike type delete "Old Type"
 shrike type delete 1779649378945 1779649378946 --yes
 ```
+
+---
+
+## `shrike index`
+
+Build and inspect the semantic-search vector index. The index is a derived cache
+over note content; it can lag the collection and is rebuilt from it.
+
+### `shrike index status`
+
+Show index state (`ready` / `building` / `unavailable` / `error`), vector count,
+dimensions, and on-disk path.
+
+### `shrike index rebuild`
+
+Drop the existing index and re-embed every note from scratch. Runs in the
+background on the server; requires the embedding service to be running. Use after
+the embedding model changes or if the index is suspected stale.
+
+### `shrike index save`
+
+Force an immediate flush of the in-memory index to disk (off the event loop).
+Normally the index auto-saves via a debounced flush, so this is rarely needed.
+
+---
+
+## `shrike embedding`
+
+Manage the `llama-server` embedding service that powers semantic search. It can
+be cycled independently of the Shrike server (model swaps, freeing GPU/RAM).
+
+### `shrike embedding status`
+
+Show whether the embedding service is running, its URL, PID, and model.
+
+### `shrike embedding start`
+
+Start the embedding service on a running server. Accepts the same embedding
+options as `shrike server start` (`--embedding-model`, `--embedding-port`,
+`--embedding-pooling`, `--embedding-arg`, `--llama-server`, …); unspecified ones
+fall back to the config/env the server booted with. Re-attaches the index and
+rebuilds it if the model changed or the index drifted.
+
+### `shrike embedding stop`
+
+Save the index, then stop the embedding service and mark the index
+`unavailable`. The server and collection stay up.
 
 ---
 
