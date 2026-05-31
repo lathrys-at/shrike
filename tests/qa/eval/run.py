@@ -248,14 +248,22 @@ def main() -> int:
     p.add_argument("--configs", default="with_skill", help="with_skill and/or baseline")
     p.add_argument("--repeats", type=int, default=1, help="runs per cell (depth)")
     p.add_argument("--batch", default=None, help="batch name (default: timestamp)")
-    p.add_argument("--author-model", default=DEFAULT_AUTHOR_MODEL)
+    p.add_argument(
+        "--author-model",
+        default=DEFAULT_AUTHOR_MODEL,
+        help=f"author model alias (default: {DEFAULT_AUTHOR_MODEL})",
+    )
     p.add_argument(
         "--author-thinking",
         type=int,
         default=DEFAULT_AUTHOR_THINKING,
         help=f"author MAX_THINKING_TOKENS (default: {DEFAULT_AUTHOR_THINKING}; 0 off)",
     )
-    p.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
+    p.add_argument(
+        "--judge-model",
+        default=DEFAULT_JUDGE_MODEL,
+        help=f"judge model alias (default: {DEFAULT_JUDGE_MODEL})",
+    )
     p.add_argument(
         "--judge-thinking",
         type=int,
