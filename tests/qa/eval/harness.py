@@ -229,8 +229,8 @@ def cmd_grade(args: argparse.Namespace) -> int:
     if author:
         print(
             f"    author[{author.get('model')} think={author.get('thinking')}]: "
-            f"{author.get('tool_calls')} tool calls · {author.get('num_turns')} turns · "
-            f"{author.get('total_tokens', 0):,} tokens "
+            f"{author.get('tool_calls')} tool calls · {author.get('thinking_blocks')} thinking · "
+            f"{author.get('num_turns')} turns · {author.get('total_tokens', 0):,} tokens "
             f"({author.get('input_tokens', 0):,} in + {author.get('output_tokens', 0):,} out, "
             f"{author.get('cache_read_tokens', 0):,} cache)"
         )

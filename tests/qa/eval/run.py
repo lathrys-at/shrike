@@ -133,8 +133,9 @@ def _parse_author_stream(stdout: str) -> tuple[str, dict[str, Any]]:
     undercounts output badly — the bug this replaces.)"""
     text = ""
     parts: list[str] = []
-    tool_calls = num_turns = 0
+    tool_calls = thinking_blocks = num_turns = 0
     usage: dict[str, Any] = {}
+    a_in = a_out = a_cache = 0  # assistant-event fallback sums
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -144,25 +145,38 @@ def _parse_author_stream(stdout: str) -> tuple[str, dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         if ev.get("type") == "assistant":
-            for b in ev.get("message", {}).get("content", []):
-                if b.get("type") == "tool_use":
+            msg = ev.get("message", {})
+            for b in msg.get("content", []):
+                bt = b.get("type")
+                if bt == "tool_use":
                     tool_calls += 1
-                elif b.get("type") == "text":
+                elif bt == "thinking":
+                    thinking_blocks += 1
+                elif bt == "text":
                     parts.append(b.get("text", ""))
+            u = msg.get("usage", {}) or {}
+            a_in += u.get("input_tokens", 0)
+            a_out += u.get("output_tokens", 0)
+            a_cache += u.get("cache_read_input_tokens", 0)
         elif ev.get("type") == "result":
             text = ev.get("result", "") or text
             num_turns = ev.get("num_turns") or num_turns
             usage = ev.get("usage", {}) or {}
-    # Sum per-call iterations (cumulative across the whole run) if present;
-    # otherwise fall back to the top-level result usage.
-    iters = usage.get("iterations") or ([usage] if usage else [])
-    in_tok = sum(i.get("input_tokens", 0) for i in iters)
-    out_tok = sum(i.get("output_tokens", 0) for i in iters)
-    cache_tok = sum(i.get("cache_read_input_tokens", 0) for i in iters)
+    # The terminal result event's top-level usage is the authoritative cumulative
+    # count (verified: its cache_read equals the sum of per-turn cache reads).
+    # The per-turn assistant events carry an early snapshot whose output isn't
+    # finalized, and usage.iterations is just the final message — both undercount.
+    if usage:
+        in_tok = usage.get("input_tokens", 0)
+        out_tok = usage.get("output_tokens", 0)
+        cache_tok = usage.get("cache_read_input_tokens", 0)
+    else:
+        in_tok, out_tok, cache_tok = a_in, a_out, a_cache
     if not text:
         text = "\n".join(p for p in parts if p).strip()
     return text, {
         "tool_calls": tool_calls,
+        "thinking_blocks": thinking_blocks,
         "num_turns": num_turns,
         "input_tokens": in_tok,
         "output_tokens": out_tok,
@@ -206,8 +220,8 @@ def _author(config: str, sid: str, model: str, thinking: int) -> tuple[str, dict
     stats.update(model=model, thinking=thinking, duration_s=round(time.monotonic() - t0, 1))
     _log(
         f"author done in {stats['duration_s']:.0f}s — {stats['tool_calls']} tools, "
-        f"{stats['num_turns']} turns, {stats['total_tokens']:,} tokens "
-        f"({stats['output_tokens']:,} out)"
+        f"{stats['thinking_blocks']} thinking, {stats['num_turns']} turns, "
+        f"{stats['total_tokens']:,} tokens ({stats['output_tokens']:,} out)"
     )
     return text, stats, proc.stdout
 
