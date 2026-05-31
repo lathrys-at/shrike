@@ -29,6 +29,8 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -52,6 +54,38 @@ AUTHOR_TIMEOUT = 900.0
 
 def _log(msg: str) -> None:
     print(f"[{datetime.now(UTC):%H:%M:%S}] {msg}", flush=True)
+
+
+def _preflight() -> None:
+    """Fail fast on missing prerequisites instead of hanging in the index-ready
+    wait — a missing embedder leaves the index ``unavailable``, which the wait
+    loop can't distinguish from a slow build until it times out."""
+    problems: list[str] = []
+
+    if shutil.which("claude") is None:
+        problems.append("`claude` CLI not on PATH — needed to spawn the author and judge")
+
+    model = os.environ.get("SHRIKE_EMBEDDING_MODEL", "")
+    if not model:
+        problems.append(
+            "SHRIKE_EMBEDDING_MODEL is unset — the eval needs embeddings; "
+            "without one the index never reaches `ready`"
+        )
+    elif not Path(model).is_file():
+        problems.append(f"SHRIKE_EMBEDDING_MODEL points at a missing file: {model}")
+
+    llama = os.environ.get("LLAMA_SERVER_PATH", "")
+    if llama and not Path(llama).is_file():
+        problems.append(f"LLAMA_SERVER_PATH points at a missing file: {llama}")
+    elif not llama and shutil.which("llama-server") is None:
+        problems.append("LLAMA_SERVER_PATH is unset and `llama-server` is not on PATH")
+
+    if problems:
+        raise SystemExit(
+            "preflight failed:\n"
+            + "\n".join(f"  - {p}" for p in problems)
+            + "\n\nSee tests/qa/README.md for the env setup."
+        )
 
 
 def _read_prompt_md(sid: str) -> str:
@@ -154,6 +188,7 @@ def main() -> int:
     p.add_argument("--no-judge", action="store_true")
     p.add_argument("--keep-going", action="store_true", help="continue after a cell errors")
     args = p.parse_args()
+    _preflight()
 
     scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
     configs = [c.strip() for c in args.configs.split(",") if c.strip()]
