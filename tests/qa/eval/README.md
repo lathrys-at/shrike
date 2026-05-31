@@ -98,3 +98,24 @@ tests/qa/eval/harness.py report --batch "$B"                  # after all cells 
 The `report` table shows mechanical run-level pass rate per scenario for
 `with_skill` vs `baseline`, the delta — the skill's measured lift over an
 unguided model — and the advisory judge's pass count.
+
+## Known model floor (read the judge verdicts accordingly)
+
+The default author is **Haiku 4.5** — deliberately weak, so the eval measures
+what the skill does for a model that needs the help. Two card-design judgments
+sit *below Haiku's floor* even with the skill and an 8k thinking budget:
+
+- **per-item cloze granularity** — splitting an enumeration into one deletion per
+  *member* rather than per category (scenario 01); and
+- **cue inversion on thin material** — flipping a "what is the significance of
+  X?" prompt so the specific fact is the answer, not a restatement (scenario 05).
+
+These are a **model floor, not a skill defect.** Re-running 01/05 with
+`--author-model sonnet` resolves both — Sonnet, reading the identical SKILL.md,
+flips the cue and uses per-chamber deletions; Haiku does neither, run after run.
+So a Haiku `mixed` judge verdict on 01/05 is the expected weak-author floor;
+don't chase it by rewriting the skill. The guidance for both lives in the
+SKILL.md workflow (the "Choosing the card type" cloze bullet and the
+"Demand recall, not recognition" rule) and is confirmed correct — a capable
+author applies it. If you want a card-quality signal that isn't floored, run the
+two scenarios with `--author-model sonnet`.
