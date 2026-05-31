@@ -102,7 +102,11 @@ using the cards you just drafted as the source of your queries
 first:** each query is a *specific, content-bearing phrase* — the card's own
 question or the actual claim it makes — not a bare keyword. A single word pulls
 back noise and misses paraphrases; the real claim finds the note that already
-states it.
+states it. This search is the **one** place a pre-existing version gets caught —
+there's no post-write net — so query with the *exact intention of each card you
+intend to create*, not its topic. If a duplicate ever slips through, the query
+didn't carry the card's intent; that's the thing to sharpen, not something to
+re-check after writing.
 
 **Example.** Drafted card: *"What is the primary function of the
 mitochondria?"* → search `function of the mitochondria` or `mitochondria
@@ -136,14 +140,17 @@ tags. Their job here is **tag consistency**, not a second duplicate hunt: these
 are the closest notes in the collection, so their tags are the best evidence for
 whether you tagged yours to match the established vocabulary. If the neighborhood
 is tagged `pharmacology`, `antibiotics` and you used `antibiotic`, align to the
-existing form (adjust with a quick `note update` on the tags if you drifted).
+existing form (adjust with a quick `note update --tags` — or `note tag <ids>
+--set …` to re-tag several at once — if you drifted; both fully replace the tag
+set, so include the tags you want to keep).
 
-You already guarded against duplicates in the step-3 pre-check, so **don't
-re-audit the neighbor scores** — that's the redundant, score-fixated behavior to
-avoid, and you don't run fresh searches afterward either. (The neighbors are keyed
-on the note's full content, so on the rare chance a near-identical one surfaces
-that your draft-phrased query missed, resolve it — delete the one you just made,
-improve the original — but that's a backstop, not the point of this step.)
+You already guarded against duplicates in the step-3 pre-check, so this step is
+**only about tags**: read the neighbors' tags, decide whether to align or add
+tags to the notes you just created, and stop there. **Don't re-audit the neighbor
+scores, don't run fresh searches, and don't go looking at or editing other
+notes** — that score-fixated re-checking is the behavior to avoid. The neighbors
+are evidence for one decision and one decision only: did you tag your new notes
+to match the established vocabulary?
 
 If a result says `neighbors_unavailable` (a transient index hiccup), the notes
 *were* saved; the response tells you how to refetch the same data with
@@ -262,3 +269,13 @@ material truly needs a new type, say so and let the user decide. Never delete a
 note without the user's say-so, with one narrow exception: a duplicate **you
 created moments ago in this same session** and have confirmed against the
 original — clean up your own mess, but nothing pre-existing.
+
+**When something looks off, raise it — don't act on it silently, and don't bury
+it.** Searching the collection will sometimes turn up more than you went looking
+for: a possible duplicate you're unsure about, an existing note that looks wrong
+or contradicts your source material, a near-identical pair, a tag or deck that
+seems misfiled, an oddly low or high similarity score you can't explain. None of
+that is yours to quietly fix or quietly ignore. Note it and surface it to the
+user — briefly, in your report — and let them decide what to do. Your job is to
+add good cards; flagging the discrepancies you happen to notice along the way is
+part of that, chasing them down and "correcting" the collection is not.
