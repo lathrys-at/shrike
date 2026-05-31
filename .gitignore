@@ -14,3 +14,6 @@ htmlcov/
 
 # QA harness working dir — regenerated each launch (see scripts/launch-qa-server.sh)
 tests/qa/run/
+
+# Packaged skills (scripts/package-skill.py)
+dist/
