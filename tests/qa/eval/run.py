@@ -127,11 +127,14 @@ def _wait_index_ready(timeout: float = INDEX_TIMEOUT) -> None:
 def _parse_author_stream(stdout: str) -> tuple[str, dict[str, Any]]:
     """Parse the author's ``--output-format stream-json`` NDJSON into (final
     report text, run stats). Tool calls are counted from ``tool_use`` content
-    blocks; tokens are summed per-turn from each assistant event's usage; turns
-    and cost come from the terminal ``result`` event."""
+    blocks. Token counts come from the terminal ``result`` event's usage — the
+    authoritative cumulative figures. (Per-turn ``assistant`` events carry an
+    *early* usage snapshot with output not yet finalized, so summing them
+    undercounts output badly — the bug this replaces.)"""
     text = ""
     parts: list[str] = []
-    tool_calls = in_tok = out_tok = cache_tok = num_turns = 0
+    tool_calls = num_turns = 0
+    usage: dict[str, Any] = {}
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -141,19 +144,21 @@ def _parse_author_stream(stdout: str) -> tuple[str, dict[str, Any]]:
         except json.JSONDecodeError:
             continue
         if ev.get("type") == "assistant":
-            msg = ev.get("message", {})
-            for b in msg.get("content", []):
+            for b in ev.get("message", {}).get("content", []):
                 if b.get("type") == "tool_use":
                     tool_calls += 1
                 elif b.get("type") == "text":
                     parts.append(b.get("text", ""))
-            u = msg.get("usage", {}) or {}
-            in_tok += u.get("input_tokens", 0)
-            out_tok += u.get("output_tokens", 0)
-            cache_tok += u.get("cache_read_input_tokens", 0)
         elif ev.get("type") == "result":
             text = ev.get("result", "") or text
             num_turns = ev.get("num_turns") or num_turns
+            usage = ev.get("usage", {}) or {}
+    # Sum per-call iterations (cumulative across the whole run) if present;
+    # otherwise fall back to the top-level result usage.
+    iters = usage.get("iterations") or ([usage] if usage else [])
+    in_tok = sum(i.get("input_tokens", 0) for i in iters)
+    out_tok = sum(i.get("output_tokens", 0) for i in iters)
+    cache_tok = sum(i.get("cache_read_input_tokens", 0) for i in iters)
     if not text:
         text = "\n".join(p for p in parts if p).strip()
     return text, {
@@ -166,8 +171,8 @@ def _parse_author_stream(stdout: str) -> tuple[str, dict[str, Any]]:
     }
 
 
-def _author(config: str, sid: str, model: str, thinking: int) -> tuple[str, dict[str, Any]]:
-    """Spawn the cold author agent; return (final report, run stats).
+def _author(config: str, sid: str, model: str, thinking: int) -> tuple[str, dict[str, Any], str]:
+    """Spawn the cold author agent; return (final report, run stats, raw stream).
     ``thinking`` sets the author's MAX_THINKING_TOKENS budget (0 disables)."""
     user = _read_prompt_md(sid)
     builder = with_skill_prompt if config == "with_skill" else baseline_prompt
@@ -201,9 +206,10 @@ def _author(config: str, sid: str, model: str, thinking: int) -> tuple[str, dict
     stats.update(model=model, thinking=thinking, duration_s=round(time.monotonic() - t0, 1))
     _log(
         f"author done in {stats['duration_s']:.0f}s — {stats['tool_calls']} tools, "
-        f"{stats['num_turns']} turns, {stats['total_tokens']:,} tokens"
+        f"{stats['num_turns']} turns, {stats['total_tokens']:,} tokens "
+        f"({stats['output_tokens']:,} out)"
     )
-    return text, stats
+    return text, stats, proc.stdout
 
 
 def _baseline(run_dir: Path) -> None:
@@ -316,12 +322,13 @@ def main() -> int:
             _reset_fixture()
             _wait_index_ready()
             _baseline(run_dir)
-            report_text, author_stats = _author(
+            report_text, author_stats, author_raw = _author(
                 config, sid, args.author_model, args.author_thinking
             )
             transcript = run_dir / "transcript.txt"
             transcript.write_text(report_text)
             (run_dir / "author_stats.json").write_text(json.dumps(author_stats, indent=2))
+            (run_dir / "author_raw.jsonl").write_text(author_raw)  # for verifying token parse
             _grade(sid, run_dir, transcript, args.judge_model, args.judge_thinking, args.no_judge)
         except (SystemExit, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             errors += 1
