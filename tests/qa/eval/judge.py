@@ -22,14 +22,33 @@ DEFAULT_JUDGE_MODEL = "sonnet"
 
 _INSTRUCTIONS = """\
 You are grading Anki flashcards that a *weaker* AI model created from a user's
-study material. Your job is a qualitative read the mechanical checks can't do:
+study material. Your job is the qualitative read the mechanical checks can't do:
 did it pick the right kind of card for each fact, are the cards atomic (one fact
 each), and do they demand recall rather than recognition? Judge the cards as
 they'd actually be reviewed, not the model's explanation of them.
 
+Stay in your lane — card quality. Process compliance (did it search the
+collection first, did its report flag any newly-created deck, did it avoid
+redundant re-reads) is graded separately by a deterministic checker and the
+behavior trace below; don't re-derive it from the cards or speculate about it.
+In particular, if the behavior trace shows searches > 0, the agent DID search —
+never claim otherwise.
+
+Judge against the material the user actually provided: don't fault the agent for
+leaving out facts that weren't in the source. But do flag a card that is weak on
+its own terms — the answer telegraphed by the question, or a back that merely
+restates the front.
+
+Anki cloze mechanics, so you don't misread them: within one note, deletions with
+DISTINCT indices — {{c1::…}}, {{c2::…}}, {{c3::…}} — each generate a SEPARATE
+card that hides only its own deletion and shows the rest. Distinct indices are
+independently-scheduled cards, not one card with everything blank at once; only
+deletions sharing an index are tested together.
+
 You are advisory — you do not pass or fail the run, you give an honest read.
 Be concrete and a little exacting: name the specific card when you flag something.
-If no cards were created, judge whether that was the right call for the material."""
+If no cards were created, judge whether that was the right call for the material
+(lean on the behavior trace — did it search and find existing coverage?)."""
 
 _OUTPUT = """\
 Return ONLY a JSON object, no prose around it:
@@ -46,8 +65,23 @@ with real but minor problems; "fail" = the rubric's core ask is missed. Do not
 use any tools — everything you need is in this message."""
 
 
+def _format_behavior(observed: dict[str, Any]) -> str:
+    if not observed:
+        return "  (no behavior trace captured)"
+    return (
+        f"  oriented (collection_info): {observed.get('orientation_calls', 0)}x\n"
+        f"  searches before writing:    {observed.get('search_calls', 0)}  "
+        f"queries={observed.get('search_queries', [])}\n"
+        f"  searches after writing:     {observed.get('post_upsert_searches', 0)}\n"
+        f"  re-read its own new notes:  {observed.get('post_upsert_readbacks', 0)}"
+    )
+
+
 def build_judge_prompt(
-    scenario: dict[str, Any], user_request: str, created: list[dict[str, Any]]
+    scenario: dict[str, Any],
+    user_request: str,
+    created: list[dict[str, Any]],
+    observed: dict[str, Any] | None = None,
 ) -> str:
     rubric = (scenario.get("judge") or "").strip() or "(no rubric provided)"
     if created:
@@ -67,6 +101,8 @@ def build_judge_prompt(
         f"{_INSTRUCTIONS}\n\n"
         f"<study_material>\n{user_request}\n</study_material>\n\n"
         f"<rubric>\n{rubric}\n</rubric>\n\n"
+        f'<agent_behavior note="objective server-log trace — what it did, not what it said">\n'
+        f"{_format_behavior(observed or {})}\n</agent_behavior>\n\n"
         f"<cards_created>\n{cards_block}\n</cards_created>\n\n"
         f"{_OUTPUT}\n"
     )
@@ -76,13 +112,14 @@ def run_judge(
     scenario: dict[str, Any],
     user_request: str,
     created: list[dict[str, Any]],
+    observed: dict[str, Any] | None = None,
     model: str = DEFAULT_JUDGE_MODEL,
     timeout: float = 300.0,
 ) -> dict[str, Any]:
     """Run the advisory judge via ``claude -p``. Always returns a dict; failure
     modes (``error``/``unparsed``) are encoded in ``verdict`` rather than raised,
     so a flaky judge never sinks a run's mechanical grade."""
-    prompt = build_judge_prompt(scenario, user_request, created)
+    prompt = build_judge_prompt(scenario, user_request, created, observed)
     try:
         proc = subprocess.run(
             ["claude", "-p", "--model", model, "--output-format", "json"],

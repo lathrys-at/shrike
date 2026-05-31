@@ -203,7 +203,9 @@ def cmd_grade(args: argparse.Namespace) -> int:
     # the mechanical result and surfaced in the report as a separate column.
     judge: dict[str, Any] | None = None
     if not args.no_judge:
-        judge = run_judge(scn, _read_prompt_md(args.scenario), created, model=args.judge_model)
+        judge = run_judge(
+            scn, _read_prompt_md(args.scenario), created, observed, model=args.judge_model
+        )
         grading["judge"] = judge
 
     (run_dir / "grading.json").write_text(json.dumps(grading, indent=2))
