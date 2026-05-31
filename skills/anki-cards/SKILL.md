@@ -81,8 +81,8 @@ the table above. Run the one command, then move on to drafting.
 Why it matters: you can only create a note of a note type that **already
 exists** in this collection — don't assume "Basic" or "Cloze" are present; use
 the real names from that call. And knowing the existing decks and tags is what
-stops you from adding a "Biology" deck next to the user's "Biological Sciences",
-or tagging `cardio` when every neighbor says `cardiology`.
+stops you from adding a "Chemistry" deck next to the user's "Chemical Sciences",
+or tagging `econ` when every neighbor says `economics`.
 
 ### 2. Draft the cards (don't write yet)
 
@@ -104,11 +104,10 @@ question or the actual claim it makes — not a bare keyword. A single word pull
 back noise and misses paraphrases; the real claim finds the note that already
 states it.
 
-**Example.** Drafted card: *"What is the primary function of the
-mitochondria?"* → search `function of the mitochondria` or `mitochondria
-produce ATP by aerobic respiration` — **not** `mitochondria`. One good query per
-distinct concept (or per cluster of related drafts) is enough; you don't need
-one per card when several share a topic.
+**Example.** Drafted card: *"What is the speed of light in a vacuum?"* → search
+`speed of light in a vacuum` or `light travels at 3×10⁸ m/s in vacuum` —
+**not** `light`. One good query per distinct concept (or per cluster of related
+drafts) is enough; you don't need one per card when several share a topic.
 
 **Send the queries as one call, not one per fact.** `search_notes` takes a
 `queries` array, and `shrike note search` takes several query strings as
@@ -227,20 +226,21 @@ well-worn spaced-repetition wisdom; the reasons matter more than the rules, so
 they're given.
 
 **One card, one fact (the minimum-information principle).** A card should test a
-single thing you can retrieve in one go. "The heart has four chambers — left and
-right atria and ventricles" is four facts wearing one card; learned as a unit it
+single thing you can retrieve in one go. "The four inner planets are Mercury,
+Venus, Earth, and Mars" is four facts wearing one card; learned as a unit it
 grades wrong if you blank on any part, and you never find out *which* part is
 weak. Split it, or use a cloze with separate deletions, so each fact rides its
 own scheduling curve. When a card feels like a paragraph, it's several cards.
 
 **Demand recall, not recognition.** The front should force you to *produce* the
 answer from memory. Yes/no and true/false cards test almost nothing — you'll be
-right half the time by luck. "Is ATP synthase a membrane protein?" teaches you
-to nod; "Where in the cell is ATP synthase located, and what does it do there?"
-makes you retrieve. Avoid cards whose answer is implied by the question.
+right half the time by luck. "Is the Great Barrier Reef off the coast of
+Australia? (yes/no)" teaches you to nod; "Off which country's coast is the Great
+Barrier Reef?" makes you retrieve. Avoid cards whose answer is implied by the
+question.
 
 **Make the cue unambiguous.** A good front has essentially one defensible answer
-in context. "Tell me about the mitochondria" has a hundred, so it trains
+in context. "Tell me about the Roman Empire" has a hundred, so it trains
 hesitation and you grade it inconsistently. If a cue could pull up many
 different answers, it's too broad — narrow it until the expected answer is
 specific.
@@ -254,13 +254,13 @@ grammar alone gives away.
 **Prefer existing structure over inventing new.** Before adding a deck or a tag,
 use what's there. Broad decks organized by tags beat deep deck trees: Anki
 schedules and mixes review per deck, so a thicket like
-`Biology::Cell::Organelles::Mitochondria` fragments your reviews into tiny
+`Chemistry::Elements::Alkali-Metals::Sodium` fragments your reviews into tiny
 sessions and is tedious to maintain. Put the card in the nearest existing deck
 and let a *tag* carry the finer topic. Create a new deck only for a genuinely new
 subject area with no home in the collection.
 
-**Reuse the collection's vocabulary.** Tags rot into synonym sets — `cardio`,
-`cardiology`, `heart` — that splinter a collection so no single tag finds
+**Reuse the collection's vocabulary.** Tags rot into synonym sets — `econ`,
+`economics`, `economy` — that splinter a collection so no single tag finds
 everything. The neighbor and search data show you what similar notes are already
 tagged; adopt those terms instead of coining a parallel one.
 
