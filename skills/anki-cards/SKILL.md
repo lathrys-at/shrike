@@ -201,8 +201,12 @@ grade inconsistently. Work through the material and match it:
   set/list — cloze preserves that context where a stripped-down Q/A would throw
   it away. For a list or sequence, give *each* item its own deletion
   (`{{c1::…}}`, `{{c2::…}}`, …) so every item is scheduled on its own, rather
-  than one "name all of them" card that grades all-or-nothing. Then hold it to
-  the cloze discipline below.
+  than one "name all of them" card that grades all-or-nothing. **An "item" is the
+  smallest thing you want to recall by name — not the category it sits in.** When
+  a set has obvious sub-groups, don't cloze the *groups*: hiding the two or three
+  categories a list divides into tests those categories and never the individual
+  members you set out to learn. One deletion per member you'd want quizzed by
+  name. Then hold it to the cloze discipline below.
 
 Reconcile the choice with reality. You can only use note types that already
 exist in this collection — you saw them in step 1. If the ideal type isn't
@@ -237,7 +241,13 @@ answer from memory. Yes/no and true/false cards test almost nothing — you'll b
 right half the time by luck. "Is the Great Barrier Reef off the coast of
 Australia? (yes/no)" teaches you to nod; "Off which country's coast is the Great
 Barrier Reef?" makes you retrieve. Avoid cards whose answer is implied by the
-question.
+question — including the quiet version of this failure: a front that asks for the
+*significance*, *role*, or *importance* of something, answered by a back that
+merely restates the front ("What was the significance of X?" → "It was
+important"). Nothing is recalled. When the material gives you a thing and why it
+mattered, don't make the why a definition prompt — flip the card so the
+significance becomes the cue and the specific fact you must produce (a name, a
+date, a place) is the answer.
 
 **Make the cue unambiguous.** A good front has essentially one defensible answer
 in context. "Tell me about the Roman Empire" has a hundred, so it trains
