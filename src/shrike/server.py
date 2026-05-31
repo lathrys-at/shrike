@@ -77,20 +77,47 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
-def _build_transport_security(host: str) -> TransportSecuritySettings | None:
-    """DNS-rebinding / CSRF protection for a loopback bind.
+def _build_transport_security(
+    host: str,
+    *,
+    allowed_hosts: list[str] | None = None,
+    allowed_origins: list[str] | None = None,
+    disable: bool = False,
+) -> TransportSecuritySettings | None:
+    """DNS-rebinding / CSRF protection settings, or ``None`` to disable the guard.
 
-    Returns settings that allow only loopback Host/Origin headers when bound to a
-    loopback address, or ``None`` for a non-loopback bind — there is no fixed set
-    of valid external Host values to allow-list, so a deliberately remote server
-    is left to the (roadmap) auth layer rather than to header validation.
+    The guard is *independent* of the bind address — binding loopback vs. a
+    network interface only decides who can reach the port, not which Host/Origin
+    headers are trusted. The guard defends against a browser on the same machine
+    (or a DNS-rebinding page) scripting requests; the deployment's own boundary
+    (a reverse proxy, a VPN/tailnet, a firewall) is a separate, often sufficient,
+    layer of trust.
+
+    Returns ``None`` (no validation) when:
+    - ``disable`` is set — the operator declares the network is the trust boundary
+      (Shrike behind Caddy / on a tailnet / firewalled); or
+    - the bind is non-loopback and no explicit ``allowed_hosts``/``allowed_origins``
+      were given — preserves the historical ``--allow-remote`` behaviour, where a
+      deliberately network-bound server has no fixed Host set to validate against.
+
+    Otherwise returns settings allow-listing the loopback Host/Origin values (when
+    bound to loopback) plus any explicit additions — so a loopback server behind a
+    local proxy can trust the proxy's forwarded hostname without opening up.
     """
-    if not _is_loopback(host):
+    extra_hosts = allowed_hosts or []
+    extra_origins = allowed_origins or []
+
+    if disable:
         return None
+    if not _is_loopback(host) and not extra_hosts and not extra_origins:
+        return None
+
+    base_hosts = list(_LOOPBACK_HOSTS) if _is_loopback(host) else []
+    base_origins = list(_LOOPBACK_ORIGINS) if _is_loopback(host) else []
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=list(_LOOPBACK_HOSTS),
-        allowed_origins=list(_LOOPBACK_ORIGINS),
+        allowed_hosts=base_hosts + extra_hosts,
+        allowed_origins=base_origins + extra_origins,
     )
 
 
@@ -346,6 +373,33 @@ def main() -> None:
         "network — only use it behind your own auth/network controls.",
     )
     parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="Additional Host header value to accept beyond loopback (repeatable). "
+        "Use for a reverse-proxy or VPN hostname, e.g. a Caddy domain or a "
+        "Tailscale name like host.tailnet.ts.net. A 'host:port' is matched exactly; "
+        "a bare host accepts any port.",
+    )
+    parser.add_argument(
+        "--allowed-origin",
+        action="append",
+        default=[],
+        metavar="ORIGIN",
+        help="Additional Origin header value to accept beyond loopback (repeatable). "
+        "Most native MCP clients send no Origin (which is always allowed); add one "
+        "only if a browser-based client is rejected with 403.",
+    )
+    parser.add_argument(
+        "--no-dns-rebinding-protection",
+        action="store_true",
+        help="Disable Host/Origin validation entirely. For deployments where the "
+        "network is the trust boundary — Shrike behind a reverse proxy (Caddy), on a "
+        "private VPN/tailnet, or firewalled. Accepts requests with any Host/Origin, "
+        "on any bind. Endpoints remain unauthenticated; rely on your network layer.",
+    )
+    parser.add_argument(
         "--log-dir",
         default=None,
         help="Directory for log files (default: platform-specific)",
@@ -565,7 +619,27 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _signal_shutdown)
     signal.signal(signal.SIGINT, _signal_shutdown)
 
-    transport_security = _build_transport_security(args.host)
+    transport_security = _build_transport_security(
+        args.host,
+        allowed_hosts=args.allowed_host,
+        allowed_origins=args.allowed_origin,
+        disable=args.no_dns_rebinding_protection,
+    )
+    if transport_security is None:
+        logger.warning(
+            "DNS-rebinding/Origin protection is OFF (%s); any Host/Origin is accepted. "
+            "Endpoints are unauthenticated — rely on your network boundary "
+            "(reverse proxy, VPN, firewall).",
+            "--no-dns-rebinding-protection"
+            if args.no_dns_rebinding_protection
+            else "non-loopback bind without --allowed-host/--allowed-origin",
+        )
+    elif args.allowed_host or args.allowed_origin:
+        logger.info(
+            "Transport guard on; additionally trusting hosts=%s origins=%s",
+            args.allowed_host or [],
+            args.allowed_origin or [],
+        )
     mcp = create_mcp(host=args.host, port=args.port, transport_security=transport_security)
     register_tools(mcp, wrapper, index=index, saver=saver)
     _register_custom_routes(

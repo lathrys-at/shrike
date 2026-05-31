@@ -103,6 +103,9 @@ class ServerSpec:
     host: str = "127.0.0.1"
     port: int = 8372
     allow_remote: bool = False
+    allowed_hosts: list[str] = field(default_factory=list)
+    allowed_origins: list[str] = field(default_factory=list)
+    no_dns_rebinding_protection: bool = False
     log_dir: str | None = None
     log_level: str = "info"
     state_dir: str | None = None
@@ -507,6 +510,12 @@ class ShrikeClient:
         ]
         if spec.allow_remote:
             cmd.append("--allow-remote")
+        for h in spec.allowed_hosts:
+            cmd += ["--allowed-host", h]
+        for o in spec.allowed_origins:
+            cmd += ["--allowed-origin", o]
+        if spec.no_dns_rebinding_protection:
+            cmd.append("--no-dns-rebinding-protection")
         if spec.log_dir:
             cmd += ["--log-dir", spec.log_dir]
         if spec.state_dir:
