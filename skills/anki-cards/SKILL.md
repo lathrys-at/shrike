@@ -45,6 +45,11 @@ otherwise. They are the same operations over the same server.
 | Inspect notes by exact filter | `list_notes` | `shrike note list --deck … / shrike note show <id>` |
 | Create or update notes | `upsert_notes` | `shrike note create … / shrike note update <id>` |
 
+**For exact flags, options, and the `--json` response shapes of these commands,
+read [references/shrike-cli.md](references/shrike-cli.md).** That's your CLI
+orientation — read it once; you don't need to rediscover the interface through
+`--help`.
+
 CLI tips: pass `--json` so you get the structured payload — you need the
 similarity **scores** and the **neighbors** that come back on create, and the
 styled output drops them. Bulk-create by piping a JSON array to
@@ -61,15 +66,23 @@ Follow this spine. Each step exists to serve one of the two habits above.
 
 ### 1. Orient yourself first
 
-Before writing anything, learn the landscape: the decks in use, the note types
-available, and the tag vocabulary already established (`collection_info` with
-decks/note_types/tags, or `shrike info --decks --types --tags`).
+Start with **exactly one** call that returns the whole landscape — decks, note
+types, and the established tag vocabulary — in a single response:
 
-This is not optional throat-clearing. You can only create a note of a note type
-that **already exists** in this collection — don't assume "Basic" or "Cloze" are
-present; check, and use the real names. And knowing the existing decks and tags
-is what stops you from adding a "Biology" deck next to the user's "Biological
-Sciences", or tagging `cardio` when every neighbor says `cardiology`.
+- MCP: `collection_info(include=["decks", "note_types", "tags"])`
+- CLI: `shrike info --decks --types --tags`
+
+That one call is all the orientation you need. **Do not make several `info` /
+`collection_info` calls** (one for decks, then another for types, then tags…) —
+the single call above already returns every section. And don't go spelunking
+through `--help` to "get oriented": the operations you need are the handful in
+the table above. Run the one command, then move on to drafting.
+
+Why it matters: you can only create a note of a note type that **already
+exists** in this collection — don't assume "Basic" or "Cloze" are present; use
+the real names from that call. And knowing the existing decks and tags is what
+stops you from adding a "Biology" deck next to the user's "Biological Sciences",
+or tagging `cardio` when every neighbor says `cardiology`.
 
 ### 2. Draft the cards (don't write yet)
 
@@ -83,12 +96,25 @@ the material; if you're writing a tenth card on a minor aside, stop.
 
 ### 3. Check for existing coverage
 
-For each concept — or one representative query per cluster of related drafts —
-search the collection (`search_notes`, or `shrike note search`). **Read the
-returned content and judge overlap yourself.** Do not decide from the score
-alone: a 0.7 can be a close paraphrase of your card *or* an unrelated fact that
-merely shares vocabulary. The number narrows the candidates; your reading
-decides.
+Now — before writing — search the collection for what you're about to add,
+using the cards you just drafted as the source of your queries
+(`search_notes`, or `shrike note search`). **Plan the queries from the drafts
+first:** each query is a *specific, content-bearing phrase* — the card's own
+question or the actual claim it makes — not a bare keyword. A single word pulls
+back noise and misses paraphrases; the real claim finds the note that already
+states it.
+
+**Example.** Drafted card: *"What is the primary function of the
+mitochondria?"* → search `function of the mitochondria` or `mitochondria
+produce ATP by aerobic respiration` — **not** `mitochondria`. One good query per
+distinct concept (or per cluster of related drafts) is enough; you don't need
+one per card when several share a topic.
+
+**Read the returned content and judge overlap yourself.** Do not decide from the
+score alone: a 0.7 can be a close paraphrase of your card *or* an unrelated fact
+that merely shares vocabulary. The number narrows the candidates; your reading
+decides. Each match also carries its **tags** — note the vocabulary the
+neighborhood uses, because that's what you'll tag from in step 4.
 
 If the collection already covers a fact well, drop that draft, or plan to
 *improve the existing note* (update it) instead of adding a parallel one. The
@@ -102,19 +128,22 @@ as a *tag*, not as a new sub-deck (see "Prefer existing structure" below). Only
 propose a new deck or a new tag when nothing existing fits — and when you do,
 flag it explicitly in your report so the user can veto it.
 
-### 5. Write, then read the neighbors back
+### 5. Write, then align tags with the neighbors
 
-Upsert the batch. Every created/updated note comes back with `neighbors` — the
-most similar existing notes, each with a score and its tags. This is a second,
-free safety net; use it:
+Upsert the batch. Every created/updated note comes back with `neighbors` **in
+the upsert response** — the existing notes most similar to it, each with its
+tags. Their job here is **tag consistency**, not a second duplicate hunt: these
+are the closest notes in the collection, so their tags are the best evidence for
+whether you tagged yours to match the established vocabulary. If the neighborhood
+is tagged `pharmacology`, `antibiotics` and you used `antibiotic`, align to the
+existing form (adjust with a quick `note update` on the tags if you drifted).
 
-- **Catch the duplicate you missed.** A neighbor scoring very high against a note
-  you just created is a likely duplicate. Read it. If it's the same fact,
-  resolve it — usually by deleting the one you just made and (if needed)
-  improving the original. Don't leave both.
-- **Check your tags against the neighborhood.** If the neighbors are all tagged
-  `pharmacology::antibiotics` and you tagged `antibiotics`, you've drifted —
-  align with what's already there.
+You already guarded against duplicates in the step-3 pre-check, so **don't
+re-audit the neighbor scores** — that's the redundant, score-fixated behavior to
+avoid, and you don't run fresh searches afterward either. (The neighbors are keyed
+on the note's full content, so on the rare chance a near-identical one surfaces
+that your draft-phrased query missed, resolve it — delete the one you just made,
+improve the original — but that's a backstop, not the point of this step.)
 
 If a result says `neighbors_unavailable` (a transient index hiccup), the notes
 *were* saved; the response tells you how to refetch the same data with
