@@ -13,8 +13,10 @@ Manual — not part of `pytest`/CI. (The pure grader has its own quick test:
 |---|---|
 | `scenarios.yaml` | Machine spec: per-scenario `assert` block (deterministic checks) + `judge` rubric. Prompts are read from `../scenarios/<id>-*.md` (single source). |
 | `grade.py` | Pure grader: `(run record, assert spec) → per-assertion pass/fail`. No I/O. |
+| `judge.py` | Advisory LLM judge: builds a rubric+cards prompt, runs `claude -p` (Sonnet by default), parses a verdict. Never gates. |
 | `prompts.py` | Canonical `with_skill` / `baseline` agent prompts (so runs are comparable). |
-| `harness.py` | Glue CLI: `prompt`, `baseline`, `grade`, `report`. Talks to the running server. |
+| `harness.py` | Glue CLI: `prompt`, `baseline`, `grade` (mechanical + judge), `report`. Talks to the running server. |
+| `run.py` | **Automated runner**: loops `scenario × config × repeat`, resets the fixture, spawns the cold author via `claude -p`, grades + judges, writes the report. The hands-free counterpart to driving `harness.py` by hand. |
 | `runs/` | Per-run artifacts (gitignored): `baseline.json`, `transcript.txt`, `run.json`, `grading.json`, `report.md`. |
 
 ## Matrix
@@ -23,35 +25,44 @@ Manual — not part of `pytest`/CI. (The pure grader has its own quick test:
 only — one shared `server.lock`, and every run mutates the collection, so each
 needs its own fresh fixture.
 
-## The loop (per run)
+## Running it
 
-Driven externally — currently an interactive Claude session spawns the agents
-(the `Agent` tool with `model: haiku`); a `claude -p` `run.py` could automate it
-later using the same prompts + harness steps.
+**Automated (`run.py`)** — the whole matrix, hands-free:
+
+```
+export LLAMA_SERVER_PATH=... SHRIKE_EMBEDDING_MODEL=...   # see ../README.md
+
+# 1x sweep, with_skill only, Sonnet judge (the defaults):
+tests/qa/eval/run.py --repeats 1 --configs with_skill
+
+# 3x depth on two scenarios, mechanical only (fast, no judge):
+tests/qa/eval/run.py --scenarios 01,03 --repeats 3 --no-judge
+```
+
+Per cell it resets the fixture, waits for the index, snapshots the baseline,
+spawns the cold author (`claude -p --model haiku`, the deliberately-weak model
+the eval measures), grades + judges, and at the end writes `report.md`. Flags:
+`--scenarios`, `--configs` (`with_skill`/`baseline`), `--repeats` (depth),
+`--author-model`, `--judge-model` (default `sonnet`), `--no-judge`,
+`--keep-going`. The author runs under `--dangerously-skip-permissions` — safe
+because the QA collection is a disposable fixture rebuilt every cell, but it's an
+autonomous agent loop, so run it deliberately.
+
+**By hand (`harness.py`)** — when you want to drive the author yourself (e.g. an
+interactive session spawning a sub-agent) and just use the deterministic steps:
 
 ```
 B=tests/qa/eval/runs/<batch>; D=$B/<scenario>/<config>/r<n>
-
-# 1. fresh fixture (clean 66-note corpus + index)
-export LLAMA_SERVER_PATH=... SHRIKE_EMBEDDING_MODEL=...   # see ../README.md
-scripts/launch-qa-server.sh
-
-# 2. snapshot before
-tests/qa/eval/harness.py baseline --out "$D"
-
-# 3. get the exact prompt, run a COLD Haiku agent with it, save its final report:
+scripts/launch-qa-server.sh                                   # 1. fresh fixture
+tests/qa/eval/harness.py baseline --out "$D"                  # 2. snapshot before
 tests/qa/eval/harness.py prompt --scenario <id> --config <config>
-#    → (spawn the agent; write its final message to $D/transcript.txt)
-
-# 4. capture what landed + grade
+#    → spawn a COLD Haiku agent with that prompt; write its final report to $D/transcript.txt
 tests/qa/eval/harness.py grade --scenario <id> --dir "$D" --transcript "$D/transcript.txt"
+tests/qa/eval/harness.py report --batch "$B"                  # after all cells → $B/report.md
 ```
 
-Repeat for every cell (reset between each), then:
-
-```
-tests/qa/eval/harness.py report --batch "$B"      # → $B/report.md
-```
+`grade` runs the advisory judge too (Sonnet); add `--no-judge` to skip it or
+`--judge-model <alias>` to swap models.
 
 ## Grading
 
@@ -59,9 +70,14 @@ tests/qa/eval/harness.py report --batch "$B"      # → $B/report.md
   note-delta + transcript: deck placement, new decks, note types, card count,
   duplicates (nearest pre-existing cosine ≥ `dup_threshold`), required/forbidden
   tags, new-deck-flagged. Deterministic.
-- **LLM judge (advisory)** — the `judge` rubric is handed to a grader agent that
-  reads the created cards and rates the qualitative bits (best card type? atomic?
-  recall-framed?). Doesn't gate; it's a sanity read alongside the numbers.
+- **LLM judge (advisory)** — `judge.py` hands the `judge` rubric and the actual
+  created cards to a cold `claude -p` (Sonnet by default) that rates the
+  qualitative bits (best card type? atomic? recall-framed?) and returns a
+  `pass`/`mixed`/`fail` verdict with strengths and issues. It does **not** gate —
+  stored in `grading.json` and surfaced as a separate `report` column, a sanity
+  read alongside the mechanical numbers. A flaky/unparsable judge is recorded as
+  `error`/`unparsed`, never sinking the run.
 
-The `report` table shows run-level pass rate per scenario for `with_skill` vs
-`baseline`, and the delta — the skill's measured lift over an unguided model.
+The `report` table shows mechanical run-level pass rate per scenario for
+`with_skill` vs `baseline`, the delta — the skill's measured lift over an
+unguided model — and the advisory judge's pass count.

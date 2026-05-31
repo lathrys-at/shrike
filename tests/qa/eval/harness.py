@@ -27,6 +27,7 @@ from typing import Any
 
 import yaml
 from grade import DEFAULT_DUP_THRESHOLD, grade_run, summarize
+from judge import DEFAULT_JUDGE_MODEL, run_judge
 from prompts import SHRIKE_BIN, baseline_prompt, with_skill_prompt
 
 HERE = Path(__file__).resolve().parent
@@ -177,6 +178,7 @@ def cmd_grade(args: argparse.Namespace) -> int:
                 "deck": n["deck"],
                 "tags": n.get("tags", []),
                 "front": front,
+                "content": fields,  # full fields, for the advisory judge
                 "nearest_existing_score": _nearest_existing_score(n["id"], new_ids),
             }
         )
@@ -195,7 +197,15 @@ def cmd_grade(args: argparse.Namespace) -> int:
 
     results = grade_run(run, scn, dup_threshold)
     s = summarize(results)
-    grading = {"scenario_id": args.scenario, "summary": s, "expectations": results}
+    grading: dict[str, Any] = {"scenario_id": args.scenario, "summary": s, "expectations": results}
+
+    # Advisory LLM judge (Sonnet by default). Never gates: it's stored alongside
+    # the mechanical result and surfaced in the report as a separate column.
+    judge: dict[str, Any] | None = None
+    if not args.no_judge:
+        judge = run_judge(scn, _read_prompt_md(args.scenario), created, model=args.judge_model)
+        grading["judge"] = judge
+
     (run_dir / "grading.json").write_text(json.dumps(grading, indent=2))
 
     mark = "PASS" if s["failed"] == 0 else "FAIL"
@@ -204,6 +214,12 @@ def cmd_grade(args: argparse.Namespace) -> int:
     for r in results:
         if not r["passed"]:
             print(f"    ✗ {r['text']} — {r['evidence']}")
+    if judge is not None:
+        verdict = judge.get("verdict", "?")
+        detail = judge.get("rubric") or judge.get("error") or judge.get("raw", "")
+        print(f"    judge[{judge.get('model')}]: {verdict} — {str(detail)[:200]}")
+        for issue in judge.get("issues", [])[:4]:
+            print(f"      issue: {issue}")
     if observed:
         print(
             f"    behavior: orient={observed['orientation_calls']} "
@@ -220,6 +236,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     batch = Path(args.batch)
     # cell -> (scenario, config) -> list of run-level pass bools
     cells: dict[tuple[str, str], list[bool]] = {}
+    # cell -> list of advisory judge verdicts ("pass"/"mixed"/"fail"/...)
+    judges: dict[tuple[str, str], list[str]] = {}
     fail_lines: list[str] = []
     for gpath in sorted(batch.rglob("grading.json")):
         g = json.loads(gpath.read_text())
@@ -227,19 +245,29 @@ def cmd_report(args: argparse.Namespace) -> int:
         config = gpath.parent.parent.name
         run_pass = g["summary"]["failed"] == 0
         cells.setdefault((sid, config), []).append(run_pass)
+        if "judge" in g:
+            judges.setdefault((sid, config), []).append(g["judge"].get("verdict", "?"))
         if not run_pass:
             fails = [e["text"] for e in g["expectations"] if not e["passed"]]
             fail_lines.append(f"- {sid} {config} {gpath.parent.name}: {', '.join(fails)}")
+
+    def judge_cell(key: tuple[str, str]) -> str:
+        verdicts = judges.get(key, [])
+        if not verdicts:
+            return "—"
+        return f"{verdicts.count('pass')}/{len(verdicts)}✓"
 
     sids = sorted({sid for sid, _ in cells})
     lines = [
         "# QA eval report",
         "",
-        "Run-level pass rate (all assertions passed) per scenario.",
+        "Mechanical run-level pass rate (all assertions passed) per scenario — the",
+        "gate. The `judge` column is the advisory Sonnet read (pass count), which",
+        "does not gate.",
         "",
     ]
-    lines.append("| Scenario | with_skill | baseline | delta |")
-    lines.append("|---|---|---|---|")
+    lines.append("| Scenario | with_skill | baseline | delta | judge (ws) |")
+    lines.append("|---|---|---|---|---|")
     for sid in sids:
         ws = cells.get((sid, "with_skill"), [])
         bl = cells.get((sid, "baseline"), [])
@@ -248,7 +276,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         ws_s = f"{sum(ws)}/{len(ws)}" if ws else "—"
         bl_s = f"{sum(bl)}/{len(bl)}" if bl else "—"
         delta = f"{(ws_rate - bl_rate) * 100:+.0f}pp" if ws and bl else "—"
-        lines.append(f"| {sid} | {ws_s} | {bl_s} | {delta} |")
+        lines.append(f"| {sid} | {ws_s} | {bl_s} | {delta} | {judge_cell((sid, 'with_skill'))} |")
     if fail_lines:
         lines += ["", "## Failing runs", "", *fail_lines]
 
@@ -275,6 +303,16 @@ def main() -> int:
     sg.add_argument("--scenario", required=True)
     sg.add_argument("--dir", required=True, help="run dir containing baseline.json")
     sg.add_argument("--transcript", help="file with the agent's final report")
+    sg.add_argument(
+        "--judge-model",
+        default=DEFAULT_JUDGE_MODEL,
+        help=f"model alias for the advisory LLM judge (default: {DEFAULT_JUDGE_MODEL})",
+    )
+    sg.add_argument(
+        "--no-judge",
+        action="store_true",
+        help="skip the advisory LLM judge (mechanical grade only)",
+    )
     sg.set_defaults(func=cmd_grade)
 
     sr = sub.add_parser("report", help="aggregate a batch of graded runs")
