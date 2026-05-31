@@ -39,15 +39,18 @@ shrike note search [QUERIES]... [--similar-to ID] [--top-k N]
 ```
 Semantic search. Give natural-language query strings (the actual claim of a card
 you drafted — not a bare keyword), and/or `--similar-to <id>` to find notes like
-an existing one. `--threshold` is the min cosine (default 0.5); `--top-k`
-default 10. Restrict with `--deck`/`--tags`.
+an existing one. **Pass several queries in one call** to check a whole batch of
+drafts at once — one round-trip, not one per fact. `--threshold` is the min
+cosine (default 0.5); `--top-k` default 10. Restrict with `--deck`/`--tags`.
 
 ```bash
-shrike note search "mitochondria produce ATP by aerobic respiration" --json
+shrike note search "table salt is sodium chloride" --json
+shrike note search "the four nitrogenous bases of DNA" "water boils at 100C at sea level" --json
 shrike note search --similar-to 1700000000123 --json
 ```
-`--json` returns `results[].matches[]` with `id`, `deck`, `tags`, `content`, and
-`score`. **Read the content; don't judge from the score alone.**
+`--json` returns `results[]`, one group per query (each echoes its `source`
+query), with `matches[]` carrying `id`, `deck`, `tags`, `content`, and `score`.
+**Read the content; don't judge from the score alone.**
 
 ## `shrike note list` / `shrike note show` — exact lookups
 
@@ -60,7 +63,7 @@ At least one filter is required. `--brief` returns only IDs + metadata (no field
 content) — handy for triage. `note show` is shorthand for `note list --ids ID`.
 
 ```bash
-shrike note list --deck "Biology" --json
+shrike note list --deck "Chemistry" --json
 shrike note show 1700000000123 --json
 ```
 
@@ -75,12 +78,12 @@ couple of cards, pipe a JSON array to `--json-input` (one upsert, 1–100 notes)
 
 ```bash
 echo '[
-  {"deck":"Biology","note_type":"Cloze",
-   "fields":{"Text":"The citric acid cycle runs in the {{c1::mitochondrial matrix}}."},
-   "tags":["biology","metabolism"]},
-  {"deck":"Biology","note_type":"Basic",
-   "fields":{"Front":"Where is ATP synthase located?","Back":"The inner mitochondrial membrane."},
-   "tags":["biology","metabolism"]}
+  {"deck":"Chemistry","note_type":"Cloze",
+   "fields":{"Text":"At sea level, water boils at {{c1::100}} °C."},
+   "tags":["chemistry","states-of-matter"]},
+  {"deck":"Chemistry","note_type":"Basic",
+   "fields":{"Front":"What is the chemical symbol for sodium?","Back":"Na."},
+   "tags":["chemistry","elements"]}
 ]' | shrike note create --json-input --json
 ```
 With `--json`, the response carries per-note `neighbors` (the most similar

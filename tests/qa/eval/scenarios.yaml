@@ -19,6 +19,10 @@
 #   report_mentions_new_deck: true   agent transcript flags a newly-created deck
 #
 # `judge` is the rubric handed to the advisory LLM grader (qualitative only).
+# `expect` is an illustrative reference solution — ONE acceptable form, not a
+# strict template — also handed to the judge so it grades against a concrete
+# anchor instead of guessing. The judge is told to credit any rubric-satisfying
+# structure even when it differs from the reference.
 
 dup_threshold: 0.85 # nearest pre-existing cosine >= this counts as a duplicate
 
@@ -37,6 +41,16 @@ scenarios:
       steps) for the blood-flow sequence, and one-way Q/A for the SA-node and
       ventricle-wall facts? Are the cards atomic and recall-framed (not bloated,
       not yes/no)?
+    expect: |
+      One acceptable solution (NOT the only one — four atomic Basics for the
+      chambers are equally fine):
+      - Cloze: "The four chambers are {{c1::left atrium}}, {{c2::right atrium}},
+        {{c3::left ventricle}}, {{c4::right ventricle}}."
+      - Cloze, ordered: "Blood flows {{c1::right atrium}} -> {{c2::right ventricle}}
+        -> {{c3::lungs}} -> {{c4::left atrium}} -> {{c5::left ventricle}} -> {{c6::body}}."
+      - Basic: "What is the heart's natural pacemaker?" / "The sinoatrial (SA) node."
+      - Basic: "Why is the left ventricle's wall the thickest?" / "It pumps blood
+        to the whole body."
 
   - id: "02"
     needs_embeddings: true
@@ -48,6 +62,11 @@ scenarios:
       and citric-acid-cycle coverage, and avoid creating duplicates (skip or
       update) — rather than blindly creating parallel cards? Did it reason from
       the matched content, not just a score?
+    expect: |
+      No new cards. All three facts (mitochondria -> ATP, proton gradient across
+      the inner membrane, citric-acid cycle in the matrix) already exist — the
+      right move is to search, recognize the coverage, and create nothing
+      (optionally flag or improve an existing note). Zero new cards is the target.
 
   - id: "03"
     needs_embeddings: true
@@ -62,6 +81,12 @@ scenarios:
       not over-clozed) WHILE catching that the 1789 French-Revolution, Bastille,
       and 1776 US-independence facts already exist (skip/flag), and creating only
       the genuinely-new Napoleon 1804 fact?
+    expect: |
+      One acceptable solution: a single new cloze for the only uncovered fact,
+      with ONE disciplined deletion on the load-bearing element:
+      - Cloze: "Napoleon was crowned Emperor in {{c1::1804}}."
+      The 1789 French-Revolution, Bastille, and 1776 US-independence facts already
+      exist and are skipped (or flagged) — not re-created in cloze form.
 
   - id: "04"
     needs_embeddings: true
@@ -74,6 +99,12 @@ scenarios:
       Did it pick a REVERSED note type for the vocabulary (so each word is
       reviewable both directions), matching the existing Spanish deck, rather than
       one-way Q/A or a newly-invented type? Tags consistent with the vocab set?
+    expect: |
+      One acceptable solution: four "Basic (and reversed card)" notes in the
+      Spanish deck, tags consistent with the existing vocab set, e.g.
+      gracias / thank you · por favor / please · la mesa / table ·
+      la ventana / window. (One-way Basic would be wrong here — vocabulary wants
+      both directions.)
 
   - id: "05"
     needs_embeddings: true
@@ -86,6 +117,14 @@ scenarios:
     judge: >
       Did it adopt the EXISTING `world-war-2` tag rather than coining a synonym
       (wwii/ww2/etc.)? Are the Midway and Yalta cards well-formed and in History?
+    expect: |
+      One acceptable solution: two well-formed cards in History tagged
+      `world-war-2` (not a synonym). Stronger than a "what was the significance"
+      restatement — flip the cue so a specific fact is the answer, e.g.:
+      - Basic: "Which 1942 naval battle was the turning point of the Pacific war?"
+        / "The Battle of Midway."
+      - Basic: "Which Feb 1945 conference set the postwar order in Europe?"
+        / "The Yalta Conference."
 
   - id: "06"
     needs_embeddings: false
@@ -96,3 +135,11 @@ scenarios:
       Did it recognize that NO existing deck fits music theory, create a new broad
       deck (flat, not deep), and explicitly FLAG that new deck in its report for
       the user — rather than forcing the cards into an ill-fitting existing deck?
+    expect: |
+      One acceptable solution: a new flat "Music" deck (the rubric's core ask),
+      explicitly flagged in the report, with ~3 Basic cards, e.g.:
+      - Basic: "How many notes are in a major scale?" / "Seven."
+      - Basic: "What does the circle of fifths arrange, and how?" / "The twelve
+        keys, by ascending perfect fifths."
+      - Basic: "What is a triad?" / "A three-note chord built in thirds."
+      The deck being new and flagged matters more than the exact card phrasings.

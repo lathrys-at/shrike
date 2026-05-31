@@ -29,10 +29,10 @@ A card carrying several facts is the most common failure. Split it.
 **Before** — four facts welded into one card:
 
 ```
-Front: Describe the citric acid cycle.
-Back:  It occurs in the mitochondrial matrix, starts when acetyl-CoA combines
-       with oxaloacetate to form citrate, produces 3 NADH, 1 FADH2, and 1 GTP
-       per turn, and is regulated by isocitrate dehydrogenase.
+Front: Describe the structure of an atom.
+Back:  The nucleus holds protons and neutrons; the atomic number is the number
+       of protons; the mass number is protons plus neutrons; and electrons,
+       which carry negative charge, occupy shells around the nucleus.
 ```
 
 You grade it wrong whenever you miss any one piece, and never learn *which*
@@ -41,20 +41,17 @@ piece is weak. Each fact also wants its own review schedule.
 **After** — four atomic cards (or a cloze; see below):
 
 ```
-Front: Where in the cell does the citric acid cycle take place?
-Back:  The mitochondrial matrix.
+Front: What does an atom's atomic number count?
+Back:  Its number of protons.
 
-Front: What two molecules combine to start the citric acid cycle, and what do
-       they form?
-Back:  Acetyl-CoA + oxaloacetate → citrate.
+Front: How is an atom's mass number calculated?
+Back:  Protons + neutrons.
 
-Front: What reduced electron carriers and nucleotide are produced per turn of
-       the citric acid cycle?
-Back:  3 NADH, 1 FADH2, 1 GTP.
+Front: Which subatomic particle carries a negative charge?
+Back:  The electron.
 
-Front: Which enzyme is the main regulatory control point of the citric acid
-       cycle?
-Back:  Isocitrate dehydrogenase.
+Front: In a neutral atom, how do the proton and electron counts compare?
+Back:  They are equal.
 ```
 
 ### Recognition → recall
@@ -72,6 +69,38 @@ Back:  Yes.
 Front: What is the approximate resting membrane potential of a typical neuron?
 Back:  About −70 mV.
 ```
+
+### The cue that answers itself (restatement)
+
+A subtler version of the same failure: the front asks for "the significance" or
+"the importance" of something, and the back just rephrases the question. Nothing
+is recalled — the cue already contains the shape of the answer.
+
+**Before** — the back restates the front:
+
+```
+Front: What was the significance of the Rosetta Stone?
+Back:  It was important for understanding ancient Egypt.
+```
+
+"What was the significance?" → "it was important" tests nothing: you can't get it
+wrong, so you learn nothing. Flip it so the answer is a specific thing you must
+produce:
+
+**After** — a lean cue whose answer must be retrieved:
+
+```
+Front: Which artifact gave scholars the key to deciphering Egyptian hieroglyphs?
+Back:  The Rosetta Stone.
+```
+
+Mind *both* ways to get this wrong. Don't let the back merely restate the front —
+but don't over-correct by stuffing every identifying detail into the cue ("Which
+2nd-century-BC granodiorite stele bearing the same decree in Greek, Demotic, and
+hieroglyphs…"). A question that lists half the answer is just recognition wearing
+a question mark; keep the cue lean and let incidental specifics live in the back.
+And when the material is genuinely thin, don't manufacture detail to pad it —
+test the one association it actually contains.
 
 ### Sharpening an ambiguous cue
 
@@ -106,15 +135,18 @@ collection has a reversed note type (often "Basic (and reversed card)").
 
 ### When it fits
 
-Vocabulary is the classic case — you must both read the word and produce it:
+A symbol-and-name pair you must read *and* produce — you meet `Na` in a formula
+and must recall "sodium", and you reach for `Na` when writing one:
 
 ```
-Front (→): 食べる (taberu)
-Back  (→): to eat
+Front (→): Na
+Back  (→): Sodium
 
-Back  (←): to eat
-Front (←): 食べる (taberu)
+Back  (←): Sodium
+Front (←): Na
 ```
+
+Both directions get used, so the second template earns its daily review.
 
 ### When it doesn't (asymmetric knowledge)
 
@@ -141,57 +173,78 @@ per note; each answerable from the rest of the sentence.
 ### A fact in meaningful context
 
 ```
-Text: Oxidative phosphorylation occurs across the mitochondrion's
-      {{c1::inner membrane}}.
+Text: At sea-level pressure, water boils at {{c1::100}} °C.
 ```
+
+The qualifier ("at sea-level pressure") is doing real work — it's the context
+that makes the boiling point a fact worth stating — so the sentence is worth
+keeping whole rather than stripped to "Boiling point of water? → 100 °C".
 
 ### An enumeration as separate deletions
 
 **Before** — one all-or-nothing card:
 
 ```
-Front: Name the four chambers of the heart.
-Back:  Left atrium, right atrium, left ventricle, right ventricle.
+Front: Name the four nitrogenous bases of DNA.
+Back:  Adenine, thymine, guanine, cytosine.
 ```
 
 **After** — one cloze note, each item independently scheduled:
 
 ```
-Text: The four chambers of the heart are the {{c1::left atrium}},
-      {{c2::right atrium}}, {{c3::left ventricle}}, and {{c4::right ventricle}}.
+Text: The four nitrogenous bases of DNA are {{c1::adenine}}, {{c2::thymine}},
+      {{c3::guanine}}, and {{c4::cytosine}}.
+```
+
+### An ordered sequence (where order is the point)
+
+Like an enumeration, but the *sequence* itself is part of the knowledge — so keep
+it in one cloze note with a deletion per step, which tests each link while the
+surrounding order cues it. Don't flatten an ordered process into a single Q/A
+("list the stages of X") that grades all-or-nothing and throws the ordering away.
+
+**Before** — the whole sequence as one answer:
+
+```
+Front: What are the four stages of the water cycle, in order?
+Back:  Evaporation, condensation, precipitation, collection.
+```
+
+**After** — each step scheduled on its own, the order preserved as context:
+
+```
+Text: The water cycle runs {{c1::evaporation}} → {{c2::condensation}} →
+      {{c3::precipitation}} → {{c4::collection}}.
 ```
 
 ### Over-cloze, repaired
 
-**Before** — so many deletions the sentence is fill-in-the-blank recognition, and
-`{{c1}}` ("the powerhouse") is a cliché that gives itself away:
+**Before** — so many deletions the sentence is fill-in-the-blank recognition:
 
 ```
-Text: The {{c1::mitochondrion}} is {{c2::the powerhouse}} of the cell, producing
-      {{c3::ATP}} through {{c4::oxidative phosphorylation}} across the
-      {{c5::inner membrane}}.
+Text: The {{c1::Sun}} is a {{c2::star}} at the centre of the {{c3::Solar System}},
+      composed mainly of {{c4::hydrogen}} and {{c5::helium}}.
 ```
 
 **After** — one load-bearing deletion per card, context left to cue it:
 
 ```
-Text: The mitochondrion produces ATP through {{c1::oxidative phosphorylation}}.
+Text: The Sun is composed mainly of {{c1::hydrogen}}, with helium second.
 
-Text: Oxidative phosphorylation occurs across the mitochondrion's
-      {{c1::inner membrane}}.
+Text: The star at the centre of the Solar System is the {{c1::Sun}}.
 ```
 
 ---
 
 ## Placement: deck vs. tag
 
-Independent of card type. The collection already has a `Medicine` deck and notes
-tagged `pharmacology`, `cardiology`, `antibiotics`.
+Independent of card type. The collection already has a `Chemistry` deck and notes
+tagged `organic`, `reactions`, `mechanisms`.
 
-**Before** — a new deck tree for one chapter of beta-blocker cards:
+**Before** — a new deck tree for one chapter of substitution-reaction cards:
 
 ```
-deck: Medicine::Pharmacology::Cardiovascular::Beta-Blockers
+deck: Chemistry::Organic::Reactions::Nucleophilic-Substitution
 tags: []
 ```
 
@@ -202,8 +255,8 @@ levels down.
 vocabulary) carry the topic:
 
 ```
-deck: Medicine
-tags: ["pharmacology", "cardiology", "beta-blockers"]
+deck: Chemistry
+tags: ["organic", "reactions", "nucleophilic-substitution"]
 ```
 
 ---
