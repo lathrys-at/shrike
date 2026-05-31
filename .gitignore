@@ -17,3 +17,4 @@ tests/qa/run/
 
 # Packaged skills (scripts/package-skill.py)
 dist/
+tests/qa/eval/runs/
