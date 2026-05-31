@@ -39,22 +39,22 @@ otherwise. They are the same operations over the same server.
 
 | What you need | MCP tool | `shrike` CLI |
 |---|---|---|
-| Learn the structure (decks, note types, tags) | `collection_info` | `shrike info --decks --types --tags` |
-| Find existing notes about a concept | `search_notes` (`queries`) | `shrike note search "<query>"` |
-| Find notes similar to one you know | `search_notes` (`ids`) | `shrike note search --similar-to <id>` |
-| Inspect notes by exact filter | `list_notes` | `shrike note list --deck … / shrike note show <id>` |
-| Create or update notes | `upsert_notes` | `shrike note create … / shrike note update <id>` |
+| Learn the structure (decks, note types, tags) | `collection_info` | `shrike info --decks --types --tags --json` |
+| Find existing notes about a concept | `search_notes` (`queries`) | `shrike note search "<query>" --json` |
+| Find notes similar to one you know | `search_notes` (`ids`) | `shrike note search --similar-to <id> --json` |
+| Inspect notes by exact filter | `list_notes` | `shrike note list --deck … --json / shrike note show <id> --json` |
+| Create or update notes | `upsert_notes` | `shrike note create --json-input --json / shrike note update <id> --json` |
 
 **For exact flags, options, and the `--json` response shapes of these commands,
 read [references/shrike-cli.md](references/shrike-cli.md).** That's your CLI
 orientation — read it once; you don't need to rediscover the interface through
 `--help`.
 
-CLI tips: pass `--json` so you get the structured payload — you need the
-similarity **scores** and the **neighbors** that come back on create, and the
-styled output drops them. Bulk-create by piping a JSON array to
-`shrike note create --json-input`. Upsert takes 1–100 notes at a time; batch
-them rather than firing one call per card.
+**Every CLI call takes `--json`.** You work from the structured payload — ids,
+similarity scores, and the neighbors returned on create — which the styled text
+output drops; a call without `--json` is a mistake. **Create in bulk:** pipe a
+JSON array to `shrike note create --json-input` — the upsert takes 1–100 notes,
+so it's one call for the whole batch, never one per card.
 
 If neither interface is available, stop and tell the user — say what you'd need
 (a running Shrike server, or its MCP tools connected) rather than inventing
@@ -67,10 +67,10 @@ Follow this spine. Each step exists to serve one of the two habits above.
 ### 1. Orient yourself first
 
 Start with **exactly one** call that returns the whole landscape — decks, note
-types, and the established tag vocabulary — in a single response:
+types, and the established tag vocabulary — in a single response. Run exactly:
 
-- MCP: `collection_info(include=["decks", "note_types", "tags"])`
-- CLI: `shrike info --decks --types --tags`
+- MCP — `collection_info(include=["decks", "note_types", "tags"])`
+- CLI — `shrike info --decks --types --tags --json`
 
 That one call is all the orientation you need. **Do not make several `info` /
 `collection_info` calls** (one for decks, then another for types, then tags…) —
@@ -96,25 +96,19 @@ the material; if you're writing a tenth card on a minor aside, stop.
 
 ### 3. Check for existing coverage
 
-Now — before writing — search the collection for what you're about to add,
-using the cards you just drafted as the source of your queries
-(`search_notes`, or `shrike note search`). **Plan the queries from the drafts
-first:** each query is a *specific, content-bearing phrase* — the card's own
-question or the actual claim it makes — not a bare keyword. A single word pulls
-back noise and misses paraphrases; the real claim finds the note that already
-states it.
+Before writing, search the collection for every fact you drafted — **in one
+batched call**, each query phrased as the card's actual claim (its question or
+the real fact it states), never a bare keyword. Run exactly:
 
-**Example.** Drafted card: *"What is the speed of light in a vacuum?"* → search
-`speed of light in a vacuum` or `light travels at 3×10⁸ m/s in vacuum` —
-**not** `light`. One good query per distinct concept (or per cluster of related
-drafts) is enough; you don't need one per card when several share a topic.
+- MCP — `search_notes(queries=["<claim of card A>", "<claim of card B>", …])`
+- CLI — `shrike note search "<claim A>" "<claim B>" … --json`
 
-**Send the queries as one call, not one per fact.** `search_notes` takes a
-`queries` array, and `shrike note search` takes several query strings as
-positional arguments —
-`shrike note search "claim of card A" "claim of card B" --json` returns a
-`results[]` group per query in a single round-trip. Fire them together; serial
-one-query-at-a-time calls are just slower, not more thorough.
+One query per distinct concept (or per cluster of related drafts) is enough — not
+one per card when several share a topic — but fire them **together in that one
+call**, never one at a time. A single word pulls back noise and misses
+paraphrases; the real claim finds the note that already states it. *Example:*
+drafted card *"What is the speed of light in a vacuum?"* → query
+`light travels at 3×10⁸ m/s in vacuum`, **not** `light`.
 
 **Read the returned content and judge overlap yourself.** Do not decide from the
 score alone: a 0.7 can be a close paraphrase of your card *or* an unrelated fact
@@ -146,10 +140,19 @@ user can veto it.
 
 ### 5. Write, then align tags with the neighbors
 
-Upsert the batch. Every created/updated note comes back with `neighbors` **in
-the upsert response** — the existing notes most similar to it, each with its
-tags. Their job here is **tag consistency**, not a second duplicate hunt: these
-are the closest notes in the collection, so their tags are the best evidence for
+Upsert the surviving drafts in **one call** — the whole batch, never one per
+card. Run exactly:
+
+- MCP — `upsert_notes(notes=[{deck, note_type, fields, tags}, …])`
+- CLI — `echo '[{…}, …]' | shrike note create --json-input --json`
+
+(The note object is `deck`, `note_type`, `fields`, `tags`; for the exact field
+names per note type, see [references/shrike-cli.md](references/shrike-cli.md).)
+
+Every created/updated note comes back with `neighbors` **in the upsert
+response** — the existing notes most similar to it, each with its tags. Their
+job here is **tag consistency**, not a second duplicate hunt: these are the
+closest notes in the collection, so their tags are the best evidence for
 whether you tagged yours to match the established vocabulary. If the neighborhood
 is tagged `pharmacology`, `antibiotics` and you used `antibiotic`, align to the
 existing form (adjust with a quick `note update` on the tags if you drifted).
