@@ -191,7 +191,7 @@ def _author(config: str, sid: str, model: str, thinking: int) -> tuple[str, dict
     user = _read_prompt_md(sid)
     builder = with_skill_prompt if config == "with_skill" else baseline_prompt
     prompt = builder(user)
-    _log(f"author: claude -p --model {model} (thinking={thinking}) ({config} {sid})…")
+    _log(f"author running… ({config} {sid})")
     t0 = time.monotonic()
     env = {**os.environ, "MAX_THINKING_TOKENS": str(max(thinking, 0))}
     proc = subprocess.run(
@@ -218,11 +218,6 @@ def _author(config: str, sid: str, model: str, thinking: int) -> tuple[str, dict
         raise SystemExit(f"author claude -p failed (exit {proc.returncode})")
     text, stats = _parse_author_stream(proc.stdout)
     stats.update(model=model, thinking=thinking, duration_s=round(time.monotonic() - t0, 1))
-    _log(
-        f"author done in {stats['duration_s']:.0f}s — {stats['tool_calls']} tools, "
-        f"{stats['thinking_blocks']} thinking, {stats['num_turns']} turns, "
-        f"{stats['total_tokens']:,} tokens ({stats['output_tokens']:,} out)"
-    )
     return text, stats, proc.stdout
 
 

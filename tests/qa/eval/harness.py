@@ -227,12 +227,14 @@ def cmd_grade(args: argparse.Namespace) -> int:
         if not r["passed"]:
             print(f"    ✗ {r['text']} — {r['evidence']}")
     if author:
+        dur = author.get("duration_s")
+        dur_s = f" · {dur:.0f}s" if isinstance(dur, int | float) else ""
         print(
             f"    author[{author.get('model')} think={author.get('thinking')}]: "
             f"{author.get('tool_calls')} tool calls · {author.get('thinking_blocks')} thinking · "
             f"{author.get('num_turns')} turns · {author.get('total_tokens', 0):,} tokens "
             f"({author.get('input_tokens', 0):,} in + {author.get('output_tokens', 0):,} out, "
-            f"{author.get('cache_read_tokens', 0):,} cache)"
+            f"{author.get('cache_read_tokens', 0):,} cache){dur_s}"
         )
     if judge is not None:
         verdict = judge.get("verdict", "?")
