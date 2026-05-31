@@ -39,15 +39,18 @@ shrike note search [QUERIES]... [--similar-to ID] [--top-k N]
 ```
 Semantic search. Give natural-language query strings (the actual claim of a card
 you drafted — not a bare keyword), and/or `--similar-to <id>` to find notes like
-an existing one. `--threshold` is the min cosine (default 0.5); `--top-k`
-default 10. Restrict with `--deck`/`--tags`.
+an existing one. **Pass several queries in one call** to check a whole batch of
+drafts at once — one round-trip, not one per fact. `--threshold` is the min
+cosine (default 0.5); `--top-k` default 10. Restrict with `--deck`/`--tags`.
 
 ```bash
 shrike note search "mitochondria produce ATP by aerobic respiration" --json
+shrike note search "four chambers of the heart" "SA node is the pacemaker" --json
 shrike note search --similar-to 1700000000123 --json
 ```
-`--json` returns `results[].matches[]` with `id`, `deck`, `tags`, `content`, and
-`score`. **Read the content; don't judge from the score alone.**
+`--json` returns `results[]`, one group per query (each echoes its `source`
+query), with `matches[]` carrying `id`, `deck`, `tags`, `content`, and `score`.
+**Read the content; don't judge from the score alone.**
 
 ## `shrike note list` / `shrike note show` — exact lookups
 

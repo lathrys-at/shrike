@@ -110,6 +110,13 @@ produce ATP by aerobic respiration` — **not** `mitochondria`. One good query p
 distinct concept (or per cluster of related drafts) is enough; you don't need
 one per card when several share a topic.
 
+**Send the queries as one call, not one per fact.** `search_notes` takes a
+`queries` array, and `shrike note search` takes several query strings as
+positional arguments —
+`shrike note search "claim of card A" "claim of card B" --json` returns a
+`results[]` group per query in a single round-trip. Fire them together; serial
+one-query-at-a-time calls are just slower, not more thorough.
+
 **Read the returned content and judge overlap yourself.** Do not decide from the
 score alone: a 0.7 can be a close paraphrase of your card *or* an unrelated fact
 that merely shares vocabulary. The number narrows the candidates; your reading
@@ -117,8 +124,12 @@ decides. Each match also carries its **tags** — note the vocabulary the
 neighborhood uses, because that's what you'll tag from in step 4.
 
 If the collection already covers a fact well, drop that draft, or plan to
-*improve the existing note* (update it) instead of adding a parallel one. The
-goal is coverage of the material, not a count of new cards.
+*improve the existing note* (update it) instead of adding a parallel one.
+**Coverage is about the fact, not the card format:** a fact already carried by a
+Basic card is covered even if you were about to make a cloze of it (and vice
+versa). A second card on the same fact in a different format isn't new material —
+it's a duplicate the user now reviews twice. The goal is coverage of the
+material, not a count of new cards.
 
 ### 4. Choose a home and tags
 
@@ -140,9 +151,15 @@ existing form (adjust with a quick `note update` on the tags if you drifted).
 
 You already guarded against duplicates in the step-3 pre-check, so **don't
 re-audit the neighbor scores** — that's the redundant, score-fixated behavior to
-avoid, and you don't run fresh searches afterward either. (The neighbors are keyed
-on the note's full content, so on the rare chance a near-identical one surfaces
-that your draft-phrased query missed, resolve it — delete the one you just made,
+avoid, and you don't run fresh searches afterward either. **And a successful
+write is a guarantee, not a maybe** — when the upsert returns success, every note
+is already in the collection exactly as you sent it: same fields, same deck, same
+tags, each with its id handed back in the response. There is nothing to verify.
+Don't `list` or `show` the notes back to confirm they saved or that the fields
+took — the success *is* the confirmation, and re-fetching what you just wrote
+tells you nothing it didn't already promise. (The neighbors are keyed on the
+note's full content, so on the rare chance a near-identical one surfaces that
+your draft-phrased query missed, resolve it — delete the one you just made,
 improve the original — but that's a backstop, not the point of this step.)
 
 If a result says `neighbors_unavailable` (a transient index hiccup), the notes
@@ -193,9 +210,15 @@ exist in this collection — you saw them in step 1. If the ideal type isn't
 present, adapt (a one-way Q/A is almost always available as a fallback) and tell
 the user if the material would genuinely be better served by a type they don't
 have. And if the user *asked* for a specific kind of card — "make cloze cards
-for the cranial nerves" — honor it, but still apply every standard below; their
-request fixes the type, it doesn't license sloppy cards. If the requested type
-truly fights the material, build the good version and explain why.
+for the cranial nerves" — honor it for the cards you do create, but still apply
+every standard below; their request fixes the type, it doesn't license sloppy
+cards. **It also doesn't override the step-3 dedup check:** "make cloze cards" is
+not licence to re-make a fact that already exists as a Basic card (or any other
+form) — a different format is still a duplicate (see step 3). When a
+requested-format card lands on a fact the collection already covers, treat it as
+covered: flag it, and offer to convert or replace the existing note rather than
+adding a format-parallel beside it. If the requested type truly fights the
+material, build the good version and explain why.
 
 ## Writing the card well
 
