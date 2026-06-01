@@ -1,12 +1,19 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/shrike"]
 
+# Version is derived from the git tag (hatch-vcs / setuptools-scm), never a
+# hand-edited constant — so it can't drift from the release tag. The build hook
+# writes the computed value to src/shrike/_version.py (gitignored), which
+# shrike/__init__.py re-exports as __version__.
 [tool.hatch.version]
-path = "src/shrike/__init__.py"
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/shrike/_version.py"
 
 [project]
 name = "shrike"
