@@ -37,15 +37,18 @@ backward compatibility; don't rush it.
   sort before the final per SemVer). Distinct from the `rc` *CI label*, though
   they pair: label the PR `rc` to run cross-platform CI, cut a `-rc.N` tag for
   testers.
-- The package version currently lives in `src/shrike/__init__.py` (`__version__`),
-  read by `pyproject.toml` via `[tool.hatch.version]`. **Bump it and tag in
-  lockstep** until tag-derived versioning lands (#42), which removes the manual
-  step and the drift risk entirely.
+- The package version is **derived from the git tag** by hatch-vcs (config in
+  `pyproject.toml`), not hand-maintained — so it can't drift from the tag. There's
+  no `__version__` constant to bump: the build writes `src/shrike/_version.py`
+  (gitignored) from `git describe`, and `shrike/__init__.py` re-exports it. Between
+  releases the version is a dev version like `0.3.2.dev7+g1a2b3c4`; on a tagged
+  commit it's the clean `0.3.2`. (CI checks out with `fetch-depth: 0` so the tag is
+  visible at install time.)
 
 ## Releasing
 
-1. Bump `__version__` and update `CHANGELOG.md` (move `Unreleased` items under the
-   new version heading).
+1. Update `CHANGELOG.md` (move `Unreleased` items under the new version heading).
+   You do **not** edit a version constant — the tag *is* the version.
 2. Create an annotated tag: `git tag -a vX.Y.Z -m "vX.Y.Z"` (add `-s` to sign).
 3. Push the tag. A tag-triggered release workflow (#43) will, once built, run the
    full cross-platform suite, build sdist + wheel, and cut a GitHub Release. Until

@@ -13,6 +13,9 @@ coverage.xml
 htmlcov/
 .testmondata
 
+# Generated at build time by hatch-vcs (see pyproject.toml)
+src/shrike/_version.py
+
 # QA harness working dir — regenerated each launch (see scripts/launch-qa-server.sh)
 tests/qa/run/
 
