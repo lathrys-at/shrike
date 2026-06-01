@@ -47,16 +47,33 @@ backward compatibility; don't rush it.
 
 ## Releasing
 
-1. Update `CHANGELOG.md` (move `Unreleased` items under the new version heading).
-   You do **not** edit a version constant — the tag *is* the version.
-2. Create an annotated tag: `git tag -a vX.Y.Z -m "vX.Y.Z"` (add `-s` to sign).
-3. Push the tag. The tag-triggered release workflow (`.github/workflows/release.yml`)
-   runs the full cross-platform integration suite, builds the artifacts, and cuts a
-   GitHub Release with them attached: the Python **sdist + wheel**, the
-   **`anki-cards.skill`** bundle (`scripts/package-skill.py`), and a **`SHA256SUMS`**.
-   Release notes come from the matching `## [X.Y.Z]` section of `CHANGELOG.md`. A
-   pre-release tag (`vX.Y.Z-rc.N`) is published as a GitHub pre-release. (PyPI
-   publishing is not wired up — see #43.)
+The tag *is* the version (hatch-vcs, #42) — there's no constant to bump. The
+tag-triggered workflow (`.github/workflows/release.yml`) runs the full
+cross-platform suite, builds the **sdist + wheel**, the **`anki-cards.skill`**
+bundle (`scripts/package-skill.py`), and a **`SHA256SUMS`**, and attaches them to a
+GitHub Release. Final-release notes come from the matching `## [X.Y.Z]` section of
+`CHANGELOG.md`; an rc tag uses auto-generated commit notes instead. (PyPI publishing
+is not wired up — see #43.)
+
+**Cut release candidates first, with the changelog left under `[Unreleased]`:**
+
+1. Tag an rc on the current commit and push:
+   `git tag -a vX.Y.Z-rc.N -m "vX.Y.Z-rc.N" && git push origin vX.Y.Z-rc.N`. It
+   publishes as a GitHub **pre-release**. Iterate (`rc.2`, …) until one is stable —
+   cut each off a **new commit** (a real fix), never by re-tagging an unchanged one.
+
+**Then cut the final release:**
+
+2. Roll up the changelog: open a PR moving the `[Unreleased]` items under a dated
+   `## [X.Y.Z]` heading (leave a fresh empty `[Unreleased]`), and merge it.
+3. Tag the **roll-up merge commit** and push:
+   `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` (signs automatically
+   when `tag.gpgsign` is set).
+
+Rolling up the changelog *after* the last rc — not before — is deliberate: it
+finalizes the changelog at release time **and** guarantees the final tag lands on a
+different commit than the rc. Two release tags on one commit make hatch-vcs ambiguous
+(it can resolve to the rc version), which the workflow's version guard then rejects.
 
 ## Issue tracking
 
