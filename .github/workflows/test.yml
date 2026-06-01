@@ -1,13 +1,14 @@
 name: Tests
 
 on:
+  # PRs only. `main` is reached exclusively through PRs (squash merge), so a
+  # push-to-main trigger would just re-run what the PR already validated — pure
+  # redundant spend. `labeled` is included so applying the `rc` label re-triggers
+  # CI (the default types don't fire on label changes); it gates the expensive
+  # cross-platform job.
   pull_request:
     branches: [main]
-    # `labeled` is added so applying the `rc` label re-triggers CI (the default
-    # types don't fire on label changes); it gates the expensive cross-platform job.
     types: [opened, synchronize, reopened, labeled]
-  push:
-    branches: [main]
 
 jobs:
   lint:
