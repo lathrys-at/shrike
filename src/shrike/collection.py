@@ -14,6 +14,8 @@ from anki.collection import Collection
 from anki.consts import MODEL_CLOZE
 from anki.errors import NotFoundError
 
+from shrike.embed_text import normalize_for_embedding
+
 logger = logging.getLogger("shrike.collection")
 
 T = TypeVar("T")
@@ -503,7 +505,14 @@ class CollectionWrapper:
 
     @staticmethod
     def note_texts(col: Collection, note_ids: Sequence[int]) -> list[str]:
-        """Concatenated field text for each note id. Must run on the worker thread."""
+        """Normalized field text for each note id. Must run on the worker thread.
+
+        Each field value is run through ``normalize_for_embedding`` (cloze fill,
+        HTML/media stripping, entity/whitespace cleanup) so we embed the rendered
+        text — deterministically, the same regardless of when or how the note is
+        embedded. Fields that normalize to nothing (pure markup/media) are
+        dropped.
+        """
         texts: list[str] = []
         for nid in note_ids:
             try:
@@ -511,7 +520,11 @@ class CollectionWrapper:
             except NotFoundError:
                 texts.append("")
                 continue
-            parts = [f"{k}: {v}" for k, v in zip(note.keys(), note.values(), strict=False) if v]
+            parts = []
+            for k, v in zip(note.keys(), note.values(), strict=False):
+                cleaned = normalize_for_embedding(v)
+                if cleaned:
+                    parts.append(f"{k}: {cleaned}")
             texts.append("\n".join(parts))
         return texts
 

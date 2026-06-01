@@ -59,3 +59,39 @@ class TestNoteTextsForEmbedding:
         texts = await wrapper.note_texts_for_embedding([nid])
         assert "Front: Only front" in texts[0]
         assert "Back:" not in texts[0]
+
+
+class TestNormalizationThroughWrapper:
+    """The rendered/cleaned text reaches the embedder, not raw markup."""
+
+    async def test_cloze_field_is_filled(self, wrapper):
+        results = await wrapper.upsert_notes(
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Cloze",
+                    "fields": {"Text": "The capital of {{c1::France}} is Paris."},
+                }
+            ]
+        )
+        (text,) = await wrapper.note_texts_for_embedding([results[0]["id"]])
+        assert "Text: The capital of France is Paris." in text
+        assert "{{c1::" not in text  # template syntax must not leak through
+
+    async def test_html_and_media_stripped(self, wrapper):
+        results = await wrapper.upsert_notes(
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {
+                        "Front": "<b>Hello</b>&nbsp;world",
+                        "Back": 'see<br>this <img src="x.png">[sound:y.mp3]',
+                    },
+                }
+            ]
+        )
+        (text,) = await wrapper.note_texts_for_embedding([results[0]["id"]])
+        assert "Front: Hello world" in text
+        assert "Back: see this" in text
+        assert "<" not in text and "[sound:" not in text and "&nbsp;" not in text
