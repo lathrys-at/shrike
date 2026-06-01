@@ -78,14 +78,14 @@ jobs:
           LD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
         run: pytest tests/integration -v -m embedding
 
-  # macOS + ARM are expensive (macOS bills at 10x), so they don't run on every
-  # PR. They run on push to main (merge time) and on any PR labelled `rc`
-  # (release candidate) — apply the label when you're about to tag a release and
-  # want full cross-platform coverage first. Each runs the full integration
-  # suite (including embedding) for that platform.
+  # macOS + ARM are expensive (macOS bills at 10x), so they NEVER run on plain
+  # PRs or on merges to main — only when a PR carries the `rc` (release
+  # candidate) label. Apply the label when you're about to tag a release and want
+  # full cross-platform coverage first. Each runs the full integration suite
+  # (including embedding) for that platform.
   cross-platform:
     name: Cross-platform (${{ matrix.os }})
-    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'rc')
+    if: contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
