@@ -18,3 +18,6 @@ tests/qa/run/
 # Packaged skills (scripts/package-skill.py)
 dist/
 tests/qa/eval/runs/
+
+# QA skill-variant A/B copies — throwaway; the swap script (use-variant.sh) is tracked
+tests/qa/eval/variants/*/

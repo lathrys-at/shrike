@@ -102,20 +102,27 @@ unguided model — and the advisory judge's pass count.
 ## Known model floor (read the judge verdicts accordingly)
 
 The default author is **Haiku 4.5** — deliberately weak, so the eval measures
-what the skill does for a model that needs the help. Two card-design judgments
-sit *below Haiku's floor* even with the skill and an 8k thinking budget:
+what the skill does for a model that needs the help. Card-design judgments that
+need multi-step restructuring can sit below Haiku's ceiling: it pattern-matches
+the surface of the source rather than re-shaping it.
 
-- **per-item cloze granularity** — splitting an enumeration into one deletion per
-  *member* rather than per category (scenario 01); and
 - **cue inversion on thin material** — flipping a "what is the significance of
   X?" prompt so the specific fact is the answer, not a restatement (scenario 05).
+  Still soft on Haiku; the "Demand recall, not recognition" rule is correct but
+  abstract, and a capable author applies it more reliably than a weak one.
+  Re-running 05 with `--author-model sonnet` is the unfloored signal.
 
-These are a **model floor, not a skill defect.** Re-running 01/05 with
-`--author-model sonnet` resolves both — Sonnet, reading the identical SKILL.md,
-flips the cue and uses per-chamber deletions; Haiku does neither, run after run.
-So a Haiku `mixed` judge verdict on 01/05 is the expected weak-author floor;
-don't chase it by rewriting the skill. The guidance for both lives in the
-SKILL.md workflow (the "Choosing the card type" cloze bullet and the
-"Demand recall, not recognition" rule) and is confirmed correct — a capable
-author applies it. If you want a card-quality signal that isn't floored, run the
-two scenarios with `--author-model sonnet`.
+**But a floor can be moved by rewriting the guidance — it is not always a hard
+model limit.** Scenario 01 (**per-item cloze granularity**: one deletion per
+*member*, not per category) used to sit here — Haiku clozed "left and right
+atria" / "left and right ventricles" as two group labels, run after run, even
+with the full skill. Rewriting the guidance from an *abstraction* ("an item is
+the smallest thing to recall by name, not the category it sits in") into an
+*executable surface check* ("if a single deletion hides a plural/category word or
+joins items with 'and', you've clozed the group — split it"), plus a concrete
+sub-group before/after in `references/examples.md`, took Haiku's 01 judge from
+**1/5 to 5/5**, with per-chamber deletions confirmed in the transcripts. The
+lesson this skill is built on: **weak models follow surface checks they can
+apply, not concepts they must reason out** — so prefer the former. (The A/B run
+that established this is reproducible via `tests/qa/eval/variants/use-variant.sh`;
+the per-variant skill copies are gitignored.)
