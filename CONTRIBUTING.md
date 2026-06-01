@@ -110,6 +110,18 @@ pytest tests/integration -q -m "integration and not embedding"
 See `CLAUDE.md` for the coverage-gate reproduction and the embedding/integration
 suites that need a local `llama-server`.
 
+### Faster inner loop (optional)
+
+While iterating, `pytest --testmon` (from `pytest-testmon`, in the `dev` extra)
+runs only the tests affected by your uncommitted changes — it tracks which code
+each test exercises in a local `.testmondata` (gitignored) and skips the rest.
+
+It's a **local convenience only**, never run in CI, for two reasons: CI always
+runs the full suite for the coverage gate, and impact analysis can produce false
+negatives — it can miss a test whose dependency it didn't capture, notably the
+integration suite, which drives a *separate* server subprocess that testmon's
+in-process tracking can't see. So always do a full `pytest` run before you push.
+
 ## Skill changes (QA eval)
 
 The `anki-cards` skill (`skills/anki-cards/**`) is **not covered by `pytest`/CI** —
