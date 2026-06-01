@@ -11,8 +11,49 @@ on:
     types: [opened, synchronize, reopened, labeled]
 
 jobs:
+  # Decide which lanes need to run for this PR's diff. Docs-only changes skip
+  # every test job (only `ci-ok` runs); the embedding lane (which spins up
+  # llama-server) is skipped unless something that can affect embedding/search
+  # changed. `changes` is cheap — checkout + a path diff. NOTE: the per-job `if`s
+  # mean jobs get *skipped*, not run-and-passed, so the single required status
+  # check for branch protection must be `ci-ok` (below), never the individual
+  # jobs — a skipped required check blocks the merge forever.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      embedding: ${{ steps.filter.outputs.embedding }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - '.github/workflows/test.yml'
+            embedding:
+              # Conservative: any source change can reach the server the
+              # embedding/search tests drive, so gate on all of src/shrike plus
+              # the embedding-specific tests and the llama-server install path.
+              - 'src/shrike/**'
+              - 'tests/integration/test_embedding.py'
+              - 'tests/integration/test_semantic.py'
+              - 'tests/unit/test_embedding.py'
+              - 'tests/unit/test_index.py'
+              - 'tests/unit/test_note_embedding_text.py'
+              - 'tests/unit/test_tools_search.py'
+              - '.github/scripts/install-llama-server.sh'
+              - 'pyproject.toml'
+              - '.github/workflows/test.yml'
+
   lint:
     name: Lint & type check
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,9 +73,13 @@ jobs:
 
   # Unit + non-embedding integration on Linux x64, under coverage with the
   # subprocess hook (so the spawned server is counted), enforcing the gate.
-  # Folds the old unit/coverage/integration-ubuntu jobs into one runner.
+  # Folds the old unit/coverage/integration-ubuntu jobs into one runner. Always
+  # runs the FULL suite when it runs — the coverage gate needs the whole picture,
+  # so selection happens at the job level (run or skip), never within the suite.
   test:
     name: Tests & coverage (linux)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,6 +107,8 @@ jobs:
 
   embedding:
     name: Embedding tests (linux)
+    needs: changes
+    if: needs.changes.outputs.embedding == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -83,7 +130,8 @@ jobs:
   # PRs or on merges to main — only when a PR carries the `rc` (release
   # candidate) label. Apply the label when you're about to tag a release and want
   # full cross-platform coverage first. Each runs the full integration suite
-  # (including embedding) for that platform.
+  # (including embedding) for that platform. Label-gated regardless of paths: a
+  # release candidate gets full coverage no matter how small the diff.
   cross-platform:
     name: Cross-platform (${{ matrix.os }})
     if: contains(github.event.pull_request.labels.*.name, 'rc')
@@ -108,3 +156,30 @@ jobs:
           LD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
           DYLD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
         run: pytest tests/integration -v -m integration
+
+  # Single required status check. Always runs, and passes iff every gated job
+  # either succeeded or was legitimately skipped (its paths didn't change / not
+  # an rc PR). This is what branch protection should require — it turns the
+  # conditional jobs into one stable check that never deadlocks a merge.
+  ci-ok:
+    name: CI passed
+    if: ${{ always() }}
+    needs: [changes, lint, test, embedding, cross-platform]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify gated jobs passed or were skipped
+        run: |
+          if [ "${{ needs.changes.result }}" != "success" ]; then
+            echo "::error::changes job result was '${{ needs.changes.result }}'"; exit 1
+          fi
+          for r in \
+            "lint=${{ needs.lint.result }}" \
+            "test=${{ needs.test.result }}" \
+            "embedding=${{ needs.embedding.result }}" \
+            "cross-platform=${{ needs.cross-platform.result }}"; do
+            case "${r#*=}" in
+              success|skipped) echo "ok: $r" ;;
+              *) echo "::error::$r"; exit 1 ;;
+            esac
+          done
+          echo "All gated jobs passed or were skipped."
