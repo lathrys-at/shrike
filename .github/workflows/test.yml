@@ -10,6 +10,13 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, labeled]
 
+# `contents: read` for checkout; `pull-requests: read` so the `changes` job's
+# paths-filter can list this PR's changed files via the API (the default token
+# is contents-only here, which fails with "Resource not accessible by integration").
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   # Decide which lanes need to run for this PR's diff. Docs-only changes skip
   # every test job (only `ci-ok` runs); the embedding lane (which spins up
