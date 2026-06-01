@@ -11,6 +11,7 @@ __pycache__/
 .coverage.*
 coverage.xml
 htmlcov/
+.testmondata
 
 # QA harness working dir — regenerated each launch (see scripts/launch-qa-server.sh)
 tests/qa/run/
