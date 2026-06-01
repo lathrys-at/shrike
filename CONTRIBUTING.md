@@ -13,8 +13,10 @@ Trunk-based. `main` is always releasable — no `develop` branch, no Gitflow.
 - **Squash merge** PRs, so `main` keeps a linear, one-commit-per-change history
   that bisects cleanly.
 - `main` is protected: the Linux CI checks (`lint`, `test`, `embedding`) must pass
-  before merge. The expensive cross-platform lanes (macOS + ARM) run at merge time
-  and on PRs labelled `rc` — see [`.github/workflows/test.yml`](.github/workflows/test.yml).
+  before merge. The expensive cross-platform lanes (macOS + ARM) run **only** on
+  PRs labelled `rc` — never on plain PRs or on merge to `main`, to keep the
+  iterate-and-merge loop off the 10×-billed macOS runners. See
+  [`.github/workflows/test.yml`](.github/workflows/test.yml).
 - Branch names are `‹type›/‹issue#›-‹slug›`, where `‹type›` is one of `feat`,
   `fix`, `docs`, `chore`, `refactor`, `test` — e.g. `fix/44-version-tag-drift`,
   `feat/33-ankiweb-sync`. The issue number ties the branch to its tracking issue.
