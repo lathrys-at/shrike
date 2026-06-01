@@ -7,6 +7,8 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-06-01
+
 ### Added
 - Tag-triggered release workflow: pushing a `v*` tag runs the full cross-platform
   integration suite, builds the release artifacts (Python sdist + wheel, the
