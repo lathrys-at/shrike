@@ -124,7 +124,7 @@ ruff format --check src/shrike/    # Format check
 mypy src/shrike/                   # Type check
 ```
 
-All three must pass cleanly. CI (`.github/workflows/test.yml`) runs, on every PR (Linux x64 only): a `lint` job, a `test` job (unit + non-embedding integration under the coverage gate), and an `embedding` job. macOS and ARM run the full integration suite on **push to `main`** (the `cross-platform` job, gated on `github.event_name == 'push'`) — Actions minutes are limited, and macOS bills at 10×, so the expensive lanes only run at merge time.
+All three must pass cleanly. CI (`.github/workflows/test.yml`) runs, on every PR (Linux x64 only): a `lint` job, a `test` job (unit + non-embedding integration under the coverage gate), and an `embedding` job. macOS and ARM run the full integration suite via the `cross-platform` job, gated on `github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'rc')` — i.e. on push to `main` (merge time) **or** on any PR labelled `rc` (release candidate). Actions minutes are limited, and macOS bills at 10×, so these lanes stay off normal PRs; apply the `rc` label before tagging a release to get cross-platform coverage first. The PR trigger lists `labeled` in its `types` so adding the label re-triggers CI.
 
 ### Running the server manually
 
@@ -311,66 +311,41 @@ Logging is configured in `shrike/log.py`. Log format, parsing, and styling all l
 ```
 Timestamp is `%Y-%m-%dT%H:%M:%S` (19 chars), level is left-padded to 5 chars, logger and message are separated by double-space. `parse_log_line()` and `style_log_line()` in `log.py` know this format — keep them in sync if you change it.
 
-## Roadmap
+## Branching, releases & issue tracking
 
-### v0.1.0 — CLI + MCP Server ✓
+Full conventions live in [`CONTRIBUTING.md`](CONTRIBUTING.md) — this is the
+working summary.
 
-- CLI integration tests and bug fixes (full command coverage) ✓
-- Daemon auto-start from any CLI command ✓
-- CLI output UI/UX review ✓
-- Tab completion (bash, zsh, fish) ✓
-- Transparent batching in ShrikeClient for large requests ✓
-- `delete_note_types` MCP tool and `type delete` CLI command ✓
-- `/status` HTTP endpoint for health checks ✓
+- **Trunk-based.** `main` is always releasable and protected; every change goes
+  through a `‹type›/‹issue#›-‹slug›` branch → PR → **squash merge**. No direct
+  pushes to `main`.
+- **SemVer**, `vX.Y.Z` annotated tags. `0.x` may break the public surface (MCP
+  schemas, CLI, config) between minor versions. `__version__` in
+  `src/shrike/__init__.py` is the version source (read by `pyproject.toml`); bump
+  it and tag in lockstep until tag-derived versioning lands.
+- **Roadmap and tracked work live in GitHub issues + milestones** (one milestone
+  per minor version, each with an `epic` tracking issue) — *not* in this file or
+  the README, which is how the old prose roadmaps drifted. `gh issue list` /
+  `gh issue list --milestone "..."` is the current state of the project.
+- **Shipped-design rationale** (the "why" behind decisions like contextual-upsert
+  neighbours, duplicate detection, full-replace tags) lives in
+  [`docs/design.md`](docs/design.md).
 
-### v0.2.0 — Semantic Search ✓
+### Defect workflow — follow this when you find a defect or limitation
 
-- llama-server integration for local embeddings ✓
-- USearch vector index (HNSW) for note content ✓
-- Wire `search_notes` tool to the vector index ✓
-- Incremental index updates on note create/modify/delete ✓
-- Startup drift detection (`col.mod` comparison) and background rebuild ✓
-- Index persistence on graceful shutdown, after rebuild, and via a count-based flush every N incremental edits ✓ (no time-based timer; a crash mid-burst still self-heals via `col.mod` drift)
-- `shrike index rebuild` CLI command for full re-indexing ✓
-- Index build state machine and progress tracking (ready/building/unavailable/error) ✓
-- Index status in `/status` endpoint and `search_notes` responses (actionable messages) ✓
-- `shrike embedding status` and `shrike index status` CLI commands ✓
-- Embedding service lifecycle ✓: `shrike embedding start` / `shrike embedding stop` cycle llama-server independently of the Shrike server; `shrike server start --no-embedding` boots with it off; the index records the embedding model's fingerprint (`model_id`) and forces a rebuild when the model changes.
-- Contextual upsert responses ✓: `upsert_notes` returns `neighbors` for each created/updated note — the k most similar existing notes as `{id, score, tags}` objects ranked by cosine similarity (defaults: `top_k_neighbors=5`, `neighbor_threshold=0.5`). Same search operation as `search_notes` (which returns `{id, score, tags, content}`), triggered by the upserted note's own content as the query. Neighbors below the threshold are excluded; batch notes are excluded from each other's results. Raw neighbor data — the server makes no tag suggestions; callers decide what to do with it. Grounds LLM-driven card creation in the collection's existing taxonomy and surfaces near-duplicates for investigation.
-- Duplicate detection ✓: threshold-based, using the same similarity infrastructure. High similarity scores in neighbors or search results indicate potential duplicates — callers apply their own threshold. No separate duplicate detection endpoint; `search_notes` and contextual upsert neighbors are the same operation.
+When you hit a bug, a limitation, or a missing API surface that is **out of scope
+for the task in hand**, do not silently fix it inline and do not leave it as a
+prose note. Capture it as resumable state:
 
-### v0.3.0 — Skill Plugin
+1. Open a GitHub issue with a clear problem statement (repro / expected vs actual /
+   scope, or the intended API surface that's missing).
+2. Create a branch `fix/‹issue#›-‹slug›` (or `feat/…` for a missing capability).
+3. Add failing test(s) that exercise the defect / pin the intended API —
+   asserting the *desired* behaviour and marked
+   `@pytest.mark.xfail(strict=True, reason="#‹n›: …")` so the branch's CI stays
+   green while the test is red-by-design, and a future fix that makes it pass
+   forces the marker's removal.
+4. Push the branch to origin and link it from the issue.
 
-- Extract `ShrikeClient` from CLI into a standalone Python client (`shrike.client`) usable outside the CLI — daemon lifecycle, MCP tool calls, server status. CLI becomes a thin layer over this client.
-- Reference skill plugin (Claude custom skill format): encodes pedagogical best practices for LLM-driven card creation — minimum information principle, cloze discipline, prefer existing decks over new ones, tag consistency via contextual upsert data, broad decks with tags over fine-grained deck hierarchies. Keeps opinions in the skill, not the server. Designed for Project-style setups with course materials as context. Initial goal is real-use iteration, not packaging.
-- **Bulk tag replace** ✓: tags stay a full *replace*, never an add/remove merge — the notes end up with exactly the set you send. Considered and rejected an additive/subtractive `mode` on `upsert_notes` (it's the "bag of optionals / hidden state" the schemas.py house style warns against, and the skill's tag work is a create-time full-set decision, not retroactive merging). Per-note replace already shipped via `upsert_notes` partial updates (`{id, tags}`) and `shrike note update --tags`; this added `shrike note tag <ids> --set a,b` as bulk sugar — the same replace applied across many notes in one batched `upsert_notes` call (`--set ""` clears). Retroactive collection-wide tag *cleanup* (a true add/remove over existing notes, backed by Anki's `bulk_add`/`bulk_remove`) remains unbuilt — out of the skill's scope until a concrete need appears.
-
-### v0.4.0 — Sync
-
-- AnkiWeb sync (auth, trigger, status)
-- Self-hosted anki-sync-server support
-- `shrike sync` commands
-- Sync server lifecycle management (`shrike sync-server start/stop/status`)
-- Credential storage
-
-### v0.5.0 — Desktop Application
-
-- Tauri shell wrapping the Python process
-- System tray / menu bar
-- Settings UI
-- Duplicate detection alerts in UI
-
-### v0.6.0 — Relay Prototype
-
-- Lightweight relay server: authenticates and forwards MCP JSON-RPC to a user's local Shrike instance
-- Removes the need for Tailscale or similar tunneling tools
-- Motivating use case: "study companion" workflow — student in Claude.ai with course materials in a Project and skill plugin shaping card creation, talking to their local collection via the relay
-- Scope is minimal: auth, forwarding, rate limiting, nothing else
-- Explicitly a prototype to test demand before investing in a hosted solution (which would need sync, multi-tenancy, storage)
-
-## What's not yet implemented
-
-- **Skill plugin**: Not started. Depends on contextual upsert responses from v0.2.0 (now complete).
-- **Sync**: No sync support yet.
-- **Desktop application**: Not started.
-- **Relay**: Not started.
+The failing test is the spec; the pushed branch is the handoff. See the full
+rationale in `CONTRIBUTING.md`.
