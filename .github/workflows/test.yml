@@ -3,6 +3,9 @@ name: Tests
 on:
   pull_request:
     branches: [main]
+    # `labeled` is added so applying the `rc` label re-triggers CI (the default
+    # types don't fire on label changes); it gates the expensive cross-platform job.
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
 
@@ -75,12 +78,14 @@ jobs:
           LD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
         run: pytest tests/integration -v -m embedding
 
-  # macOS + ARM are expensive (macOS bills at 10x), so they only run on push to
-  # main — i.e. at merge time — not on every PR. Each runs the full integration
+  # macOS + ARM are expensive (macOS bills at 10x), so they don't run on every
+  # PR. They run on push to main (merge time) and on any PR labelled `rc`
+  # (release candidate) — apply the label when you're about to tag a release and
+  # want full cross-platform coverage first. Each runs the full integration
   # suite (including embedding) for that platform.
   cross-platform:
     name: Cross-platform (${{ matrix.os }})
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

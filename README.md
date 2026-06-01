@@ -74,13 +74,14 @@ Shrike exposes the following MCP tools:
 
 - **collection_info** — collection structure, note types, decks, tags, and stats
 - **list_notes** — filter and retrieve notes by deck, tags, type, IDs, or date
-- **search_notes** — semantic similarity search (not yet implemented)
+- **search_notes** — semantic similarity search over note embeddings
 - **upsert_notes** — create or update notes in bulk
 - **upsert_note_types** — create or update note type definitions
 - **delete_notes** — permanently delete notes by ID
 - **delete_note_types** — delete note types by ID (only if no notes use them)
 
-Full input/output schemas are in [`docs/mcp-schema.json`](docs/mcp-schema.json).
+The authoritative machine schema is whatever the running server advertises via
+`tools/list`; [`docs/mcp-tools.md`](docs/mcp-tools.md) is the human-readable companion.
 
 ## Development
 
@@ -89,19 +90,24 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
-pytest tests/unit -v                         # 93 unit tests
-pytest tests/integration -v -m integration   # 103 integration tests
+pytest tests/unit -v                         # unit tests (no server)
+pytest tests/integration -v -m integration   # integration tests (real server subprocess)
 ruff check src/shrike/
 mypy src/shrike/
 ```
 
+## Contributing
+
+Conventions for branching, versioning, releases, and how defects get tracked are
+in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 ## Roadmap
 
-- **v0.1.0** — CLI and MCP server *(done)*
-- **v0.2.0** — Semantic search via local embeddings (llama-server + USearch), index consistency and crash recovery, contextual upsert responses (neighbor tags for taxonomy grounding), reference skill plugin for LLM-driven card creation
-- **v0.3.0** — AnkiWeb and self-hosted sync support
-- **v0.4.0** — Desktop application (Tauri)
-- **v0.5.0** — Relay prototype for remote access without tunneling (auth + forwarding to local instance)
+Shipped through **v0.3.x**: CLI + MCP server, semantic search (local embeddings +
+USearch), and the reference skill plugin for LLM-driven card creation. Next up is
+sync (v0.4). Tracked work lives in
+[GitHub issues and milestones](https://github.com/lathrys-at/shrike/milestones),
+not here — see `CONTRIBUTING.md` for how the roadmap is organised.
 
 ## License
 
