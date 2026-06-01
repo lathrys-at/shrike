@@ -24,6 +24,37 @@ python -m shrike.server --collection /path/to/collection.anki2
 
 The server listens on `http://127.0.0.1:8372/mcp` (JSON-RPC 2.0). Any MCP client can connect to it. The CLI auto-starts the daemon if it isn't already running.
 
+### Connect an MCP client
+
+Start the server (above) first — it holds an exclusive lock on the collection, so it must be the one process that has it open.
+
+**Claude Code** speaks streamable HTTP directly:
+
+```bash
+claude mcp add --transport http shrike http://127.0.0.1:8372/mcp
+```
+
+**Claude Desktop / claude.ai** native *URL connectors* require OAuth, which Shrike does not yet implement, so connect through the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) stdio bridge instead. Add this to `claude_desktop_config.json` (Settings → Developer → Edit Config):
+
+```json
+{
+  "mcpServers": {
+    "shrike": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "http://127.0.0.1:8372/mcp",
+        "--allow-http",
+        "--transport",
+        "http-only"
+      ]
+    }
+  }
+}
+```
+
+The endpoint is unauthenticated and bound to loopback by default — see the transport-security and remote-access options in [`docs/cli-reference.md`](docs/cli-reference.md) before exposing it beyond `127.0.0.1`.
+
 ### CLI
 
 ```bash

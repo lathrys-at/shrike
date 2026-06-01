@@ -1,0 +1,141 @@
+name: Release
+
+# Tag-triggered release. The expensive cross-platform lanes that plain PRs skip
+# (they only run on `rc`-labelled PRs — see test.yml) run here unconditionally:
+# tagging a release is exactly the moment to pay for full coverage. On a `v*` tag
+# push we run the full integration suite on every platform, build the artifacts
+# (Python sdist + wheel, the anki-cards.skill bundle, and SHA256SUMS), and cut a
+# GitHub Release with them attached.
+#
+# Pre-release tags (`vX.Y.Z-rc.N`, `-alpha`, …) are marked as GitHub pre-releases.
+# PyPI publishing is intentionally out of scope (see #43) — decide separately
+# whether Shrike ships to PyPI before wiring trusted publishing in here.
+on:
+  push:
+    tags:
+      - "v*"
+
+# `contents: write` is required to create the Release and upload its assets.
+permissions:
+  contents: write
+
+jobs:
+  # Full integration + embedding suite on every supported platform. This is the
+  # cross-platform job from test.yml, run unconditionally instead of gated on the
+  # `rc` label — a release must be green everywhere before we build or publish.
+  test:
+    name: Full suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history + tags so hatch-vcs can derive the version at install
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install llama-server
+        run: bash .github/scripts/install-llama-server.sh
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run integration + embedding tests
+        env:
+          LD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
+          DYLD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
+        run: pytest tests/integration -v -m integration
+
+  # Build the release artifacts from the tagged commit: the Python sdist + wheel
+  # (hatch-vcs derives the version from the tag, hence fetch-depth: 0) and the
+  # anki-cards skill bundle (a .skill zip — the format Claude Desktop / claude.ai
+  # accept). Both go into the `dist` artifact for the release job to attach.
+  build:
+    name: Build sdist + wheel + skill
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs reads the tag via `git describe` at build time
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          pip install build twine
+          python -m build
+      - name: Validate metadata
+        run: twine check dist/*
+      - name: Sanity-check built version matches the tag
+        # Defence-in-depth against a broken/shallow build producing a dev version
+        # (e.g. tag not fetched) — NOT the old __version__ drift, which hatch-vcs
+        # made impossible. Skipped for pre-releases: PEP 440 normalises the tag
+        # (v1.2.3-rc.1 -> 1.2.3rc1), so a literal tag↔filename match wouldn't hold.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "$version" != *-* ]]; then
+            if ! ls "dist/shrike-${version}.tar.gz" >/dev/null 2>&1; then
+              echo "::error::built artifacts don't match tag ${GITHUB_REF_NAME}: $(ls dist)"
+              exit 1
+            fi
+          fi
+      # Run after `twine check` so it only ever saw the Python dists. The script
+      # validates SKILL.md frontmatter and writes dist/anki-cards.skill.
+      - name: Package the anki-cards skill bundle
+        run: python scripts/package-skill.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  # Create the GitHub Release and attach the artifacts. Notes come from the
+  # matching CHANGELOG section for a final release; pre-releases (and a final tag
+  # whose section is missing) fall back to auto-generated commit notes.
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4  # for CHANGELOG.md at the tagged commit
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+
+          # A SemVer pre-release identifier (the hyphen in v1.2.3-rc.1) marks this
+          # as a GitHub pre-release.
+          prerelease=""
+          [[ "$version" == *-* ]] && prerelease="--prerelease"
+
+          # Curated notes: the section under "## [VERSION]" in CHANGELOG.md, up to
+          # the next "## " heading. Literal-prefix match (index == 1) so dots in
+          # the version need no regex escaping. Pre-releases skip this — their
+          # section usually doesn't exist yet (still under Unreleased).
+          notes="--generate-notes"
+          if [[ -z "$prerelease" ]]; then
+            awk -v hdr="## [$version]" '
+              index($0, hdr) == 1 { capture = 1; next }
+              capture && /^## / { exit }
+              capture { print }
+            ' CHANGELOG.md > notes.md
+            # Drop the blank line that follows the heading; use the file only if
+            # it has real content.
+            sed -i -e '/./,$!d' notes.md
+            [[ -s notes.md ]] && notes="--notes-file notes.md"
+          fi
+
+          # Checksums for verifiable downloads. The explicit globs can't match
+          # SHA256SUMS itself, so it never hashes its own (partial) contents.
+          ( cd dist && sha256sum -- *.whl *.tar.gz *.skill > SHA256SUMS )
+
+          gh release create "$tag" dist/* --title "$tag" $prerelease $notes

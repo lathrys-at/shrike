@@ -126,6 +126,8 @@ mypy src/shrike/                   # Type check
 
 All three must pass cleanly. CI (`.github/workflows/test.yml`) runs, on every PR (Linux x64 only): a `lint` job, a `test` job (unit + non-embedding integration under the coverage gate), and an `embedding` job. macOS and ARM run the full integration suite via the `cross-platform` job, gated on `contains(github.event.pull_request.labels.*.name, 'rc')` — i.e. **only** on a PR labelled `rc` (release candidate), never on plain PRs and never on merge to `main`. Actions minutes are limited and macOS bills at 10×, so these lanes stay off the normal iterate-and-merge loop entirely; apply the `rc` label before tagging a release to get cross-platform coverage first. The PR trigger lists `labeled` in its `types` so adding the label re-triggers CI.
 
+A separate **release workflow** (`.github/workflows/release.yml`) fires on `push` of a `v*` tag (not on PRs): it runs the full cross-platform integration suite on all three platforms unconditionally, builds the release artifacts — Python sdist + wheel (hatch-vcs derives the version from the tag, so the build/test jobs check out with `fetch-depth: 0`), the `anki-cards.skill` bundle (`scripts/package-skill.py`), and a `SHA256SUMS` — and cuts a GitHub Release with them all attached. Release notes come from the matching `## [X.Y.Z]` section of `CHANGELOG.md` (falling back to auto-generated commit notes); a pre-release tag (`vX.Y.Z-rc.N`, detected by the SemVer hyphen) is published as a GitHub pre-release. PyPI publishing is intentionally not wired up (#43).
+
 ### Running the server manually
 
 ```bash

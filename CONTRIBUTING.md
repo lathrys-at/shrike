@@ -50,9 +50,13 @@ backward compatibility; don't rush it.
 1. Update `CHANGELOG.md` (move `Unreleased` items under the new version heading).
    You do **not** edit a version constant — the tag *is* the version.
 2. Create an annotated tag: `git tag -a vX.Y.Z -m "vX.Y.Z"` (add `-s` to sign).
-3. Push the tag. A tag-triggered release workflow (#43) will, once built, run the
-   full cross-platform suite, build sdist + wheel, and cut a GitHub Release. Until
-   then, do the build/release step by hand.
+3. Push the tag. The tag-triggered release workflow (`.github/workflows/release.yml`)
+   runs the full cross-platform integration suite, builds the artifacts, and cuts a
+   GitHub Release with them attached: the Python **sdist + wheel**, the
+   **`anki-cards.skill`** bundle (`scripts/package-skill.py`), and a **`SHA256SUMS`**.
+   Release notes come from the matching `## [X.Y.Z]` section of `CHANGELOG.md`. A
+   pre-release tag (`vX.Y.Z-rc.N`) is published as a GitHub pre-release. (PyPI
+   publishing is not wired up — see #43.)
 
 ## Issue tracking
 
