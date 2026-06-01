@@ -23,7 +23,7 @@ CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP)
 
 ```
 src/shrike/                       # Python package (src layout)
-├── __init__.py                   # Just __version__
+├── __init__.py                   # Re-exports __version__ from generated _version.py (hatch-vcs)
 ├── server.py                     # MCP server entry point (argparse, FastMCP)
 ├── collection.py                 # CollectionWrapper — all Anki DB operations
 ├── note_types.py                 # upsert_note_types() — create/update note types
@@ -320,9 +320,9 @@ working summary.
   through a `‹type›/‹issue#›-‹slug›` branch → PR → **squash merge**. No direct
   pushes to `main`.
 - **SemVer**, `vX.Y.Z` annotated tags. `0.x` may break the public surface (MCP
-  schemas, CLI, config) between minor versions. `__version__` in
-  `src/shrike/__init__.py` is the version source (read by `pyproject.toml`); bump
-  it and tag in lockstep until tag-derived versioning lands.
+  schemas, CLI, config) between minor versions. The version is **derived from the
+  git tag** by hatch-vcs (no `__version__` constant to bump): the build writes
+  `src/shrike/_version.py`, re-exported by `__init__.py`. Just tag to release.
 - **Roadmap and tracked work live in GitHub issues + milestones** (one milestone
   per minor version, each with an `epic` tracking issue) — *not* in this file or
   the README, which is how the old prose roadmaps drifted. `gh issue list` /

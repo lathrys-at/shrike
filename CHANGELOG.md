@@ -17,6 +17,8 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 - `search_notes` query strings logged at DEBUG (#26).
 
 ### Changed
+- Version is now derived from the git tag via hatch-vcs instead of a hand-edited
+  `__version__` constant, ending tag/version drift (#42, #44).
 - Note text is normalized (rendered, stable) before embedding (#32).
 - Security hardening of the HTTP transport; concurrency serialization of
   collection access (#13, #17).
