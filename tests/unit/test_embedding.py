@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, Mock, patch
 import httpx
 import pytest
 
+from shrike.embed_text import EMBED_TEXT_VERSION
 from shrike.embedding import EmbeddingRuntime, EmbeddingService
 
 
@@ -431,10 +432,12 @@ class TestModelInfo:
 
 class TestModelFingerprint:
     _META = {"n_params": 1, "n_embd": 2, "n_vocab": 3, "n_ctx_train": 4, "size": 5}
+    # The note-text normalization version is appended to every fingerprint.
+    _TP = f":textprep={EMBED_TEXT_VERSION}"
 
     def test_from_meta(self, svc: EmbeddingService) -> None:
         with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
-            assert svc.model_fingerprint() == "meta:1:2:3:4:5"
+            assert svc.model_fingerprint() == "meta:1:2:3:4:5" + self._TP
 
     def test_name_excluded(self, svc: EmbeddingService) -> None:
         # Same numeric meta, different name → identical fingerprint.
@@ -449,16 +452,16 @@ class TestModelFingerprint:
         model.write_bytes(b"x" * 100)
         svc = EmbeddingService(model=str(model))
         with patch.object(svc, "model_info", return_value={}):
-            assert svc.model_fingerprint() == "file:model.gguf:100"
+            assert svc.model_fingerprint() == "file:model.gguf:100" + self._TP
 
     def test_fallback_missing_file(self, svc: EmbeddingService) -> None:
         with patch.object(svc, "model_info", return_value={}):
-            assert svc.model_fingerprint() == "file:model.gguf:-1"
+            assert svc.model_fingerprint() == "file:model.gguf:-1" + self._TP
 
     def test_pooling_folded_in(self) -> None:
         svc = EmbeddingService(model="/m.gguf", pooling="last")
         with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
-            assert svc.model_fingerprint() == "meta:1:2:3:4:5:pool=last"
+            assert svc.model_fingerprint() == "meta:1:2:3:4:5:pool=last" + self._TP
 
     def test_pooling_changes_fingerprint(self) -> None:
         # Different pooling on the same model → different identity → rebuild.
@@ -470,15 +473,15 @@ class TestModelFingerprint:
         ):
             assert mean.model_fingerprint() != last.model_fingerprint()
 
-    def test_unset_pooling_matches_legacy(self, svc: EmbeddingService) -> None:
-        # No pooling set → fingerprint unchanged from before the feature existed.
+    def test_unset_pooling_adds_no_pool_token(self, svc: EmbeddingService) -> None:
+        # No pooling set → no pool= token (only the always-present textprep tail).
         with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
-            assert svc.model_fingerprint() == "meta:1:2:3:4:5"
+            assert svc.model_fingerprint() == "meta:1:2:3:4:5" + self._TP
 
     def test_extra_args_folded_in(self) -> None:
         svc = EmbeddingService(model="/m.gguf", extra_args=["--flash-attn"])
         with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
-            assert svc.model_fingerprint() == "meta:1:2:3:4:5:args=--flash-attn"
+            assert svc.model_fingerprint() == "meta:1:2:3:4:5:args=--flash-attn" + self._TP
 
     def test_extra_args_change_fingerprint(self) -> None:
         a = EmbeddingService(model="/m.gguf", extra_args=["--flash-attn"])
@@ -494,12 +497,14 @@ class TestModelFingerprint:
         # appear in the fingerprint (and thus can't force a needless rebuild).
         svc = EmbeddingService(model="/m.gguf", extra_args=["--host 0.0.0.0"])
         with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
-            assert svc.model_fingerprint() == "meta:1:2:3:4:5"
+            assert svc.model_fingerprint() == "meta:1:2:3:4:5" + self._TP
 
     def test_pooling_and_extra_args_both_folded(self) -> None:
         svc = EmbeddingService(model="/m.gguf", pooling="last", extra_args=["--flash-attn"])
         with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
-            assert svc.model_fingerprint() == "meta:1:2:3:4:5:pool=last:args=--flash-attn"
+            assert (
+                svc.model_fingerprint() == "meta:1:2:3:4:5:pool=last:args=--flash-attn" + self._TP
+            )
 
 
 class TestEmbedModelPinning:

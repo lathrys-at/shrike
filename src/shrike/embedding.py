@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from shrike.embed_text import EMBED_TEXT_VERSION
+
 if TYPE_CHECKING:
     from shrike.index import VectorIndex
 
@@ -431,6 +433,12 @@ class EmbeddingService:
         vector spaces. (Vector-affecting flags should be typed settings — like
         ``--embedding-pooling`` — not buried in the passthrough.) Reserved flags
         are excluded because they never reach llama-server.
+
+        Finally the note-text normalization version (``EMBED_TEXT_VERSION``) is
+        appended unconditionally: the text we feed the model is as much a part of
+        the vector space as the model itself, so changing how notes are cleaned
+        must invalidate the index. (Unlike pooling/passthrough this is never
+        omitted — an index built under the old raw-text scheme *should* rebuild.)
         """
         meta = self.model_info().get("meta") or {}
         fields = ("n_params", "n_embd", "n_vocab", "n_ctx_train", "size")
@@ -449,7 +457,7 @@ class EmbeddingService:
         passthrough = self._passthrough_tokens()
         if passthrough:
             base = f"{base}:args={' '.join(passthrough)}"
-        return base
+        return f"{base}:textprep={EMBED_TEXT_VERSION}"
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Compute embeddings for a list of texts.
