@@ -196,6 +196,19 @@ Text: The four nitrogenous bases of DNA are {{c1::adenine}}, {{c2::thymine}},
       {{c3::guanine}}, and {{c4::cytosine}}.
 ```
 
+**Also wrong** — clozing the sub-*groups* instead of the members. The bases split
+into two classes (purines, pyrimidines), and that grouping is a trap:
+
+```
+Text: DNA's bases are the purines {{c1::adenine and guanine}} and the
+      pyrimidines {{c2::thymine and cytosine}}.
+```
+
+Only two deletions, so you're tested on "name the purines" / "name the
+pyrimidines" — never the four bases individually. Notice each deletion joins two
+names with "and": that's the tell you've clozed the group. One deletion per base,
+as in the "after" above.
+
 ### An ordered sequence (where order is the point)
 
 Like an enumeration, but the *sequence* itself is part of the knowledge — so keep
