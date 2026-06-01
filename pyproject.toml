@@ -19,6 +19,7 @@ version-file = "src/shrike/_version.py"
 name = "shrike"
 dynamic = ["version"]
 description = "MCP server for Anki collection management"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "AGPL-3.0-or-later"
 dependencies = [

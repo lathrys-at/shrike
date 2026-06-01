@@ -8,6 +8,12 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ## [Unreleased]
 
 ### Added
+- Tag-triggered release workflow: pushing a `v*` tag runs the full cross-platform
+  integration suite, builds the release artifacts (Python sdist + wheel, the
+  `anki-cards.skill` bundle, and `SHA256SUMS`), and cuts a GitHub Release with them
+  attached (notes from the matching `CHANGELOG.md` section) (#43).
+- `readme = "README.md"` in package metadata, so the sdist/wheel carry a
+  long description (#43).
 - Reference `anki-cards` skill plugin for LLM-driven card creation, with a QA eval
   harness (`tests/qa/`) and a skill-packaging script (#21, #24, #25, #27, #29–#31).
 - `shrike note tag <ids> --set …` for bulk tag replacement (#28).
