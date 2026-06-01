@@ -12,3 +12,4 @@ Closes #<!-- issue number -->
 - [ ] `ruff check` / `ruff format --check` / `mypy` pass
 - [ ] `CHANGELOG.md` updated under `Unreleased` (if user-visible)
 - [ ] Docs updated (`CLAUDE.md` / `docs/` / `README.md`) if behaviour changed
+- [ ] If `skills/**` changed: ran the QA eval and noted the `with_skill` vs `baseline` result above

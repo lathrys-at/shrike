@@ -107,3 +107,26 @@ pytest tests/integration -q -m "integration and not embedding"
 
 See `CLAUDE.md` for the coverage-gate reproduction and the embedding/integration
 suites that need a local `llama-server`.
+
+## Skill changes (QA eval)
+
+The `anki-cards` skill (`skills/anki-cards/**`) is **not covered by `pytest`/CI** —
+only the pure grader (`tests/qa/eval/test_grade.py`) runs there. A change to the
+skill's guidance or references can pass every CI check while silently regressing
+card quality, so the regression guard is the manual eval harness, not the test
+suite. (For scale: rewording one rule from an abstraction into a surface check
+moved a weak-model scenario from 1/5 to 5/5 — the kind of swing CI can't see.)
+
+When you change skill definitions, **run the QA eval and note the `with_skill`
+result (vs `baseline`) in the PR.** It needs a local `llama-server` + `claude -p`
+and costs real tokens, so it can't be a CI gate — it's expected practice, not a
+hard merge blocker.
+
+```bash
+tests/qa/eval/run.py        # see tests/qa/eval/README.md for flags
+```
+
+Scope is your judgment: run the scenarios the change plausibly affects (a targeted
+`--scenarios …` sweep is fine for a narrow edit; a fuller matrix before a release).
+The harness, scenarios, and grading are documented in
+[`tests/qa/eval/README.md`](tests/qa/eval/README.md).
