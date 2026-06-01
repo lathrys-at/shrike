@@ -60,7 +60,7 @@ with reality).
   checklist of its deliverables. Fine-grained issues are broken out for the
   next-up version and linked from the epic; later versions stay as the epic until
   they come into focus.
-- Shipped-design rationale lives in [`docs/design.md`](docs/design.md), not in
+- Shipped-design rationale lives in [`docs/decisions.md`](docs/decisions.md), not in
   closed issues.
 
 ## Defect & limitation workflow

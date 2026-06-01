@@ -329,7 +329,7 @@ working summary.
   `gh issue list --milestone "..."` is the current state of the project.
 - **Shipped-design rationale** (the "why" behind decisions like contextual-upsert
   neighbours, duplicate detection, full-replace tags) lives in
-  [`docs/design.md`](docs/design.md).
+  [`docs/decisions.md`](docs/decisions.md).
 
 ### Defect workflow — follow this when you find a defect or limitation
 
