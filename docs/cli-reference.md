@@ -1,10 +1,10 @@
 # Shrike CLI Reference
 
-The Shrike CLI manages your Anki collection through the MCP server. If the server isn't running when you run a command, the CLI starts the daemon automatically.
+The Shrike CLI manages your Anki collection through the MCP server. If the server isn't running when you run a command, the CLI starts the daemon automatically, as long as a collection is configured (in the config file or `SHRIKE_COLLECTION`). On a fresh setup, start it yourself first with `shrike server start --collection`.
 
 All commands accept `--json` for machine-readable output and `--pretty/--no-pretty` for controlling Rich formatting. These flags work on both the root command and any subcommand (`shrike --json info` and `shrike info --json` are equivalent).
 
-Note IDs accept an optional `#` prefix — `shrike note show #1779749914797` and `shrike note show 1779749914797` are the same. Type commands accept either a name or numeric ID wherever an identifier is expected.
+Note IDs accept an optional `#` prefix, so `shrike note show #1779749914797` and `shrike note show 1779749914797` are the same. Type commands accept either a name or numeric ID wherever an identifier is expected.
 
 ## Global Options
 
@@ -35,10 +35,10 @@ Start the server as a background daemon. The collection path can come from `--co
 | `--collection PATH` | Path to the Anki collection file (`collection.anki2`). |
 | `--port INTEGER` | Port to listen on (default: 8372). |
 | `--host TEXT` | Host to bind to (default: `127.0.0.1`). |
-| `--allow-remote` | Permit binding to a non-loopback host. Every endpoint is unauthenticated, so this exposes the full collection API to the network — only behind your own auth/network controls. |
+| `--allow-remote` | Permit binding to a non-loopback host. Every endpoint is unauthenticated, so this exposes the full collection API to the network. Use it only behind your own auth or network controls. |
 | `--allowed-host TEXT` | Additional `Host` header to trust beyond loopback (repeatable). For a reverse-proxy or VPN hostname; a proxy forwards `name:port`, so use the `name:*` port-wildcard form. |
 | `--allowed-origin TEXT` | Additional `Origin` header to trust beyond loopback (repeatable). Native MCP clients usually send none (always allowed); add one only if a browser client is rejected with 403. |
-| `--no-dns-rebinding-protection` | Disable `Host`/`Origin` validation entirely, on any bind — for deployments where the network is the trust boundary (behind a reverse proxy, on a VPN/tailnet, firewalled). Endpoints stay unauthenticated. |
+| `--no-dns-rebinding-protection` | Disable `Host`/`Origin` validation entirely, on any bind, for deployments where the network is the trust boundary (behind a reverse proxy, on a VPN/tailnet, firewalled). Endpoints stay unauthenticated. |
 | `--foreground` | Run in the foreground instead of daemonizing. |
 | `--log-dir PATH` | Directory for log files (default: platform-specific). |
 | `--log-level` | `debug`, `info`, `warning`, or `error` (default: `info`). |
@@ -197,7 +197,7 @@ shrike note update 1779749914797 --deck "Other::Deck"
 
 ### `shrike note tag <NOTE_IDS>... --set TEXT`
 
-Replace the tags on one or more notes with the same new set. Tags are fully replaced, not merged — each note ends up with exactly the tags you pass. Fields and decks are untouched. Backed by a single batched `upsert_notes` call.
+Replace the tags on one or more notes with the same new set. Tags are fully replaced, not merged; each note ends up with exactly the tags you pass. Fields and decks are untouched. Backed by a single batched `upsert_notes` call.
 
 | Option | Description |
 |---|---|
@@ -316,7 +316,7 @@ Each template object:
 
 ### `shrike type update <IDENTIFIER>`
 
-Update an existing note type. For simple changes, use `--name` or `--css`. For structural changes (fields, templates), pipe a JSON definition with `--json-input` — the identifier is resolved and the ID is injected automatically.
+Update an existing note type. For simple changes, use `--name` or `--css`. For structural changes (fields, templates), pipe a JSON definition with `--json-input`; the identifier is resolved and the ID is injected automatically.
 
 | Option | Description |
 |---|---|
