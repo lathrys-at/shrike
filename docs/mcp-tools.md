@@ -1,18 +1,18 @@
-# Anki MCP Server — Tool Interface
+# Shrike MCP Tools
 
-Seven tools for managing an Anki flashcard collection. The server maintains a local vector index over all note content, enabling semantic search and contextual neighbor suggestions without external API calls.
+These tools manage an Anki flashcard collection. The server maintains a local vector index over all note content, enabling semantic search and contextual neighbor suggestions without external API calls.
 
-This document is the human-readable reference. The machine-readable schema each tool advertises (input and output) is generated at runtime by the server from the Pydantic models in `shrike/schemas.py` — that module is the single source of truth.
+This document is the human-readable reference. The machine-readable schema each tool advertises (input and output) is generated at runtime by the server from the Pydantic models in `shrike/schemas.py`, which is the single source of truth.
 
-Notes in Anki have a **note type** that defines their fields (e.g., a "Basic" note type has "Front" and "Back" fields; a "Cloze" note type has "Text" and "Extra"). A note type also defines **card templates** — HTML templates that control how cards are rendered — and **CSS styling** shared across all its cards. A single note produces one or more cards depending on its note type. Notes belong to a **deck** and can have **tags**.
+Notes in Anki have a **note type** that defines their fields (e.g., a "Basic" note type has "Front" and "Back" fields; a "Cloze" note type has "Text" and "Extra"). A note type also defines **card templates** (HTML templates that control how cards are rendered) and **CSS styling** shared across all its cards. A single note produces one or more cards depending on its note type. Notes belong to a **deck** and can have **tags**.
 
 ---
 
 ## `collection_info`
 
-Return the structure of the Anki collection: available note types with their fields, deck names, tags, and summary statistics. Use this to orient yourself before creating or searching for notes — especially to discover which note types, fields, and decks exist.
+Return the structure of the Anki collection: available note types with their fields, deck names, tags, and summary statistics. Use this to orient yourself before creating or searching for notes, especially to discover which note types, fields, and decks exist.
 
-Called with no arguments, returns a compact summary (counts, dates, and collection path). Use the `include` parameter to request specific sections — or `"all"` for everything.
+Called with no arguments, returns a compact summary (counts, dates, and collection path). Use the `include` parameter to request specific sections, or `"all"` for everything.
 
 Note type summaries include field names and type (standard/cloze) but not full template HTML or CSS. To inspect or modify templates, request full details with `note_type_details`.
 
@@ -92,11 +92,11 @@ Requesting `include: ["all"]` (or specific sections) adds them:
 
 ## `list_notes`
 
-Retrieve notes by structured filters — deck, tags, note type, note IDs, or modification date. Use this for precise lookups: fetching specific notes by ID, listing everything in a deck, or finding notes matching exact criteria. For conceptual or fuzzy queries ("cards about mitochondrial membrane potential"), use `search_notes` instead.
+Retrieve notes by structured filters: deck, tags, note type, note IDs, or modification date. Use this for precise lookups: fetching specific notes by ID, listing everything in a deck, or finding notes matching exact criteria. For conceptual or fuzzy queries ("cards about mitochondrial membrane potential"), use `search_notes` instead.
 
 Returns note metadata and content. Use `fields: "meta"` to return only metadata, which is useful when listing large result sets for triage before reading individual notes.
 
-Results are capped by `limit`. The response includes `total` (the full count of matching notes) so you can tell whether your query matched more than was returned. If so, narrow your filters rather than attempting to retrieve everything — large result sets aren't useful in conversation.
+Results are capped by `limit`. The response includes `total` (the full count of matching notes) so you can tell whether your query matched more than was returned. If so, narrow your filters rather than attempting to retrieve everything; large result sets aren't useful in conversation.
 
 ### Parameters
 
@@ -136,7 +136,7 @@ At least one filter (`ids`, `deck`, `tags`, `note_type`, `modified_since`, or `q
 }
 ```
 
-Anki permits per-card decks, so a single note's cards can live in different decks. `deck` reports the **first card's deck** — Shrike treats notes as belonging to one deck, so split-deck notes are represented by that first card only.
+Anki permits per-card decks, so a single note's cards can live in different decks. `deck` reports the **first card's deck**. Shrike treats notes as belonging to one deck, so split-deck notes are represented by that first card only.
 
 ---
 
@@ -144,7 +144,7 @@ Anki permits per-card decks, so a single note's cards can live in different deck
 
 Semantic similarity search over the collection. Accepts a list of natural-language query strings, a list of note IDs (to find notes similar to existing ones), or both. Returns the top matches ranked by similarity score.
 
-Use this for conceptual queries that keyword search can't handle: "cards about electron transport chain regulation", "anything related to this note about Japanese honorifics", or pre-creation checks ("do I already have a card covering this concept?"). Read the results and reason about overlap from the content — don't rely on the numeric scores for decision-making.
+Use this for conceptual queries that keyword search can't handle: "cards about electron transport chain regulation", "anything related to this note about Japanese honorifics", or pre-creation checks ("do I already have a card covering this concept?"). Read the results and reason about overlap from the content; don't rely on the numeric scores for decision-making.
 
 Results can be filtered by deck or tags to narrow the search space.
 
@@ -153,7 +153,7 @@ Results can be filtered by deck or tags to narrow the search space.
 | Name | Type | Required | Description |
 |---|---|---|---|
 | `queries` | `string[]` | no | Natural-language search strings. Each is embedded and matched against the collection independently. Max 50 per call. |
-| `ids` | `integer[]` | no | Note IDs to use as search anchors — finds notes semantically similar to these. Source notes are automatically excluded from results. Max 50 per call. |
+| `ids` | `integer[]` | no | Note IDs to use as search anchors, finding notes semantically similar to these. Source notes are automatically excluded from results. Max 50 per call. |
 | `top_k` | `integer` | no | Maximum results per query or source ID. Default `10`, max `50`. |
 | `threshold` | `number` | no | Minimum cosine similarity (0–1) for a match. Default `0.5`. Results scoring below it are dropped. |
 | `deck` | `string` | no | Restrict search to notes in this deck (includes child decks). |
@@ -196,11 +196,11 @@ At least one of `queries` or `ids` must be provided.
 
 Create or update notes in bulk. If a note object includes an `id`, the existing note is updated. If `id` is absent, a new note is created.
 
-When creating notes, `deck`, `note_type`, and `fields` are required. When updating, only `id` and the properties being changed need to be provided — omitted properties are left unchanged.
+When creating notes, `deck`, `note_type`, and `fields` are required. When updating, only `id` and the properties being changed need to be provided; omitted properties are left unchanged.
 
 When a vector index is available, each result includes `neighbors`: the most similar existing notes ranked by cosine similarity. Use these for tag consistency (adopt tags from nearby notes), detecting near-duplicates (high scores suggest overlap), or understanding where a new note sits in the collection.
 
-If the index update fails transiently (for example, the embedding service is briefly unavailable), the notes are still saved but `neighbors` is omitted. Each affected result is flagged with `neighbors_unavailable: true`, and the response carries a top-level `message` naming the IDs to retry. The exact same neighbor data is reproducible afterward with `search_notes` keyed on the note ID (`search_notes(ids=[<note id>])`) — it embeds the same note text against the same index, so the result is identical to what would have been attached here.
+If the index update fails transiently (for example, the embedding service is briefly unavailable), the notes are still saved but `neighbors` is omitted. Each affected result is flagged with `neighbors_unavailable: true`, and the response carries a top-level `message` naming the IDs to retry. The exact same neighbor data is reproducible afterward with `search_notes` keyed on the note ID (`search_notes(ids=[<note id>])`). It embeds the same note text against the same index, so the result is identical to what would have been attached here.
 
 ### Parameters
 
@@ -218,7 +218,7 @@ If the index update fails transiently (for example, the embedding service is bri
 | `deck` | `string` | create | Target deck. Required for new notes. On update, moves the note to this deck. |
 | `note_type` | `string` | create | Note type (e.g., `"Basic"`, `"Cloze"`). Required for new notes. Cannot be changed on update. |
 | `fields` | `object` | create | Field key-value pairs (e.g., `{"Front": "...", "Back": "..."}`). On update, only specified fields are modified. |
-| `tags` | `string[]` | no | Tags to set. On create, these are the note's tags. On update, **replaces** all existing tags — include existing tags you want to keep. |
+| `tags` | `string[]` | no | Tags to set. On create, these are the note's tags. On update, **replaces** all existing tags, so include existing tags you want to keep. |
 
 ### Response
 
@@ -258,7 +258,7 @@ When the index update fails transiently, saved notes carry `neighbors_unavailabl
     {
       "status": "created",
       "id": 1700000000789,
-      "neighbors_unavailable": true   // index hiccup — neighbors not computed
+      "neighbors_unavailable": true   // index hiccup; neighbors not computed
     }
   ],
   "message": "Notes were saved, but the vector index update failed, so neighbors could not be computed. Retry with search_notes(ids=[1700000000789]) to fetch the same neighbor data."
@@ -373,7 +373,7 @@ Permanently delete notes and all their associated cards. This cannot be undone.
 
 ## `delete_note_types`
 
-Permanently delete note type definitions. A note type can only be deleted if no notes currently use it — attempting to delete a note type that has notes will return an error for that item.
+Permanently delete note type definitions. A note type can only be deleted if no notes currently use it; attempting to delete a note type that has notes returns an error for that item.
 
 ### Parameters
 
