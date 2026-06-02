@@ -16,7 +16,7 @@ source = "vcs"
 version-file = "src/shrike/_version.py"
 
 [project]
-name = "shrike"
+name = "shrike-mcp"
 dynamic = ["version"]
 description = "MCP server for Anki collection management"
 readme = "README.md"
@@ -94,3 +94,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
 [project.scripts]
 shrike = "shrike.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/lathrys-at/shrike"
+Issues = "https://github.com/lathrys-at/shrike/issues"
