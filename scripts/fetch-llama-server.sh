@@ -18,7 +18,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CACHE="$ROOT/.cache"
 LLAMA_DIR="$CACHE/llama-server"
 MODEL_DIR="$CACHE/models"
-MODEL_NAME="all-MiniLM-L6-v2-Q4_0.gguf"
+MODEL_NAME="all-MiniLM-L6-v2-Q4_K_M.gguf"
 MODEL_URL="https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/$MODEL_NAME"
 
 # Pinned llama.cpp tag + per-platform checksums (shared with CI).

@@ -53,7 +53,7 @@ Start Shrike with both:
 ```bash
 shrike server start --collection ~/path/to/collection.anki2 \
   --llama-server ~/llama.cpp/build/bin/llama-server \
-  --embedding-model ~/models/all-MiniLM-L6-v2-Q4_0.gguf
+  --embedding-model ~/models/all-MiniLM-L6-v2-Q4_K_M.gguf
 ```
 
 If `--llama-server` or `--embedding-model` isn't given on the command line or in your config file, Shrike falls back to `LLAMA_SERVER_PATH` and a `llama-server` on your `PATH` for the binary, and to `SHRIKE_EMBEDDING_MODEL` for the model.

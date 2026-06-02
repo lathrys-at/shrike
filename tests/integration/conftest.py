@@ -29,9 +29,9 @@ from shrike.cli import cli
 
 EMBEDDING_MODEL_URL = (
     "https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF"
-    "/resolve/main/all-MiniLM-L6-v2-Q4_0.gguf"
+    "/resolve/main/all-MiniLM-L6-v2-Q4_K_M.gguf"
 )
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2-Q4_0.gguf"
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2-Q4_K_M.gguf"
 
 
 def _free_port() -> int:
