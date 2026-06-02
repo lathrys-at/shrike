@@ -78,7 +78,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           if [[ "$version" != *-* ]]; then
-            if ! ls "dist/shrike-${version}.tar.gz" >/dev/null 2>&1; then
+            if ! ls "dist/shrike_mcp-${version}.tar.gz" >/dev/null 2>&1; then
               echo "::error::built artifacts don't match tag ${GITHUB_REF_NAME}: $(ls dist)"
               exit 1
             fi
@@ -139,3 +139,27 @@ jobs:
           ( cd dist && sha256sum -- *.whl *.tar.gz *.skill > SHA256SUMS )
 
           gh release create "$tag" dist/* --title "$tag" $prerelease $notes
+
+  # Publish the Python package to PyPI on a final release, via trusted publishing
+  # (OIDC, no API token). Skipped for pre-release (rc) tags. Requires a trusted
+  # publisher configured on PyPI for `shrike-mcp`, pointing at this repo, this
+  # workflow file, and the `pypi` environment.
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    # Final releases only — a pre-release (rc) tag carries a SemVer hyphen.
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # mint the OIDC token PyPI trusted publishing verifies
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Keep only the Python distributions
+        # The dist artifact also carries anki-cards.skill; PyPI must receive only
+        # the sdist + wheel.
+        run: find dist -maxdepth 1 -type f ! -name '*.whl' ! -name '*.tar.gz' -delete
+      - uses: pypa/gh-action-pypi-publish@release/v1

@@ -7,6 +7,10 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 
 ## [Unreleased]
 
+### Added
+- Published to PyPI as `shrike-mcp` (the import package and `shrike` command are
+  unchanged), with releases publishing via GitHub trusted publishing (#58).
+
 ## [0.3.2] — 2026-06-01
 
 ### Added
