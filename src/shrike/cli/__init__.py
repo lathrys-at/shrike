@@ -5,6 +5,7 @@ from typing import Any
 
 import click
 
+from shrike import __version__
 from shrike.cli.config import DEFAULT_CONFIG_PATH, build_server_spec, load_config, resolve_url
 from shrike.client import ShrikeClient, ShrikeError
 
@@ -51,7 +52,7 @@ class ShrikeGroup(click.Group):
     default=True,
     help="Styled output (default: --pretty).",
 )
-@click.version_option(package_name="shrike")
+@click.version_option(version=__version__, prog_name="shrike")
 @click.pass_context
 def cli(
     ctx: click.Context,

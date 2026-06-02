@@ -7,6 +7,13 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-06-01
+
+### Fixed
+- `shrike --version` crashed after the PyPI rename: Click looked up distribution
+  metadata for `shrike`, but the published distribution is `shrike-mcp`. It now
+  reads the version directly from `__version__` (#61).
+
 ## [0.3.3] — 2026-06-01
 
 ### Added

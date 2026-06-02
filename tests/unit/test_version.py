@@ -51,3 +51,17 @@ def test_version_at_least_latest_tag() -> None:
         pytest.skip("no git tags available in this checkout")
     version_cls = pytest.importorskip("packaging.version").Version
     assert version_cls(shrike.__version__) >= version_cls(latest)
+
+
+def test_cli_version_flag_works() -> None:
+    """`shrike --version` must not depend on the distribution being named
+    `shrike`. It broke once when the PyPI name became `shrike-mcp` but Click's
+    version_option still looked up metadata for `shrike` (#61). Feeding the
+    version directly from __version__ avoids the lookup."""
+    from click.testing import CliRunner
+
+    from shrike.cli import cli
+
+    result = CliRunner().invoke(cli, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert shrike.__version__ in result.output
