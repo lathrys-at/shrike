@@ -1,0 +1,65 @@
+name: Warm CI cache
+
+# Populates main's actions/cache scope with the pinned llama-server and GGUF
+# embedding model, so PR embedding runs restore them instead of cold-downloading
+# from HuggingFace (which intermittently 429s). A cache is only restorable from
+# the current branch or the default branch; the test workflow runs on PRs only,
+# so without this nothing ever seeds main's scope and every PR misses (#93).
+#
+# Runs on the default branch twice a week — comfortably under the 7-day cache
+# eviction window — and on demand via workflow_dispatch (use it to warm the cache
+# immediately, e.g. after bumping the pinned llama-server or model).
+on:
+  schedule:
+    - cron: "17 4 * * 1,4" # Mon & Thu, 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    name: Warm embedding caches
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Same path/key as the embedding job in test.yml, so PRs restore exactly
+      # what this saves. llama-server is pinned via scripts/llama-server.lock.
+      - name: Cache llama-server
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/llama-server
+          key: llama-server-${{ runner.os }}-${{ hashFiles('scripts/llama-server.lock') }}
+      - name: Warm llama-server
+        run: bash .github/scripts/install-llama-server.sh
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/shrike-test-models
+          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M
+      - name: Warm embedding model
+        env:
+          SHRIKE_TEST_MODEL_DIR: ${{ runner.temp }}/shrike-test-models
+        run: |
+          pip install httpx
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from tests.integration.model_cache import (
+              EMBEDDING_MODEL_NAME,
+              EMBEDDING_MODEL_URL,
+              cached_model_path,
+              download_with_retry,
+          )
+
+          dest = cached_model_path(EMBEDDING_MODEL_NAME, Path(os.environ["RUNNER_TEMP"]) / "models")
+          if dest.exists() and dest.stat().st_size > 0:
+              print(f"model already present: {dest}")
+          else:
+              download_with_retry(EMBEDDING_MODEL_URL, dest)
+              print(f"downloaded model: {dest}")
+          PY

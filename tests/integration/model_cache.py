@@ -16,6 +16,14 @@ from pathlib import Path
 
 import httpx
 
+# Pinned test embedding model. Bump manually (URL + name together) to change it;
+# the CI cache-warmer and the test fixture both read these so they stay in sync.
+EMBEDDING_MODEL_URL = (
+    "https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF"
+    "/resolve/main/all-MiniLM-L6-v2-Q4_K_M.gguf"
+)
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2-Q4_K_M.gguf"
+
 # Statuses worth retrying: HF rate-limit plus transient gateway/server errors.
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 

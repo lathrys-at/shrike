@@ -26,13 +26,12 @@ import pytest
 from click.testing import CliRunner
 
 from shrike.cli import cli
-from tests.integration.model_cache import cached_model_path, download_with_retry
-
-EMBEDDING_MODEL_URL = (
-    "https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF"
-    "/resolve/main/all-MiniLM-L6-v2-Q4_K_M.gguf"
+from tests.integration.model_cache import (
+    EMBEDDING_MODEL_NAME,
+    EMBEDDING_MODEL_URL,
+    cached_model_path,
+    download_with_retry,
 )
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2-Q4_K_M.gguf"
 
 
 def _free_port() -> int:
