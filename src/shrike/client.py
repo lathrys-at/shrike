@@ -34,6 +34,8 @@ from shrike import daemon
 from shrike.schemas import (
     ClearUnusedTagsResponse,
     CollectionInfo,
+    DeckInput,
+    DeleteDecksResponse,
     DeleteNotesResponse,
     DeleteNoteTypesResponse,
     EmbeddingStartResponse,
@@ -51,6 +53,7 @@ from shrike.schemas import (
     ShutdownResponse,
     StopResponse,
     UpdateNoteTagsResponse,
+    UpsertDecksResponse,
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
 )
@@ -378,6 +381,21 @@ class ShrikeClient:
     def clear_unused_tags(self) -> ClearUnusedTagsResponse:
         return ClearUnusedTagsResponse.model_validate(self._call("clear_unused_tags", {}))
 
+    def upsert_decks(self, decks: Sequence[DeckInput | dict[str, Any]]) -> UpsertDecksResponse:
+        """Create or rename decks, transparently batching if over the server limit."""
+        payload = [_as_dict(d) for d in decks]
+        merged = self._batched_call(
+            "upsert_decks",
+            items=payload,
+            param_key="decks",
+            result_key="results",
+            batch_size=100,
+        )
+        return UpsertDecksResponse.model_validate(merged)
+
+    def delete_decks(self, names: list[str]) -> DeleteDecksResponse:
+        return DeleteDecksResponse.model_validate(self._call("delete_decks", {"decks": names}))
+
     def _batched_call(
         self,
         tool_name: str,
@@ -589,8 +607,8 @@ class ShrikeClient:
             )
 
 
-def _as_dict(item: NoteInput | NoteTypeInput | dict[str, Any]) -> dict[str, Any]:
+def _as_dict(item: NoteInput | NoteTypeInput | DeckInput | dict[str, Any]) -> dict[str, Any]:
     """Normalize a request item (model or dict) to a JSON-RPC argument dict."""
-    if isinstance(item, NoteInput | NoteTypeInput):
+    if isinstance(item, NoteInput | NoteTypeInput | DeckInput):
         return item.model_dump(exclude_none=True)
     return item

@@ -598,6 +598,55 @@ class TestTagGroup:
         assert data["tags_removed"] >= 1
 
 
+class TestDeckGroup:
+    """Deck lifecycle via CLI."""
+
+    def _deck_names(self, runner):
+        return {d["name"] for d in runner.json(["info", "--decks"])["decks"]}
+
+    def test_create(self, runner):
+        data = runner.json(["deck", "create", "CLIDeck::Sub"])
+        assert data["results"][0]["status"] == "created"
+        assert "CLIDeck::Sub" in self._deck_names(runner)
+
+    def test_rename(self, runner):
+        runner.json(["deck", "create", "RenmeFrom"])
+        data = runner.json(["deck", "rename", "RenmeFrom", "RenmeTo"])
+        assert data["results"][0]["status"] == "updated"
+        names = self._deck_names(runner)
+        assert "RenmeTo" in names and "RenmeFrom" not in names
+
+    def test_rename_unknown_errors(self, runner):
+        result = runner.invoke(["deck", "rename", "NoSuchDeck", "Whatever"])
+        assert result.exit_code != 0
+
+    def test_delete_empty(self, runner):
+        runner.json(["deck", "create", "DeleteMe"])
+        data = runner.json(["deck", "delete", "DeleteMe", "--yes"])
+        assert data["deleted"] == ["DeleteMe"]
+        assert "DeleteMe" not in self._deck_names(runner)
+
+    def test_delete_non_empty_refused(self, runner):
+        runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "FullDeck",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+            ]
+        )
+        result = runner.invoke(["deck", "delete", "FullDeck", "--yes"])
+        assert result.exit_code != 0
+        assert "not empty" in result.output.lower()
+        assert "FullDeck" in self._deck_names(runner)
+
+
 class TestNoteDelete:
     """Deleting notes via CLI."""
 

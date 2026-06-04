@@ -570,6 +570,76 @@ class CollectionWrapper:
     def _clear_unused_tags(self) -> dict[str, Any]:
         return {"tags_removed": self.col.tags.clear_unused_tags().count}
 
+    # -- decks ---------------------------------------------------------------
+
+    async def upsert_decks(self, decks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return await self.run(lambda _c: self._upsert_decks(decks))
+
+    def _upsert_decks(self, decks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Create or rename decks in bulk (same shape as ``_upsert_notes``).
+
+        Each item carries the desired ``name``; an optional ``id`` selects an
+        existing deck to rename to that name. Renaming onto a name already used by
+        a *different* deck is rejected (Anki would silently disambiguate to
+        ``name+``); to consolidate, move the notes instead. Per-item try/except so
+        one bad item doesn't sink the batch.
+        """
+        results: list[dict[str, Any]] = []
+        for index, deck in enumerate(decks):
+            try:
+                results.append(self._upsert_one_deck(deck))
+            except Exception as e:
+                results.append({"status": "error", "index": index, "error": str(e)})
+        return results
+
+    def _upsert_one_deck(self, deck: dict[str, Any]) -> dict[str, Any]:
+        name = deck.get("name")
+        if not name:
+            raise ValueError("name is required")
+        deck_id = deck.get("id")
+        if deck_id is not None:
+            if self.col.decks.get(deck_id, default=False) is None:  # type: ignore[arg-type]
+                raise ValueError(f"Deck {deck_id} not found")
+            clash = self.col.decks.id_for_name(name)
+            if clash is not None and int(clash) != int(deck_id):
+                raise ValueError(f"A deck named '{name}' already exists")
+            self.col.decks.rename(deck_id, name)  # type: ignore[arg-type]
+            logger.debug("Renamed deck %d -> %s", deck_id, name)
+            return {"status": "updated", "id": int(deck_id), "name": name}
+        existing = self.col.decks.id_for_name(name)
+        if existing is not None:
+            return {"status": "updated", "id": int(existing), "name": name}
+        new_id = self.col.decks.add_normal_deck_with_name(name).id
+        logger.debug("Created deck %s (id=%d)", name, new_id)
+        return {"status": "created", "id": int(new_id), "name": name}
+
+    async def delete_decks(self, names: list[str]) -> dict[str, Any]:
+        return await self.run(lambda _c: self._delete_decks(names))
+
+    def _delete_decks(self, names: list[str]) -> dict[str, Any]:
+        """Delete decks by name — only if empty (no cards in the deck or subdecks).
+
+        Emptying a deck is composed separately (move/merge its notes out, then
+        delete), so this never deletes a card or note and never touches the index
+        beyond the caller's col_mod bump.
+        """
+        deleted: list[str] = []
+        not_found: list[str] = []
+        not_empty: list[str] = []
+        to_remove: list[int] = []
+        for name in names:
+            deck_id = self.col.decks.id_for_name(name)
+            if deck_id is None:
+                not_found.append(name)
+            elif self.col.decks.card_count(deck_id, include_subdecks=True) > 0:
+                not_empty.append(name)
+            else:
+                to_remove.append(deck_id)
+                deleted.append(name)
+        if to_remove:
+            self.col.decks.remove(to_remove)  # type: ignore[arg-type]
+        return {"deleted": deleted, "not_found": not_found, "not_empty": not_empty}
+
     # -- embedding text ------------------------------------------------------
 
     async def note_texts_for_embedding(self, note_ids: Sequence[int]) -> list[str]:

@@ -249,6 +249,42 @@ shrike note search "mitochondria" --deck Biochemistry
 
 ---
 
+## `shrike deck`
+
+Create, rename, and delete decks. Deletion requires the deck to be empty — move its notes elsewhere first (e.g. `shrike note update <id> --deck …`), then delete.
+
+### `shrike deck create <NAME>`
+
+Create an empty deck. Use `::` for nesting. No-op if it already exists.
+
+```bash
+shrike deck create "Japanese::Vocabulary"
+```
+
+### `shrike deck rename <OLD> <NEW>`
+
+Rename or reparent a deck. **Decks do not merge** — renaming onto a name another deck already uses is an error. To consolidate, move the notes instead.
+
+```bash
+shrike deck rename "Japanese::Vocabulary" "Japanese::Vocab"
+shrike deck rename "Misc::French" "French"      # reparent to top level
+```
+
+### `shrike deck delete <NAMES>...`
+
+Delete one or more decks, each of which must already be empty (no cards in it or any subdeck). Prompts for confirmation unless `--yes`. Exits non-zero if any named deck was not empty or not found.
+
+| Option | Description |
+|---|---|
+| `-y, --yes` | Skip confirmation. |
+
+```bash
+shrike deck delete "Old Deck"
+shrike deck delete "A" "B" --yes
+```
+
+---
+
 ## `shrike tag`
 
 Collection-level tag operations. Per-note tag editing (set/add/remove on specific notes) lives under `shrike note tag`; these act on the collection's tag taxonomy.

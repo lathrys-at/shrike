@@ -262,6 +262,33 @@ class NoteTypeError(BaseModel):
 NoteTypeResult = Annotated[NoteTypeOk | NoteTypeError, Field(discriminator="status")]
 
 
+class DeckInput(BaseModel):
+    # Upsert input mirroring NoteInput: ``name`` is the desired deck name; an
+    # optional ``id`` selects an existing deck to rename to that name. Absent id =
+    # create (or no-op if the name already exists).
+    id: int | None = Field(
+        default=None,
+        description="Deck ID. Present = rename this deck to `name`, absent = create `name`.",
+    )
+    name: str = Field(description='Deck name (e.g., "Japanese::Vocabulary"); "::" denotes nesting.')
+
+
+class UpsertDeckOk(BaseModel):
+    status: Literal["created", "updated"]
+    id: int
+    name: str
+
+
+class UpsertDeckError(BaseModel):
+    status: Literal["error"]
+    index: int
+    name: str | None = None
+    error: str
+
+
+UpsertDeckResult = Annotated[UpsertDeckOk | UpsertDeckError, Field(discriminator="status")]
+
+
 class NoteTypeDeleted(BaseModel):
     status: Literal["deleted"]
     id: int
@@ -352,6 +379,16 @@ class RenameTagResponse(BaseModel):
 
 class ClearUnusedTagsResponse(BaseModel):
     tags_removed: int = 0
+
+
+class UpsertDecksResponse(BaseModel):
+    results: list[UpsertDeckResult] = []
+
+
+class DeleteDecksResponse(BaseModel):
+    deleted: list[str] = []
+    not_found: list[str] = []
+    not_empty: list[str] = []
 
 
 # ============================================================================

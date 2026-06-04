@@ -8,6 +8,15 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ## [Unreleased]
 
 ### Added
+- Deck lifecycle (#74): `upsert_decks` and `delete_decks` MCP tools plus a
+  `shrike deck create|rename|delete` CLI group.
+  - `deck create NAME` makes an empty deck (nested `Parent::Child` ok);
+    `deck rename OLD NEW` renames/reparents. `upsert_decks` mirrors `upsert_notes`
+    (an `id` renames the existing deck; absent creates). Decks do not merge —
+    renaming onto an existing name is an error.
+  - `deck delete` / `delete_decks` is **empty-only**: a deck with cards in it or a
+    subdeck is refused (reported `not_empty`). Move its notes out first, then
+    delete — so deleting a deck can never delete a note.
 - Tag curation beyond full-replace (#73): three new MCP tools and matching CLI.
   - `update_note_tags` / `shrike note tag --set|--add|--remove`: edit tags on a
     set of notes. `--set` replaces (and `--set ""` clears); `--add`/`--remove`

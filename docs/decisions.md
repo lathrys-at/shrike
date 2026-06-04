@@ -80,3 +80,27 @@ Because tags are not part of a note's embedding text, these ops bump `col.mod`
 but leave every vector valid; each advances the stored index `col_mod` without
 re-embedding, so a tag-only change doesn't trigger a full rebuild on next
 startup.
+
+## Decks
+
+### Deck deletion is empty-only; decks never merge (#74)
+
+`delete_decks` / `shrike deck delete` refuses unless the deck *and every subdeck*
+is empty. There is deliberately no "delete the cards too" or "move cards to
+Default" mode. Emptying a deck is a separate, composable step — move its notes
+elsewhere (`upsert_notes` with a new `deck`, `shrike note update --deck`) — and
+then the deck is deletable. The payoff: **deck deletion can never delete a note**,
+so it has no bearing on the collection's note set or the vector index (a deck name
+isn't embedding text). A destructive cards-and-notes wipe, if ever wanted, is just
+`delete_notes` on the deck's notes — no need to overload deck delete with it.
+
+Renaming a deck onto a name another deck already uses is an **error**, not a
+merge. Anki's backend would silently disambiguate (`B` → `B+`), which is
+surprising and litters the tree; we reject the collision instead and tell the
+caller to move notes if they meant to consolidate. So `upsert_decks` mirrors
+`upsert_notes` (id present = rename the existing deck; absent = create) without
+ever introducing a hidden merge.
+
+Like tag ops, deck create/rename/delete bump `col.mod` but change no vector, so
+they advance the stored index `col_mod` (shared `_bump_col_mod_after_metadata_change`
+helper) without re-embedding.

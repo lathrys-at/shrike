@@ -419,6 +419,55 @@ None.
 
 ---
 
+## `upsert_decks`
+
+Create or rename decks in bulk (1–100), the same shape as `upsert_notes`. Each item's `name` is the desired deck name (nested with `::`, e.g. `Japanese::Vocabulary`). An optional `id` selects an existing deck to rename/reparent to `name`.
+
+- item `{name}` (no id) → ensure a deck named `name` exists: `created` if newly made, `updated` if it already existed.
+- item `{id, name}` → rename/reparent deck `id` to `name` (`updated`). **Decks do not merge**: renaming onto a name another deck already uses returns an `error` for that item. An unknown `id` is also an `error`.
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `decks` | `object[]` | **yes** | 1–100 deck objects. Each: `name` (string, required), `id` (integer, optional — present = rename that deck to `name`). |
+
+### Response
+
+```jsonc
+{
+  "results": [
+    { "status": "created", "id": 1700000000111, "name": "Japanese::Vocabulary" },
+    { "status": "updated", "id": 1700000000222, "name": "French" },
+    { "status": "error", "index": 2, "name": "Dup", "error": "A deck named 'Dup' already exists" }
+  ]
+}
+```
+
+---
+
+## `delete_decks`
+
+Delete decks by name — **only if empty**. A deck is deletable only when neither it nor any of its subdecks contains cards. To remove a non-empty deck, move its notes elsewhere first (`upsert_notes` with a new `deck`), then delete the now-empty deck. This keeps deletion from ever destroying a note.
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `decks` | `string[]` | **yes** | 1–100 deck names to delete. |
+
+### Response
+
+```jsonc
+{
+  "deleted": ["Old Deck"],
+  "not_found": ["Typo Deck"],     // no deck by that name
+  "not_empty": ["Active Deck"]    // skipped: it (or a subdeck) still has cards
+}
+```
+
+---
+
 ## `delete_notes`
 
 Permanently delete notes and all their associated cards. This cannot be undone.

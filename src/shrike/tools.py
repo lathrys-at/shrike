@@ -13,6 +13,8 @@ from shrike.index import IndexSaver, IndexState, VectorIndex
 from shrike.schemas import (
     ClearUnusedTagsResponse,
     CollectionInfo,
+    DeckInput,
+    DeleteDecksResponse,
     DeleteNotesResponse,
     DeleteNoteTypesResponse,
     ListNotesResponse,
@@ -21,6 +23,7 @@ from shrike.schemas import (
     RenameTagResponse,
     SearchResponse,
     UpdateNoteTagsResponse,
+    UpsertDecksResponse,
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
 )
@@ -740,11 +743,11 @@ def register_tools(
         logger.info("delete_note_types completed: %s", statuses)
         return DeleteNoteTypesResponse.model_validate(result)
 
-    async def _bump_col_mod_after_tag_op() -> None:
-        """Keep the index from needlessly rebuilding after a tag-only change.
+    async def _bump_col_mod_after_metadata_change() -> None:
+        """Keep the index from needlessly rebuilding after a vectors-unchanged edit.
 
-        Tags are not part of a note's embedding text, so a tag op leaves every
-        vector valid — but it still bumps ``col.mod``. Advance the stored
+        Tag and deck operations don't touch a note's embedding text, so every
+        vector stays valid — but they still bump ``col.mod``. Advance the stored
         ``col_mod`` (and request a debounced save) so the next startup sees no
         drift and skips a full re-embed. Best-effort: index bookkeeping must
         never fail the operation, which is already committed to the collection.
@@ -756,7 +759,7 @@ def register_tools(
             if saver is not None:
                 saver.request_save()
         except Exception:
-            logger.warning("Failed to advance index col_mod after tag op", exc_info=True)
+            logger.warning("Failed to advance index col_mod after metadata change", exc_info=True)
 
     @mcp.tool()
     @_safe_tool
@@ -822,7 +825,7 @@ def register_tools(
         )
 
         if result["notes_modified"]:
-            await _bump_col_mod_after_tag_op()
+            await _bump_col_mod_after_metadata_change()
 
         return UpdateNoteTagsResponse.model_validate(result)
 
@@ -856,7 +859,7 @@ def register_tools(
         result = await wrapper.rename_tag(old, new, note_ids)
         logger.info("rename_tag modified %d note(s)", result["notes_modified"])
         if result["notes_modified"]:
-            await _bump_col_mod_after_tag_op()
+            await _bump_col_mod_after_metadata_change()
         return RenameTagResponse.model_validate(result)
 
     @mcp.tool()
@@ -871,5 +874,85 @@ def register_tools(
         result = await wrapper.clear_unused_tags()
         logger.info("clear_unused_tags removed %d tag(s)", result["tags_removed"])
         if result["tags_removed"]:
-            await _bump_col_mod_after_tag_op()
+            await _bump_col_mod_after_metadata_change()
         return ClearUnusedTagsResponse.model_validate(result)
+
+    @mcp.tool()
+    @_safe_tool
+    async def upsert_decks(
+        decks: Annotated[
+            list[DeckInput],
+            Field(
+                min_length=1,
+                max_length=100,
+                description="Array of deck objects to create or rename.",
+            ),
+        ],
+    ) -> UpsertDecksResponse:
+        """Create or rename decks in bulk (1-100 per call).
+
+        Same shape as upsert_notes: each item's `name` is the desired deck name.
+        If an item includes an `id`, that existing deck is renamed to `name`
+        (and reparented if the name has a new `::` prefix); renaming onto a name
+        already used by a different deck is an error (decks do not merge — move
+        the notes instead). If `id` is absent, a deck named `name` is created (or
+        left as-is if it already exists). Nested decks use "::"
+        (e.g. "Japanese::Vocabulary").
+
+        Each result reports `status` ("created", "updated", or "error") with the
+        deck `id` and `name`. Use this to set up deck structure before adding
+        notes, or to reorganize the hierarchy. To delete a deck, empty it first
+        (move its notes elsewhere) then call delete_decks."""
+        creates = sum(1 for d in decks if d.id is None)
+        logger.info("upsert_decks count=%d (renames=%d)", len(decks), len(decks) - creates)
+
+        deck_dicts = [d.model_dump(exclude_none=True) for d in decks]
+        results = await wrapper.upsert_decks(deck_dicts)
+
+        created = sum(1 for r in results if r.get("status") == "created")
+        updated = sum(1 for r in results if r.get("status") == "updated")
+        errors = sum(1 for r in results if r.get("status") == "error")
+        logger.info(
+            "upsert_decks completed: %d created, %d updated, %d errors", created, updated, errors
+        )
+        for r in results:
+            if r.get("status") == "error":
+                logger.warning("upsert_decks item %d failed: %s", r.get("index"), r["error"])
+
+        if created or updated:
+            await _bump_col_mod_after_metadata_change()
+        return UpsertDecksResponse.model_validate({"results": results})
+
+    @mcp.tool()
+    @_safe_tool
+    async def delete_decks(
+        decks: Annotated[
+            list[str],
+            Field(
+                min_length=1,
+                max_length=100,
+                description="Deck names to delete. Each must be empty (see below).",
+            ),
+        ],
+    ) -> DeleteDecksResponse:
+        """Delete decks by name — only if they are already empty.
+
+        A deck is deletable only when neither it nor any of its subdecks contains
+        cards. To remove a non-empty deck, first move its notes elsewhere (e.g.
+        upsert_notes with a new `deck`, or rename the deck onto another to merge),
+        then delete the now-empty deck. This keeps deletion from ever destroying
+        notes.
+
+        Returns `deleted`, `not_found`, and `not_empty` name lists; a non-empty
+        or missing deck is skipped, not an error."""
+        logger.info("delete_decks requested=%d", len(decks))
+        result = await wrapper.delete_decks(decks)
+        logger.info(
+            "delete_decks completed: %d deleted, %d not found, %d not empty",
+            len(result["deleted"]),
+            len(result["not_found"]),
+            len(result["not_empty"]),
+        )
+        if result["deleted"]:
+            await _bump_col_mod_after_metadata_change()
+        return DeleteDecksResponse.model_validate(result)

@@ -131,6 +131,14 @@ shrike tag rename jp japanese --note 1779749914797   # only on these notes
 shrike tag clean                               # drop tags no note uses anymore
 ```
 
+Manage decks with `shrike deck`:
+
+```bash
+shrike deck create "Japanese::Vocabulary"      # nested decks use ::
+shrike deck rename "Misc::French" "French"      # rename or reparent
+shrike deck delete "Old Deck" --yes            # delete (must be empty first)
+```
+
 Note types have their own commands:
 
 ```bash
@@ -179,6 +187,8 @@ Shrike exposes these MCP tools:
 - **update_note_tags**: set, add, or remove tags on a set of notes
 - **rename_tag**: rename a tag collection-wide or on specific notes
 - **clear_unused_tags**: remove tags no longer used by any note
+- **upsert_decks**: create or rename/reparent decks in bulk
+- **delete_decks**: delete decks by name, if empty
 - **delete_notes**: permanently delete notes by ID
 - **delete_note_types**: delete note types by ID, if no notes use them
 
