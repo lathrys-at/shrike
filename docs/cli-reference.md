@@ -4,7 +4,7 @@ The Shrike CLI manages your Anki collection through the MCP server. If the serve
 
 All commands accept `--json` for machine-readable output and `--pretty/--no-pretty` for controlling Rich formatting. These flags work on both the root command and any subcommand (`shrike --json info` and `shrike info --json` are equivalent).
 
-Note IDs accept an optional `#` prefix, so `shrike note show #1779749914797` and `shrike note show 1779749914797` are the same. Type commands accept either a name or numeric ID wherever an identifier is expected.
+Note IDs accept an optional `#` prefix, so `shrike note show #1779749914797` and `shrike note show 1779749914797` are the same. Type commands accept either a name or numeric ID wherever an identifier is expected. **Decks** are likewise referenceable by name, numeric ID, or `#id` anywhere a deck is taken (`--deck`, `deck rename`, `deck delete`): `#id` is always an ID, a bare number is tried as an ID then falls back to a name.
 
 ## Global Options
 
@@ -251,7 +251,7 @@ shrike note search "mitochondria" --deck Biochemistry
 
 ## `shrike deck`
 
-Create, rename, and delete decks. Deletion requires the deck to be empty — move its notes elsewhere first (e.g. `shrike note update <id> --deck …`), then delete.
+Create, rename, and delete decks. Deletion requires the deck to be empty — move its notes elsewhere first (e.g. `shrike note update <id> --deck …`), then delete. `rename` and `delete` accept a deck name, numeric ID, or `#id`.
 
 ### `shrike deck create <NAME>`
 

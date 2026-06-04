@@ -51,6 +51,48 @@ class TestDeckRename:
         assert "not found" in result.output.lower()
         up.assert_not_called()
 
+    def test_rename_by_numeric_id(self):
+        decks = [DeckInfo(name="Old", id=42)]
+        result, up, _ = _invoke(["rename", "42", "New"], decks=decks)
+        assert result.exit_code == 0, result.output
+        up.assert_called_once_with([{"id": 42, "name": "New"}])
+
+    def test_rename_by_hash_id(self):
+        decks = [DeckInfo(name="Old", id=42)]
+        result, up, _ = _invoke(["rename", "#42", "New"], decks=decks)
+        assert result.exit_code == 0, result.output
+        up.assert_called_once_with([{"id": 42, "name": "New"}])
+
+
+class TestMatchDeck:
+    """The deck-ref matcher used by `deck rename` (mirrors the server rule)."""
+
+    def _decks(self):
+        return [DeckInfo(name="Alpha", id=10), DeckInfo(name="999", id=20)]
+
+    def test_name_match(self):
+        from shrike.cli.deck_cmd import _match_deck
+
+        assert _match_deck(self._decks(), "Alpha").id == 10
+
+    def test_hash_id_match(self):
+        from shrike.cli.deck_cmd import _match_deck
+
+        assert _match_deck(self._decks(), "#10").id == 10
+
+    def test_numeric_prefers_id_over_name(self):
+        from shrike.cli.deck_cmd import _match_deck
+
+        # "999" is both deck #20's name and not an id present → matches by name;
+        # but a bare number equal to an existing id matches that id first.
+        assert _match_deck(self._decks(), "20").id == 20  # id 20 wins
+        assert _match_deck(self._decks(), "999").id == 20  # no id 999 → name "999"
+
+    def test_no_match(self):
+        from shrike.cli.deck_cmd import _match_deck
+
+        assert _match_deck(self._decks(), "Nope") is None
+
 
 class TestDeckDelete:
     def test_delete_yes_skips_prompt(self):

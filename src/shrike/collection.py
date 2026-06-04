@@ -291,7 +291,11 @@ class CollectionWrapper:
 
         query_parts: list[str] = []
         if deck is not None:
-            query_parts.append(f'"deck:{deck}"')
+            resolved_deck = self._resolve_deck_ref(deck)
+            if resolved_deck is None:
+                # An explicit #id (or numeric id) that matches no deck → no hits.
+                return {"notes": [], "total": 0, "limit": limit}
+            query_parts.append(f'"deck:{resolved_deck}"')
         if tags is not None:
             for tag in tags:
                 if tag.startswith("-"):
@@ -415,6 +419,11 @@ class CollectionWrapper:
         if notetype is None:
             raise ValueError(f"Note type '{note_type_name}' not found")
 
+        resolved_deck = self._resolve_deck_ref(deck_name)
+        if resolved_deck is None:
+            raise ValueError(f"Deck '{deck_name}' not found")
+        deck_name = resolved_deck
+
         deck_id = self.col.decks.id_for_name(deck_name)
         if deck_id is None:
             deck_id = self.col.decks.id(deck_name)
@@ -471,9 +480,12 @@ class CollectionWrapper:
         self.col.update_note(note)
 
         if "deck" in note_input and note_input["deck"] is not None:
-            target_deck_id = self.col.decks.id_for_name(note_input["deck"])
+            resolved_deck = self._resolve_deck_ref(note_input["deck"])
+            if resolved_deck is None:
+                raise ValueError(f"Deck '{note_input['deck']}' not found")
+            target_deck_id = self.col.decks.id_for_name(resolved_deck)
             if target_deck_id is None:
-                target_deck_id = self.col.decks.id(note_input["deck"])
+                target_deck_id = self.col.decks.id(resolved_deck)
             if target_deck_id is not None:
                 card_ids = note.card_ids()
                 self.col.set_deck(card_ids, int(target_deck_id))
@@ -566,6 +578,26 @@ class CollectionWrapper:
 
     # -- decks ---------------------------------------------------------------
 
+    async def resolve_deck_ref(self, ref: str) -> str | None:
+        return await self.run(lambda _c: self._resolve_deck_ref(ref))
+
+    def _resolve_deck_ref(self, ref: str) -> str | None:
+        """Map a deck reference to a deck name.
+
+        Accepts a deck name, a numeric deck ID, or a ``#``-prefixed ID:
+        - ``#<id>`` is always an ID — returns the deck's name, or ``None`` if no
+          deck has that ID.
+        - a bare integer is tried as an ID first, falling back to a literal name
+          if no deck has that ID (a deck genuinely named "123" still resolves).
+        - anything else is a name, returned unchanged.
+        """
+        if ref.startswith("#") and ref[1:].isdigit():
+            return self.col.decks.name_if_exists(int(ref[1:]))  # type: ignore[arg-type]
+        if ref.isdigit():
+            name = self.col.decks.name_if_exists(int(ref))  # type: ignore[arg-type]
+            return name if name is not None else ref
+        return ref
+
     async def upsert_decks(self, decks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return await self.run(lambda _c: self._upsert_decks(decks))
 
@@ -621,15 +653,18 @@ class CollectionWrapper:
         not_found: list[str] = []
         not_empty: list[str] = []
         to_remove: list[int] = []
-        for name in names:
-            deck_id = self.col.decks.id_for_name(name)
+        # Report back the reference the caller passed (name or #id), not the
+        # resolved name, so the result lists echo their input.
+        for ref in names:
+            resolved = self._resolve_deck_ref(ref)
+            deck_id = self.col.decks.id_for_name(resolved) if resolved is not None else None
             if deck_id is None:
-                not_found.append(name)
+                not_found.append(ref)
             elif self.col.decks.card_count(deck_id, include_subdecks=True) > 0:
-                not_empty.append(name)
+                not_empty.append(ref)
             else:
                 to_remove.append(deck_id)
-                deleted.append(name)
+                deleted.append(ref)
         if to_remove:
             self.col.decks.remove(to_remove)  # type: ignore[arg-type]
         return {"deleted": deleted, "not_found": not_found, "not_empty": not_empty}

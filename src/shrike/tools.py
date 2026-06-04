@@ -150,7 +150,8 @@ def register_tools(
             Field(
                 description=(
                     'Filter to notes in this deck. Use "::" for nested decks '
-                    '(e.g., "Japanese::Vocabulary"). Includes child decks.'
+                    '(e.g., "Japanese::Vocabulary"). Includes child decks. Accepts a '
+                    "deck name, numeric deck ID, or #ID."
                 )
             ),
         ] = None,
@@ -290,7 +291,10 @@ def register_tools(
         ] = 0.5,
         deck: Annotated[
             str | None,
-            Field(description="Restrict search to notes in this deck (includes child decks)."),
+            Field(
+                description="Restrict search to notes in this deck (includes child "
+                "decks). Accepts a deck name, numeric deck ID, or #ID."
+            ),
         ] = None,
         tags: Annotated[
             list[str],
@@ -371,6 +375,14 @@ def register_tools(
                     "Use list_notes for structured filtering instead."
                 )
             )
+
+        if deck:
+            # Accept a deck name, #id, or numeric id; resolve to the name the
+            # post-filter compares against. An explicit id that matches nothing
+            # yields no results.
+            deck = await wrapper.resolve_deck_ref(deck)
+            if deck is None:
+                return SearchResponse(results=[], message="No deck matches that reference.")
 
         exclude_set = set(exclude_ids or [])
 
@@ -915,7 +927,8 @@ def register_tools(
             Field(
                 min_length=1,
                 max_length=100,
-                description="Deck names to delete. Each must be empty (see below).",
+                description="Decks to delete (name, numeric ID, or #ID). Each must be "
+                "empty (see below).",
             ),
         ],
     ) -> DeleteDecksResponse:
