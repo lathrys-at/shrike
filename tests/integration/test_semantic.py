@@ -278,8 +278,14 @@ class TestSearchNotes:
 
     def test_similar_concepts_rank_higher(self, semantic_mcp, collection_server):
         _wait_for_index_ready(collection_server)
+        # This is a *ranking* check: the calculus note should be the nearest
+        # match. Pass threshold=0 so it doesn't hinge on the absolute score
+        # clearing the default 0.5 cutoff — with the small quantized test model
+        # the right answer scores just under 0.5, which would otherwise drop it
+        # and leave no matches to rank (#91).
         result = semantic_mcp(
-            "search_notes", {"queries": ["derivative calculus rate of change"], "top_k": 5}
+            "search_notes",
+            {"queries": ["derivative calculus rate of change"], "top_k": 5, "threshold": 0.0},
         )
         matches = result["results"][0]["matches"]
         assert len(matches) > 0
