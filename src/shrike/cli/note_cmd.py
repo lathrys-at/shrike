@@ -5,6 +5,7 @@ import sys
 from typing import Any
 
 import click
+from click.core import ParameterSource
 
 from shrike.cli import output
 from shrike.cli.config import resolve_collection
@@ -303,44 +304,86 @@ def note_update(
     output.result_status(result.results)
 
 
-@note.command("tag", short_help="Replace tags on one or more notes")
+@note.command("tag", short_help="Edit tags on one or more notes")
 @output_options
 @click.argument("note_ids", type=NOTE_ID, nargs=-1, required=True)
 @click.option(
     "--set",
     "set_tags",
     multiple=True,
-    required=True,
     callback=_parse_comma_separated,
     expose_value=True,
-    help="New tag set, replacing existing tags (repeatable, comma-separated). "
-    'Pass --set "" to clear all tags.',
+    help="Replace all tags with this set (repeatable, comma-separated). "
+    'Pass --set "" to clear all tags. Mutually exclusive with --add/--remove.',
+)
+@click.option(
+    "--add",
+    "add_tags",
+    multiple=True,
+    callback=_parse_comma_separated,
+    expose_value=True,
+    help="Add these tags, leaving other tags intact (repeatable, comma-separated).",
+)
+@click.option(
+    "--remove",
+    "remove_tags",
+    multiple=True,
+    callback=_parse_comma_separated,
+    expose_value=True,
+    help="Remove these tags, leaving other tags intact (repeatable, comma-separated).",
 )
 @click.pass_context
-def note_tag(ctx: click.Context, note_ids: tuple[int, ...], set_tags: tuple[str, ...]) -> None:
-    """Replace the tags on each given note with the same new set.
+def note_tag(
+    ctx: click.Context,
+    note_ids: tuple[int, ...],
+    set_tags: tuple[str, ...],
+    add_tags: tuple[str, ...],
+    remove_tags: tuple[str, ...],
+) -> None:
+    """Edit the tags on one or more notes.
 
-    Tags are fully replaced, not merged — the notes end up with exactly the tags
-    you pass (and nothing else). Fields and decks are untouched.
+    Pick exactly one mode — there is no default:
+
+    \b
+      --set      replace all tags with the given set (--set "" clears)
+      --add      add tags without disturbing the others
+      --remove   remove specific tags without disturbing the others
+
+    \b
+    --add and --remove combine in one call; --set cannot mix with them.
+    Fields and decks are untouched.
 
     \b
     Examples:
       shrike note tag 170000123 --set world-war-2,history
-      shrike note tag 170000123 170000456 --set needs-review
+      shrike note tag 170000123 --add needs-review
+      shrike note tag 170000123 --add jp --add verbs --remove jp-verbs
       shrike note tag 170000123 --set ""        # clear all tags
     """
-    client = ctx.obj["client"]
-    tags = list(set_tags)
-    notes = [{"id": nid, "tags": tags} for nid in note_ids]
+    set_passed = ctx.get_parameter_source("set_tags") == ParameterSource.COMMANDLINE
+    add = list(add_tags)
+    remove = list(remove_tags)
 
-    with output.spinner("Tagging notes…"):
-        result = client.upsert_notes(notes)
+    if set_passed and (add or remove):
+        raise click.UsageError("--set cannot be combined with --add or --remove.")
+    if not set_passed and not add and not remove:
+        raise click.UsageError("Specify one of --set, --add, or --remove.")
+
+    client = ctx.obj["client"]
+    with output.spinner("Updating tags…"):
+        if set_passed:
+            result = client.update_note_tags(list(note_ids), set=list(set_tags))
+        else:
+            result = client.update_note_tags(list(note_ids), add=add or None, remove=remove or None)
 
     if ctx.obj["json"]:
         output.emit_json(result)
         return
 
-    output.result_status(result.results)
+    output.console.print(f"Updated tags on {result.notes_modified} note(s).")
+    if result.not_found:
+        ids = ", ".join(f"[green]#{i}[/green]" for i in result.not_found)
+        output.console.print(f"[bold red]![/bold red] Not found: {ids}")
 
 
 @note.command("delete", short_help="Delete notes by ID")

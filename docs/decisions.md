@@ -46,24 +46,37 @@ caller can't see or tune).
 
 ## Tags
 
-### Tags are a full replace, never an add/remove merge
+### Setting tags is a full replace; add/remove is a separate operation (#73)
 
-Everywhere Shrike sets tags — `upsert_notes` partial updates (`{id, tags}`),
-`shrike note update --tags`, and the bulk `shrike note tag <ids> --set a,b`
-(`--set ""` clears) — the note ends up with *exactly* the set you sent. There is
-no additive or subtractive mode.
+When you *set* tags — `upsert_notes` partial updates (`{id, tags}`),
+`shrike note update --tags`, and `update_note_tags`/`shrike note tag --set`
+(`--set ""` clears) — the note ends up with *exactly* the set you sent. Replace
+never silently merges.
 
-We considered and rejected an additive/subtractive `mode` parameter on
-`upsert_notes`. It's precisely the "bag of optionals / hidden state" the
-`schemas.py` house style warns against — the meaning of the `tags` field would
-silently depend on a second field. And it doesn't match the actual workflow: the
-skill's tag work is a create-time, full-set decision ("this card's tags are X, Y,
-Z"), not a retroactive merge into whatever was already there.
+We rejected an additive/subtractive `mode` parameter that changes the meaning of
+the `tags` field on `upsert_notes` — that's the "bag of optionals / hidden state"
+the `schemas.py` house style warns against, where one field's meaning depends on
+another. Create-time tagging stays a full-set decision ("this card's tags are X,
+Y, Z").
 
-### Retroactive collection-wide tag cleanup is deliberately unbuilt
+Additive/subtractive editing is instead its **own** tool, `update_note_tags`,
+with explicit, non-overlapping fields: `set` (full replace) is mutually exclusive
+with `add`/`remove`, and `add`/`remove` combine freely (e.g. add `["jp","verbs"]`
++ remove `["jp-verbs"]` swaps one tag for two). There is no default mode — the
+caller picks one. So replace and merge are distinct, named operations rather than
+a single overloaded field.
 
-A true add/remove sweep over many *existing* notes (backed by Anki's `bulk_add` /
-`bulk_remove`) is a different operation from create-time tagging, and it's out of
-scope until a concrete need appears. `shrike note tag --set` is bulk *replace*
-sugar, not cleanup — it sets the same exact tag set across many notes, which is
-still a full-set decision, just applied widely.
+### Retroactive collection-wide tag curation is built (#73)
+
+Earlier this was deliberately unbuilt "until a concrete need appears" — #73 was
+that need. Bulk add/remove over existing notes (`update_note_tags`, backed by
+Anki's `bulk_add`/`bulk_remove`), collection-wide and note-scoped tag rename
+(`rename_tag` / `shrike tag rename`), and unused-tag cleanup (`clear_unused_tags`
+/ `shrike tag clean`) are all available. Note-scoped rename matches the tag
+*exactly* (find notes carrying it, then swap) rather than a substring
+find/replace, so renaming `jp` never touches `jp-verbs`.
+
+Because tags are not part of a note's embedding text, these ops bump `col.mod`
+but leave every vector valid; each advances the stored index `col_mod` without
+re-embedding, so a tag-only change doesn't trigger a full rebuild on next
+startup.

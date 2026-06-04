@@ -494,6 +494,82 @@ class CollectionWrapper:
 
         return {"deleted": deleted, "not_found": not_found}
 
+    # -- tags ----------------------------------------------------------------
+
+    async def update_note_tags(
+        self,
+        note_ids: list[int],
+        *,
+        set_tags: list[str] | None,
+        add: list[str],
+        remove: list[str],
+    ) -> dict[str, Any]:
+        return await self.run(
+            lambda _c: self._update_note_tags(note_ids, set_tags=set_tags, add=add, remove=remove)
+        )
+
+    def _update_note_tags(
+        self,
+        note_ids: list[int],
+        *,
+        set_tags: list[str] | None,
+        add: list[str],
+        remove: list[str],
+    ) -> dict[str, Any]:
+        """Edit tags on a set of notes.
+
+        ``set_tags`` is a full replace (an empty list clears all tags); it is
+        mutually exclusive with ``add``/``remove``, which apply additively and
+        subtractively without disturbing other tags. Validation of that rule
+        lives in the tool layer — here ``set_tags is not None`` selects replace
+        mode. Returns the notes the operation applied to and any IDs not found.
+        """
+        existing = set(self.col.find_notes(f"nid:{','.join(str(i) for i in note_ids)}"))
+        not_found = [i for i in note_ids if i not in existing]
+        targets = [i for i in note_ids if i in existing]
+
+        if targets:
+            if set_tags is not None:
+                for nid in targets:
+                    note = self.col.get_note(nid)  # type: ignore[arg-type]
+                    note.tags = list(set_tags)
+                    self.col.update_note(note)
+            else:
+                # Remove before add so a tag named in both ends up present.
+                if remove:
+                    self.col.tags.bulk_remove(targets, " ".join(remove))  # type: ignore[arg-type]
+                if add:
+                    self.col.tags.bulk_add(targets, " ".join(add))  # type: ignore[arg-type]
+
+        return {"notes_modified": len(targets), "not_found": not_found}
+
+    async def rename_tag(self, old: str, new: str, note_ids: list[int]) -> dict[str, Any]:
+        return await self.run(lambda _c: self._rename_tag(old, new, note_ids))
+
+    def _rename_tag(self, old: str, new: str, note_ids: list[int]) -> dict[str, Any]:
+        """Rename a tag collection-wide (empty ``note_ids``) or on a note set.
+
+        The note-scoped path renames the tag *exactly* (match notes carrying
+        ``old``, then swap it for ``new``) rather than a substring find/replace,
+        so renaming ``jp`` never touches ``jp-verbs``.
+        """
+        if not note_ids:
+            count = self.col.tags.rename(old, new).count
+            return {"notes_modified": count}
+
+        scope = ",".join(str(i) for i in note_ids)
+        matching = list(self.col.find_notes(f"(nid:{scope}) tag:{old}"))
+        if matching:
+            self.col.tags.bulk_remove(matching, old)
+            self.col.tags.bulk_add(matching, new)
+        return {"notes_modified": len(matching)}
+
+    async def clear_unused_tags(self) -> dict[str, Any]:
+        return await self.run(lambda _c: self._clear_unused_tags())
+
+    def _clear_unused_tags(self) -> dict[str, Any]:
+        return {"tags_removed": self.col.tags.clear_unused_tags().count}
+
     # -- embedding text ------------------------------------------------------
 
     async def note_texts_for_embedding(self, note_ids: Sequence[int]) -> list[str]:

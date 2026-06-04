@@ -28,7 +28,7 @@ src/shrike/                       # Python package (src layout)
 ├── collection.py                 # CollectionWrapper — all Anki DB operations
 ├── note_types.py                 # upsert_note_types() — create/update note types
 ├── daemon.py                     # Daemon lifecycle — file locks, spawn, shutdown
-├── tools.py                      # Registers 7 MCP tools; returns response models (emits outputSchema)
+├── tools.py                      # Registers 10 MCP tools; returns response models (emits outputSchema)
 ├── schemas.py                    # Pydantic models — single source of truth for every tool request/response + status shape
 ├── client.py                     # ShrikeClient — standalone HTTP client; typed per-tool methods, daemon lifecycle
 ├── paths.py                      # Platform-canonical directories (via platformdirs)
@@ -44,7 +44,8 @@ src/shrike/                       # Python package (src layout)
     ├── index_cmd.py              # shrike index rebuild/status
     ├── server_cmd.py             # shrike server start/stop/status/logs (daemon management)
     ├── info_cmd.py               # shrike info
-    ├── note_cmd.py               # shrike note list/show/create/update/delete/search
+    ├── note_cmd.py               # shrike note list/show/create/update/tag/delete/search
+    ├── tag_cmd.py                # shrike tag rename/clean (collection-level tag ops)
     ├── type_cmd.py               # shrike type list/show/create/update/delete
     └── output.py                 # Rich formatting, output_options decorator
 tests/
@@ -154,7 +155,7 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 
 **OAuth is required for native connectors (deferred; tracked here).** Claude Desktop / claude.ai *URL connectors* require OAuth 2.1 + Dynamic Client Registration: they try to register against the MCP server's sign-in service and fail against an unauthenticated endpoint, regardless of TLS or network exposure. So the "run Shrike behind a reverse proxy / on a VPN and add it as a connector" story depends on implementing MCP server auth (`mcp.server.auth`, OAuth 2.0 + PKCE — see audit §1.1); it's a v0.4/v0.6-class project, intentionally not started. Until then the unauthenticated + network-boundary model serves CLI / programmatic / `mcp-remote` clients: a native client reaches Shrike through the **`mcp-remote` stdio bridge** (`npx mcp-remote http://127.0.0.1:8372/mcp --allow-http --transport http-only`), which connects without auth because Shrike demands none. This is how the QA harness drives Claude Desktop.
 
-### MCP tools (7 total)
+### MCP tools (10 total)
 
 | Tool | Status | Purpose |
 |------|--------|---------|
@@ -163,8 +164,13 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 | `search_notes` | Working | Semantic similarity search over note embeddings |
 | `upsert_notes` | Working | Create or update notes in bulk (1-100), returns similar neighbors |
 | `upsert_note_types` | Working | Create or update note type definitions (1-10) |
+| `update_note_tags` | Working | Edit tags on a note set (1-1000): `set` (replace) XOR `add`/`remove` |
+| `rename_tag` | Working | Rename a tag collection-wide or on a note set (exact match) |
+| `clear_unused_tags` | Working | Remove tag names no longer used by any note |
 | `delete_notes` | Working | Permanently delete notes by ID |
 | `delete_note_types` | Working | Delete note types by ID (only if unused) |
+
+The tag tools (#73) are a derived-index-aware special case: tags are **not** part of a note's embedding text, so a tag op leaves every vector valid but bumps `col.mod`. Each tool advances the stored `index.col_mod` (and requests a debounced save) **without** re-embedding, so a tag-only change doesn't force a spurious full rebuild on next startup. Full-replace lives in both `update_note_tags` (`set`) and incidentally in `upsert_notes` (`{id, tags}`); the additive/subtractive logic lives only in `update_note_tags`.
 
 Every tool request and response shape — plus the server-status shapes — is a Pydantic model in `shrike/schemas.py` (the single source of truth). Tool functions in `tools.py` return the response models, so FastMCP emits an `outputSchema` for each tool, and `_safe_tool` runs each docstring through `inspect.cleandoc` so the advertised descriptions carry no source indentation. The standalone `ShrikeClient` exposes a typed per-tool method for each (e.g. `list_notes(...) -> ListNotesResponse`) that validates the wire response into the model; `ShrikeClient._call()` is the untyped escape hatch. There is no checked-in schema file: the authoritative machine schema is whatever the running server advertises via `tools/list`, derived from these models. `docs/mcp-tools.md` is the human-readable companion.
 
@@ -180,7 +186,8 @@ The CLI uses Click with rich for output formatting. Command hierarchy:
 shrike [--config PATH] [--url URL] [--json] [--pretty/--no-pretty]
 ├── server start|stop|status|logs
 ├── info [--types] [--decks] [--tags] [--stats] [--type-details NAME]
-├── note list|show|create|update|delete|search
+├── note list|show|create|update|tag|delete|search
+├── tag rename|clean
 ├── type list|show|create|update|delete
 ├── index rebuild|status|save
 └── embedding status|start|stop

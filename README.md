@@ -106,7 +106,7 @@ echo '[
 ]' | shrike note create --json-input
 ```
 
-Update fields, replace tags, or delete:
+Update fields, edit tags, or delete:
 
 ```bash
 shrike note update 1779749914797 -f Back="to read; to interpret"
@@ -114,7 +114,22 @@ shrike note tag 1779749914797 --set verb,jlpt-n5
 shrike note delete 1779749914797 --yes
 ```
 
-`shrike note tag` replaces a note's tags wholesale; the note ends up with exactly the set you pass, nothing else.
+`shrike note tag` edits a note's tags in one of three modes, and you pick one explicitly:
+
+```bash
+shrike note tag 1779749914797 --set verb,jlpt-n5         # replace all tags
+shrike note tag 1779749914797 --add needs-review         # add, leaving others
+shrike note tag 1779749914797 --add jp --remove jp-verb  # add and remove together
+shrike note tag 1779749914797 --set ""                   # clear all tags
+```
+
+For tags across the whole collection, `shrike tag` renames and cleans up:
+
+```bash
+shrike tag rename history::ww2 history::wwii   # rename everywhere it appears
+shrike tag rename jp japanese --note 1779749914797   # only on these notes
+shrike tag clean                               # drop tags no note uses anymore
+```
 
 Note types have their own commands:
 
@@ -161,6 +176,9 @@ Shrike exposes these MCP tools:
 - **search_notes**: semantic search over note embeddings
 - **upsert_notes**: create or update notes in bulk
 - **upsert_note_types**: create or update note type definitions
+- **update_note_tags**: set, add, or remove tags on a set of notes
+- **rename_tag**: rename a tag collection-wide or on specific notes
+- **clear_unused_tags**: remove tags no longer used by any note
 - **delete_notes**: permanently delete notes by ID
 - **delete_note_types**: delete note types by ID, if no notes use them
 

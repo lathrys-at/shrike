@@ -7,16 +7,30 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 
 ## [Unreleased]
 
+### Added
+- Tag curation beyond full-replace (#73): three new MCP tools and matching CLI.
+  - `update_note_tags` / `shrike note tag --set|--add|--remove`: edit tags on a
+    set of notes. `--set` replaces (and `--set ""` clears); `--add`/`--remove`
+    edit additively and combine in one call. Exactly one mode per call — there
+    is no default, and `--set` cannot mix with `--add`/`--remove`.
+  - `rename_tag` / `shrike tag rename OLD NEW [--note ID]`: rename a tag
+    collection-wide, or exactly on specific notes (`jp` never touches `jp-verbs`).
+  - `clear_unused_tags` / `shrike tag clean`: drop tag names no note uses anymore.
+  - Tag changes advance the vector index's stored `col_mod` without re-embedding
+    (tags aren't part of embedding text), so a tag-only edit no longer forces a
+    spurious full index rebuild on the next startup.
+- `shrike server start --save-config` writes the resolved collection, server,
+  embedding, cache, and index-tuning settings to the config file (#56).
+
 ### Changed
 - `shrike server start` no longer writes `config.yml` on its own. It previously
   saved the flags only on the very first run (when no config existed) and then
   silently ignored later flags, so the on-disk config could diverge from how the
   daemon was actually running. The config file is now user-managed; pass the new
   `--save-config` flag to persist the resolved flags explicitly (#56).
-
-### Added
-- `shrike server start --save-config` writes the resolved collection, server,
-  embedding, cache, and index-tuning settings to the config file (#56).
+- `shrike note tag` now requires choosing a mode (`--set`, `--add`, or
+  `--remove`) and its output reports `notes_modified`/`not_found` instead of
+  per-note upsert results (#73).
 
 ## [0.3.4] — 2026-06-01
 

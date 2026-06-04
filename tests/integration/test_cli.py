@@ -484,7 +484,7 @@ class TestNoteUpdate:
 
 
 class TestNoteTag:
-    """Bulk tag-replace via CLI."""
+    """set/add/remove tag editing via CLI."""
 
     def _make(self, runner, tags):
         created = runner.json(
@@ -505,29 +505,97 @@ class TestNoteTag:
         )
         return str(created["results"][0]["id"])
 
-    def test_tag_replaces_across_multiple_notes(self, runner):
+    def _tags(self, runner, note_id):
+        return sorted(runner.json(["note", "show", note_id])["notes"][0]["tags"])
+
+    def test_set_replaces_across_multiple_notes(self, runner):
         id1 = self._make(runner, "old1")
         id2 = self._make(runner, "old2")
 
         data = runner.json(["note", "tag", id1, id2, "--set", "shared,history"])
-        assert all(r["status"] == "updated" for r in data["results"])
+        assert data["notes_modified"] == 2
 
         for note_id in (id1, id2):
-            tags = runner.json(["note", "show", note_id])["notes"][0]["tags"]
-            assert sorted(tags) == ["history", "shared"]
+            assert self._tags(runner, note_id) == ["history", "shared"]
 
-    def test_tag_clears_with_empty_set(self, runner):
+    def test_set_clears_with_empty_set(self, runner):
         note_id = self._make(runner, "keep,me")
-
         runner.json(["note", "tag", note_id, "--set", ""])
+        assert self._tags(runner, note_id) == []
 
-        tags = runner.json(["note", "show", note_id])["notes"][0]["tags"]
-        assert tags == []
+    def test_add_leaves_others_intact(self, runner):
+        note_id = self._make(runner, "base")
+        runner.json(["note", "tag", note_id, "--add", "extra"])
+        assert self._tags(runner, note_id) == ["base", "extra"]
 
-    def test_tag_requires_set(self, runner):
+    def test_remove_leaves_others_intact(self, runner):
+        note_id = self._make(runner, "base,drop")
+        runner.json(["note", "tag", note_id, "--remove", "drop"])
+        assert self._tags(runner, note_id) == ["base"]
+
+    def test_add_and_remove_combine(self, runner):
+        note_id = self._make(runner, "jp-verbs,keep")
+        runner.json(
+            ["note", "tag", note_id, "--add", "jp", "--add", "verbs", "--remove", "jp-verbs"]
+        )
+        assert self._tags(runner, note_id) == ["jp", "keep", "verbs"]
+
+    def test_requires_a_mode(self, runner):
         note_id = self._make(runner, "x")
         result = runner.invoke(["note", "tag", note_id])
         assert result.exit_code != 0
+
+    def test_set_and_add_conflict(self, runner):
+        note_id = self._make(runner, "x")
+        result = runner.invoke(["note", "tag", note_id, "--set", "a", "--add", "b"])
+        assert result.exit_code != 0
+
+
+class TestTagGroup:
+    """Collection-level tag ops: rename and clean."""
+
+    def _make(self, runner, tags):
+        created = runner.json(
+            [
+                "note",
+                "create",
+                "--deck",
+                "Default",
+                "--type",
+                "Basic",
+                "-f",
+                "Front=Q",
+                "-f",
+                "Back=A",
+                "--tags",
+                tags,
+            ]
+        )
+        return str(created["results"][0]["id"])
+
+    def _tags(self, runner, note_id):
+        return sorted(runner.json(["note", "show", note_id])["notes"][0]["tags"])
+
+    def test_rename_collection_wide(self, runner):
+        id1 = self._make(runner, "history::ww2")
+        id2 = self._make(runner, "history::ww2,other")
+
+        data = runner.json(["tag", "rename", "history::ww2", "history::wwii"])
+        assert data["notes_modified"] == 2
+        assert "history::wwii" in self._tags(runner, id1)
+        assert "history::wwii" in self._tags(runner, id2)
+
+    def test_rename_scoped_is_exact(self, runner):
+        note_id = self._make(runner, "jp,jp-verbs")
+        data = runner.json(["tag", "rename", "jp", "japanese", "--note", note_id])
+        assert data["notes_modified"] == 1
+        assert self._tags(runner, note_id) == ["japanese", "jp-verbs"]
+
+    def test_clean_removes_unused(self, runner):
+        note_id = self._make(runner, "soon-unused")
+        runner.json(["note", "tag", note_id, "--set", ""])  # orphan the tag name
+        data = runner.json(["tag", "clean"])
+        assert data["tags_removed"] >= 1
 
 
 class TestNoteDelete:

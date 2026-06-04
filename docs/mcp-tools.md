@@ -350,6 +350,75 @@ Card templates use Anki's `{{FieldName}}` replacement syntax. The special `{{Fro
 
 ---
 
+## `update_note_tags`
+
+Edit tags on a set of notes (1–1000) without rewriting the whole note. Choose exactly one mode — there is no default:
+
+- `set`: full replace. The notes end up with exactly the tags you pass; an empty list clears all tags.
+- `add` and/or `remove`: additive/subtractive. Add tags without disturbing existing ones, remove specific tags, or both in one call (e.g. add `["jp","verbs"]` + remove `["jp-verbs"]` swaps one tag for two).
+
+`set` cannot be combined with `add`/`remove`. To replace a note's tags as part of a broader edit (fields, deck), use `upsert_notes` instead.
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `note_ids` | `integer[]` | **yes** | Note IDs whose tags to edit (1–1000). |
+| `set` | `string[]` | no | Full replace (empty clears). Mutually exclusive with `add`/`remove`. |
+| `add` | `string[]` | no | Tags to add, leaving other tags intact. |
+| `remove` | `string[]` | no | Tags to remove, leaving other tags intact. |
+
+### Response
+
+```jsonc
+{
+  "notes_modified": 2,
+  "not_found": [9999999999999]   // requested IDs that didn't match any note
+}
+```
+
+---
+
+## `rename_tag`
+
+Rename a tag, collection-wide or on a set of notes. With no `note_ids`, the tag is renamed everywhere it appears, children included (renaming `history` also moves `history::ww2`). With `note_ids`, only those notes are affected and the tag is matched **exactly** — renaming `jp` never touches `jp-verbs`.
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `old` | `string` | **yes** | The tag to rename. |
+| `new` | `string` | **yes** | The new tag name (must differ from `old`). |
+| `note_ids` | `integer[]` | no | Restrict the rename to these notes. Omit to rename across the whole collection. |
+
+### Response
+
+```jsonc
+{
+  "notes_modified": 2
+}
+```
+
+---
+
+## `clear_unused_tags`
+
+Remove tags that are no longer used by any note. Anki keeps a registry of tag names separate from note tags; deleting the last note carrying a tag leaves the name behind. This prunes those orphans.
+
+### Parameters
+
+None.
+
+### Response
+
+```jsonc
+{
+  "tags_removed": 3
+}
+```
+
+---
+
 ## `delete_notes`
 
 Permanently delete notes and all their associated cards. This cannot be undone.

@@ -32,6 +32,7 @@ from pydantic import TypeAdapter
 
 from shrike import daemon
 from shrike.schemas import (
+    ClearUnusedTagsResponse,
     CollectionInfo,
     DeleteNotesResponse,
     DeleteNoteTypesResponse,
@@ -44,10 +45,12 @@ from shrike.schemas import (
     ListNotesResponse,
     NoteInput,
     NoteTypeInput,
+    RenameTagResponse,
     SearchResponse,
     ServerStatus,
     ShutdownResponse,
     StopResponse,
+    UpdateNoteTagsResponse,
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
 )
@@ -326,6 +329,54 @@ class ShrikeClient:
             all_deleted.extend(result.get("deleted", []))
             all_not_found.extend(result.get("not_found", []))
         return DeleteNotesResponse(deleted=all_deleted, not_found=all_not_found)
+
+    def update_note_tags(
+        self,
+        note_ids: list[int],
+        *,
+        set: list[str] | None = None,  # noqa: A002 — `set` is the wire name for full-replace
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+    ) -> UpdateNoteTagsResponse:
+        """Edit tags on a set of notes, transparently batching over the server limit.
+
+        Pass `set` for full replace (empty list clears) OR `add`/`remove` for
+        additive/subtractive edits — not both. Validation is enforced server-side.
+        """
+        args: dict[str, Any] = {}
+        if set is not None:
+            args["set"] = set
+        if add:
+            args["add"] = add
+        if remove:
+            args["remove"] = remove
+
+        if len(note_ids) <= 1000:
+            return UpdateNoteTagsResponse.model_validate(
+                self._call("update_note_tags", {"note_ids": note_ids, **args})
+            )
+
+        modified = 0
+        not_found: list[int] = []
+        message: str | None = None
+        for i in range(0, len(note_ids), 1000):
+            chunk = note_ids[i : i + 1000]
+            result = self._call("update_note_tags", {"note_ids": chunk, **args})
+            modified += result.get("notes_modified", 0)
+            not_found.extend(result.get("not_found", []))
+            message = result.get("message") or message
+        return UpdateNoteTagsResponse(notes_modified=modified, not_found=not_found, message=message)
+
+    def rename_tag(
+        self, old: str, new: str, note_ids: list[int] | None = None
+    ) -> RenameTagResponse:
+        args: dict[str, Any] = {"old": old, "new": new}
+        if note_ids:
+            args["note_ids"] = note_ids
+        return RenameTagResponse.model_validate(self._call("rename_tag", args))
+
+    def clear_unused_tags(self) -> ClearUnusedTagsResponse:
+        return ClearUnusedTagsResponse.model_validate(self._call("clear_unused_tags", {}))
 
     def _batched_call(
         self,

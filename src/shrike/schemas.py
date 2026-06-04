@@ -340,6 +340,20 @@ class DeleteNoteTypesResponse(BaseModel):
     results: list[DeleteNoteTypeResult] = []
 
 
+class UpdateNoteTagsResponse(BaseModel):
+    notes_modified: int = 0
+    not_found: list[int] = []
+    message: str | None = None
+
+
+class RenameTagResponse(BaseModel):
+    notes_modified: int = 0
+
+
+class ClearUnusedTagsResponse(BaseModel):
+    tags_removed: int = 0
+
+
 # ============================================================================
 # Server status / custom-endpoint models (not tool returns; client-side use)
 # ============================================================================

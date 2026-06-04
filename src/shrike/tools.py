@@ -11,13 +11,16 @@ from pydantic import Field
 from shrike.collection import CollectionWrapper
 from shrike.index import IndexSaver, IndexState, VectorIndex
 from shrike.schemas import (
+    ClearUnusedTagsResponse,
     CollectionInfo,
     DeleteNotesResponse,
     DeleteNoteTypesResponse,
     ListNotesResponse,
     NoteInput,
     NoteTypeInput,
+    RenameTagResponse,
     SearchResponse,
+    UpdateNoteTagsResponse,
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
 )
@@ -736,3 +739,137 @@ def register_tools(
             statuses[s] = statuses.get(s, 0) + 1
         logger.info("delete_note_types completed: %s", statuses)
         return DeleteNoteTypesResponse.model_validate(result)
+
+    async def _bump_col_mod_after_tag_op() -> None:
+        """Keep the index from needlessly rebuilding after a tag-only change.
+
+        Tags are not part of a note's embedding text, so a tag op leaves every
+        vector valid — but it still bumps ``col.mod``. Advance the stored
+        ``col_mod`` (and request a debounced save) so the next startup sees no
+        drift and skips a full re-embed. Best-effort: index bookkeeping must
+        never fail the operation, which is already committed to the collection.
+        """
+        if index is None or not index.available:
+            return
+        try:
+            index.col_mod = await wrapper.run(lambda c: c.mod)
+            if saver is not None:
+                saver.request_save()
+        except Exception:
+            logger.warning("Failed to advance index col_mod after tag op", exc_info=True)
+
+    @mcp.tool()
+    @_safe_tool
+    async def update_note_tags(
+        note_ids: Annotated[
+            list[int],
+            Field(
+                min_length=1,
+                max_length=1000,
+                description="Note IDs whose tags to edit.",
+            ),
+        ],
+        *,
+        set: Annotated[  # noqa: A002 — `set` is the wire/CLI name for full-replace mode
+            list[str] | None,
+            Field(
+                description=(
+                    "Full replace: the notes end up with exactly these tags (an empty "
+                    "list clears all tags). Mutually exclusive with add/remove."
+                ),
+            ),
+        ] = None,
+        add: Annotated[
+            list[str],
+            Field(default_factory=list, description="Tags to add, leaving other tags intact."),
+        ],
+        remove: Annotated[
+            list[str],
+            Field(default_factory=list, description="Tags to remove, leaving other tags intact."),
+        ],
+    ) -> UpdateNoteTagsResponse:
+        """Edit tags on a set of notes (1-1000 per call).
+
+        Choose exactly one mode — there is no default:
+        - `set`: full replace. The notes end up with exactly the tags you pass;
+          pass an empty list to clear all tags.
+        - `add` and/or `remove`: additive/subtractive. Add tags without
+          disturbing existing ones, remove specific tags, or both in one call
+          (e.g. add ["jp","verbs"] + remove ["jp-verbs"] swaps one tag for two).
+
+        `set` cannot be combined with `add`/`remove`. To replace a note's tags
+        as part of a broader edit (fields, deck), use upsert_notes instead.
+
+        Returns the number of notes the operation applied to and any requested
+        IDs that were not found."""
+        set_mode = set is not None
+        addremove_mode = bool(add or remove)
+        if set_mode and addremove_mode:
+            raise ToolInputError("Provide either `set` (full replace) or `add`/`remove`, not both.")
+        if not set_mode and not addremove_mode:
+            raise ToolInputError("Specify `set`, or `add` and/or `remove`.")
+
+        if set_mode:
+            logger.info("update_note_tags notes=%d set=%s", len(note_ids), set)
+        else:
+            logger.info("update_note_tags notes=%d add=%s remove=%s", len(note_ids), add, remove)
+
+        result = await wrapper.update_note_tags(note_ids, set_tags=set, add=add, remove=remove)
+        logger.info(
+            "update_note_tags modified %d note(s), %d not found",
+            result["notes_modified"],
+            len(result["not_found"]),
+        )
+
+        if result["notes_modified"]:
+            await _bump_col_mod_after_tag_op()
+
+        return UpdateNoteTagsResponse.model_validate(result)
+
+    @mcp.tool()
+    @_safe_tool
+    async def rename_tag(
+        old: Annotated[str, Field(min_length=1, description="The tag to rename.")],
+        new: Annotated[str, Field(min_length=1, description="The new tag name.")],
+        note_ids: Annotated[
+            list[int],
+            Field(
+                default_factory=list,
+                description=(
+                    "Restrict the rename to these notes. Omit (empty) to rename the tag "
+                    "across the entire collection."
+                ),
+            ),
+        ],
+    ) -> RenameTagResponse:
+        """Rename a tag, collection-wide or on a set of notes.
+
+        With no `note_ids`, the tag is renamed everywhere it appears (and so are
+        its children, e.g. renaming "history" moves "history::ww2"). With
+        `note_ids`, only those notes are affected and the tag is matched exactly
+        — renaming "jp" never touches "jp-verbs".
+
+        Returns the number of notes whose tags changed."""
+        if old == new:
+            raise ToolInputError("`old` and `new` tags are identical — nothing to rename.")
+        logger.info("rename_tag %r -> %r (scope=%d notes)", old, new, len(note_ids))
+        result = await wrapper.rename_tag(old, new, note_ids)
+        logger.info("rename_tag modified %d note(s)", result["notes_modified"])
+        if result["notes_modified"]:
+            await _bump_col_mod_after_tag_op()
+        return RenameTagResponse.model_validate(result)
+
+    @mcp.tool()
+    @_safe_tool
+    async def clear_unused_tags() -> ClearUnusedTagsResponse:
+        """Remove tags that are no longer used by any note.
+
+        Anki keeps a registry of tag names separate from note tags; deleting the
+        last note with a tag leaves the name behind. This prunes those orphans.
+        Returns the number of tag names removed."""
+        logger.info("clear_unused_tags")
+        result = await wrapper.clear_unused_tags()
+        logger.info("clear_unused_tags removed %d tag(s)", result["tags_removed"])
+        if result["tags_removed"]:
+            await _bump_col_mod_after_tag_op()
+        return ClearUnusedTagsResponse.model_validate(result)

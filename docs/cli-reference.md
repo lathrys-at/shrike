@@ -198,17 +198,20 @@ shrike note update 1779749914797 --tags newtag,kept-tag
 shrike note update 1779749914797 --deck "Other::Deck"
 ```
 
-### `shrike note tag <NOTE_IDS>... --set TEXT`
+### `shrike note tag <NOTE_IDS>...`
 
-Replace the tags on one or more notes with the same new set. Tags are fully replaced, not merged; each note ends up with exactly the tags you pass. Fields and decks are untouched. Backed by a single batched `upsert_notes` call.
+Edit the tags on one or more notes. Pick exactly one mode — there is no default. `--set` replaces wholesale; `--add`/`--remove` edit additively and combine in a single call. `--set` cannot be combined with `--add`/`--remove`. Fields and decks are untouched.
 
 | Option | Description |
 |---|---|
-| `--set TEXT` | New tag set, replacing existing tags. Required. Repeatable and comma-separated. Pass `--set ""` to clear all tags. |
+| `--set TEXT` | Replace all tags with this set. Repeatable and comma-separated. Pass `--set ""` to clear all tags. Mutually exclusive with `--add`/`--remove`. |
+| `--add TEXT` | Add these tags, leaving other tags intact. Repeatable and comma-separated. |
+| `--remove TEXT` | Remove these tags, leaving other tags intact. Repeatable and comma-separated. |
 
 ```bash
 shrike note tag 1779749914797 --set world-war-2,history
-shrike note tag 1779749914797 1779749914798 --set needs-review
+shrike note tag 1779749914797 1779749914798 --add needs-review
+shrike note tag 1779749914797 --add jp --add verbs --remove jp-verbs
 shrike note tag 1779749914797 --set ""        # clear all tags
 ```
 
@@ -242,6 +245,33 @@ Semantic similarity search over the collection. Accepts text queries, note IDs t
 shrike note search "electron transport chain"
 shrike note search --similar-to 1779749914797
 shrike note search "mitochondria" --deck Biochemistry
+```
+
+---
+
+## `shrike tag`
+
+Collection-level tag operations. Per-note tag editing (set/add/remove on specific notes) lives under `shrike note tag`; these act on the collection's tag taxonomy.
+
+### `shrike tag rename <OLD> <NEW>`
+
+Rename a tag. With no `--note`, the tag is renamed everywhere it appears, children included (renaming `history` also moves `history::ww2`). With `--note`, only those notes are affected and the tag is matched exactly, so renaming `jp` never touches `jp-verbs`.
+
+| Option | Description |
+|---|---|
+| `--note NOTE_ID` | Restrict the rename to this note ID. Repeatable. Omit to rename across the whole collection. |
+
+```bash
+shrike tag rename history::ww2 history::wwii
+shrike tag rename jp japanese --note 1779749914797 --note 1779749914798
+```
+
+### `shrike tag clean`
+
+Remove tag names that are no longer used by any note. Anki keeps the tag registry separate from note tags, so deleting the last note carrying a tag leaves its name behind; this prunes those orphans.
+
+```bash
+shrike tag clean
 ```
 
 ---

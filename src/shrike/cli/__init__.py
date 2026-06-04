@@ -105,6 +105,7 @@ from shrike.cli.index_cmd import index  # noqa: E402
 from shrike.cli.info_cmd import info  # noqa: E402
 from shrike.cli.note_cmd import note  # noqa: E402
 from shrike.cli.server_cmd import server  # noqa: E402
+from shrike.cli.tag_cmd import tag  # noqa: E402
 from shrike.cli.type_cmd import type_group  # noqa: E402
 
 cli.add_command(completion)
@@ -113,4 +114,5 @@ cli.add_command(index)
 cli.add_command(server)
 cli.add_command(info)
 cli.add_command(note)
+cli.add_command(tag)
 cli.add_command(type_group, name="type")
