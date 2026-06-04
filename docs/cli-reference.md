@@ -54,8 +54,11 @@ Start the server as a background daemon. The collection path can come from `--co
 | `--embedding-arg TOKENS` | Extra `llama-server` flag passed through verbatim, repeatable and `shlex`-split (e.g. `--embedding-arg='--flash-attn'`). For runtime-only flags; Shrike-owned flags (`--model`/`--host`/`--port`/`--embeddings`) are rejected, and any change forces an index rebuild. Vector-affecting flags belong in typed settings like `--embedding-pooling`. |
 | `--llama-server PATH` | Path to the `llama-server` binary (default: `LLAMA_SERVER_PATH` or `PATH`). |
 | `--no-embedding` | Start without the embedding service even if a model is configured. |
+| `--save-config` | Persist the resolved flags to the config file. Without this, `server start` never writes config — it stays under your control and start always reflects the flags you pass. |
 
 The embedding flags above are also accepted by `shrike embedding start`, which cycles the service on an already-running server.
+
+`server start` never edits your config file on its own. Pass `--save-config` once to write the flags you started with (collection, ports, embedding model, cache and index tuning) so you can drop them from later commands; without it, the file is yours alone to edit.
 
 ### `shrike server stop`
 

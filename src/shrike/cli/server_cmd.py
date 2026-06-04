@@ -201,6 +201,14 @@ def server() -> None:
     help="Start the server without the embedding service even if a model is configured "
     "(start it later with 'shrike embedding start').",
 )
+@click.option(
+    "--save-config",
+    "save_config_flag",
+    is_flag=True,
+    help="Persist the resolved flags to the config file. Without this, 'server start' "
+    "never writes config — it stays under your control and start always reflects the "
+    "flags you pass.",
+)
 @click.pass_context
 def server_start(
     ctx: click.Context,
@@ -226,6 +234,7 @@ def server_start(
     embedding_pooling: str | None,
     embedding_arg: tuple[str, ...],
     no_embedding: bool,
+    save_config_flag: bool,
 ) -> None:
     """Start the Shrike MCP server as a background daemon.
 
@@ -307,6 +316,37 @@ def server_start(
             "Stop it first with: shrike server stop"
         )
 
+    json_out: bool = ctx.obj["json"]
+
+    # Persist the resolved flags only when asked. `server start` is otherwise a
+    # no-write operation: the config file stays user-managed, and start always
+    # reflects exactly the flags it was given (see #56).
+    if save_config_flag:
+        config_path = ctx.obj["config_path"]
+        config["collection"] = collection_path
+        config["server"]["host"] = server_host
+        config["server"]["port"] = server_port
+        if allow_remote:
+            config["server"]["allow_remote"] = True
+        if resolved_transport["allowed_hosts"]:
+            config["server"]["allowed_hosts"] = resolved_transport["allowed_hosts"]
+        if resolved_transport["allowed_origins"]:
+            config["server"]["allowed_origins"] = resolved_transport["allowed_origins"]
+        if resolved_transport["no_dns_rebinding_protection"]:
+            config["server"]["no_dns_rebinding_protection"] = True
+        # Remember embedding settings so `shrike embedding start` works later.
+        for key, value in resolved_embedding.items():
+            if value is not None:
+                config.setdefault("embedding", {})[key] = value
+        if resolved_cache_dir:
+            config["cache_dir"] = resolved_cache_dir
+        for key, value in resolved_index_save.items():
+            if value is not None:
+                config.setdefault("index", {})[key] = value
+        saved = save_config(config, config_path)
+        if not json_out:
+            output.console.print(f"  [dim]Config saved to {saved}[/dim]")
+
     if foreground:
         output.console.print(f"Starting server in foreground on {server_host}:{server_port}")
         output.console.print(f"Collection: {collection_path}")
@@ -370,35 +410,6 @@ def server_start(
             stderr=bootstrap_log_file,
             start_new_session=True,
         )
-
-    json_out: bool = ctx.obj["json"]
-
-    # Save config if it doesn't exist yet
-    config_path = ctx.obj.get("config_path")
-    if config_path and not config_path.exists():
-        config["collection"] = collection_path
-        config["server"]["host"] = server_host
-        config["server"]["port"] = server_port
-        if allow_remote:
-            config["server"]["allow_remote"] = True
-        if resolved_transport["allowed_hosts"]:
-            config["server"]["allowed_hosts"] = resolved_transport["allowed_hosts"]
-        if resolved_transport["allowed_origins"]:
-            config["server"]["allowed_origins"] = resolved_transport["allowed_origins"]
-        if resolved_transport["no_dns_rebinding_protection"]:
-            config["server"]["no_dns_rebinding_protection"] = True
-        # Remember embedding settings so `shrike embedding start` works later.
-        for key, value in resolved_embedding.items():
-            if value is not None:
-                config.setdefault("embedding", {})[key] = value
-        if resolved_cache_dir:
-            config["cache_dir"] = resolved_cache_dir
-        for key, value in resolved_index_save.items():
-            if value is not None:
-                config.setdefault("index", {})[key] = value
-        saved = save_config(config, config_path)
-        if not json_out:
-            output.console.print(f"  [dim]Config saved to {saved}[/dim]")
 
     log_file = get_log_file(config, log_dir_override=resolved_log_dir)
     status = _wait_for_server(url)

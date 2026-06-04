@@ -7,6 +7,17 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 
 ## [Unreleased]
 
+### Changed
+- `shrike server start` no longer writes `config.yml` on its own. It previously
+  saved the flags only on the very first run (when no config existed) and then
+  silently ignored later flags, so the on-disk config could diverge from how the
+  daemon was actually running. The config file is now user-managed; pass the new
+  `--save-config` flag to persist the resolved flags explicitly (#56).
+
+### Added
+- `shrike server start --save-config` writes the resolved collection, server,
+  embedding, cache, and index-tuning settings to the config file (#56).
+
 ## [0.3.4] — 2026-06-01
 
 ### Fixed

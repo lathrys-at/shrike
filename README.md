@@ -168,7 +168,12 @@ The machine schema is whatever the running server advertises via `tools/list`. [
 
 ## Configuration
 
-Shrike reads settings from a YAML file in the platform config directory: `~/.config/shrike/config.yml` on Linux, `~/Library/Application Support/shrike/config.yml` on macOS. The first `shrike server start` creates it.
+Shrike reads settings from a YAML file in the platform config directory: `~/.config/shrike/config.yml` on Linux, `~/Library/Application Support/shrike/config.yml` on macOS. The file is yours to manage; `shrike server start` never writes it on its own. To save the flags you started with so you don't have to repeat them, pass `--save-config` and Shrike writes the resolved settings to the file:
+
+```bash
+shrike server start --collection ~/path/to/collection.anki2 \
+  --embedding-model ~/models/all-MiniLM-L6-v2-Q4_K_M.gguf --save-config
+```
 
 Most settings also take an environment variable (`SHRIKE_URL`, `SHRIKE_COLLECTION`, `SHRIKE_EMBEDDING_MODEL`, and more) or a command-line flag. Command-line flags take precedence, then environment variables, then the file. [The CLI reference](docs/cli-reference.md) has the full list.
 
