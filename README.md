@@ -123,12 +123,11 @@ shrike note tag 1779749914797 --add jp --remove jp-verb  # add and remove togeth
 shrike note tag 1779749914797 --set ""                   # clear all tags
 ```
 
-For tags across the whole collection, `shrike tag` renames and cleans up:
+For tags across the whole collection, `shrike tag` renames:
 
 ```bash
 shrike tag rename history::ww2 history::wwii   # rename everywhere it appears
 shrike tag rename jp japanese --note 1779749914797   # only on these notes
-shrike tag clean                               # drop tags no note uses anymore
 ```
 
 Manage decks with `shrike deck`:
@@ -186,7 +185,6 @@ Shrike exposes these MCP tools:
 - **upsert_note_types**: create or update note type definitions
 - **update_note_tags**: set, add, or remove tags on a set of notes
 - **rename_tag**: rename a tag collection-wide or on specific notes
-- **clear_unused_tags**: remove tags no longer used by any note
 - **upsert_decks**: create or rename/reparent decks in bulk
 - **delete_decks**: delete decks by name, if empty
 - **delete_notes**: permanently delete notes by ID

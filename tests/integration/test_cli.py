@@ -591,12 +591,6 @@ class TestTagGroup:
         assert data["notes_modified"] == 1
         assert self._tags(runner, note_id) == ["japanese", "jp-verbs"]
 
-    def test_clean_removes_unused(self, runner):
-        note_id = self._make(runner, "soon-unused")
-        runner.json(["note", "tag", note_id, "--set", ""])  # orphan the tag name
-        data = runner.json(["tag", "clean"])
-        assert data["tags_removed"] >= 1
-
 
 class TestDeckGroup:
     """Deck lifecycle via CLI."""

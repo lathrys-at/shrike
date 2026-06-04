@@ -94,16 +94,3 @@ class TestRenameTagTool:
         assert result["notes_modified"] == 1
         assert mock_index.col_mod == wrapper.col.mod
         mock_saver.request_save.assert_called_once()
-
-
-class TestClearUnusedTagsTool:
-    def test_clears_and_bumps(self, wrapper, mock_index, mock_saver, mcp_app, basic_note):
-        # Strip the note's tags so "math"/"easy" become unused registry entries.
-        _call(mcp_app, "update_note_tags", {"note_ids": [basic_note], "set": []})
-        mock_saver.reset_mock()
-        mock_index.col_mod = 0
-
-        result = _call(mcp_app, "clear_unused_tags", {})
-        assert result["tags_removed"] >= 1
-        assert mock_index.col_mod == wrapper.col.mod
-        mock_saver.request_save.assert_called_once()

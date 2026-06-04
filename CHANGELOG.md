@@ -17,14 +17,13 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
   - `deck delete` / `delete_decks` is **empty-only**: a deck with cards in it or a
     subdeck is refused (reported `not_empty`). Move its notes out first, then
     delete — so deleting a deck can never delete a note.
-- Tag curation beyond full-replace (#73): three new MCP tools and matching CLI.
+- Tag curation beyond full-replace (#73): new MCP tools and matching CLI.
   - `update_note_tags` / `shrike note tag --set|--add|--remove`: edit tags on a
     set of notes. `--set` replaces (and `--set ""` clears); `--add`/`--remove`
     edit additively and combine in one call. Exactly one mode per call — there
     is no default, and `--set` cannot mix with `--add`/`--remove`.
   - `rename_tag` / `shrike tag rename OLD NEW [--note ID]`: rename a tag
     collection-wide, or exactly on specific notes (`jp` never touches `jp-verbs`).
-  - `clear_unused_tags` / `shrike tag clean`: drop tag names no note uses anymore.
   - Tag changes advance the vector index's stored `col_mod` without re-embedding
     (tags aren't part of embedding text), so a tag-only edit no longer forces a
     spurious full index rebuild on the next startup.

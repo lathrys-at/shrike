@@ -672,7 +672,7 @@ class TestValidation:
 
 
 class TestTagOps:
-    """update_note_tags, rename_tag, clear_unused_tags over transport."""
+    """update_note_tags and rename_tag over transport."""
 
     def _make(self, mcp, tags):
         created = mcp(
@@ -734,12 +734,6 @@ class TestTagOps:
     def test_rename_identical_rejected(self, mcp):
         with pytest.raises(RuntimeError, match="identical"):
             mcp("rename_tag", {"old": "a", "new": "a"})
-
-    def test_clear_unused(self, mcp):
-        nid = self._make(mcp, ["soon-unused"])
-        mcp("update_note_tags", {"note_ids": [nid], "set": []})
-        result = mcp("clear_unused_tags", {})
-        assert result["tags_removed"] >= 1
 
 
 class TestDeckOps:

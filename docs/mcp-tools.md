@@ -401,24 +401,6 @@ Rename a tag, collection-wide or on a set of notes. With no `note_ids`, the tag 
 
 ---
 
-## `clear_unused_tags`
-
-Remove tags that are no longer used by any note. Anki keeps a registry of tag names separate from note tags; deleting the last note carrying a tag leaves the name behind. This prunes those orphans.
-
-### Parameters
-
-None.
-
-### Response
-
-```jsonc
-{
-  "tags_removed": 3
-}
-```
-
----
-
 ## `upsert_decks`
 
 Create or rename decks in bulk (1–100), the same shape as `upsert_notes`. Each item's `name` is the desired deck name (nested with `::`, e.g. `Japanese::Vocabulary`). An optional `id` selects an existing deck to rename/reparent to `name`.

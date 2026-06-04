@@ -377,10 +377,6 @@ class RenameTagResponse(BaseModel):
     notes_modified: int = 0
 
 
-class ClearUnusedTagsResponse(BaseModel):
-    tags_removed: int = 0
-
-
 class UpsertDecksResponse(BaseModel):
     results: list[UpsertDeckResult] = []
 

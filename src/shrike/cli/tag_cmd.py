@@ -8,7 +8,7 @@ from shrike.cli.output import NOTE_ID, output_options
 
 @click.group("tag", short_help="Manage tags across the collection")
 def tag() -> None:
-    """Rename tags and clean up unused ones.
+    """Rename tags across the collection.
 
     Note-level tag editing (set/add/remove on specific notes) lives under
     'shrike note tag'. These commands act on the collection's tag taxonomy.
@@ -53,23 +53,3 @@ def tag_rename(ctx: click.Context, old: str, new: str, note_ids: tuple[int, ...]
         f"Renamed [yellow]{old}[/yellow] → [yellow]{new}[/yellow] "
         f"on {result.notes_modified} note(s)."
     )
-
-
-@tag.command("clean", short_help="Remove unused tags")
-@output_options
-@click.pass_context
-def tag_clean(ctx: click.Context) -> None:
-    """Remove tag names that are no longer used by any note.
-
-    Anki keeps the tag registry separate from note tags, so deleting the last
-    note carrying a tag leaves its name behind. This prunes those orphans.
-    """
-    client = ctx.obj["client"]
-    with output.spinner("Clearing unused tags…"):
-        result = client.clear_unused_tags()
-
-    if ctx.obj["json"]:
-        output.emit_json(result)
-        return
-
-    output.console.print(f"Removed {result.tags_removed} unused tag(s).")

@@ -1,4 +1,4 @@
-"""Collection-layer tag operations (#73): set/add/remove, rename, clear-unused."""
+"""Collection-layer tag operations (#73): set/add/remove and rename."""
 
 from __future__ import annotations
 
@@ -96,18 +96,6 @@ class TestRenameTag:
     async def test_scoped_rename_no_match_is_noop(self, wrapper, basic_note):
         result = await wrapper.rename_tag("absent", "whatever", [basic_note])
         assert result["notes_modified"] == 0
-
-
-class TestClearUnusedTags:
-    async def test_clears_orphaned_tag_names(self, wrapper):
-        nid = await _make_note(wrapper, "n", ["temp-tag"])
-        # Remove the tag from the note; the name lingers in the registry.
-        await wrapper.update_note_tags([nid], set_tags=[], add=[], remove=[])
-        assert "temp-tag" in wrapper.run_sync(lambda c: c.tags.all())
-
-        result = await wrapper.clear_unused_tags()
-        assert result["tags_removed"] >= 1
-        assert "temp-tag" not in wrapper.run_sync(lambda c: c.tags.all())
 
 
 @pytest.mark.parametrize("scope", [[], [123]])

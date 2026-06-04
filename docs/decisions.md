@@ -70,11 +70,13 @@ a single overloaded field.
 
 Earlier this was deliberately unbuilt "until a concrete need appears" — #73 was
 that need. Bulk add/remove over existing notes (`update_note_tags`, backed by
-Anki's `bulk_add`/`bulk_remove`), collection-wide and note-scoped tag rename
-(`rename_tag` / `shrike tag rename`), and unused-tag cleanup (`clear_unused_tags`
-/ `shrike tag clean`) are all available. Note-scoped rename matches the tag
-*exactly* (find notes carrying it, then swap) rather than a substring
-find/replace, so renaming `jp` never touches `jp-verbs`.
+Anki's `bulk_add`/`bulk_remove`) and collection-wide and note-scoped tag rename
+(`rename_tag` / `shrike tag rename`) are available. Note-scoped rename matches the
+tag *exactly* (find notes carrying it, then swap) rather than a substring
+find/replace, so renaming `jp` never touches `jp-verbs`. Unused-tag cleanup
+shipped briefly here too, but was pulled back out: it belongs with other
+collection-maintenance chores (remove-empty-notes, etc.) under a single
+`collection_prune` op rather than a one-off `tag clean` (#89).
 
 Because tags are not part of a note's embedding text, these ops bump `col.mod`
 but leave every vector valid; each advances the stored index `col_mod` without

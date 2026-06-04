@@ -287,7 +287,7 @@ shrike deck delete "A" "B" --yes
 
 ## `shrike tag`
 
-Collection-level tag operations. Per-note tag editing (set/add/remove on specific notes) lives under `shrike note tag`; these act on the collection's tag taxonomy.
+Collection-level tag operations. Per-note tag editing (set/add/remove on specific notes) lives under `shrike note tag`; this acts on the collection's tag taxonomy.
 
 ### `shrike tag rename <OLD> <NEW>`
 
@@ -300,14 +300,6 @@ Rename a tag. With no `--note`, the tag is renamed everywhere it appears, childr
 ```bash
 shrike tag rename history::ww2 history::wwii
 shrike tag rename jp japanese --note 1779749914797 --note 1779749914798
-```
-
-### `shrike tag clean`
-
-Remove tag names that are no longer used by any note. Anki keeps the tag registry separate from note tags, so deleting the last note carrying a tag leaves its name behind; this prunes those orphans.
-
-```bash
-shrike tag clean
 ```
 
 ---

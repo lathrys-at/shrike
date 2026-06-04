@@ -564,12 +564,6 @@ class CollectionWrapper:
             self.col.tags.bulk_add(matching, new)
         return {"notes_modified": len(matching)}
 
-    async def clear_unused_tags(self) -> dict[str, Any]:
-        return await self.run(lambda _c: self._clear_unused_tags())
-
-    def _clear_unused_tags(self) -> dict[str, Any]:
-        return {"tags_removed": self.col.tags.clear_unused_tags().count}
-
     # -- decks ---------------------------------------------------------------
 
     async def upsert_decks(self, decks: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -11,7 +11,6 @@ from pydantic import Field
 from shrike.collection import CollectionWrapper
 from shrike.index import IndexSaver, IndexState, VectorIndex
 from shrike.schemas import (
-    ClearUnusedTagsResponse,
     CollectionInfo,
     DeckInput,
     DeleteDecksResponse,
@@ -861,21 +860,6 @@ def register_tools(
         if result["notes_modified"]:
             await _bump_col_mod_after_metadata_change()
         return RenameTagResponse.model_validate(result)
-
-    @mcp.tool()
-    @_safe_tool
-    async def clear_unused_tags() -> ClearUnusedTagsResponse:
-        """Remove tags that are no longer used by any note.
-
-        Anki keeps a registry of tag names separate from note tags; deleting the
-        last note with a tag leaves the name behind. This prunes those orphans.
-        Returns the number of tag names removed."""
-        logger.info("clear_unused_tags")
-        result = await wrapper.clear_unused_tags()
-        logger.info("clear_unused_tags removed %d tag(s)", result["tags_removed"])
-        if result["tags_removed"]:
-            await _bump_col_mod_after_metadata_change()
-        return ClearUnusedTagsResponse.model_validate(result)
 
     @mcp.tool()
     @_safe_tool
