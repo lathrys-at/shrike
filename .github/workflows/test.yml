@@ -49,11 +49,16 @@ jobs:
               - 'src/shrike/**'
               - 'tests/integration/test_embedding.py'
               - 'tests/integration/test_semantic.py'
+              # Shared harness that the embedding lane depends on (model
+              # download/cache, server fixtures) and the workflow itself.
+              - 'tests/integration/conftest.py'
+              - 'tests/integration/model_cache.py'
               - 'tests/unit/test_embedding.py'
               - 'tests/unit/test_index.py'
               - 'tests/unit/test_note_embedding_text.py'
               - 'tests/unit/test_tools_search.py'
               - '.github/scripts/install-llama-server.sh'
+              - '.github/workflows/test.yml'
               - 'pyproject.toml'
               - '.github/workflows/test.yml'
 
