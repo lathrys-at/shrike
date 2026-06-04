@@ -23,22 +23,31 @@ sha_var="SHA256_${PLATFORM//-/_}"
 expected="${!sha_var}"
 
 INSTALL_DIR="${RUNNER_TEMP}/llama-server"
-TARBALL="${RUNNER_TEMP}/llama-${LLAMA_TAG}-bin-${PLATFORM}.tar.gz"
-curl -fsSL \
-    "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-bin-${PLATFORM}.tar.gz" \
-    -o "$TARBALL"
 
-if command -v sha256sum >/dev/null; then
-    actual=$(sha256sum "$TARBALL" | awk '{print $1}')
+# Skip the download when a restored cache already holds the pinned binary. The
+# cache is keyed on scripts/llama-server.lock (tag + SHA256), so a hit is the
+# same verified build a download would produce; a tag/SHA bump changes the key
+# and forces a fresh, re-verified download.
+if [ -x "$INSTALL_DIR/llama-server" ]; then
+    echo "llama-server already present at $INSTALL_DIR (cache hit) — skipping download"
 else
-    actual=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
-fi
-if [ "$actual" != "$expected" ]; then
-    echo "Checksum mismatch for $PLATFORM: expected $expected, got $actual" >&2 && exit 1
-fi
+    TARBALL="${RUNNER_TEMP}/llama-${LLAMA_TAG}-bin-${PLATFORM}.tar.gz"
+    curl -fsSL \
+        "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-bin-${PLATFORM}.tar.gz" \
+        -o "$TARBALL"
 
-tar xz -C "${RUNNER_TEMP}" -f "$TARBALL"
-mv "${RUNNER_TEMP}/llama-${LLAMA_TAG}" "$INSTALL_DIR"
+    if command -v sha256sum >/dev/null; then
+        actual=$(sha256sum "$TARBALL" | awk '{print $1}')
+    else
+        actual=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
+    fi
+    if [ "$actual" != "$expected" ]; then
+        echo "Checksum mismatch for $PLATFORM: expected $expected, got $actual" >&2 && exit 1
+    fi
+
+    tar xz -C "${RUNNER_TEMP}" -f "$TARBALL"
+    mv "${RUNNER_TEMP}/llama-${LLAMA_TAG}" "$INSTALL_DIR"
+fi
 
 echo "$INSTALL_DIR" >> "$GITHUB_PATH"
 echo "LLAMA_DIR=$INSTALL_DIR" >> "$GITHUB_ENV"

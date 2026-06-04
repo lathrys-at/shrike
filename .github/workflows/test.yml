@@ -135,6 +135,14 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
+      # Cache the pinned llama-server build so we don't re-download the release
+      # tarball every run (#83). Keyed on the lock file (tag + SHA256), so a bump
+      # invalidates it; install-llama-server.sh skips the download on a hit.
+      - name: Cache llama-server
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/llama-server
+          key: llama-server-${{ runner.os }}-${{ hashFiles('scripts/llama-server.lock') }}
       - name: Install llama-server
         run: bash .github/scripts/install-llama-server.sh
       - name: Install dependencies
@@ -175,6 +183,11 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
+      - name: Cache llama-server
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/llama-server
+          key: llama-server-${{ matrix.os }}-${{ hashFiles('scripts/llama-server.lock') }}
       - name: Install llama-server
         run: bash .github/scripts/install-llama-server.sh
       - name: Install dependencies
