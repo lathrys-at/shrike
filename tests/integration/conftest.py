@@ -26,6 +26,7 @@ import pytest
 from click.testing import CliRunner
 
 from shrike.cli import cli
+from tests.integration.model_cache import cached_model_path, download_with_retry
 
 EMBEDDING_MODEL_URL = (
     "https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF"
@@ -289,13 +290,16 @@ requires_llama_server = pytest.mark.skipif(
 
 @pytest.fixture(scope="session")
 def embedding_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Download a small embedding model for tests, cached per session."""
-    cache_dir = tmp_path_factory.mktemp("models")
-    model_path = cache_dir / EMBEDDING_MODEL_NAME
-    resp = httpx.get(EMBEDDING_MODEL_URL, follow_redirects=True, timeout=120.0)
-    resp.raise_for_status()
-    model_path.write_bytes(resp.content)
-    return model_path
+    """Provide a small embedding model for tests.
+
+    Reuses an already-downloaded copy (a stable, CI-cached dir via
+    ``$SHRIKE_TEST_MODEL_DIR``, else a per-session temp dir) and downloads with
+    retry/backoff so a transient HuggingFace 429 doesn't fail the lane (#83).
+    """
+    model_path = cached_model_path(EMBEDDING_MODEL_NAME, tmp_path_factory.mktemp("models"))
+    if model_path.exists() and model_path.stat().st_size > 0:
+        return model_path
+    return download_with_retry(EMBEDDING_MODEL_URL, model_path)
 
 
 @pytest.fixture(scope="class")

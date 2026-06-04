@@ -134,9 +134,17 @@ jobs:
         run: bash .github/scripts/install-llama-server.sh
       - name: Install dependencies
         run: pip install -e ".[dev]"
+      # Persist the GGUF across runs so we don't re-hit HuggingFace every time
+      # (the source of the 429 flake, #83). The fixture reads SHRIKE_TEST_MODEL_DIR.
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/shrike-test-models
+          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M
       - name: Run embedding tests
         env:
           LD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
+          SHRIKE_TEST_MODEL_DIR: ${{ runner.temp }}/shrike-test-models
         run: pytest tests/integration -v -m embedding
 
   # macOS + ARM are expensive (macOS bills at 10x), so they NEVER run on plain
@@ -166,10 +174,16 @@ jobs:
         run: bash .github/scripts/install-llama-server.sh
       - name: Install dependencies
         run: pip install -e ".[dev]"
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/shrike-test-models
+          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M-${{ matrix.os }}
       - name: Run integration + embedding tests
         env:
           LD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
           DYLD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
+          SHRIKE_TEST_MODEL_DIR: ${{ runner.temp }}/shrike-test-models
         run: pytest tests/integration -v -m integration
 
   # Single required status check. Always runs, and passes iff every gated job
