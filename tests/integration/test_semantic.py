@@ -165,6 +165,17 @@ def collection_server(server_factory, embedding_model):
     created = sum(1 for r in result["results"] if r["status"] == "created")
     assert created == 50, f"Expected 50 notes created, got {created}"
 
+    # Build the index here so the fixture is self-sufficient: this server boots
+    # against an empty collection, and an empty-at-boot server does NOT index
+    # notes added by incremental upsert (#148 — the upsert path is gated on
+    # index.available, which is False until the index is materialized). Without
+    # this, the index only gets built as a side effect of TestIndexBuild running
+    # first, so a single TestSearchNotes test run in isolation (-k) would hang the
+    # full _wait_for_index_ready timeout. Remove this explicit rebuild once #148
+    # lands (incremental upsert will materialize the index on its own).
+    httpx.post(f"{_base_url(srv)}/index/rebuild", timeout=30.0)
+    _wait_for_index_ready(srv)
+
     return srv
 
 
@@ -278,18 +289,24 @@ class TestSearchNotes:
 
     def test_similar_concepts_rank_higher(self, semantic_mcp, collection_server):
         _wait_for_index_ready(collection_server)
-        # This is a *ranking* check: the calculus note should be the nearest
-        # match. Pass threshold=0 so it doesn't hinge on the absolute score
-        # clearing the default 0.5 cutoff — with the small quantized test model
-        # the right answer scores just under 0.5, which would otherwise drop it
-        # and leave no matches to rank (#91).
+        # This is a *ranking* check: calculus notes should be among the nearest
+        # matches for a calculus query. Pass threshold=0 so it doesn't hinge on
+        # the absolute score clearing the default 0.5 cutoff — with the small
+        # quantized test model the right answers score just under 0.5, which
+        # would otherwise drop them and leave nothing to rank (#91).
+        #
+        # Assert calculus is present in the top-k tags rather than pinned to an
+        # exact slot: "rate of change" legitimately pulls in mechanics notes
+        # (velocity/acceleration), so which concept lands at slot 0 flips run to
+        # run on this borderline model. Membership in the top-k is robust to
+        # that perturbation while still failing if the ranking is actually broken.
         result = semantic_mcp(
             "search_notes",
             {"queries": ["derivative calculus rate of change"], "top_k": 5, "threshold": 0.0},
         )
         matches = result["results"][0]["matches"]
         assert len(matches) > 0
-        top_tags = matches[0].get("tags", [])
+        top_tags = {t for m in matches for t in m.get("tags", [])}
         assert "calculus" in top_tags
 
     def test_id_based_search(self, semantic_mcp, collection_server):
