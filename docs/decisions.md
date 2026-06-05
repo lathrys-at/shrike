@@ -419,3 +419,30 @@ metadata-bump op: empty-note/empty-card removal deletes notes, so their vectors
 leave the index via `index.remove` exactly like `delete_notes`, while unused-tag
 clearing leaves every vector valid. The tool does both in one pass and advances
 `col_mod` once when anything changed.
+
+## Collection lifecycle
+
+### Reload is the first slice of cooperative locking, built deliberately (#79 → #64)
+
+`shrike collection reload` / `POST /reload` closes and re-opens the
+`anki.Collection` and re-checks index drift. We built it now as an explicit
+**down-payment on #64** (cooperative locking), not as a fully independent feature,
+because its honest value today is narrow: the daemon holds the collection's
+exclusive lock for its whole life, so while it's up almost nothing can edit the
+file underneath it except a *file-level* replacement (a restored backup, an
+`rsync`/sync swap). The "edit in Anki desktop, then reload" story the issue
+implies only works once #64 lets the daemon release the lock when idle — at which
+point #64's per-acquire drift check makes reload mostly automatic and the explicit
+command shrinks to "release now + re-check."
+
+What makes it a down-payment rather than throwaway is the primitive it introduces:
+`CollectionWrapper.reopen`/`_do_reopen` (close + re-open on the worker thread) and
+— the subtle part — `run`/`run_sync` now read `self.col` **at execution time on
+the worker thread** instead of capturing it when called. That means an operation
+queued after a reopen runs against the new handle, never a closed one; `self.col`
+becomes "the current handle" rather than "a handle fixed at boot." That open/swap
+lifecycle on the single worker chokepoint is exactly what #64's open-on-demand,
+idle-release design needs. It's a **control endpoint + CLI, not an MCP tool**
+(operational, like `/index/rebuild` and `/embedding/*`), and `server.lock`
+(daemon liveness) is untouched — only Anki's collection lock is released and
+re-acquired.

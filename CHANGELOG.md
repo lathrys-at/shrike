@@ -8,6 +8,11 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ## [Unreleased]
 
 ### Added
+- `shrike collection reload` (and a `POST /reload` control endpoint) — close and
+  re-open the collection without restarting the daemon, picking up changes made to
+  the collection file on disk (a restored backup, a file-level sync or swap) and
+  re-checking the search index for drift (rebuilding in the background if it
+  moved). Groundwork for cooperative locking (#79, #64).
 - `migrate_note_type` MCP tool and `shrike note migrate-type` — change a set of
   notes from one note type to another with an explicit field (and optional
   template) map, the way Anki's "Change Note Type" does: note IDs and, for mapped

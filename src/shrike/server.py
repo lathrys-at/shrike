@@ -50,13 +50,18 @@ def _maybe_rebuild(
     col_mod: int,
     note_ids: list[int],
     texts: list[str],
-) -> None:
-    """Trigger a background rebuild if the index drifted or the model changed."""
+) -> bool:
+    """Trigger a background rebuild if the index drifted or the model changed.
+
+    Returns True if a rebuild was started (drift detected and the collection is
+    non-empty), False otherwise.
+    """
     if index.check_drift(col_mod, model_id):
         if note_ids:
             index.rebuild_in_background(note_ids, texts, col_mod, model_id=model_id)
-        else:
-            logger.info("Collection is empty, skipping index rebuild")
+            return True
+        logger.info("Collection is empty, skipping index rebuild")
+    return False
 
 
 # Host/Origin values accepted when the server is bound to a loopback address.
@@ -327,6 +332,25 @@ def _register_custom_routes(
         index.save()
         await asyncio.to_thread(runtime.stop)
         return JSONResponse({"status": "stopped", "index": index.status()})
+
+    @app.custom_route("/reload", methods=["POST"])
+    @_guard
+    async def handle_reload(request: Request) -> JSONResponse:
+        logger.info("Reload requested via HTTP from %s", request.client)
+        # Close and re-open the collection, picking up on-disk changes.
+        await wrapper.reopen()
+        col_mod = await wrapper.run(lambda c: c.mod)
+
+        # Re-check index drift against the re-opened collection. Without a running
+        # embedder we can't rebuild (the index stays unavailable); just report.
+        rebuilding = False
+        svc = runtime.service
+        if svc is not None and svc.running:
+            model_id = await asyncio.to_thread(svc.model_fingerprint)
+            all_note_ids, new_col_mod, texts = await wrapper.run(_collect_for_rebuild)
+            rebuilding = _maybe_rebuild(index, model_id, new_col_mod, all_note_ids, texts)
+
+        return JSONResponse({"status": "reloaded", "col_mod": col_mod, "rebuilding": rebuilding})
 
     @app.custom_route("/shutdown", methods=["POST"])
     @_guard

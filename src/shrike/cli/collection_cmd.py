@@ -153,3 +153,26 @@ def query(ctx: click.Context, expression: str, brief: bool, limit: int) -> None:
             output.note_detail(n)
 
     output.console.print()
+
+
+@collection.command("reload", short_help="Re-open the collection from disk")
+@output_options
+@click.pass_context
+def reload(ctx: click.Context) -> None:
+    """Close and re-open the collection without restarting the daemon.
+
+    Picks up changes made to the collection file on disk underneath the daemon
+    (a restored backup, a file-level sync or swap) and re-checks the search index
+    for drift, rebuilding it in the background if the collection changed.
+    """
+    client = ctx.obj["client"]
+    with output.spinner("Reloading…"):
+        result = client.reload()
+
+    if ctx.obj["json"]:
+        output.emit_json(result)
+        return
+
+    output.console.print(f"Reloaded collection [dim](col_mod={result.col_mod})[/dim].")
+    if result.rebuilding:
+        output.console.print("[dim]Collection changed — rebuilding the search index…[/dim]")

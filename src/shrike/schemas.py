@@ -804,6 +804,13 @@ class ShutdownResponse(BaseModel):
     pid: int
 
 
+class ReloadResponse(BaseModel):
+    # POST /reload — closed and re-opened the collection (#79).
+    status: Literal["reloaded"] = "reloaded"
+    col_mod: int  # collection mod stamp after re-opening
+    rebuilding: bool = False  # whether the re-open drift check started an index rebuild
+
+
 class StopSucceeded(BaseModel):
     """The daemon was stopped. ``pid`` is None only if the pid file was
     unreadable; ``forced`` is True if a graceful stop timed out into a kill."""

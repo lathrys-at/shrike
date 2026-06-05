@@ -51,6 +51,7 @@ from shrike.schemas import (
     MigrateNoteTypeResponse,
     NoteInput,
     NoteTypeInput,
+    ReloadResponse,
     RenameTagResponse,
     SearchResponse,
     ServerStatus,
@@ -605,6 +606,9 @@ class ShrikeClient:
         return _EMBEDDING_STOP_ADAPTER.validate_python(
             self._request("POST", "/embedding/stop", timeout=30.0)
         )
+
+    def reload(self) -> ReloadResponse:
+        return ReloadResponse.model_validate(self._request("POST", "/reload", timeout=60.0))
 
     def shutdown(self) -> ShutdownResponse:
         return ShutdownResponse.model_validate(self._request("POST", "/shutdown", timeout=5.0))

@@ -241,7 +241,7 @@ shrike [--config PATH] [--url URL] [--json] [--pretty/--no-pretty]
 ├── deck create|rename|delete
 ├── tag rename
 ├── type list|show|create|update|delete
-├── collection query|prune
+├── collection query|prune|reload
 ├── index rebuild|status|save
 └── embedding status|start|stop
 ```
@@ -281,6 +281,7 @@ Signal handlers (SIGTERM, SIGINT) remain as a secondary path for Unix `kill` com
 - `POST /index/save` — forces an immediate flush of the in-memory index to disk (off the event loop). Returns `saved` (with `size` and the `pending` count it flushed), `empty` (no index built yet), or `building` (refused mid-rebuild). Backs `shrike index save`; the index also saves automatically (debounced flush + shutdown).
 - `POST /embedding/start` — starts the embedding service (optional JSON body overrides model/port/etc.; falls back to the params the server booted with). Attaches it to the index and triggers a rebuild if the model changed or the index drifted. Returns `started` / `already_running` / a 400 if no model is configured.
 - `POST /embedding/stop` — saves the index, then stops the embedding service and marks the index `unavailable`. The server and collection stay up.
+- `POST /reload` — closes and re-opens the collection (picks up on-disk changes — a restored backup, a file-level sync/swap) and re-checks index drift, rebuilding in the background if `col.mod` moved. Returns `{status: "reloaded", col_mod, rebuilding}`. Backs `shrike collection reload`. **First slice of cooperative locking (#64):** the reopen primitive (`CollectionWrapper.reopen`/`_do_reopen`) plus reading `self.col` at execution time in `run`/`run_sync` (so an op queued after a reopen sees the new handle) is exactly what #64's open-on-demand lifecycle will reuse. Under today's permanent-hold lock its utility is narrow (the lock blocks most external edits while the daemon runs) — it widens once #64 lands, where the per-acquire drift check makes reload mostly automatic. It's a control endpoint + CLI, not an MCP tool (operational, like the index/embedding routes).
 
 State files live in the platform state directory (see `shrike/paths.py`):
 - `server.lock` — exclusive file lock held by the running server

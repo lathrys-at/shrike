@@ -151,18 +151,42 @@ class CollectionWrapper:
         The escape hatch for collection operations that don't have a dedicated
         method here (e.g. note-type edits, reading ``col.mod``). All access is
         serialized through the same single worker thread.
+
+        ``self.col`` is read **on the worker thread at execution time**, not
+        captured when this is called — so an op queued after a ``reopen`` sees the
+        new handle, never a closed one. (The handle is swapped only by ``reopen``;
+        with no reopen this is identical to passing ``self.col`` directly.)
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, fn, self.col)
+        return await loop.run_in_executor(self._executor, lambda: fn(self.col))
 
     def run_sync(self, fn: Callable[[Collection], T]) -> T:
         """Run ``fn(col)`` on the worker thread, blocking until it returns.
 
         For the startup and shutdown paths, which run before/after the event
         loop and so cannot ``await``. Still routes through the worker thread,
-        preserving single-thread ownership of the collection.
+        preserving single-thread ownership of the collection. Reads ``self.col``
+        at execution time, like ``run``.
         """
-        return self._executor.submit(fn, self.col).result()
+        return self._executor.submit(lambda: fn(self.col)).result()
+
+    async def reopen(self) -> None:
+        """Close and re-open the collection on the worker thread.
+
+        Releases Anki's SQLite lock and re-opens the file, picking up changes made
+        on disk underneath the daemon (a restored backup, a file-level sync/swap).
+        Runs on the single worker thread, so it's serialized against every other
+        operation — nothing sees a half-swapped handle. The index is not touched
+        here; the caller re-checks drift afterwards. This is the primitive
+        cooperative locking (#64) will reuse for its open-on-demand lifecycle.
+        """
+        await self.run(self._do_reopen)
+
+    def _do_reopen(self, _c: Collection) -> None:
+        with contextlib.suppress(Exception):
+            self.col.close()
+        self.col = Collection(self._path)
+        logger.info("Reopened collection at %s", self._path)
 
     def close(self) -> None:
         if self._closed:

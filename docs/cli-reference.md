@@ -382,6 +382,16 @@ shrike collection prune --empty-notes --apply -y # remove empty notes, no prompt
 
 `--apply` is destructive and cannot be undone; preview first.
 
+### `shrike collection reload`
+
+Close and re-open the collection without restarting the daemon. Picks up changes made to the collection file on disk underneath a running daemon (a restored backup, a file-level sync or swap) and re-checks the search index for drift, rebuilding it in the background if the collection changed. Reports the new `col_mod` and whether a rebuild was triggered.
+
+```bash
+shrike collection reload
+```
+
+Note: while the daemon is running it holds the collection's lock, so external tools (Anki desktop, sync) generally cannot edit it underneath you — reload is mainly for file-level replacement today, and becomes more broadly useful once cooperative locking lands.
+
 ---
 
 ## `shrike type`
