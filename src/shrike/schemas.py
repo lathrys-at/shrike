@@ -46,6 +46,14 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
+# Stable wire marker prefixing a tool's MCP isError text when the call failed
+# because the collection couldn't be acquired (another process holds it, under
+# cooperative locking — #65). The single source of truth shared by the server
+# (collection.py builds the message) and the dependency-light client (which maps
+# it to CollectionBusyError). Not a response model: busy is a transport-level
+# error class, orthogonal to every tool's response (the op never ran).
+COLLECTION_BUSY_CODE = "collection_busy"
+
 # ============================================================================
 # Request models (tool inputs)
 # ============================================================================

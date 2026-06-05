@@ -8,6 +8,13 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ## [Unreleased]
 
 ### Added
+- Busy-acquire error surface for cooperative locking: when the daemon can't
+  re-acquire the collection because another process holds it (typically Anki
+  desktop is open), tool calls now fail with a distinct, typed "collection busy"
+  error instead of a leaked exception string. `ShrikeClient` raises a
+  `CollectionBusyError` (a sibling of `ServerError`) callers can catch and retry,
+  and the CLI prints an actionable "the collection is in use by another process
+  (is Anki open?)" message. It returns busy immediately (no retry) (#65).
 - Cooperative collection locking (opt-in): `shrike server start --cooperative-lock`
   releases Anki's exclusive collection lock when the daemon is idle and re-opens
   it on demand, so an idle daemon no longer blocks launching Anki desktop against

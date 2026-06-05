@@ -13,10 +13,29 @@ from typing import Any, Literal, TypeVar
 
 from anki.collection import Collection
 from anki.consts import MODEL_CLOZE
-from anki.errors import NotFoundError
+from anki.errors import DBError, NotFoundError
 from anki.notes import NoteFieldsCheckResult
 
 from shrike.embed_text import field_is_blank, normalize_for_embedding
+from shrike.schemas import COLLECTION_BUSY_CODE
+
+
+class CollectionBusyError(Exception):
+    """A cooperative-mode re-acquire failed: another process holds the collection.
+
+    Raised when re-opening the collection (after an idle release, #64) hits Anki's
+    ``DBError`` lock — typically because Anki desktop is open. Expected, not a bug;
+    the tool layer surfaces it over MCP with ``COLLECTION_BUSY_CODE`` and the
+    client maps it to its own ``CollectionBusyError``. The message is prefixed
+    with the code so the client can detect it without parsing prose.
+    """
+
+    def __init__(self, detail: str = "") -> None:
+        human = detail or (
+            "The collection is in use by another process (is Anki open?). Close it and try again."
+        )
+        super().__init__(f"{COLLECTION_BUSY_CODE}: {human}")
+
 
 logger = logging.getLogger("shrike.collection")
 
@@ -203,7 +222,13 @@ class CollectionWrapper:
         this is just ``fn(self.col)``.
         """
         if not self._open_flag:
-            self.col = Collection(self._path)
+            try:
+                self.col = Collection(self._path)
+            except DBError as e:
+                # The file opened fine at boot, so a DBError on re-acquire is
+                # overwhelmingly lock contention (another process — usually Anki
+                # desktop — holds it), not corruption. Surface it as busy.
+                raise CollectionBusyError() from e
             self._open_flag = True
             logger.debug("Re-acquired collection at %s", self._path)
             if self._on_acquire is not None:

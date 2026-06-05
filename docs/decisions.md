@@ -422,6 +422,29 @@ clearing leaves every vector valid. The tool does both in one pass and advances
 
 ## Collection lifecycle
 
+### Busy is a typed error, not a per-tool response variant (#65)
+
+Under cooperative locking a re-acquire can fail because Anki holds the collection
+— "database is locked" is now an *expected* outcome that every tool call needs a
+clean path for. The issue floated a discriminated-union `CollectionBusy` variant,
+but busy is **orthogonal to every tool's response**: the op never ran, so it's
+not "one of the shapes `upsert_notes` can return", it's a transport-level failure
+that applies identically to all 18 tools. Bolting the same variant onto 18
+unrelated response models would be the wrong kind of union. So it's modelled as an
+**error class with a stable wire code**, riding the existing two-layer split that
+already separates server `ToolInputError` from client `ServerError`: a server-side
+`CollectionBusyError` whose message is prefixed with `COLLECTION_BUSY_CODE`
+(`schemas.py`, the one source of truth), surfaced as an MCP `isError`, and mapped
+by `ShrikeClient` to a client-side `CollectionBusyError(ShrikeError)` callers can
+catch-and-retry. "Make illegal states unrepresentable" governs *within* a
+response; a condition orthogonal to all responses is an error class.
+
+And it **returns busy immediately**, with no server-side retry. A retry only helps
+for a momentary lock (Anki mid-write), but the dominant case is Anki open for a
+whole session — there a retry just adds latency before the inevitable busy. Fail
+fast and let the caller decide; the cooperative idle-hold (#64) already smooths the
+*daemon's own* open/close churn, which is the churn worth smoothing.
+
 ### Cooperative locking is opt-in, time-sliced, with a 5 s idle hold (#64)
 
 By default the daemon holds Anki's exclusive collection lock for its whole life,
