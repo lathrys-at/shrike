@@ -385,6 +385,98 @@ def note_tag(
         output.console.print(f"[bold red]![/bold red] Not found: {ids}")
 
 
+@note.command("replace", short_help="Find and replace text across notes")
+@output_options
+@click.argument("search")
+@click.argument("replace")
+@click.option("--deck", help="Scope to this deck (name, numeric id, or #id).")
+@click.option(
+    "--tags",
+    multiple=True,
+    callback=_parse_comma_separated,
+    expose_value=True,
+    help="Scope to notes with these tags (repeatable, comma-separated).",
+)
+@click.option("--type", "note_type", help="Scope to this note type.")
+@click.option("--ids", multiple=True, type=NOTE_ID, help="Scope to these note IDs.")
+@click.option("--field", help="Restrict to a single field (default: all fields).")
+@click.option("--regex", is_flag=True, help="Treat SEARCH as a regular expression.")
+@click.option("--match-case", is_flag=True, help="Case-sensitive match.")
+@click.option("--dry-run", is_flag=True, help="Preview the changes without applying them.")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def note_replace(
+    ctx: click.Context,
+    search: str,
+    replace: str,
+    deck: str | None,
+    tags: tuple[str, ...],
+    note_type: str | None,
+    ids: tuple[int, ...],
+    field: str | None,
+    regex: bool,
+    match_case: bool,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Find and replace text across the fields of a scoped set of notes.
+
+    A scope is required (--deck, --tags, --type, or --ids). SEARCH is literal
+    unless --regex. By default this previews the changes, asks for confirmation,
+    then applies; --dry-run only previews, --yes skips the prompt.
+
+    \b
+    Examples:
+      shrike note replace "teh" "the" --deck "Biology" --dry-run
+      shrike note replace "colou?r" "color" --regex --tags spelling
+    """
+    if not any([deck, tags, note_type, ids]):
+        raise click.UsageError("A scope is required: --deck, --tags, --type, or --ids.")
+
+    client = ctx.obj["client"]
+    common: dict[str, Any] = {
+        "regex": regex,
+        "match_case": match_case,
+        "field": field,
+        "deck": deck,
+        "tags": list(tags) or None,
+        "note_type": note_type,
+        "ids": list(ids) or None,
+    }
+
+    # JSON mode is non-interactive: --dry-run previews, otherwise apply directly.
+    if ctx.obj["json"]:
+        result = client.find_replace_notes(search, replace, dry_run=dry_run, **common)
+        output.emit_json(result)
+        return
+
+    with output.spinner("Scanning…"):
+        preview = client.find_replace_notes(search, replace, dry_run=True, **common)
+
+    if preview.notes_changed == 0:
+        output.console.print("[dim]No matching notes.[/dim]")
+        return
+
+    output.console.print(f"[yellow]{preview.notes_changed}[/yellow] note(s) would change:")
+    for s in preview.samples:
+        output.console.print(f"  [green]#{s.id}[/green] [cyan]{s.field}[/cyan]")
+        output.console.print(f"    [dim]- {s.before}[/dim]")
+        output.console.print(f"    [dim]+ {s.after}[/dim]")
+    extra = preview.notes_changed - len(preview.samples)
+    if extra > 0:
+        output.console.print(f"  [dim]… and {extra} more[/dim]")
+
+    if dry_run:
+        return
+    if not yes and not click.confirm(f"Apply to {preview.notes_changed} note(s)?"):
+        output.console.print("Cancelled.")
+        return
+
+    with output.spinner("Replacing…"):
+        result = client.find_replace_notes(search, replace, dry_run=False, **common)
+    output.console.print(f"Replaced in {result.notes_changed} note(s).")
+
+
 @note.command("delete", short_help="Delete notes by ID")
 @output_options
 @click.argument("note_ids", type=NOTE_ID, nargs=-1, required=True)

@@ -15,6 +15,14 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
   note field values are touched and no note data is migrated — so it bumps the
   index `col_mod` without re-embedding. `match_case` defaults to true (template
   and CSS text is code). Typed `ShrikeClient.find_replace_in_note_type` too.
+- Bulk find-and-replace across note fields: `find_replace_notes` MCP tool and
+  `shrike note replace SEARCH REPLACE`. Scoped by `--deck`/`--tags`/`--type`/
+  `--ids` (a scope is required), optional `--regex` (Anki's engine; `$1` capture
+  refs), `--match-case`, and `--field` to limit to one field. The CLI previews the
+  changes and asks before applying (`--dry-run` to preview only, `--yes` to skip
+  the prompt); the MCP tool applies by default with a `dry_run` option. Changed
+  notes are re-embedded so semantic search stays correct, and the edit is undoable
+  in Anki (#85).
 - `search_notes` / `shrike note search` now match each query **both** by semantic
   similarity and as an exact, case-insensitive substring of note fields, folded
   into one result list. Each hit carries a `score` when semantically ranked and a

@@ -585,6 +585,41 @@ Delete decks by name — **only if empty**. A deck is deletable only when neithe
 
 ---
 
+## `find_replace_notes`
+
+Find and replace text across the fields of a scoped set of notes. A scope is **required** — at least one of `deck`, `tags`, `note_type`, or `ids` (the same filters as `list_notes`). `search` is literal unless `regex` is set (Anki's regex engine; capture references in `replace` use `$1`). `field` limits the edit to a single field; otherwise all fields are searched.
+
+By default the tool **applies** the change; pass `dry_run: true` to preview without modifying. Either way the response reports `notes_changed` and a sample of before/after edits. Changed notes are re-embedded so semantic search stays correct, and the edit is undoable in Anki. For literal searches the dry-run preview matches the apply exactly; for regex the preview is a best-effort sample and the apply is authoritative.
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `search` | `string` | **yes** | Text (or regex) to find. |
+| `replace` | `string` | **yes** | Replacement text. In regex mode, capture refs use Anki's `$1`. |
+| `regex` | `boolean` | no | Treat `search` as a regular expression. Default `false`. |
+| `match_case` | `boolean` | no | Case-sensitive match. Default `false`. |
+| `field` | `string` | no | Restrict to this single field; omit for all fields. |
+| `deck` | `string` | no | Scope: a deck (name, numeric ID, or `#id`; includes child decks). |
+| `tags` | `string[]` | no | Scope: notes having all of these tags. |
+| `note_type` | `string` | no | Scope: notes using this note type. |
+| `ids` | `integer[]` | no | Scope: these note IDs. |
+| `dry_run` | `boolean` | no | Preview only — change nothing. Default `false`. |
+
+### Response
+
+```jsonc
+{
+  "notes_changed": 3,
+  "dry_run": false,
+  "samples": [   // capped illustrative before/after, per changed field
+    { "id": 1700000000123, "field": "Front", "before": "teh cell", "after": "the cell" }
+  ]
+}
+```
+
+---
+
 ## `delete_notes`
 
 Permanently delete notes and all their associated cards. This cannot be undone.

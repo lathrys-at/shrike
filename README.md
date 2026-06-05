@@ -125,6 +125,13 @@ shrike note tag 1779749914797 --add jp --remove jp-verb  # add and remove togeth
 shrike note tag 1779749914797 --set ""                   # clear all tags
 ```
 
+Fix text across many notes at once with `shrike note replace`. It needs a scope, previews the changes, and asks before applying:
+
+```bash
+shrike note replace "teh" "the" --deck "Biology"          # preview, confirm, apply
+shrike note replace "colou?r" "color" --regex --tags spelling --dry-run
+```
+
 For tags across the whole collection, `shrike tag` renames:
 
 ```bash
@@ -185,6 +192,7 @@ Shrike exposes these MCP tools:
 - **collection_info**: collection structure, note types, decks, tags, and stats
 - **list_notes**: filter and retrieve notes by deck, tags, type, IDs, or date
 - **search_notes**: semantic similarity and exact-substring search over notes
+- **find_replace_notes**: bulk find and replace across note fields in a scoped set
 - **upsert_notes**: create or update notes in bulk
 - **upsert_note_types**: create or update note type definitions
 - **update_note_type_fields**: add, remove, rename, or reposition a note type's fields (data-safe)

@@ -247,6 +247,27 @@ shrike note search --similar-to 1779749914797
 shrike note search "mitochondria" --deck Biochemistry
 ```
 
+### `shrike note replace <SEARCH> <REPLACE>`
+
+Find and replace text across note fields, scoped to a selection. A scope is required. `SEARCH` is literal unless `--regex`. By default it previews the changes, asks for confirmation, then applies; changed notes are re-embedded, and the edit is undoable in Anki.
+
+| Option | Description |
+|---|---|
+| `--deck TEXT` | Scope to this deck (name, numeric ID, or `#id`). |
+| `--tags TEXT` | Scope to notes with these tags. Repeatable and comma-separated. |
+| `--type TEXT` | Scope to this note type. |
+| `--ids ID` | Scope to these note IDs. Repeatable. |
+| `--field TEXT` | Restrict to a single field (default: all fields). |
+| `--regex` | Treat `SEARCH` as a regular expression (capture refs in `REPLACE` use `$1`). |
+| `--match-case` | Case-sensitive match. |
+| `--dry-run` | Preview the changes without applying them. |
+| `-y, --yes` | Skip the confirmation prompt. |
+
+```bash
+shrike note replace "teh" "the" --deck "Biology" --dry-run
+shrike note replace "colou?r" "color" --regex --tags spelling -y
+```
+
 ---
 
 ## `shrike deck`

@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import contextlib
 import logging
+import re
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -55,6 +56,26 @@ def _escape_anki_text(text: str) -> str:
     for ch in _ANKI_SEARCH_SPECIALS:
         text = text.replace(ch, "\\" + ch)
     return text
+
+
+def apply_replacement(
+    value: str, search: str, replacement: str, *, regex: bool, match_case: bool
+) -> str:
+    """Render search→replace on a single field value, for preview only.
+
+    Mirrors Anki's ``find_and_replace`` closely enough to preview literal edits
+    *exactly* (the apply path runs Anki itself). Regex previews use Python ``re``
+    and are illustrative — capture-group replacements differ (Anki uses ``$1``,
+    Python ``\\1``), so the apply is authoritative for those.
+    """
+    if regex:
+        flags = 0 if match_case else re.IGNORECASE
+        return re.sub(search, replacement, value, flags=flags)
+    if match_case:
+        return value.replace(search, replacement)
+    # Case-insensitive literal: match-escaped pattern, literal replacement (a
+    # function repl avoids backref/template interpretation of the replacement).
+    return re.sub(re.escape(search), lambda _m: replacement, value, flags=re.IGNORECASE)
 
 
 def substring_info(content: dict[str, str] | None, text: str) -> dict[str, Any] | None:
@@ -316,6 +337,41 @@ class CollectionWrapper:
 
     # -- list / read ---------------------------------------------------------
 
+    def _build_scope_query(
+        self,
+        *,
+        ids: list[int] | None = None,
+        deck: str | None = None,
+        tags: list[str] | None = None,
+        note_type: str | None = None,
+    ) -> tuple[str | None, bool]:
+        """Build an Anki search from structured selectors.
+
+        Returns ``(query, no_match)``: ``query`` is ``None`` when no selector was
+        given; ``no_match`` is True when a deck reference resolved to no deck (so
+        the caller should treat the result as empty). Shared by list and
+        find-replace so their scoping is identical.
+        """
+        parts: list[str] = []
+        if deck is not None:
+            resolved = self._resolve_deck_ref(deck)
+            if resolved is None:
+                return None, True
+            parts.append(f'"deck:{resolved}"')
+        if tags is not None:
+            for tag in tags:
+                if tag.startswith("-"):
+                    parts.append(f"-tag:{tag[1:]}")
+                else:
+                    parts.append(f"tag:{tag}")
+        if note_type is not None:
+            parts.append(f'"note:{note_type}"')
+        combined = " ".join(parts) if parts else None
+        if ids is not None:
+            id_query = f"nid:{','.join(str(i) for i in ids)}"
+            combined = f"{id_query} {combined}" if combined else id_query
+        return combined, False
+
     async def list_notes(
         self,
         *,
@@ -353,27 +409,12 @@ class CollectionWrapper:
         if ids is not None and not any([deck, tags, note_type, modified_since]):
             return self._get_notes_by_ids(ids, fields_mode, limit)
 
-        query_parts: list[str] = []
-        if deck is not None:
-            resolved_deck = self._resolve_deck_ref(deck)
-            if resolved_deck is None:
-                # An explicit #id (or numeric id) that matches no deck → no hits.
-                return {"notes": [], "total": 0, "limit": limit}
-            query_parts.append(f'"deck:{resolved_deck}"')
-        if tags is not None:
-            for tag in tags:
-                if tag.startswith("-"):
-                    query_parts.append(f"-tag:{tag[1:]}")
-                else:
-                    query_parts.append(f"tag:{tag}")
-        if note_type is not None:
-            query_parts.append(f'"note:{note_type}"')
-
-        combined = " ".join(query_parts) if query_parts else None
-
-        if ids is not None:
-            id_query = f"nid:{','.join(str(i) for i in ids)}"
-            combined = f"{id_query} {combined}" if combined else id_query
+        combined, no_match = self._build_scope_query(
+            ids=ids, deck=deck, tags=tags, note_type=note_type
+        )
+        if no_match:
+            # An explicit #id (or numeric id) that matches no deck → no hits.
+            return {"notes": [], "total": 0, "limit": limit}
 
         if combined is None:
             if modified_since is not None:
@@ -470,6 +511,117 @@ class CollectionWrapper:
             if len(results) >= limit:
                 break
         return results
+
+    async def find_replace(
+        self,
+        search: str,
+        replacement: str,
+        *,
+        regex: bool = False,
+        match_case: bool = False,
+        field: str | None = None,
+        deck: str | None = None,
+        tags: list[str] | None = None,
+        note_type: str | None = None,
+        ids: list[int] | None = None,
+        dry_run: bool = False,
+        sample_limit: int = 20,
+    ) -> dict[str, Any]:
+        return await self.run(
+            lambda _c: self._find_replace(
+                search,
+                replacement,
+                regex=regex,
+                match_case=match_case,
+                field=field,
+                deck=deck,
+                tags=tags,
+                note_type=note_type,
+                ids=ids,
+                dry_run=dry_run,
+                sample_limit=sample_limit,
+            )
+        )
+
+    def _find_replace(
+        self,
+        search: str,
+        replacement: str,
+        *,
+        regex: bool,
+        match_case: bool,
+        field: str | None,
+        deck: str | None,
+        tags: list[str] | None,
+        note_type: str | None,
+        ids: list[int] | None,
+        dry_run: bool,
+        sample_limit: int,
+    ) -> dict[str, Any]:
+        """Bulk find-and-replace over a scoped note set.
+
+        Preview (samples + predicted count) is computed in Python; the apply runs
+        Anki's ``find_and_replace`` (authoritative) and the changed set is the
+        notes whose ``mod`` advanced — re-embedded by the tool layer.
+        """
+        empty = {"notes_changed": 0, "dry_run": dry_run, "samples": [], "changed_ids": []}
+        combined, no_match = self._build_scope_query(
+            ids=ids, deck=deck, tags=tags, note_type=note_type
+        )
+        if no_match or combined is None:
+            return empty
+        candidates = list(self.col.find_notes(combined))
+        if not candidates:
+            return empty
+
+        # Predict changes in Python for the preview / dry-run count.
+        samples: list[dict[str, Any]] = []
+        predicted: set[int] = set()
+        for nid in candidates:
+            note = self.col.get_note(nid)  # type: ignore[arg-type]
+            for fname, value in zip(note.keys(), note.values(), strict=False):
+                if field is not None and fname != field:
+                    continue
+                new = apply_replacement(
+                    value, search, replacement, regex=regex, match_case=match_case
+                )
+                if new != value:
+                    predicted.add(nid)
+                    if len(samples) < sample_limit:
+                        samples.append({"id": nid, "field": fname, "before": value, "after": new})
+
+        if dry_run:
+            return {
+                "notes_changed": len(predicted),
+                "dry_run": True,
+                "samples": samples,
+                "changed_ids": [],
+            }
+
+        # Apply via Anki; detect the actually-changed notes by mod-bump diff.
+        # Detect the actually-changed notes by diffing field content before/after
+        # (note.mod is only second-resolution, so a fast edit wouldn't show a bump).
+        db = self.col.db
+        assert db is not None
+        id_list = ",".join(str(i) for i in candidates)
+        flds_sql = f"select id, flds from notes where id in ({id_list})"
+        before: dict[int, str] = {int(r[0]): r[1] for r in db.all(flds_sql)}
+        count = self.col.find_and_replace(
+            note_ids=candidates,  # type: ignore[arg-type]
+            search=search,
+            replacement=replacement,
+            regex=regex,
+            field_name=field,
+            match_case=match_case,
+        ).count
+        after: dict[int, str] = {int(r[0]): r[1] for r in db.all(flds_sql)}
+        changed_ids = [nid for nid in candidates if after.get(nid) != before.get(nid)]
+        return {
+            "notes_changed": count,
+            "dry_run": False,
+            "samples": samples,
+            "changed_ids": changed_ids,
+        }
 
     async def note_to_dict(self, nid: int, fields_mode: str) -> dict[str, Any]:
         return await self.run(lambda _c: self._note_to_dict(nid, fields_mode))

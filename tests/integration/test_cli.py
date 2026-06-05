@@ -751,6 +751,43 @@ class TestNoteSearch:
         assert result.exit_code != 0
 
 
+class TestNoteReplace:
+    """`note replace` find-and-replace via CLI."""
+
+    def _make(self, runner, deck: str, front: str, back: str = "x") -> None:
+        runner.json(
+            ["note", "create", "--deck", deck, "--type", "Basic"]
+            + ["-f", f"Front={front}", "-f", f"Back={back}"]
+        )
+
+    def test_apply_json(self, runner):
+        self._make(runner, "Rep", "teh cell", "teh power")
+        applied = runner.json(["note", "replace", "teh", "the", "--deck", "Rep"])
+        assert applied["dry_run"] is False
+        assert applied["notes_changed"] == 1
+        note = runner.json(["note", "list", "--deck", "Rep"])["notes"][0]
+        assert note["content"]["Front"] == "the cell"
+        assert note["content"]["Back"] == "the power"
+
+    def test_dry_run_changes_nothing(self, runner):
+        self._make(runner, "Rep2", "teh keep")
+        dry = runner.json(["note", "replace", "teh", "the", "--deck", "Rep2", "--dry-run"])
+        assert dry["dry_run"] is True
+        assert dry["notes_changed"] == 1
+        note = runner.json(["note", "list", "--deck", "Rep2"])["notes"][0]
+        assert note["content"]["Front"] == "teh keep"  # untouched
+
+    def test_pretty_confirm_apply(self, runner):
+        self._make(runner, "Rep3", "teh pretty")
+        result = runner.invoke(["note", "replace", "teh", "the", "--deck", "Rep3"], input="y\n")
+        assert result.exit_code == 0
+        assert "Replaced in 1" in result.output
+
+    def test_requires_scope(self, runner):
+        result = runner.invoke(["note", "replace", "a", "b"])
+        assert result.exit_code != 0
+
+
 class TestIndexSave:
     """`shrike index save` against a server with no embedding/index configured."""
 

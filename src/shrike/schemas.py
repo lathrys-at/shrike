@@ -567,6 +567,19 @@ class DeleteDecksResponse(BaseModel):
     not_empty: list[str] = []
 
 
+class FindReplaceSample(BaseModel):
+    id: int
+    field: str
+    before: str
+    after: str
+
+
+class FindReplaceResponse(BaseModel):
+    notes_changed: int = 0
+    dry_run: bool = False
+    samples: list[FindReplaceSample] = []
+
+
 # ============================================================================
 # Server status / custom-endpoint models (not tool returns; client-side use)
 # ============================================================================

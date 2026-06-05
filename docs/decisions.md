@@ -103,6 +103,26 @@ The remaining raw-Anki power (`is:due`, `prop:ivl>=30`, `added:`, `flag:`, …) 
 review/scheduling-oriented — outside Shrike's non-review scope — and will return
 as an explicit `shrike collection query` tool (#97) rather than a leaky param.
 
+### Find-and-replace edits via Anki's engine; a scope is required (#85)
+
+`find_replace_notes` / `shrike note replace` runs the actual edit through Anki's
+`col.find_and_replace` (Rust regex — linear-time, no catastrophic backtracking —
+and undo-able), rather than re-implementing replacement. A **scope is required**
+(`deck`/`tags`/`note_type`/`ids`) so a collection-wide edit is always an explicit
+choice. The MCP tool applies by default with a `dry_run` option; the CLI previews
+then confirms (`--dry-run`/`--yes`).
+
+Two subtleties worth recording:
+- **Re-embedding.** Unlike tag/deck ops, this changes field bodies, which *are*
+  embedding text — so changed notes are re-embedded (the `upsert_notes` index
+  path), not just `col_mod`-bumped. The changed set is found by diffing
+  `notes.flds` before/after the apply; `note.mod` is only second-resolution, so a
+  same-second edit wouldn't show a bump.
+- **Preview faithfulness.** The dry-run preview is rendered in Python
+  (`apply_replacement`): exact for literal edits, illustrative for regex (Anki's
+  `$1` capture syntax vs Python's `\1`), with the apply authoritative. Acceptable
+  because literal is the common case and the apply is what mutates.
+
 ## Tags
 
 ### Setting tags is a full replace; add/remove is a separate operation (#73)
