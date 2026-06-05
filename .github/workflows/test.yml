@@ -17,6 +17,16 @@ permissions:
   contents: read
   pull-requests: read
 
+# Cancel a PR's in-flight run when a new commit is pushed to it: every follow-up
+# commit otherwise lets the older run (lint + test + maybe embedding) finish on a
+# commit nobody will merge, burning Actions minutes. Grouped by `github.ref`
+# (`refs/pull/<n>/merge`), so cancellation is scoped to the same PR — never across
+# PRs. The release workflow deliberately has no such group (a tag build must run
+# to completion).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Decide which lanes need to run for this PR's diff. Docs-only changes skip
   # every test job (only `ci-ok` runs); the embedding lane (which spins up
