@@ -28,14 +28,14 @@ class TestCall:
     def test_success_returns_content(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
         body = {"result": {"structuredContent": {"ok": 1}}}
-        with patch("shrike.client.httpx.post", return_value=_resp(200, body)):
+        with patch("httpx.Client.post", return_value=_resp(200, body)):
             assert c._call("t") == {"ok": 1}
 
     def test_is_error_result_raises(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
         body = {"result": {"isError": True, "content": [{"type": "text", "text": "bad note"}]}}
         with (
-            patch("shrike.client.httpx.post", return_value=_resp(200, body)),
+            patch("httpx.Client.post", return_value=_resp(200, body)),
             pytest.raises(ServerError, match="bad note"),
         ):
             c._call("t")
@@ -43,7 +43,7 @@ class TestCall:
     def test_jsonrpc_error(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
         with (
-            patch("shrike.client.httpx.post", return_value=_resp(200, {"error": {"code": -1}})),
+            patch("httpx.Client.post", return_value=_resp(200, {"error": {"code": -1}})),
             pytest.raises(ServerError),
         ):
             c._call("t")
@@ -51,7 +51,7 @@ class TestCall:
     def test_http_error_raises_typed(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
         with (
-            patch("shrike.client.httpx.post", return_value=_resp(500, {})),
+            patch("httpx.Client.post", return_value=_resp(500, {})),
             pytest.raises(ServerHTTPError) as ei,
         ):
             c._call("t")
@@ -60,7 +60,7 @@ class TestCall:
     def test_unreachable(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
         with (
-            patch("shrike.client.httpx.post", side_effect=httpx.ConnectError("down")),
+            patch("httpx.Client.post", side_effect=httpx.ConnectError("down")),
             pytest.raises(ServerUnreachableError),
         ):
             c._call("t")
@@ -70,7 +70,7 @@ class TestCustomEndpoints:
     def test_http_error_surfaces_server_message(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
         with (
-            patch("shrike.client.httpx.request", return_value=_resp(400, {"error": "no model"})),
+            patch("httpx.Client.request", return_value=_resp(400, {"error": "no model"})),
             pytest.raises(ServerHTTPError, match="no model"),
         ):
             c.embedding_start()
@@ -78,7 +78,7 @@ class TestCustomEndpoints:
     def test_request_unreachable(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
         with (
-            patch("shrike.client.httpx.request", side_effect=httpx.ConnectError("down")),
+            patch("httpx.Client.request", side_effect=httpx.ConnectError("down")),
             pytest.raises(ServerUnreachableError),
         ):
             c.index_rebuild()
@@ -98,13 +98,13 @@ class TestCustomEndpoints:
                 },
             )
 
-        with patch("shrike.client.httpx.request", side_effect=req):
+        with patch("httpx.Client.request", side_effect=req):
             c.embedding_start(model="/m.gguf", port=None, threads=4)
         assert captured["json"] == {"model": "/m.gguf", "threads": 4}
 
     def test_server_status_none_on_unreachable(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
-        with patch("shrike.client.httpx.get", side_effect=httpx.ConnectError("down")):
+        with patch("httpx.Client.get", side_effect=httpx.ConnectError("down")):
             assert c.server_status() is None
 
     def test_index_status_extracts_section(self) -> None:
@@ -119,7 +119,7 @@ class TestCustomEndpoints:
             "embedding": {"state": "not_configured"},
             "index": {"state": "ready", "size": 5, "ndim": 384},
         }
-        with patch("shrike.client.httpx.request", return_value=_resp(200, status)):
+        with patch("httpx.Client.request", return_value=_resp(200, status)):
             idx = c.index_status()
             assert idx.state == "ready"
             assert idx.size == 5
@@ -201,7 +201,7 @@ class TestLifecycle:
             return _resp(200, body)
 
         with (
-            patch("shrike.client.httpx.post", side_effect=post),
+            patch("httpx.Client.post", side_effect=post),
             patch.object(ShrikeClient, "ensure_running", return_value=spec.url) as er,
         ):
             assert c._call("t") == {"ok": 1}

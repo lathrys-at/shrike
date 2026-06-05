@@ -19,6 +19,7 @@ translates them into user-facing messages.
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import sys
 import time
@@ -163,11 +164,32 @@ class ShrikeClient:
         self.autostart = autostart and spec is not None
         self._request_id = 0
         self._autostarted = False
+        self._http = httpx.Client()
 
     @property
     def _base_url(self) -> str:
         """The server root (URL without the trailing ``/mcp``)."""
         return self.url.rsplit("/", 1)[0]
+
+    def close(self) -> None:
+        """Close the underlying HTTP connection pool. Idempotent."""
+        http = getattr(self, "_http", None)
+        if http is not None:
+            http.close()
+
+    def __enter__(self) -> ShrikeClient:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Reuse one keep-alive connection across calls instead of a fresh
+        # connect per request; close the pool on GC so a short-lived caller
+        # (e.g. a CLI command) doesn't leak it or emit a ResourceWarning.
+        # Best-effort: __del__ can run during interpreter shutdown.
+        with contextlib.suppress(Exception):
+            self.close()
 
     # -- MCP tool calls ------------------------------------------------------
 
@@ -213,13 +235,13 @@ class ShrikeClient:
         """POST to the MCP endpoint, auto-starting the daemon on first failure."""
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         try:
-            return httpx.post(self.url, json=payload, headers=headers, timeout=timeout)
+            return self._http.post(self.url, json=payload, headers=headers, timeout=timeout)
         except httpx.ConnectError as err:
             if self.autostart and not self._autostarted:
                 assert self.spec is not None
                 self.ensure_running(self.spec)
                 try:
-                    return httpx.post(self.url, json=payload, headers=headers, timeout=timeout)
+                    return self._http.post(self.url, json=payload, headers=headers, timeout=timeout)
                 except (httpx.ConnectError, httpx.TimeoutException) as err2:
                     raise ServerUnreachableError(self._unreachable_msg()) from err2
             raise ServerUnreachableError(self._unreachable_msg()) from err
@@ -565,7 +587,7 @@ class ShrikeClient:
         A non-raising liveness probe — does NOT auto-start.
         """
         try:
-            resp = httpx.get(f"{self._base_url}/status", timeout=5.0)
+            resp = self._http.get(f"{self._base_url}/status", timeout=5.0)
         except (httpx.ConnectError, httpx.TimeoutException):
             return None
         if resp.status_code == 200:
@@ -623,7 +645,7 @@ class ShrikeClient:
     ) -> dict[str, Any]:
         """Call a custom endpoint, raising typed errors on failure."""
         try:
-            resp = httpx.request(method, f"{self._base_url}{path}", json=json, timeout=timeout)
+            resp = self._http.request(method, f"{self._base_url}{path}", json=json, timeout=timeout)
         except httpx.ConnectError as err:
             raise ServerUnreachableError(self._unreachable_msg()) from err
         except httpx.TimeoutException as err:

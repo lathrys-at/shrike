@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -138,6 +138,9 @@ class MCPClient:
 
     def __init__(self, url: str) -> None:
         self._url = url
+        # Reuse one keep-alive connection: a fresh httpx.post per call pays a TCP
+        # connect (~2.4ms) every time, and a session client makes ~700 calls.
+        self._client = httpx.Client(timeout=10.0)
 
     def __call__(self, tool_name: str, arguments: dict | None = None) -> dict:
         arguments = dict(arguments or {})
@@ -148,7 +151,7 @@ class MCPClient:
         # pass an explicit on_duplicate and are unaffected.
         if tool_name == "upsert_notes" and "on_duplicate" not in arguments:
             arguments["on_duplicate"] = "allow"
-        resp = httpx.post(
+        resp = self._client.post(
             self._url,
             json={
                 "jsonrpc": "2.0",
@@ -157,7 +160,6 @@ class MCPClient:
                 "params": {"name": tool_name, "arguments": arguments},
             },
             headers={"Content-Type": "application/json", "Accept": "application/json"},
-            timeout=10.0,
         )
         resp.raise_for_status()
         body = resp.json()
@@ -179,6 +181,12 @@ class MCPClient:
         if tool_name == "upsert_notes":
             _reset_tracker.note_results(structured)
         return structured
+
+    def __del__(self) -> None:
+        client = getattr(self, "_client", None)
+        if client is not None:
+            with suppress(Exception):
+                client.close()
 
 
 class CLIRunner:
