@@ -7,6 +7,12 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-06-05
+
+_Collection-management release: cooperative locking, note-type editing, deck and
+tag tools, find/replace, raw queries, and collection cleanup — plus incremental
+index reconcile on drift._
+
 ### Added
 - `update_note_type_field_metadata` MCP tool — set a note type's per-field editor metadata:
   the `font` and `size` used when editing a field in Anki, and the field
@@ -67,6 +73,14 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
   note field values are touched and no note data is migrated — so it bumps the
   index `col_mod` without re-embedding. `match_case` defaults to true (template
   and CSS text is code). Typed `ShrikeClient.find_replace_note_types` too.
+- `update_note_type_fields` and `update_note_type_templates` MCP tools (#76):
+  edit a note type's fields or card templates **by name** with a sequence of
+  `add`/`remove`/`rename`/`reposition` ops — the data-safe, identity-based
+  counterpart to the positional `fields`/`templates` replace in
+  `upsert_note_types`. They delegate to Anki's own primitives so note data and
+  cards migrate by identity (a reposition is a true move; a non-trailing remove
+  drops only that field's data / that template's cards). Each call is atomic — the
+  op sequence is validated before any change runs (#101, #102).
 - Bulk find-and-replace across note fields: `find_replace_notes` MCP tool and
   `shrike note replace SEARCH REPLACE`. Scoped by `--deck`/`--tags`/`--type`/
   `--ids` (a scope is required), optional `--regex` (Anki's engine; `$1` capture
@@ -112,6 +126,19 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
   embedding, cache, and index-tuning settings to the config file (#56).
 
 ### Changed
+- Index drift now **reconciles incrementally** instead of re-embedding the whole
+  collection. When the collection changes outside Shrike (Anki GUI, sync, import),
+  a per-note embedding-text hash sidecar lets the index re-embed only the notes
+  whose text changed, add new notes, and drop deleted ones — the end state is
+  identical to a full rebuild, but a drift touching a handful of notes now costs a
+  handful of embeddings, not the whole collection. Explicit `index rebuild` stays
+  full (#38, #144).
+- `upsert_notes` now runs Anki's own add-note validation on each new note and
+  takes an `on_duplicate` policy — `error` (default; reported, not written),
+  `skip`, or `allow`. Structurally invalid notes (empty first field, broken cloze)
+  are always reported and never written, regardless of policy; `dry_run` runs the
+  same validation but writes nothing. This replaces the idea of a separate
+  duplicate pre-check tool (which would be racy) (#77).
 - `shrike server start` no longer writes `config.yml` on its own. It previously
   saved the flags only on the very first run (when no config existed) and then
   silently ignored later flags, so the on-disk config could diverge from how the
@@ -127,6 +154,20 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
   filters cover deck/tag/type. Raw Anki query expressions (`is:due`, `prop:`,
   `added:`, …) will return as a dedicated `shrike collection query` tool (#97,
   #86).
+
+### Fixed
+- An empty-at-boot server now indexes notes added later in the same session. A
+  daemon started against an empty collection never materialized its vector index,
+  so the incremental upsert path was skipped and notes stayed semantically
+  unsearchable (with a misleading "embedding service not running" message) until a
+  restart. Boot now materializes an empty, ready index so later upserts are
+  indexed incrementally (#148).
+- Note-type field/template updates no longer lose data. The positional
+  `fields`/`templates` replace in `upsert_note_types` rebuilt the note type from
+  scratch, blanking note data and deleting cards on any edit; it now replaces by
+  position (data preserved) and rejects reorders/inserts/non-trailing removes that
+  would silently re-label note data — pointing at the by-identity tools instead
+  (#99).
 
 ## [0.3.4] — 2026-06-01
 
@@ -196,7 +237,11 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 - Initial release: the `shrike` CLI and the MCP server over streamable HTTP, with
   collection-info, note, and note-type tools; daemon lifecycle; tab completion (#6).
 
-[Unreleased]: https://github.com/lathrys-at/shrike/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/lathrys-at/shrike/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/lathrys-at/shrike/compare/v0.3.4...v0.3.5
+[0.3.4]: https://github.com/lathrys-at/shrike/compare/v0.3.3...v0.3.4
+[0.3.3]: https://github.com/lathrys-at/shrike/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/lathrys-at/shrike/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/lathrys-at/shrike/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/lathrys-at/shrike/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/lathrys-at/shrike/compare/v0.2.0...v0.2.1
