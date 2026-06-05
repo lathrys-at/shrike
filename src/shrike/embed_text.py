@@ -106,3 +106,25 @@ def normalize_for_embedding(value: str) -> str:
     text = _strip_html(text)
     text = text.replace("\xa0", " ")
     return _WS_RE.sub(" ", text).strip()
+
+
+# Media references that make a field non-empty even with no text: <img>, <audio>,
+# <video>, <object>, <embed>, <source>, and [sound:…]. Used by collection_prune's
+# empty-note rule (#89), not by embedding (which strips media out entirely).
+_MEDIA_RE = re.compile(r"(?i)<\s*(?:img|audio|video|object|embed|source)\b|\[sound:")
+
+
+def field_is_blank(value: str) -> bool:
+    """True if a field value carries no content — no text and no media.
+
+    A field is blank when it strips to nothing (HTML removed, ``&nbsp;`` and
+    whitespace folded) **and** references no media. An image- or audio-only field
+    is therefore *not* blank, so a note made only of media is never treated as
+    empty. This is the per-field rule behind removing empty notes; it is stricter
+    than ``normalize_for_embedding`` (which deliberately drops media to ``""``).
+    """
+    if not value:
+        return True
+    if _MEDIA_RE.search(value):
+        return False
+    return not _strip_html(value).replace("\xa0", " ").strip()

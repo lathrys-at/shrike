@@ -536,6 +536,40 @@ Rename a tag, collection-wide or on a set of notes. With no `note_ids`, the tag 
 
 ---
 
+## `collection_prune`
+
+Tidy up the collection with one or more cleanups: remove **unused tags** (tag-registry names no note uses any more), **empty notes** (notes whose every field is blank), and **empty cards** (cards that render empty, e.g. a cloze card with no matching deletion). Enable the cleanups you want; **if you set none of them, all three run.**
+
+This is destructive (it deletes notes and cards) and cannot be undone through this tool, so `dry_run` defaults to **true** — by default it only **previews**, reporting what would be removed without changing anything. Pass `dry_run: false` to apply.
+
+An **empty note** has every field blank, where a field is blank only if it has no text **and** no media — so a card that is just an image or audio clip is never removed. On apply, empty notes are removed first, then empty cards, then unused tags (so tags freed by the deletions are cleared in the same call). Because the dry-run previews each cleanup independently, an apply may clear a few more tags than the preview showed.
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `unused_tags` | `boolean` | no | Remove tag-registry names no note uses. Default `false`. |
+| `empty_notes` | `boolean` | no | Delete notes whose every field is blank (text- and media-free). Default `false`. |
+| `empty_cards` | `boolean` | no | Remove cards that render empty; a note that loses its last card is deleted. Default `false`. |
+| `dry_run` | `boolean` | no | Preview only — report without mutating. Default `true`. |
+
+If none of `unused_tags`/`empty_notes`/`empty_cards` is set, all three run.
+
+### Response
+
+Each cleanup reports its own section; a section is `null` (absent) when that cleanup was not requested.
+
+```jsonc
+{
+  "dry_run": true,
+  "unused_tags": { "removed": 3, "tags": ["old-deck", "typo-tag", "temp"] },
+  "empty_notes": { "removed": [1700000000123, 1700000000456] },
+  "empty_cards": { "cards_removed": 2, "notes_deleted": [1700000000789] }
+}
+```
+
+---
+
 ## `upsert_decks`
 
 Create or rename decks in bulk (1–100), the same shape as `upsert_notes`. Each item's `name` is the desired deck name (nested with `::`, e.g. `Japanese::Vocabulary`). An optional `id` selects an existing deck to rename/reparent to `name`.

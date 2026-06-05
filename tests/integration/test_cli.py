@@ -788,6 +788,42 @@ class TestNoteReplace:
         assert result.exit_code != 0
 
 
+class TestCollectionPrune:
+    """`shrike collection prune` via CLI."""
+
+    def test_preview_lists_unused_tag(self, runner):
+        runner.json(
+            ["note", "create", "--deck", "CP", "--type", "Basic"]
+            + ["-f", "Front=cp-preview", "-f", "Back=a", "--tags", "cporphan"]
+        )
+        nid = runner.json(["note", "list", "--deck", "CP"])["notes"][0]["id"]
+        runner.json(["note", "tag", str(nid), "--set", ""])  # orphan "cporphan"
+
+        # Default is preview-only (no --apply): JSON shows it as a dry run.
+        preview = runner.json(["collection", "prune", "--unused-tags"])
+        assert preview["dry_run"] is True
+        assert "cporphan" in preview["unused_tags"]["tags"]
+        # Still in the registry — preview mutated nothing.
+        assert "cporphan" in runner.json(["info", "--tags"])["tags"]
+
+    def test_pretty_preview_says_preview_only(self, runner):
+        result = runner.invoke(["collection", "prune", "--unused-tags"])
+        assert result.exit_code == 0
+        assert "Preview only" in result.output
+
+    def test_apply_clears_unused_tag(self, runner):
+        runner.json(
+            ["note", "create", "--deck", "CPA", "--type", "Basic"]
+            + ["-f", "Front=cp-apply", "-f", "Back=a", "--tags", "cpapply"]
+        )
+        nid = runner.json(["note", "list", "--deck", "CPA"])["notes"][0]["id"]
+        runner.json(["note", "tag", str(nid), "--set", ""])
+
+        applied = runner.json(["collection", "prune", "--unused-tags", "--apply"])
+        assert applied["dry_run"] is False
+        assert "cpapply" not in runner.json(["info", "--tags"])["tags"]
+
+
 class TestIndexSave:
     """`shrike index save` against a server with no embedding/index configured."""
 

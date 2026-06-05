@@ -99,6 +99,7 @@ def cli(
 
 
 # Register subcommands
+from shrike.cli.collection_cmd import collection  # noqa: E402
 from shrike.cli.completion_cmd import completion  # noqa: E402
 from shrike.cli.deck_cmd import deck  # noqa: E402
 from shrike.cli.embedding_cmd import embedding  # noqa: E402
@@ -118,3 +119,4 @@ cli.add_command(note)
 cli.add_command(deck)
 cli.add_command(tag)
 cli.add_command(type_group, name="type")
+cli.add_command(collection)

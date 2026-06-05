@@ -557,6 +557,35 @@ class RenameTagResponse(BaseModel):
     notes_modified: int = 0
 
 
+# -- collection_prune (#89) --------------------------------------------------
+# One maintenance tool runs several cleanups. Each cleanup's result is its own
+# nested sub-model, present only when that cleanup was requested. The `| None`
+# here is genuine independent optionality ("this cleanup wasn't run"), not a
+# correlated hidden state, so it's a plain optional rather than a union — counts
+# (not unions) describe a single cleanup's outcome.
+
+
+class PruneUnusedTags(BaseModel):
+    removed: int = 0  # unused tag-registry names removed (or that would be, on dry-run)
+    tags: list[str] = []  # the names
+
+
+class PruneEmptyNotes(BaseModel):
+    removed: list[int] = []  # note ids removed (or that would be)
+
+
+class PruneEmptyCards(BaseModel):
+    cards_removed: int = 0  # empty cards removed (or that would be)
+    notes_deleted: list[int] = []  # notes that lost their last card and were deleted
+
+
+class CollectionPruneResponse(BaseModel):
+    dry_run: bool = True
+    unused_tags: PruneUnusedTags | None = None  # None = cleanup not requested
+    empty_notes: PruneEmptyNotes | None = None
+    empty_cards: PruneEmptyCards | None = None
+
+
 class UpsertDecksResponse(BaseModel):
     results: list[UpsertDeckResult] = []
 

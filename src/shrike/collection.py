@@ -16,7 +16,7 @@ from anki.consts import MODEL_CLOZE
 from anki.errors import NotFoundError
 from anki.notes import NoteFieldsCheckResult
 
-from shrike.embed_text import normalize_for_embedding
+from shrike.embed_text import field_is_blank, normalize_for_embedding
 
 logger = logging.getLogger("shrike.collection")
 
@@ -918,6 +918,96 @@ class CollectionWrapper:
             self.col.tags.bulk_remove(matching, old)
             self.col.tags.bulk_add(matching, new)
         return {"notes_modified": len(matching)}
+
+    # -- collection maintenance ----------------------------------------------
+
+    async def prune(
+        self,
+        *,
+        unused_tags: bool,
+        empty_notes: bool,
+        empty_cards: bool,
+        dry_run: bool,
+    ) -> tuple[dict[str, Any], list[int]]:
+        return await self.run(
+            lambda _c: self._prune(
+                unused_tags=unused_tags,
+                empty_notes=empty_notes,
+                empty_cards=empty_cards,
+                dry_run=dry_run,
+            )
+        )
+
+    def _find_empty_notes(self) -> list[int]:
+        """Note ids whose every field is blank (no text and no media).
+
+        Uses ``embed_text.field_is_blank`` per field, so a note made only of an
+        image or ``[sound:…]`` is *not* empty. Scans the whole ``notes`` table —
+        prune is a maintenance op, so the full pass is acceptable.
+        """
+        db = self.col.db
+        assert db is not None  # always present on an open collection
+        empty: list[int] = []
+        for nid, flds in db.all("select id, flds from notes"):
+            if all(field_is_blank(f) for f in flds.split("\x1f")):
+                empty.append(int(nid))
+        return empty
+
+    def _prune(
+        self,
+        *,
+        unused_tags: bool,
+        empty_notes: bool,
+        empty_cards: bool,
+        dry_run: bool,
+    ) -> tuple[dict[str, Any], list[int]]:
+        """Run the requested cleanups; return (result, note ids removed).
+
+        On apply the cleanups run in order — empty notes, then empty cards, then
+        unused tags — so tag-registry names orphaned by the deletions get cleared
+        in the same call. The returned note-id list (empty notes + empty cards
+        that lost their last card) is what the tool layer removes from the index.
+
+        Dry-run mutates nothing and computes each cleanup against the *current*
+        collection; the empty-cards preview subtracts the empty-note ids (those
+        notes go first on apply) so a note isn't listed under both. Because the
+        previews are independent, a real apply may clear a few more tags than the
+        dry-run reported (deletions free additional tags).
+        """
+        result: dict[str, Any] = {"dry_run": dry_run}
+        removed_note_ids: list[int] = []
+
+        empty_note_ids: list[int] = []
+        if empty_notes:
+            empty_note_ids = self._find_empty_notes()
+            if not dry_run and empty_note_ids:
+                self.col.remove_notes(empty_note_ids)  # type: ignore[arg-type]
+            result["empty_notes"] = {"removed": empty_note_ids}
+            removed_note_ids += empty_note_ids
+
+        if empty_cards:
+            report = self.col.get_empty_cards()
+            card_ids = [cid for n in report.notes for cid in n.card_ids]
+            notes_deleted = [n.note_id for n in report.notes if n.will_delete_note]
+            if dry_run:
+                # Empty notes go first on apply, so don't double-list them here.
+                already = set(empty_note_ids)
+                notes_deleted = [nid for nid in notes_deleted if nid not in already]
+            elif card_ids:
+                self.col.remove_cards_and_orphaned_notes(card_ids)  # type: ignore[arg-type]
+            result["empty_cards"] = {
+                "cards_removed": len(card_ids),
+                "notes_deleted": notes_deleted,
+            }
+            removed_note_ids += notes_deleted
+
+        if unused_tags:
+            names = [t for t in self.col.tags.all() if not self.col.find_notes(f'"tag:{t}"')]
+            if not dry_run and names:
+                self.col.tags.clear_unused_tags()
+            result["unused_tags"] = {"removed": len(names), "tags": names}
+
+        return result, removed_note_ids
 
     # -- decks ---------------------------------------------------------------
 

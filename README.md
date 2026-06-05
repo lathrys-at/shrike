@@ -204,6 +204,7 @@ Shrike exposes these MCP tools:
 - **delete_decks**: delete decks by name, if empty
 - **delete_notes**: permanently delete notes by ID
 - **delete_note_types**: delete note types by ID, if no notes use them
+- **collection_prune**: clean up unused tags, empty notes, and empty cards (previews by default)
 
 The machine schema is whatever the running server advertises via `tools/list`. [`docs/mcp-tools.md`](docs/mcp-tools.md) is the human-readable companion.
 

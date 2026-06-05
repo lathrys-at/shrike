@@ -315,3 +315,48 @@ collapsing two field refs into one). Producing a template that references a
 missing field still fails Anki's own save validation, as it should.
 
 Remaining for #76: the field font/description metadata getters/setters.
+
+## Collection maintenance
+
+### One `collection_prune` tool, not scattered cleanups (#89)
+
+Small "tidy up" chores — clear unused tags, remove empty notes, remove empty
+cards — live behind one `collection_prune` tool / `shrike collection prune`
+rather than a tool each. `clear_unused_tags` actually shipped standalone first
+(`shrike tag clean`, #73) and was deliberately **removed** (#90) to fold in here,
+and this supersedes a standalone remove-empty-notes (#78, closed wontfix). The
+reasoning mirrors the "one query, many mechanisms" call for search: these are all
+"maintenance passes over the whole collection," so one entry point with opt-in
+flags (none selected → run all) beats N one-off verbs cluttering the surface. The
+`collection` CLI group it introduces is also where `collection query` (#97) will
+land.
+
+Three decisions worth recording:
+
+- **Preview by default — the opposite of `find_replace_notes`.** `dry_run`
+  defaults **true**; the CLI previews unless `--apply`. The note find/replace
+  applies by default (it's scoped to an explicit selector, and the edit is
+  undoable in Anki). Prune is collection-wide *and* deletes notes and cards, with
+  no per-call scope to contain a mistake — so it errs the safe way and makes you
+  ask for the mutation. Same two primitives (`dry_run` / a confirm flow), opposite
+  default, chosen per blast radius.
+
+- **"Empty" is media-safe.** A note is empty only if *every* field is blank by
+  `embed_text.field_is_blank` — no text **and** no media reference. This is
+  stricter than the embedding normalizer (which drops media to `""`): an
+  image-only or audio-only card has real content and must never be pruned. We did
+  *not* use Anki's "generates no cards" definition, which would delete a note
+  whose only content sits in a field no template renders — silent data loss.
+
+- **Apply ordering: notes → cards → tags.** Empty notes are removed first, then
+  empty cards, then unused tags, so a tag orphaned by the deletions is cleared in
+  the same call. The dry-run previews each cleanup independently against the
+  current state (and subtracts empty-note ids from the empty-cards list to avoid
+  double-listing), so an apply can legitimately clear a few more tags than the
+  preview showed — preview is advisory, apply is authoritative.
+
+Index handling is **mixed**, which is the whole reason prune isn't a plain
+metadata-bump op: empty-note/empty-card removal deletes notes, so their vectors
+leave the index via `index.remove` exactly like `delete_notes`, while unused-tag
+clearing leaves every vector valid. The tool does both in one pass and advances
+`col_mod` once when anything changed.

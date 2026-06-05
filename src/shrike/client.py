@@ -33,6 +33,7 @@ from pydantic import TypeAdapter
 from shrike import daemon
 from shrike.schemas import (
     CollectionInfo,
+    CollectionPruneResponse,
     DeckInput,
     DeleteDecksResponse,
     DeleteNotesResponse,
@@ -435,6 +436,26 @@ class ShrikeClient:
         if note_ids:
             args["note_ids"] = note_ids
         return RenameTagResponse.model_validate(self._call("rename_tag", args))
+
+    def prune(
+        self,
+        *,
+        unused_tags: bool = False,
+        empty_notes: bool = False,
+        empty_cards: bool = False,
+        dry_run: bool = True,
+    ) -> CollectionPruneResponse:
+        return CollectionPruneResponse.model_validate(
+            self._call(
+                "collection_prune",
+                {
+                    "unused_tags": unused_tags,
+                    "empty_notes": empty_notes,
+                    "empty_cards": empty_cards,
+                    "dry_run": dry_run,
+                },
+            )
+        )
 
     def upsert_decks(self, decks: Sequence[DeckInput | dict[str, Any]]) -> UpsertDecksResponse:
         """Create or rename decks, transparently batching if over the server limit."""

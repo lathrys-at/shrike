@@ -325,6 +325,33 @@ shrike tag rename jp japanese --note 1779749914797 --note 1779749914798
 
 ---
 
+## `shrike collection`
+
+Collection-wide maintenance.
+
+### `shrike collection prune`
+
+Tidy up the collection: remove unused tags, empty notes, and empty cards. Select cleanups with the flags below; **with none selected, all three run.** By default this only **previews** what would be removed — pass `--apply` to actually remove (it previews, asks for confirmation, then applies). An empty note has every field blank, where a field is blank only if it has no text **and** no media, so an image- or audio-only note is kept.
+
+| Option | Description |
+|---|---|
+| `--unused-tags` | Remove tag-registry names no note uses. |
+| `--empty-notes` | Delete notes whose every field is blank (text- and media-free). |
+| `--empty-cards` | Remove cards that render empty; a note that loses its last card is deleted. |
+| `--apply` | Apply the changes. Without it, the command only previews. |
+| `-y, --yes` | Skip the confirmation prompt (with `--apply`). |
+
+```bash
+shrike collection prune                          # preview every cleanup
+shrike collection prune --unused-tags            # preview just unused tags
+shrike collection prune --apply                  # preview, confirm, then prune all
+shrike collection prune --empty-notes --apply -y # remove empty notes, no prompt
+```
+
+`--apply` is destructive and cannot be undone; preview first.
+
+---
+
 ## `shrike type`
 
 Create, list, show, update, and delete note type definitions. All subcommands accept either a note type name or numeric ID as the identifier.

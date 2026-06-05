@@ -12,6 +12,7 @@ from shrike.collection import CollectionWrapper, substring_info
 from shrike.index import IndexSaver, IndexState, VectorIndex
 from shrike.schemas import (
     CollectionInfo,
+    CollectionPruneResponse,
     DeckInput,
     DeleteDecksResponse,
     DeleteNotesResponse,
@@ -1227,6 +1228,99 @@ def register_tools(
         if result["notes_modified"]:
             await _bump_col_mod_after_metadata_change()
         return RenameTagResponse.model_validate(result)
+
+    @mcp.tool()
+    @_safe_tool
+    async def collection_prune(
+        unused_tags: Annotated[
+            bool,
+            Field(description="Remove tag-registry names that no note uses any more."),
+        ] = False,
+        empty_notes: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Delete notes whose every field is blank. A field counts as "
+                    "blank only if it has no text and no media, so an image- or "
+                    "audio-only note is kept."
+                )
+            ),
+        ] = False,
+        empty_cards: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Remove cards that render empty (e.g. a cloze card with no "
+                    "matching deletion). A note that loses its last card is deleted."
+                )
+            ),
+        ] = False,
+        dry_run: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Preview only — report what would be removed without changing "
+                    "anything. Defaults to true; pass false to apply."
+                )
+            ),
+        ] = True,
+    ) -> CollectionPruneResponse:
+        """Clean up the collection: unused tags, empty notes, and empty cards.
+
+        Runs the cleanups you enable. If you set **none** of `unused_tags`,
+        `empty_notes`, or `empty_cards`, all three run. Each enabled cleanup is
+        reported in its own section of the response; a section is absent when its
+        cleanup was not requested.
+
+        `dry_run` defaults to **true**, so by default this only previews — it
+        reports the unused tag names, the empty note IDs, and the empty card
+        count (with any notes that would be deleted) without mutating anything.
+        Pass `dry_run: false` to actually remove them. This is destructive and
+        cannot be undone through this tool, so preview first.
+
+        An empty note is one whose every field is blank, where a field is blank
+        only if it has no text *and* no media — so a card that is just an image
+        or audio clip is never removed. On apply, empty notes are removed first,
+        then empty cards, then unused tags (so tags freed by the deletions are
+        cleared in the same call)."""
+        # No selection means "prune everything".
+        if not (unused_tags or empty_notes or empty_cards):
+            unused_tags = empty_notes = empty_cards = True
+        logger.info(
+            "collection_prune unused_tags=%s empty_notes=%s empty_cards=%s dry_run=%s",
+            unused_tags,
+            empty_notes,
+            empty_cards,
+            dry_run,
+        )
+        result, removed_note_ids = await wrapper.prune(
+            unused_tags=unused_tags,
+            empty_notes=empty_notes,
+            empty_cards=empty_cards,
+            dry_run=dry_run,
+        )
+        logger.info(
+            "collection_prune %s: %d note(s) removed, tags=%s",
+            "previewed" if dry_run else "applied",
+            len(removed_note_ids),
+            result.get("unused_tags", {}).get("removed", "-"),
+        )
+
+        # Empty notes/cards delete notes — their vectors must leave the index
+        # (like delete_notes); clearing unused tags is a metadata-only change.
+        # All best-effort: index bookkeeping never fails an applied prune.
+        if not dry_run and index is not None and index.available:
+            try:
+                if removed_note_ids:
+                    index.remove(removed_note_ids)
+                if removed_note_ids or result.get("unused_tags", {}).get("removed"):
+                    index.col_mod = await wrapper.run(lambda c: c.mod)
+                    if saver is not None:
+                        saver.request_save()
+            except Exception:
+                logger.warning("Failed to update index after prune", exc_info=True)
+
+        return CollectionPruneResponse.model_validate(result)
 
     @mcp.tool()
     @_safe_tool

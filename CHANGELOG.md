@@ -8,6 +8,15 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ## [Unreleased]
 
 ### Added
+- Collection cleanup: `collection_prune` MCP tool and `shrike collection prune`
+  (a new `collection` CLI group) — clear unused tags, remove empty notes, and
+  remove empty cards. Select cleanups with flags (`--unused-tags`/`--empty-notes`/
+  `--empty-cards`); with none selected, all run. It **previews by default**
+  (`dry_run` defaults true; the CLI applies only with `--apply`, confirming first
+  unless `--yes`) because it deletes notes and cards collection-wide. An empty
+  note is one whose every field is blank — no text *and* no media — so an image-
+  or audio-only note is kept. Folds in the old `clear_unused_tags`/`tag clean`
+  (removed in #90) and supersedes a standalone remove-empty-notes (#89, #78).
 - `find_replace_note_types` MCP tool (#76, anki-connect's `findAndReplaceInModels`):
   literal-or-regex find/replace inside one note type's card-template HTML and
   shared CSS, scoped by `front`/`back`/`css` selectors, returning a replacement
