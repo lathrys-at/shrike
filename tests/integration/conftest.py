@@ -242,8 +242,11 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
 
     yield create
 
+    # Signal every server first, then wait — so the per-server shutdowns (each
+    # stopping its own llama-server child) overlap instead of running serially.
     for proc in processes:
         proc.terminate()
+    for proc in processes:
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -424,9 +427,14 @@ def embedding_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return download_with_retry(EMBEDDING_MODEL_URL, model_path)
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="session")
 def embedding_server(server_factory, embedding_model: Path) -> ServerInfo:
     """Server with embedding service enabled.
+
+    Session-scoped: its consumers (`TestEmbeddingHealth`, `TestEmbeddings`,
+    `TestEmbeddingServiceViaShrike`) are read-only against a stateless embedding
+    endpoint, so one llama-server boot serves them all — avoids a model load (and
+    a teardown) per class.
 
     Verifies the embedding service is actually available after server start.
     Fails with diagnostics if it isn't (e.g. shared lib issues, model problems).
@@ -453,7 +461,7 @@ def embedding_server(server_factory, embedding_model: Path) -> ServerInfo:
     return srv
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="session")
 def embedding_mcp(embedding_server: ServerInfo) -> MCPClient:
     """MCP client bound to the embedding-enabled server."""
     return MCPClient(embedding_server.url)
