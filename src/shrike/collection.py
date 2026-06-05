@@ -6,7 +6,7 @@ import contextlib
 import logging
 import re
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any, Literal, TypeVar
@@ -344,25 +344,34 @@ class CollectionWrapper:
         detail_names = set(note_type_details or [])
         result: dict[str, Any] = {}
 
+        # Compute the two expensive intermediates shared across sections at most
+        # once: the scheduler due tree (summary + stats) and the per-deck note
+        # counts (decks + stats — a full card-table scan). collection_info("all")
+        # would otherwise build each twice.
+        tree = self.col.sched.deck_due_tree() if {"summary", "stats"} & set(sections) else None
+        counts = self._note_counts_by_deck() if {"decks", "stats"} & set(sections) else None
+
         if "summary" in sections:
-            result["summary"] = self._get_summary()
+            assert tree is not None
+            result["summary"] = self._get_summary(tree)
 
         if "note_types" in sections:
             result["note_types"] = self._get_note_types(detail_names)
 
         if "decks" in sections:
-            result["decks"] = self._get_decks()
+            assert counts is not None
+            result["decks"] = self._get_decks(counts)
 
         if "tags" in sections:
             result["tags"] = self.col.tags.all()
 
         if "stats" in sections:
-            result["stats"] = self._get_stats()
+            assert tree is not None and counts is not None
+            result["stats"] = self._get_stats(tree, counts)
 
         return result
 
-    def _get_summary(self) -> dict[str, Any]:
-        tree = self.col.sched.deck_due_tree()
+    def _get_summary(self, tree: Any) -> dict[str, Any]:
         # Top-level node counts are already rolled up to include their
         # subdecks, so the collection total is the sum over top-level decks
         # only. Recursing into children would double-count nested decks.
@@ -440,8 +449,7 @@ class CollectionWrapper:
 
         return {name: len(rolled.get(name, set())) for name in id_to_name.values()}
 
-    def _get_decks(self) -> list[dict]:
-        counts = self._note_counts_by_deck()
+    def _get_decks(self, counts: dict[str, int]) -> list[dict]:
         return [
             {
                 "name": name_id.name,
@@ -451,16 +459,13 @@ class CollectionWrapper:
             for name_id in self.col.decks.all_names_and_ids()
         ]
 
-    def _get_stats(self) -> dict[str, Any]:
-        tree = self.col.sched.deck_due_tree()
-
+    def _get_stats(self, tree: Any, note_counts: dict[str, int]) -> dict[str, Any]:
         # Top-level node counts already include their subdecks, so collection
         # totals sum over top-level decks only. The per-deck summary below
         # walks every node — each node's count is its own rolled-up total.
         total_due = sum(top.review_count + top.learn_count for top in tree.children)
         total_new = sum(top.new_count for top in tree.children)
 
-        note_counts = self._note_counts_by_deck()
         decks_summary: dict[str, dict] = {}
 
         def walk(node: Any, prefix: str = "") -> None:
@@ -742,12 +747,12 @@ class CollectionWrapper:
         if not candidates:
             return empty
 
-        # Predict changes in Python for the preview / dry-run count.
+        # Predict changes in Python for the preview / dry-run count. Read fields
+        # in one query (shared with note_texts) rather than get_note per note.
         samples: list[dict[str, Any]] = []
         predicted: set[int] = set()
-        for nid in candidates:
-            note = self.col.get_note(nid)  # type: ignore[arg-type]
-            for fname, value in zip(note.keys(), note.values(), strict=False):
+        for nid, names, values in self._note_field_rows(self.col, candidates):
+            for fname, value in zip(names, values, strict=False):
                 if field is not None and fname != field:
                     continue
                 new = apply_replacement(
@@ -1460,15 +1465,38 @@ class CollectionWrapper:
         embedded. Fields that normalize to nothing (pure markup/media) are
         dropped.
 
-        Reads all note rows in one query (raw ``mid``/``flds`` columns) instead of
-        ``get_note`` per note — this runs once per note on every index rebuild, so
-        the N+1 mattered for large collections. Field names come from the model
-        (in field order, == ``note.keys()``); values from ``flds`` split on U+001F
-        (== ``note.values()``). Missing ids yield "" at the same position.
+        Built on ``_note_field_rows`` (one query, no per-note ``get_note``), which
+        runs once per note on every index rebuild. Missing ids yield "" at the
+        same position.
+        """
+        rendered = {
+            nid: "\n".join(
+                f"{k}: {cleaned}"
+                for k, v in zip(names, values, strict=False)
+                if (cleaned := normalize_for_embedding(v))
+            )
+            for nid, names, values in CollectionWrapper._note_field_rows(col, note_ids)
+        }
+        return [rendered.get(nid, "") for nid in note_ids]
+
+    @staticmethod
+    def _note_field_rows(
+        col: Collection, note_ids: Sequence[int]
+    ) -> Iterator[tuple[int, list[str], list[str]]]:
+        """Yield ``(note_id, field_names, field_values)`` per existing note, in
+        input order, from a single query over the raw notes table.
+
+        The shared low-level field reader behind ``note_texts`` and the
+        find-replace preview — both need a note's fields without a per-note
+        ``get_note`` round trip. Field names come from the note type (field order,
+        == ``Note.keys()``); values from the ``flds`` column split on U+001F
+        (== ``Note.values()``, as relied on in ``_find_empty_notes``). Ids absent
+        from the collection are skipped (so callers that need a fixed-length,
+        position-aligned result map by id rather than zipping).
         """
         ids = list(note_ids)
         if not ids:
-            return []
+            return
         db = col.db
         assert db is not None  # always present on an open collection
         id_list = ",".join(str(n) for n in ids)
@@ -1477,29 +1505,17 @@ class CollectionWrapper:
             for r in db.all(f"select id, mid, flds from notes where id in ({id_list})")
         }
         field_names: dict[int, list[str]] = {}
-
-        def _fields(mid: int) -> list[str]:
+        for nid in ids:
+            row = rows.get(nid)
+            if row is None:
+                continue
+            mid, flds = row
             names = field_names.get(mid)
             if names is None:
                 nt = col.models.get(mid)  # type: ignore[arg-type]
                 names = [f["name"] for f in nt["flds"]] if nt else []
                 field_names[mid] = names
-            return names
-
-        texts: list[str] = []
-        for nid in ids:
-            row = rows.get(nid)
-            if row is None:
-                texts.append("")
-                continue
-            mid, flds = row
-            parts = []
-            for k, v in zip(_fields(mid), flds.split("\x1f"), strict=False):
-                cleaned = normalize_for_embedding(v)
-                if cleaned:
-                    parts.append(f"{k}: {cleaned}")
-            texts.append("\n".join(parts))
-        return texts
+            yield nid, names, flds.split("\x1f")
 
     # -- note types ----------------------------------------------------------
 

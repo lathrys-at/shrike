@@ -466,7 +466,11 @@ def register_tools(
         def _in_scope(note_data: dict[str, Any]) -> bool:
             if deck and note_data.get("deck") != deck:
                 return False
-            return not (tags and not all(t in set(note_data.get("tags", [])) for t in tags))
+            if tags:
+                note_tags = set(note_data.get("tags", []))
+                if not all(t in note_tags for t in tags):
+                    return False
+            return True
 
         results: list[dict[str, Any]] = []
         for i, (kind, label, text) in enumerate(text_sources):
