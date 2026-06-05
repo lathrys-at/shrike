@@ -517,6 +517,71 @@ class TestDeleteIndexUpdate:
 
 
 # ---------------------------------------------------------------------------
+# Empty-at-boot indexing (#148)
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyBootIndexing:
+    """A server booted against an empty collection should still index notes
+    added later in the same session (#148)."""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "#148: an empty-at-boot server never materializes the index, so the "
+            "incremental upsert path (gated on index.available) skips indexing and "
+            "the notes stay unsearchable until a restart/explicit rebuild."
+        ),
+    )
+    def test_upsert_into_empty_boot_collection_is_indexed(
+        self, server_factory, embedding_model
+    ) -> None:
+        # A dedicated server with its own empty collection (not the shared,
+        # rebuilt collection_server). Boot logs "Collection is empty, skipping
+        # index rebuild", so the index object is never created.
+        srv = server_factory("empty-boot-index", embedding_model=str(embedding_model))
+        base = _base_url(srv)
+
+        # The embedding service must be up before we upsert; otherwise a skip
+        # would be for the wrong reason (no embedder) rather than the bug.
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if httpx.get(f"{base}/status", timeout=5.0).json()["embedding"]["available"]:
+                break
+            time.sleep(0.5)
+        else:
+            pytest.skip("embedding service did not become available")
+
+        mcp = MCPClient(srv.url)
+        result = mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "deck": "Bio",
+                        "note_type": "Basic",
+                        "fields": {
+                            "Front": "What is a ribosome?",
+                            "Back": "The cellular machine that synthesizes proteins",
+                        },
+                        "tags": ["cell-biology"],
+                    }
+                ]
+            },
+        )
+        assert result["results"][0]["status"] == "created"
+
+        # No explicit /index/rebuild: the incremental upsert path should have
+        # materialized the index (index.add() is self-sufficient — it creates the
+        # USearch index from the embedding dimension via _ensure_index()). The bug
+        # is that upsert gates this on index.available, which is False until the
+        # index exists, so the add is skipped and the note is never indexed.
+        idx = httpx.get(f"{base}/status", timeout=5.0).json()["index"]
+        assert idx["available"] is True
+        assert idx["size"] >= 1
+
+
+# ---------------------------------------------------------------------------
 # CLI commands: index and embedding
 # ---------------------------------------------------------------------------
 
