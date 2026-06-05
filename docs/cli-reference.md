@@ -327,7 +327,22 @@ shrike tag rename jp japanese --note 1779749914797 --note 1779749914798
 
 ## `shrike collection`
 
-Collection-wide maintenance.
+Collection-wide query and maintenance.
+
+### `shrike collection query <EXPRESSION>`
+
+Find notes with a raw [Anki search expression](https://docs.ankiweb.net/searching.html) — the power-user escape hatch. EXPRESSION is passed straight to Anki's search engine, so the full language works (`is:due`, `prop:ivl>=30`, `added:`, `rated:`, `flag:`, `OR`, `-`, parentheses). For meaning/text search use `shrike note search`; for plain deck/tag/type filters use `shrike note list`.
+
+| Option | Description |
+|---|---|
+| `--brief` | Show only IDs and metadata, not field content. |
+| `--limit INTEGER` | Max notes to return (default 50, max 200). |
+
+```bash
+shrike collection query "is:due prop:ivl>=30"
+shrike collection query "added:7 -tag:done" --brief
+shrike collection query "deck:Japanese (tag:verb OR tag:adj)" --limit 100
+```
 
 ### `shrike collection prune`
 

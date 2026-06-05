@@ -8,6 +8,14 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ## [Unreleased]
 
 ### Added
+- `collection_query` MCP tool and `shrike collection query "<expression>"` — find
+  notes with a **raw Anki search expression**. The string is passed straight to
+  Anki's search engine, so the full language works (`is:due`, `prop:ivl>=30`,
+  `added:`, `rated:`, `flag:`, `nid:`/`cid:`, `OR`/`-`/parentheses). It's the
+  power-user escape hatch, distinct from `search_notes` (meaning/text) and
+  `list_notes` (structured filters), and returns the same note shape as
+  `list_notes`. This restores the raw query removed in #86, now as an explicit
+  tool rather than a `list_notes` param (#97).
 - Collection cleanup: `collection_prune` MCP tool and `shrike collection prune`
   (a new `collection` CLI group) — clear unused tags, remove empty notes, and
   remove empty cards. Select cleanups with flags (`--unused-tags`/`--empty-notes`/

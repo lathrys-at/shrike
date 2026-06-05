@@ -139,6 +139,38 @@ Anki permits per-card decks, so a single note's cards can live in different deck
 
 ---
 
+## `collection_query`
+
+Find notes with a **raw [Anki search expression](https://docs.ankiweb.net/searching.html)** — the power-user escape hatch. The `query` string is passed straight to Anki's search engine, so the full language is available: `is:due`, `prop:ivl>=30`, `added:`, `rated:`, `flag:`, `nid:`/`cid:`, and boolean `OR` / `-` / parentheses.
+
+Reach for this when you need predicates the structured tools don't expose. For conceptual or exact-text search use [`search_notes`](#search_notes); for plain deck/tag/type filters use [`list_notes`](#list_notes). It returns the **same note shape** as `list_notes`. An invalid expression is reported as an input error.
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `query` | `string` | **yes** | A raw Anki search expression (e.g. `"deck:Japanese (tag:verb OR tag:adj) -is:suspended"`). |
+| `fields` | `string` | no | `"full"` (default) returns all field content; `"meta"` returns only metadata. |
+| `limit` | `integer` | no | Maximum notes to return. Default `50`, max `200`. |
+
+### Response
+
+Same shape as `list_notes` — `notes` (capped by `limit`), `total` (full match count), and `limit`:
+
+```jsonc
+{
+  "notes": [
+    { "id": 1700000000123, "note_type": "Basic", "deck": "Japanese::Vocabulary",
+      "tags": ["verb"], "modified": "2026-05-20T14:32:00Z",
+      "content": { "Front": "食べる", "Back": "to eat" } }
+  ],
+  "total": 27,
+  "limit": 50
+}
+```
+
+---
+
 ## `search_notes`
 
 Search the collection by **meaning and by exact text in one call**. Each query string is matched two ways — semantic similarity (the vector index) and exact, case-insensitive substring over note fields — and the results are folded together. Every match carries a `score` when it was semantically ranked and a `substring` annotation (which fields matched + a snippet) when the query text occurs literally; both when both apply.

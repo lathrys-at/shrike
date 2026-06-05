@@ -3,13 +3,14 @@ from __future__ import annotations
 import click
 
 from shrike.cli import output
+from shrike.cli.config import resolve_collection
 from shrike.cli.output import output_options
 from shrike.schemas import CollectionPruneResponse
 
 
-@click.group("collection", short_help="Collection-wide maintenance")
+@click.group("collection", short_help="Collection-wide query and maintenance")
 def collection() -> None:
-    """Collection-wide maintenance operations."""
+    """Collection-wide operations: raw query and maintenance."""
 
 
 def _render_preview(r: CollectionPruneResponse) -> int:
@@ -100,3 +101,55 @@ def prune(
         result = client.prune(dry_run=False, **selected)
     output.console.print("Pruned.")
     _render_preview(result)
+
+
+@collection.command("query", short_help="Find notes with a raw Anki search expression")
+@output_options
+@click.argument("expression")
+@click.option("--brief", is_flag=True, help="Show only IDs and metadata, not field content.")
+@click.option("--limit", type=int, default=50, help="Max notes to return (default 50).")
+@click.pass_context
+def query(ctx: click.Context, expression: str, brief: bool, limit: int) -> None:
+    """Find notes matching a raw Anki search EXPRESSION.
+
+    The power-user escape hatch: EXPRESSION is passed straight to Anki's search
+    engine, so the full language works (is:due, prop:ivl>=30, added:, rated:,
+    flag:, OR, -, parentheses). For meaning/text search use 'note search'; for
+    plain deck/tag/type filters use 'note list'.
+
+    \b
+    Examples:
+      shrike collection query "is:due prop:ivl>=30"
+      shrike collection query "added:7 -tag:done" --brief
+      shrike collection query "deck:Japanese (tag:verb OR tag:adj)" --limit 100
+    """
+    client = ctx.obj["client"]
+
+    with output.spinner("Searching…"):
+        result = client.query(expression, fields="meta" if brief else "full", limit=limit)
+
+    if ctx.obj["json"]:
+        output.emit_json(result)
+        return
+
+    notes = result.notes
+    if not notes:
+        output.console.print("[dim]No notes found.[/dim]")
+        return
+
+    col_path = resolve_collection(ctx.obj["config"]) or "collection"
+    count = f"{len(notes)} of {result.total}" if result.total > len(notes) else str(result.total)
+    output.console.print(
+        f"[dim]Showing {count} note(s) matching [cyan]{expression}[/cyan] "
+        f"from [cyan]{col_path}[/cyan][/dim]"
+    )
+    output.console.print()
+
+    if brief or not any(n.content for n in notes):
+        rows = [output.note_summary_row(n) for n in notes]
+        output.table(["ID", "Type", "Deck", "Tags", "Modified"], rows)
+    else:
+        for n in notes:
+            output.note_detail(n)
+
+    output.console.print()

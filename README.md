@@ -192,6 +192,7 @@ Shrike exposes these MCP tools:
 - **collection_info**: collection structure, note types, decks, tags, and stats
 - **list_notes**: filter and retrieve notes by deck, tags, type, IDs, or date
 - **search_notes**: semantic similarity and exact-substring search over notes
+- **collection_query**: find notes with a raw Anki search expression (`is:due`, `prop:`, …)
 - **find_replace_notes**: bulk find and replace across note fields in a scoped set
 - **upsert_notes**: create or update notes in bulk
 - **upsert_note_types**: create or update note type definitions
