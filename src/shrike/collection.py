@@ -1434,16 +1434,42 @@ class CollectionWrapper:
         text — deterministically, the same regardless of when or how the note is
         embedded. Fields that normalize to nothing (pure markup/media) are
         dropped.
+
+        Reads all note rows in one query (raw ``mid``/``flds`` columns) instead of
+        ``get_note`` per note — this runs once per note on every index rebuild, so
+        the N+1 mattered for large collections. Field names come from the model
+        (in field order, == ``note.keys()``); values from ``flds`` split on U+001F
+        (== ``note.values()``). Missing ids yield "" at the same position.
         """
+        ids = list(note_ids)
+        if not ids:
+            return []
+        db = col.db
+        assert db is not None  # always present on an open collection
+        id_list = ",".join(str(n) for n in ids)
+        rows = {
+            r[0]: (r[1], r[2])
+            for r in db.all(f"select id, mid, flds from notes where id in ({id_list})")
+        }
+        field_names: dict[int, list[str]] = {}
+
+        def _fields(mid: int) -> list[str]:
+            names = field_names.get(mid)
+            if names is None:
+                nt = col.models.get(mid)  # type: ignore[arg-type]
+                names = [f["name"] for f in nt["flds"]] if nt else []
+                field_names[mid] = names
+            return names
+
         texts: list[str] = []
-        for nid in note_ids:
-            try:
-                note = col.get_note(nid)  # type: ignore[arg-type]
-            except NotFoundError:
+        for nid in ids:
+            row = rows.get(nid)
+            if row is None:
                 texts.append("")
                 continue
+            mid, flds = row
             parts = []
-            for k, v in zip(note.keys(), note.values(), strict=False):
+            for k, v in zip(_fields(mid), flds.split("\x1f"), strict=False):
                 cleaned = normalize_for_embedding(v)
                 if cleaned:
                     parts.append(f"{k}: {cleaned}")
