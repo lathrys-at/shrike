@@ -97,18 +97,10 @@ def _update_note_type(col: Collection, nt_input: dict[str, Any]) -> dict[str, An
         notetype["css"] = nt_input["css"]
 
     if "fields" in nt_input and nt_input["fields"] is not None:
-        notetype["flds"] = []
-        for field_name in nt_input["fields"]:
-            field = col.models.new_field(field_name)
-            col.models.add_field(notetype, field)
+        _set_fields(col, notetype, nt_input["fields"])
 
     if "templates" in nt_input and nt_input["templates"] is not None:
-        notetype["tmpls"] = []
-        for tmpl_input in nt_input["templates"]:
-            tmpl = col.models.new_template(tmpl_input["name"])
-            tmpl["qfmt"] = tmpl_input["front"]
-            tmpl["afmt"] = tmpl_input["back"]
-            col.models.add_template(notetype, tmpl)
+        _set_templates(col, notetype, nt_input["templates"])
 
     col.models.update_dict(notetype)
 
@@ -118,3 +110,54 @@ def _update_note_type(col: Collection, nt_input: dict[str, Any]) -> dict[str, An
         "id": nt_id,
         "name": notetype["name"],
     }
+
+
+def _set_fields(col: Collection, notetype: dict[str, Any], names: list[str]) -> None:
+    """Replace a note type's field list, preserving note data by position.
+
+    Anki migrates a note's field *values* by field ordinal: a field keeps its
+    data as long as the field at that ordinal survives. Rebuilding the list from
+    fresh ``new_field`` objects (ord unset) makes the backend treat every field
+    as newly added and *every existing field as removed*, blanking all note data
+    for the type. So we reuse the existing field dicts in place — renaming the
+    ones whose position survives, appending new fields only for added positions,
+    and dropping the tail for removed ones (the only positions whose data Anki
+    discards). This makes a whole-list field replace data-safe, matching Anki's
+    "fields are keyed by position" rule. (A true by-identity reorder is a
+    separate, explicit operation — see #76; here a reordered name list is
+    interpreted positionally, i.e. as renames, which is non-destructive.)
+    """
+    old = notetype["flds"]
+    new = []
+    for i, name in enumerate(names):
+        if i < len(old):
+            field = old[i]
+            field["name"] = name
+        else:
+            field = col.models.new_field(name)
+        new.append(field)
+    notetype["flds"] = new
+
+
+def _set_templates(
+    col: Collection, notetype: dict[str, Any], templates: list[dict[str, Any]]
+) -> None:
+    """Replace a note type's templates, preserving existing cards by position.
+
+    Same hazard as ``_set_fields``: a card belongs to a template by ordinal, so
+    rebuilding ``tmpls`` from fresh ``new_template`` objects makes the backend
+    drop every existing template and the cards generated from it — re-sending the
+    *same* templates deletes all of a note's cards (and their scheduling history).
+    Reuse the existing template dicts in place, updating name/front/back, append
+    only for added positions, and drop the tail for removed ones (whose cards are
+    intentionally removed).
+    """
+    old = notetype["tmpls"]
+    new = []
+    for i, tmpl_input in enumerate(templates):
+        tmpl = old[i] if i < len(old) else col.models.new_template(tmpl_input["name"])
+        tmpl["name"] = tmpl_input["name"]
+        tmpl["qfmt"] = tmpl_input["front"]
+        tmpl["afmt"] = tmpl_input["back"]
+        new.append(tmpl)
+    notetype["tmpls"] = new

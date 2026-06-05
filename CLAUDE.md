@@ -50,7 +50,7 @@ src/shrike/                       # Python package (src layout)
     ├── type_cmd.py               # shrike type list/show/create/update/delete
     └── output.py                 # Rich formatting, output_options decorator
 tests/
-├── unit/                         # 496 tests — direct calls, no server
+├── unit/                         # 523 tests — direct calls, no server
 │   ├── conftest.py               # wrapper fixture (temp collection), basic_note fixture
 │   ├── test_collection_info.py
 │   ├── test_list_notes.py
@@ -67,7 +67,7 @@ tests/
 │   ├── test_server_security.py  # loopback guard + transport-security helpers
 │   ├── test_daemon.py           # stop_server HTTP→SIGTERM→SIGKILL escalation
 │   └── test_collection_concurrency.py  # single-worker-thread serialization
-└── integration/                  # 196 tests — real server subprocess + HTTP transport
+└── integration/                  # 200 tests — real server subprocess + HTTP transport
     ├── conftest.py               # server fixture (session-scoped), mcp fixture
     ├── test_tools.py
     ├── test_cli.py

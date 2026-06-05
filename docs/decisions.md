@@ -157,3 +157,30 @@ server because that's where the collection is; the CLI passes references through
 untouched (except `deck rename`, which must resolve to an ID client-side for the
 `upsert_decks` call). On note **create**, a name that doesn't exist is still
 auto-created as before; only an explicit unknown `#id` is an error.
+
+## Note types
+
+### Field and template updates are applied by position, preserving note data (#76)
+
+`upsert_note_types` lets you replace a note type's whole `fields`/`templates`
+list on update. Anki migrates a note's field *values* (and a template's *cards*)
+by **ordinal** — the field/template at position *N* keeps its data as long as
+position *N* survives. The original implementation rebuilt `flds`/`tmpls` from
+fresh `new_field`/`new_template` objects, which carry no ordinal, so Anki saw
+every existing field/template as removed and every incoming one as new. The
+effect was catastrophic and silent: **any** update carrying a `fields` key blanked
+every note's content for that type, and **any** `templates` key deleted every
+card (losing all scheduling/review history) — even re-sending the *identical*
+list did it.
+
+The fix (`_set_fields` / `_set_templates` in `note_types.py`) reuses the existing
+field/template dicts in place — renaming/retitling the ones whose position
+survives, appending only for added positions, and dropping the tail for removed
+ones. So a whole-list replace is now data-safe and matches Anki's
+"keyed by position" rule: rename-in-place and edit-in-place preserve data;
+lengthening appends empty fields / new cards; shortening discards only the
+trailing entries (the standard meaning of removing a field/template). A genuine
+*reorder* (moving a field/template to a new position while keeping its identity)
+is necessarily a separate, explicit operation — a positional name swap reads as
+two renames, which is non-destructive but not a move. That dedicated
+rename/reposition/add/remove surface is the remaining, lower-risk half of #76.

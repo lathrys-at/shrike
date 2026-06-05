@@ -643,6 +643,43 @@ class TestNoteTypeLifecycle:
         assert "NewName" in names
         assert "OldName" not in names
 
+    def test_field_update_preserves_note_data(self, mcp):
+        # Regression (#76): updating a note type's fields used to blank every
+        # note's content and delete its cards. Rename a field and confirm the
+        # existing note keeps its data under the new field name.
+        created = mcp(
+            "upsert_note_types",
+            {
+                "note_types": [
+                    {
+                        "name": "Preserve",
+                        "fields": ["Front", "Back"],
+                        "templates": [{"name": "C", "front": "{{Front}}", "back": "{{Back}}"}],
+                        "css": "",
+                    }
+                ]
+            },
+        )
+        nt_id = created["results"][0]["id"]
+        note = mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "deck": "Preserve",
+                        "note_type": "Preserve",
+                        "fields": {"Front": "Q", "Back": "A"},
+                    }
+                ]
+            },
+        )
+        note_id = note["results"][0]["id"]
+
+        mcp("upsert_note_types", {"note_types": [{"id": nt_id, "fields": ["Frente", "Back"]}]})
+
+        listed = mcp("list_notes", {"ids": [note_id]})["notes"][0]
+        assert listed["content"] == {"Frente": "Q", "Back": "A"}
+
     def test_duplicate_name_rejected(self, mcp):
         result = mcp(
             "upsert_note_types",

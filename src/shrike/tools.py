@@ -724,8 +724,14 @@ def register_tools(
         a field value, {{FrontSide}} on the back template inserts the
         rendered front side. Cloze note types use {{cloze:FieldName}}.
 
-        Note: removing fields from an existing note type deletes that
-        field's data from all notes of that type."""
+        On update, `fields` and `templates` replace the whole list but are
+        applied **by position**, so existing note data and cards are preserved:
+        the field/template at each position keeps its data even when renamed or
+        retitled. Only shortening the list discards the trailing entries —
+        removing a field drops that field's data, removing a template deletes
+        its cards. Adding entries appends empty fields / new cards. (To move a
+        field or template rather than rename-by-position, use a dedicated
+        reorder once available.)"""
         names = [nt.name or f"id={nt.id}" for nt in note_types]
         logger.info("upsert_note_types count=%d names=%s", len(note_types), ", ".join(names))
 

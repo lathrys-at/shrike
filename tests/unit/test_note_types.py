@@ -235,3 +235,92 @@ class TestDeleteNoteType:
         assert statuses[nt_id] == "deleted"
         assert statuses[basic_id] == "error"
         assert statuses[9999999999] == "not_found"
+
+
+def _type_with_note(wrapper, fields, values, templates=None):
+    """Create a note type plus one note carrying `values`; return (mid, nid)."""
+    tmpls = templates or [
+        {"name": "C", "front": "{{" + fields[0] + "}}", "back": "{{" + fields[-1] + "}}"}
+    ]
+
+    def build(c):
+        mid = upsert_note_types(
+            c, [{"name": "DataSafe", "fields": fields, "templates": tmpls, "css": ""}]
+        )[0]["id"]
+        note = c.new_note(c.models.get(mid))
+        for k, v in values.items():
+            note[k] = v
+        c.add_note(note, c.decks.id("DataSafe"))
+        return mid, note.id
+
+    return wrapper.run_sync(build)
+
+
+def _content(wrapper, nid):
+    return wrapper.run_sync(lambda c: dict(c.get_note(nid).items()))
+
+
+def _update_type(wrapper, payload):
+    return wrapper.run_sync(lambda c: upsert_note_types(c, [payload]))
+
+
+class TestUpdateNoteTypeFieldsPreserveData:
+    """Regression: a whole-list field/template replace must not destroy note data.
+
+    Previously `_update_note_type` rebuilt `flds`/`tmpls` from fresh objects, so
+    any update carrying a `fields` key blanked every note's content and any
+    `templates` key deleted every card (#76).
+    """
+
+    async def test_identical_fields_preserve_data(self, wrapper):
+        mid, nid = _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
+        _update_type(wrapper, {"id": mid, "fields": ["Front", "Back"]})
+        assert _content(wrapper, nid) == {"Front": "Q", "Back": "A"}
+
+    async def test_rename_field_carries_data(self, wrapper):
+        mid, nid = _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
+        _update_type(wrapper, {"id": mid, "fields": ["Frente", "Back"]})
+        assert _content(wrapper, nid) == {"Frente": "Q", "Back": "A"}
+
+    async def test_add_field_keeps_existing_and_adds_empty(self, wrapper):
+        mid, nid = _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
+        _update_type(wrapper, {"id": mid, "fields": ["Front", "Back", "Extra"]})
+        assert _content(wrapper, nid) == {"Front": "Q", "Back": "A", "Extra": ""}
+
+    async def test_remove_trailing_field_keeps_rest(self, wrapper):
+        mid, nid = _type_with_note(wrapper, ["A", "B", "C"], {"A": "va", "B": "vb", "C": "vc"})
+        _update_type(wrapper, {"id": mid, "fields": ["A", "B"]})
+        assert _content(wrapper, nid) == {"A": "va", "B": "vb"}
+
+    async def test_identical_templates_keep_cards(self, wrapper):
+        mid, nid = _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
+        before = wrapper.run_sync(lambda c: c.find_cards(f"nid:{nid}"))
+        _update_type(
+            wrapper,
+            {"id": mid, "templates": [{"name": "C", "front": "{{Front}}", "back": "{{Back}}"}]},
+        )
+        after = wrapper.run_sync(lambda c: c.find_cards(f"nid:{nid}"))
+        assert after == before  # same cards, scheduling history intact
+
+    async def test_edit_template_body_keeps_cards(self, wrapper):
+        mid, nid = _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
+        before = wrapper.run_sync(lambda c: c.find_cards(f"nid:{nid}"))
+        _update_type(
+            wrapper,
+            {"id": mid, "templates": [{"name": "C", "front": "{{Front}}!", "back": "{{Back}}"}]},
+        )
+        after = wrapper.run_sync(lambda c: c.find_cards(f"nid:{nid}"))
+        assert after == before
+        # the body change actually took effect
+        info = await wrapper.get_collection_info(
+            include=["note_types"], note_type_details=["DataSafe"]
+        )
+        ds = next(nt for nt in info["note_types"] if nt["id"] == mid)
+        assert ds["detail"]["templates"][0]["front"] == "{{Front}}!"
+
+    async def test_fields_and_data_round_trip_in_info(self, wrapper):
+        mid, _ = _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
+        _update_type(wrapper, {"id": mid, "fields": ["Frente", "Back"]})
+        info = await wrapper.get_collection_info(include=["note_types"])
+        ds = next(nt for nt in info["note_types"] if nt["id"] == mid)
+        assert ds["fields"] == ["Frente", "Back"]

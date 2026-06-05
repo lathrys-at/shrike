@@ -117,13 +117,18 @@ class NoteTypeInput(BaseModel):
     fields: list[str] | None = Field(
         default=None,
         description=(
-            "Ordered list of field names. Required for new note types. "
-            "On update, replaces the full field list."
+            "Ordered list of field names. Required for new note types. On update, "
+            "replaces the field list by position — the field at each position keeps "
+            "its note data even when renamed; only shortening the list drops the "
+            "trailing fields' data."
         ),
     )
     templates: list[TemplateInput] | None = Field(
         default=None,
-        description="Card templates. Required for new note types.",
+        description=(
+            "Card templates. Required for new note types. On update, replaced by "
+            "position like fields, preserving existing cards and their scheduling."
+        ),
     )
     css: str | None = Field(
         default=None,
