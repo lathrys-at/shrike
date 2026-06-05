@@ -322,8 +322,8 @@ class TestNoteListAndShow:
         assert "note_type" in note
 
     def test_list_since(self, runner):
-        import time
-
+        # End-to-end plumbing of `--since` both ways (the boundary logic itself
+        # is unit-tested deterministically, so no real-time sleep here).
         runner.json(
             [
                 "note",
@@ -333,33 +333,21 @@ class TestNoteListAndShow:
                 "--type",
                 "Basic",
                 "-f",
-                "Front=Old",
+                "Front=Note",
                 "-f",
-                "Back=Note",
+                "Back=Body",
             ]
         )
-        time.sleep(1)
-        from datetime import UTC, datetime
+        present = runner.json(
+            ["note", "list", "--deck", "SinceDeck", "--since", "2000-01-01T00:00:00Z"]
+        )
+        assert present["total"] == 1
+        assert present["notes"][0]["content"]["Front"] == "Note"
 
-        cutoff = datetime.now(UTC).isoformat()
-        time.sleep(1)
-        runner.json(
-            [
-                "note",
-                "create",
-                "--deck",
-                "SinceDeck",
-                "--type",
-                "Basic",
-                "-f",
-                "Front=New",
-                "-f",
-                "Back=Note",
-            ]
+        excluded = runner.json(
+            ["note", "list", "--deck", "SinceDeck", "--since", "2099-01-01T00:00:00Z"]
         )
-        data = runner.json(["note", "list", "--deck", "SinceDeck", "--since", cutoff])
-        assert data["total"] == 1
-        assert data["notes"][0]["content"]["Front"] == "New"
+        assert excluded["total"] == 0
 
 
 class TestNoteUpdate:

@@ -375,9 +375,10 @@ class TestListNotesAdvanced:
     """Tests for modified_since, query, and limit clamping."""
 
     def test_modified_since(self, mcp):
-        import time
-        from datetime import UTC, datetime
-
+        # End-to-end plumbing of the `modified_since` filter both ways — a past
+        # cutoff includes the note, a future cutoff excludes it. The precise
+        # boundary-between-two-notes semantics is covered deterministically in
+        # the unit tests (no real-time sleep needed here).
         mcp(
             "upsert_notes",
             {
@@ -385,30 +386,18 @@ class TestListNotesAdvanced:
                     {
                         "deck": "TimeDeck",
                         "note_type": "Basic",
-                        "fields": {"Front": "Old", "Back": "Note"},
-                    }
-                ]
-            },
-        )
-        time.sleep(1)
-        cutoff = datetime.now(UTC).isoformat()
-        time.sleep(1)
-        mcp(
-            "upsert_notes",
-            {
-                "notes": [
-                    {
-                        "deck": "TimeDeck",
-                        "note_type": "Basic",
-                        "fields": {"Front": "New", "Back": "Note"},
+                        "fields": {"Front": "Note", "Back": "Body"},
                     }
                 ]
             },
         )
 
-        result = mcp("list_notes", {"deck": "TimeDeck", "modified_since": cutoff})
-        assert result["total"] == 1
-        assert result["notes"][0]["content"]["Front"] == "New"
+        past = mcp("list_notes", {"deck": "TimeDeck", "modified_since": "2000-01-01T00:00:00Z"})
+        assert past["total"] == 1
+        assert past["notes"][0]["content"]["Front"] == "Note"
+
+        future = mcp("list_notes", {"deck": "TimeDeck", "modified_since": "2099-01-01T00:00:00Z"})
+        assert future["total"] == 0
 
     def test_search_substring_without_index(self, mcp):
         # This server has no embedding index, so search_notes' semantic ranking is

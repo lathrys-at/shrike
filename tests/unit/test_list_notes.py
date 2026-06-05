@@ -1,7 +1,15 @@
 from __future__ import annotations
 
-import time
 from datetime import UTC, datetime
+
+
+def _backdate(wrapper, nid: int, mod: int) -> None:
+    """Set a note's modification time directly (epoch seconds).
+
+    `modified_since` filters on `notes.mod`, so explicit timestamps make the
+    boundary deterministic without sleeping to manufacture a real-time gap.
+    """
+    wrapper.run_sync(lambda c: c.db.execute("update notes set mod = ? where id = ?", mod, nid))
 
 
 class TestListNotes:
@@ -99,35 +107,27 @@ class TestListNotes:
         assert "T" in note["modified"]  # ISO 8601 format
 
     async def test_modified_since_filters_old_notes(self, wrapper):
-        await wrapper.upsert_notes(
-            [
-                {
-                    "deck": "Test",
-                    "note_type": "Basic",
-                    "fields": {"Front": "Old", "Back": "Note"},
-                }
-            ]
-        )
-        time.sleep(1)
-        cutoff = datetime.now(UTC).isoformat()
-        time.sleep(1)
-        await wrapper.upsert_notes(
-            [
-                {
-                    "deck": "Test",
-                    "note_type": "Basic",
-                    "fields": {"Front": "New", "Back": "Note"},
-                }
-            ]
-        )
+        old = (
+            await wrapper.upsert_notes(
+                [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Old", "Back": "Note"}}]
+            )
+        )[0]["id"]
+        new = (
+            await wrapper.upsert_notes(
+                [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "New", "Back": "Note"}}]
+            )
+        )[0]["id"]
+        _backdate(wrapper, old, 1000)
+        _backdate(wrapper, new, 2000)
+        cutoff = datetime.fromtimestamp(1500, UTC).isoformat()
 
         result = await wrapper.list_notes(modified_since=cutoff)
         assert result["total"] == 1
         assert result["notes"][0]["content"]["Front"] == "New"
 
     async def test_modified_since_no_matches(self, wrapper, basic_note):
-        time.sleep(1)
-        future = datetime.now(UTC).isoformat()
+        _backdate(wrapper, basic_note, 1000)
+        future = datetime.fromtimestamp(2000, UTC).isoformat()
         result = await wrapper.list_notes(modified_since=future)
         assert result["total"] == 0
 
