@@ -1,5 +1,6 @@
 # Shrike
 
+[![SafeSkill 30/100](https://img.shields.io/badge/SafeSkill-30%2F100_Blocked-red)](https://safeskill.dev/scan/lathrys-at-shrike)
 Sometimes you want to work on your Anki collection without opening Anki. That's what Shrike is for. It's a command-line client and an MCP server for your collection, so you can manage cards from a terminal or hand them to an LLM agent.
 
 Shrike works directly on the collection's SQLite database, without using the Anki desktop app or relying on the AnkiConnect bridge. You get:
