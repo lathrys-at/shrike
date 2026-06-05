@@ -570,16 +570,13 @@ class CollectionWrapper:
         total = len(note_ids)
         note_ids = note_ids[:limit]
 
-        notes = [self._note_to_dict(nid, fields_mode) for nid in note_ids]
+        notes = self._notes_to_dicts(note_ids, fields_mode)
         return {"notes": notes, "total": total, "limit": limit}
 
     def _get_notes_by_ids(self, ids: list[int], fields_mode: str, limit: int) -> dict[str, Any]:
-        notes = []
-        for nid in ids[:limit]:
-            try:
-                notes.append(self._note_to_dict(nid, fields_mode))
-            except NotFoundError:
-                continue
+        # _notes_to_dicts skips ids absent from the collection, so a stale id is
+        # dropped just as the per-note get_note path did (via NotFoundError).
+        notes = self._notes_to_dicts(ids[:limit], fields_mode)
         return {"notes": notes, "total": len(notes), "limit": limit}
 
     async def query(
@@ -598,7 +595,7 @@ class CollectionWrapper:
         """
         note_ids = list(self.col.find_notes(query))
         total = len(note_ids)
-        notes = [self._note_to_dict(nid, fields_mode) for nid in note_ids[:limit]]
+        notes = self._notes_to_dicts(note_ids[:limit], fields_mode)
         return {"notes": notes, "total": total, "limit": limit}
 
     async def search_substring(
@@ -772,30 +769,70 @@ class CollectionWrapper:
     async def note_to_dict(self, nid: int, fields_mode: str) -> dict[str, Any]:
         return await self.run(lambda _c: self._note_to_dict(nid, fields_mode))
 
-    def _note_to_dict(self, nid: int, fields_mode: str) -> dict[str, Any]:
-        note = self.col.get_note(nid)  # type: ignore[arg-type]
-        notetype = self.col.models.get(note.mid)
+    def _notes_to_dicts(self, nids: Sequence[int], fields_mode: str) -> list[dict[str, Any]]:
+        """Serialize many notes in a fixed number of queries (no per-note N+1).
 
-        # Anki permits per-card decks; a note's cards can live in different
-        # decks. We report the first card's deck — adequate for Shrike's
-        # one-deck-per-note model, but it does not represent split-deck notes.
-        cards = note.cards()
-        deck_id = cards[0].did if cards else None
-        deck_obj = self.col.decks.get(deck_id) if deck_id else None
-        deck_name = deck_obj["name"] if deck_obj else "Default"
+        Reads all note rows and their first-card decks in two indexed queries
+        instead of ``get_note`` + ``note.cards()`` + ``decks.get()`` *per note*.
+        Field values come from the raw ``flds`` column (Anki joins fields with
+        U+001F, as already relied on in ``_find_empty_notes``) and tags from the
+        space-delimited ``tags`` column — both verified equal to the Note API.
+        Results follow input order; ids missing from the collection are skipped
+        (matching ``get_note`` raising ``NotFoundError`` for the single-note path).
+        """
+        if not nids:
+            return []
+        db = self.col.db
+        assert db is not None  # always present on an open collection
+        id_list = ",".join(str(n) for n in nids)
 
-        result: dict[str, Any] = {
-            "id": note.id,
-            "note_type": notetype["name"] if notetype else "Unknown",
-            "deck": deck_name,
-            "tags": note.tags,
-            "modified": datetime.fromtimestamp(note.mod, tz=UTC).isoformat(),
+        note_rows = {
+            r[0]: r
+            for r in db.all(f"select id, mid, tags, flds, mod from notes where id in ({id_list})")
         }
+        # First card's deck per note (lowest ord), matching note.cards()[0].did.
+        deck_by_nid: dict[int, int] = {}
+        for nid, did in db.all(f"select nid, did from cards where nid in ({id_list}) order by ord"):
+            deck_by_nid.setdefault(nid, did)
+        deck_names = {d.id: d.name for d in self.col.decks.all_names_and_ids()}
 
-        if fields_mode == "full":
-            result["content"] = dict(zip(note.keys(), note.values(), strict=False))
+        model_cache: dict[int, tuple[str, list[str]]] = {}
 
-        return result
+        def _model(mid: int) -> tuple[str, list[str]]:
+            cached = model_cache.get(mid)
+            if cached is None:
+                nt = self.col.models.get(mid)  # type: ignore[arg-type]
+                cached = (nt["name"], [f["name"] for f in nt["flds"]]) if nt else ("Unknown", [])
+                model_cache[mid] = cached
+            return cached
+
+        out: list[dict[str, Any]] = []
+        for nid in nids:
+            row = note_rows.get(nid)
+            if row is None:
+                continue
+            _id, mid, tags, flds, mod = row
+            name, field_names = _model(mid)
+            did = deck_by_nid.get(nid)
+            result: dict[str, Any] = {
+                "id": _id,
+                "note_type": name,
+                "deck": deck_names.get(did, "Default") if did is not None else "Default",
+                "tags": tags.split(),
+                "modified": datetime.fromtimestamp(mod, tz=UTC).isoformat(),
+            }
+            if fields_mode == "full":
+                result["content"] = dict(zip(field_names, flds.split("\x1f"), strict=False))
+            out.append(result)
+        return out
+
+    def _note_to_dict(self, nid: int, fields_mode: str) -> dict[str, Any]:
+        dicts = self._notes_to_dicts([nid], fields_mode)
+        if not dicts:
+            # Missing note (rare — a stale id, e.g. an index neighbor pointing at
+            # a deleted note): defer to Anki to raise its NotFoundError as before.
+            self.col.get_note(nid)  # type: ignore[arg-type]
+        return dicts[0]
 
     # -- upsert / delete -----------------------------------------------------
 
@@ -1262,12 +1299,29 @@ class CollectionWrapper:
             removed_note_ids += notes_deleted
 
         if unused_tags:
-            names = [t for t in self.col.tags.all() if not self.col.find_notes(f'"tag:{t}"')]
+            names = self._unused_tag_names()
             if not dry_run and names:
                 self.col.tags.clear_unused_tags()
             result["unused_tags"] = {"removed": len(names), "tags": names}
 
         return result, removed_note_ids
+
+    def _unused_tag_names(self) -> list[str]:
+        """Registered tags present on no note — in one scan, not a find_notes per
+        tag. A tag is *used* if a note carries it or any descendant (``a`` is used
+        when a note has ``a::b``), mirroring Anki's hierarchical, case-insensitive
+        ``tag:`` search: collect every note tag's ancestor chain, case-folded, and
+        flag the registered tags absent from it.
+        """
+        db = self.col.db
+        assert db is not None  # always present on an open collection
+        used: set[str] = set()
+        for (tagstr,) in db.all("select distinct tags from notes"):
+            for tag in tagstr.split():
+                parts = tag.lower().split("::")
+                for i in range(1, len(parts) + 1):
+                    used.add("::".join(parts[:i]))
+        return [t for t in self.col.tags.all() if t.lower() not in used]
 
     # -- decks ---------------------------------------------------------------
 
