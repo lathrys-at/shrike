@@ -110,10 +110,13 @@ SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
 echo 'import coverage; coverage.process_startup()' > "$SITE/coverage_subprocess.pth"
 
 export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
-coverage run --parallel-mode -m pytest tests/unit -q -n auto
-coverage run --parallel-mode -m pytest tests/integration -q -m "integration and not embedding" -n auto
+coverage run --parallel-mode -m pytest tests/unit tests/integration -q -m "not embedding" -n auto
 coverage combine && coverage report      # exits non-zero below fail_under
 ```
+
+Both suites run in one combined `-n auto` invocation (xdist balances them, so
+workers don't idle between phases — faster than two separate runs); `-m "not
+embedding"` drops the embedding-gated tests. This is exactly what CI runs.
 
 A plain `pytest tests/unit --cov=shrike` reads ~18 points lower because it can't
 see the server subprocess — use the combined flow above when checking the gate.
