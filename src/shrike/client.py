@@ -33,6 +33,7 @@ from pydantic import TypeAdapter
 
 from shrike import daemon
 from shrike.schemas import (
+    COLLECTION_BUSY_CODE,
     CollectionInfo,
     CollectionPruneResponse,
     DeckInput,
@@ -84,6 +85,16 @@ class ShrikeError(Exception):
 
 class ServerError(ShrikeError):
     """The server accepted the request but a tool returned an error."""
+
+
+class CollectionBusyError(ShrikeError):
+    """The collection couldn't be acquired — another process holds it.
+
+    Raised under cooperative locking (#64/#65) when the server can't re-open the
+    collection because something else (typically Anki desktop) has it open. A
+    distinct, expected outcome — catch it to retry rather than treating it as a
+    generic ``ServerError``.
+    """
 
 
 class ServerUnreachableError(ShrikeError):
@@ -227,7 +238,12 @@ class ShrikeClient:
             # Tool failure: the message lives in the text content. Tools no
             # longer embed an error field in structuredContent — failures are
             # MCP isError results.
-            raise ServerError(_error_text(result.get("content")) or "Tool returned an error")
+            text = _error_text(result.get("content"))
+            if text and text.startswith(f"{COLLECTION_BUSY_CODE}:"):
+                # The collection couldn't be acquired (another process holds it);
+                # raise a distinct, catchable error with the human message.
+                raise CollectionBusyError(text.split(":", 1)[1].strip())
+            raise ServerError(text or "Tool returned an error")
 
         content = result.get("structuredContent", {})
         return content if isinstance(content, dict) else {}

@@ -9,7 +9,7 @@ from anki.errors import SearchError
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from shrike.collection import CollectionWrapper, substring_info
+from shrike.collection import CollectionBusyError, CollectionWrapper, substring_info
 from shrike.index import IndexSaver, IndexState, VectorIndex
 from shrike.schemas import (
     CollectionInfo,
@@ -70,6 +70,11 @@ def _safe_tool(fn: Any) -> Any:
                 return await fn(*args, **kwargs)
             except ToolInputError:
                 raise
+            except CollectionBusyError as e:
+                # Expected under cooperative locking — another process holds the
+                # collection. Surface the coded message (client maps it), no trace.
+                logger.warning("%s in %s", e, fn.__name__)
+                raise
             except Exception:
                 logger.exception("Unhandled error in %s", fn.__name__)
                 raise
@@ -82,6 +87,9 @@ def _safe_tool(fn: Any) -> Any:
         try:
             return fn(*args, **kwargs)
         except ToolInputError:
+            raise
+        except CollectionBusyError as e:
+            logger.warning("%s in %s", e, fn.__name__)
             raise
         except Exception:
             logger.exception("Unhandled error in %s", fn.__name__)
