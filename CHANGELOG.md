@@ -8,6 +8,14 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ## [Unreleased]
 
 ### Added
+- Cooperative collection locking (opt-in): `shrike server start --cooperative-lock`
+  releases Anki's exclusive collection lock when the daemon is idle and re-opens
+  it on demand, so an idle daemon no longer blocks launching Anki desktop against
+  the same collection. The hold window is `--lock-hold-seconds` (config
+  `server.lock_hold_seconds`, default 5s). On each re-acquire the index re-checks
+  drift and rebuilds if the collection changed while released. The default
+  permanent-hold behaviour is unchanged. `server status` (and `/status`) now
+  report the locking mode and whether the collection is currently held (#64).
 - `shrike collection reload` (and a `POST /reload` control endpoint) — close and
   re-open the collection without restarting the daemon, picking up changes made to
   the collection file on disk (a restored backup, a file-level sync or swap) and

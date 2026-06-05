@@ -717,6 +717,12 @@ class ServerStatus(BaseModel):
     log: str | None = None
     embedding: EmbeddingStatus
     index: IndexStatus
+    # Collection-lock state (#64): the locking mode and whether the collection is
+    # currently held open. In the default permanent-hold mode it's always held;
+    # in cooperative mode it's released when idle. Defaulted so older payloads
+    # (and the permanent-mode common case) validate.
+    locking: Literal["permanent", "cooperative"] = "permanent"
+    collection_held: bool = True
 
 
 # -- custom-endpoint responses (discriminated on `status`) -------------------

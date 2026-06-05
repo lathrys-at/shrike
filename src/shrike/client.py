@@ -126,6 +126,7 @@ class ServerSpec:
     cache_dir: str | None = None
     embedding_args: list[str] = field(default_factory=list)
     index_args: list[str] = field(default_factory=list)
+    locking_args: list[str] = field(default_factory=list)
 
     @property
     def url(self) -> str:
@@ -729,6 +730,7 @@ class ShrikeClient:
         if spec.cache_dir:
             cmd += ["--cache-dir", spec.cache_dir]
         cmd += spec.index_args
+        cmd += spec.locking_args
         cmd += spec.embedding_args
 
         daemon.STATE_DIR.mkdir(parents=True, exist_ok=True)

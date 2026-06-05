@@ -422,6 +422,45 @@ clearing leaves every vector valid. The tool does both in one pass and advances
 
 ## Collection lifecycle
 
+### Cooperative locking is opt-in, time-sliced, with a 5 s idle hold (#64)
+
+By default the daemon holds Anki's exclusive collection lock for its whole life,
+which is ideal for the heavy single-collection embedding workflow (no acquire
+latency, no contention) but blocks launching Anki desktop against the same file.
+`--cooperative-lock` opens on demand and releases after an idle window.
+
+- **Opt-in, default off.** The permanent-hold model stays the default until
+  cooperative mode is proven; cooperative is a flag, not a replacement. Whether it
+  ever becomes the default is deferred.
+- **Cooperative time-slicing, not concurrent sharing.** Anki desktop holds the
+  collection for its entire runtime — it does not cooperate. So the win is
+  precise: an *idle* daemon stops blocking Anki's launch, not that both operate at
+  once. Contention surfaces as a clean SQLite "database is locked" busy error
+  (SQLite guarantees no corruption); making that error pretty is separate work.
+- **5 s idle hold.** Sized from the parallels: SQLite's conventional
+  `busy_timeout` is ~5 s, and unlike a DB connection pool (idle timeouts of
+  minutes, because holding a pooled connection harms nothing and reconnecting is
+  expensive) our held resource *actively blocks a human launching Anki* and
+  re-acquiring is a cheap local SQLite open. Both forces push short; 5 s is the
+  default, tunable via `--lock-hold-seconds` / `server.lock_hold_seconds` (a
+  human-free programmatic deployment can raise it to cut re-acquire churn).
+- **Drift is re-checked per re-acquire, col_mod-only.** After each idle release,
+  the next op re-opens and the acquire hook compares `col.mod` to the index's
+  stored value; a mismatch (an external edit during the gap) triggers a rebuild,
+  reusing the boot machinery (read texts under the lock, embed off-lock). The hook
+  deliberately does *not* re-fetch the model fingerprint — a model change is
+  already handled by `/embedding/start`, and skipping it avoids a llama-server
+  round-trip on every re-acquire.
+- **`server.lock` and the collection lock are now distinct.** "Daemon alive" and
+  "collection currently held" stopped being the same fact, so `/status` /
+  `server status` report both (`locking`, `collection_held`).
+
+Implementation keeps `self.col` typed `Collection` (a `Collection | None` would
+ripple through every `self.col.X`); a `_open_flag` tracks held-vs-released and
+`_locked` re-opens before any access, so the handle is never dereferenced while
+closed. In permanent mode `_open_flag` is always True and every cooperative path
+is inert. Built on #79's reopen + read-at-execution-time primitive.
+
 ### Reload is the first slice of cooperative locking, built deliberately (#79 → #64)
 
 `shrike collection reload` / `POST /reload` closes and re-opens the

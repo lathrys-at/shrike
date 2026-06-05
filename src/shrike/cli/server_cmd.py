@@ -12,10 +12,12 @@ from shrike.cli import output
 from shrike.cli.config import (
     embedding_args,
     index_args,
+    locking_args,
     resolve_cache_dir,
     resolve_collection,
     resolve_embedding,
     resolve_index_save,
+    resolve_locking,
     resolve_transport,
     save_config,
     transport_args,
@@ -45,6 +47,9 @@ def _render_status(status: ServerStatus) -> None:
         output.kv("Log", f"[cyan]{status.log}[/cyan]")
     if status.uptime:
         output.kv("Uptime", status.uptime)
+    if status.locking == "cooperative":
+        held = "[green]held[/green]" if status.collection_held else "[dim]released (idle)[/dim]"
+        output.kv("Locking", f"cooperative · collection {held}")
 
     emb = status.embedding
     if emb.state == "running" and emb.available:
@@ -166,6 +171,19 @@ def server() -> None:
     help="Unsaved index changes that force an immediate flush (default: 100).",
 )
 @click.option(
+    "--cooperative-lock",
+    is_flag=True,
+    help="Release the collection lock when idle and re-open on demand, so an idle "
+    "daemon doesn't block launching Anki (opt-in; default holds the lock for the "
+    "daemon's lifetime).",
+)
+@click.option(
+    "--lock-hold-seconds",
+    type=float,
+    help="In cooperative mode, seconds to hold the collection after the last "
+    "operation before releasing it (default: 5).",
+)
+@click.option(
     "--llama-server",
     type=click.Path(),
     help="Path to llama-server binary (default: LLAMA_SERVER_PATH env or PATH lookup).",
@@ -225,6 +243,8 @@ def server_start(
     cache_dir: str | None,
     index_save_delay: float | None,
     index_save_threshold: int | None,
+    cooperative_lock: bool,
+    lock_hold_seconds: float | None,
     llama_server: str | None,
     embedding_model: str | None,
     embedding_port: int | None,
@@ -305,6 +325,12 @@ def server_start(
     cache_args = ["--cache-dir", resolved_cache_dir] if resolved_cache_dir else []
     index_save_args = index_args(resolved_index_save)
 
+    # Resolve cooperative-locking settings (config → env → flags).
+    resolved_locking = resolve_locking(
+        config, cooperative=cooperative_lock or None, hold_seconds=lock_hold_seconds
+    )
+    locking_cli_args = locking_args(resolved_locking)
+
     # Check if already running (via lock, not PID)
     if is_server_alive():
         meta = read_server_meta()
@@ -334,6 +360,10 @@ def server_start(
             config["server"]["allowed_origins"] = resolved_transport["allowed_origins"]
         if resolved_transport["no_dns_rebinding_protection"]:
             config["server"]["no_dns_rebinding_protection"] = True
+        if resolved_locking["cooperative"]:
+            config["server"]["cooperative_lock"] = True
+        if resolved_locking["hold_seconds"] is not None:
+            config["server"]["lock_hold_seconds"] = resolved_locking["hold_seconds"]
         # Remember embedding settings so `shrike embedding start` works later.
         for key, value in resolved_embedding.items():
             if value is not None:
@@ -369,6 +399,7 @@ def server_start(
             *transport_cli_args,
             *cache_args,
             *index_save_args,
+            *locking_cli_args,
             *embedding_cli_args,
         ]
         from shrike.server import main
@@ -404,6 +435,7 @@ def server_start(
                 *transport_cli_args,
                 *cache_args,
                 *index_save_args,
+                *locking_cli_args,
                 *embedding_cli_args,
             ],
             stdout=bootstrap_log_file,

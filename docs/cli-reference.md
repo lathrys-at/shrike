@@ -45,6 +45,8 @@ Start the server as a background daemon. The collection path can come from `--co
 | `--cache-dir PATH` | Directory for the vector index and other caches (default: platform-specific). |
 | `--index-save-delay FLOAT` | Seconds of idle after the last index change before flushing to disk (default: 60). |
 | `--index-save-threshold INTEGER` | Unsaved index changes that force an immediate flush (default: 100). |
+| `--cooperative-lock` | Release the collection lock when idle and re-open on demand, so an idle daemon doesn't block launching Anki (opt-in; default holds the lock for the daemon's lifetime). |
+| `--lock-hold-seconds FLOAT` | In cooperative mode, seconds to hold the collection after the last operation before releasing it (default: 5). |
 | `--embedding-model PATH` | Path to a GGUF embedding model. Enables semantic search. |
 | `--embedding-port INTEGER` | Port for the embedding server (default: 8373). |
 | `--embedding-context-size INTEGER` | Context size for the embedding model. |
@@ -66,7 +68,7 @@ Stop the running daemon.
 
 ### `shrike server status`
 
-Show whether the server is running, and if so, its URL, PID, collection path, and uptime.
+Show whether the server is running, and if so, its URL, PID, collection path, and uptime. In cooperative-locking mode it also shows whether the collection is currently held or released (idle).
 
 ### `shrike server logs`
 

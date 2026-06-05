@@ -1290,6 +1290,42 @@ class TestMigrateNoteType:
             )
 
 
+class TestCooperativeLocking:
+    """End-to-end cooperative locking on an isolated server (#64)."""
+
+    def test_status_reports_and_idle_release(self, server_factory):
+        from shrike.client import ShrikeClient
+
+        info = server_factory(
+            "coop", extra_args=["--cooperative-lock", "--lock-hold-seconds", "2.0"]
+        )
+        client = ShrikeClient(info.url, autostart=False)
+
+        st = client.status()
+        assert st.locking == "cooperative"
+        assert st.collection_held is False  # released right after boot
+
+        # An MCP op re-acquires the collection.
+        client.query("deck:*")
+        assert client.status().collection_held is True
+
+        # After the idle window it releases again (poll, timing-tolerant).
+        deadline = time.time() + 8
+        while client.status().collection_held and time.time() < deadline:
+            time.sleep(0.2)
+        assert client.status().collection_held is False
+
+        # Re-acquire still works after release.
+        assert client.query("deck:*").total == 0
+
+    def test_default_server_is_permanent(self, server):
+        from shrike.client import ShrikeClient
+
+        st = ShrikeClient(server.url, autostart=False).status()
+        assert st.locking == "permanent"
+        assert st.collection_held is True
+
+
 class TestStatusEndpoint:
     """Verify the GET /status endpoint."""
 

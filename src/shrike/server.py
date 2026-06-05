@@ -19,7 +19,7 @@ from mcp.server.transport_security import (
     TransportSecuritySettings,
 )
 
-from shrike.collection import CollectionWrapper
+from shrike.collection import DEFAULT_LOCK_HOLD, CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
 from shrike.embedding import EmbeddingRuntime
 from shrike.index import (
@@ -219,6 +219,8 @@ def _register_custom_routes(
         # slow/hung embedding server can't stall request handling.
         status["embedding"] = await asyncio.to_thread(runtime.health)
         status["index"] = index.status()
+        status["locking"] = "cooperative" if wrapper.cooperative else "permanent"
+        status["collection_held"] = wrapper.is_open
 
         return JSONResponse(status)
 
@@ -449,6 +451,20 @@ def main() -> None:
         help="Directory for cache files like the vector index (default: platform-specific)",
     )
     parser.add_argument(
+        "--cooperative-lock",
+        action="store_true",
+        help="Release the collection lock when idle and re-open on demand, so an "
+        "idle daemon doesn't block launching Anki (opt-in; default holds the lock "
+        "for the daemon's lifetime).",
+    )
+    parser.add_argument(
+        "--lock-hold-seconds",
+        type=float,
+        default=None,
+        help="In cooperative mode, seconds to hold the collection after the last "
+        f"operation before releasing it (default: {DEFAULT_LOCK_HOLD:g})",
+    )
+    parser.add_argument(
         "--index-save-delay",
         type=float,
         default=None,
@@ -569,7 +585,18 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("Opening collection at %s", args.collection)
-    wrapper = CollectionWrapper(args.collection)
+    hold_seconds = (
+        args.lock_hold_seconds if args.lock_hold_seconds is not None else DEFAULT_LOCK_HOLD
+    )
+    wrapper = CollectionWrapper(
+        args.collection,
+        cooperative=args.cooperative_lock,
+        hold_seconds=hold_seconds,
+    )
+    if args.cooperative_lock:
+        logger.info(
+            "Cooperative locking on: releasing the collection after %.0fs idle", hold_seconds
+        )
     notes, decks, note_types = wrapper.run_sync(
         lambda c: (c.note_count(), len(c.decks.all_names_and_ids()), len(c.models.all()))
     )
@@ -629,6 +656,28 @@ def main() -> None:
             _maybe_rebuild(index, model_id, col_mod, all_note_ids, texts)
     elif args.no_embedding and args.embedding_model:
         logger.info("Embedding service disabled at boot (--no-embedding); model configured")
+
+    if args.cooperative_lock:
+        # On every re-acquire after an idle release, re-check index drift: if the
+        # collection changed on disk while we were released (Anki, sync, import),
+        # rebuild. Cheap col_mod-only check; texts are read under the lock and
+        # embedded off-lock only on real drift. Runs on the worker thread.
+        def _acquire_hook(col: Any) -> None:
+            if not index.available or not index.check_drift(col.mod):
+                return
+            svc_now = runtime.service
+            if svc_now is None or not svc_now.running:
+                return
+            note_ids, changed_mod, texts = _collect_for_rebuild(col)
+            logger.info("Collection changed while idle (col_mod=%d); rebuilding index", changed_mod)
+            index.rebuild_in_background(
+                note_ids, texts, changed_mod, model_id=svc_now.model_fingerprint()
+            )
+
+        wrapper.set_acquire_hook(_acquire_hook)
+        # Release now so a freshly-booted, never-touched idle daemon doesn't hold
+        # the lock; the first request re-acquires on demand.
+        wrapper.release_now()
 
     def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
         sig_name = signal.Signals(signum).name

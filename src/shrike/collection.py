@@ -46,6 +46,12 @@ _DUPLICATE_MESSAGE = "The first field duplicates an existing note of this type."
 
 T = TypeVar("T")
 
+# Default seconds to hold the collection open after the last operation before
+# releasing the lock, in cooperative mode (#64). Near SQLite's conventional
+# ``busy_timeout``; short because holding blocks launching Anki and re-opening is
+# a cheap local SQLite open.
+DEFAULT_LOCK_HOLD = 5.0
+
 # Chars that are special inside an Anki search even within double quotes; escaped
 # so the term is matched literally (verified against anki 25.9.4: ':' must be
 # escaped even quoted, or a substring spanning it silently misses).
@@ -123,52 +129,145 @@ class CollectionWrapper:
     responsive while the collection is busy. ``run_sync`` and ``close`` provide
     synchronous entry points for the startup and shutdown paths where no event
     loop is running.
+
+    **Cooperative locking (#64, opt-in).** By default the collection is opened
+    once and held for the daemon's lifetime (Anki's exclusive lock too). In
+    cooperative mode the collection is still opened at boot, but released after a
+    short idle window and re-opened on demand, so an *idle* daemon doesn't block
+    launching Anki. ``self._open`` tracks held-vs-released; every op routes
+    through ``_locked`` (re-open if released, run an acquire drift hook), and each
+    async op (re)arms an idle-release timer. In the default mode ``self._open`` is
+    always True and these paths are inert.
     """
 
     # Assigned on the worker thread in ``_open``; declared here for the type
     # checker. Never mutate or call methods on it outside the worker thread.
+    # In cooperative mode it may be a *closed* handle while released; ``_locked``
+    # re-opens before any access, so it is never dereferenced while closed.
     col: Collection
 
-    def __init__(self, path: str) -> None:
+    def __init__(
+        self,
+        path: str,
+        *,
+        cooperative: bool = False,
+        hold_seconds: float = DEFAULT_LOCK_HOLD,
+        on_acquire: Callable[[Collection], None] | None = None,
+    ) -> None:
         self._path = path
         self._closed = False
+        self._cooperative = cooperative
+        self._hold = hold_seconds
+        self._on_acquire = on_acquire
+        self._open_flag = False
+        self._release_handle: asyncio.TimerHandle | None = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shrike-collection")
         # Open on the worker thread so the backend is owned by the same thread
-        # that will service every subsequent operation.
+        # that will service every subsequent operation. (Cooperative mode opens
+        # at boot too; the idle-release lifecycle takes over afterwards.)
         self._executor.submit(self._open).result()
         atexit.register(self.close)
 
     def _open(self) -> None:
         logger.debug("Opening collection at %s", self._path)
         self.col = Collection(self._path)
+        self._open_flag = True
         logger.debug("Collection opened successfully")
 
+    def set_acquire_hook(self, hook: Callable[[Collection], None] | None) -> None:
+        """Set the callback run (on the worker thread) after a fresh re-open.
+
+        Set post-construction because the hook closes over the index/embedding
+        runtime, which are built after the wrapper. Used in cooperative mode to
+        re-check index drift on every re-acquire.
+        """
+        self._on_acquire = hook
+
+    @property
+    def cooperative(self) -> bool:
+        return self._cooperative
+
+    @property
+    def is_open(self) -> bool:
+        """Whether the collection is currently held open (vs idle-released)."""
+        return self._open_flag
+
     # -- execution primitives ------------------------------------------------
+
+    def _locked(self, fn: Callable[[Collection], T]) -> T:
+        """Run ``fn(col)`` on the worker thread, re-opening first if released.
+
+        The single place that touches ``self.col``: if cooperative mode released
+        the collection, re-open it and run the acquire hook (drift re-check)
+        before the op. In the default mode ``self._open_flag`` is always True, so
+        this is just ``fn(self.col)``.
+        """
+        if not self._open_flag:
+            self.col = Collection(self._path)
+            self._open_flag = True
+            logger.debug("Re-acquired collection at %s", self._path)
+            if self._on_acquire is not None:
+                with contextlib.suppress(Exception):
+                    self._on_acquire(self.col)
+        return fn(self.col)
 
     async def run(self, fn: Callable[[Collection], T]) -> T:
         """Run ``fn(col)`` on the worker thread and await the result.
 
         The escape hatch for collection operations that don't have a dedicated
         method here (e.g. note-type edits, reading ``col.mod``). All access is
-        serialized through the same single worker thread.
-
-        ``self.col`` is read **on the worker thread at execution time**, not
-        captured when this is called — so an op queued after a ``reopen`` sees the
-        new handle, never a closed one. (The handle is swapped only by ``reopen``;
-        with no reopen this is identical to passing ``self.col`` directly.)
+        serialized through the same single worker thread, which re-opens the
+        collection first if cooperative mode released it (``_locked``). In
+        cooperative mode the idle-release timer is (re)armed after the op.
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, lambda: fn(self.col))
+        try:
+            return await loop.run_in_executor(self._executor, lambda: self._locked(fn))
+        finally:
+            if self._cooperative and not self._closed:
+                self._schedule_release(loop)
 
     def run_sync(self, fn: Callable[[Collection], T]) -> T:
         """Run ``fn(col)`` on the worker thread, blocking until it returns.
 
         For the startup and shutdown paths, which run before/after the event
-        loop and so cannot ``await``. Still routes through the worker thread,
-        preserving single-thread ownership of the collection. Reads ``self.col``
-        at execution time, like ``run``.
+        loop and so cannot ``await``. Still routes through the worker thread
+        (re-opening first if released), preserving single-thread ownership. No
+        idle-release is armed here — there is no loop; the next async op or an
+        explicit ``release_now`` handles release.
         """
-        return self._executor.submit(lambda: fn(self.col)).result()
+        return self._executor.submit(lambda: self._locked(fn)).result()
+
+    # -- cooperative idle-release (#64) --------------------------------------
+
+    def _schedule_release(self, loop: asyncio.AbstractEventLoop) -> None:
+        """(Re)arm the idle-release timer; mirrors IndexSaver's debounce."""
+        if self._release_handle is not None:
+            self._release_handle.cancel()
+        self._release_handle = loop.call_later(self._hold, self._fire_release)
+
+    def _fire_release(self) -> None:
+        self._release_handle = None
+        # Close on the worker thread; fire-and-forget so the loop never blocks.
+        # A re-acquire racing this is safe — _release no-ops if already re-opened
+        # and _locked re-opens before any access.
+        self._executor.submit(self._release)
+
+    def _release(self) -> None:
+        if not self._open_flag or self._closed:
+            return
+        with contextlib.suppress(Exception):
+            self.col.close()
+        self._open_flag = False
+        logger.debug("Released collection lock after idle")
+
+    def release_now(self) -> None:
+        """Synchronously release the collection (close + mark released).
+
+        For the boot path (release after the initial drift check so a
+        never-touched idle daemon doesn't hold the lock) and tests.
+        """
+        self._executor.submit(self._release).result()
 
     async def reopen(self) -> None:
         """Close and re-open the collection on the worker thread.
@@ -186,12 +285,16 @@ class CollectionWrapper:
         with contextlib.suppress(Exception):
             self.col.close()
         self.col = Collection(self._path)
+        self._open_flag = True
         logger.info("Reopened collection at %s", self._path)
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        if self._release_handle is not None:
+            self._release_handle.cancel()
+            self._release_handle = None
         logger.debug("Closing collection")
         with contextlib.suppress(Exception):
             self._executor.submit(lambda _c: self.col.close(), None).result()

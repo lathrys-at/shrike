@@ -105,6 +105,10 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
         server_out["allowed_origins"] = list(server["allowed_origins"])
     if server.get("no_dns_rebinding_protection"):
         server_out["no_dns_rebinding_protection"] = True
+    if server.get("cooperative_lock"):
+        server_out["cooperative_lock"] = True
+    if server.get("lock_hold_seconds") is not None:
+        server_out["lock_hold_seconds"] = server["lock_hold_seconds"]
     if server_out:
         output["server"] = server_out
 
@@ -295,6 +299,45 @@ def resolve_transport(
     }
 
 
+def resolve_locking(
+    config: dict[str, Any],
+    *,
+    cooperative: bool | None = None,
+    hold_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Resolve cooperative-locking settings via flag → env → config.
+
+    ``cooperative`` enables open-on-demand/idle-release; ``hold_seconds`` is the
+    idle window before releasing. Env vars: ``SHRIKE_COOPERATIVE_LOCK`` (truthy:
+    1/true/yes/on) and ``SHRIKE_LOCK_HOLD_SECONDS``. A ``hold_seconds`` of None
+    means "use the server's built-in default".
+    """
+    server = config.get("server", {})
+
+    if cooperative is None:
+        env_flag = os.environ.get("SHRIKE_COOPERATIVE_LOCK")
+        if env_flag is not None:
+            cooperative = env_flag.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            cooperative = bool(server.get("cooperative_lock", False))
+
+    if hold_seconds is None:
+        env_hold = os.environ.get("SHRIKE_LOCK_HOLD_SECONDS")
+        hold_seconds = float(env_hold) if env_hold else server.get("lock_hold_seconds")
+
+    return {"cooperative": cooperative, "hold_seconds": hold_seconds}
+
+
+def locking_args(resolved: dict[str, Any]) -> list[str]:
+    """Build server CLI args from resolved locking params (see resolve_locking)."""
+    args: list[str] = []
+    if resolved.get("cooperative"):
+        args.append("--cooperative-lock")
+    if resolved.get("hold_seconds") is not None:
+        args.extend(["--lock-hold-seconds", str(resolved["hold_seconds"])])
+    return args
+
+
 def index_args(resolved: dict[str, Any]) -> list[str]:
     """Build server CLI args from resolved index-flush params (see resolve_index_save)."""
     args: list[str] = []
@@ -357,6 +400,7 @@ def build_server_spec(
     embedding_overrides: dict[str, Any] | None = None,
     index_save_overrides: dict[str, Any] | None = None,
     transport_overrides: dict[str, Any] | None = None,
+    locking_overrides: dict[str, Any] | None = None,
 ) -> ServerSpec | None:
     """Resolve a launch spec for the local daemon, or None if no collection.
 
@@ -377,6 +421,7 @@ def build_server_spec(
     resolved_emb = resolve_embedding(config, **(embedding_overrides or {}))
     resolved_index = resolve_index_save(config, **(index_save_overrides or {}))
     resolved_transport = resolve_transport(config, **(transport_overrides or {}))
+    resolved_locking = resolve_locking(config, **(locking_overrides or {}))
 
     return ServerSpec(
         collection=coll,
@@ -391,6 +436,7 @@ def build_server_spec(
         cache_dir=resolve_cache_dir(config, cache_dir),
         embedding_args=embedding_args(resolved_emb, no_embedding=no_embedding),
         index_args=index_args(resolved_index),
+        locking_args=locking_args(resolved_locking),
     )
 
 

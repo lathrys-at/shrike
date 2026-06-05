@@ -8,9 +8,11 @@ from shrike.cli.config import (
     DEFAULT_CONFIG,
     index_args,
     load_config,
+    locking_args,
     resolve_cache_dir,
     resolve_embedding,
     resolve_index_save,
+    resolve_locking,
     resolve_transport,
     save_config,
     transport_args,
@@ -374,3 +376,57 @@ def _clean_embedding_env(monkeypatch) -> None:
         "SHRIKE_NO_DNS_REBINDING_PROTECTION",
     ):
         monkeypatch.delenv(var, raising=False)
+
+
+class TestResolveLocking:
+    """Cooperative-locking resolution (config → env → flag) and arg building (#64)."""
+
+    def test_defaults_off(self) -> None:
+        r = resolve_locking({})
+        assert r["cooperative"] is False
+        assert r["hold_seconds"] is None
+        assert locking_args(r) == []
+
+    def test_from_config(self) -> None:
+        cfg = {"server": {"cooperative_lock": True, "lock_hold_seconds": 12.5}}
+        r = resolve_locking(cfg)
+        assert r["cooperative"] is True
+        assert r["hold_seconds"] == 12.5
+        assert locking_args(r) == ["--cooperative-lock", "--lock-hold-seconds", "12.5"]
+
+    def test_env_overrides_config(self, monkeypatch) -> None:
+        monkeypatch.setenv("SHRIKE_COOPERATIVE_LOCK", "1")
+        monkeypatch.setenv("SHRIKE_LOCK_HOLD_SECONDS", "3")
+        r = resolve_locking({"server": {"cooperative_lock": False}})
+        assert r["cooperative"] is True
+        assert r["hold_seconds"] == 3.0
+
+    def test_flag_overrides_env_and_config(self, monkeypatch) -> None:
+        monkeypatch.setenv("SHRIKE_COOPERATIVE_LOCK", "0")
+        r = resolve_locking(
+            {"server": {"cooperative_lock": False}}, cooperative=True, hold_seconds=7.0
+        )
+        assert r["cooperative"] is True
+        assert r["hold_seconds"] == 7.0
+
+    def test_cooperative_only_omits_hold_arg(self) -> None:
+        assert locking_args({"cooperative": True, "hold_seconds": None}) == ["--cooperative-lock"]
+
+    def test_save_config_persists_locking(self, tmp_path) -> None:
+        cfg = {"server": {"cooperative_lock": True, "lock_hold_seconds": 8.0}}
+        path = save_config(cfg, tmp_path / "config.yml")
+        reloaded = load_config(path)
+        assert reloaded["server"]["cooperative_lock"] is True
+        assert reloaded["server"]["lock_hold_seconds"] == 8.0
+
+
+def test_server_spec_includes_locking_args() -> None:
+    from shrike.cli.config import build_server_spec
+
+    spec = build_server_spec(
+        {"collection": "/tmp/c.anki2"},
+        locking_overrides={"cooperative": True, "hold_seconds": 5.0},
+    )
+    assert spec is not None
+    assert "--cooperative-lock" in spec.locking_args
+    assert "--lock-hold-seconds" in spec.locking_args
