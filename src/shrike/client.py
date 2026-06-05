@@ -41,6 +41,7 @@ from shrike.schemas import (
     EmbeddingStatus,
     EmbeddingStopResponse,
     FieldOp,
+    FindReplaceInNoteTypeResponse,
     IndexRebuildResponse,
     IndexSaveResponse,
     IndexStatus,
@@ -342,6 +343,34 @@ class ShrikeClient:
         ]
         return UpdateNoteTypeTemplatesResponse.model_validate(
             self._call("update_note_type_templates", {"note_type": note_type, "operations": ops})
+        )
+
+    def find_replace_in_note_type(
+        self,
+        note_type: str,
+        search: str,
+        replace: str,
+        *,
+        front: bool = True,
+        back: bool = True,
+        css: bool = True,
+        regex: bool = False,
+        match_case: bool = True,
+    ) -> FindReplaceInNoteTypeResponse:
+        return FindReplaceInNoteTypeResponse.model_validate(
+            self._call(
+                "find_replace_in_note_type",
+                {
+                    "note_type": note_type,
+                    "search": search,
+                    "replace": replace,
+                    "front": front,
+                    "back": back,
+                    "css": css,
+                    "regex": regex,
+                    "match_case": match_case,
+                },
+            )
         )
 
     def delete_note_types(self, ids: list[int]) -> DeleteNoteTypesResponse:

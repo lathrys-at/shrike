@@ -875,6 +875,58 @@ class TestNoteTypeLifecycle:
         )
         assert result["results"][0]["status"] == "error"
 
+    def test_find_replace_in_note_type(self, mcp):
+        # findAndReplaceInModels (#76): literal find/replace across a model's
+        # template HTML and CSS, scoped by front/back/css, returning a count.
+        mcp(
+            "upsert_note_types",
+            {
+                "note_types": [
+                    {
+                        "name": "FRModel",
+                        "fields": ["Old", "New"],
+                        "templates": [{"name": "C", "front": "{{Old}}", "back": "ans {{Old}}"}],
+                        "css": ".card { color: red; }",
+                    }
+                ]
+            },
+        )
+        result = mcp(
+            "find_replace_in_note_type",
+            {"note_type": "FRModel", "search": "{{Old}}", "replace": "{{New}}"},
+        )
+        assert result["replacements"] == 2
+        assert result["templates_changed"] == ["C"]
+        assert result["css_changed"] is False
+
+        # A CSS-only replace, with the templates excluded.
+        css = mcp(
+            "find_replace_in_note_type",
+            {
+                "note_type": "FRModel",
+                "search": "red",
+                "replace": "blue",
+                "front": False,
+                "back": False,
+            },
+        )
+        assert css["replacements"] == 1
+        assert css["css_changed"] is True
+
+        details = mcp(
+            "collection_info", {"include": ["note_types"], "note_type_details": ["FRModel"]}
+        )
+        nt = next(n for n in details["note_types"] if n["name"] == "FRModel")
+        assert nt["detail"]["templates"][0]["front"] == "{{New}}"
+        assert "color: blue" in nt["detail"]["css"]
+
+    def test_find_replace_in_note_type_unknown(self, mcp):
+        with pytest.raises(RuntimeError, match="not found"):
+            mcp(
+                "find_replace_in_note_type",
+                {"note_type": "DoesNotExist", "search": "a", "replace": "b"},
+            )
+
 
 class TestSearchNotesNoIndex:
     def test_query_without_index_notes_unavailable(self, mcp):

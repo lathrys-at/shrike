@@ -448,6 +448,43 @@ Operations apply in order; the whole call is **atomic** (an invalid op — unkno
 
 ---
 
+## `find_replace_in_note_type`
+
+Find and replace text inside a **single note type's card templates and shared CSS** — the note type *definition*, not note field values. No note is touched. Use `front`/`back`/`css` to pick where to search (all on by default). Typical uses: fix a `{{OldField}}` reference across a model's templates after a field rename, swap a CSS class or colour, or correct a typo in template markup for all of a note type's cards at once.
+
+`search` is literal text unless `regex` is set, in which case it is a Python regular expression and `replace` may use `$1`/`\1` capture references. `match_case` defaults to **true** because template and CSS text is code (field names, class names) where case is significant. The model is saved only if at least one replacement is made.
+
+To rename a *field* itself (and migrate note data), use [`update_note_type_fields`](#update_note_type_fields); this tool only rewrites the template text that references fields.
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `note_type` | `string` | **yes** | Name of the note type to edit. |
+| `search` | `string` | **yes** | Text (or regex, if `regex`) to find. |
+| `replace` | `string` | **yes** | Replacement text. Literal by default; with `regex`, `$1`/`\1` refer to capture groups. May be empty (deletes matches). |
+| `front` | `boolean` | no | Search each card template's front (question) HTML. Default `true`. |
+| `back` | `boolean` | no | Search each card template's back (answer) HTML. Default `true`. |
+| `css` | `boolean` | no | Search the note type's shared CSS. Default `true`. |
+| `regex` | `boolean` | no | Treat `search` as a Python regular expression. Default `false`. |
+| `match_case` | `boolean` | no | Case-sensitive match. Default `true`. |
+
+At least one of `front`/`back`/`css` must be enabled.
+
+### Response
+
+```jsonc
+{
+  "id": 1234567890,
+  "name": "Japanese Vocabulary",
+  "replacements": 7,                 // total substitutions made
+  "templates_changed": ["Recall"],   // templates whose front/back changed
+  "css_changed": true
+}
+```
+
+---
+
 ## `update_note_tags`
 
 Edit tags on a set of notes (1–1000) without rewriting the whole note. Choose exactly one mode — there is no default:

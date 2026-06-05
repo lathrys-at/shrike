@@ -8,6 +8,13 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ## [Unreleased]
 
 ### Added
+- `find_replace_in_note_type` MCP tool (#76, anki-connect's `findAndReplaceInModels`):
+  literal-or-regex find/replace inside one note type's card-template HTML and
+  shared CSS, scoped by `front`/`back`/`css` selectors, returning a replacement
+  count and the templates/CSS that changed. It rewrites template text only — no
+  note field values are touched and no note data is migrated — so it bumps the
+  index `col_mod` without re-embedding. `match_case` defaults to true (template
+  and CSS text is code). Typed `ShrikeClient.find_replace_in_note_type` too.
 - `search_notes` / `shrike note search` now match each query **both** by semantic
   similarity and as an exact, case-insensitive substring of note fields, folded
   into one result list. Each hit carries a `score` when semantically ranked and a

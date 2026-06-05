@@ -255,5 +255,43 @@ and every move/insert/non-trailing-remove goes through the identity tools. The
 overlap that remains (those simple edits doable both ways) is the benign
 PUT-vs-PATCH kind; the dangerous overlap is gone.
 
-Remaining for #76: `findAndReplaceInModels` (overlaps the separate find-and-replace
-issue #85) and the field font/description metadata getters/setters.
+### `find_replace_in_note_type` rewrites template text, not fields (#76)
+
+anki-connect's `findAndReplaceInModels` is the third note-type edit tool, and it
+is deliberately a *different* operation from the find-and-replace over note
+*content* (#85, `find_replace_notes`): this one searches a single note type's
+card-template HTML (`qfmt`/`afmt`) and shared CSS — the model definition — and
+touches no note field values. So the two find-and-replaces don't share code or a
+selector vocabulary; they operate on different layers (one model's templates vs a
+scoped set of notes' fields), and shipping the model one separately from the
+unmerged #85 was the clean call.
+
+It scopes to **one model per call** with `front`/`back`/`css` booleans (mirroring
+anki-connect's shape) and returns a replacement count plus which templates/CSS
+changed. Three decisions worth recording:
+
+- **No data migration, so no re-embed — but a `col_mod` bump.** Templates and CSS
+  aren't part of a note's embedding text, so every vector stays valid. Like the
+  tag/deck metadata ops, it advances the stored `col_mod` without re-embedding
+  (via `_bump_col_mod_after_metadata_change`) so the `update_dict` mod-bump
+  doesn't trigger a spurious rebuild. This is the opposite of the *structural*
+  field/template ops, whose removes change embedding text and correctly let a
+  drift-rebuild happen.
+- **`match_case` defaults to true**, unlike a note-content find-and-replace where
+  prose makes case-insensitive the friendlier default. Template and CSS text is
+  *code* — field names (`{{Front}}`), CSS class names, colours — where case is
+  significant, so a case-sensitive default is the safe one.
+- **Literal mode inserts the replacement verbatim.** Literal `search` is
+  `re.escape`d and the replacement is applied through a constant function, so a
+  replacement containing `\1` or `$2` is inserted as those characters, not
+  interpreted as a backreference; capture refs are available only under `regex`.
+  We reused Python `re` (not Anki's `find_and_replace`, which is note-scoped)
+  because the substitution target is model strings we already hold in memory.
+
+It does **not** rename a field — Anki's `rename_field` already rewrites template
+references when a field is renamed via `update_note_type_fields`, so this tool is
+for the cases that primitive doesn't cover (CSS edits, literal markup typos,
+collapsing two field refs into one). Producing a template that references a
+missing field still fails Anki's own save validation, as it should.
+
+Remaining for #76: the field font/description metadata getters/setters.

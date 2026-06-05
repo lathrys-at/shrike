@@ -17,6 +17,7 @@ from shrike.schemas import (
     DeleteNotesResponse,
     DeleteNoteTypesResponse,
     FieldOp,
+    FindReplaceInNoteTypeResponse,
     ListNotesResponse,
     NoteInput,
     NoteTypeInput,
@@ -93,6 +94,7 @@ def register_tools(
     saver: IndexSaver | None = None,
 ) -> None:
     from shrike.note_types import NoteTypeOpError
+    from shrike.note_types import find_and_replace_in_note_type as _find_and_replace_in_note_type
     from shrike.note_types import update_note_type_fields as _update_note_type_fields
     from shrike.note_types import update_note_type_templates as _update_note_type_templates
     from shrike.note_types import upsert_note_types as _upsert_note_types
@@ -846,6 +848,101 @@ def register_tools(
             raise ToolInputError(str(e)) from e
         logger.info("update_note_type_templates %r -> %s", note_type, result["templates"])
         return UpdateNoteTypeTemplatesResponse.model_validate(result)
+
+    @mcp.tool()
+    @_safe_tool
+    async def find_replace_in_note_type(
+        note_type: Annotated[
+            str, Field(min_length=1, description="Name of the note type to edit.")
+        ],
+        search: Annotated[
+            str,
+            Field(min_length=1, description="Text (or regex, if `regex`) to find."),
+        ],
+        replace: Annotated[
+            str,
+            Field(
+                description=(
+                    "Replacement text. Literal by default; with `regex`, $1/\\1 "
+                    "refer to capture groups."
+                )
+            ),
+        ],
+        front: Annotated[
+            bool, Field(description="Search each card template's front (question) HTML.")
+        ] = True,
+        back: Annotated[
+            bool, Field(description="Search each card template's back (answer) HTML.")
+        ] = True,
+        css: Annotated[bool, Field(description="Search the note type's shared CSS.")] = True,
+        regex: Annotated[
+            bool, Field(description="Treat `search` as a Python regular expression.")
+        ] = False,
+        match_case: Annotated[
+            bool,
+            Field(description="Case-sensitive match. Default true — template/CSS text is code."),
+        ] = True,
+    ) -> FindReplaceInNoteTypeResponse:
+        """Find and replace text inside one note type's templates and CSS.
+
+        Edits the note type *definition* — each card template's front (`qfmt`)
+        and back (`afmt`) HTML and the shared CSS — not note field values. No
+        note is touched. Use `front`/`back`/`css` to pick where to search (all
+        on by default). Typical uses: fix a `{{OldField}}` reference across a
+        model's templates after a field rename, swap a CSS class or colour, or
+        correct a typo in template markup for all of a note type's cards at once.
+
+        `search` is literal text unless `regex` is set, in which case it is a
+        Python regular expression and `replace` may use `$1`/`\\1` capture
+        references. `match_case` defaults to true because template and CSS text
+        is code (field names, class names) where case is significant. The model
+        is saved only if at least one replacement is made. Returns the total
+        replacement count, the templates whose front/back changed, and whether
+        the CSS changed.
+
+        For renaming a *field* itself (and migrating note data), use
+        update_note_type_fields; this tool only rewrites the template text that
+        references fields."""
+        if not (front or back or css):
+            raise ToolInputError("Enable at least one of `front`, `back`, or `css`.")
+        logger.info(
+            "find_replace_in_note_type %r search=%r front=%s back=%s css=%s regex=%s",
+            note_type,
+            search,
+            front,
+            back,
+            css,
+            regex,
+        )
+        try:
+            result = await wrapper.run(
+                lambda c: _find_and_replace_in_note_type(
+                    c,
+                    note_type,
+                    search=search,
+                    replacement=replace,
+                    regex=regex,
+                    match_case=match_case,
+                    front=front,
+                    back=back,
+                    css=css,
+                )
+            )
+        except NoteTypeOpError as e:
+            raise ToolInputError(str(e)) from e
+        logger.info(
+            "find_replace_in_note_type %r -> %d replacement(s) in %d template(s), css=%s",
+            note_type,
+            result["replacements"],
+            len(result["templates_changed"]),
+            result["css_changed"],
+        )
+        # Templates/CSS aren't note embedding text, so vectors stay valid — but
+        # update_dict bumped col.mod. Advance the stored col_mod without
+        # re-embedding, like the tag/deck metadata ops.
+        if result["replacements"]:
+            await _bump_col_mod_after_metadata_change()
+        return FindReplaceInNoteTypeResponse.model_validate(result)
 
     @mcp.tool()
     @_safe_tool

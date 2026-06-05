@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from anki.collection import Collection
@@ -384,3 +385,98 @@ def _apply_template_op(col: Collection, notetype: dict[str, Any], op: dict[str, 
         by_name[op["name"]]["name"] = op["new_name"]
     elif kind == "reposition":
         col.models.reposition_template(notetype, by_name[op["name"]], op["position"])
+
+
+def _subn_text(
+    value: str, search: str, replacement: str, *, regex: bool, match_case: bool
+) -> tuple[str, int]:
+    """Substitute in one string; return (new_value, replacements_made).
+
+    Literal mode escapes ``search`` and treats ``replacement`` as plain text (no
+    ``\\1`` group-ref interpretation, via a constant lambda). Regex mode honours
+    capture refs in ``replacement``. ``match_case=False`` adds ``re.IGNORECASE``.
+    """
+    flags = 0 if match_case else re.IGNORECASE
+    if regex:
+        return re.subn(search, replacement, value, flags=flags)
+    return re.subn(re.escape(search), lambda _m: replacement, value, flags=flags)
+
+
+def find_and_replace_in_note_type(
+    col: Collection,
+    note_type_name: str,
+    *,
+    search: str,
+    replacement: str,
+    regex: bool = False,
+    match_case: bool = True,
+    front: bool = True,
+    back: bool = True,
+    css: bool = True,
+) -> dict[str, Any]:
+    """Find/replace literal-or-regex text inside one note type's templates and CSS.
+
+    Walks the model definition — each card template's front (``qfmt``) and back
+    (``afmt``) HTML and the shared ``css`` — substituting ``search`` with
+    ``replacement`` in whichever of ``front``/``back``/``css`` are enabled. This
+    edits the *note type*, not note field values: no note is touched and every
+    embedding vector stays valid (the caller advances ``col.mod`` without
+    re-embedding). Typical use is fixing a ``{{OldField}}`` reference across a
+    model's templates after a field rename, or a CSS class/colour swap.
+
+    The model is persisted once (a single ``update_dict``) only if at least one
+    replacement was made. Returns the total replacement count, the names of the
+    templates whose front/back changed, and whether the CSS changed.
+    """
+    notetype = col.models.by_name(note_type_name)
+    if notetype is None:
+        raise NoteTypeOpError(f"Note type '{note_type_name}' not found")
+
+    if regex:
+        try:
+            re.compile(search, 0 if match_case else re.IGNORECASE)
+        except re.error as e:
+            raise NoteTypeOpError(f"invalid regex: {e}") from e
+
+    def sub(value: str) -> tuple[str, int]:
+        return _subn_text(value, search, replacement, regex=regex, match_case=match_case)
+
+    total = 0
+    templates_changed: list[str] = []
+    for tmpl in notetype["tmpls"]:
+        changed = 0
+        if front:
+            new, n = sub(tmpl["qfmt"])
+            if n:
+                tmpl["qfmt"], changed = new, changed + n
+        if back:
+            new, n = sub(tmpl["afmt"])
+            if n:
+                tmpl["afmt"], changed = new, changed + n
+        if changed:
+            templates_changed.append(tmpl["name"])
+            total += changed
+
+    css_changed = False
+    if css:
+        new, n = sub(notetype["css"])
+        if n:
+            notetype["css"], css_changed, total = new, True, total + n
+
+    if total:
+        col.models.update_dict(notetype)
+
+    logger.debug(
+        "find_and_replace_in_note_type %r: %d replacement(s), templates=%s css=%s",
+        note_type_name,
+        total,
+        templates_changed,
+        css_changed,
+    )
+    return {
+        "id": notetype["id"],
+        "name": note_type_name,
+        "replacements": total,
+        "templates_changed": templates_changed,
+        "css_changed": css_changed,
+    }

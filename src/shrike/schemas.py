@@ -428,6 +428,17 @@ class UpdateNoteTypeTemplatesResponse(BaseModel):
     templates: list[str]  # the resulting ordered template names
 
 
+class FindReplaceInNoteTypeResponse(BaseModel):
+    # Find/replace inside one note type's card-template HTML and shared CSS (no
+    # note field values are touched). Flat, not a union: every field is always
+    # present — `replacements` is 0 and the lists empty on a no-op.
+    id: int
+    name: str
+    replacements: int  # total substitutions made across selected templates + CSS
+    templates_changed: list[str]  # names of templates whose front/back changed
+    css_changed: bool
+
+
 class DeckInput(BaseModel):
     # Upsert input mirroring NoteInput: ``name`` is the desired deck name; an
     # optional ``id`` selects an existing deck to rename to that name. Absent id =
