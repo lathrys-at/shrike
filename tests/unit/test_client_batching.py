@@ -29,7 +29,13 @@ class TestUpsertNotesBatching:
 
         mock_call.assert_called_once_with(
             "upsert_notes",
-            {"notes": notes, "top_k_neighbors": 5, "neighbor_threshold": 0.5},
+            {
+                "notes": notes,
+                "top_k_neighbors": 5,
+                "neighbor_threshold": 0.5,
+                "on_duplicate": "error",
+                "dry_run": False,
+            },
         )
         assert len(result.results) == 5
 
@@ -57,6 +63,32 @@ class TestUpsertNotesBatching:
         assert call_count == 3
         assert chunks_received == [100, 100, 50]
         assert len(result.results) == 250
+
+    def test_passes_policy_and_restores_dry_run(self, client):
+        notes = [
+            {"deck": "D", "note_type": "Basic", "fields": {"Front": f"Q{i}"}} for i in range(150)
+        ]
+
+        def fake_call(tool_name, args):
+            # Server echoes dry_run, but _batched_call drops it when merging.
+            return {
+                "results": [
+                    {"status": "ok", "index": i, "action": "create"}
+                    for i in range(len(args["notes"]))
+                ],
+                "dry_run": args["dry_run"],
+            }
+
+        with patch.object(client, "_call", side_effect=fake_call) as mock_call:
+            result = client.upsert_notes(notes, on_duplicate="skip", dry_run=True)
+
+        # Policy flags reach every batch.
+        for call in mock_call.call_args_list:
+            assert call.args[1]["on_duplicate"] == "skip"
+            assert call.args[1]["dry_run"] is True
+        # dry_run survives the chunk merge.
+        assert result.dry_run is True
+        assert len(result.results) == 150
 
 
 class TestUpsertNoteTypesBatching:

@@ -24,8 +24,13 @@ BASIC_NOTE = {
 
 
 def _seed(wrapper, notes):
-    """Seed notes synchronously via the wrapper's worker thread."""
-    return wrapper.run_sync(lambda _c: wrapper._upsert_notes(notes))
+    """Seed notes synchronously via the wrapper's worker thread.
+
+    Defaults to ``on_duplicate="allow"``: these neighbor tests deliberately
+    create notes identical to seeded ones to exercise similarity lookup, which
+    the default error-on-duplicate policy would otherwise reject.
+    """
+    return wrapper.run_sync(lambda _c: wrapper._upsert_notes(notes, on_duplicate="allow"))
 
 
 def _call(mcp: FastMCP, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -34,6 +39,9 @@ def _call(mcp: FastMCP, name: str, args: dict[str, Any] | None = None) -> dict[s
 
 
 def _upsert(mcp: FastMCP, notes: list[dict], **extra: Any) -> dict[str, Any]:
+    # See _seed: duplicates are intentional here, so allow them unless a test
+    # opts into a different policy.
+    extra.setdefault("on_duplicate", "allow")
     return _call(mcp, "upsert_notes", {"notes": notes, **extra})
 
 
@@ -390,3 +398,24 @@ class TestUpsertIndexUpdate:
         assert r["neighbors"] == []
         assert r["neighbors_unavailable"] is False
         assert result["message"] is None
+
+
+class TestUpsertPolicyTool:
+    """The upsert_notes *tool* defaults (error-on-duplicate); dry_run echoes."""
+
+    def test_tool_default_errors_on_duplicate(self, wrapper, mock_index, mcp_app):
+        # Call the tool directly (not the _upsert helper, which forces allow) so
+        # the registered default on_duplicate="error" is what's exercised.
+        first = _call(mcp_app, "upsert_notes", {"notes": [BASIC_NOTE]})
+        assert first["results"][0]["status"] == "created"
+
+        second = _call(mcp_app, "upsert_notes", {"notes": [BASIC_NOTE]})
+        assert second["results"][0]["status"] == "error"
+        assert second["results"][0]["reason"] == "duplicate"
+
+    def test_dry_run_echoed_and_skips_index(self, wrapper, mock_index, mcp_app):
+        result = _call(mcp_app, "upsert_notes", {"notes": [BASIC_NOTE], "dry_run": True})
+        assert result["dry_run"] is True
+        assert result["results"][0] == {"status": "ok", "index": 0, "action": "create"}
+        # No write, so the index is never touched on a dry run.
+        mock_index.add.assert_not_called()

@@ -5,11 +5,21 @@ Each test class gets its own isolated server with a fresh collection.
 
 from __future__ import annotations
 
+import itertools
 import json
 
 import pytest
 
 pytestmark = pytest.mark.integration
+
+# Unique first-field values for setup notes. Each test class shares one
+# collection, and `shrike note create` defaults to on_duplicate="error", so
+# notes created purely as fixtures must not collide on their first field.
+_front_counter = itertools.count()
+
+
+def _unique_front() -> str:
+    return f"Front=Q{next(_front_counter)}"
 
 
 class TestInfo:
@@ -422,7 +432,7 @@ class TestNoteUpdate:
                 "--type",
                 "Basic",
                 "-f",
-                "Front=Q",
+                _unique_front(),
                 "-f",
                 "Back=A",
             ]
@@ -442,7 +452,7 @@ class TestNoteUpdate:
                 "--type",
                 "Basic",
                 "-f",
-                "Front=Q",
+                _unique_front(),
                 "-f",
                 "Back=A",
                 "--tags",
@@ -469,7 +479,7 @@ class TestNoteUpdate:
                 "--type",
                 "Basic",
                 "-f",
-                "Front=Q",
+                _unique_front(),
                 "-f",
                 "Back=A",
             ]
@@ -496,7 +506,7 @@ class TestNoteTag:
                 "--type",
                 "Basic",
                 "-f",
-                "Front=Q",
+                _unique_front(),
                 "-f",
                 "Back=A",
                 "--tags",
@@ -564,7 +574,7 @@ class TestTagGroup:
                 "--type",
                 "Basic",
                 "-f",
-                "Front=Q",
+                _unique_front(),
                 "-f",
                 "Back=A",
                 "--tags",

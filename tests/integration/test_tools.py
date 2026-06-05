@@ -324,6 +324,53 @@ class TestNoteLifecycle:
         assert "modified" in note
 
 
+class TestUpsertDuplicatePolicy:
+    """on_duplicate policy and dry_run over HTTP."""
+
+    DUP = {"deck": "Dup", "note_type": "Basic", "fields": {"Front": "Dup Q", "Back": "A"}}
+
+    def _count(self, mcp) -> int:
+        return mcp("collection_info", {"include": ["stats"]})["stats"]["total_notes"]
+
+    def test_error_default_blocks_duplicate(self, mcp):
+        created = mcp("upsert_notes", {"notes": [self.DUP]})  # helper injects allow
+        assert created["results"][0]["status"] == "created"
+
+        blocked = mcp("upsert_notes", {"notes": [self.DUP], "on_duplicate": "error"})
+        assert blocked["results"][0]["status"] == "error"
+        assert blocked["results"][0]["reason"] == "duplicate"
+
+    def test_skip_and_allow(self, mcp):
+        mcp("upsert_notes", {"notes": [self.DUP]})
+        before = self._count(mcp)
+
+        skipped = mcp("upsert_notes", {"notes": [self.DUP], "on_duplicate": "skip"})
+        assert skipped["results"][0] == {"status": "skipped", "index": 0, "reason": "duplicate"}
+        assert self._count(mcp) == before  # nothing added
+
+        allowed = mcp("upsert_notes", {"notes": [self.DUP], "on_duplicate": "allow"})
+        assert allowed["results"][0]["status"] == "created"
+        assert self._count(mcp) == before + 1
+
+    def test_dry_run_validates_without_writing(self, mcp):
+        before = self._count(mcp)
+        result = mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {"deck": "Dry", "note_type": "Basic", "fields": {"Front": "DryQ", "Back": "x"}},
+                    {"deck": "Dry", "note_type": "Basic", "fields": {"Front": "", "Back": "y"}},
+                ],
+                "dry_run": True,
+            },
+        )
+        assert result["dry_run"] is True
+        assert result["results"][0] == {"status": "ok", "index": 0, "action": "create"}
+        assert result["results"][1]["status"] == "error"
+        assert result["results"][1]["reason"] == "empty"
+        assert self._count(mcp) == before  # wrote nothing
+
+
 class TestListNotesAdvanced:
     """Tests for modified_since, query, and limit clamping."""
 

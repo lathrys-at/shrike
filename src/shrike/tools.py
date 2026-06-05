@@ -478,6 +478,28 @@ def register_tools(
                 description="Minimum cosine similarity for a neighbor to be included. Default 0.5.",
             ),
         ] = 0.5,
+        on_duplicate: Annotated[
+            Literal["error", "skip", "allow"],
+            Field(
+                description=(
+                    "Policy for a new note whose first field exactly duplicates an existing "
+                    "note of the same type (Anki's own duplicate rule). `error` (default): "
+                    "report the item as an error, don't write it. `skip`: leave it unwritten "
+                    "and report `status: skipped`. `allow`: create it anyway. Applies only to "
+                    "creates; updates are unaffected."
+                ),
+            ),
+        ] = "error",
+        dry_run: Annotated[
+            bool,
+            Field(
+                description=(
+                    "If true, validate every note and report what would happen, but write "
+                    "nothing. Each result is `ok` (with `action: create|update`), `skipped`, "
+                    "or `error`. Use it as a pre-flight sanity check before a real upsert."
+                ),
+            ),
+        ] = False,
     ) -> UpsertNotesResponse:
         """Create or update notes in bulk (1-100 per call).
 
@@ -488,14 +510,28 @@ def register_tools(
         updates, only `id` and the properties being changed are needed —
         omitted properties are left unchanged.
 
-        When a vector index is available, each result includes `neighbors`:
-        the most similar existing notes ranked by cosine similarity, filtered
-        to those above `neighbor_threshold` (default 0.5) and capped at
-        `top_k_neighbors` (default 5). Use these for tag consistency (adopt
-        tags from nearby notes), detecting near-duplicates (high scores
-        suggest overlap), or understanding where a new note sits in the
-        collection. Neighbors include note ID, similarity score, and tags —
-        use list_notes or search_notes to inspect content if needed.
+        Each new note is validated against Anki's own add-note rule before it
+        is written. A first-field duplicate (same first field as an existing
+        note of that type) is governed by `on_duplicate`: `error` (default,
+        reported and not written), `skip` (`status: skipped`), or `allow`
+        (created anyway). Notes that are malformed regardless of policy — an
+        empty first field, or broken cloze structure — are always reported as
+        errors with a `reason` and never written. The whole batch still
+        proceeds: one bad note doesn't block the rest.
+
+        Set `dry_run: true` to validate everything and write nothing — a
+        pre-flight sanity check. Each result is `ok` (with `action`),
+        `skipped`, or `error`; the response echoes `dry_run: true`.
+
+        When a vector index is available (and not a dry run), each created or
+        updated result includes `neighbors`: the most similar existing notes
+        ranked by cosine similarity, filtered to those above
+        `neighbor_threshold` (default 0.5) and capped at `top_k_neighbors`
+        (default 5). Use these for tag consistency (adopt tags from nearby
+        notes), spotting near-duplicates by meaning (a high score is a softer
+        signal than the exact `on_duplicate` rule), or understanding where a
+        new note sits in the collection. Neighbors include note ID, similarity
+        score, and tags — use list_notes or search_notes to inspect content.
 
         If the index update fails transiently (e.g. the embedding service is
         briefly unavailable), the notes are still saved but `neighbors` is
@@ -506,22 +542,33 @@ def register_tools(
         to what would have been attached here."""
         creates = sum(1 for n in notes if n.id is None)
         updates = len(notes) - creates
-        logger.info("upsert_notes count=%d (creates=%d, updates=%d)", len(notes), creates, updates)
-
-        note_dicts = [n.model_dump(exclude_none=True) for n in notes]
-        results = await wrapper.upsert_notes(note_dicts)
-
-        created = sum(1 for r in results if r.get("status") == "created")
-        updated = sum(1 for r in results if r.get("status") == "updated")
-        errors = sum(1 for r in results if r.get("status") == "error")
         logger.info(
-            "upsert_notes completed: %d created, %d updated, %d errors",
-            created,
-            updated,
-            errors,
+            "upsert_notes count=%d (creates=%d, updates=%d) on_duplicate=%s dry_run=%s",
+            len(notes),
+            creates,
+            updates,
+            on_duplicate,
+            dry_run,
         )
 
-        if index and index.available:
+        note_dicts = [n.model_dump(exclude_none=True) for n in notes]
+        results = await wrapper.upsert_notes(note_dicts, on_duplicate=on_duplicate, dry_run=dry_run)
+
+        counts: dict[str, int] = {}
+        for r in results:
+            counts[r["status"]] = counts.get(r["status"], 0) + 1
+        logger.info(
+            "upsert_notes completed: %d created, %d updated, %d ok, %d skipped, %d errors",
+            counts.get("created", 0),
+            counts.get("updated", 0),
+            counts.get("ok", 0),
+            counts.get("skipped", 0),
+            counts.get("error", 0),
+        )
+
+        # A dry run writes nothing, so there is no index maintenance or neighbor
+        # lookup to do — the results are pure validation outcomes.
+        if not dry_run and index and index.available:
             changed_ids = [r["id"] for r in results if r.get("status") in ("created", "updated")]
             if changed_ids:
                 # Index maintenance is best-effort: the notes are already
@@ -572,6 +619,7 @@ def register_tools(
                         return UpsertNotesResponse.model_validate(
                             {
                                 "results": results,
+                                "dry_run": False,
                                 "message": (
                                     "Notes were saved, but the vector index update failed, "
                                     "so neighbors could not be computed. Retry with "
@@ -581,7 +629,7 @@ def register_tools(
                             }
                         )
 
-        return UpsertNotesResponse.model_validate({"results": results})
+        return UpsertNotesResponse.model_validate({"results": results, "dry_run": dry_run})
 
     async def _attach_neighbors(
         results: list[dict[str, Any]],

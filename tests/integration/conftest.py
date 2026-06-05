@@ -93,13 +93,21 @@ class MCPClient:
         self._url = url
 
     def __call__(self, tool_name: str, arguments: dict | None = None) -> dict:
+        arguments = dict(arguments or {})
+        # Each test class shares one collection, and many reuse first-field
+        # values across tests as incidental setup. The server defaults
+        # on_duplicate="error", which would reject those repeats — so default
+        # setup upserts to "allow". Tests that exercise the duplicate policy
+        # pass an explicit on_duplicate and are unaffected.
+        if tool_name == "upsert_notes" and "on_duplicate" not in arguments:
+            arguments["on_duplicate"] = "allow"
         resp = httpx.post(
             self._url,
             json={
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "tools/call",
-                "params": {"name": tool_name, "arguments": arguments or {}},
+                "params": {"name": tool_name, "arguments": arguments},
             },
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             timeout=10.0,

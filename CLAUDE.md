@@ -50,7 +50,7 @@ src/shrike/                       # Python package (src layout)
     ├── type_cmd.py               # shrike type list/show/create/update/delete
     └── output.py                 # Rich formatting, output_options decorator
 tests/
-├── unit/                         # 326 tests — direct calls, no server
+├── unit/                         # 496 tests — direct calls, no server
 │   ├── conftest.py               # wrapper fixture (temp collection), basic_note fixture
 │   ├── test_collection_info.py
 │   ├── test_list_notes.py
@@ -67,7 +67,7 @@ tests/
 │   ├── test_server_security.py  # loopback guard + transport-security helpers
 │   ├── test_daemon.py           # stop_server HTTP→SIGTERM→SIGKILL escalation
 │   └── test_collection_concurrency.py  # single-worker-thread serialization
-└── integration/                  # 159 tests — real server subprocess + HTTP transport
+└── integration/                  # 196 tests — real server subprocess + HTTP transport
     ├── conftest.py               # server fixture (session-scoped), mcp fixture
     ├── test_tools.py
     ├── test_cli.py
@@ -165,7 +165,7 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 | `collection_info` | Working | Collection structure, note types, decks, tags, stats |
 | `list_notes` | Working | Filter/retrieve notes by deck, tags, type, IDs, date |
 | `search_notes` | Working | Semantic similarity search over note embeddings |
-| `upsert_notes` | Working | Create or update notes in bulk (1-100), returns similar neighbors |
+| `upsert_notes` | Working | Create or update notes in bulk (1-100); `on_duplicate` policy + `dry_run`; returns similar neighbors |
 | `upsert_note_types` | Working | Create or update note type definitions (1-10) |
 | `update_note_tags` | Working | Edit tags on a note set (1-1000): `set` (replace) XOR `add`/`remove` |
 | `rename_tag` | Working | Rename a tag collection-wide or on a note set (exact match) |
@@ -173,6 +173,8 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 | `delete_decks` | Working | Delete decks by name, only if empty (else reported `not_empty`) |
 | `delete_notes` | Working | Permanently delete notes by ID |
 | `delete_note_types` | Working | Delete note types by ID (only if unused) |
+
+**Duplicate handling lives *inside* `upsert_notes`, not in a separate pre-check (#77).** Before each new note is written, Anki's own add-note validation (`note.fields_check()`, via `CollectionWrapper._check_new_note`) runs. A first-field duplicate (same first field as an existing note of that type — Anki's rule, collection-wide and **deck-independent**) is governed by the `on_duplicate` param: `error` (**default** — reported, not written), `skip` (`status: skipped`), or `allow` (written anyway). Structurally invalid notes — empty first field, broken cloze — are *always* reported as errors with a `reason` regardless of policy, and never written. `dry_run: true` runs the exact same validation but writes nothing: every result is `ok` (with `action: create|update`), `skipped`, or `error`, and the response echoes `dry_run: true` — so `dry_run` + the default policy is a full `fields_check`-based sanity pass over a batch. The per-item result union (`UpsertNoteResult` in `schemas.py`) carries the four variants (`UpsertNoteOk` / `UpsertNoteValidated` / `UpsertNoteSkipped` / `UpsertNoteError`, discriminated on `status`); `UpsertNoteError.reason` is the machine-readable `NoteValidationReason`. This is Anki's *exact* first-field rule, distinct from the *semantic* near-duplicate signal the returned `neighbors` provide. A standalone `canAddNotes`-style tool was rejected: it would be racy (check-then-write) and only actionable by a follow-up call (see `docs/decisions.md`). Note the validation applies to **creates**; updates are validated for existence/fields but not duplicate/empty. `dry_run` does not catch intra-batch duplicates (it writes nothing, so two identical new notes in one call both validate clean — a real run catches the second).
 
 The tag tools (#73) **and** deck tools (#74) are a derived-index-aware special case: tags and deck names are **not** part of a note's embedding text, so these ops leave every vector valid but bump `col.mod`. Each advances the stored `index.col_mod` (and requests a debounced save) **without** re-embedding — via the shared `_bump_col_mod_after_metadata_change` helper in `tools.py` — so a tag/deck-only change doesn't force a spurious full rebuild on next startup. Full-replace of tags lives in both `update_note_tags` (`set`) and incidentally in `upsert_notes` (`{id, tags}`); the additive/subtractive logic lives only in `update_note_tags`. `upsert_decks` mirrors `upsert_notes` (id present = rename the existing deck; absent = create); **decks never merge** — renaming onto an existing deck name is an error, and `delete_decks` is **empty-only** (move notes out first), so deck deletion can never delete a note. (Unused-tag cleanup is intentionally deferred to a unified `collection_prune` op — #89.)
 

@@ -198,7 +198,11 @@ Create or update notes in bulk. If a note object includes an `id`, the existing 
 
 When creating notes, `deck`, `note_type`, and `fields` are required. When updating, only `id` and the properties being changed need to be provided; omitted properties are left unchanged.
 
-When a vector index is available, each result includes `neighbors`: the most similar existing notes ranked by cosine similarity. Use these for tag consistency (adopt tags from nearby notes), detecting near-duplicates (high scores suggest overlap), or understanding where a new note sits in the collection.
+**Duplicate and validity checking.** Each new note is validated against Anki's own add-note rule before it is written. A first-field duplicate — a new note whose first field matches an existing note of the same type (Anki's rule, applied collection-wide and independent of deck) — is governed by `on_duplicate`: `error` (the default; the item is reported and not written), `skip` (`status: "skipped"`), or `allow` (created anyway). Notes that are malformed regardless of policy — an empty first field, or broken cloze structure — are always reported as errors and never written. As with any batch op, one bad note doesn't block the rest. This exact first-field check is distinct from the *semantic* `neighbors` below: a high neighbor score is a softer "this looks similar" hint, while `on_duplicate` enforces Anki's precise rule.
+
+**Dry run.** Set `dry_run: true` to validate every note and write nothing — a pre-flight sanity check. Each result is `ok` (with `action: "create" | "update"`), `skipped`, or `error`, and the response echoes `dry_run: true`. (Because nothing is written, two identical new notes in the *same* dry-run call both validate clean; a real run catches the second.)
+
+When a vector index is available (and not a dry run), each created or updated result includes `neighbors`: the most similar existing notes ranked by cosine similarity. Use these for tag consistency (adopt tags from nearby notes), spotting near-duplicates by meaning, or understanding where a new note sits in the collection.
 
 If the index update fails transiently (for example, the embedding service is briefly unavailable), the notes are still saved but `neighbors` is omitted. Each affected result is flagged with `neighbors_unavailable: true`, and the response carries a top-level `message` naming the IDs to retry. The exact same neighbor data is reproducible afterward with `search_notes` keyed on the note ID (`search_notes(ids=[<note id>])`). It embeds the same note text against the same index, so the result is identical to what would have been attached here.
 
@@ -207,6 +211,8 @@ If the index update fails transiently (for example, the embedding service is bri
 | Name | Type | Required | Description |
 |---|---|---|---|
 | `notes` | `object[]` | **yes** | Array of note objects (1–100). See note schema below. |
+| `on_duplicate` | `string` | no | Policy for a first-field duplicate on **create**: `"error"` (default), `"skip"`, or `"allow"`. Updates are unaffected. |
+| `dry_run` | `boolean` | no | If `true`, validate everything and write nothing. Default `false`. |
 | `top_k_neighbors` | `integer` | no | Maximum neighbors per result. Default `5`. Set to `0` to disable. |
 | `neighbor_threshold` | `number` | no | Minimum cosine similarity for a neighbor. Default `0.5`. Higher values return only very similar notes. |
 
@@ -242,11 +248,32 @@ If the index update fails transiently (for example, the embedding service is bri
       "neighbors": [{ "id": 1700000000001, "score": 0.71, "tags": ["verb"] }]
     },
     {
+      "status": "skipped",          // on_duplicate: "skip" met a duplicate
+      "index": 2,
+      "reason": "duplicate"
+    },
+    {
       "status": "error",
-      "index": 2,                  // position in the input array
-      "error": "Note type 'Basicc' not found"
+      "index": 3,                  // position in the input array
+      "error": "The first field duplicates an existing note of this type.",
+      "reason": "duplicate"        // duplicate | empty | missing_cloze |
+                                   // notetype_not_cloze | field_not_cloze |
+                                   // unknown_note_type | unknown_field
     }
-  ]
+  ],
+  "dry_run": false
+}
+```
+
+A dry run writes nothing; would-succeed notes report `ok` with the action they would have taken:
+
+```jsonc
+{
+  "results": [
+    { "status": "ok", "index": 0, "action": "create" },
+    { "status": "error", "index": 1, "error": "The first field is empty.", "reason": "empty" }
+  ],
+  "dry_run": true
 }
 ```
 

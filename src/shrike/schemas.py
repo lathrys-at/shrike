@@ -231,6 +231,21 @@ class Stats(BaseModel):
 # ============================================================================
 
 
+# Why a candidate note cannot be added, mirroring Anki's own NoteFieldsCheckResult
+# (run via note.fields_check()) plus the two structural problems we catch before
+# that check. This is Anki's add-note rule, distinct from the semantic-neighbour
+# hint upsert_notes attaches.
+NoteValidationReason = Literal[
+    "duplicate",
+    "empty",
+    "missing_cloze",
+    "notetype_not_cloze",
+    "field_not_cloze",
+    "unknown_note_type",
+    "unknown_field",
+]
+
+
 class UpsertNoteOk(BaseModel):
     status: Literal["created", "updated"]
     id: int
@@ -238,13 +253,37 @@ class UpsertNoteOk(BaseModel):
     neighbors_unavailable: bool = False
 
 
+class UpsertNoteValidated(BaseModel):
+    # A dry-run outcome: the note passed validation and *would* be written, but
+    # nothing was. `action` is what a real run would have done. Distinct status
+    # ("ok") so it can never be mistaken for an actual write.
+    status: Literal["ok"]
+    index: int
+    action: Literal["create", "update"]
+
+
+class UpsertNoteSkipped(BaseModel):
+    # on_duplicate="skip": an exact first-field duplicate, left unwritten.
+    status: Literal["skipped"]
+    index: int
+    reason: Literal["duplicate"]
+
+
 class UpsertNoteError(BaseModel):
     status: Literal["error"]
     index: int
     error: str
+    # Set when the failure is a structured validation result (Anki's
+    # fields_check, or an unknown note type / field); None for ad-hoc errors
+    # (note not found, deck missing, unexpected exception). Genuine independent
+    # optionality — many error paths carry no machine-readable reason.
+    reason: NoteValidationReason | None = None
 
 
-UpsertNoteResult = Annotated[UpsertNoteOk | UpsertNoteError, Field(discriminator="status")]
+UpsertNoteResult = Annotated[
+    UpsertNoteOk | UpsertNoteValidated | UpsertNoteSkipped | UpsertNoteError,
+    Field(discriminator="status"),
+]
 
 
 class NoteTypeOk(BaseModel):
@@ -351,6 +390,9 @@ class SearchResponse(BaseModel):
 
 class UpsertNotesResponse(BaseModel):
     results: list[UpsertNoteResult] = []
+    # Echoes the request: when true, nothing was written and each result is a
+    # validation outcome (`ok`/`skipped`/`error`), never `created`/`updated`.
+    dry_run: bool = False
     message: str | None = None
 
 

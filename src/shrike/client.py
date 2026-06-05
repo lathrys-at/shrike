@@ -25,7 +25,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from pydantic import TypeAdapter
@@ -286,6 +286,8 @@ class ShrikeClient:
         *,
         top_k_neighbors: int = 5,
         neighbor_threshold: float = 0.5,
+        on_duplicate: Literal["error", "skip", "allow"] = "error",
+        dry_run: bool = False,
     ) -> UpsertNotesResponse:
         """Upsert notes, transparently batching if over the server limit."""
         payload = [_as_dict(n) for n in notes]
@@ -298,8 +300,13 @@ class ShrikeClient:
             extra={
                 "top_k_neighbors": top_k_neighbors,
                 "neighbor_threshold": neighbor_threshold,
+                "on_duplicate": on_duplicate,
+                "dry_run": dry_run,
             },
         )
+        # _batched_call drops top-level fields other than results/message when it
+        # merges chunks; restore the request's dry_run (the server echoes it).
+        merged["dry_run"] = dry_run
         return UpsertNotesResponse.model_validate(merged)
 
     def upsert_note_types(

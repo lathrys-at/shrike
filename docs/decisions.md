@@ -35,14 +35,44 @@ collection's existing taxonomy (reuse tags that already exist) and spot
 near-duplicates — while the *policy* for what to do with that lives in the skill,
 not the server.
 
-### Duplicate detection is not a separate feature
+### Semantic duplicate detection is not a separate feature
 
-There is no dedicated duplicate-detection endpoint, and there won't be one. A high
-similarity score in `search_notes` results or in upsert neighbours *is* the
-duplicate signal; the caller applies its own threshold. Adding a second code path
-that re-implements the same cosine-similarity lookup with a built-in cutoff would
-be redundant surface area with a worse interface (a hard-coded threshold the
-caller can't see or tune).
+There is no dedicated *semantic* duplicate-detection endpoint, and there won't be
+one. A high similarity score in `search_notes` results or in upsert neighbours *is*
+the soft duplicate signal; the caller applies its own threshold. Adding a second
+code path that re-implements the same cosine-similarity lookup with a built-in
+cutoff would be redundant surface area with a worse interface (a hard-coded
+threshold the caller can't see or tune).
+
+### Anki's exact duplicate rule lives inside `upsert_notes`, not a `canAddNotes` tool (#77)
+
+Distinct from the semantic signal above, Anki has a *precise* duplicate rule:
+a note duplicates another if it shares the first field with an existing note of the
+same type (collection-wide, deck-independent). #77 asked for a pre-flight check for
+this, mirroring anki-connect's `canAddNotes`. We folded it into `upsert_notes` (an
+`on_duplicate` policy defaulting to `error`, plus a `dry_run` flag) rather than
+shipping a standalone checker, because a separate check is the wrong shape for this
+codebase:
+
+- **It would be racy.** A check-then-write pair has a TOCTOU gap; the collection
+  can change between the two calls, so the check can lie. Folding the rule into the
+  write makes creation a single atomic, race-free operation.
+- **Its result is only actionable by another call.** A checker that says "this would
+  be a duplicate" just sends you to `upsert_notes` anyway — extra surface area and a
+  round-trip for no committed outcome.
+- **It overlaps the existing per-item result union.** `error`/`skipped`/`ok`
+  variants already fit `UpsertNoteResult`; a second tool would re-model the same
+  thing.
+
+The one capability a standalone checker has that an inline policy doesn't — a pure
+zero-write preview — is covered by `dry_run`, which runs the identical validation
+path and writes nothing. So `dry_run` with the default `on_duplicate="error"` is a
+full `fields_check`-based sanity pass over a batch, without a second tool or a
+second code path. Structurally invalid notes (empty first field, broken cloze) are
+always errors regardless of `on_duplicate` — they're malformed, not merely
+duplicated. The default is `error` (not the old silent-create behaviour) because
+silently writing a duplicate or an empty note is almost always a mistake; callers
+who genuinely want duplicates opt in with `allow`.
 
 ## Tags
 

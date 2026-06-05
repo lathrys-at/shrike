@@ -170,3 +170,112 @@ class TestUpdateNotes:
             [{"id": basic_note, "fields": {"Nonexistent": "value"}}]
         )
         assert results[0]["status"] == "error"
+        assert results[0]["reason"] == "unknown_field"
+
+
+async def _count(wrapper) -> int:
+    return await wrapper.run(lambda c: len(c.find_notes("")))
+
+
+class TestDuplicatePolicy:
+    """on_duplicate governs exact first-field duplicates (Anki's rule)."""
+
+    BASIC = {"deck": "Test", "note_type": "Basic", "fields": {"Front": "Dup", "Back": "A"}}
+
+    async def test_duplicate_errors_by_default(self, wrapper):
+        first = await wrapper.upsert_notes([self.BASIC])
+        assert first[0]["status"] == "created"
+
+        again = await wrapper.upsert_notes(
+            [{**self.BASIC, "fields": {"Front": "Dup", "Back": "B"}}]
+        )
+        assert again[0]["status"] == "error"
+        assert again[0]["reason"] == "duplicate"
+        assert await _count(wrapper) == 1  # not written
+
+    async def test_duplicate_skip(self, wrapper):
+        await wrapper.upsert_notes([self.BASIC])
+        result = await wrapper.upsert_notes([self.BASIC], on_duplicate="skip")
+        assert result[0]["status"] == "skipped"
+        assert result[0]["reason"] == "duplicate"
+        assert await _count(wrapper) == 1
+
+    async def test_duplicate_allow(self, wrapper):
+        await wrapper.upsert_notes([self.BASIC])
+        result = await wrapper.upsert_notes([self.BASIC], on_duplicate="allow")
+        assert result[0]["status"] == "created"
+        assert await _count(wrapper) == 2
+
+    async def test_empty_first_field_always_errors(self, wrapper):
+        # Structural problems are rejected regardless of on_duplicate.
+        result = await wrapper.upsert_notes(
+            [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "", "Back": "A"}}],
+            on_duplicate="allow",
+        )
+        assert result[0]["status"] == "error"
+        assert result[0]["reason"] == "empty"
+        assert await _count(wrapper) == 0
+
+    async def test_missing_cloze_errors(self, wrapper):
+        result = await wrapper.upsert_notes(
+            [{"deck": "Test", "note_type": "Cloze", "fields": {"Text": "no cloze here"}}]
+        )
+        assert result[0]["status"] == "error"
+        assert result[0]["reason"] == "missing_cloze"
+
+    async def test_unknown_note_type_reason(self, wrapper):
+        result = await wrapper.upsert_notes(
+            [{"deck": "Test", "note_type": "Nope", "fields": {"Front": "Q", "Back": "A"}}]
+        )
+        assert result[0]["status"] == "error"
+        assert result[0]["reason"] == "unknown_note_type"
+
+
+class TestDryRun:
+    """dry_run validates every note and writes nothing."""
+
+    async def test_would_create_writes_nothing(self, wrapper):
+        result = await wrapper.upsert_notes(
+            [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Q", "Back": "A"}}],
+            dry_run=True,
+        )
+        assert result[0] == {"status": "ok", "index": 0, "action": "create"}
+        assert await _count(wrapper) == 0
+
+    async def test_reports_duplicate_without_writing(self, wrapper):
+        await wrapper.upsert_notes(
+            [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Dup", "Back": "A"}}]
+        )
+        result = await wrapper.upsert_notes(
+            [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Dup", "Back": "B"}}],
+            dry_run=True,
+        )
+        assert result[0]["status"] == "error"
+        assert result[0]["reason"] == "duplicate"
+        assert await _count(wrapper) == 1  # only the original
+
+    async def test_would_update_does_not_change_note(self, wrapper, basic_note):
+        result = await wrapper.upsert_notes(
+            [{"id": basic_note, "fields": {"Back": "Changed"}}], dry_run=True
+        )
+        assert result[0] == {"status": "ok", "index": 0, "action": "update"}
+        note = (await wrapper.list_notes(ids=[basic_note]))["notes"][0]
+        assert note["content"]["Back"] == "4"  # unchanged
+
+    async def test_mixed_sanity_check(self, wrapper, basic_note):
+        # basic_note has Front "What is 2+2?"; default on_duplicate=error.
+        result = await wrapper.upsert_notes(
+            [
+                {"deck": "Test", "note_type": "Basic", "fields": {"Front": "Fresh", "Back": "x"}},
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": "What is 2+2?", "Back": "y"},
+                },
+                {"deck": "Test", "note_type": "Basic", "fields": {"Front": "", "Back": "z"}},
+            ],
+            dry_run=True,
+        )
+        assert [r["status"] for r in result] == ["ok", "error", "error"]
+        assert [r.get("reason") for r in result] == [None, "duplicate", "empty"]
+        assert await _count(wrapper) == 1  # only basic_note

@@ -8,15 +8,40 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from anki.collection import Collection
 from anki.consts import MODEL_CLOZE
 from anki.errors import NotFoundError
+from anki.notes import NoteFieldsCheckResult
 
 from shrike.embed_text import normalize_for_embedding
 
 logger = logging.getLogger("shrike.collection")
+
+OnDuplicate = Literal["error", "skip", "allow"]
+
+# Anki's note.fields_check() failures that are *not* duplicates — these are
+# structural problems with the note itself and are always rejected (no policy
+# knob), mapped to a machine reason + human message. DUPLICATE is handled
+# separately because it's the one fields_check result a caller may legitimately
+# want to allow.
+_STRUCTURAL_PROBLEMS: dict[NoteFieldsCheckResult.V, tuple[str, str]] = {
+    NoteFieldsCheckResult.EMPTY: ("empty", "The first field is empty."),
+    NoteFieldsCheckResult.MISSING_CLOZE: (
+        "missing_cloze",
+        "No cloze deletions ({{c1::...}}) were found in the cloze field.",
+    ),
+    NoteFieldsCheckResult.NOTETYPE_NOT_CLOZE: (
+        "notetype_not_cloze",
+        "Cloze syntax was used but the note type is not a cloze type.",
+    ),
+    NoteFieldsCheckResult.FIELD_NOT_CLOZE: (
+        "field_not_cloze",
+        "A cloze deletion is in a field that is not the cloze field.",
+    ),
+}
+_DUPLICATE_MESSAGE = "The first field duplicates an existing note of this type."
 
 T = TypeVar("T")
 
@@ -378,17 +403,35 @@ class CollectionWrapper:
 
     # -- upsert / delete -----------------------------------------------------
 
-    async def upsert_notes(self, notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return await self.run(lambda _c: self._upsert_notes(notes))
+    async def upsert_notes(
+        self,
+        notes: list[dict[str, Any]],
+        *,
+        on_duplicate: OnDuplicate = "error",
+        dry_run: bool = False,
+    ) -> list[dict[str, Any]]:
+        return await self.run(
+            lambda _c: self._upsert_notes(notes, on_duplicate=on_duplicate, dry_run=dry_run)
+        )
 
-    def _upsert_notes(self, notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _upsert_notes(
+        self,
+        notes: list[dict[str, Any]],
+        *,
+        on_duplicate: OnDuplicate = "error",
+        dry_run: bool = False,
+    ) -> list[dict[str, Any]]:
         results = []
         for i, note_input in enumerate(notes):
             try:
                 if "id" in note_input and note_input["id"] is not None:
-                    results.append(self._update_note(note_input))
+                    results.append(self._update_note(note_input, index=i, dry_run=dry_run))
                 else:
-                    results.append(self._create_note(note_input))
+                    results.append(
+                        self._create_note(
+                            note_input, index=i, on_duplicate=on_duplicate, dry_run=dry_run
+                        )
+                    )
             except Exception as e:
                 results.append(
                     {
@@ -399,7 +442,28 @@ class CollectionWrapper:
                 )
         return results
 
-    def _create_note(self, note_input: dict[str, Any]) -> dict[str, Any]:
+    def _check_new_note(self, note: Any, on_duplicate: OnDuplicate) -> dict[str, Any] | None:
+        """Run Anki's add-note validation on a candidate note.
+
+        Returns ``None`` if the note is addable (including a duplicate when
+        ``on_duplicate="allow"``), or a partial result dict (``status`` +
+        ``reason`` [+ ``error``], no ``index``) describing why not.
+        """
+        state = note.fields_check()
+        if state == NoteFieldsCheckResult.NORMAL:
+            return None
+        if state == NoteFieldsCheckResult.DUPLICATE:
+            if on_duplicate == "allow":
+                return None
+            if on_duplicate == "skip":
+                return {"status": "skipped", "reason": "duplicate"}
+            return {"status": "error", "error": _DUPLICATE_MESSAGE, "reason": "duplicate"}
+        reason, message = _STRUCTURAL_PROBLEMS[state]
+        return {"status": "error", "error": message, "reason": reason}
+
+    def _create_note(
+        self, note_input: dict[str, Any], *, index: int, on_duplicate: OnDuplicate, dry_run: bool
+    ) -> dict[str, Any]:
         note_type_name = note_input.get("note_type")
         deck_name = note_input.get("deck")
         fields = note_input.get("fields")
@@ -413,32 +477,52 @@ class CollectionWrapper:
 
         notetype = self.col.models.by_name(note_type_name)
         if notetype is None:
-            raise ValueError(f"Note type '{note_type_name}' not found")
-
-        deck_id = self.col.decks.id_for_name(deck_name)
-        if deck_id is None:
-            deck_id = self.col.decks.id(deck_name)
-
-        if deck_id is None:
-            raise ValueError(f"Could not find or create deck '{deck_name}'")
+            return {
+                "status": "error",
+                "index": index,
+                "error": f"Note type '{note_type_name}' not found",
+                "reason": "unknown_note_type",
+            }
 
         note = self.col.new_note(notetype)
         for field_name, value in fields.items():
             if field_name not in note:
-                raise ValueError(
-                    f"Field '{field_name}' not found in note type '{note_type_name}'. "
-                    f"Available fields: {list(note.keys())}"
-                )
+                return {
+                    "status": "error",
+                    "index": index,
+                    "error": (
+                        f"Field '{field_name}' not found in note type '{note_type_name}'. "
+                        f"Available fields: {list(note.keys())}"
+                    ),
+                    "reason": "unknown_field",
+                }
             note[field_name] = value
 
         if "tags" in note_input and note_input["tags"] is not None:
             note.tags = note_input["tags"]
 
+        # Anki's own add-note validation (duplicate / empty / cloze structure),
+        # applied before any write so dry runs and real runs classify identically.
+        problem = self._check_new_note(note, on_duplicate)
+        if problem is not None:
+            return {"index": index, **problem}
+
+        if dry_run:
+            return {"status": "ok", "index": index, "action": "create"}
+
+        deck_id = self.col.decks.id_for_name(deck_name)
+        if deck_id is None:
+            deck_id = self.col.decks.id(deck_name)
+        if deck_id is None:
+            raise ValueError(f"Could not find or create deck '{deck_name}'")
+
         self.col.add_note(note, deck_id)
         logger.debug("Created note %d (type=%s, deck=%s)", note.id, note_type_name, deck_name)
         return {"status": "created", "id": note.id}
 
-    def _update_note(self, note_input: dict[str, Any]) -> dict[str, Any]:
+    def _update_note(
+        self, note_input: dict[str, Any], *, index: int, dry_run: bool
+    ) -> dict[str, Any]:
         nid = note_input["id"]
         try:
             note = self.col.get_note(nid)  # type: ignore[arg-type]
@@ -459,14 +543,22 @@ class CollectionWrapper:
                 if field_name not in note:
                     nt = self.col.models.get(note.mid)
                     nt_name = nt["name"] if nt else "Unknown"
-                    raise ValueError(
-                        f"Field '{field_name}' not found in note type "
-                        f"'{nt_name}'. Available fields: {list(note.keys())}"
-                    )
+                    return {
+                        "status": "error",
+                        "index": index,
+                        "error": (
+                            f"Field '{field_name}' not found in note type "
+                            f"'{nt_name}'. Available fields: {list(note.keys())}"
+                        ),
+                        "reason": "unknown_field",
+                    }
                 note[field_name] = value
 
         if "tags" in note_input and note_input["tags"] is not None:
             note.tags = note_input["tags"]
+
+        if dry_run:
+            return {"status": "ok", "index": index, "action": "update"}
 
         self.col.update_note(note)
 
