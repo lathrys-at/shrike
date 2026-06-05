@@ -780,6 +780,85 @@ class TestNoteTypeLifecycle:
         assert result["results"][0]["status"] == "error"
         assert "update_note_type_fields" in result["results"][0]["error"]
 
+    def test_template_ops_move_rename_remove(self, mcp):
+        # update_note_type_templates: identity-based ops preserve cards (#76).
+        mcp(
+            "upsert_note_types",
+            {
+                "note_types": [
+                    {
+                        "name": "Tmpl",
+                        "fields": ["F"],
+                        "templates": [
+                            {"name": "Ta", "front": "Ta {{F}}", "back": "{{F}}"},
+                            {"name": "Tb", "front": "Tb {{F}}", "back": "{{F}}"},
+                            {"name": "Tc", "front": "Tc {{F}}", "back": "{{F}}"},
+                        ],
+                        "css": "",
+                    }
+                ]
+            },
+        )
+        note = mcp(
+            "upsert_notes",
+            {"notes": [{"deck": "Tmpl", "note_type": "Tmpl", "fields": {"F": "x"}}]},
+        )
+        note_id = note["results"][0]["id"]
+        assert mcp("list_notes", {"ids": [note_id]})["total"] == 1
+
+        result = mcp(
+            "update_note_type_templates",
+            {
+                "note_type": "Tmpl",
+                "operations": [
+                    {"op": "reposition", "name": "Tc", "position": 0},
+                    {"op": "rename", "name": "Ta", "new_name": "Alpha"},
+                    {"op": "remove", "name": "Tb"},
+                    {"op": "add", "name": "Td", "front": "Td {{F}}", "back": "{{F}}"},
+                ],
+            },
+        )
+        assert result["templates"] == ["Tc", "Alpha", "Td"]
+        # note still has one card per surviving/added template (3)
+        details = mcp("collection_info", {"include": ["note_types"], "note_type_details": ["Tmpl"]})
+        tmpl = next(nt for nt in details["note_types"] if nt["name"] == "Tmpl")
+        assert [t["name"] for t in tmpl["detail"]["templates"]] == ["Tc", "Alpha", "Td"]
+
+    def test_upsert_template_reorder_rejected(self, mcp):
+        created = mcp(
+            "upsert_note_types",
+            {
+                "note_types": [
+                    {
+                        "name": "NoTmplReorder",
+                        "fields": ["F"],
+                        "templates": [
+                            {"name": "Ta", "front": "Ta {{F}}", "back": "{{F}}"},
+                            {"name": "Tb", "front": "Tb {{F}}", "back": "{{F}}"},
+                        ],
+                        "css": "",
+                    }
+                ]
+            },
+        )
+        nt_id = created["results"][0]["id"]
+        result = mcp(
+            "upsert_note_types",
+            {
+                "note_types": [
+                    {
+                        "id": nt_id,
+                        "templates": [
+                            {"name": "Tb", "front": "Tb {{F}}", "back": "{{F}}"},
+                            {"name": "Ta", "front": "Ta {{F}}", "back": "{{F}}"},
+                        ],
+                    }
+                ]
+            },
+        )
+        assert result["results"][0]["status"] == "error"
+        assert "update_note_type_templates" in result["results"][0]["error"]
+
     def test_duplicate_name_rejected(self, mcp):
         result = mcp(
             "upsert_note_types",

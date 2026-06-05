@@ -133,7 +133,9 @@ def _set_fields(col: Collection, notetype: dict[str, Any], names: list[str]) -> 
     Use ``update_note_type_fields`` for identity-based moves/inserts/removes.
     """
     old = [f["name"] for f in notetype["flds"]]
-    _reject_unsound_field_replace(old, names)
+    _reject_unsound_positional_replace(
+        old, names, what="field", mislabels="note data", mover_tool="update_note_type_fields"
+    )
 
     old_flds = notetype["flds"]
     new = []
@@ -147,26 +149,29 @@ def _set_fields(col: Collection, notetype: dict[str, Any], names: list[str]) -> 
     notetype["flds"] = new
 
 
-def _reject_unsound_field_replace(old: list[str], new: list[str]) -> None:
-    """Reject a positional field replace that would mislabel note data.
+def _reject_unsound_positional_replace(
+    old: list[str], new: list[str], *, what: str, mislabels: str, mover_tool: str
+) -> None:
+    """Reject a positional field/template replace that would mislabel data.
 
-    The replace renames the field *at position i* to ``new[i]``; data never
-    leaves its slot. That's sound only while every existing field name stays at
-    its current position. If an existing name appears at a *different* position
-    in ``new``, the caller is really asking to move it (reorder, insert, or
-    non-trailing remove, which shifts the names after it) — which positionally
-    becomes a silent re-label. Refuse it and point at the explicit tool.
+    A positional replace renames the entry *at position i* to ``new[i]``; the
+    data (a field's note values, a template's cards) never leaves its slot.
+    That's sound only while every existing name stays at its current position.
+    If an existing name appears at a *different* position in ``new``, the caller
+    is really asking to move it (reorder, insert, or non-trailing remove, which
+    shifts the names after it) — which positionally becomes a silent re-label.
+    Refuse it and point at the explicit identity-based tool.
     """
     old_index = {name: i for i, name in enumerate(old)}
     for i, name in enumerate(new):
         if name in old_index and old_index[name] != i:
             raise ValueError(
-                f"Field '{name}' would move from position {old_index[name]} to {i}. "
-                "upsert_note_types replaces fields by position — it can only rename a "
-                "field in place, append new fields, or drop trailing fields; moving, "
-                "inserting, or removing a non-trailing field this way would silently "
-                "mislabel note data. Use update_note_type_fields (reposition / add / "
-                "remove / rename) for that."
+                f"{what.capitalize()} '{name}' would move from position "
+                f"{old_index[name]} to {i}. upsert_note_types replaces {what}s by "
+                f"position — it can only rename a {what} in place, append new {what}s, "
+                f"or drop trailing {what}s; moving, inserting, or removing a "
+                f"non-trailing {what} this way would silently mislabel {mislabels}. "
+                f"Use {mover_tool} (reposition / add / remove / rename) for that."
             )
 
 
@@ -182,8 +187,19 @@ def _set_templates(
     Reuse the existing template dicts in place, updating name/front/back, append
     only for added positions, and drop the tail for removed ones (whose cards are
     intentionally removed).
+
+    Like ``_set_fields``, the positional replace can only rename/edit in place,
+    append, or drop trailing templates. A move/insert/non-trailing remove would
+    silently re-label cards, so it's refused — use ``update_note_type_templates``.
     """
     old = notetype["tmpls"]
+    _reject_unsound_positional_replace(
+        [t["name"] for t in old],
+        [t["name"] for t in templates],
+        what="template",
+        mislabels="cards (and their scheduling history)",
+        mover_tool="update_note_type_templates",
+    )
     new = []
     for i, tmpl_input in enumerate(templates):
         tmpl = old[i] if i < len(old) else col.models.new_template(tmpl_input["name"])
@@ -194,8 +210,8 @@ def _set_templates(
     notetype["tmpls"] = new
 
 
-class FieldOpError(ValueError):
-    """An explicit field operation was invalid (unknown field, name clash, etc.).
+class NoteTypeOpError(ValueError):
+    """An explicit field/template operation was invalid (unknown name, clash, etc.).
 
     A plain ``ValueError`` subclass so the tool layer can translate it into a
     ``ToolInputError`` (logged without a traceback — it's caller error).
@@ -221,13 +237,13 @@ def update_note_type_fields(
     """
     notetype = col.models.by_name(note_type_name)
     if notetype is None:
-        raise FieldOpError(f"Note type '{note_type_name}' not found")
+        raise NoteTypeOpError(f"Note type '{note_type_name}' not found")
 
     # Validate the whole sequence first (atomic: nothing applied if any op is
     # bad). `sim` tracks field names as each op would leave them.
     sim = [f["name"] for f in notetype["flds"]]
     for i, op in enumerate(operations):
-        _simulate_field_op(sim, op, i)
+        _simulate_struct_op(sim, op, i, what="field")
 
     # `by_name` returned the live notetype dict; the Anki primitives mutate it
     # (and its `flds`) in place, so apply them all to it and persist once.
@@ -245,39 +261,87 @@ def update_note_type_fields(
     return {"id": notetype["id"], "name": note_type_name, "fields": final}
 
 
-def _simulate_field_op(sim: list[str], op: dict[str, Any], i: int) -> None:
+def update_note_type_templates(
+    col: Collection, note_type_name: str, operations: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Apply explicit, identity-based card-template operations to a note type.
+
+    The template counterpart of ``update_note_type_fields``. Templates are
+    addressed by *name*, so these ops can move a template, insert one, or remove
+    a non-trailing one — all via Anki's data-safe primitives, which migrate
+    *cards* by template identity (a card belongs to its template by ordinal, so a
+    reposition carries the card and its scheduling along; a remove deletes only
+    that template's cards). A ``rename`` only changes the template's label — cards
+    key by ordinal, not name, so no card is touched. (To edit a template's
+    front/back HTML in place, use ``upsert_note_types``, whose positional replace
+    is data-safe for in-place edits.)
+
+    Atomic and ordered, exactly like ``update_note_type_fields``: the sequence is
+    validated against a simulated template-name list first; only if every op is
+    valid are the primitives applied to one in-memory notetype and persisted with
+    a single ``update_dict``.
+    """
+    notetype = col.models.by_name(note_type_name)
+    if notetype is None:
+        raise NoteTypeOpError(f"Note type '{note_type_name}' not found")
+
+    sim = [t["name"] for t in notetype["tmpls"]]
+    for i, op in enumerate(operations):
+        _simulate_struct_op(sim, op, i, what="template")
+
+    for op in operations:
+        _apply_template_op(col, notetype, op)
+    col.models.update_dict(notetype)
+
+    final = [t["name"] for t in notetype["tmpls"]]
+    logger.debug(
+        "update_note_type_templates %r: applied %d op(s) -> %s",
+        note_type_name,
+        len(operations),
+        final,
+    )
+    return {"id": notetype["id"], "name": note_type_name, "templates": final}
+
+
+def _simulate_struct_op(sim: list[str], op: dict[str, Any], i: int, *, what: str) -> None:
+    """Validate one field/template op against a simulated name list (in place).
+
+    ``what`` is "field" or "template" — only used for error wording. The ops
+    share a shape (add/remove/rename/reposition by name), so one simulator
+    serves both.
+    """
     kind = op["op"]
     if kind == "add":
         name = op["name"]
         if name in sim:
-            raise FieldOpError(f"op {i} (add): field '{name}' already exists")
+            raise NoteTypeOpError(f"op {i} (add): {what} '{name}' already exists")
         pos = op.get("position")
         if pos is None:
             sim.append(name)
         elif not 0 <= pos <= len(sim):
-            raise FieldOpError(f"op {i} (add): position {pos} out of range 0..{len(sim)}")
+            raise NoteTypeOpError(f"op {i} (add): position {pos} out of range 0..{len(sim)}")
         else:
             sim.insert(pos, name)
     elif kind == "remove":
         name = op["name"]
         if name not in sim:
-            raise FieldOpError(f"op {i} (remove): field '{name}' not found")
+            raise NoteTypeOpError(f"op {i} (remove): {what} '{name}' not found")
         if len(sim) == 1:
-            raise FieldOpError(f"op {i} (remove): a note type must keep at least one field")
+            raise NoteTypeOpError(f"op {i} (remove): a note type must keep at least one {what}")
         sim.remove(name)
     elif kind == "rename":
         name, new = op["name"], op["new_name"]
         if name not in sim:
-            raise FieldOpError(f"op {i} (rename): field '{name}' not found")
+            raise NoteTypeOpError(f"op {i} (rename): {what} '{name}' not found")
         if new != name and new in sim:
-            raise FieldOpError(f"op {i} (rename): field '{new}' already exists")
+            raise NoteTypeOpError(f"op {i} (rename): {what} '{new}' already exists")
         sim[sim.index(name)] = new
     elif kind == "reposition":
         name, pos = op["name"], op["position"]
         if name not in sim:
-            raise FieldOpError(f"op {i} (reposition): field '{name}' not found")
+            raise NoteTypeOpError(f"op {i} (reposition): {what} '{name}' not found")
         if not 0 <= pos < len(sim):
-            raise FieldOpError(
+            raise NoteTypeOpError(
                 f"op {i} (reposition): position {pos} out of range 0..{len(sim) - 1}"
             )
         sim.remove(name)
@@ -300,3 +364,23 @@ def _apply_field_op(col: Collection, notetype: dict[str, Any], op: dict[str, Any
         col.models.rename_field(notetype, by_name[op["name"]], op["new_name"])
     elif kind == "reposition":
         col.models.reposition_field(notetype, by_name[op["name"]], op["position"])
+
+
+def _apply_template_op(col: Collection, notetype: dict[str, Any], op: dict[str, Any]) -> None:
+    by_name = {t["name"]: t for t in notetype["tmpls"]}
+    kind = op["op"]
+    if kind == "add":
+        tmpl = col.models.new_template(op["name"])
+        tmpl["qfmt"] = op["front"]
+        tmpl["afmt"] = op["back"]
+        col.models.add_template(notetype, tmpl)
+        if op.get("position") is not None:
+            col.models.reposition_template(notetype, tmpl, op["position"])
+    elif kind == "remove":
+        col.models.remove_template(notetype, by_name[op["name"]])
+    elif kind == "rename":
+        # Templates key cards by ordinal, not name, so a rename is a pure label
+        # change — no Anki primitive, no card migration.
+        by_name[op["name"]]["name"] = op["new_name"]
+    elif kind == "reposition":
+        col.models.reposition_template(notetype, by_name[op["name"]], op["position"])

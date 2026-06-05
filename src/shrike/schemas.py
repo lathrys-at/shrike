@@ -129,7 +129,10 @@ class NoteTypeInput(BaseModel):
         default=None,
         description=(
             "Card templates. Required for new note types. On update, replaced by "
-            "position like fields, preserving existing cards and their scheduling."
+            "position like fields, preserving existing cards and their scheduling. "
+            "May only rename/edit in place, append, or drop trailing templates; "
+            "moving/inserting/removing a non-trailing template is rejected (use "
+            "update_note_type_templates)."
         ),
     )
     css: str | None = Field(
@@ -372,6 +375,57 @@ class UpdateNoteTypeFieldsResponse(BaseModel):
     id: int
     name: str
     fields: list[str]  # the resulting ordered field names
+
+
+# -- explicit note-type template operations (update_note_type_templates) ------
+# The template counterpart of the field ops: identity-based card-template edits
+# the positional `upsert_note_types` replace can't express safely (move, insert,
+# non-trailing remove). Same discriminator pattern.
+
+
+class TemplateOpAdd(BaseModel):
+    op: Literal["add"]
+    name: str = Field(description="Name for the new card template.")
+    front: str = Field(description="Front-side HTML. Use {{FieldName}} to insert field values.")
+    back: str = Field(
+        description="Back-side HTML. Use {{FieldName}} and {{FrontSide}} for the rendered front."
+    )
+    position: int | None = Field(
+        default=None,
+        ge=0,
+        description="0-based position to insert at. Appended to the end if omitted.",
+    )
+
+
+class TemplateOpRemove(BaseModel):
+    op: Literal["remove"]
+    name: str = Field(
+        description="Template to remove. Its cards are deleted from every note of this type."
+    )
+
+
+class TemplateOpRename(BaseModel):
+    op: Literal["rename"]
+    name: str = Field(description="Current name of the template to rename.")
+    new_name: str = Field(description="New name. A label change only — cards are untouched.")
+
+
+class TemplateOpReposition(BaseModel):
+    op: Literal["reposition"]
+    name: str = Field(description="Template to move. Its cards move with it.")
+    position: int = Field(ge=0, description="New 0-based position for the template.")
+
+
+TemplateOp = Annotated[
+    TemplateOpAdd | TemplateOpRemove | TemplateOpRename | TemplateOpReposition,
+    Field(discriminator="op"),
+]
+
+
+class UpdateNoteTypeTemplatesResponse(BaseModel):
+    id: int
+    name: str
+    templates: list[str]  # the resulting ordered template names
 
 
 class DeckInput(BaseModel):

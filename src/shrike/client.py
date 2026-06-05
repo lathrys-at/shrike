@@ -52,8 +52,10 @@ from shrike.schemas import (
     ServerStatus,
     ShutdownResponse,
     StopResponse,
+    TemplateOp,
     UpdateNoteTagsResponse,
     UpdateNoteTypeFieldsResponse,
+    UpdateNoteTypeTemplatesResponse,
     UpsertDecksResponse,
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
@@ -330,6 +332,16 @@ class ShrikeClient:
         ]
         return UpdateNoteTypeFieldsResponse.model_validate(
             self._call("update_note_type_fields", {"note_type": note_type, "operations": ops})
+        )
+
+    def update_note_type_templates(
+        self, note_type: str, operations: Sequence[TemplateOp | dict[str, Any]]
+    ) -> UpdateNoteTypeTemplatesResponse:
+        ops = [
+            op if isinstance(op, dict) else op.model_dump(exclude_none=True) for op in operations
+        ]
+        return UpdateNoteTypeTemplatesResponse.model_validate(
+            self._call("update_note_type_templates", {"note_type": note_type, "operations": ops})
         )
 
     def delete_note_types(self, ids: list[int]) -> DeleteNoteTypesResponse:

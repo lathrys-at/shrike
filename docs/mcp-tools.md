@@ -320,7 +320,7 @@ Card templates use Anki's `{{FieldName}}` replacement syntax. The special `{{Fro
 | `id` | `integer` | no | Note type ID. Present = update, absent = create. |
 | `name` | `string` | create | Name for the note type (e.g., `"Japanese Vocabulary"`). |
 | `fields` | `string[]` | create | Ordered list of field names (e.g., `["Word", "Reading", "Meaning"]`). On update, replaces the field list **by position**: the field at each position keeps its note data even when renamed. Only shortening the list discards the trailing fields' data; lengthening it appends empty fields. May only rename in place, append, or drop trailing fields — a move, insert, or non-trailing remove is **rejected** (it would mislabel note data); use [`update_note_type_fields`](#update_note_type_fields). |
-| `templates` | `object[]` | create | Card templates. Each produces one card per note (except cloze types). On update, replaced **by position** like `fields`: existing cards (and their scheduling history) are preserved; only removing a trailing template deletes its cards. See template schema below. |
+| `templates` | `object[]` | create | Card templates. Each produces one card per note (except cloze types). On update, replaced **by position** like `fields`: existing cards (and their scheduling history) are preserved; only removing a trailing template deletes its cards. May only rename/edit in place, append, or drop trailing templates — a move, insert, or non-trailing remove is **rejected** (it would re-label cards); use [`update_note_type_templates`](#update_note_type_templates). See template schema below. |
 | `css` | `string` | create | CSS styling shared across all cards of this note type. |
 | `is_cloze` | `boolean` | no | If `true`, this is a cloze deletion note type. Default `false`. Cannot be changed on update. |
 
@@ -409,6 +409,40 @@ Operations apply in order, so a `rename` followed by an op naming the new name i
   "id": 1234567890,
   "name": "Japanese Vocabulary",
   "fields": ["Reading", "Word", "Meaning", "Notes"]   // the resulting order
+}
+```
+
+---
+
+## `update_note_type_templates`
+
+Edit an existing note type's **card templates by name**, preserving cards. The template counterpart of [`update_note_type_fields`](#update_note_type_fields): where `upsert_note_types` replaces the whole template list by position (rename/edit in place, append, or drop the trailing template only), this tool can truly move a template, insert one, or remove a non-trailing one — migrating cards (and their scheduling) by template identity.
+
+Operations apply in order; the whole call is **atomic** (an invalid op — unknown template, name clash, out-of-range position, or removing the last remaining template — changes nothing). To change a template's front/back **HTML in place**, use `upsert_note_types` (its positional replace is data-safe for in-place edits).
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `note_type` | `string` | **yes** | Name of the note type to edit. |
+| `operations` | `object[]` | **yes** | Template operations to apply in order (1–50). Each is one of the variants below, discriminated on `op`. |
+
+#### Operation variants
+
+| `op` | Fields | Effect |
+|---|---|---|
+| `add` | `name`, `front`, `back`, `position?` | Add a new template (generates a card per note). Inserted at `position` (0-based) if given, else appended. |
+| `remove` | `name` | Remove the template. **Deletes that template's cards** (and their scheduling) from every note. Can't remove the last remaining template. |
+| `rename` | `name`, `new_name` | Rename the template — a label change only; cards are untouched. |
+| `reposition` | `name`, `position` | Move the template to `position` (0-based); its cards move with it. |
+
+### Response
+
+```jsonc
+{
+  "id": 1234567890,
+  "name": "Japanese Vocabulary",
+  "templates": ["Recall", "Recognition"]   // the resulting order
 }
 ```
 

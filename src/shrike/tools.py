@@ -22,8 +22,10 @@ from shrike.schemas import (
     NoteTypeInput,
     RenameTagResponse,
     SearchResponse,
+    TemplateOp,
     UpdateNoteTagsResponse,
     UpdateNoteTypeFieldsResponse,
+    UpdateNoteTypeTemplatesResponse,
     UpsertDecksResponse,
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
@@ -90,8 +92,9 @@ def register_tools(
     index: VectorIndex | None = None,
     saver: IndexSaver | None = None,
 ) -> None:
-    from shrike.note_types import FieldOpError
+    from shrike.note_types import NoteTypeOpError
     from shrike.note_types import update_note_type_fields as _update_note_type_fields
+    from shrike.note_types import update_note_type_templates as _update_note_type_templates
     from shrike.note_types import upsert_note_types as _upsert_note_types
 
     @mcp.tool()
@@ -791,10 +794,58 @@ def register_tools(
         op_dicts = [op.model_dump(exclude_none=True) for op in operations]
         try:
             result = await wrapper.run(lambda c: _update_note_type_fields(c, note_type, op_dicts))
-        except FieldOpError as e:
+        except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
         logger.info("update_note_type_fields %r -> %s", note_type, result["fields"])
         return UpdateNoteTypeFieldsResponse.model_validate(result)
+
+    @mcp.tool()
+    @_safe_tool
+    async def update_note_type_templates(
+        note_type: Annotated[
+            str, Field(min_length=1, description="Name of the note type to edit.")
+        ],
+        operations: Annotated[
+            list[TemplateOp],
+            Field(
+                min_length=1,
+                max_length=50,
+                description="Card-template operations to apply, in order.",
+            ),
+        ],
+    ) -> UpdateNoteTypeTemplatesResponse:
+        """Edit a note type's card templates by name, preserving cards.
+
+        The template counterpart of update_note_type_fields. Apply a sequence of
+        operations to an existing note type's card templates:
+        - `add`: add a new template (`front`/`back` HTML; optional 0-based
+          `position`, appended otherwise) — generates a new card per note.
+        - `remove`: remove a template by name — deletes that template's cards
+          (and their scheduling) from every note of this type.
+        - `rename`: rename a template; a label change only, cards are untouched.
+        - `reposition`: move a template to a new 0-based `position`; its cards
+          (and scheduling) move with it.
+
+        Operations apply in order; the whole call is atomic (an invalid op —
+        unknown template, name clash, out-of-range position, or removing the
+        last remaining template — changes nothing).
+
+        Unlike upsert_note_types — which replaces the whole template list by
+        position, so it can only rename/edit in place, append, or drop the tail
+        — these operations are addressed by template name and can truly move,
+        insert, or remove a non-trailing template. To change a template's
+        front/back HTML in place, use upsert_note_types. Returns the resulting
+        ordered template names."""
+        logger.info("update_note_type_templates %r ops=%d", note_type, len(operations))
+        op_dicts = [op.model_dump(exclude_none=True) for op in operations]
+        try:
+            result = await wrapper.run(
+                lambda c: _update_note_type_templates(c, note_type, op_dicts)
+            )
+        except NoteTypeOpError as e:
+            raise ToolInputError(str(e)) from e
+        logger.info("update_note_type_templates %r -> %s", note_type, result["templates"])
+        return UpdateNoteTypeTemplatesResponse.model_validate(result)
 
     @mcp.tool()
     @_safe_tool

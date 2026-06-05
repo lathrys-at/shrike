@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from shrike.note_types import FieldOpError, update_note_type_fields, upsert_note_types
+from shrike.note_types import (
+    NoteTypeOpError,
+    update_note_type_fields,
+    update_note_type_templates,
+    upsert_note_types,
+)
 
 
 class TestCreateNoteType:
@@ -424,7 +429,7 @@ class TestUpdateNoteTypeFields:
     async def test_invalid_op_is_atomic(self, wrapper):
         _mid, nid = _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
         # second op is invalid (renaming a nonexistent field); nothing should apply
-        with pytest.raises(FieldOpError, match="not found"):
+        with pytest.raises(NoteTypeOpError, match="not found"):
             _apply_ops(
                 wrapper,
                 "DataSafe",
@@ -441,24 +446,207 @@ class TestUpdateNoteTypeFields:
 
     async def test_rename_to_existing_name_rejected(self, wrapper):
         _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
-        with pytest.raises(FieldOpError, match="already exists"):
+        with pytest.raises(NoteTypeOpError, match="already exists"):
             _apply_ops(wrapper, "DataSafe", [{"op": "rename", "name": "Front", "new_name": "Back"}])
 
     async def test_add_duplicate_name_rejected(self, wrapper):
         _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
-        with pytest.raises(FieldOpError, match="already exists"):
+        with pytest.raises(NoteTypeOpError, match="already exists"):
             _apply_ops(wrapper, "DataSafe", [{"op": "add", "name": "Front"}])
 
     async def test_remove_last_field_rejected(self, wrapper):
         _type_with_note(wrapper, ["Only"], {"Only": "v"})
-        with pytest.raises(FieldOpError, match="at least one field"):
+        with pytest.raises(NoteTypeOpError, match="at least one"):
             _apply_ops(wrapper, "DataSafe", [{"op": "remove", "name": "Only"}])
 
     async def test_reposition_out_of_range_rejected(self, wrapper):
         _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
-        with pytest.raises(FieldOpError, match="out of range"):
+        with pytest.raises(NoteTypeOpError, match="out of range"):
             _apply_ops(wrapper, "DataSafe", [{"op": "reposition", "name": "Front", "position": 9}])
 
     async def test_unknown_note_type_rejected(self, wrapper):
-        with pytest.raises(FieldOpError, match="not found"):
+        with pytest.raises(NoteTypeOpError, match="not found"):
             _apply_ops(wrapper, "Nonexistent", [{"op": "add", "name": "X"}])
+
+
+def _apply_template_ops(wrapper, name, ops):
+    return wrapper.run_sync(lambda c: update_note_type_templates(c, name, ops))
+
+
+def _type_with_cards(wrapper, template_names, field="F"):
+    """Create a note type with N always-rendering templates and one note (N cards)."""
+    tmpls = [
+        {"name": t, "front": t + " {{" + field + "}}", "back": "{{" + field + "}}"}
+        for t in template_names
+    ]
+
+    def build(c):
+        mid = upsert_note_types(
+            c, [{"name": "TmplSafe", "fields": [field], "templates": tmpls, "css": ""}]
+        )[0]["id"]
+        note = c.new_note(c.models.get(mid))
+        note[field] = "x"
+        c.add_note(note, c.decks.id("TmplSafe"))
+        return mid, note.id
+
+    return wrapper.run_sync(build)
+
+
+def _cards_by_template(wrapper, nid, mid):
+    """Map each of the note's cards to its template name -> card id."""
+
+    def q(c):
+        out = {}
+        for cid in c.find_cards(f"nid:{nid}"):
+            ord_ = c.get_card(cid).ord
+            out[c.models.get(mid)["tmpls"][ord_]["name"]] = cid
+        return out
+
+    return wrapper.run_sync(q)
+
+
+class TestUpdateNoteTypeTemplates:
+    """Identity-based template operations (#76) preserve cards by template."""
+
+    async def test_rename_keeps_cards(self, wrapper):
+        mid, nid = _type_with_cards(wrapper, ["Ta", "Tb"])
+        before = _cards_by_template(wrapper, nid, mid)
+        res = _apply_template_ops(
+            wrapper, "TmplSafe", [{"op": "rename", "name": "Ta", "new_name": "Recall"}]
+        )
+        assert res == {"id": mid, "name": "TmplSafe", "templates": ["Recall", "Tb"]}
+        after = _cards_by_template(wrapper, nid, mid)
+        # same card ids; only the template label changed (Ta -> Recall)
+        assert after == {"Recall": before["Ta"], "Tb": before["Tb"]}
+
+    async def test_reposition_is_a_true_move(self, wrapper):
+        mid, nid = _type_with_cards(wrapper, ["Ta", "Tb", "Tc"])
+        before = _cards_by_template(wrapper, nid, mid)
+        res = _apply_template_ops(
+            wrapper, "TmplSafe", [{"op": "reposition", "name": "Tc", "position": 0}]
+        )
+        assert res["templates"] == ["Tc", "Ta", "Tb"]
+        # each card stays with its template (same ids), just reordered
+        assert _cards_by_template(wrapper, nid, mid) == before
+
+    async def test_remove_non_trailing_keeps_other_cards(self, wrapper):
+        mid, nid = _type_with_cards(wrapper, ["Ta", "Tb", "Tc"])
+        before = _cards_by_template(wrapper, nid, mid)
+        res = _apply_template_ops(wrapper, "TmplSafe", [{"op": "remove", "name": "Tb"}])
+        assert res["templates"] == ["Ta", "Tc"]
+        after = _cards_by_template(wrapper, nid, mid)
+        assert after == {"Ta": before["Ta"], "Tc": before["Tc"]}  # only Tb's card gone
+
+    async def test_add_generates_a_card(self, wrapper):
+        mid, nid = _type_with_cards(wrapper, ["Ta"])
+        res = _apply_template_ops(
+            wrapper,
+            "TmplSafe",
+            [{"op": "add", "name": "Tb", "front": "Tb {{F}}", "back": "{{F}}"}],
+        )
+        assert res["templates"] == ["Ta", "Tb"]
+        assert set(_cards_by_template(wrapper, nid, mid)) == {"Ta", "Tb"}
+
+    async def test_add_at_position(self, wrapper):
+        _mid, _nid = _type_with_cards(wrapper, ["Ta", "Tb"])
+        res = _apply_template_ops(
+            wrapper,
+            "TmplSafe",
+            [{"op": "add", "name": "Mid", "front": "Mid {{F}}", "back": "{{F}}", "position": 1}],
+        )
+        assert res["templates"] == ["Ta", "Mid", "Tb"]
+
+    async def test_sequence_applies_in_order(self, wrapper):
+        mid, nid = _type_with_cards(wrapper, ["Ta", "Tb"])
+        before = _cards_by_template(wrapper, nid, mid)
+        res = _apply_template_ops(
+            wrapper,
+            "TmplSafe",
+            [
+                {"op": "rename", "name": "Ta", "new_name": "Aa"},
+                {"op": "reposition", "name": "Aa", "position": 1},
+            ],
+        )
+        assert res["templates"] == ["Tb", "Aa"]
+        assert _cards_by_template(wrapper, nid, mid) == {"Tb": before["Tb"], "Aa": before["Ta"]}
+
+    async def test_invalid_op_is_atomic(self, wrapper):
+        mid, nid = _type_with_cards(wrapper, ["Ta", "Tb"])
+        before = _cards_by_template(wrapper, nid, mid)
+        with pytest.raises(NoteTypeOpError, match="not found"):
+            _apply_template_ops(
+                wrapper,
+                "TmplSafe",
+                [
+                    {"op": "rename", "name": "Ta", "new_name": "Aa"},
+                    {"op": "remove", "name": "Nope"},
+                ],
+            )
+        info = await wrapper.get_collection_info(
+            include=["note_types"], note_type_details=["TmplSafe"]
+        )
+        ts = next(nt for nt in info["note_types"] if nt["name"] == "TmplSafe")
+        assert [t["name"] for t in ts["detail"]["templates"]] == ["Ta", "Tb"]
+        assert _cards_by_template(wrapper, nid, mid) == before
+
+    async def test_remove_last_template_rejected(self, wrapper):
+        _type_with_cards(wrapper, ["Only"])
+        with pytest.raises(NoteTypeOpError, match="at least one"):
+            _apply_template_ops(wrapper, "TmplSafe", [{"op": "remove", "name": "Only"}])
+
+    async def test_rename_to_existing_rejected(self, wrapper):
+        _type_with_cards(wrapper, ["Ta", "Tb"])
+        with pytest.raises(NoteTypeOpError, match="already exists"):
+            _apply_template_ops(
+                wrapper, "TmplSafe", [{"op": "rename", "name": "Ta", "new_name": "Tb"}]
+            )
+
+    async def test_unknown_note_type_rejected(self, wrapper):
+        with pytest.raises(NoteTypeOpError, match="not found"):
+            _apply_template_ops(
+                wrapper, "Nonexistent", [{"op": "rename", "name": "x", "new_name": "y"}]
+            )
+
+
+class TestUpsertTemplateReplaceRejectsUnsound:
+    """upsert_note_types' positional template replace refuses reorders/inserts/
+    non-trailing removes (they'd re-label cards) and redirects to
+    update_note_type_templates. In-place edits stay allowed."""
+
+    async def test_reorder_rejected(self, wrapper):
+        mid, nid = _type_with_cards(wrapper, ["Ta", "Tb"])
+        before = _cards_by_template(wrapper, nid, mid)
+        res = _update_type(
+            wrapper,
+            {
+                "id": mid,
+                "templates": [
+                    {"name": "Tb", "front": "Tb {{F}}", "back": "{{F}}"},
+                    {"name": "Ta", "front": "Ta {{F}}", "back": "{{F}}"},
+                ],
+            },
+        )
+        assert res[0]["status"] == "error"
+        assert "update_note_type_templates" in res[0]["error"]
+        assert _cards_by_template(wrapper, nid, mid) == before  # untouched
+
+    async def test_in_place_html_edit_allowed(self, wrapper):
+        mid, nid = _type_with_cards(wrapper, ["Ta", "Tb"])
+        before = _cards_by_template(wrapper, nid, mid)
+        res = _update_type(
+            wrapper,
+            {
+                "id": mid,
+                "templates": [
+                    {"name": "Ta", "front": "Ta! {{F}}", "back": "{{F}}"},
+                    {"name": "Tb", "front": "Tb {{F}}", "back": "{{F}}"},
+                ],
+            },
+        )
+        assert res[0]["status"] == "updated"
+        assert _cards_by_template(wrapper, nid, mid) == before  # cards preserved
+        info = await wrapper.get_collection_info(
+            include=["note_types"], note_type_details=["TmplSafe"]
+        )
+        ts = next(nt for nt in info["note_types"] if nt["name"] == "TmplSafe")
+        assert ts["detail"]["templates"][0]["front"] == "Ta! {{F}}"
