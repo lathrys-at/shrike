@@ -40,6 +40,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
+    "pytest-xdist>=3.6",  # `-n auto` parallelizes the suite (each server gets its own port/dirs)
     "pytest-testmon>=2.1",  # local-only: `pytest --testmon` runs just affected tests (see CONTRIBUTING.md)
     "mypy>=1.10",
     "ruff>=0.8",

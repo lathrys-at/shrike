@@ -110,12 +110,16 @@ jobs:
         run: |
           SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
           echo 'import coverage; coverage.process_startup()' > "$SITE/coverage_subprocess.pth"
+      # `-n auto` (pytest-xdist) parallelizes across cores. The integration suite
+      # is server-spawn-bound and roughly halves; the subprocess `.pth` hook above
+      # already fires for each xdist worker and each spawned server, so
+      # `coverage combine` merges them all (verified: identical totals to serial).
       - name: Run unit + integration under coverage
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
         run: |
-          coverage run --parallel-mode -m pytest tests/unit -q
-          coverage run --parallel-mode -m pytest tests/integration -q -m "integration and not embedding"
+          coverage run --parallel-mode -m pytest tests/unit -q -n auto
+          coverage run --parallel-mode -m pytest tests/integration -q -m "integration and not embedding" -n auto
       - name: Combine and report (enforces fail_under)
         run: |
           coverage combine

@@ -110,13 +110,21 @@ SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
 echo 'import coverage; coverage.process_startup()' > "$SITE/coverage_subprocess.pth"
 
 export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
-coverage run --parallel-mode -m pytest tests/unit -q
-coverage run --parallel-mode -m pytest tests/integration -q -m "integration and not embedding"
+coverage run --parallel-mode -m pytest tests/unit -q -n auto
+coverage run --parallel-mode -m pytest tests/integration -q -m "integration and not embedding" -n auto
 coverage combine && coverage report      # exits non-zero below fail_under
 ```
 
 A plain `pytest tests/unit --cov=shrike` reads ~18 points lower because it can't
 see the server subprocess — use the combined flow above when checking the gate.
+
+**`-n auto`** (pytest-xdist) parallelizes the suite across cores — the integration
+suite is server-spawn-bound and roughly halves (each server gets its own free
+port + temp state/log/cache dirs, so workers don't collide). It composes with the
+coverage hook above (the `.pth` fires for each xdist worker *and* each spawned
+server, so `coverage combine` merges everything to the same total). CI runs both
+suites with `-n auto`. Locally it's opt-in — the default (no `-n`) stays serial so
+`-x`, `-s`, and `pdb` keep working for debugging.
 
 ### Linting
 
