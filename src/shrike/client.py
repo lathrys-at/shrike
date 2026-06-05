@@ -32,6 +32,14 @@ import httpx
 from pydantic import TypeAdapter
 
 from shrike import daemon
+from shrike.errors import (
+    CollectionBusyError,
+    ServerError,
+    ServerHTTPError,
+    ServerStartError,
+    ServerUnreachableError,
+    ShrikeError,
+)
 from shrike.schemas import (
     COLLECTION_BUSY_CODE,
     CollectionInfo,
@@ -78,41 +86,24 @@ _EMBEDDING_START_ADAPTER: TypeAdapter[EmbeddingStartResponse] = TypeAdapter(Embe
 _EMBEDDING_STOP_ADAPTER: TypeAdapter[EmbeddingStopResponse] = TypeAdapter(EmbeddingStopResponse)
 _STOP_ADAPTER: TypeAdapter[StopResponse] = TypeAdapter(StopResponse)
 
-# -- Exceptions --------------------------------------------------------------
+# Re-exported so ``from shrike.client import ShrikeError`` (and the subclasses)
+# keeps working now that the hierarchy lives in the dependency-light
+# ``shrike.errors`` — ``__all__`` marks them exported (some aren't referenced in
+# this module's own code).
+__all__ = [
+    "CollectionBusyError",
+    "ServerError",
+    "ServerHTTPError",
+    "ServerSpec",
+    "ServerStartError",
+    "ServerUnreachableError",
+    "ShrikeClient",
+    "ShrikeError",
+]
 
-
-class ShrikeError(Exception):
-    """Base class for all client-raised errors."""
-
-
-class ServerError(ShrikeError):
-    """The server accepted the request but a tool returned an error."""
-
-
-class CollectionBusyError(ShrikeError):
-    """The collection couldn't be acquired — another process holds it.
-
-    Raised under cooperative locking (#64/#65) when the server can't re-open the
-    collection because something else (typically Anki desktop) has it open. A
-    distinct, expected outcome — catch it to retry rather than treating it as a
-    generic ``ServerError``.
-    """
-
-
-class ServerUnreachableError(ShrikeError):
-    """The server could not be reached (connection refused or timed out)."""
-
-
-class ServerHTTPError(ShrikeError):
-    """The server returned a non-2xx HTTP status."""
-
-    def __init__(self, status_code: int, message: str) -> None:
-        self.status_code = status_code
-        super().__init__(message)
-
-
-class ServerStartError(ShrikeError):
-    """Auto-starting the local daemon failed."""
+# The exception hierarchy now lives in the dependency-light ``shrike.errors``
+# (imported above) so the CLI can catch ``ShrikeError`` without pulling httpx;
+# they stay importable as ``shrike.client.ShrikeError`` for the historical path.
 
 
 # -- Launch spec -------------------------------------------------------------

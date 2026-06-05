@@ -51,7 +51,10 @@ def run(tmp_path, fake):
     runner = CliRunner()
 
     def _run(*args: str):
-        with patch("shrike.cli.ShrikeClient", return_value=fake):
+        # Patch at the source: the CLI now imports ShrikeClient lazily inside the
+        # root callback (so no-server commands don't pull httpx), so it's no
+        # longer a `shrike.cli` attribute.
+        with patch("shrike.client.ShrikeClient", return_value=fake):
             return runner.invoke(cli, ["--config", str(cfg), *args], catch_exceptions=False)
 
     return _run
