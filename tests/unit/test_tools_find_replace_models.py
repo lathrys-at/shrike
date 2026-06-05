@@ -1,4 +1,4 @@
-"""Tool-layer tests for find_replace_in_note_type (#76, findAndReplaceInModels).
+"""Tool-layer tests for find_replace_note_types (#76, findAndReplaceInModels).
 
 Editing a note type's template HTML / CSS never changes any note's embedding
 text, so a successful replace must advance the stored index col_mod (avoiding a
@@ -64,13 +64,13 @@ def model(wrapper):
     )
 
 
-class TestFindReplaceInNoteTypeTool:
+class TestFindReplaceNoteTypesTool:
     def test_replace_bumps_col_mod_without_vectors(
         self, wrapper, model, mock_index, mock_saver, mcp_app
     ):
         result = _call(
             mcp_app,
-            "find_replace_in_note_type",
+            "find_replace_note_types",
             {"note_type": "FR", "search": "red", "replace": "blue"},
         )
         assert result["replacements"] == 1
@@ -84,7 +84,7 @@ class TestFindReplaceInNoteTypeTool:
     def test_no_match_does_not_bump(self, wrapper, model, mock_index, mock_saver, mcp_app):
         result = _call(
             mcp_app,
-            "find_replace_in_note_type",
+            "find_replace_note_types",
             {"note_type": "FR", "search": "absent", "replace": "x"},
         )
         assert result["replacements"] == 0
@@ -95,7 +95,7 @@ class TestFindReplaceInNoteTypeTool:
         with pytest.raises(ToolError):
             _call(
                 mcp_app,
-                "find_replace_in_note_type",
+                "find_replace_note_types",
                 {"note_type": "Nope", "search": "a", "replace": "b"},
             )
 
@@ -103,7 +103,7 @@ class TestFindReplaceInNoteTypeTool:
         with pytest.raises(ToolError):
             _call(
                 mcp_app,
-                "find_replace_in_note_type",
+                "find_replace_note_types",
                 {
                     "note_type": "FR",
                     "search": "old",
@@ -118,7 +118,7 @@ class TestFindReplaceInNoteTypeTool:
         with pytest.raises(ToolError):
             _call(
                 mcp_app,
-                "find_replace_in_note_type",
+                "find_replace_note_types",
                 {"note_type": "FR", "search": "", "replace": "x"},
             )
 
@@ -126,6 +126,6 @@ class TestFindReplaceInNoteTypeTool:
         with pytest.raises(ToolError):
             _call(
                 mcp_app,
-                "find_replace_in_note_type",
+                "find_replace_note_types",
                 {"note_type": "FR", "search": "(unclosed", "replace": "x", "regex": True},
             )

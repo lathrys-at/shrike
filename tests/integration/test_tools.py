@@ -864,7 +864,7 @@ class TestNoteTypeLifecycle:
         )
         assert result["results"][0]["status"] == "error"
 
-    def test_find_replace_in_note_type(self, mcp):
+    def test_find_replace_note_types(self, mcp):
         # findAndReplaceInModels (#76): literal find/replace across a model's
         # template HTML and CSS, scoped by front/back/css, returning a count.
         mcp(
@@ -881,7 +881,7 @@ class TestNoteTypeLifecycle:
             },
         )
         result = mcp(
-            "find_replace_in_note_type",
+            "find_replace_note_types",
             {"note_type": "FRModel", "search": "{{Old}}", "replace": "{{New}}"},
         )
         assert result["replacements"] == 2
@@ -890,7 +890,7 @@ class TestNoteTypeLifecycle:
 
         # A CSS-only replace, with the templates excluded.
         css = mcp(
-            "find_replace_in_note_type",
+            "find_replace_note_types",
             {
                 "note_type": "FRModel",
                 "search": "red",
@@ -909,10 +909,10 @@ class TestNoteTypeLifecycle:
         assert nt["detail"]["templates"][0]["front"] == "{{New}}"
         assert "color: blue" in nt["detail"]["css"]
 
-    def test_find_replace_in_note_type_unknown(self, mcp):
+    def test_find_replace_note_types_unknown(self, mcp):
         with pytest.raises(RuntimeError, match="not found"):
             mcp(
-                "find_replace_in_note_type",
+                "find_replace_note_types",
                 {"note_type": "DoesNotExist", "search": "a", "replace": "b"},
             )
 

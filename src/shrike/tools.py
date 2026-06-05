@@ -17,7 +17,7 @@ from shrike.schemas import (
     DeleteNotesResponse,
     DeleteNoteTypesResponse,
     FieldOp,
-    FindReplaceInNoteTypeResponse,
+    FindReplaceNoteTypesResponse,
     FindReplaceResponse,
     ListNotesResponse,
     NoteInput,
@@ -95,7 +95,7 @@ def register_tools(
     saver: IndexSaver | None = None,
 ) -> None:
     from shrike.note_types import NoteTypeOpError
-    from shrike.note_types import find_and_replace_in_note_type as _find_and_replace_in_note_type
+    from shrike.note_types import find_and_replace_note_types as _find_and_replace_note_types
     from shrike.note_types import update_note_type_fields as _update_note_type_fields
     from shrike.note_types import update_note_type_templates as _update_note_type_templates
     from shrike.note_types import upsert_note_types as _upsert_note_types
@@ -852,7 +852,7 @@ def register_tools(
 
     @mcp.tool()
     @_safe_tool
-    async def find_replace_in_note_type(
+    async def find_replace_note_types(
         note_type: Annotated[
             str, Field(min_length=1, description="Name of the note type to edit.")
         ],
@@ -883,7 +883,7 @@ def register_tools(
             bool,
             Field(description="Case-sensitive match. Default true — template/CSS text is code."),
         ] = True,
-    ) -> FindReplaceInNoteTypeResponse:
+    ) -> FindReplaceNoteTypesResponse:
         """Find and replace text inside one note type's templates and CSS.
 
         Edits the note type *definition* — each card template's front (`qfmt`)
@@ -907,7 +907,7 @@ def register_tools(
         if not (front or back or css):
             raise ToolInputError("Enable at least one of `front`, `back`, or `css`.")
         logger.info(
-            "find_replace_in_note_type %r search=%r front=%s back=%s css=%s regex=%s",
+            "find_replace_note_types %r search=%r front=%s back=%s css=%s regex=%s",
             note_type,
             search,
             front,
@@ -917,7 +917,7 @@ def register_tools(
         )
         try:
             result = await wrapper.run(
-                lambda c: _find_and_replace_in_note_type(
+                lambda c: _find_and_replace_note_types(
                     c,
                     note_type,
                     search=search,
@@ -932,7 +932,7 @@ def register_tools(
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
         logger.info(
-            "find_replace_in_note_type %r -> %d replacement(s) in %d template(s), css=%s",
+            "find_replace_note_types %r -> %d replacement(s) in %d template(s), css=%s",
             note_type,
             result["replacements"],
             len(result["templates_changed"]),
@@ -943,7 +943,7 @@ def register_tools(
         # re-embedding, like the tag/deck metadata ops.
         if result["replacements"]:
             await _bump_col_mod_after_metadata_change()
-        return FindReplaceInNoteTypeResponse.model_validate(result)
+        return FindReplaceNoteTypesResponse.model_validate(result)
 
     @mcp.tool()
     @_safe_tool

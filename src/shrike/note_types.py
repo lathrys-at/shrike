@@ -402,7 +402,7 @@ def _subn_text(
     return re.subn(re.escape(search), lambda _m: replacement, value, flags=flags)
 
 
-def find_and_replace_in_note_type(
+def find_and_replace_note_types(
     col: Collection,
     note_type_name: str,
     *,
@@ -467,7 +467,7 @@ def find_and_replace_in_note_type(
         col.models.update_dict(notetype)
 
     logger.debug(
-        "find_and_replace_in_note_type %r: %d replacement(s), templates=%s css=%s",
+        "find_and_replace_note_types %r: %d replacement(s), templates=%s css=%s",
         note_type_name,
         total,
         templates_changed,

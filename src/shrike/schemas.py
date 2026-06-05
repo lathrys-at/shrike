@@ -428,7 +428,7 @@ class UpdateNoteTypeTemplatesResponse(BaseModel):
     templates: list[str]  # the resulting ordered template names
 
 
-class FindReplaceInNoteTypeResponse(BaseModel):
+class FindReplaceNoteTypesResponse(BaseModel):
     # Find/replace inside one note type's card-template HTML and shared CSS (no
     # note field values are touched). Flat, not a union: every field is always
     # present — `replacements` is 0 and the lists empty on a no-op.

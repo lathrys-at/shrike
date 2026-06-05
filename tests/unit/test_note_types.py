@@ -4,7 +4,7 @@ import pytest
 
 from shrike.note_types import (
     NoteTypeOpError,
-    find_and_replace_in_note_type,
+    find_and_replace_note_types,
     update_note_type_fields,
     update_note_type_templates,
     upsert_note_types,
@@ -671,11 +671,11 @@ async def _detail(wrapper):
 
 
 def _replace(wrapper, **kw):
-    return wrapper.run_sync(lambda c: find_and_replace_in_note_type(c, "FR", **kw))
+    return wrapper.run_sync(lambda c: find_and_replace_note_types(c, "FR", **kw))
 
 
-class TestFindAndReplaceInNoteType:
-    """find_and_replace_in_note_type rewrites template HTML and CSS in place,
+class TestFindAndReplaceNoteTypes:
+    """find_and_replace_note_types rewrites template HTML and CSS in place,
     scoped by the front/back/css selectors, returning a replacement count. No
     note field values are involved."""
 
@@ -798,7 +798,7 @@ class TestFindAndReplaceInNoteType:
     async def test_unknown_note_type_raises(self, wrapper):
         with pytest.raises(NoteTypeOpError, match="not found"):
             wrapper.run_sync(
-                lambda c: find_and_replace_in_note_type(c, "Nope", search="a", replacement="b")
+                lambda c: find_and_replace_note_types(c, "Nope", search="a", replacement="b")
             )
 
     async def test_invalid_regex_raises(self, wrapper):

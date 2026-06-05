@@ -448,7 +448,7 @@ Operations apply in order; the whole call is **atomic** (an invalid op — unkno
 
 ---
 
-## `find_replace_in_note_type`
+## `find_replace_note_types`
 
 Find and replace text inside a **single note type's card templates and shared CSS** — the note type *definition*, not note field values. No note is touched. Use `front`/`back`/`css` to pick where to search (all on by default). Typical uses: fix a `{{OldField}}` reference across a model's templates after a field rename, swap a CSS class or colour, or correct a typo in template markup for all of a note type's cards at once.
 

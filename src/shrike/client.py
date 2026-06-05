@@ -41,7 +41,7 @@ from shrike.schemas import (
     EmbeddingStatus,
     EmbeddingStopResponse,
     FieldOp,
-    FindReplaceInNoteTypeResponse,
+    FindReplaceNoteTypesResponse,
     FindReplaceResponse,
     IndexRebuildResponse,
     IndexSaveResponse,
@@ -346,7 +346,7 @@ class ShrikeClient:
             self._call("update_note_type_templates", {"note_type": note_type, "operations": ops})
         )
 
-    def find_replace_in_note_type(
+    def find_replace_note_types(
         self,
         note_type: str,
         search: str,
@@ -357,10 +357,10 @@ class ShrikeClient:
         css: bool = True,
         regex: bool = False,
         match_case: bool = True,
-    ) -> FindReplaceInNoteTypeResponse:
-        return FindReplaceInNoteTypeResponse.model_validate(
+    ) -> FindReplaceNoteTypesResponse:
+        return FindReplaceNoteTypesResponse.model_validate(
             self._call(
-                "find_replace_in_note_type",
+                "find_replace_note_types",
                 {
                     "note_type": note_type,
                     "search": search,

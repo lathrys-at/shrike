@@ -275,7 +275,7 @@ and every move/insert/non-trailing-remove goes through the identity tools. The
 overlap that remains (those simple edits doable both ways) is the benign
 PUT-vs-PATCH kind; the dangerous overlap is gone.
 
-### `find_replace_in_note_type` rewrites template text, not fields (#76)
+### `find_replace_note_types` rewrites template text, not fields (#76)
 
 anki-connect's `findAndReplaceInModels` is the third note-type edit tool, and it
 is deliberately a *different* operation from the find-and-replace over note
