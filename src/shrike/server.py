@@ -19,6 +19,7 @@ from mcp.server.transport_security import (
     TransportSecuritySettings,
 )
 
+from shrike._mcp_perf import install_validator_cache
 from shrike.collection import DEFAULT_LOCK_HOLD, CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
 from shrike.embedding import EmbeddingRuntime
@@ -714,6 +715,9 @@ def main() -> None:
             args.allowed_origin or [],
         )
     mcp = create_mcp(host=args.host, port=args.port, transport_security=transport_security)
+    # Compile each tool schema's JSON Schema validator once instead of per call
+    # (the SDK's jsonschema.validate rebuilds it every request — ~5.8ms/call).
+    install_validator_cache()
     register_tools(mcp, wrapper, index=index, saver=saver)
     _register_custom_routes(
         mcp,
