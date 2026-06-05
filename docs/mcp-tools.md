@@ -316,7 +316,7 @@ Card templates use Anki's `{{FieldName}}` replacement syntax. The special `{{Fro
 |---|---|---|---|
 | `id` | `integer` | no | Note type ID. Present = update, absent = create. |
 | `name` | `string` | create | Name for the note type (e.g., `"Japanese Vocabulary"`). |
-| `fields` | `string[]` | create | Ordered list of field names (e.g., `["Word", "Reading", "Meaning"]`). On update, replaces the field list **by position**: the field at each position keeps its note data even when renamed. Only shortening the list discards the trailing fields' data; lengthening it appends empty fields. |
+| `fields` | `string[]` | create | Ordered list of field names (e.g., `["Word", "Reading", "Meaning"]`). On update, replaces the field list **by position**: the field at each position keeps its note data even when renamed. Only shortening the list discards the trailing fields' data; lengthening it appends empty fields. May only rename in place, append, or drop trailing fields — a move, insert, or non-trailing remove is **rejected** (it would mislabel note data); use [`update_note_type_fields`](#update_note_type_fields). |
 | `templates` | `object[]` | create | Card templates. Each produces one card per note (except cloze types). On update, replaced **by position** like `fields`: existing cards (and their scheduling history) are preserved; only removing a trailing template deletes its cards. See template schema below. |
 | `css` | `string` | create | CSS styling shared across all cards of this note type. |
 | `is_cloze` | `boolean` | no | If `true`, this is a cloze deletion note type. Default `false`. Cannot be changed on update. |

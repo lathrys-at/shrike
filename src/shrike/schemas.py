@@ -120,7 +120,9 @@ class NoteTypeInput(BaseModel):
             "Ordered list of field names. Required for new note types. On update, "
             "replaces the field list by position — the field at each position keeps "
             "its note data even when renamed; only shortening the list drops the "
-            "trailing fields' data."
+            "trailing fields' data. May only rename in place, append, or drop trailing "
+            "fields; moving/inserting/removing a non-trailing field is rejected (use "
+            "update_note_type_fields)."
         ),
     )
     templates: list[TemplateInput] | None = Field(

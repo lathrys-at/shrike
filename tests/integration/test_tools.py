@@ -754,6 +754,27 @@ class TestNoteTypeLifecycle:
         atomic = next(nt for nt in info["note_types"] if nt["name"] == "Atomic")
         assert atomic["fields"] == ["X", "Y"]  # unchanged
 
+    def test_upsert_field_reorder_rejected(self, mcp):
+        # The position-keyed upsert refuses a move (would mislabel data) and
+        # redirects to update_note_type_fields.
+        created = mcp(
+            "upsert_note_types",
+            {
+                "note_types": [
+                    {
+                        "name": "NoReorder",
+                        "fields": ["A", "B"],
+                        "templates": [{"name": "C1", "front": "{{A}}", "back": "{{B}}"}],
+                        "css": "",
+                    }
+                ]
+            },
+        )
+        nt_id = created["results"][0]["id"]
+        result = mcp("upsert_note_types", {"note_types": [{"id": nt_id, "fields": ["B", "A"]}]})
+        assert result["results"][0]["status"] == "error"
+        assert "update_note_type_fields" in result["results"][0]["error"]
+
     def test_duplicate_name_rejected(self, mcp):
         result = mcp(
             "upsert_note_types",

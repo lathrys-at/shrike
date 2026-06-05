@@ -205,6 +205,24 @@ changes nothing; only once every op is known-good are the primitives applied to
 one in-memory notetype and persisted with a single `update_dict`. Like
 `upsert_note_types`, it does no inline index maintenance — the `col.mod` bump
 drives a drift-rebuild on next startup (correct, since a removed field changes a
-note's embedding text). Remaining for #76: `findAndReplaceInModels` (overlaps the
-separate find-and-replace issue #85) and the field font/description metadata
-getters/setters.
+note's embedding text).
+
+With a correct mover in hand, the two tools are **reconciled** so they don't
+overlap dangerously: `upsert_note_types`' positional `fields` replace now
+*refuses* any update where an existing field name lands at a different position —
+a reorder, an insert before another field, or a non-trailing remove (which shifts
+the names after it). Positionally those silently re-label note data (the value
+stays in its slot while the slot's name changes), and that's exactly the footgun
+the position-keyed contract can't avoid. The check is one rule
+(`_reject_unsound_field_replace`: an existing name may not change index) and its
+error points at `update_note_type_fields`. So `upsert_note_types` keeps only the
+*unambiguous* positional edits — rename-in-place, append, trailing-remove — and
+every move/insert/middle-remove goes through the identity tool. The overlap that
+remains (rename/append/trailing-remove doable both ways) is the benign PUT-vs-PATCH
+kind; the dangerous overlap is gone. Remaining for #76: `findAndReplaceInModels`
+(overlaps the separate find-and-replace issue #85) and the field font/description
+metadata getters/setters.
+
+The same positional footgun still exists for **templates** (a reorder re-labels
+cards), but there's no template-ops tool to redirect to yet, so it's left
+unguarded for now — a follow-up when identity-based template ops land.

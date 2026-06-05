@@ -733,9 +733,14 @@ def register_tools(
         the field/template at each position keeps its data even when renamed or
         retitled. Only shortening the list discards the trailing entries —
         removing a field drops that field's data, removing a template deletes
-        its cards. Adding entries appends empty fields / new cards. (To move a
-        field or template rather than rename-by-position, use the explicit
-        update_note_type_fields operations.)"""
+        its cards. Adding entries appends empty fields / new cards.
+
+        Because the replace is positional, a `fields` update may only rename in
+        place, append, or drop trailing fields. Anything that would *move* an
+        existing field — a reorder, an insert before another field, or a
+        non-trailing remove — is rejected (it would silently mislabel note
+        data); use update_note_type_fields (reposition / add / remove / rename)
+        for those."""
         names = [nt.name or f"id={nt.id}" for nt in note_types]
         logger.info("upsert_note_types count=%d names=%s", len(note_types), ", ".join(names))
 

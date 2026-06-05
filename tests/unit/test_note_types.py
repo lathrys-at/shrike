@@ -266,6 +266,47 @@ def _update_type(wrapper, payload):
     return wrapper.run_sync(lambda c: upsert_note_types(c, [payload]))
 
 
+class TestUpsertFieldReplaceRejectsUnsound:
+    """upsert_note_types' positional field replace refuses moves/inserts/
+    non-trailing removes — they would silently mislabel note data — and points
+    the caller at update_note_type_fields. Rename/append/trailing-remove stay
+    allowed (covered by TestUpdateNoteTypeFieldsPreserveData)."""
+
+    async def test_reorder_rejected_and_data_untouched(self, wrapper):
+        mid, nid = _type_with_note(wrapper, ["A", "B", "C"], {"A": "va", "B": "vb", "C": "vc"})
+        res = _update_type(wrapper, {"id": mid, "fields": ["C", "A", "B"]})
+        assert res[0]["status"] == "error"
+        assert "update_note_type_fields" in res[0]["error"]
+        assert _content(wrapper, nid) == {"A": "va", "B": "vb", "C": "vc"}
+
+    async def test_swap_rejected(self, wrapper):
+        mid, _ = _type_with_note(wrapper, ["A", "B"], {"A": "va", "B": "vb"})
+        res = _update_type(wrapper, {"id": mid, "fields": ["B", "A"]})
+        assert res[0]["status"] == "error"
+        assert "update_note_type_fields" in res[0]["error"]
+
+    async def test_remove_non_trailing_rejected(self, wrapper):
+        mid, nid = _type_with_note(wrapper, ["A", "B", "C"], {"A": "va", "B": "vb", "C": "vc"})
+        res = _update_type(wrapper, {"id": mid, "fields": ["A", "C"]})
+        assert res[0]["status"] == "error"
+        assert "update_note_type_fields" in res[0]["error"]
+        assert _content(wrapper, nid) == {"A": "va", "B": "vb", "C": "vc"}
+
+    async def test_insert_before_rejected(self, wrapper):
+        mid, _ = _type_with_note(wrapper, ["A", "B"], {"A": "va", "B": "vb"})
+        res = _update_type(wrapper, {"id": mid, "fields": ["A", "X", "B"]})
+        assert res[0]["status"] == "error"
+        assert "update_note_type_fields" in res[0]["error"]
+
+    async def test_rename_plus_append_still_allowed(self, wrapper):
+        # A rename in place combined with an append shifts no existing field, so
+        # it stays a sound positional replace.
+        mid, nid = _type_with_note(wrapper, ["A", "B"], {"A": "va", "B": "vb"})
+        res = _update_type(wrapper, {"id": mid, "fields": ["Aa", "B", "C"]})
+        assert res[0]["status"] == "updated"
+        assert _content(wrapper, nid) == {"Aa": "va", "B": "vb", "C": ""}
+
+
 class TestUpdateNoteTypeFieldsPreserveData:
     """Regression: a whole-list field/template replace must not destroy note data.
 

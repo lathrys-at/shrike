@@ -123,20 +123,51 @@ def _set_fields(col: Collection, notetype: dict[str, Any], names: list[str]) -> 
     ones whose position survives, appending new fields only for added positions,
     and dropping the tail for removed ones (the only positions whose data Anki
     discards). This makes a whole-list field replace data-safe, matching Anki's
-    "fields are keyed by position" rule. (A true by-identity reorder is a
-    separate, explicit operation — see #76; here a reordered name list is
-    interpreted positionally, i.e. as renames, which is non-destructive.)
+    "fields are keyed by position" rule.
+
+    Because the replace is positional, it can only express a rename-in-place, an
+    append, or a trailing remove. Anything that *moves* an existing field —
+    a reorder, an insert before another field, or a non-trailing remove — would
+    silently re-label note data (the value stays in its slot while the name on
+    that slot changes). We refuse those: see ``_reject_unsound_field_replace``.
+    Use ``update_note_type_fields`` for identity-based moves/inserts/removes.
     """
-    old = notetype["flds"]
+    old = [f["name"] for f in notetype["flds"]]
+    _reject_unsound_field_replace(old, names)
+
+    old_flds = notetype["flds"]
     new = []
     for i, name in enumerate(names):
-        if i < len(old):
-            field = old[i]
+        if i < len(old_flds):
+            field = old_flds[i]
             field["name"] = name
         else:
             field = col.models.new_field(name)
         new.append(field)
     notetype["flds"] = new
+
+
+def _reject_unsound_field_replace(old: list[str], new: list[str]) -> None:
+    """Reject a positional field replace that would mislabel note data.
+
+    The replace renames the field *at position i* to ``new[i]``; data never
+    leaves its slot. That's sound only while every existing field name stays at
+    its current position. If an existing name appears at a *different* position
+    in ``new``, the caller is really asking to move it (reorder, insert, or
+    non-trailing remove, which shifts the names after it) — which positionally
+    becomes a silent re-label. Refuse it and point at the explicit tool.
+    """
+    old_index = {name: i for i, name in enumerate(old)}
+    for i, name in enumerate(new):
+        if name in old_index and old_index[name] != i:
+            raise ValueError(
+                f"Field '{name}' would move from position {old_index[name]} to {i}. "
+                "upsert_note_types replaces fields by position — it can only rename a "
+                "field in place, append new fields, or drop trailing fields; moving, "
+                "inserting, or removing a non-trailing field this way would silently "
+                "mislabel note data. Use update_note_type_fields (reposition / add / "
+                "remove / rename) for that."
+            )
 
 
 def _set_templates(
