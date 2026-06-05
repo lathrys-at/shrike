@@ -439,11 +439,15 @@ class CollectionWrapper:
 
         db = self.col.db
         assert db is not None  # always present on an open collection
+        # Let SQLite produce the distinct (note, deck) pairs: a card in a filtered
+        # deck counts toward both its current deck (did) and original (odid), and
+        # UNION both dedups those and collapses a note's many cards in one deck to
+        # a single row — so Python walks distinct pairs, not every card.
         nids_by_deck: dict[int, set[int]] = defaultdict(set)
-        for nid, did, odid in db.all("select nid, did, odid from cards"):
+        for nid, did in db.all(
+            "select nid, did from cards union select nid, odid from cards where odid != 0"
+        ):
             nids_by_deck[did].add(nid)
-            if odid:
-                nids_by_deck[odid].add(nid)
 
         # Roll each deck's notes up into itself and every ancestor (by name
         # prefix), so a parent's count includes all its subdecks' notes.
