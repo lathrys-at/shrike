@@ -203,11 +203,9 @@ class VectorIndex:
 
             with self._lock:
                 idx = self._ensure_index(vecs_array.shape[1])
-
-                for key in batch_ids:
-                    if key in idx:
-                        idx.remove(key)
-
+                # Drop any keys already present in one call (batch remove ignores
+                # keys not in the index) so a re-add replaces rather than dupes.
+                idx.remove(keys_array)
                 idx.add(keys_array, vecs_array)
             added += len(batch_ids)
 
@@ -220,12 +218,10 @@ class VectorIndex:
         if self._index is None or not note_ids:
             return 0
 
-        removed = 0
         with self._lock:
-            for nid in note_ids:
-                if nid in self._index:
-                    self._index.remove(nid)
-                    removed += 1
+            # Batch remove returns the count actually removed and ignores ids not
+            # in the index — no need for a per-id membership check.
+            removed = int(self._index.remove(np.array(note_ids, dtype=np.int64)))
 
         self._dirty += removed
         logger.debug("Removed %d vectors from index (total: %d)", removed, self.size)
@@ -250,8 +246,13 @@ class VectorIndex:
         assert self._index is not None
         results: list[list[dict[str, Any]]] = []
         with self._lock:
-            for vec in query_array:
-                matches = self._index.search(vec, top_k)
+            # One batched search over all queries — usearch parallelises across
+            # them internally, versus a Python loop of single-query searches. It
+            # returns Matches for a single query, BatchMatches (indexable per
+            # query) for several.
+            raw = self._index.search(query_array, top_k)
+            per_query = [raw] if len(texts) == 1 else [raw[i] for i in range(len(texts))]
+            for matches in per_query:
                 result_list: list[dict[str, Any]] = []
                 for key, dist in zip(matches.keys, matches.distances, strict=True):
                     if int(key) == 0 and float(dist) == 0.0 and self.size == 0:
