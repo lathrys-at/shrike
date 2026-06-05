@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import enum
+import hashlib
 import json
 import logging
 import threading
@@ -29,6 +30,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger("shrike.index")
 
 BATCH_SIZE = 64
+
+
+def _hash_text(text: str) -> str:
+    """Stable fingerprint of a note's embedding text.
+
+    Used to tell, on drift, which notes' embedding text actually changed so a
+    reconcile re-embeds only those. Must be process-stable (so not ``hash()``);
+    BLAKE2b-64 is fast and collision-safe enough for change detection — a
+    collision would at worst skip re-embedding one changed note (a stale vector),
+    which the next ``model_id`` change or explicit rebuild corrects.
+    """
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest()
+
 
 # Defaults for the debounced index flush (see IndexSaver). Persistence is
 # otherwise shutdown- and rebuild-only; the flush bounds how much incremental
@@ -63,11 +77,17 @@ class VectorIndex:
         self._dir = Path(path)
         self._index_path = self._dir / "index.usearch"
         self._meta_path = self._dir / "index.meta.json"
+        self._hashes_path = self._dir / "index.hashes.json"
         self._embedding = embedding_service
         self._index: Any | None = None
         self._ndim: int | None = None
         self._col_mod: int | None = None
         self._model_id: str | None = None
+        # note_id -> embedding-text hash for the vectors currently in the index.
+        # Drives incremental reconcile (re-embed only changed notes). ``None``
+        # means "no per-note state" (old index / never built) — reconcile then
+        # falls back to a full rebuild. Maintained by add/remove/rebuild.
+        self._note_hashes: dict[int, str] | None = None
         self._state = IndexState.UNAVAILABLE if embedding_service is None else IndexState.READY
         self._build_progress: tuple[int, int] = (0, 0)
         self._build_error: str | None = None
@@ -162,6 +182,18 @@ class VectorIndex:
             logger.warning("Failed to load index from %s: %s", self._index_path, e)
             self._index = None
             self._ndim = None
+            return
+
+        # Per-note hashes are an optional sidecar: a missing or corrupt file (or
+        # an index built before this existed) leaves _note_hashes None, so the
+        # next reconcile safely falls back to a full rebuild.
+        if self._hashes_path.exists():
+            try:
+                self._note_hashes = {
+                    int(k): v for k, v in json.loads(self._hashes_path.read_text()).items()
+                }
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning("Corrupt index hashes at %s: %s", self._hashes_path, e)
 
     def _ensure_index(self, ndim: int) -> Any:
         """Create the USearch index if it doesn't exist yet."""
@@ -207,6 +239,9 @@ class VectorIndex:
                 # keys not in the index) so a re-add replaces rather than dupes.
                 idx.remove(keys_array)
                 idx.add(keys_array, vecs_array)
+                if self._note_hashes is not None:
+                    for nid, text in zip(batch_ids, batch_texts, strict=True):
+                        self._note_hashes[int(nid)] = _hash_text(text)
             added += len(batch_ids)
 
         self._dirty += added
@@ -222,6 +257,9 @@ class VectorIndex:
             # Batch remove returns the count actually removed and ignores ids not
             # in the index — no need for a per-id membership check.
             removed = int(self._index.remove(np.array(note_ids, dtype=np.int64)))
+            if self._note_hashes is not None:
+                for nid in note_ids:
+                    self._note_hashes.pop(int(nid), None)
 
         self._dirty += removed
         logger.debug("Removed %d vectors from index (total: %d)", removed, self.size)
@@ -286,6 +324,8 @@ class VectorIndex:
         with self._lock:
             self._index.save(str(self._index_path))
             self._meta_path.write_text(json.dumps(meta))
+            if self._note_hashes is not None:
+                self._hashes_path.write_text(json.dumps(self._note_hashes))
             self._dirty = 0
         logger.debug("Saved vector index: %d vectors to %s", self.size, self._index_path)
 
@@ -295,10 +335,10 @@ class VectorIndex:
             self._index = None
             self._ndim = None
             self._model_id = None
-        if self._index_path.exists():
-            self._index_path.unlink()
-        if self._meta_path.exists():
-            self._meta_path.unlink()
+            self._note_hashes = None
+        for path in (self._index_path, self._meta_path, self._hashes_path):
+            if path.exists():
+                path.unlink()
         logger.info("Cleared vector index at %s", self._dir)
 
     def check_drift(self, current_col_mod: int, model_id: str | None = None) -> bool:
@@ -356,6 +396,8 @@ class VectorIndex:
             with self._lock:
                 self._index = None
                 self._ndim = None
+                # Start fresh — add() repopulates per-note hashes as it embeds.
+                self._note_hashes = {}
 
             indexed = 0
             for i in range(0, total, BATCH_SIZE):
@@ -378,6 +420,96 @@ class VectorIndex:
             self._build_error = str(e)
             logger.error("Index rebuild failed: %s", e)
             raise
+
+    def reconcile(
+        self,
+        note_ids: Sequence[int],
+        texts: Sequence[str],
+        col_mod: int,
+        *,
+        model_id: str | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """Incrementally bring the index up to date on drift.
+
+        Re-embeds only the notes whose embedding *text* changed (by hash) plus
+        new notes, removes deleted ones, and leaves every unchanged vector in
+        place — instead of re-embedding the whole collection. The end state is
+        identical to a full rebuild over the same notes.
+
+        Falls back to ``rebuild`` when there's no prior per-note hash state (an
+        index built before this existed, or never built), no index is loaded, or
+        the model changed (which moves every vector to a different space).
+        """
+        old = self._note_hashes
+        model_changed = model_id is not None and self._model_id != model_id
+        if old is None or self._index is None or model_changed:
+            self.rebuild(note_ids, texts, col_mod, model_id=model_id, on_progress=on_progress)
+            return
+
+        new_hashes = {int(nid): _hash_text(t) for nid, t in zip(note_ids, texts, strict=True)}
+        text_by_id = {int(nid): t for nid, t in zip(note_ids, texts, strict=True)}
+        to_embed = [nid for nid, h in new_hashes.items() if old.get(nid) != h]
+        to_remove = [nid for nid in old if nid not in new_hashes]
+
+        if not to_embed and not to_remove:
+            # A non-embedding edit (tags/deck/template) bumped col.mod without
+            # changing any note's embedding text: just advance the watermark.
+            self._col_mod = col_mod
+            self.save()
+            logger.info("Index reconcile: no embedding-text changes (col_mod=%d)", col_mod)
+            return
+
+        logger.info(
+            "Index reconcile: re-embed %d, remove %d (of %d notes; a full rebuild would embed %d)",
+            len(to_embed),
+            len(to_remove),
+            len(new_hashes),
+            len(new_hashes),
+        )
+        self._state = IndexState.BUILDING
+        self._build_progress = (0, len(to_embed))
+        self._build_error = None
+        try:
+            if to_remove:
+                self.remove(to_remove)
+            if to_embed:
+                self.add(to_embed, [text_by_id[nid] for nid in to_embed])
+            # add/remove already maintain hashes incrementally; set the full
+            # current state as the authoritative record before saving.
+            self._note_hashes = new_hashes
+            self._col_mod = col_mod
+            if model_id is not None:
+                self._model_id = model_id
+            self.save()
+            self._state = IndexState.READY
+            logger.info("Index reconcile complete: %d vectors", self.size)
+        except Exception as e:
+            self._state = IndexState.ERROR
+            self._build_error = str(e)
+            logger.error("Index reconcile failed: %s", e)
+            raise
+
+    def reconcile_in_background(
+        self,
+        note_ids: Sequence[int],
+        texts: Sequence[str],
+        col_mod: int,
+        *,
+        model_id: str | None = None,
+    ) -> None:
+        """Start an incremental reconcile in a background thread."""
+        if self._state == IndexState.BUILDING:
+            logger.warning("Rebuild already in progress, skipping")
+            return
+
+        def _run() -> None:
+            with contextlib.suppress(Exception):
+                self.reconcile(note_ids, texts, col_mod, model_id=model_id)
+
+        self._build_thread = threading.Thread(target=_run, name="index-reconcile", daemon=True)
+        self._build_thread.start()
+        logger.info("Background index reconcile started (%d notes)", len(note_ids))
 
     def rebuild_in_background(
         self,

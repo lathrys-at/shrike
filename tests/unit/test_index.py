@@ -572,3 +572,98 @@ class TestRebuildInBackground:
         idx.rebuild_in_background([1], ["a"], col_mod=100)
         idx._build_thread.join(timeout=5)  # type: ignore[union-attr]
         assert idx.state == IndexState.ERROR
+
+
+def _vectors(idx: VectorIndex) -> dict[int, tuple]:
+    """The index's {note_id: rounded vector} — for asserting two indexes match."""
+    keys = list(idx._index.keys)  # type: ignore[union-attr]
+    return {int(k): tuple(np.round(idx._index.get(k), 5)) for k in keys}  # type: ignore[union-attr]
+
+
+def _embedded(svc: MagicMock) -> list[str]:
+    """Every text passed to embed() since the last reset, flattened."""
+    return [t for call in svc.embed.call_args_list for t in call.args[0]]
+
+
+class TestReconcile:
+    """Incremental reconcile (#38): re-embed only changed notes on drift, and
+    leave an index identical to a full rebuild over the same final state."""
+
+    def test_reconcile_matches_full_rebuild(
+        self, tmp_path: Path, embedding_service: MagicMock
+    ) -> None:
+        idx = VectorIndex(tmp_path / "a", embedding_service=embedding_service)
+        idx.rebuild([1, 2, 3, 4], ["t1", "t2", "t3", "t4"], col_mod=1)
+        # change t2, delete 4, add 5; 1 and 3 unchanged.
+        new_ids, new_texts = [1, 2, 3, 5], ["t1", "t2-changed", "t3", "t5"]
+        idx.reconcile(new_ids, new_texts, col_mod=2)
+
+        ref = VectorIndex(tmp_path / "b", embedding_service=embedding_service)
+        ref.rebuild(new_ids, new_texts, col_mod=2)
+
+        assert _vectors(idx) == _vectors(ref)
+        assert idx.col_mod == 2
+
+    def test_only_reembeds_changed_and_new(
+        self, index: VectorIndex, embedding_service: MagicMock
+    ) -> None:
+        index.rebuild([1, 2, 3], ["a", "b", "c"], col_mod=1)
+        embedding_service.embed.reset_mock()
+        index.reconcile([1, 2, 3, 4], ["a", "b-new", "c", "d"], col_mod=2)
+        assert sorted(_embedded(embedding_service)) == ["b-new", "d"]
+
+    def test_removes_deleted(self, index: VectorIndex) -> None:
+        index.rebuild([1, 2, 3], ["a", "b", "c"], col_mod=1)
+        index.reconcile([1, 3], ["a", "c"], col_mod=2)
+        assert index.size == 2
+        assert not index.contains(2)
+
+    def test_no_text_change_advances_col_mod_without_embedding(
+        self, index: VectorIndex, embedding_service: MagicMock
+    ) -> None:
+        index.rebuild([1, 2], ["a", "b"], col_mod=1)
+        embedding_service.embed.reset_mock()
+        index.reconcile([1, 2], ["a", "b"], col_mod=99)
+        assert embedding_service.embed.call_count == 0
+        assert index.col_mod == 99
+
+    def test_model_change_falls_back_to_full_rebuild(
+        self, index: VectorIndex, embedding_service: MagicMock
+    ) -> None:
+        index.rebuild([1, 2], ["a", "b"], col_mod=1, model_id="m1")
+        embedding_service.embed.reset_mock()
+        index.reconcile([1, 2], ["a", "b"], col_mod=2, model_id="m2")
+        assert sorted(_embedded(embedding_service)) == ["a", "b"]  # every vector re-embedded
+        assert index.model_id == "m2"
+
+    def test_no_prior_hashes_falls_back_to_full_rebuild(
+        self, index: VectorIndex, embedding_service: MagicMock
+    ) -> None:
+        index.rebuild([1, 2], ["a", "b"], col_mod=1)
+        index._note_hashes = None  # simulate an index built before hashes existed
+        embedding_service.embed.reset_mock()
+        index.reconcile([1, 2, 3], ["a", "b", "c"], col_mod=2)
+        assert sorted(_embedded(embedding_service)) == ["a", "b", "c"]
+
+    def test_hashes_persist_across_reload(
+        self, tmp_path: Path, embedding_service: MagicMock
+    ) -> None:
+        idx = VectorIndex(tmp_path / "i", embedding_service=embedding_service)
+        idx.rebuild([1, 2], ["a", "b"], col_mod=1)
+        reloaded = VectorIndex(tmp_path / "i", embedding_service=embedding_service)
+        assert reloaded._note_hashes is not None
+        embedding_service.embed.reset_mock()
+        reloaded.reconcile([1, 2], ["a", "b-changed"], col_mod=2)
+        assert _embedded(embedding_service) == ["b-changed"]  # only the changed note
+
+    def test_incremental_add_keeps_hashes_current(
+        self, tmp_path: Path, embedding_service: MagicMock
+    ) -> None:
+        # add() maintains hashes, so a reconcile doesn't re-embed notes Shrike
+        # itself just upserted.
+        idx = VectorIndex(tmp_path / "i", embedding_service=embedding_service)
+        idx.rebuild([1], ["a"], col_mod=1)
+        idx.add([2], ["b"])
+        embedding_service.embed.reset_mock()
+        idx.reconcile([1, 2], ["a", "b"], col_mod=2)
+        assert embedding_service.embed.call_count == 0

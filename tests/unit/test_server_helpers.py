@@ -15,17 +15,20 @@ def _index(*, drift: bool) -> MagicMock:
 
 
 class TestMaybeRebuild:
-    def test_starts_rebuild_on_drift(self):
+    def test_starts_reconcile_on_drift(self):
+        # Drift reconciles incrementally (reconcile falls back to a full rebuild
+        # internally when the model changed or there's no prior per-note state).
         idx = _index(drift=True)
         assert _maybe_rebuild(idx, "model", 123, [1, 2], ["a", "b"]) is True
-        idx.rebuild_in_background.assert_called_once()
+        idx.reconcile_in_background.assert_called_once()
+        idx.rebuild_in_background.assert_not_called()
 
-    def test_no_rebuild_without_drift(self):
+    def test_no_work_without_drift(self):
         idx = _index(drift=False)
         assert _maybe_rebuild(idx, "model", 123, [1], ["a"]) is False
-        idx.rebuild_in_background.assert_not_called()
+        idx.reconcile_in_background.assert_not_called()
 
-    def test_no_rebuild_on_empty_collection_even_if_drifted(self):
+    def test_no_work_on_empty_collection_even_if_drifted(self):
         idx = _index(drift=True)
         assert _maybe_rebuild(idx, "model", 123, [], []) is False
-        idx.rebuild_in_background.assert_not_called()
+        idx.reconcile_in_background.assert_not_called()

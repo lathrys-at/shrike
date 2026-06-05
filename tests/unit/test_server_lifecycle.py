@@ -26,25 +26,25 @@ class TestCollectForRebuild:
 
 
 class TestMaybeRebuild:
-    def test_rebuilds_on_drift_with_notes(self):
+    def test_reconciles_on_drift_with_notes(self):
         index = MagicMock()
         index.check_drift.return_value = True
         _maybe_rebuild(index, "model-1", 99, [1, 2], ["a", "b"])
-        index.rebuild_in_background.assert_called_once_with(
+        index.reconcile_in_background.assert_called_once_with(
             [1, 2], ["a", "b"], 99, model_id="model-1"
         )
 
-    def test_no_rebuild_when_no_drift(self):
+    def test_no_work_when_no_drift(self):
         index = MagicMock()
         index.check_drift.return_value = False
         _maybe_rebuild(index, "model-1", 99, [1, 2], ["a", "b"])
-        index.rebuild_in_background.assert_not_called()
+        index.reconcile_in_background.assert_not_called()
 
     def test_drift_but_empty_collection_skips(self):
         index = MagicMock()
         index.check_drift.return_value = True
         _maybe_rebuild(index, "model-1", 99, [], [])
-        index.rebuild_in_background.assert_not_called()
+        index.reconcile_in_background.assert_not_called()
 
 
 class TestNonLoopbackGuard:

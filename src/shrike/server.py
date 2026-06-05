@@ -52,14 +52,17 @@ def _maybe_rebuild(
     note_ids: list[int],
     texts: list[str],
 ) -> bool:
-    """Trigger a background rebuild if the index drifted or the model changed.
+    """Reconcile the index in the background if it drifted or the model changed.
 
-    Returns True if a rebuild was started (drift detected and the collection is
-    non-empty), False otherwise.
+    Drift (an external ``col.mod`` bump) reconciles incrementally — re-embedding
+    only the notes whose text changed — rather than re-embedding the whole
+    collection; ``reconcile`` itself falls back to a full rebuild when the model
+    changed or there's no prior per-note state. Returns True if work was started
+    (drift detected and the collection is non-empty), False otherwise.
     """
     if index.check_drift(col_mod, model_id):
         if note_ids:
-            index.rebuild_in_background(note_ids, texts, col_mod, model_id=model_id)
+            index.reconcile_in_background(note_ids, texts, col_mod, model_id=model_id)
             return True
         logger.info("Collection is empty, skipping index rebuild")
     return False
