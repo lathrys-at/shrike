@@ -68,7 +68,7 @@ tests/
 │   ├── test_daemon.py           # stop_server HTTP→SIGTERM→SIGKILL escalation
 │   └── test_collection_concurrency.py  # single-worker-thread serialization
 └── integration/                  # 206 tests — real server subprocess + HTTP transport
-    ├── conftest.py               # server fixture (session-scoped), mcp fixture
+    ├── conftest.py               # shared session server + per-test collection reset; mcp/runner; isolated_server
     ├── test_tools.py
     ├── test_cli.py
     ├── test_security.py          # custom-route Host/Origin guard + non-loopback refusal
@@ -128,6 +128,23 @@ coverage hook above (the `.pth` fires for each xdist worker *and* each spawned
 server, so `coverage combine` merges everything to the same total). CI runs both
 suites with `-n auto`. Locally it's opt-in — the default (no `-n`) stays serial so
 `-x`, `-s`, and `pdb` keep working for debugging.
+
+**Integration tests share one server, with a per-test reset.** Spawning a server
+subprocess per test class dominated the suite (each boots `anki` under coverage),
+so all non-embedding integration tests share a single session-scoped `server`
+(one boot per xdist worker), and an autouse fixture (`_reset_shared_collection`)
+resets the collection to its pristine baseline after each test — deletes every
+note, then any non-baseline deck / note type. So a test always starts clean, and
+even collection-wide assertions (`total_notes == 0`) hold regardless of run order.
+**When writing an integration test you don't need to clean up after yourself** —
+just don't assume the collection is empty mid-suite without the reset, and prefer
+asserting on your own deck/tag. Two affordances: `scoped_collection(url)` (a
+context manager that snapshots and unrolls a sub-section explicitly) and
+`isolated_server` / `isolated_mcp` / `isolated_runner` (opt-in fixtures that spawn
+a *dedicated* collection for the rare test that needs an exclusive, un-reset one —
+e.g. asserting on collection-wide tag counts, which the reset can't restore since
+Anki keeps the tag registry). Embedding tests use their own `embedding_server` /
+`collection_server` and are untouched by the reset.
 
 ### Linting
 

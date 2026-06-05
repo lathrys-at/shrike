@@ -18,6 +18,8 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,7 @@ import pytest
 from click.testing import CliRunner
 
 from shrike.cli import cli
+from shrike.client import ShrikeClient
 from tests.integration.model_cache import (
     EMBEDDING_MODEL_NAME,
     EMBEDDING_MODEL_URL,
@@ -248,21 +251,102 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
             proc.wait()
 
 
-@pytest.fixture(scope="class")
+# -- Shared server + per-test collection reset --------------------------------
+#
+# Spawning a `python -m shrike.server` subprocess per test class dominated the
+# integration suite (each boots anki under coverage). Instead all non-embedding
+# tests share ONE server per xdist worker, and the collection is reset to its
+# pristine baseline after every test (`_reset_shared_collection`, autouse) so a
+# test always starts clean — which keeps even collection-wide assertions
+# (`total_notes == 0`) valid regardless of run order. Tests that genuinely need
+# their own exclusive collection opt into `isolated_server`.
+
+Baseline = tuple[frozenset[str], frozenset[str]]  # (deck names, note-type names)
+
+
+def _snapshot_baseline(url: str) -> Baseline:
+    client = ShrikeClient(url, autostart=False)
+    ci = client.collection_info(include=["decks", "note_types"])
+    return (
+        frozenset(d.name for d in (ci.decks or [])),
+        frozenset(t.name for t in (ci.note_types or [])),
+    )
+
+
+def _reset_to_baseline(url: str, baseline: Baseline) -> None:
+    """Return a collection to *baseline*: delete every note, then any deck or
+    note type not in the baseline. Notes go first so the decks/(unused) note
+    types become deletable. Best-effort and idempotent."""
+    baseline_decks, baseline_types = baseline
+    client = ShrikeClient(url, autostart=False)
+
+    # `modified_since` an old date matches all notes; paginate since list_notes
+    # caps at 200 and a test may have created more. (delete_notes batches >100.)
+    while True:
+        notes = client.list_notes(modified_since="2000-01-01T00:00:00Z", limit=200).notes
+        if not notes:
+            break
+        client.delete_notes([n.id for n in notes])
+
+    ci = client.collection_info(include=["decks", "note_types"])
+    extra_decks = [d.name for d in (ci.decks or []) if d.name not in baseline_decks]
+    if extra_decks:
+        client.delete_decks(extra_decks)
+    extra_types = [t.id for t in (ci.note_types or []) if t.name not in baseline_types]
+    if extra_types:
+        client.delete_note_types(extra_types)
+
+
+@contextmanager
+def scoped_collection(url: str) -> Iterator[ShrikeClient]:
+    """Explicit scope: snapshot the collection on enter, undo any notes / non-
+    baseline decks / note types created in the block on exit. Shared-server tests
+    get this automatically via the autouse reset; use this to sub-scope within a
+    test, or on an `isolated_server`. Yields a `ShrikeClient` for convenience."""
+    baseline = _snapshot_baseline(url)
+    try:
+        yield ShrikeClient(url, autostart=False)
+    finally:
+        _reset_to_baseline(url, baseline)
+
+
+@pytest.fixture(scope="session")
 def server(server_factory) -> ServerInfo:
-    """Class-scoped server — each test class gets its own fresh collection."""
-    return server_factory("class")
+    """Session-scoped server shared by all non-embedding tests (one boot per
+    xdist worker). The autouse `_reset_shared_collection` resets its collection
+    between tests; use `isolated_server` for an exclusive one."""
+    return server_factory("session")
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="session")
+def _baseline(server: ServerInfo) -> Baseline:
+    """Pristine decks/note-types, snapshotted once before any test mutates."""
+    return _snapshot_baseline(server.url)
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_collection(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Reset the shared collection to baseline after each test that used it.
+    Skipped for tests that don't touch the shared server (embedding tests on
+    `embedding_server`, or tests using `isolated_server`)."""
+    if not {"server", "mcp", "runner", "cli_config"} & set(request.fixturenames):
+        yield
+        return
+    # Capture the pristine baseline before the test body runs (session-scoped,
+    # so this snapshots once, on the first shared-server test's setup).
+    request.getfixturevalue("_baseline")
+    server: ServerInfo = request.getfixturevalue("server")
+    yield
+    _reset_to_baseline(server.url, request.getfixturevalue("_baseline"))
+
+
+@pytest.fixture(scope="session")
 def mcp(server: ServerInfo) -> MCPClient:
-    """MCP tool caller bound to the class's server."""
+    """MCP tool caller bound to the shared server."""
     return MCPClient(server.url)
 
 
-@pytest.fixture(scope="class")
-def cli_config(server: ServerInfo, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Isolated config file pointing at the class's server."""
+def _write_cli_config(server: ServerInfo, tmp_path_factory: pytest.TempPathFactory) -> Path:
     config_dir = tmp_path_factory.mktemp("cli-config")
     config_path = config_dir / "config.yml"
     config_path.write_text(
@@ -276,10 +360,41 @@ def cli_config(server: ServerInfo, tmp_path_factory: pytest.TempPathFactory) -> 
     return config_path
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="session")
+def cli_config(server: ServerInfo, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Config file pointing at the shared server."""
+    return _write_cli_config(server, tmp_path_factory)
+
+
+@pytest.fixture(scope="session")
 def runner(server: ServerInfo, cli_config: Path) -> CLIRunner:
-    """CLI test runner bound to the class's server."""
+    """CLI test runner bound to the shared server."""
     return CLIRunner(server.url, str(cli_config))
+
+
+# -- Opt-in isolation: a dedicated, exclusive collection for one test ----------
+
+
+@pytest.fixture
+def isolated_server(server_factory) -> ServerInfo:
+    """A fresh server/collection for a single test — for the rare cases needing a
+    pristine, exclusive collection that the autouse reset must not touch. Spawns
+    a server, so prefer the shared `server` unless isolation is genuinely needed."""
+    return server_factory("isolated")
+
+
+@pytest.fixture
+def isolated_mcp(isolated_server: ServerInfo) -> MCPClient:
+    """MCP caller bound to a dedicated `isolated_server`."""
+    return MCPClient(isolated_server.url)
+
+
+@pytest.fixture
+def isolated_runner(
+    isolated_server: ServerInfo, tmp_path_factory: pytest.TempPathFactory
+) -> CLIRunner:
+    """CLI runner bound to a dedicated `isolated_server`."""
+    return CLIRunner(isolated_server.url, str(_write_cli_config(isolated_server, tmp_path_factory)))
 
 
 # -- Embedding fixtures --
