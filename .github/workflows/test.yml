@@ -70,12 +70,14 @@ jobs:
               - '.github/scripts/install-llama-server.sh'
               - '.github/workflows/test.yml'
               - 'pyproject.toml'
-              - '.github/workflows/test.yml'
 
   lint:
     name: Lint & type check
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # `|| rc-label` forces this lane even on a docs-only diff the path filter
+    # would skip, so a release candidate runs the full suite at the PR level
+    # rather than first at the v* tag (#152).
+    if: needs.changes.outputs.code == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -107,7 +109,10 @@ jobs:
   test:
     name: Tests & coverage (linux)
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # `|| rc-label` forces this lane even on a docs-only diff the path filter
+    # would skip, so a release candidate runs the full suite at the PR level
+    # rather than first at the v* tag (#152).
+    if: needs.changes.outputs.code == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -149,7 +154,8 @@ jobs:
   embedding:
     name: Embedding tests (linux)
     needs: changes
-    if: needs.changes.outputs.embedding == 'true'
+    # Same rc-label escape hatch as the lint/test lanes (#152).
+    if: needs.changes.outputs.embedding == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
