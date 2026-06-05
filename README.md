@@ -200,6 +200,7 @@ Shrike exposes these MCP tools:
 - **update_note_type_fields**: add, remove, rename, or reposition a note type's fields (data-safe)
 - **update_note_type_templates**: add, remove, rename, or reposition a note type's card templates (data-safe)
 - **find_replace_note_types**: find and replace text in a note type's template HTML and CSS
+- **update_note_type_field_metadata**: set a note type's per-field editor metadata (font, size, description)
 - **update_note_tags**: set, add, or remove tags on a set of notes
 - **rename_tag**: rename a tag collection-wide or on specific notes
 - **upsert_decks**: create or rename/reparent decks in bulk

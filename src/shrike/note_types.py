@@ -480,3 +480,46 @@ def find_and_replace_note_types(
         "templates_changed": templates_changed,
         "css_changed": css_changed,
     }
+
+
+def update_note_type_field_metadata(
+    col: Collection, note_type_name: str, updates: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Set per-field editor metadata (font, size, description) on a note type.
+
+    Each update is addressed by field *name* and sets only the attributes it
+    provides (``font``/``size``/``description``); the rest are left as-is. This is
+    cosmetics — it touches neither note field values nor templates/CSS, so it
+    changes no card and no embedding vector (the tool layer bumps ``col.mod``
+    without re-embedding). Atomic like the other note-type ops: the whole batch is
+    validated before any field is touched, then persisted with one ``update_dict``.
+    """
+    notetype = col.models.by_name(note_type_name)
+    if notetype is None:
+        raise NoteTypeOpError(f"Note type '{note_type_name}' not found")
+
+    by_name = {f["name"]: f for f in notetype["flds"]}
+    # Validate the whole batch first (atomic: nothing applied if any update is bad).
+    for i, up in enumerate(updates):
+        name = up["name"]
+        if name not in by_name:
+            raise NoteTypeOpError(f"update {i}: field '{name}' not in note type '{note_type_name}'")
+        if up.get("font") is None and up.get("size") is None and up.get("description") is None:
+            raise NoteTypeOpError(
+                f"update {i} (field '{name}'): set at least one of font, size, description"
+            )
+
+    updated: list[str] = []
+    for up in updates:
+        field = by_name[up["name"]]
+        if up.get("font") is not None:
+            field["font"] = up["font"]
+        if up.get("size") is not None:
+            field["size"] = up["size"]
+        if up.get("description") is not None:
+            field["description"] = up["description"]
+        updated.append(up["name"])
+    col.models.update_dict(notetype)
+
+    logger.debug("update_note_type_field_metadata %r: updated %s", note_type_name, updated)
+    return {"id": notetype["id"], "name": note_type_name, "fields_updated": updated}

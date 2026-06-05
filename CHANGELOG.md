@@ -8,6 +8,12 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ## [Unreleased]
 
 ### Added
+- `update_note_type_field_metadata` MCP tool — set a note type's per-field editor metadata:
+  the `font` and `size` used when editing a field in Anki, and the field
+  `description` (hint text). `collection_info` note-type details now include each
+  field's font/size/description too, so the values are readable. It's cosmetics
+  only (no effect on note content, cards, or search), so it bumps `col.mod`
+  without re-embedding. Completes the #76 epic (#119).
 - Busy-acquire error surface for cooperative locking: when the daemon can't
   re-acquire the collection because another process holds it (typically Anki
   desktop is open), tool calls now fail with a distinct, typed "collection busy"

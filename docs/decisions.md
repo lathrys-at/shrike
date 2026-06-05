@@ -333,7 +333,26 @@ for the cases that primitive doesn't cover (CSS edits, literal markup typos,
 collapsing two field refs into one). Producing a template that references a
 missing field still fails Anki's own save validation, as it should.
 
-Remaining for #76: the field font/description metadata getters/setters.
+### Field editor metadata: getter folded into `collection_info`, dedicated setter (#119)
+
+The last #76 item — per-field `font`/`size`/`description` (Anki's edit-time
+cosmetics, no bearing on note data, cards, or search). Two surface calls:
+
+- **Getter folded into `collection_info`**, not its own read. The metadata is just
+  more of a note type's *definition*, so it rides the existing
+  `note_type_details` block (`detail.fields[]`) the caller already requests for
+  templates/CSS — one fetch for the whole definition, and it inherits the CLI
+  surface (`type show`, `info --type-details`). A separate getter tool would be
+  redundant round-trips for data that travels with the note type.
+- **Dedicated setter `update_note_type_field_metadata`, not an op on `update_note_type_fields`.**
+  The structural field ops deliberately let a drift-rebuild happen on next startup
+  (a removed field changes embedding text). Field metadata changes *no* embedding
+  text, so it wants the col_mod-bump-no-re-embed treatment (like the tag/deck/
+  `find_replace_note_types` ops) — the opposite index policy. Folding it into
+  `update_note_type_fields` would mix the two policies in one tool; a small
+  dedicated setter keeps each tool's index behaviour single and clear. Like the
+  #101/#102 structural ops it's MCP + client only (no CLI setter) and atomic
+  (validate the whole batch, then one `update_dict`).
 
 ### Changing a note's type is a dedicated tool, not part of `upsert_notes` (#75)
 

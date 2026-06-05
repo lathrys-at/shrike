@@ -233,6 +233,15 @@ def note_type_detail(nt: NoteTypeInfo) -> None:
     lines.append(f"[dim]Fields:[/dim] {', '.join(nt.fields)}")
 
     if nt.detail is not None:
+        if nt.detail.fields:
+            lines.append("")
+            lines.append("[bold]Fields[/bold]")
+            for fd in nt.detail.fields:
+                meta = f"{fd.font} {fd.size}px"
+                if fd.description:
+                    meta += f' · "{fd.description}"'
+                lines.append(f"  [cyan]{fd.name}[/cyan] [dim]{meta}[/dim]")
+
         lines.append("")
         lines.append("[bold]Templates[/bold]")
         for tmpl in nt.detail.templates:

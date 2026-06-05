@@ -18,6 +18,7 @@ from shrike.schemas import (
     DeleteDecksResponse,
     DeleteNotesResponse,
     DeleteNoteTypesResponse,
+    FieldMetadataInput,
     FieldOp,
     FindReplaceNoteTypesResponse,
     FindReplaceResponse,
@@ -29,6 +30,7 @@ from shrike.schemas import (
     SearchResponse,
     TemplateOp,
     UpdateNoteTagsResponse,
+    UpdateNoteTypeFieldMetadataResponse,
     UpdateNoteTypeFieldsResponse,
     UpdateNoteTypeTemplatesResponse,
     UpsertDecksResponse,
@@ -107,6 +109,7 @@ def register_tools(
 ) -> None:
     from shrike.note_types import NoteTypeOpError
     from shrike.note_types import find_and_replace_note_types as _find_and_replace_note_types
+    from shrike.note_types import update_note_type_field_metadata as _update_field_metadata
     from shrike.note_types import update_note_type_fields as _update_note_type_fields
     from shrike.note_types import update_note_type_templates as _update_note_type_templates
     from shrike.note_types import upsert_note_types as _upsert_note_types
@@ -1003,6 +1006,45 @@ def register_tools(
         if result["replacements"]:
             await _bump_col_mod_after_metadata_change()
         return FindReplaceNoteTypesResponse.model_validate(result)
+
+    @mcp.tool()
+    @_safe_tool
+    async def update_note_type_field_metadata(
+        note_type: Annotated[
+            str, Field(min_length=1, description="Name of the note type to edit.")
+        ],
+        fields: Annotated[
+            list[FieldMetadataInput],
+            Field(
+                min_length=1,
+                max_length=100,
+                description="Per-field metadata updates, addressed by field name.",
+            ),
+        ],
+    ) -> UpdateNoteTypeFieldMetadataResponse:
+        """Set a note type's per-field editor metadata: font, size, description.
+
+        These are **editor cosmetics** — the font and size used when editing a
+        field in Anki, and the description (hint text) shown for it. They have no
+        effect on note content, card rendering, or search. Each update is keyed by
+        field `name` and sets only the attributes you provide (`font`, `size`,
+        `description`); others are left unchanged. At least one attribute per
+        update. The call is atomic — an unknown field name changes nothing.
+
+        Read the current values from collection_info's note type details
+        (`note_type_details`), which include each field's font/size/description.
+        To change which fields exist or their order, use update_note_type_fields."""
+        logger.info("update_note_type_field_metadata %r fields=%d", note_type, len(fields))
+        updates = [f.model_dump(exclude_none=True) for f in fields]
+        try:
+            result = await wrapper.run(lambda c: _update_field_metadata(c, note_type, updates))
+        except NoteTypeOpError as e:
+            raise ToolInputError(str(e)) from e
+        logger.info("update_note_type_field_metadata %r -> %s", note_type, result["fields_updated"])
+        # Editor metadata isn't note embedding text, so vectors stay valid; advance
+        # col_mod without re-embedding (like the tag/deck/find_replace_note_types ops).
+        await _bump_col_mod_after_metadata_change()
+        return UpdateNoteTypeFieldMetadataResponse.model_validate(result)
 
     @mcp.tool()
     @_safe_tool

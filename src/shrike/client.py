@@ -43,6 +43,7 @@ from shrike.schemas import (
     EmbeddingStartResponse,
     EmbeddingStatus,
     EmbeddingStopResponse,
+    FieldMetadataInput,
     FieldOp,
     FindReplaceNoteTypesResponse,
     FindReplaceResponse,
@@ -61,6 +62,7 @@ from shrike.schemas import (
     StopResponse,
     TemplateOp,
     UpdateNoteTagsResponse,
+    UpdateNoteTypeFieldMetadataResponse,
     UpdateNoteTypeFieldsResponse,
     UpdateNoteTypeTemplatesResponse,
     UpsertDecksResponse,
@@ -437,6 +439,17 @@ class ShrikeClient:
                     "regex": regex,
                     "match_case": match_case,
                 },
+            )
+        )
+
+    def update_note_type_field_metadata(
+        self, note_type: str, fields: Sequence[FieldMetadataInput | dict[str, Any]]
+    ) -> UpdateNoteTypeFieldMetadataResponse:
+        payload = [f if isinstance(f, dict) else f.model_dump(exclude_none=True) for f in fields]
+        return UpdateNoteTypeFieldMetadataResponse.model_validate(
+            self._call(
+                "update_note_type_field_metadata",
+                {"note_type": note_type, "fields": payload},
             )
         )
 

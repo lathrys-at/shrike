@@ -403,6 +403,15 @@ class CollectionWrapper:
                         for t in nt["tmpls"]
                     ],
                     "css": nt.get("css", ""),
+                    "fields": [
+                        {
+                            "name": f["name"],
+                            "font": f.get("font", ""),
+                            "size": f.get("size", 0),
+                            "description": f.get("description", ""),
+                        }
+                        for f in nt["flds"]
+                    ],
                 }
             note_types.append(entry)
         return note_types

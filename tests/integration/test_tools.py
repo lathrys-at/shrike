@@ -916,6 +916,32 @@ class TestNoteTypeLifecycle:
                 {"note_type": "DoesNotExist", "search": "a", "replace": "b"},
             )
 
+    def test_update_note_type_field_metadata(self, mcp):
+        mcp(
+            "upsert_note_types",
+            {
+                "note_types": [
+                    {
+                        "name": "FM",
+                        "fields": ["F"],
+                        "templates": [{"name": "C", "front": "{{F}}", "back": "{{F}}"}],
+                        "css": "",
+                    }
+                ]
+            },
+        )
+        result = mcp(
+            "update_note_type_field_metadata",
+            {"note_type": "FM", "fields": [{"name": "F", "size": 28, "description": "the prompt"}]},
+        )
+        assert result["fields_updated"] == ["F"]
+
+        details = mcp("collection_info", {"include": ["note_types"], "note_type_details": ["FM"]})
+        nt = next(n for n in details["note_types"] if n["name"] == "FM")
+        meta = {f["name"]: f for f in nt["detail"]["fields"]}
+        assert meta["F"]["size"] == 28
+        assert meta["F"]["description"] == "the prompt"
+
 
 class TestSearchNotesNoIndex:
     def test_query_without_index_notes_unavailable(self, mcp):

@@ -63,7 +63,12 @@ Requesting `include: ["all"]` (or specific sections) adds them:
             "back": "{{FrontSide}}<hr id=answer>{{Back}}"
           }
         ],
-        "css": ".card { font-family: arial; font-size: 20px; text-align: center; }"
+        "css": ".card { font-family: arial; font-size: 20px; text-align: center; }",
+        // per-field editor metadata (font/size used when editing, + hint text)
+        "fields": [
+          { "name": "Front", "font": "Arial", "size": 20, "description": "" },
+          { "name": "Back", "font": "Arial", "size": 20, "description": "" }
+        ]
       }
     }
   ],
@@ -512,6 +517,31 @@ At least one of `front`/`back`/`css` must be enabled.
   "replacements": 7,                 // total substitutions made
   "templates_changed": ["Recall"],   // templates whose front/back changed
   "css_changed": true
+}
+```
+
+---
+
+## `update_note_type_field_metadata`
+
+Set a note type's **per-field editor metadata**: the `font` and `size` used when editing a field in Anki, and the field `description` (hint text shown in the editor). These are cosmetics — they have no effect on note content, card rendering, or search. Read the current values from [`collection_info`](#collection_info)'s note type details (each field carries `font`/`size`/`description`).
+
+Each update is addressed by field `name` and sets only the attributes you provide; the rest are left unchanged. At least one attribute per update. The call is atomic — an unknown field name changes nothing. To add/remove/rename/reorder fields, use [`update_note_type_fields`](#update_note_type_fields).
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `note_type` | `string` | **yes** | Name of the note type to edit. |
+| `fields` | `object[]` | **yes** | Per-field updates (1–100), each `{ name, font?, size?, description? }` — at least one of `font`/`size`/`description` set. |
+
+### Response
+
+```jsonc
+{
+  "id": 1234567890,
+  "name": "Basic",
+  "fields_updated": ["Front"]
 }
 ```
 

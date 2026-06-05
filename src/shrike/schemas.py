@@ -208,11 +208,21 @@ class TemplateInfo(BaseModel):
     back: str
 
 
+class FieldDetail(BaseModel):
+    """A field's editor metadata (cosmetics — no bearing on note data or cards)."""
+
+    name: str
+    font: str  # edit-time font family
+    size: int  # edit-time font size (px)
+    description: str  # hint text shown in the note editor
+
+
 class NoteTypeDetail(BaseModel):
-    """Full template/CSS definition — the two always travel together."""
+    """Full definition (templates/CSS) plus per-field editor metadata."""
 
     templates: list[TemplateInfo]
     css: str
+    fields: list[FieldDetail] = []
 
 
 class NoteTypeInfo(BaseModel):
@@ -379,10 +389,27 @@ FieldOp = Annotated[
 ]
 
 
+class FieldMetadataInput(BaseModel):
+    """A per-field editor-metadata update (#119). Only the set attrs change."""
+
+    name: str = Field(description="Name of the field to update.")
+    font: str | None = Field(default=None, description="Edit-time font family.")
+    size: int | None = Field(default=None, ge=1, description="Edit-time font size (px).")
+    description: str | None = Field(
+        default=None, description="Hint text shown for the field in the note editor."
+    )
+
+
 class UpdateNoteTypeFieldsResponse(BaseModel):
     id: int
     name: str
     fields: list[str]  # the resulting ordered field names
+
+
+class UpdateNoteTypeFieldMetadataResponse(BaseModel):
+    id: int
+    name: str
+    fields_updated: list[str]  # names of the fields whose metadata changed
 
 
 # -- explicit note-type template operations (update_note_type_templates) ------
