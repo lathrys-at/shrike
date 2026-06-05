@@ -28,7 +28,7 @@ src/shrike/                       # Python package (src layout)
 ├── collection.py                 # CollectionWrapper — all Anki DB operations
 ├── note_types.py                 # upsert_note_types() — create/update note types
 ├── daemon.py                     # Daemon lifecycle — file locks, spawn, shutdown
-├── tools.py                      # Registers 11 MCP tools; returns response models (emits outputSchema)
+├── tools.py                      # Registers 12 MCP tools; returns response models (emits outputSchema)
 ├── schemas.py                    # Pydantic models — single source of truth for every tool request/response + status shape
 ├── client.py                     # ShrikeClient — standalone HTTP client; typed per-tool methods, daemon lifecycle
 ├── paths.py                      # Platform-canonical directories (via platformdirs)
@@ -50,7 +50,7 @@ src/shrike/                       # Python package (src layout)
     ├── type_cmd.py               # shrike type list/show/create/update/delete
     └── output.py                 # Rich formatting, output_options decorator
 tests/
-├── unit/                         # 523 tests — direct calls, no server
+├── unit/                         # 535 tests — direct calls, no server
 │   ├── conftest.py               # wrapper fixture (temp collection), basic_note fixture
 │   ├── test_collection_info.py
 │   ├── test_list_notes.py
@@ -67,7 +67,7 @@ tests/
 │   ├── test_server_security.py  # loopback guard + transport-security helpers
 │   ├── test_daemon.py           # stop_server HTTP→SIGTERM→SIGKILL escalation
 │   └── test_collection_concurrency.py  # single-worker-thread serialization
-└── integration/                  # 200 tests — real server subprocess + HTTP transport
+└── integration/                  # 202 tests — real server subprocess + HTTP transport
     ├── conftest.py               # server fixture (session-scoped), mcp fixture
     ├── test_tools.py
     ├── test_cli.py
@@ -158,7 +158,7 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 
 **OAuth is required for native connectors (deferred; tracked here).** Claude Desktop / claude.ai *URL connectors* require OAuth 2.1 + Dynamic Client Registration: they try to register against the MCP server's sign-in service and fail against an unauthenticated endpoint, regardless of TLS or network exposure. So the "run Shrike behind a reverse proxy / on a VPN and add it as a connector" story depends on implementing MCP server auth (`mcp.server.auth`, OAuth 2.0 + PKCE — see audit §1.1); it's a v0.4/v0.6-class project, intentionally not started. Until then the unauthenticated + network-boundary model serves CLI / programmatic / `mcp-remote` clients: a native client reaches Shrike through the **`mcp-remote` stdio bridge** (`npx mcp-remote http://127.0.0.1:8372/mcp --allow-http --transport http-only`), which connects without auth because Shrike demands none. This is how the QA harness drives Claude Desktop.
 
-### MCP tools (11 total)
+### MCP tools (12 total)
 
 | Tool | Status | Purpose |
 |------|--------|---------|
@@ -167,6 +167,7 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 | `search_notes` | Working | Semantic similarity search over note embeddings |
 | `upsert_notes` | Working | Create or update notes in bulk (1-100); `on_duplicate` policy + `dry_run`; returns similar neighbors |
 | `upsert_note_types` | Working | Create or update note type definitions (1-10) |
+| `update_note_type_fields` | Working | Edit a note type's fields by name: add/remove/rename/reposition (data-safe) |
 | `update_note_tags` | Working | Edit tags on a note set (1-1000): `set` (replace) XOR `add`/`remove` |
 | `rename_tag` | Working | Rename a tag collection-wide or on a note set (exact match) |
 | `upsert_decks` | Working | Create or rename/reparent decks in bulk (1-100); id = rename |
@@ -175,6 +176,8 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 | `delete_note_types` | Working | Delete note types by ID (only if unused) |
 
 **Duplicate handling lives *inside* `upsert_notes`, not in a separate pre-check (#77).** Before each new note is written, Anki's own add-note validation (`note.fields_check()`, via `CollectionWrapper._check_new_note`) runs. A first-field duplicate (same first field as an existing note of that type — Anki's rule, collection-wide and **deck-independent**) is governed by the `on_duplicate` param: `error` (**default** — reported, not written), `skip` (`status: skipped`), or `allow` (written anyway). Structurally invalid notes — empty first field, broken cloze — are *always* reported as errors with a `reason` regardless of policy, and never written. `dry_run: true` runs the exact same validation but writes nothing: every result is `ok` (with `action: create|update`), `skipped`, or `error`, and the response echoes `dry_run: true` — so `dry_run` + the default policy is a full `fields_check`-based sanity pass over a batch. The per-item result union (`UpsertNoteResult` in `schemas.py`) carries the four variants (`UpsertNoteOk` / `UpsertNoteValidated` / `UpsertNoteSkipped` / `UpsertNoteError`, discriminated on `status`); `UpsertNoteError.reason` is the machine-readable `NoteValidationReason`. This is Anki's *exact* first-field rule, distinct from the *semantic* near-duplicate signal the returned `neighbors` provide. A standalone `canAddNotes`-style tool was rejected: it would be racy (check-then-write) and only actionable by a follow-up call (see `docs/decisions.md`). Note the validation applies to **creates**; updates are validated for existence/fields but not duplicate/empty. `dry_run` does not catch intra-batch duplicates (it writes nothing, so two identical new notes in one call both validate clean — a real run catches the second).
+
+**Note-type field edits come in two flavours, both data-safe (#76).** `upsert_note_types` replaces the whole `fields`/`templates` list **by position** (the field/template at each position keeps its note data/cards even when renamed; only shortening drops the tail) — fixed in #99 after the original rebuild-from-scratch blanked note data and deleted cards. `update_note_type_fields` is the **by-identity** counterpart: a sequence of `add`/`remove`/`rename`/`reposition` ops addressed by field *name*, so it can express a true move, an insert, or a non-trailing remove that position-replace can't. It delegates to Anki's own data-safe primitives (`rename_field`/`reposition_field`/`add_field`/`remove_field`), which migrate note data by field identity; the call is **atomic** (the op sequence is validated against a simulated field list before any primitive runs — an invalid op changes nothing) and persists with a single `update_dict`. Like `upsert_note_types`, it does no inline index maintenance — the `col.mod` bump from `update_dict` triggers a drift-rebuild on next startup (a removed field changes embedding text, so a rebuild is correct; for rename/reposition it's conservative). Both live in `note_types.py`. (`FieldOpError` → `ToolInputError` so bad ops log without a traceback.)
 
 The tag tools (#73) **and** deck tools (#74) are a derived-index-aware special case: tags and deck names are **not** part of a note's embedding text, so these ops leave every vector valid but bump `col.mod`. Each advances the stored `index.col_mod` (and requests a debounced save) **without** re-embedding — via the shared `_bump_col_mod_after_metadata_change` helper in `tools.py` — so a tag/deck-only change doesn't force a spurious full rebuild on next startup. Full-replace of tags lives in both `update_note_tags` (`set`) and incidentally in `upsert_notes` (`{id, tags}`); the additive/subtractive logic lives only in `update_note_tags`. `upsert_decks` mirrors `upsert_notes` (id present = rename the existing deck; absent = create); **decks never merge** — renaming onto an existing deck name is an error, and `delete_decks` is **empty-only** (move notes out first), so deck deletion can never delete a note. (Unused-tag cleanup is intentionally deferred to a unified `collection_prune` op — #89.)
 

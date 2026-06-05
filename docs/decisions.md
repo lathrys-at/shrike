@@ -182,5 +182,29 @@ lengthening appends empty fields / new cards; shortening discards only the
 trailing entries (the standard meaning of removing a field/template). A genuine
 *reorder* (moving a field/template to a new position while keeping its identity)
 is necessarily a separate, explicit operation — a positional name swap reads as
-two renames, which is non-destructive but not a move. That dedicated
-rename/reposition/add/remove surface is the remaining, lower-risk half of #76.
+two renames, which is non-destructive but not a move.
+
+### Identity-based field ops are a second tool, not a mode of `upsert_note_types` (#76)
+
+The genuine move/insert/non-trailing-remove that position-replace can't express
+is the `update_note_type_fields` tool: a sequence of `add`/`remove`/`rename`/
+`reposition` operations addressed by field **name**. It exists separately from
+`upsert_note_types` rather than as another shape of its `fields` param because the
+two are fundamentally different contracts — a *declarative* "the fields are now
+exactly this list" (position-keyed) versus an *imperative* "move X to 0, rename Y"
+(identity-keyed). Conflating them in one param would make "is `["B","A"]` a reorder
+or two renames?" ambiguous; keeping them apart makes each unambiguous.
+
+It delegates to Anki's own data-safe primitives (`rename_field`,
+`reposition_field`, `add_field`, `remove_field`), which migrate note data by
+field identity, so a reposition is a true move (data follows the field) and a
+non-trailing remove drops only that field. The call is **atomic**: the whole op
+sequence is validated against a simulated field-name list first, so an invalid op
+(unknown field, name clash, out-of-range position, removing the last field)
+changes nothing; only once every op is known-good are the primitives applied to
+one in-memory notetype and persisted with a single `update_dict`. Like
+`upsert_note_types`, it does no inline index maintenance — the `col.mod` bump
+drives a drift-rebuild on next startup (correct, since a removed field changes a
+note's embedding text). Remaining for #76: `findAndReplaceInModels` (overlaps the
+separate find-and-replace issue #85) and the field font/description metadata
+getters/setters.

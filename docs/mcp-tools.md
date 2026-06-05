@@ -377,6 +377,40 @@ Card templates use Anki's `{{FieldName}}` replacement syntax. The special `{{Fro
 
 ---
 
+## `update_note_type_fields`
+
+Edit an existing note type's fields **by name**, preserving note data. Where `upsert_note_types` replaces the whole field list by position (so it can only rename in place, append, or drop the trailing field), this tool applies a sequence of identity-addressed operations and can truly move a field, insert one at a position, or remove a non-trailing field — all migrating note data by field identity.
+
+Operations apply in order, so a `rename` followed by an op naming the new name is valid. The whole call is **atomic**: if any operation is invalid (unknown field, name clash, out-of-range position, or removing the last remaining field), nothing is changed.
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `note_type` | `string` | **yes** | Name of the note type to edit. |
+| `operations` | `object[]` | **yes** | Field operations to apply in order (1–50). Each is one of the variants below, discriminated on `op`. |
+
+#### Operation variants
+
+| `op` | Fields | Effect |
+|---|---|---|
+| `add` | `name`, `position?` | Add a new (empty) field. Inserted at `position` (0-based) if given, else appended. |
+| `remove` | `name` | Remove the field. **Drops that field's data from every note** of this type. Can't remove the last remaining field. |
+| `rename` | `name`, `new_name` | Rename the field, preserving its data. |
+| `reposition` | `name`, `position` | Move the field to `position` (0-based); its data moves with it. |
+
+### Response
+
+```jsonc
+{
+  "id": 1234567890,
+  "name": "Japanese Vocabulary",
+  "fields": ["Reading", "Word", "Meaning", "Notes"]   // the resulting order
+}
+```
+
+---
+
 ## `update_note_tags`
 
 Edit tags on a set of notes (1–1000) without rewriting the whole note. Choose exactly one mode — there is no default:

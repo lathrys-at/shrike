@@ -161,3 +161,111 @@ def _set_templates(
         tmpl["afmt"] = tmpl_input["back"]
         new.append(tmpl)
     notetype["tmpls"] = new
+
+
+class FieldOpError(ValueError):
+    """An explicit field operation was invalid (unknown field, name clash, etc.).
+
+    A plain ``ValueError`` subclass so the tool layer can translate it into a
+    ``ToolInputError`` (logged without a traceback — it's caller error).
+    """
+
+
+def update_note_type_fields(
+    col: Collection, note_type_name: str, operations: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Apply explicit, identity-based field operations to a note type.
+
+    Unlike ``upsert_note_types``' position-keyed whole-list replace, these
+    operations are addressed by field *name*, so they can express a true move
+    (``reposition``), a non-trailing ``remove``, or an insert at a position —
+    all via Anki's data-safe primitives, which migrate note data by field
+    identity. Operations apply in order; ``rename`` then a later op referencing
+    the new name is valid.
+
+    The whole call is atomic: the sequence is validated against a simulated
+    field list first, so an invalid op fails without mutating anything. Only
+    once every op is known-valid are the real primitives applied to one
+    in-memory notetype and persisted with a single ``update_dict``.
+    """
+    notetype = col.models.by_name(note_type_name)
+    if notetype is None:
+        raise FieldOpError(f"Note type '{note_type_name}' not found")
+
+    # Validate the whole sequence first (atomic: nothing applied if any op is
+    # bad). `sim` tracks field names as each op would leave them.
+    sim = [f["name"] for f in notetype["flds"]]
+    for i, op in enumerate(operations):
+        _simulate_field_op(sim, op, i)
+
+    # `by_name` returned the live notetype dict; the Anki primitives mutate it
+    # (and its `flds`) in place, so apply them all to it and persist once.
+    for op in operations:
+        _apply_field_op(col, notetype, op)
+    col.models.update_dict(notetype)
+
+    final = [f["name"] for f in notetype["flds"]]
+    logger.debug(
+        "update_note_type_fields %r: applied %d op(s) -> %s",
+        note_type_name,
+        len(operations),
+        final,
+    )
+    return {"id": notetype["id"], "name": note_type_name, "fields": final}
+
+
+def _simulate_field_op(sim: list[str], op: dict[str, Any], i: int) -> None:
+    kind = op["op"]
+    if kind == "add":
+        name = op["name"]
+        if name in sim:
+            raise FieldOpError(f"op {i} (add): field '{name}' already exists")
+        pos = op.get("position")
+        if pos is None:
+            sim.append(name)
+        elif not 0 <= pos <= len(sim):
+            raise FieldOpError(f"op {i} (add): position {pos} out of range 0..{len(sim)}")
+        else:
+            sim.insert(pos, name)
+    elif kind == "remove":
+        name = op["name"]
+        if name not in sim:
+            raise FieldOpError(f"op {i} (remove): field '{name}' not found")
+        if len(sim) == 1:
+            raise FieldOpError(f"op {i} (remove): a note type must keep at least one field")
+        sim.remove(name)
+    elif kind == "rename":
+        name, new = op["name"], op["new_name"]
+        if name not in sim:
+            raise FieldOpError(f"op {i} (rename): field '{name}' not found")
+        if new != name and new in sim:
+            raise FieldOpError(f"op {i} (rename): field '{new}' already exists")
+        sim[sim.index(name)] = new
+    elif kind == "reposition":
+        name, pos = op["name"], op["position"]
+        if name not in sim:
+            raise FieldOpError(f"op {i} (reposition): field '{name}' not found")
+        if not 0 <= pos < len(sim):
+            raise FieldOpError(
+                f"op {i} (reposition): position {pos} out of range 0..{len(sim) - 1}"
+            )
+        sim.remove(name)
+        sim.insert(pos, name)
+
+
+def _apply_field_op(col: Collection, notetype: dict[str, Any], op: dict[str, Any]) -> None:
+    # Look fields up by their current name each call, so an op that follows a
+    # rename/reposition sees the up-to-date list.
+    by_name = {f["name"]: f for f in notetype["flds"]}
+    kind = op["op"]
+    if kind == "add":
+        field = col.models.new_field(op["name"])
+        col.models.add_field(notetype, field)
+        if op.get("position") is not None:
+            col.models.reposition_field(notetype, field, op["position"])
+    elif kind == "remove":
+        col.models.remove_field(notetype, by_name[op["name"]])
+    elif kind == "rename":
+        col.models.rename_field(notetype, by_name[op["name"]], op["new_name"])
+    elif kind == "reposition":
+        col.models.reposition_field(notetype, by_name[op["name"]], op["position"])

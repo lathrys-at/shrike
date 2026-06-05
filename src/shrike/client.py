@@ -40,6 +40,7 @@ from shrike.schemas import (
     EmbeddingStartResponse,
     EmbeddingStatus,
     EmbeddingStopResponse,
+    FieldOp,
     IndexRebuildResponse,
     IndexSaveResponse,
     IndexStatus,
@@ -52,6 +53,7 @@ from shrike.schemas import (
     ShutdownResponse,
     StopResponse,
     UpdateNoteTagsResponse,
+    UpdateNoteTypeFieldsResponse,
     UpsertDecksResponse,
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
@@ -321,6 +323,16 @@ class ShrikeClient:
             batch_size=10,
         )
         return UpsertNoteTypesResponse.model_validate(merged)
+
+    def update_note_type_fields(
+        self, note_type: str, operations: Sequence[FieldOp | dict[str, Any]]
+    ) -> UpdateNoteTypeFieldsResponse:
+        ops = [
+            op if isinstance(op, dict) else op.model_dump(exclude_none=True) for op in operations
+        ]
+        return UpdateNoteTypeFieldsResponse.model_validate(
+            self._call("update_note_type_fields", {"note_type": note_type, "operations": ops})
+        )
 
     def delete_note_types(self, ids: list[int]) -> DeleteNoteTypesResponse:
         return DeleteNoteTypesResponse.model_validate(self._call("delete_note_types", {"ids": ids}))

@@ -16,12 +16,14 @@ from shrike.schemas import (
     DeleteDecksResponse,
     DeleteNotesResponse,
     DeleteNoteTypesResponse,
+    FieldOp,
     ListNotesResponse,
     NoteInput,
     NoteTypeInput,
     RenameTagResponse,
     SearchResponse,
     UpdateNoteTagsResponse,
+    UpdateNoteTypeFieldsResponse,
     UpsertDecksResponse,
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
@@ -88,6 +90,8 @@ def register_tools(
     index: VectorIndex | None = None,
     saver: IndexSaver | None = None,
 ) -> None:
+    from shrike.note_types import FieldOpError
+    from shrike.note_types import update_note_type_fields as _update_note_type_fields
     from shrike.note_types import upsert_note_types as _upsert_note_types
 
     @mcp.tool()
@@ -730,8 +734,8 @@ def register_tools(
         retitled. Only shortening the list discards the trailing entries —
         removing a field drops that field's data, removing a template deletes
         its cards. Adding entries appends empty fields / new cards. (To move a
-        field or template rather than rename-by-position, use a dedicated
-        reorder once available.)"""
+        field or template rather than rename-by-position, use the explicit
+        update_note_type_fields operations.)"""
         names = [nt.name or f"id={nt.id}" for nt in note_types]
         logger.info("upsert_note_types count=%d names=%s", len(note_types), ", ".join(names))
 
@@ -746,6 +750,51 @@ def register_tools(
                 )
 
         return UpsertNoteTypesResponse.model_validate({"results": results})
+
+    @mcp.tool()
+    @_safe_tool
+    async def update_note_type_fields(
+        note_type: Annotated[
+            str, Field(min_length=1, description="Name of the note type to edit.")
+        ],
+        operations: Annotated[
+            list[FieldOp],
+            Field(
+                min_length=1,
+                max_length=50,
+                description="Field operations to apply, in order.",
+            ),
+        ],
+    ) -> UpdateNoteTypeFieldsResponse:
+        """Edit a note type's fields by name, preserving note data.
+
+        Apply a sequence of field operations to an existing note type:
+        - `add`: add a new field (optionally at a 0-based `position`; appended
+          otherwise).
+        - `remove`: remove a field by name — drops that field's data from every
+          note of this type.
+        - `rename`: rename a field; its data is preserved.
+        - `reposition`: move a field to a new 0-based `position`; its data moves
+          with it.
+
+        Operations apply in order, so a `rename` followed by an op naming the
+        new name is valid. The whole call is atomic: if any operation is invalid
+        (unknown field, name clash, out-of-range position, or removing the last
+        remaining field), nothing is changed.
+
+        Unlike upsert_note_types — which replaces the whole field list by
+        position, so it can only rename in place, append, or drop the tail —
+        these operations are addressed by field name and can truly move, insert,
+        or remove a non-trailing field. Returns the resulting ordered field
+        names."""
+        logger.info("update_note_type_fields %r ops=%d", note_type, len(operations))
+        op_dicts = [op.model_dump(exclude_none=True) for op in operations]
+        try:
+            result = await wrapper.run(lambda c: _update_note_type_fields(c, note_type, op_dicts))
+        except FieldOpError as e:
+            raise ToolInputError(str(e)) from e
+        logger.info("update_note_type_fields %r -> %s", note_type, result["fields"])
+        return UpdateNoteTypeFieldsResponse.model_validate(result)
 
     @mcp.tool()
     @_safe_tool

@@ -307,6 +307,53 @@ class NoteTypeError(BaseModel):
 NoteTypeResult = Annotated[NoteTypeOk | NoteTypeError, Field(discriminator="status")]
 
 
+# -- explicit note-type field operations (update_note_type_fields) -----------
+# Identity-based field edits that the position-keyed `upsert_note_types` replace
+# can't express safely: a true move, a non-trailing remove, an insert at a
+# position. Each is a discriminated variant on `op`; applied in order.
+
+
+class FieldAdd(BaseModel):
+    op: Literal["add"]
+    name: str = Field(description="Name for the new field.")
+    position: int | None = Field(
+        default=None,
+        ge=0,
+        description="0-based position to insert at. Appended to the end if omitted.",
+    )
+
+
+class FieldRemove(BaseModel):
+    op: Literal["remove"]
+    name: str = Field(
+        description="Field to remove. Its data is dropped from every note of this type."
+    )
+
+
+class FieldRename(BaseModel):
+    op: Literal["rename"]
+    name: str = Field(description="Current name of the field to rename.")
+    new_name: str = Field(description="New name. Field data is preserved.")
+
+
+class FieldReposition(BaseModel):
+    op: Literal["reposition"]
+    name: str = Field(description="Field to move. Its data moves with it.")
+    position: int = Field(ge=0, description="New 0-based position for the field.")
+
+
+FieldOp = Annotated[
+    FieldAdd | FieldRemove | FieldRename | FieldReposition,
+    Field(discriminator="op"),
+]
+
+
+class UpdateNoteTypeFieldsResponse(BaseModel):
+    id: int
+    name: str
+    fields: list[str]  # the resulting ordered field names
+
+
 class DeckInput(BaseModel):
     # Upsert input mirroring NoteInput: ``name`` is the desired deck name; an
     # optional ``id`` selects an existing deck to rename to that name. Absent id =
