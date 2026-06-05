@@ -516,6 +516,18 @@ class ListNotesResponse(BaseModel):
     limit: int = 50
 
 
+class MigrateNoteTypeResponse(BaseModel):
+    # Result of changing a set of notes from one note type to another (#75).
+    # The two list fields surface the data-affecting parts of the migration so
+    # the caller sees exactly what was lost / left empty.
+    changed: list[int] = []  # note ids migrated (or that would be, on dry-run)
+    from_note_type: str
+    to_note_type: str
+    dropped_fields: list[str] = []  # source fields with no mapping — content lost
+    new_empty_fields: list[str] = []  # target fields nothing mapped into
+    dry_run: bool = False
+
+
 class SearchResultGroup(BaseModel):
     source: str
     matches: list[SearchMatch] = []

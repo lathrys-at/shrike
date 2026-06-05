@@ -807,6 +807,15 @@ class TestCollectionPrune:
         assert "cporphan" in runner.json(["info", "--tags"])["tags"]
 
     def test_pretty_preview_says_preview_only(self, runner):
+        # Seed an orphan tag so there's something to preview (the per-test reset
+        # means we can't rely on another test's data).
+        runner.json(
+            ["note", "create", "--deck", "CPP", "--type", "Basic"]
+            + ["-f", "Front=cpp", "-f", "Back=a", "--tags", "cpporphan"]
+        )
+        nid = runner.json(["note", "list", "--deck", "CPP"])["notes"][0]["id"]
+        runner.json(["note", "tag", str(nid), "--set", ""])
+
         result = runner.invoke(["collection", "prune", "--unused-tags"])
         assert result.exit_code == 0
         assert "Preview only" in result.output
@@ -822,6 +831,38 @@ class TestCollectionPrune:
         applied = runner.json(["collection", "prune", "--unused-tags", "--apply"])
         assert applied["dry_run"] is False
         assert "cpapply" not in runner.json(["info", "--tags"])["tags"]
+
+
+class TestMigrateType:
+    """`shrike note migrate-type` via CLI. Self-seeding (shared-server reset)."""
+
+    def _basic(self, runner, deck, front, back="x"):
+        runner.json(
+            ["note", "create", "--deck", deck, "--type", "Basic"]
+            + ["-f", f"Front={front}", "-f", f"Back={back}"]
+        )
+        return runner.json(["note", "list", "--deck", deck])["notes"][0]["id"]
+
+    def test_apply_json(self, runner):
+        nid = self._basic(runner, "MT", "mt-front", "mt-back")
+        result = runner.json(
+            ["note", "migrate-type", str(nid), "--to", "Cloze"]
+            + ["--map", "Front=Text", "--map", "Back=Back Extra"]
+        )
+        assert result["dry_run"] is False
+        assert result["to_note_type"] == "Cloze"
+        note = runner.json(["note", "show", str(nid)])["notes"][0]
+        assert note["note_type"] == "Cloze"
+        assert note["content"]["Text"] == "mt-front"
+
+    def test_dry_run_shows_drop(self, runner):
+        nid = self._basic(runner, "MTD", "mtd-front", "mtd-back")
+        result = runner.invoke(
+            ["note", "migrate-type", str(nid), "--to", "Cloze", "--map", "Front=Text", "--dry-run"]
+        )
+        assert result.exit_code == 0
+        assert "Back" in result.output  # dropped field
+        assert runner.json(["note", "show", str(nid)])["notes"][0]["note_type"] == "Basic"
 
 
 class TestCollectionQuery:

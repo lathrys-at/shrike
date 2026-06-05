@@ -194,6 +194,7 @@ Shrike exposes these MCP tools:
 - **search_notes**: semantic similarity and exact-substring search over notes
 - **collection_query**: find notes with a raw Anki search expression (`is:due`, `prop:`, …)
 - **find_replace_notes**: bulk find and replace across note fields in a scoped set
+- **migrate_note_type**: change notes' note type with a field/template map (preserves history)
 - **upsert_notes**: create or update notes in bulk
 - **upsert_note_types**: create or update note type definitions
 - **update_note_type_fields**: add, remove, rename, or reposition a note type's fields (data-safe)

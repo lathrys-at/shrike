@@ -268,6 +268,23 @@ shrike note replace "teh" "the" --deck "Biology" --dry-run
 shrike note replace "colou?r" "color" --regex --tags spelling -y
 ```
 
+### `shrike note migrate-type <NOTE_IDS>...`
+
+Change one or more notes to a different note type, moving field content by an explicit map. The notes must all currently share one note type. This is Anki's "Change Note Type": note IDs and (for mapped templates) review scheduling are preserved. **Source fields you don't `--map` are dropped and their content is lost** — by default the command previews (showing the drops), asks to confirm, then applies.
+
+| Option | Description |
+|---|---|
+| `--to TEXT` | Target note type (required). |
+| `--map OLD=NEW` | Field mapping, source=target. Repeatable; at least one required. |
+| `--template-map OLD=NEW` | Optional card-template mapping, source=target. Repeatable. |
+| `--dry-run` | Preview the migration without applying it. |
+| `-y, --yes` | Skip the confirmation prompt. |
+
+```bash
+shrike note migrate-type 1700000000123 --to Cloze --map Front=Text --map "Back=Back Extra"
+shrike note migrate-type 170...1 170...2 --to Basic --map Text=Front --dry-run
+```
+
 ---
 
 ## `shrike deck`

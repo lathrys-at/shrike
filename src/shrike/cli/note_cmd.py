@@ -612,3 +612,90 @@ def note_search(
                 output.note_detail(m, subtitle=f"[{badges}]" if badges else None)
 
     output.console.print()
+
+
+@note.command("migrate-type", short_help="Change notes' note type with a field map")
+@output_options
+@click.argument("note_ids", type=NOTE_ID, nargs=-1, required=True)
+@click.option("--to", "to_type", required=True, help="Target note type to migrate the notes to.")
+@click.option(
+    "--map",
+    "field_maps",
+    metavar="OLD=NEW",
+    multiple=True,
+    help="Field mapping, source=target (repeatable). Required.",
+)
+@click.option(
+    "--template-map",
+    "template_maps",
+    metavar="OLD=NEW",
+    multiple=True,
+    help="Optional card-template mapping, source=target (repeatable).",
+)
+@click.option("--dry-run", is_flag=True, help="Preview the migration without applying it.")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def note_migrate_type(
+    ctx: click.Context,
+    note_ids: tuple[int, ...],
+    to_type: str,
+    field_maps: tuple[str, ...],
+    template_maps: tuple[str, ...],
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Change one or more notes to a different note type, preserving history.
+
+    The notes must all currently share one note type. --map moves field content
+    by name (source=target); source fields you don't map are dropped and their
+    content is lost. This is Anki's "Change Note Type": note IDs and scheduling
+    for mapped templates are preserved. By default it previews, asks to confirm,
+    then applies; --dry-run only previews, --yes skips the prompt.
+
+    \b
+    Examples:
+      shrike note migrate-type 1700000000123 --to Cloze --map Front=Text --map "Back=Back Extra"
+      shrike note migrate-type 170...1 170...2 --to Basic --map Text=Front --dry-run
+    """
+    if not field_maps:
+        raise click.UsageError("At least one --map OLD=NEW is required.")
+    field_map = dict(_parse_field(m) for m in field_maps)
+    template_map = dict(_parse_field(m) for m in template_maps) or None
+
+    client = ctx.obj["client"]
+    common: dict[str, Any] = {"template_map": template_map}
+
+    if ctx.obj["json"]:
+        result = client.migrate_note_type(
+            list(note_ids), to_type, field_map, dry_run=dry_run, **common
+        )
+        output.emit_json(result)
+        return
+
+    with output.spinner("Checking…"):
+        preview = client.migrate_note_type(
+            list(note_ids), to_type, field_map, dry_run=True, **common
+        )
+
+    output.console.print(
+        f"[yellow]{len(preview.changed)}[/yellow] note(s): "
+        f"[cyan]{preview.from_note_type}[/cyan] → [cyan]{preview.to_note_type}[/cyan]"
+    )
+    if preview.dropped_fields:
+        output.console.print(
+            "  [red]drops (content lost):[/red] " + ", ".join(preview.dropped_fields)
+        )
+    if preview.new_empty_fields:
+        output.console.print("  [dim]empty in target:[/dim] " + ", ".join(preview.new_empty_fields))
+
+    if dry_run:
+        return
+    if not yes and not click.confirm(f"Migrate {len(preview.changed)} note(s) to {to_type}?"):
+        output.console.print("Cancelled.")
+        return
+
+    with output.spinner("Migrating…"):
+        result = client.migrate_note_type(
+            list(note_ids), to_type, field_map, dry_run=False, **common
+        )
+    output.console.print(f"Migrated {len(result.changed)} note(s) to {result.to_note_type}.")

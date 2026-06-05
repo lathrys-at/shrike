@@ -335,6 +335,46 @@ missing field still fails Anki's own save validation, as it should.
 
 Remaining for #76: the field font/description metadata getters/setters.
 
+### Changing a note's type is a dedicated tool, not part of `upsert_notes` (#75)
+
+`upsert_notes` hard-refuses a type change; `migrate_note_type` is where it lives,
+wrapping Anki's `col.models.change`. The point of the operation is **preserving
+history** — a type change keeps note IDs and carries each card's scheduling across
+mapped templates, which is exactly what delete-and-recreate would throw away. So
+it's worth a first-class, careful tool rather than a flag.
+
+Why not fold it into `upsert_notes` (the issue floated both)? Folding makes
+`field_map`/`template_map` a conditional sub-mode — meaningful only on an update
+whose `note_type` differs — and creates an ambiguous interaction with the item's
+own `fields` (set values on old field names or new? before or after the remap?).
+That's the bag-of-optionals/hidden-state smell `schemas.py` warns against, plus it
+buries a destructive migration (dropped fields, deleted cards' scheduling) inside
+a routine bulk create/update. A dedicated tool keeps `upsert_notes` simple and its
+"cannot change type" guard intact.
+
+Three shape decisions:
+
+- **The map is explicit; nothing is guessed.** `field_map` (source field *name* →
+  target field name) is required and non-empty. A source field absent from it is
+  *dropped* and reported in `dropped_fields` (content lost); target fields nothing
+  maps into are reported in `new_empty_fields`. Unknown field names, two source
+  fields mapping to one target, mixed source types across the `note_ids`, or
+  target == source are all errors. We rejected auto-mapping same-named fields: the
+  whole risk here is silent content loss, so the caller states intent and the
+  response shows exactly what was dropped. (Maps are by name for the caller;
+  `_migrate_note_type` translates to the ordinal `fmap`/`cmap` Anki's API takes.)
+- **Apply-by-default with a `dry_run` preview**, CLI confirms — same posture as
+  `find_replace_notes` (a targeted note-data edit with explicit inputs), not the
+  preview-by-default posture of `collection_prune` (unscoped, collection-wide).
+- **"migrate", not "change".** The verb names the intent — carrying content and
+  scheduling to a new home — which is the feature's whole reason to exist over
+  delete+recreate. The object stays in the name (`migrate_note_type` /
+  `note migrate-type`) so it isn't a bare ambiguous "migrate".
+
+Index handling matches `find_replace_notes`: the remap changes a note's embedding
+text but not its ID, so on apply the migrated notes are re-embedded in place via
+the `upsert_notes` index path.
+
 ## Collection maintenance
 
 ### One `collection_prune` tool, not scattered cleanups (#89)

@@ -22,6 +22,7 @@ from shrike.schemas import (
     FindReplaceNoteTypesResponse,
     FindReplaceResponse,
     ListNotesResponse,
+    MigrateNoteTypeResponse,
     NoteInput,
     NoteTypeInput,
     RenameTagResponse,
@@ -1133,6 +1134,111 @@ def register_tools(
                 logger.warning("Failed to update index after find_replace", exc_info=True)
 
         return FindReplaceResponse.model_validate(result)
+
+    @mcp.tool()
+    @_safe_tool
+    async def migrate_note_type(
+        note_ids: Annotated[
+            list[int],
+            Field(
+                min_length=1,
+                max_length=1000,
+                description=(
+                    "Notes to migrate. They must all currently share one note type "
+                    "(a single field/template map can't apply to mixed types)."
+                ),
+            ),
+        ],
+        new_note_type: Annotated[
+            str, Field(min_length=1, description="Name of the note type to migrate the notes to.")
+        ],
+        field_map: Annotated[
+            dict[str, str],
+            Field(
+                min_length=1,
+                description=(
+                    "Map of source field name to target field name. Source fields "
+                    "omitted here are dropped (their content is lost). Two source "
+                    "fields may not map to the same target field."
+                ),
+            ),
+        ],
+        template_map: Annotated[
+            dict[str, str],
+            Field(
+                default_factory=dict,
+                description=(
+                    "Optional map of source card-template name to target template "
+                    "name. Omit to let Anki map templates by position."
+                ),
+            ),
+        ],
+        dry_run: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Preview only — report what would change (including dropped "
+                    "fields) without modifying anything. Default false (applies)."
+                )
+            ),
+        ] = False,
+    ) -> MigrateNoteTypeResponse:
+        """Change a set of notes from one note type to another.
+
+        Migrates `note_ids` (which must all currently share one note type) to
+        `new_note_type`, moving field content per `field_map` (source field name →
+        target field name). This is Anki's "Change Note Type": note IDs and — for
+        mapped card templates — review scheduling are preserved, so it's the
+        history-safe way to convert Basic↔Cloze, consolidate redundant note types,
+        or adopt a richer template.
+
+        It is **data-affecting**: a source field not named in `field_map` is
+        dropped and its content lost (reported in `dropped_fields`); target fields
+        nothing maps into start empty (`new_empty_fields`). The mapping is
+        explicit — unknown field names, or two source fields mapping to one
+        target, are errors rather than guesses. Use `dry_run` to preview the drops
+        first. To create or edit notes without changing type, use upsert_notes."""
+        logger.info(
+            "migrate_note_type notes=%d -> %s dry_run=%s",
+            len(note_ids),
+            new_note_type,
+            dry_run,
+        )
+        try:
+            result = await wrapper.migrate_note_type(
+                note_ids,
+                new_note_type,
+                field_map,
+                template_map=template_map or None,
+                dry_run=dry_run,
+            )
+        except ValueError as e:
+            raise ToolInputError(str(e)) from e
+
+        changed = result["changed"]
+        logger.info(
+            "migrate_note_type %s %d note(s) %s -> %s, dropped=%s",
+            "would migrate" if dry_run else "migrated",
+            len(changed),
+            result["from_note_type"],
+            result["to_note_type"],
+            result["dropped_fields"],
+        )
+
+        if not dry_run and changed and index and index.available:
+            # Remapped fields change the embedding text, so re-embed the migrated
+            # notes (their IDs are unchanged) — best-effort, like find_replace_notes.
+            try:
+                texts = await wrapper.note_texts_for_embedding(changed)
+                index.add(changed, texts)
+                index.col_mod = await wrapper.run(lambda c: c.mod)
+                if saver is not None:
+                    saver.request_save()
+                logger.debug("Index updated after migrate: %d vectors", len(changed))
+            except Exception:
+                logger.warning("Failed to update index after migrate_note_type", exc_info=True)
+
+        return MigrateNoteTypeResponse.model_validate(result)
 
     @mcp.tool()
     @_safe_tool

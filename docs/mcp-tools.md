@@ -686,6 +686,37 @@ By default the tool **applies** the change; pass `dry_run: true` to preview with
 
 ---
 
+## `migrate_note_type`
+
+Change a set of notes from one note type to another, moving field content per an explicit map. This is Anki's "Change Note Type": **note IDs and — for mapped card templates — review scheduling are preserved**, so it's the history-safe way to convert Basic↔Cloze, consolidate redundant note types, or adopt a richer template. To create or edit notes *without* changing type, use [`upsert_notes`](#upsert_notes) (which refuses a type change).
+
+All `note_ids` must currently share **one** note type (a single map can't apply to mixed types). The migration is **data-affecting**: a source field not named in `field_map` is dropped and its content lost (reported in `dropped_fields`); target fields nothing maps into start empty (`new_empty_fields`). The mapping is explicit — unknown field names, or two source fields mapping to one target, are errors, not guesses. Use `dry_run` to preview the drops first.
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `note_ids` | `integer[]` | **yes** | Notes to migrate (1–1000). Must all currently share one note type. |
+| `new_note_type` | `string` | **yes** | Name of the note type to migrate to (must differ from the current one). |
+| `field_map` | `object` | **yes** | Map of source field name → target field name (at least one). Unmapped source fields are dropped; two sources may not map to one target. |
+| `template_map` | `object` | no | Optional source template name → target template name. Omit to let Anki map templates by position. |
+| `dry_run` | `boolean` | no | Preview only — report drops without changing anything. Default `false` (applies). |
+
+### Response
+
+```jsonc
+{
+  "changed": [1700000000123, 1700000000456],
+  "from_note_type": "Basic",
+  "to_note_type": "Cloze",
+  "dropped_fields": ["Hint"],        // source fields with no mapping (content lost)
+  "new_empty_fields": ["Back Extra"],// target fields nothing mapped into
+  "dry_run": false
+}
+```
+
+---
+
 ## `delete_notes`
 
 Permanently delete notes and all their associated cards. This cannot be undone.

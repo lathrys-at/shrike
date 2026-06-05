@@ -28,7 +28,7 @@ src/shrike/                       # Python package (src layout)
 ├── collection.py                 # CollectionWrapper — all Anki DB operations
 ├── note_types.py                 # upsert_note_types() — create/update note types
 ├── daemon.py                     # Daemon lifecycle — file locks, spawn, shutdown
-├── tools.py                      # Registers 17 MCP tools; returns response models (emits outputSchema)
+├── tools.py                      # Registers 18 MCP tools; returns response models (emits outputSchema)
 ├── schemas.py                    # Pydantic models — single source of truth for every tool request/response + status shape
 ├── client.py                     # ShrikeClient — standalone HTTP client; typed per-tool methods, daemon lifecycle
 ├── paths.py                      # Platform-canonical directories (via platformdirs)
@@ -186,7 +186,7 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 
 **OAuth is required for native connectors (deferred; tracked here).** Claude Desktop / claude.ai *URL connectors* require OAuth 2.1 + Dynamic Client Registration: they try to register against the MCP server's sign-in service and fail against an unauthenticated endpoint, regardless of TLS or network exposure. So the "run Shrike behind a reverse proxy / on a VPN and add it as a connector" story depends on implementing MCP server auth (`mcp.server.auth`, OAuth 2.0 + PKCE — see audit §1.1); it's a v0.4/v0.6-class project, intentionally not started. Until then the unauthenticated + network-boundary model serves CLI / programmatic / `mcp-remote` clients: a native client reaches Shrike through the **`mcp-remote` stdio bridge** (`npx mcp-remote http://127.0.0.1:8372/mcp --allow-http --transport http-only`), which connects without auth because Shrike demands none. This is how the QA harness drives Claude Desktop.
 
-### MCP tools (17 total)
+### MCP tools (18 total)
 
 | Tool | Status | Purpose |
 |------|--------|---------|
@@ -202,6 +202,7 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 | `update_note_tags` | Working | Edit tags on a note set (1-1000): `set` (replace) XOR `add`/`remove` |
 | `rename_tag` | Working | Rename a tag collection-wide or on a note set (exact match) |
 | `find_replace_notes` | Working | Bulk find/replace across fields in a scoped set; literal or regex; `dry_run` preview |
+| `migrate_note_type` | Working | Change notes' note type via field/template name map; reports drops; `dry_run` preview |
 | `upsert_decks` | Working | Create or rename/reparent decks in bulk (1-100); id = rename |
 | `delete_decks` | Working | Delete decks by name, only if empty (else reported `not_empty`) |
 | `delete_notes` | Working | Permanently delete notes by ID |
@@ -220,6 +221,8 @@ The tag tools (#73), deck tools (#74), **and** `find_replace_note_types` (#76) a
 
 `find_replace_notes` (#85) is the opposite case: it edits **field bodies**, which *are* embedding text, so it re-embeds the changed notes via the `upsert_notes` index path (not the col_mod-only helper). The actual edit runs Anki's `col.find_and_replace` (Rust regex, undo-able); the changed set is detected by diffing `notes.flds` before/after (note `mod` is only second-resolution, so a same-second edit shows no bump) and exactly those are re-embedded. The dry-run preview is computed in Python (`apply_replacement`): exact for literal, illustrative for regex. A scope (`deck`/`tags`/`note_type`/`ids`) is required.
 
+**Changing a note's note type is `migrate_note_type` (#75), a dedicated tool — `upsert_notes` still hard-refuses a type change.** It wraps Anki's `col.models.change(source, nids, target, fmap, cmap)`: a history-safe migration (note IDs preserved; card scheduling carried across mapped templates) for Basic↔Cloze conversions, consolidating redundant note types, or adopting a richer template. The user-facing `field_map`/`template_map` are by **name**; `_migrate_note_type` (in `collection.py`) translates them to the ordinal `fmap`/`cmap` Anki wants (every source field ord → target ord or `None`=drop). It's **data-affecting and explicit**: `field_map` is required and non-empty, a source field not in it is *dropped* (reported in `dropped_fields`, content lost), target fields nothing maps into are reported (`new_empty_fields`), and unknown names / two-sources-to-one-target / mixed source types / target==source all raise `ValueError` → `ToolInputError` (no guessing). All `note_ids` must currently share one source type. Like `find_replace_notes` it edits embedding text (the fields move), so on apply it re-embeds the changed notes via the `upsert_notes` index path (IDs are unchanged). Applies by default with a `dry_run` preview; the CLI `note migrate-type` previews the drops, confirms, then applies.
+
 Every tool request and response shape — plus the server-status shapes — is a Pydantic model in `shrike/schemas.py` (the single source of truth). Tool functions in `tools.py` return the response models, so FastMCP emits an `outputSchema` for each tool, and `_safe_tool` runs each docstring through `inspect.cleandoc` so the advertised descriptions carry no source indentation. The standalone `ShrikeClient` exposes a typed per-tool method for each (e.g. `list_notes(...) -> ListNotesResponse`) that validates the wire response into the model; `ShrikeClient._call()` is the untyped escape hatch. There is no checked-in schema file: the authoritative machine schema is whatever the running server advertises via `tools/list`, derived from these models. `docs/mcp-tools.md` is the human-readable companion.
 
 **Make illegal states unrepresentable — the schemas.py house style.** When a field's presence is *correlated* with another (a hidden state), model it as a **discriminated union**, never a bag of optionals. The pattern is an `Annotated` type alias: each variant is a `BaseModel` with a `Literal` discriminator field, and `Thing = Annotated[A | B, Field(discriminator="status")]`. Validate the alias with `TypeAdapter(Thing).validate_python(...)` (a model *field* typed as `Thing` validates automatically). Examples: per-item results (`UpsertNoteResult = UpsertNoteOk | UpsertNoteError` — success has `id`+`neighbors`, error has `index`+`error`), `IndexStatus` (`IndexUnavailable | IndexBuilding | IndexReady | IndexErrored` — `progress` only on building, `error` only on errored), and the `/index/rebuild` + `/embedding/*` endpoint responses (unions on `status`). Two fields that always appear or vanish *as a pair* are the same smell at smaller scale — group them into a nested sub-model (`NoteTypeInfo.detail: NoteTypeDetail | None`), not two optionals. A bare `X | None` is reserved for *genuinely independent* optionality (a datum absent on its own — `col_mod` before the index is built, a field omitted from a partial update, a caller-selected `collection_info` section); annotate why so it reads as deliberate. Response models carry **no `error` field**: a whole-call failure (bad input, unhandled exception) is raised in the tool and surfaces as an MCP `isError` result, which `ShrikeClient._call` turns into a `ServerError`. Expected bad input raises `ToolInputError` (logged without a traceback); genuine bugs log with one. The only optional advisory on a success response is `message` (e.g. index-building notice, neighbor-retry hint).
@@ -234,7 +237,7 @@ The CLI uses Click with rich for output formatting. Command hierarchy:
 shrike [--config PATH] [--url URL] [--json] [--pretty/--no-pretty]
 ├── server start|stop|status|logs
 ├── info [--types] [--decks] [--tags] [--stats] [--type-details NAME]
-├── note list|show|create|update|tag|delete|search
+├── note list|show|create|update|tag|delete|search|replace|migrate-type
 ├── deck create|rename|delete
 ├── tag rename
 ├── type list|show|create|update|delete

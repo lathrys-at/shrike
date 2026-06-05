@@ -8,6 +8,15 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ## [Unreleased]
 
 ### Added
+- `migrate_note_type` MCP tool and `shrike note migrate-type` — change a set of
+  notes from one note type to another with an explicit field (and optional
+  template) map, the way Anki's "Change Note Type" does: note IDs and, for mapped
+  templates, review scheduling are preserved. It's the history-safe way to convert
+  Basic↔Cloze, consolidate redundant note types, or adopt a richer template. The
+  map is required and explicit — a source field you don't map is dropped (and
+  reported), unknown names or ambiguous (two→one) maps error rather than guess —
+  and it previews by `dry_run`/`--dry-run` before applying. `upsert_notes` still
+  refuses a type change (#75).
 - `collection_query` MCP tool and `shrike collection query "<expression>"` — find
   notes with a **raw Anki search expression**. The string is passed straight to
   Anki's search engine, so the full language works (`is:due`, `prop:ivl>=30`,

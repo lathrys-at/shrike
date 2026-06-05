@@ -855,6 +855,120 @@ class CollectionWrapper:
         logger.debug("Updated note %d", note.id)
         return {"status": "updated", "id": note.id}
 
+    async def migrate_note_type(
+        self,
+        note_ids: list[int],
+        new_note_type: str,
+        field_map: dict[str, str],
+        *,
+        template_map: dict[str, str] | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        return await self.run(
+            lambda _c: self._migrate_note_type(
+                note_ids, new_note_type, field_map, template_map=template_map, dry_run=dry_run
+            )
+        )
+
+    def _migrate_note_type(
+        self,
+        note_ids: list[int],
+        new_note_type: str,
+        field_map: dict[str, str],
+        *,
+        template_map: dict[str, str] | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Change a set of notes from one note type to another (Anki's models.change).
+
+        All ``note_ids`` must currently share a single source note type — one
+        field/template map can't apply to mixed types. ``field_map`` maps source
+        field *names* to target field names; source fields absent from it are
+        dropped (reported in ``dropped_fields``), and target fields nothing maps
+        into are reported in ``new_empty_fields``. ``template_map`` is optional;
+        omitted, Anki maps templates by ordinal. Note IDs and (for mapped
+        templates) card scheduling are preserved. Raises ``ValueError`` for any
+        caller error — the tool layer turns it into a ``ToolInputError``.
+        """
+        try:
+            notes = [self.col.get_note(nid) for nid in note_ids]  # type: ignore[arg-type]
+        except NotFoundError as err:
+            raise ValueError(f"Note not found: {err}") from err
+
+        source_mids = {n.mid for n in notes}
+        if len(source_mids) != 1:
+            raise ValueError("All notes must currently share one note type to migrate together.")
+        source = self.col.models.get(source_mids.pop())
+        assert source is not None
+
+        target = self.col.models.by_name(new_note_type)
+        if target is None:
+            raise ValueError(f"Note type '{new_note_type}' not found")
+        if target["id"] == source["id"]:
+            raise ValueError(f"Notes already use note type '{new_note_type}'.")
+
+        src_fields = {f["name"]: f["ord"] for f in source["flds"]}
+        tgt_fields = {f["name"]: f["ord"] for f in target["flds"]}
+        for old, new in field_map.items():
+            if old not in src_fields:
+                raise ValueError(f"Source field '{old}' not in note type '{source['name']}'")
+            if new not in tgt_fields:
+                raise ValueError(f"Target field '{new}' not in note type '{new_note_type}'")
+        targets = list(field_map.values())
+        ambiguous = sorted({t for t in targets if targets.count(t) > 1})
+        if ambiguous:
+            raise ValueError(f"Multiple source fields map to the same target field(s): {ambiguous}")
+
+        # fmap covers every source field ord: mapped -> target ord, else None (drop).
+        fmap: dict[int, int | None] = {
+            ord_: (tgt_fields[field_map[name]] if name in field_map else None)
+            for name, ord_ in src_fields.items()
+        }
+        dropped_fields = [name for name in src_fields if name not in field_map]
+        mapped_targets = set(field_map.values())
+        new_empty_fields = [name for name in tgt_fields if name not in mapped_targets]
+
+        cmap: dict[int, int | None] | None = None
+        if template_map:
+            src_tmpls = {t["name"]: t["ord"] for t in source["tmpls"]}
+            tgt_tmpls = {t["name"]: t["ord"] for t in target["tmpls"]}
+            for old, new in template_map.items():
+                if old not in src_tmpls:
+                    raise ValueError(f"Source template '{old}' not in note type '{source['name']}'")
+                if new not in tgt_tmpls:
+                    raise ValueError(f"Target template '{new}' not in note type '{new_note_type}'")
+            cmap = {
+                ord_: (tgt_tmpls[template_map[name]] if name in template_map else None)
+                for name, ord_ in src_tmpls.items()
+            }
+
+        result = {
+            "changed": [n.id for n in notes],
+            "from_note_type": source["name"],
+            "to_note_type": target["name"],
+            "dropped_fields": dropped_fields,
+            "new_empty_fields": new_empty_fields,
+            "dry_run": dry_run,
+        }
+        if dry_run:
+            return result
+
+        self.col.models.change(
+            source,
+            [n.id for n in notes],  # type: ignore[misc]
+            target,
+            fmap,
+            cmap,
+        )
+        logger.debug(
+            "Migrated %d note(s) %s -> %s (dropped=%s)",
+            len(notes),
+            source["name"],
+            target["name"],
+            dropped_fields,
+        )
+        return result
+
     async def delete_notes(self, ids: list[int]) -> dict[str, Any]:
         return await self.run(lambda _c: self._delete_notes(ids))
 

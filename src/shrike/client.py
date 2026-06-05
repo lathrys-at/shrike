@@ -48,6 +48,7 @@ from shrike.schemas import (
     IndexSaveResponse,
     IndexStatus,
     ListNotesResponse,
+    MigrateNoteTypeResponse,
     NoteInput,
     NoteTypeInput,
     RenameTagResponse,
@@ -266,6 +267,25 @@ class ShrikeClient:
         return ListNotesResponse.model_validate(
             self._call("collection_query", {"query": query, "fields": fields, "limit": limit})
         )
+
+    def migrate_note_type(
+        self,
+        note_ids: list[int],
+        new_note_type: str,
+        field_map: dict[str, str],
+        *,
+        template_map: dict[str, str] | None = None,
+        dry_run: bool = False,
+    ) -> MigrateNoteTypeResponse:
+        args: dict[str, Any] = {
+            "note_ids": note_ids,
+            "new_note_type": new_note_type,
+            "field_map": field_map,
+            "dry_run": dry_run,
+        }
+        if template_map:
+            args["template_map"] = template_map
+        return MigrateNoteTypeResponse.model_validate(self._call("migrate_note_type", args))
 
     def search_notes(
         self,
