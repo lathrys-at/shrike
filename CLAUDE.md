@@ -399,8 +399,10 @@ working summary.
   schemas, CLI, config) between minor versions. The version is **derived from the
   git tag** by hatch-vcs (no `__version__` constant to bump): the build writes
   `src/shrike/_version.py`, re-exported by `__init__.py`. Just tag to release.
-- **Roadmap and tracked work live in GitHub issues + milestones** (one milestone
-  per minor version, each with an `epic` tracking issue) — *not* in this file or
+- **Roadmap and tracked work live in GitHub issues + milestones** (each milestone
+  is a themed body of work — e.g. *Sync*, *Terminal UI (TUI)* — with an `epic`
+  tracking issue; milestones are **not** tied to specific version numbers, since
+  what ships in a given release is decided at tag time) — *not* in this file or
   the README, which is how the old prose roadmaps drifted. `gh issue list` /
   `gh issue list --milestone "..."` is the current state of the project.
 - **Shipped-design rationale** (the "why" behind decisions like contextual-upsert
