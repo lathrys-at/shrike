@@ -95,13 +95,32 @@ backend (#98) adds another annotation, never a new param or tool. Exact matches
 are **not** subject to the semantic `threshold` (a literal hit is always
 relevant), and within a group literal hits are listed first, then by score.
 
-### Raw Anki query is removed, to return as its own tool
+### Raw Anki query moved from a leaky param to its own tool (#86 → #97)
 
-`note list --query` / `list_notes.query` (the raw Anki search escape hatch) is
-gone. Text search lives in `search_notes`; deck/tag/type are structured filters.
-The remaining raw-Anki power (`is:due`, `prop:ivl>=30`, `added:`, `flag:`, …) is
-review/scheduling-oriented — outside Shrike's non-review scope — and will return
-as an explicit `shrike collection query` tool (#97) rather than a leaky param.
+`note list --query` / `list_notes.query` (the raw Anki search escape hatch) was
+removed in #86: text search lives in `search_notes`, deck/tag/type are structured
+`list_notes` filters, and the raw param was a leaky mode bolted onto a structured
+tool. The remaining raw-Anki power (`is:due`, `prop:ivl>=30`, `added:`, `flag:`,
+`OR`/`-`/brackets, …) returned in #97 as an explicit tool — `collection_query` /
+`shrike collection query` — rather than that param.
+
+Two scope decisions when building it:
+
+- **Full grammar, no whitelist.** The query string is passed straight to
+  `col.find_notes` — every operator works, including the review/scheduling
+  predicates (`is:due`, `prop:`, `rated:`). This *looks* like it brushes Shrike's
+  non-review stance, but that stance is about not performing review *operations*
+  (answering cards, rescheduling). `collection_query` is **read-only**: filtering
+  by `is:due` returns notes, it reviews nothing. Whitelisting a "non-review
+  subset" would mean re-implementing a parser to police Anki's grammar (fragile)
+  and would defeat the whole point of a raw escape hatch — so we don't.
+
+- **Its own tool, reusing `list_notes`' shape.** It returns the same `Note` /
+  `ListNotesResponse` as `list_notes` (same `_note_to_dict`), so callers get one
+  note shape across all three retrieval surfaces. A malformed expression is a
+  caller error: `find_notes` raises `SearchError`, surfaced as `ToolInputError`
+  (with Anki's U+2068/U+2069 isolation marks stripped from the message). It lives
+  in the `collection` CLI group introduced by #89.
 
 ### Find-and-replace edits via Anki's engine; a scope is required (#85)
 

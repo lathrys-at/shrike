@@ -455,6 +455,25 @@ class CollectionWrapper:
                 continue
         return {"notes": notes, "total": len(notes), "limit": limit}
 
+    async def query(
+        self, query: str, *, fields_mode: str = "full", limit: int = 50
+    ) -> dict[str, Any]:
+        return await self.run(lambda _c: self._query(query, fields_mode=fields_mode, limit=limit))
+
+    def _query(self, query: str, *, fields_mode: str = "full", limit: int = 50) -> dict[str, Any]:
+        """Run a raw Anki search expression and return matching notes.
+
+        The query string is passed straight to ``col.find_notes`` — the full
+        Anki search language, no structured filters. A malformed expression
+        raises ``anki.errors.SearchError``, which the tool layer turns into a
+        ``ToolInputError``. Returns the same shape as ``list_notes`` (``total``
+        is the full match count before ``limit``).
+        """
+        note_ids = list(self.col.find_notes(query))
+        total = len(note_ids)
+        notes = [self._note_to_dict(nid, fields_mode) for nid in note_ids[:limit]]
+        return {"notes": notes, "total": total, "limit": limit}
+
     async def search_substring(
         self,
         text: str,

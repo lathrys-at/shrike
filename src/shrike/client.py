@@ -262,6 +262,11 @@ class ShrikeClient:
                 args[key] = value
         return ListNotesResponse.model_validate(self._call("list_notes", args))
 
+    def query(self, query: str, *, fields: str = "full", limit: int = 50) -> ListNotesResponse:
+        return ListNotesResponse.model_validate(
+            self._call("collection_query", {"query": query, "fields": fields, "limit": limit})
+        )
+
     def search_notes(
         self,
         *,

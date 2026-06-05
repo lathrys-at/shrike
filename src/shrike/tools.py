@@ -5,6 +5,7 @@ import inspect
 import logging
 from typing import Annotated, Any, Literal
 
+from anki.errors import SearchError
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
@@ -250,6 +251,54 @@ def register_tools(
             len(result.get("notes", [])),
             result.get("total", 0),
         )
+        return ListNotesResponse.model_validate(result)
+
+    @mcp.tool()
+    @_safe_tool
+    async def collection_query(
+        query: Annotated[
+            str,
+            Field(
+                min_length=1,
+                description=(
+                    "A raw Anki search expression, e.g. 'is:due prop:ivl>=30', "
+                    "'added:7 -tag:done', 'deck:Japanese (tag:verb OR tag:adj)'. "
+                    "See https://docs.ankiweb.net/searching.html."
+                ),
+            ),
+        ],
+        fields: Annotated[
+            Literal["full", "meta"],
+            Field(
+                description=(
+                    '"full" (default) returns all field content. "meta" returns only '
+                    "note ID, note type, deck, tags, and modification time."
+                )
+            ),
+        ] = "full",
+        limit: Annotated[
+            int, Field(ge=1, le=200, description="Maximum notes to return. Default 50.")
+        ] = 50,
+    ) -> ListNotesResponse:
+        """Find notes with a raw Anki search expression.
+
+        This is the power-user escape hatch: the `query` string is passed
+        straight to Anki's search engine, so the full expression language is
+        available — `is:due`, `prop:ivl>=30`, `added:`, `rated:`, `flag:`,
+        `nid:`/`cid:`, and boolean `OR` / `-` / parentheses.
+
+        Use this when you need predicates the structured tools don't expose. For
+        conceptual or exact-text search use search_notes; for plain deck/tag/type
+        filters use list_notes. Returns the same note shape as list_notes, with
+        `total` the full match count before `limit`. An invalid expression is
+        reported as an input error."""
+        logger.info("collection_query %r fields=%s limit=%d", query, fields, limit)
+        try:
+            result = await wrapper.query(query, fields_mode=fields, limit=limit)
+        except SearchError as e:
+            # Anki wraps interpolated values in U+2068/U+2069 isolation marks.
+            raise ToolInputError(str(e).replace("⁨", "").replace("⁩", "")) from e
+        logger.info("collection_query returned %d/%d notes", len(result["notes"]), result["total"])
         return ListNotesResponse.model_validate(result)
 
     @mcp.tool()
