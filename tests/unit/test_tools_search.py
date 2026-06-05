@@ -72,11 +72,14 @@ def mcp_no_index(wrapper):
 
 
 class TestSearchNotesStates:
-    def test_unavailable_returns_message(self, mcp_app, mock_index):
+    def test_unavailable_still_runs_exact(self, mcp_app, mock_index):
+        # Semantic down, but substring matching needs no index: the call still
+        # runs (no literal "test" in a fresh collection → empty group) and notes
+        # that semantic ranking was skipped.
         mock_index.state = IndexState.UNAVAILABLE
         result = _call(mcp_app, "search_notes", {"queries": ["test"]})
-        assert result["results"] == []
-        assert "not available" in result["message"]
+        assert "exact text matches" in result["message"]
+        assert all(not g["matches"] for g in result["results"])
 
     def test_building_returns_progress(self, mcp_app, mock_index):
         mock_index.state = IndexState.BUILDING
@@ -89,10 +92,18 @@ class TestSearchNotesStates:
         result = _call(mcp_app, "search_notes", {"queries": ["test"]})
         assert "error" in result["message"]
 
-    def test_no_index_returns_message(self, mcp_no_index):
+    def test_no_index_still_runs_exact(self, mcp_no_index):
         result = _call(mcp_no_index, "search_notes", {"queries": ["test"]})
+        assert "exact text matches" in result["message"]
+        assert all(not g["matches"] for g in result["results"])
+
+    def test_ids_only_with_no_index_returns_message(self, mcp_no_index, wrapper):
+        # An id anchor has no literal text to match, so with no index there's
+        # nothing to do — message, no results.
+        seeded = _seed(wrapper, [BASIC_NOTE])
+        result = _call(mcp_no_index, "search_notes", {"ids": [seeded[0]["id"]]})
         assert result["results"] == []
-        assert "not available" in result["message"]
+        assert "unavailable" in result["message"]
 
     def test_requires_queries_or_ids(self, mcp_app):
         from mcp.server.fastmcp.exceptions import ToolError
@@ -139,6 +150,49 @@ class TestSearchNotesResults:
         mock_index.search.return_value = [[{"note_id": basic_note, "distance": 0.1}]]
         result = _call(mcp_app, "search_notes", {"queries": ["test"], "deck": "Nonexistent"})
         assert result["results"][0]["matches"] == []
+
+
+class TestUnifiedSearch:
+    """Each query is matched by semantics AND exact substring, folded together."""
+
+    def _seed_front(self, wrapper, front: str) -> int:
+        note = {"deck": "Test", "note_type": "Basic", "fields": {"Front": front, "Back": "x"}}
+        return _seed(wrapper, [note])[0]["id"]
+
+    def test_exact_match_without_semantic(self, wrapper, mock_index, mcp_app):
+        mock_index.search.return_value = [[]]  # no semantic hits
+        self._seed_front(wrapper, "Electron transport chain")
+        m = _call(mcp_app, "search_notes", {"queries": ["transport"]})["results"][0]["matches"]
+        assert len(m) == 1
+        assert m[0]["score"] is None
+        assert m[0]["substring"]["matched_fields"] == ["Front"]
+
+    def test_both_score_and_substring(self, wrapper, mock_index, mcp_app):
+        nid = self._seed_front(wrapper, "Electron transport chain")
+        mock_index.search.return_value = [[{"note_id": nid, "distance": 0.1}]]  # score 0.9
+        m = _call(mcp_app, "search_notes", {"queries": ["transport"]})["results"][0]["matches"][0]
+        assert m["score"] == 0.9
+        assert m["substring"] is not None
+
+    def test_threshold_does_not_drop_exact(self, wrapper, mock_index, mcp_app):
+        nid = self._seed_front(wrapper, "unique phrase here")
+        # Semantic score 0.01 is below threshold → not attached; exact still includes it.
+        mock_index.search.return_value = [[{"note_id": nid, "distance": 0.99}]]
+        m = _call(mcp_app, "search_notes", {"queries": ["unique phrase"], "threshold": 0.5})[
+            "results"
+        ][0]["matches"]
+        assert len(m) == 1
+        assert m[0]["score"] is None
+        assert m[0]["substring"] is not None
+
+    def test_exact_first_ordering(self, wrapper, mock_index, mcp_app):
+        exact_nid = self._seed_front(wrapper, "alpha beta gamma")
+        sem_only = self._seed_front(wrapper, "unrelated content")
+        # semantic returns the unrelated note with a high score; exact match has none
+        mock_index.search.return_value = [[{"note_id": sem_only, "distance": 0.05}]]  # 0.95
+        m = _call(mcp_app, "search_notes", {"queries": ["beta gamma"]})["results"][0]["matches"]
+        ids = [x["id"] for x in m]
+        assert ids[0] == exact_nid  # literal hit ranks first despite no score
 
     def test_tags_filter(self, wrapper, mock_index, mcp_app, basic_note):
         mock_index.search.return_value = [[{"note_id": basic_note, "distance": 0.1}]]

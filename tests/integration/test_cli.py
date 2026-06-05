@@ -300,38 +300,6 @@ class TestNoteListAndShow:
         result = runner.invoke(["note", "show", "999999999"])
         assert result.exit_code != 0
 
-    def test_list_by_query(self, runner):
-        runner.json(
-            [
-                "note",
-                "create",
-                "--deck",
-                "QueryDeck",
-                "--type",
-                "Basic",
-                "-f",
-                "Front=mitochondria",
-                "-f",
-                "Back=powerhouse",
-            ]
-        )
-        runner.json(
-            [
-                "note",
-                "create",
-                "--deck",
-                "QueryDeck",
-                "--type",
-                "Basic",
-                "-f",
-                "Front=ribosome",
-                "-f",
-                "Back=protein",
-            ]
-        )
-        data = runner.json(["note", "list", "--query", "mitochondria"])
-        assert data["total"] == 1
-
     def test_list_meta_flag(self, runner):
         runner.json(
             [
@@ -763,9 +731,36 @@ class TestNoteDelete:
 
 
 class TestNoteSearch:
-    def test_search_stub(self, runner):
-        result = runner.invoke(["note", "search", "test query"])
-        assert result.exit_code != 0 or "not available" in result.output.lower()
+    """`note search` on a server with no embeddings: exact substring still works."""
+
+    def _make(self, runner, front: str) -> None:
+        runner.json(
+            ["note", "create", "--deck", "S", "--type", "Basic"]
+            + ["-f", f"Front={front}", "-f", "Back=x"]
+        )
+
+    def test_substring_finds_note_json(self, runner):
+        self._make(runner, "mitochondria powerhouse")
+        self._make(runner, "ribosome protein")
+        data = runner.json(["note", "search", "mitochondria"])
+        matches = data["results"][0]["matches"]
+        assert len(matches) == 1
+        # CLI --json drops null fields, so an exact-only hit has no `score` key.
+        assert matches[0].get("score") is None
+        assert matches[0]["substring"]["matched_fields"] == ["Front"]
+
+    def test_substring_pretty_shows_snippet(self, runner):
+        self._make(runner, "electron transport chain")
+        result = runner.invoke(["note", "search", "transport"])
+        assert result.exit_code == 0
+        assert "transport" in result.output
+        # semantic ranking is unavailable on this server; that's surfaced (the
+        # message wraps in the panel, so match on a single unbroken word)
+        assert "unavailable" in result.output.lower()
+
+    def test_requires_an_argument(self, runner):
+        result = runner.invoke(["note", "search"])
+        assert result.exit_code != 0
 
 
 class TestIndexSave:

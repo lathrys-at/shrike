@@ -74,6 +74,35 @@ duplicated. The default is `error` (not the old silent-create behaviour) because
 silently writing a duplicate or an empty note is almost always a mistake; callers
 who genuinely want duplicates opt in with `allow`.
 
+### One query, many retrieval mechanisms, annotated results (#86)
+
+`search_notes` takes a single `queries` input and runs it through *every*
+retrieval mechanism, folding the evidence into one result list rather than
+exposing a separate param/tool per mechanism. Today that's semantic similarity
+(the vector index) and exact case-insensitive substring matching; each match
+carries a `score` when semantically ranked and a `substring` annotation (matched
+fields + snippet) when the text occurs literally — both when both apply, and a
+given annotation is simply absent otherwise (a returned match always has at
+least one).
+
+This was deliberately chosen over a `--substring`/`substring` parameter: a
+separate flag reads as a filter and forces a union-vs-intersection decision,
+whereas "the query is matched every way we can, and results tell you how" needs
+no mode. It also degrades gracefully — with the embedding index down, a query
+still returns its exact matches (no `score`) plus an advisory `message`. The
+optional match-evidence fields are the extension point: a future n-gram/fuzzy
+backend (#98) adds another annotation, never a new param or tool. Exact matches
+are **not** subject to the semantic `threshold` (a literal hit is always
+relevant), and within a group literal hits are listed first, then by score.
+
+### Raw Anki query is removed, to return as its own tool
+
+`note list --query` / `list_notes.query` (the raw Anki search escape hatch) is
+gone. Text search lives in `search_notes`; deck/tag/type are structured filters.
+The remaining raw-Anki power (`is:due`, `prop:ivl>=30`, `added:`, `flag:`, …) is
+review/scheduling-oriented — outside Shrike's non-review scope — and will return
+as an explicit `shrike collection query` tool (#97) rather than a leaky param.
+
 ## Tags
 
 ### Setting tags is a full replace; add/remove is a separate operation (#73)

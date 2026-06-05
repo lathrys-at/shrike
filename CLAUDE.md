@@ -164,7 +164,7 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 |------|--------|---------|
 | `collection_info` | Working | Collection structure, note types, decks, tags, stats |
 | `list_notes` | Working | Filter/retrieve notes by deck, tags, type, IDs, date |
-| `search_notes` | Working | Semantic similarity search over note embeddings |
+| `search_notes` | Working | Per-query semantic similarity **and** exact-substring search, folded into annotated results (`score`?/`substring`?) |
 | `upsert_notes` | Working | Create or update notes in bulk (1-100); `on_duplicate` policy + `dry_run`; returns similar neighbors |
 | `upsert_note_types` | Working | Create or update note type definitions (1-10) |
 | `update_note_tags` | Working | Edit tags on a note set (1-1000): `set` (replace) XOR `add`/`remove` |

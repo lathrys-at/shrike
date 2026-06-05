@@ -410,7 +410,9 @@ class TestListNotesAdvanced:
         assert result["total"] == 1
         assert result["notes"][0]["content"]["Front"] == "New"
 
-    def test_query_raw_search(self, mcp):
+    def test_search_substring_without_index(self, mcp):
+        # This server has no embedding index, so search_notes' semantic ranking is
+        # skipped — but exact substring matching still works and is annotated.
         mcp(
             "upsert_notes",
             {
@@ -428,9 +430,12 @@ class TestListNotesAdvanced:
                 ]
             },
         )
-        result = mcp("list_notes", {"query": "mitochondria"})
-        assert result["total"] == 1
-        assert "mitochondria" in result["notes"][0]["content"]["Front"]
+        result = mcp("search_notes", {"queries": ["mitochondria"]})
+        matches = result["results"][0]["matches"]
+        assert len(matches) == 1
+        assert matches[0]["score"] is None
+        assert matches[0]["substring"]["matched_fields"] == ["Front"]
+        assert "exact text matches" in (result.get("message") or "")
 
     def test_limit_over_max_rejected(self, mcp):
         # limit is schema-constrained (1-200); out-of-range is rejected.
@@ -697,11 +702,13 @@ class TestNoteTypeLifecycle:
         assert result["results"][0]["status"] == "error"
 
 
-class TestSearchNotesStub:
-    def test_returns_stub_message(self, mcp):
+class TestSearchNotesNoIndex:
+    def test_query_without_index_notes_unavailable(self, mcp):
+        # No embedding index on this server: semantic ranking is skipped, but the
+        # call still runs (exact substring needs no index) and says so.
         result = mcp("search_notes", {"queries": ["anything"]})
-        assert result["results"] == []
-        assert result["message"]
+        assert "exact text matches" in result["message"]
+        assert all(not g["matches"] for g in result["results"])
 
     def test_requires_queries_or_ids(self, mcp):
         with pytest.raises(RuntimeError, match="queries or ids"):

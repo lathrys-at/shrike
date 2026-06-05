@@ -65,6 +65,8 @@ shrike note search "electron transport chain"
 shrike note search --similar-to 1700000000123
 ```
 
+`shrike note search` also matches your query as exact text, so it finds notes that contain the words literally as well as ones that are semantically close; each result shows you which applied. The exact-text part works even without the embedding service running.
+
 ## CLI
 
 `shrike info` summarizes the collection: note types, decks, tags, and scheduling stats.
@@ -182,7 +184,7 @@ Shrike exposes these MCP tools:
 
 - **collection_info**: collection structure, note types, decks, tags, and stats
 - **list_notes**: filter and retrieve notes by deck, tags, type, IDs, or date
-- **search_notes**: semantic search over note embeddings
+- **search_notes**: semantic similarity and exact-substring search over notes
 - **upsert_notes**: create or update notes in bulk
 - **upsert_note_types**: create or update note type definitions
 - **update_note_tags**: set, add, or remove tags on a set of notes
