@@ -546,9 +546,3 @@ def embedding_server(server_factory, embedding_model: Path) -> ServerInfo:
         )
 
     return srv
-
-
-@pytest.fixture(scope="session")
-def embedding_mcp(embedding_server: ServerInfo) -> MCPClient:
-    """MCP client bound to the embedding-enabled server."""
-    return MCPClient(embedding_server.url)
