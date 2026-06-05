@@ -45,6 +45,48 @@ _DUPLICATE_MESSAGE = "The first field duplicates an existing note of this type."
 
 T = TypeVar("T")
 
+# Chars that are special inside an Anki search even within double quotes; escaped
+# so the term is matched literally (verified against anki 25.9.4: ':' must be
+# escaped even quoted, or a substring spanning it silently misses).
+_ANKI_SEARCH_SPECIALS = ("\\", '"', "*", "_", ":")
+
+
+def _escape_anki_text(text: str) -> str:
+    for ch in _ANKI_SEARCH_SPECIALS:
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
+def substring_info(content: dict[str, str] | None, text: str) -> dict[str, Any] | None:
+    """Locate a case-insensitive literal substring in a note's fields.
+
+    Returns ``{"matched_fields": [...], "snippet": ...}`` (snippet = ≈80-char
+    context around the first occurrence in the first matched field), or ``None``
+    when no field contains the text. The authority for exact-match evidence — the
+    Anki query is only a fast pre-filter, so this drops any false positives.
+    """
+    needle = text.lower()
+    matched: list[str] = []
+    snippet: str | None = None
+    for name, value in (content or {}).items():
+        v = value or ""
+        idx = v.lower().find(needle)
+        if idx == -1:
+            continue
+        matched.append(name)
+        if snippet is None:
+            start = max(0, idx - 30)
+            end = idx + len(text) + 30
+            frag = v[start:end]
+            if start > 0:
+                frag = "…" + frag
+            if end < len(v):
+                frag = frag + "…"
+            snippet = frag
+    if not matched:
+        return None
+    return {"matched_fields": matched, "snippet": snippet}
+
 
 class CollectionWrapper:
     """Serializes every access to the underlying ``anki.Collection``.
@@ -282,7 +324,6 @@ class CollectionWrapper:
         tags: list[str] | None = None,
         note_type: str | None = None,
         modified_since: str | None = None,
-        query: str | None = None,
         fields_mode: str = "full",
         limit: int = 50,
     ) -> dict[str, Any]:
@@ -293,7 +334,6 @@ class CollectionWrapper:
                 tags=tags,
                 note_type=note_type,
                 modified_since=modified_since,
-                query=query,
                 fields_mode=fields_mode,
                 limit=limit,
             )
@@ -307,11 +347,10 @@ class CollectionWrapper:
         tags: list[str] | None = None,
         note_type: str | None = None,
         modified_since: str | None = None,
-        query: str | None = None,
         fields_mode: str = "full",
         limit: int = 50,
     ) -> dict[str, Any]:
-        if ids is not None and not any([deck, tags, note_type, modified_since, query]):
+        if ids is not None and not any([deck, tags, note_type, modified_since]):
             return self._get_notes_by_ids(ids, fields_mode, limit)
 
         query_parts: list[str] = []
@@ -329,8 +368,6 @@ class CollectionWrapper:
                     query_parts.append(f"tag:{tag}")
         if note_type is not None:
             query_parts.append(f'"note:{note_type}"')
-        if query is not None:
-            query_parts.append(query)
 
         combined = " ".join(query_parts) if query_parts else None
 
@@ -376,6 +413,63 @@ class CollectionWrapper:
             except NotFoundError:
                 continue
         return {"notes": notes, "total": len(notes), "limit": limit}
+
+    async def search_substring(
+        self,
+        text: str,
+        *,
+        deck: str | None = None,
+        tags: list[str] | None = None,
+        exclude_ids: list[int] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        return await self.run(
+            lambda _c: self._search_substring(
+                text, deck=deck, tags=tags, exclude_ids=exclude_ids, limit=limit
+            )
+        )
+
+    def _search_substring(
+        self,
+        text: str,
+        *,
+        deck: str | None,
+        tags: list[str] | None,
+        exclude_ids: list[int] | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Notes whose field text contains ``text`` literally (case-insensitive).
+
+        Anki's ``"*term*"`` wildcard search is a fast pre-filter; each candidate
+        is then confirmed (and annotated) by ``substring_info``, the authority.
+        Returns full note dicts each carrying a ``substring`` annotation; no
+        ``score`` (this is the non-semantic mechanism).
+        """
+        if not text.strip():
+            return []
+        parts = [f'"*{_escape_anki_text(text)}*"']
+        if deck is not None:
+            resolved = self._resolve_deck_ref(deck)
+            if resolved is None:
+                return []
+            parts.append(f'"deck:{resolved}"')
+        for tag in tags or []:
+            parts.append(f'"tag:{tag}"')
+
+        exclude = set(exclude_ids or [])
+        results: list[dict[str, Any]] = []
+        for nid in self.col.find_notes(" ".join(parts)):
+            if nid in exclude:
+                continue
+            note = self._note_to_dict(nid, "full")
+            info = substring_info(note.get("content"), text)
+            if info is None:
+                continue  # Anki matched across markup/normalization; not a literal hit
+            note["substring"] = info
+            results.append(note)
+            if len(results) >= limit:
+                break
+        return results
 
     async def note_to_dict(self, nid: int, fields_mode: str) -> dict[str, Any]:
         return await self.run(lambda _c: self._note_to_dict(nid, fields_mode))

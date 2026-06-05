@@ -156,44 +156,6 @@ class TestListNotes:
         result = await wrapper.list_notes(modified_since=past)
         assert result["total"] >= 1
 
-    async def test_query_raw_anki_search(self, wrapper):
-        await wrapper.upsert_notes(
-            [
-                {
-                    "deck": "Test",
-                    "note_type": "Basic",
-                    "fields": {"Front": "mitochondria", "Back": "powerhouse"},
-                },
-                {
-                    "deck": "Test",
-                    "note_type": "Basic",
-                    "fields": {"Front": "ribosome", "Back": "protein synthesis"},
-                },
-            ]
-        )
-        result = await wrapper.list_notes(query="mitochondria")
-        assert result["total"] == 1
-        assert "mitochondria" in result["notes"][0]["content"]["Front"]
-
-    async def test_query_combined_with_deck(self, wrapper):
-        await wrapper.upsert_notes(
-            [
-                {
-                    "deck": "Biology",
-                    "note_type": "Basic",
-                    "fields": {"Front": "cell", "Back": "unit of life"},
-                },
-                {
-                    "deck": "Other",
-                    "note_type": "Basic",
-                    "fields": {"Front": "cell", "Back": "battery unit"},
-                },
-            ]
-        )
-        result = await wrapper.list_notes(deck="Biology", query="cell")
-        assert result["total"] == 1
-        assert result["notes"][0]["deck"] == "Biology"
-
     async def test_ids_combined_with_deck_filter(self, wrapper):
         results = await wrapper.upsert_notes(
             [

@@ -8,6 +8,14 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ## [Unreleased]
 
 ### Added
+- `search_notes` / `shrike note search` now match each query **both** by semantic
+  similarity and as an exact, case-insensitive substring of note fields, folded
+  into one result list. Each hit carries a `score` when semantically ranked and a
+  `substring` annotation (matched fields + snippet) when the text occurs
+  literally — both when both apply. Exact matches are returned even when the
+  embedding index is unavailable (the response notes semantic ranking was
+  skipped), so text search works without embeddings. This is the single-query /
+  annotated-evidence contract future retrieval backends plug into (n-gram, #98).
 - Decks can now be referenced by **ID** anywhere a deck name is taken — a bare
   numeric ID or a `#`-prefixed ID — across the CLI (`note list/create/update
   --deck`, `note search --deck`, `deck rename`, `deck delete`) and the MCP tools
@@ -45,6 +53,13 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 - `shrike note tag` now requires choosing a mode (`--set`, `--add`, or
   `--remove`) and its output reports `notes_modified`/`not_found` instead of
   per-note upsert results (#73).
+
+### Removed
+- `shrike note list --query` and the `query` param of `list_notes` (the raw Anki
+  search escape hatch). Text search now lives in `search_notes`; structured
+  filters cover deck/tag/type. Raw Anki query expressions (`is:due`, `prop:`,
+  `added:`, …) will return as a dedicated `shrike collection query` tool (#97,
+  #86).
 
 ## [0.3.4] — 2026-06-01
 

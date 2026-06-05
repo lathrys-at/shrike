@@ -157,10 +157,28 @@ class Note(BaseModel):
     content: dict[str, str] | None = None
 
 
-class SearchMatch(Note):
-    """A search result: a note plus its similarity score."""
+class SubstringInfo(BaseModel):
+    """Evidence that the query text occurs literally in a note."""
 
-    score: float
+    matched_fields: list[str] = []
+    snippet: str | None = None
+
+
+class SearchMatch(Note):
+    """A search result with per-mechanism match evidence.
+
+    A hit can be semantically ranked, an exact-substring hit, or both. Each
+    annotation below is independently optional and absent when its mechanism did
+    not contribute — but a returned match always carries at least one. This is the
+    extension point for future retrieval backends (n-gram / fuzzy / prefix, #98):
+    they add further optional evidence fields here, never a new param or tool.
+    """
+
+    # Semantic similarity (0-1); None when the hit matched only by exact substring
+    # or the vector index was unavailable. Independent of `substring`.
+    score: float | None = None
+    # Present when the query text occurs literally in the note.
+    substring: SubstringInfo | None = None
 
 
 class Neighbor(BaseModel):

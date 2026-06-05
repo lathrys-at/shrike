@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from shrike.collection import CollectionWrapper
+from shrike.collection import CollectionWrapper, substring_info
 from shrike.index import IndexSaver, IndexState, VectorIndex
 from shrike.schemas import (
     CollectionInfo,
@@ -179,15 +179,6 @@ def register_tools(
                 )
             ),
         ] = None,
-        query: Annotated[
-            str | None,
-            Field(
-                description=(
-                    'Raw Anki search query for advanced filtering (e.g., "is:due", '
-                    '"prop:ivl>=30"). Combined with other filters via AND.'
-                )
-            ),
-        ] = None,
         fields: Annotated[
             Literal["full", "meta"] | None,
             Field(
@@ -209,16 +200,16 @@ def register_tools(
 
         Use this for precise lookups: fetching specific notes by ID, listing
         a deck's contents, or filtering by exact criteria. For conceptual or
-        fuzzy queries, use search_notes instead.
+        exact-text queries, use search_notes instead.
 
         At least one filter must be provided. Combine filters freely — they
         are ANDed together. Use `fields: "meta"` to return only metadata for
         large result sets. The response includes `total` (full match count);
         if more notes matched than `limit` allows, narrow your filters."""
-        if not any([ids, deck, tags, note_type, modified_since, query]):
+        if not any([ids, deck, tags, note_type, modified_since]):
             raise ToolInputError(
                 "At least one filter (ids, deck, tags, note_type,"
-                " modified_since, or query) must be provided."
+                " or modified_since) must be provided."
             )
 
         filters = [
@@ -229,7 +220,6 @@ def register_tools(
                 f"type={note_type}" if note_type else "",
                 f"ids={len(ids)}" if ids else "",
                 f"since={modified_since}" if modified_since else "",
-                f"query={query!r}" if query else "",
             ]
             if f
         ]
@@ -241,7 +231,6 @@ def register_tools(
             tags=tags or None,
             note_type=note_type,
             modified_since=modified_since,
-            query=query,
             fields_mode=fields or "full",
             limit=limit,
         )
@@ -261,7 +250,8 @@ def register_tools(
             Field(
                 default_factory=list,
                 max_length=50,
-                description="Natural-language search strings, each matched independently "
+                description="Search strings, each matched independently both by semantic "
+                "similarity and as an exact (case-insensitive) substring of note fields "
                 "(max 50 per call).",
             ),
         ],
@@ -311,18 +301,23 @@ def register_tools(
             ),
         ],
     ) -> SearchResponse:
-        """Semantic similarity search over the Anki collection.
+        """Search the collection by meaning and by exact text in one call.
 
-        Accepts natural-language query strings, note IDs (to find
-        conceptually similar notes), or both. Returns the top matches
-        ranked by similarity score.
+        Each query string is matched two ways and the results are folded
+        together: by semantic similarity (the vector index) and by exact,
+        case-insensitive substring over note fields. Every match carries a
+        `score` when it was semantically ranked and a `substring` annotation
+        (matched fields + a snippet) when the query text occurs literally — both
+        when both apply. Note IDs in `ids` are semantic anchors only (no literal
+        text to match).
 
-        Use this for conceptual queries that keyword search cannot handle:
-        finding cards about a topic, checking if a concept is already
-        covered before creating new cards, or exploring thematic clusters
-        in the collection.
+        Exact substring matches are returned even when the embedding index is
+        unavailable (the response carries a `message` noting semantic ranking was
+        skipped) and are not subject to `threshold`. Within a group, matches that
+        contain the text literally are listed first, then by descending score.
 
-        At least one of `queries` or `ids` must be provided."""
+        Use this for conceptual queries keyword search can't handle and for
+        finding exact wording. At least one of `queries` or `ids` is required."""
         if not queries and not ids:
             raise ToolInputError("At least one of queries or ids must be provided.")
 
@@ -333,132 +328,132 @@ def register_tools(
             top_k,
             threshold,
         )
-        # Query text only at DEBUG — useful for seeing *how* a caller searched
-        # (e.g. eval of search-query quality), but noisy/PII-ish for INFO.
         if queries:
             logger.debug("search_notes query strings: %s", queries)
         if ids:
             logger.debug("search_notes source ids: %s", ids)
 
-        if index is None or index.state == IndexState.UNAVAILABLE:
-            return SearchResponse(
-                message=(
-                    "Semantic search is not available — the embedding service is not "
-                    "running. Start it with 'shrike embedding start', or use list_notes "
-                    "for structured filtering instead."
+        # Substring matching needs no embeddings; semantic ranking does.
+        semantic_ok = index is not None and index.available and index.state == IndexState.READY
+        message: str | None = None
+        if not semantic_ok:
+            if index is not None and index.state == IndexState.BUILDING:
+                indexed, total = index.build_progress
+                message = (
+                    f"Semantic ranking unavailable (index building {indexed}/{total}); "
+                    "returning exact text matches only."
                 )
-            )
-
-        if index.state == IndexState.BUILDING:
-            indexed, total = index.build_progress
-            return SearchResponse(
-                message=(
-                    f"The vector index is building ({indexed}/{total} notes indexed). "
-                    "Try again shortly."
+            elif index is not None and index.state == IndexState.ERROR:
+                message = (
+                    "Semantic ranking unavailable (index error); returning exact text matches only."
                 )
-            )
-
-        if index.state == IndexState.ERROR:
-            return SearchResponse(
-                message=(
-                    "The vector index encountered an error during the last build. "
-                    "It will retry on next server restart. "
-                    "Use list_notes for structured filtering instead."
+            else:
+                message = (
+                    "Semantic ranking unavailable (embedding service not running); "
+                    "returning exact text matches only. Start it with "
+                    "'shrike embedding start'."
                 )
-            )
-
-        if not index.available:
-            return SearchResponse(
-                message=(
-                    "Semantic search is not available. "
-                    "The vector index has not been built. "
-                    "Use list_notes for structured filtering instead."
-                )
-            )
+            # Pure semantic request with nothing to substring-match → nothing to do.
+            if not queries:
+                return SearchResponse(message=message)
 
         if deck:
-            # Accept a deck name, #id, or numeric id; resolve to the name the
-            # post-filter compares against. An explicit id that matches nothing
-            # yields no results.
+            # Accept a deck name, #id, or numeric id; an explicit id that matches
+            # nothing yields no results.
             deck = await wrapper.resolve_deck_ref(deck)
             if deck is None:
                 return SearchResponse(results=[], message="No deck matches that reference.")
 
         exclude_set = set(exclude_ids or [])
 
-        all_query_texts: list[str] = []
-        sources: list[str] = []
-
+        # Assemble search sources: each query string (semantic + substring) and
+        # each id anchor (semantic only). Anchors are excluded from their results.
+        text_sources: list[tuple[str, str, str]] = []  # (kind, label, text)
         for q in queries or []:
-            all_query_texts.append(q)
-            sources.append(q)
-
+            text_sources.append(("query", q, q))
         if ids:
             note_texts = await wrapper.note_texts_for_embedding(ids)
             for nid, text in zip(ids, note_texts, strict=True):
                 if text:
-                    all_query_texts.append(text)
-                    sources.append(f"note #{nid}")
+                    text_sources.append(("id", f"note #{nid}", text))
                     exclude_set.add(nid)
 
-        if not all_query_texts:
+        if not text_sources:
             return SearchResponse(message="No valid queries or note IDs to search.")
 
-        # Over-fetch to cover excluded ids. When a deck/tag filter is set, the
-        # filtering happens post-hoc, so widen the window aggressively — otherwise
-        # a deck-scoped search whose nearest neighbors sit outside the deck can
-        # silently under-return. (Heuristic: still possible to under-return if the
-        # in-scope notes rank very deep; documented in docs/mcp-tools.md.)
-        fetch_k = top_k + len(exclude_set)
-        if deck or tags:
-            fetch_k = max(fetch_k, top_k * 10)
-            if index.size:
-                fetch_k = min(fetch_k, index.size)
-        raw_results = index.search(all_query_texts, top_k=fetch_k)
+        # Semantic pass (batched). Over-fetch to cover excluded ids and post-hoc
+        # deck/tag/substring filtering, which can otherwise under-return.
+        sem_raw: dict[int, list[dict[str, Any]]] = {}
+        if semantic_ok:
+            assert index is not None
+            fetch_k = top_k + len(exclude_set)
+            if deck or tags:
+                fetch_k = max(fetch_k, top_k * 10)
+                if index.size:
+                    fetch_k = min(fetch_k, index.size)
+            raw = index.search([t for (_, _, t) in text_sources], top_k=fetch_k)
+            sem_raw = dict(enumerate(raw))
+
+        def _in_scope(note_data: dict[str, Any]) -> bool:
+            if deck and note_data.get("deck") != deck:
+                return False
+            return not (tags and not all(t in set(note_data.get("tags", [])) for t in tags))
 
         results: list[dict[str, Any]] = []
-        for source, matches in zip(sources, raw_results, strict=True):
-            enriched: list[dict[str, Any]] = []
-            for m in matches:
+        for i, (kind, label, text) in enumerate(text_sources):
+            merged: dict[int, dict[str, Any]] = {}
+
+            # Exact substring (query sources only; deck/tags/exclude applied inside).
+            if kind == "query":
+                exact = await wrapper.search_substring(
+                    text, deck=deck, tags=tags or None, exclude_ids=list(exclude_set), limit=top_k
+                )
+                for note in exact:
+                    merged[note["id"]] = {**note, "score": None}
+
+            # Semantic.
+            sem_count = 0
+            for m in sem_raw.get(i, []):
                 nid = m["note_id"]
                 if nid in exclude_set:
                     continue
-
                 score = round(1.0 - m["distance"], 3)
                 if score < threshold:
-                    break
-
+                    break  # raw is distance-ascending → the rest are below threshold
                 try:
                     note_data = await wrapper.note_to_dict(nid, "full")
                 except Exception:
                     logger.debug("search_notes: skipping unreadable note %s", nid, exc_info=True)
                     continue
-
-                if deck and note_data.get("deck") != deck:
+                if not _in_scope(note_data):
                     continue
-                if tags:
-                    note_tags = set(note_data.get("tags", []))
-                    if not all(t in note_tags for t in tags):
-                        continue
-
-                enriched.append(
-                    {
-                        **note_data,
-                        "score": score,
-                    }
-                )
-
-                if len(enriched) >= top_k:
+                if nid in merged:
+                    merged[nid]["score"] = score
+                else:
+                    entry = {**note_data, "score": score}
+                    if kind == "query":
+                        entry["substring"] = substring_info(note_data.get("content"), text)
+                    merged[nid] = entry
+                sem_count += 1
+                if sem_count >= top_k:
                     break
 
-            results.append({"source": source, "matches": enriched})
+            # Literal hits first, then by descending score.
+            ordered = sorted(
+                merged.values(),
+                key=lambda e: (
+                    0 if e.get("substring") is not None else 1,
+                    -(e["score"] if e.get("score") is not None else -1.0),
+                ),
+            )
+            results.append({"source": label, "matches": ordered})
 
         logger.info(
             "search_notes returned %d groups, %d total matches",
             len(results),
             sum(len(r["matches"]) for r in results),
         )
-        return SearchResponse.model_validate({"results": results})
+        return SearchResponse.model_validate({"results": results, "message": message})
 
     @mcp.tool()
     @_safe_tool

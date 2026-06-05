@@ -350,13 +350,13 @@ class TestSearchNotes:
         result = semantic_mcp(
             "search_notes", {"queries": ["Big-O notation algorithm complexity"], "top_k": 3}
         )
-        match = result["results"][0]["matches"][0]
-        assert "id" in match
-        assert "score" in match
-        assert "deck" in match
-        assert "note_type" in match
-        assert "tags" in match
-        assert "content" in match
+        # Each query is matched semantically and by exact substring; inspect a
+        # semantically-ranked hit (exact-only hits carry no score).
+        scored = [m for m in result["results"][0]["matches"] if m.get("score") is not None]
+        assert scored
+        match = scored[0]
+        for key in ("id", "score", "deck", "note_type", "tags", "content"):
+            assert key in match
         assert 0 < match["score"] <= 1.0
 
 
@@ -701,8 +701,13 @@ class TestEmbeddingLifecycle:
         assert status["embedding"]["available"] is False
         assert status["index"]["state"] == "unavailable"
 
-        degraded = mcp("search_notes", {"queries": ["mitochondria"], "top_k": 5})
-        assert degraded["results"] == []
+        # Semantic ranking is gone, but exact substring matching needs no index
+        # and still works ("ATP" appears literally in the seeded notes).
+        degraded = mcp("search_notes", {"queries": ["ATP"], "top_k": 5})
+        matches = degraded["results"][0]["matches"]
+        assert matches
+        assert all(m["score"] is None for m in matches)
+        assert matches[0]["substring"]["matched_fields"]
         assert "not running" in degraded["message"].lower()
 
         # Stopping again is a no-op.

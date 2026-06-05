@@ -10,6 +10,7 @@ from click.core import ParameterSource
 from shrike.cli import output
 from shrike.cli.config import resolve_collection
 from shrike.cli.output import NOTE_ID, output_options
+from shrike.schemas import SearchMatch
 
 
 def _parse_field(value: str) -> tuple[str, str]:
@@ -52,7 +53,6 @@ def note() -> None:
 @click.option("--type", "note_type", help="Filter by note type.")
 @click.option("--ids", multiple=True, type=NOTE_ID, help="Fetch specific note IDs.")
 @click.option("--since", "modified_since", help="Notes modified after this date (ISO 8601).")
-@click.option("--query", help="Raw Anki search query.")
 @click.option("--brief", is_flag=True, help="Show only IDs and metadata, not field content.")
 @click.option("--limit", type=int, default=50, help="Max notes to return (default: 50).")
 @click.pass_context
@@ -63,25 +63,25 @@ def note_list(
     note_type: str | None,
     ids: tuple[int, ...],
     modified_since: str | None,
-    query: str | None,
     brief: bool,
     limit: int,
 ) -> None:
     """List notes matching structured filters.
 
-    At least one filter is required. Use --brief for compact output.
+    At least one filter is required. Use --brief for compact output. For text or
+    semantic search, use 'shrike note search'.
 
     \b
     Examples:
       shrike note list --deck "Japanese::Vocabulary"
       shrike note list --tags verb,chapter-3
-      shrike note list --type Cloze --meta --limit 20
+      shrike note list --type Cloze --brief --limit 20
     """
     client = ctx.obj["client"]
 
-    if not any([deck, tags, note_type, ids, modified_since, query]):
+    if not any([deck, tags, note_type, ids, modified_since]):
         raise click.UsageError(
-            "At least one filter is required: --deck, --tags, --type, --ids, --since, or --query"
+            "At least one filter is required: --deck, --tags, --type, --ids, or --since"
         )
 
     kwargs: dict[str, Any] = {
@@ -90,7 +90,6 @@ def note_list(
         "note_type": note_type,
         "ids": list(ids) or None,
         "modified_since": modified_since,
-        "query": query,
         "fields": "meta" if brief else "full",
         "limit": limit,
     }
@@ -490,22 +489,34 @@ def note_search(
         output.emit_json(result)
         return
 
+    # A message can accompany results (e.g. semantic ranking unavailable, exact
+    # matches still shown), so print it but don't suppress the results below.
     if result.message:
         output.console.print(f"[dim]{result.message}[/dim]")
+
+    if not result.results or not any(g.matches for g in result.results):
+        if not result.message:
+            output.console.print("[dim]No results.[/dim]")
         return
 
-    if not result.results:
-        output.console.print("[dim]No results.[/dim]")
-        return
+    def _badges(m: SearchMatch) -> str:
+        bits = []
+        if m.score is not None:
+            bits.append(f"{m.score:.2f}")
+        if m.substring is not None:
+            bits.append("match: " + ", ".join(m.substring.matched_fields))
+        return " · ".join(bits)
 
     for group in result.results:
         output.console.print(f"\nResults for: [cyan]{group.source}[/cyan]")
         for m in group.matches:
+            badges = _badges(m)
             if brief:
-                output.console.print(
-                    f"  \\[{m.score:.2f}] [green]#{m.id}[/green] ([cyan]{m.deck}[/cyan])"
-                )
+                tag = f"\\[{badges}] " if badges else ""
+                output.console.print(f"  {tag}[green]#{m.id}[/green] ([cyan]{m.deck}[/cyan])")
+                if m.substring is not None and m.substring.snippet:
+                    output.console.print(f"      [dim]{m.substring.snippet}[/dim]")
             else:
-                output.note_detail(m, subtitle=f"[{m.score:.2f}]")
+                output.note_detail(m, subtitle=f"[{badges}]" if badges else None)
 
     output.console.print()

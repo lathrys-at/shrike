@@ -239,7 +239,6 @@ class ShrikeClient:
         tags: list[str] | None = None,
         note_type: str | None = None,
         modified_since: str | None = None,
-        query: str | None = None,
         fields: str | None = None,
         limit: int = 50,
     ) -> ListNotesResponse:
@@ -250,7 +249,6 @@ class ShrikeClient:
             ("tags", tags),
             ("note_type", note_type),
             ("modified_since", modified_since),
-            ("query", query),
             ("fields", fields),
         ):
             if value is not None:

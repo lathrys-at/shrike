@@ -107,11 +107,10 @@ Results are capped by `limit`. The response includes `total` (the full count of 
 | `tags` | `string[]` | no | Filter to notes having **all** of these tags. Prefix a tag with `"-"` to exclude (e.g., `["-leech", "verb"]`). |
 | `note_type` | `string` | no | Filter to notes using this note type (e.g., `"Basic"`, `"Cloze"`). |
 | `modified_since` | `string` | no | ISO 8601 date or datetime. Only notes modified after this time. |
-| `query` | `string` | no | Raw Anki search query for advanced filtering (e.g., `"is:due prop:ivl>=30"`). Combined with other filters via AND. See [Anki search docs](https://docs.ankiweb.net/searching.html). |
 | `fields` | `string` | no | `"full"` (default) returns all field content. `"meta"` returns only note ID, note type, deck, tags, and modification time. |
 | `limit` | `integer` | no | Maximum notes to return. Default `50`, max `200`. |
 
-At least one filter (`ids`, `deck`, `tags`, `note_type`, `modified_since`, or `query`) must be provided.
+At least one filter (`ids`, `deck`, `tags`, `note_type`, or `modified_since`) must be provided. For text search, use `search_notes`.
 
 ### Response
 
@@ -142,29 +141,31 @@ Anki permits per-card decks, so a single note's cards can live in different deck
 
 ## `search_notes`
 
-Semantic similarity search over the collection. Accepts a list of natural-language query strings, a list of note IDs (to find notes similar to existing ones), or both. Returns the top matches ranked by similarity score.
+Search the collection by **meaning and by exact text in one call**. Each query string is matched two ways — semantic similarity (the vector index) and exact, case-insensitive substring over note fields — and the results are folded together. Every match carries a `score` when it was semantically ranked and a `substring` annotation (which fields matched + a snippet) when the query text occurs literally; both when both apply.
 
-Use this for conceptual queries that keyword search can't handle: "cards about electron transport chain regulation", "anything related to this note about Japanese honorifics", or pre-creation checks ("do I already have a card covering this concept?"). Read the results and reason about overlap from the content; don't rely on the numeric scores for decision-making.
+Use it for conceptual queries keyword search can't handle ("cards about electron transport chain regulation") and for finding exact wording. Note IDs in `ids` are semantic anchors only (no literal text to match).
 
-Results can be filtered by deck or tags to narrow the search space.
+Exact matches are returned even when the embedding index is unavailable — the response carries a `message` noting semantic ranking was skipped — and are **not** subject to `threshold` (a literal hit is always relevant). Within a group, literal hits are listed first, then by descending score.
 
 ### Parameters
 
 | Name | Type | Required | Description |
 |---|---|---|---|
-| `queries` | `string[]` | no | Natural-language search strings. Each is embedded and matched against the collection independently. Max 50 per call. |
-| `ids` | `integer[]` | no | Note IDs to use as search anchors, finding notes semantically similar to these. Source notes are automatically excluded from results. Max 50 per call. |
-| `top_k` | `integer` | no | Maximum results per query or source ID. Default `10`, max `50`. |
-| `threshold` | `number` | no | Minimum cosine similarity (0–1) for a match. Default `0.5`. Results scoring below it are dropped. |
-| `deck` | `string` | no | Restrict search to notes in this deck (includes child decks). Accepts a deck name, numeric ID, or `#id`. |
-| `tags` | `string[]` | no | Restrict search to notes matching all of these tags. |
+| `queries` | `string[]` | no | Search strings. Each is matched independently by semantic similarity **and** as an exact substring of note fields. Max 50 per call. |
+| `ids` | `integer[]` | no | Note IDs to use as semantic anchors, finding notes similar to these. Source notes are excluded from results. Max 50 per call. |
+| `top_k` | `integer` | no | Maximum results per mechanism per query/anchor. Default `10`, max `50`. |
+| `threshold` | `number` | no | Minimum cosine similarity (0–1) for a *semantic* match. Default `0.5`. Does not apply to exact substring matches. |
+| `deck` | `string` | no | Restrict to notes in this deck (includes child decks). Accepts a deck name, numeric ID, or `#id`. |
+| `tags` | `string[]` | no | Restrict to notes matching all of these tags. |
 | `exclude_ids` | `integer[]` | no | Additional note IDs to exclude from results. |
 
 At least one of `queries` or `ids` must be provided.
 
-`deck`/`tags` are applied after the vector search over a widened candidate window. This covers the common case, but if the in-scope notes rank very deep in the overall similarity ranking a deck/tag-filtered search may still return fewer than `top_k`; widen with a higher `top_k` if needed.
+`deck`/`tags` are applied after the vector search over a widened candidate window; if in-scope notes rank very deep a filtered semantic search may still return fewer than `top_k` (exact matches are filtered precisely). 
 
 ### Response
+
+Each match is a note annotated with the evidence that produced it: `score` (semantic, `null`/omitted when only an exact hit) and `substring` (`{matched_fields, snippet}`, absent when there was no literal hit).
 
 ```jsonc
 {
@@ -178,15 +179,17 @@ At least one of `queries` or `ids` must be provided.
           "note_type": "Basic",
           "deck": "Biochemistry",
           "tags": ["metabolism", "chapter-18"],
-          "content": {
-            "Front": "What are the three regulatory points of the ETC?",
-            "Back": "Complex I (NADH dehydrogenase), Complex III (cytochrome bc1), and Complex IV (cytochrome c oxidase)"
-          },
-          "score": 0.87
+          "content": { "Front": "…", "Back": "…" },
+          "score": 0.87,                 // semantic similarity; null/omitted if exact-only
+          "substring": {                 // present only when the text matched literally
+            "matched_fields": ["Front"],
+            "snippet": "…electron transport chain…"
+          }
         }
       ]
     }
-  ]
+  ],
+  "message": null   // e.g. "Semantic ranking unavailable …" when the index is down
 }
 ```
 

@@ -124,16 +124,16 @@ List notes matching structured filters. At least one filter is required.
 | `--type TEXT` | Filter by note type. |
 | `--ids ID` | Fetch specific note IDs. Repeatable. |
 | `--since TEXT` | Notes modified after this date (ISO 8601). |
-| `--query TEXT` | Raw [Anki search query](https://docs.ankiweb.net/searching.html). |
 | `--brief` | Show only IDs and metadata (type, deck, tags, modified), not field content. |
 | `--limit INTEGER` | Max notes to return (default: 50). |
+
+For text or semantic search, use `shrike note search`.
 
 ```bash
 shrike note list --deck "Japanese::Vocabulary"
 shrike note list --tags verb,chapter-3
 shrike note list --type Cloze --brief --limit 20
 shrike note list --since 2026-05-01
-shrike note list --query "is:due prop:ivl>=30"
 ```
 
 ### `shrike note show <NOTE_ID>`
@@ -230,19 +230,19 @@ shrike note delete 1779749914797 1779749914798 --yes
 
 ### `shrike note search [QUERIES]...`
 
-Semantic similarity search over the collection. Accepts text queries, note IDs to find similar notes, or both. Requires the embedding service and a built index. Pass `--json` to get the similarity scores.
+Search the collection by meaning **and** by exact text. Each query is matched both by semantic similarity (needs the embedding service and a built index) and as an exact, case-insensitive substring of note fields. Results are folded together: each shows a similarity score when ranked and the matched field + a snippet when the text occurs literally. Exact matches work even with no embedding service (you'll see a note that semantic ranking was skipped). Accepts query strings, note IDs to find similar notes, or both.
 
 | Option | Description |
 |---|---|
-| `--similar-to ID` | Find notes similar to this note ID. Repeatable. |
-| `--top-k INTEGER` | Results per query (default: 10). |
-| `--threshold FLOAT` | Minimum similarity score, 0–1 (default: 0.5). Matches below it are dropped. |
-| `--deck TEXT` | Restrict search to this deck. |
+| `--similar-to ID` | Find notes similar to this note ID (semantic only). Repeatable. |
+| `--top-k INTEGER` | Results per mechanism per query (default: 10). |
+| `--threshold FLOAT` | Minimum *semantic* similarity, 0–1 (default: 0.5). Exact matches ignore it. |
+| `--deck TEXT` | Restrict search to this deck (name, numeric ID, or `#id`). |
 | `--tags TEXT` | Restrict search to notes with these tags. Repeatable and comma-separated. |
-| `--brief` | Show only IDs and scores, not full note content. |
+| `--brief` | Show only IDs, badges, and snippet, not full note content. |
 
 ```bash
-shrike note search "electron transport chain"
+shrike note search "electron transport chain"   # semantic + exact
 shrike note search --similar-to 1779749914797
 shrike note search "mitochondria" --deck Biochemistry
 ```
