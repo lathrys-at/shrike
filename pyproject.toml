@@ -66,10 +66,11 @@ concurrency = ["thread"]
 [tool.coverage.report]
 show_missing = true
 # Ratchet: bump this up as coverage climbs; never lower it just to make CI pass.
-# Measured ~84% on the unit + non-embedding integration suite after the CLI
-# index/embedding command tests (#106) pulled those modules out of the
-# embedding-only blind spot; the buffer absorbs platform/timing variance.
-fail_under = 80
+# Measured ~88% on the unit + non-embedding integration suite after the CLI
+# command tests for index/embedding (#106) and server (#105) lifted those
+# modules out of the embedding/daemon blind spots; the buffer absorbs
+# platform/timing variance.
+fail_under = 84
 
 [tool.mypy]
 python_version = "3.12"
