@@ -26,25 +26,35 @@ class TestCollectForRebuild:
 
 
 class TestMaybeRebuild:
+    @staticmethod
+    def _embedding(dim: int | None = 8) -> MagicMock:
+        svc = MagicMock()
+        svc.embedding_dim.return_value = dim
+        return svc
+
     def test_reconciles_on_drift_with_notes(self):
         index = MagicMock()
         index.check_drift.return_value = True
-        _maybe_rebuild(index, "model-1", 99, [1, 2], ["a", "b"])
+        _maybe_rebuild(index, "model-1", 99, [1, 2], ["a", "b"], self._embedding())
         index.reconcile_in_background.assert_called_once_with(
             [1, 2], ["a", "b"], 99, model_id="model-1"
         )
+        index.materialize_empty.assert_not_called()
 
     def test_no_work_when_no_drift(self):
         index = MagicMock()
         index.check_drift.return_value = False
-        _maybe_rebuild(index, "model-1", 99, [1, 2], ["a", "b"])
+        _maybe_rebuild(index, "model-1", 99, [1, 2], ["a", "b"], self._embedding())
         index.reconcile_in_background.assert_not_called()
 
-    def test_drift_but_empty_collection_skips(self):
+    def test_drift_but_empty_collection_materializes(self):
+        # An empty collection materializes an empty, ready index (#148) rather
+        # than reconciling (nothing to embed) or skipping entirely.
         index = MagicMock()
         index.check_drift.return_value = True
-        _maybe_rebuild(index, "model-1", 99, [], [])
+        _maybe_rebuild(index, "model-1", 99, [], [], self._embedding(8))
         index.reconcile_in_background.assert_not_called()
+        index.materialize_empty.assert_called_once_with(8, 99, "model-1")
 
 
 class TestNonLoopbackGuard:

@@ -22,7 +22,7 @@ from mcp.server.transport_security import (
 from shrike._mcp_perf import install_validator_cache
 from shrike.collection import DEFAULT_LOCK_HOLD, CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
-from shrike.embedding import EmbeddingRuntime
+from shrike.embedding import EmbeddingRuntime, EmbeddingService
 from shrike.index import (
     DEFAULT_SAVE_DELAY,
     DEFAULT_SAVE_THRESHOLD,
@@ -51,6 +51,7 @@ def _maybe_rebuild(
     col_mod: int,
     note_ids: list[int],
     texts: list[str],
+    embedding: EmbeddingService,
 ) -> bool:
     """Reconcile the index in the background if it drifted or the model changed.
 
@@ -59,12 +60,21 @@ def _maybe_rebuild(
     collection; ``reconcile`` itself falls back to a full rebuild when the model
     changed or there's no prior per-note state. Returns True if work was started
     (drift detected and the collection is non-empty), False otherwise.
+
+    When the collection is *empty* there is nothing to embed, but we still
+    materialize an empty, ready index at the model's dimension so notes added
+    later in the session are indexed incrementally instead of being skipped until
+    a restart (#148).
     """
     if index.check_drift(col_mod, model_id):
         if note_ids:
             index.reconcile_in_background(note_ids, texts, col_mod, model_id=model_id)
             return True
-        logger.info("Collection is empty, skipping index rebuild")
+        ndim = embedding.embedding_dim()
+        if ndim is not None:
+            index.materialize_empty(ndim, col_mod, model_id)
+        else:
+            logger.info("Collection is empty and embedding dim unknown, skipping index rebuild")
     return False
 
 
@@ -317,7 +327,7 @@ def _register_custom_routes(
 
         model_id = await asyncio.to_thread(svc.model_fingerprint)
         all_note_ids, col_mod, texts = await wrapper.run(_collect_for_rebuild)
-        _maybe_rebuild(index, model_id, col_mod, all_note_ids, texts)
+        await asyncio.to_thread(_maybe_rebuild, index, model_id, col_mod, all_note_ids, texts, svc)
 
         return JSONResponse(
             {
@@ -354,7 +364,9 @@ def _register_custom_routes(
         if svc is not None and svc.running:
             model_id = await asyncio.to_thread(svc.model_fingerprint)
             all_note_ids, new_col_mod, texts = await wrapper.run(_collect_for_rebuild)
-            rebuilding = _maybe_rebuild(index, model_id, new_col_mod, all_note_ids, texts)
+            rebuilding = await asyncio.to_thread(
+                _maybe_rebuild, index, model_id, new_col_mod, all_note_ids, texts, svc
+            )
 
         return JSONResponse({"status": "reloaded", "col_mod": col_mod, "rebuilding": rebuilding})
 
@@ -657,7 +669,7 @@ def main() -> None:
         else:
             model_id = svc.model_fingerprint()
             all_note_ids, col_mod, texts = wrapper.run_sync(_collect_for_rebuild)
-            _maybe_rebuild(index, model_id, col_mod, all_note_ids, texts)
+            _maybe_rebuild(index, model_id, col_mod, all_note_ids, texts, svc)
     elif args.no_embedding and args.embedding_model:
         logger.info("Embedding service disabled at boot (--no-embedding); model configured")
 

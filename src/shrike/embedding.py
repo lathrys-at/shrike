@@ -412,6 +412,25 @@ class EmbeddingService:
         except (httpx.HTTPError, ValueError, KeyError, IndexError):
             return {}
 
+    def embedding_dim(self) -> int | None:
+        """The loaded model's embedding dimension (``n_embd``), or ``None``.
+
+        Read from llama-server's ``/v1/models`` metadata (the same block the
+        fingerprint uses). Falls back to probing — a tiny embed call whose vector
+        length is the dimension — when the metadata omits it (an older llama.cpp),
+        so an empty-at-boot index can still be materialized at the right width
+        (#148). Returns ``None`` only if both routes fail.
+        """
+        meta = self.model_info().get("meta") or {}
+        n_embd = meta.get("n_embd")
+        if n_embd:
+            return int(n_embd)
+        try:
+            vectors = self.embed([" "])
+        except Exception:
+            return None
+        return len(vectors[0]) if vectors and vectors[0] else None
+
     def model_fingerprint(self) -> str:
         """A stable identity for the loaded embedding model.
 

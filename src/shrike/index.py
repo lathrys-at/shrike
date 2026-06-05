@@ -215,6 +215,31 @@ class VectorIndex:
         logger.info("Created new vector index: %d dims", ndim)
         return self._index
 
+    def materialize_empty(self, ndim: int, col_mod: int, model_id: str | None) -> None:
+        """Create an empty, ready index for an empty collection.
+
+        An empty collection's index is trivially complete and current, so create
+        the (zero-vector) USearch index eagerly at the model's dimension and stamp
+        the current ``col_mod``/``model_id`` — rather than leaving ``_index`` None.
+        That flips ``available`` to True so notes upserted *later in the same
+        session* are indexed incrementally via the upsert path (which gates on
+        ``available``), instead of being silently skipped until a restart (#148).
+
+        No-op if an index already exists (drift on a non-empty-to-empty change is
+        the reconcile path's job, not this one).
+        """
+        if self._index is not None:
+            return
+        with self._lock:
+            self._ensure_index(ndim)
+            if self._note_hashes is None:
+                self._note_hashes = {}
+            self._col_mod = col_mod
+            self._model_id = model_id
+            self._state = IndexState.READY
+        self.save()
+        logger.info("Materialized empty index (%d dims, col_mod=%d)", ndim, col_mod)
+
     def add(self, note_ids: Sequence[int], texts: Sequence[str]) -> int:
         """Embed texts and add them to the index. Returns count added."""
         if not self._embedding:

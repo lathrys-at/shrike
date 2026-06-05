@@ -228,6 +228,47 @@ class TestPersistence:
         assert idx2.col_mod == 1234567890
 
 
+class TestMaterializeEmpty:
+    """Eagerly materializing an empty-but-ready index (#148)."""
+
+    def test_makes_index_available(self, index: VectorIndex) -> None:
+        assert index.available is False
+        index.materialize_empty(NDIM, col_mod=42, model_id="m1")
+        assert index.available is True
+        assert index.size == 0
+        assert index.ndim == NDIM
+        assert index.col_mod == 42
+        assert index.model_id == "m1"
+
+    def test_incremental_add_works_after_materialize(self, index: VectorIndex) -> None:
+        # The point of #148: once materialized, the upsert path (gated on
+        # available) can add notes that are then searchable in the same session.
+        index.materialize_empty(NDIM, col_mod=42, model_id="m1")
+        index.add([1], ["hello"])
+        assert index.size == 1
+        results = index.search(["hello"], top_k=1)
+        assert results[0][0]["note_id"] == 1
+
+    def test_persists_to_disk(self, tmp_path: Path, embedding_service: MagicMock) -> None:
+        path = tmp_path / "index"
+        idx1 = VectorIndex(path, embedding_service=embedding_service)
+        idx1.materialize_empty(NDIM, col_mod=99, model_id="m1")
+
+        idx2 = VectorIndex(path, embedding_service=embedding_service)
+        assert idx2.available is True
+        assert idx2.col_mod == 99
+        assert idx2.model_id == "m1"
+        # A matching col_mod means no drift, so reload skips a rebuild.
+        assert idx2.check_drift(99, "m1") is False
+
+    def test_noop_when_index_exists(self, index: VectorIndex) -> None:
+        index.add([1], ["hello"])
+        index.materialize_empty(NDIM, col_mod=7, model_id="m1")
+        # The existing vector and its (unset) col_mod are left untouched.
+        assert index.size == 1
+        assert index.col_mod is None
+
+
 class TestDirtyTracking:
     def test_add_increments_pending(self, index: VectorIndex) -> None:
         index.add([1, 2, 3], ["a", "b", "c"])

@@ -430,6 +430,30 @@ class TestModelInfo:
             assert svc.model_info() == {}
 
 
+class TestEmbeddingDim:
+    _META = {"n_params": 1, "n_embd": 384, "n_vocab": 3, "n_ctx_train": 4, "size": 5}
+
+    def test_from_meta(self, svc: EmbeddingService) -> None:
+        with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
+            assert svc.embedding_dim() == 384
+
+    def test_probe_fallback_when_meta_missing(self, svc: EmbeddingService) -> None:
+        # No n_embd in meta → probe with a tiny embed and measure the width.
+        with (
+            patch.object(svc, "model_info", return_value={"id": "m", "meta": {}}),
+            patch.object(svc, "embed", return_value=[[0.0] * 16]) as embed,
+        ):
+            assert svc.embedding_dim() == 16
+        embed.assert_called_once()
+
+    def test_none_when_both_routes_fail(self, svc: EmbeddingService) -> None:
+        with (
+            patch.object(svc, "model_info", return_value={}),
+            patch.object(svc, "embed", side_effect=RuntimeError("down")),
+        ):
+            assert svc.embedding_dim() is None
+
+
 class TestModelFingerprint:
     _META = {"n_params": 1, "n_embd": 2, "n_vocab": 3, "n_ctx_train": 4, "size": 5}
     # The note-text normalization version is appended to every fingerprint.

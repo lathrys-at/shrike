@@ -525,20 +525,12 @@ class TestEmptyBootIndexing:
     """A server booted against an empty collection should still index notes
     added later in the same session (#148)."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "#148: an empty-at-boot server never materializes the index, so the "
-            "incremental upsert path (gated on index.available) skips indexing and "
-            "the notes stay unsearchable until a restart/explicit rebuild."
-        ),
-    )
     def test_upsert_into_empty_boot_collection_is_indexed(
         self, server_factory, embedding_model
     ) -> None:
         # A dedicated server with its own empty collection (not the shared,
-        # rebuilt collection_server). Boot logs "Collection is empty, skipping
-        # index rebuild", so the index object is never created.
+        # rebuilt collection_server). An empty collection's index is trivially
+        # complete, so boot materializes an empty, ready index (#148).
         srv = server_factory("empty-boot-index", embedding_model=str(embedding_model))
         base = _base_url(srv)
 
@@ -571,14 +563,23 @@ class TestEmptyBootIndexing:
         )
         assert result["results"][0]["status"] == "created"
 
-        # No explicit /index/rebuild: the incremental upsert path should have
-        # materialized the index (index.add() is self-sufficient — it creates the
-        # USearch index from the embedding dimension via _ensure_index()). The bug
-        # is that upsert gates this on index.available, which is False until the
-        # index exists, so the add is skipped and the note is never indexed.
+        # No explicit /index/rebuild: boot materialized an empty, ready index, so
+        # `index.available` is True and the incremental upsert path indexed the
+        # note (index.add() is self-sufficient — _ensure_index() sizes the USearch
+        # index from the embedding dimension).
         idx = httpx.get(f"{base}/status", timeout=5.0).json()["index"]
         assert idx["available"] is True
         assert idx["size"] >= 1
+
+        # And the note is actually semantically searchable in the same session.
+        # threshold=0 so the assertion doesn't hinge on the small quantized test
+        # model clearing the default 0.5 cutoff (see test_similar_concepts_rank_higher).
+        search = mcp(
+            "search_notes",
+            {"queries": ["protein synthesis organelle"], "top_k": 5, "threshold": 0.0},
+        )
+        matches = search["results"][0]["matches"]
+        assert any("cell-biology" in m.get("tags", []) for m in matches)
 
 
 # ---------------------------------------------------------------------------
@@ -745,9 +746,8 @@ class TestEmbeddingLifecycle:
                 ]
             },
         )
-        # Populate the index from the seeded collection (an empty-at-boot server
-        # does no rebuild, so incremental upserts alone leave it empty).
-        httpx.post(f"{_base_url(srv)}/index/rebuild", timeout=30.0)
+        # No explicit rebuild needed: an empty-at-boot server materializes a
+        # ready index at boot (#148), so the upserts above index incrementally.
         _wait_for_index_ready(srv)
         return srv
 
