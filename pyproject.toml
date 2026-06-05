@@ -66,11 +66,12 @@ concurrency = ["thread"]
 [tool.coverage.report]
 show_missing = true
 # Ratchet: bump this up as coverage climbs; never lower it just to make CI pass.
-# Measured ~88% on the unit + non-embedding integration suite after the CLI
-# command tests for index/embedding (#106) and server (#105) lifted those
-# modules out of the embedding/daemon blind spots; the buffer absorbs
-# platform/timing variance.
-fail_under = 84
+# Measured ~90% on the unit + non-embedding integration suite after the CLI
+# command tests (#106/#105) and the daemon/server lifecycle tests (#104) lifted
+# those modules out of the embedding/daemon blind spots; the buffer absorbs
+# platform/timing variance. (server.py's remaining gap is the async/embedding-
+# gated route handlers, covered by the embedding lane rather than this gate.)
+fail_under = 86
 
 [tool.mypy]
 python_version = "3.12"
