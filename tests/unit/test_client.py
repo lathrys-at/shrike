@@ -180,7 +180,12 @@ class TestLifecycle:
 
     def test_wait_until_ready_times_out(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
-        with patch.object(ShrikeClient, "server_status", return_value=None):
+        # Mock the poll sleep: otherwise the loop eats one full 0.2s interval
+        # before re-checking the deadline.
+        with (
+            patch.object(ShrikeClient, "server_status", return_value=None),
+            patch("shrike.client.time.sleep", lambda *_: None),
+        ):
             assert c.wait_until_ready(timeout=0.01) is None
 
     def test_call_autostarts_then_retries(self, tmp_path) -> None:

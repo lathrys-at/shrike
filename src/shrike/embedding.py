@@ -41,6 +41,9 @@ DEFAULT_HOST = "127.0.0.1"
 HEALTH_TIMEOUT = 30.0
 HEALTH_POLL_INTERVAL = 0.25
 SHUTDOWN_TIMEOUT = 5.0
+# How long to wait for the port to free after a SIGKILL escalation. Shorter than
+# SHUTDOWN_TIMEOUT — a SIGKILL'd process can't linger like one ignoring SIGTERM.
+SIGKILL_PORT_TIMEOUT = 2.0
 
 # llama-server flags Shrike owns; a generic passthrough (``--embedding-arg``)
 # must not override them. ``--host`` is a security boundary — the embedding
@@ -253,7 +256,7 @@ class EmbeddingService:
         sig = signal.SIGTERM if sys.platform == "win32" else signal.SIGKILL
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(pid, sig)
-        self._wait_port_free(2.0)
+        self._wait_port_free(SIGKILL_PORT_TIMEOUT)
 
     def _wait_port_free(self, timeout: float) -> bool:
         """Block until our port is free, or *timeout* elapses. Returns freeness."""

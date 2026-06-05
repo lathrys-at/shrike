@@ -761,7 +761,10 @@ class TestReapOrphan:
         with (
             patch("shrike.embedding._pid_alive", return_value=True),
             patch("shrike.embedding._port_in_use", return_value=True),  # never frees
-            patch("shrike.embedding.SHUTDOWN_TIMEOUT", 0.05),
+            # Zero both port-free deadlines: with time.sleep a no-op, any positive
+            # timeout busy-spins on time.monotonic() for that wall-clock duration.
+            patch("shrike.embedding.SHUTDOWN_TIMEOUT", 0.0),
+            patch("shrike.embedding.SIGKILL_PORT_TIMEOUT", 0.0),
             patch("shrike.embedding.time.sleep", lambda *_: None),
             patch("shrike.embedding.os.kill", side_effect=lambda pid, sig: killed.append(sig)),
         ):
