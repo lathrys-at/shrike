@@ -75,8 +75,9 @@ class NoteInput(BaseModel):
     deck: str | None = Field(
         default=None,
         description=(
-            'Target deck (e.g., "Japanese::Vocabulary"). '
-            "Required for new notes. On update, moves the note to this deck."
+            'Target deck (e.g., "Japanese::Vocabulary"). Required for new notes. '
+            "On update, moves the note to this deck. Accepts a deck name, numeric "
+            "deck ID, or #ID; an unknown ID is an error, a new name is created."
         ),
     )
     note_type: str | None = Field(

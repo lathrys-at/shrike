@@ -8,6 +8,12 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ## [Unreleased]
 
 ### Added
+- Decks can now be referenced by **ID** anywhere a deck name is taken — a bare
+  numeric ID or a `#`-prefixed ID — across the CLI (`note list/create/update
+  --deck`, `note search --deck`, `deck rename`, `deck delete`) and the MCP tools
+  (`list_notes`, `search_notes`, `upsert_notes`, `delete_decks`). `#id` is always
+  an ID; a bare number is tried as an ID first, falling back to a literal name if
+  no deck has that ID (#88).
 - Deck lifecycle (#74): `upsert_decks` and `delete_decks` MCP tools plus a
   `shrike deck create|rename|delete` CLI group.
   - `deck create NAME` makes an empty deck (nested `Parent::Child` ok);

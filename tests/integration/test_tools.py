@@ -836,6 +836,21 @@ class TestDeckOps:
         result = mcp("delete_decks", {"decks": ["Ghost"]})
         assert result["not_found"] == ["Ghost"]
 
+    def test_deck_by_id_across_tools(self, mcp):
+        # create deck, then reference it by #id (create note) and numeric id (list)
+        did = mcp("upsert_decks", {"decks": [{"name": "ByID"}]})["results"][0]["id"]
+        mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {"deck": f"#{did}", "note_type": "Basic", "fields": {"Front": "q", "Back": "a"}}
+                ]
+            },
+        )
+        assert mcp("list_notes", {"deck": str(did)})["total"] == 1
+        # non-empty deck deleted by #id is refused (echoing the ref)
+        assert mcp("delete_decks", {"decks": [f"#{did}"]})["not_empty"] == [f"#{did}"]
+
 
 class TestStatusEndpoint:
     """Verify the GET /status endpoint."""

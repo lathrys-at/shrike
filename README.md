@@ -138,6 +138,8 @@ shrike deck rename "Misc::French" "French"      # rename or reparent
 shrike deck delete "Old Deck" --yes            # delete (must be empty first)
 ```
 
+Anywhere a command takes a deck (including `--deck` on note commands), you can pass the deck's name, its numeric ID, or `#id` instead.
+
 Note types have their own commands:
 
 ```bash

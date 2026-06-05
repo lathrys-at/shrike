@@ -136,3 +136,24 @@ ever introducing a hidden merge.
 Like tag ops, deck create/rename/delete bump `col.mod` but change no vector, so
 they advance the stored index `col_mod` (shared `_bump_col_mod_after_metadata_change`
 helper) without re-embedding.
+
+### Deck references accept name, numeric ID, or `#id` (#88)
+
+Anywhere a deck is *referenced* (not created) — `list_notes`/`note list --deck`,
+`search_notes`, `upsert_notes`' `deck`, `delete_decks`, `deck rename`'s target —
+the value may be a deck name, a bare numeric ID, or a `#`-prefixed ID. One rule,
+applied server-side in `CollectionWrapper._resolve_deck_ref` and mirrored by the
+CLI's `_match_deck` for `deck rename`:
+
+- `#<id>` is **always** an ID; it resolves to that deck's name, or is "not found"
+  if no deck has it (never silently treated as a name).
+- a **bare integer** is tried as an ID first, then falls back to a literal name —
+  so a deck genuinely named `123` is still reachable, while `123` meaning deck-id
+  123 is the common case.
+- anything else is a name.
+
+This mirrors note IDs' `#`-prefix handling (`NoteIDType`). Resolution lives on the
+server because that's where the collection is; the CLI passes references through
+untouched (except `deck rename`, which must resolve to an ID client-side for the
+`upsert_decks` call). On note **create**, a name that doesn't exist is still
+auto-created as before; only an explicit unknown `#id` is an error.

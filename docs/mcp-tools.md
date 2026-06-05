@@ -103,7 +103,7 @@ Results are capped by `limit`. The response includes `total` (the full count of 
 | Name | Type | Required | Description |
 |---|---|---|---|
 | `ids` | `integer[]` | no | Specific note IDs to retrieve. |
-| `deck` | `string` | no | Filter to notes in this deck. Use `"::"` for nested decks (e.g., `"Japanese::Vocabulary"`). Includes child decks. |
+| `deck` | `string` | no | Filter to notes in this deck. Use `"::"` for nested decks (e.g., `"Japanese::Vocabulary"`). Includes child decks. Accepts a deck name, numeric ID, or `#id`. |
 | `tags` | `string[]` | no | Filter to notes having **all** of these tags. Prefix a tag with `"-"` to exclude (e.g., `["-leech", "verb"]`). |
 | `note_type` | `string` | no | Filter to notes using this note type (e.g., `"Basic"`, `"Cloze"`). |
 | `modified_since` | `string` | no | ISO 8601 date or datetime. Only notes modified after this time. |
@@ -156,7 +156,7 @@ Results can be filtered by deck or tags to narrow the search space.
 | `ids` | `integer[]` | no | Note IDs to use as search anchors, finding notes semantically similar to these. Source notes are automatically excluded from results. Max 50 per call. |
 | `top_k` | `integer` | no | Maximum results per query or source ID. Default `10`, max `50`. |
 | `threshold` | `number` | no | Minimum cosine similarity (0–1) for a match. Default `0.5`. Results scoring below it are dropped. |
-| `deck` | `string` | no | Restrict search to notes in this deck (includes child decks). |
+| `deck` | `string` | no | Restrict search to notes in this deck (includes child decks). Accepts a deck name, numeric ID, or `#id`. |
 | `tags` | `string[]` | no | Restrict search to notes matching all of these tags. |
 | `exclude_ids` | `integer[]` | no | Additional note IDs to exclude from results. |
 
@@ -221,7 +221,7 @@ If the index update fails transiently (for example, the embedding service is bri
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `id` | `integer` | no | Note ID. Present = update, absent = create. |
-| `deck` | `string` | create | Target deck. Required for new notes. On update, moves the note to this deck. |
+| `deck` | `string` | create | Target deck. Required for new notes. On update, moves the note to this deck. Accepts a deck name, numeric ID, or `#id` (an unknown ID is an error; a new name is created). |
 | `note_type` | `string` | create | Note type (e.g., `"Basic"`, `"Cloze"`). Required for new notes. Cannot be changed on update. |
 | `fields` | `object` | create | Field key-value pairs (e.g., `{"Front": "...", "Back": "..."}`). On update, only specified fields are modified. |
 | `tags` | `string[]` | no | Tags to set. On create, these are the note's tags. On update, **replaces** all existing tags, so include existing tags you want to keep. |
@@ -463,7 +463,7 @@ Delete decks by name — **only if empty**. A deck is deletable only when neithe
 
 | Name | Type | Required | Description |
 |---|---|---|---|
-| `decks` | `string[]` | **yes** | 1–100 deck names to delete. |
+| `decks` | `string[]` | **yes** | 1–100 decks to delete, each a name, numeric ID, or `#id`. |
 
 ### Response
 

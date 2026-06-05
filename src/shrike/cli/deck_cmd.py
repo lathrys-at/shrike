@@ -4,7 +4,23 @@ import click
 
 from shrike.cli import output
 from shrike.cli.output import output_options
-from shrike.schemas import UpsertDecksResponse
+from shrike.schemas import DeckInfo, UpsertDecksResponse
+
+
+def _match_deck(decks: list[DeckInfo], ref: str) -> DeckInfo | None:
+    """Find a deck by name, numeric id, or '#'-prefixed id.
+
+    '#<id>' matches by id only; a bare integer is tried as an id first, then as
+    a name; anything else is a name (mirrors the server's deck-ref resolution).
+    """
+    if ref.startswith("#") and ref[1:].isdigit():
+        did = int(ref[1:])
+        return next((d for d in decks if d.id == did), None)
+    if ref.isdigit():
+        did = int(ref)
+        by_id = next((d for d in decks if d.id == did), None)
+        return by_id or next((d for d in decks if d.name == ref), None)
+    return next((d for d in decks if d.name == ref), None)
 
 
 @click.group("deck", short_help="Manage decks")
@@ -67,7 +83,7 @@ def deck_rename(ctx: click.Context, old: str, new: str) -> None:
     """
     client = ctx.obj["client"]
     decks = client.collection_info(include=["decks"]).decks or []
-    match = next((d for d in decks if d.name == old), None)
+    match = _match_deck(decks, old)
     if match is None:
         raise click.ClickException(f"Deck not found: {old}")
 
