@@ -107,7 +107,11 @@ the hook once, then run both suites under `coverage` and combine:
 
 ```bash
 SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
-echo 'import coverage; coverage.process_startup()' > "$SITE/coverage_subprocess.pth"
+# The hook only imports coverage when COVERAGE_PROCESS_START is set, so it costs
+# nothing on every other `python`/`shrike`/`pytest` startup in the venv (a plain
+# `import coverage; coverage.process_startup()` would import coverage — ~30ms —
+# on every interpreter start). Same guard coverage's own auto `.pth` uses.
+echo 'import os; os.getenv("COVERAGE_PROCESS_START") and __import__("coverage").process_startup()' > "$SITE/coverage_subprocess.pth"
 
 export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
 coverage run --parallel-mode -m pytest tests/unit tests/integration -q -m "not embedding" -n auto

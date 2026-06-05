@@ -127,7 +127,9 @@ jobs:
       - name: Enable subprocess coverage
         run: |
           SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
-          echo 'import coverage; coverage.process_startup()' > "$SITE/coverage_subprocess.pth"
+          # Guard the import on COVERAGE_PROCESS_START (set below) so the hook
+          # adds nothing to interpreter startup outside the coverage run.
+          echo 'import os; os.getenv("COVERAGE_PROCESS_START") and __import__("coverage").process_startup()' > "$SITE/coverage_subprocess.pth"
       # One combined `-n auto` run over both suites: xdist balances the work so
       # quick unit tests keep workers busy while integration servers spawn,
       # instead of two phases that each leave workers idle (measured faster than
