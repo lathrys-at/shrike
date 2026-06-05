@@ -133,9 +133,13 @@ suites with `-n auto`. Locally it's opt-in — the default (no `-n`) stays seria
 subprocess per test class dominated the suite (each boots `anki` under coverage),
 so all non-embedding integration tests share a single session-scoped `server`
 (one boot per xdist worker), and an autouse fixture (`_reset_shared_collection`)
-resets the collection to its pristine baseline after each test — deletes every
-note, then any non-baseline deck / note type. So a test always starts clean, and
-even collection-wide assertions (`total_notes == 0`) hold regardless of run order.
+resets the collection to its pristine baseline after each test. The `mcp`/`runner`
+test clients record what a test mutated (a `_ResetTracker`), so the reset is
+cheap: a read-only test resets to nothing, created notes are deleted by tracked
+id (never re-listed), and one `collection_info` catches auto-created decks plus
+any untracked note (the safety net — a tracking gap costs an extra enumeration,
+never leaked state). So a test always starts clean, and even collection-wide
+assertions (`total_notes == 0`) hold regardless of run order.
 **When writing an integration test you don't need to clean up after yourself** —
 just don't assume the collection is empty mid-suite without the reset, and prefer
 asserting on your own deck/tag. Two affordances: `scoped_collection(url)` (a

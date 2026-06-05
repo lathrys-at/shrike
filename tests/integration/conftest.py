@@ -36,6 +36,50 @@ from tests.integration.model_cache import (
     download_with_retry,
 )
 
+# -- Per-test mutation tracking (drives the cheap collection reset) -----------
+#
+# The shared-collection reset runs after every test. Enumerating the collection
+# (list all notes + list decks/types) on every test is most of its cost. Instead
+# the test clients record what a test *mutated*: a read-only test resets to
+# nothing, and created notes are deleted by tracked id rather than re-listed.
+# The reset still does one `collection_info` to catch auto-created decks and any
+# untracked note (e.g. a pretty-mode CLI create whose id we can't parse) — so a
+# tracking gap can never leak state, only cost an extra enumeration.
+
+_MCP_READ_TOOLS = frozenset({"collection_info", "list_notes", "search_notes"})
+_CLI_READ_VERBS = frozenset({"list", "show", "search", "status", "logs"})
+
+
+def _cli_noun_verb(args: list[str]) -> tuple[str | None, str | None]:
+    """The (noun, verb) of a CLI invocation, ignoring leading output flags."""
+    a = list(args)
+    while a and a[0] in ("--json", "--no-pretty", "--pretty"):
+        a.pop(0)
+    return (a[0] if a else None, a[1] if len(a) > 1 else None)
+
+
+class _ResetTracker:
+    """Records the current test's mutations so the reset can skip enumeration."""
+
+    def __init__(self) -> None:
+        self.dirty = False
+        self.note_ids: set[int] = set()
+
+    def clear(self) -> None:
+        self.dirty = False
+        self.note_ids.clear()
+
+    def note_results(self, data: object) -> None:
+        results = data.get("results", []) if isinstance(data, dict) else []
+        for r in results:
+            if isinstance(r, dict) and r.get("status") in ("created", "updated") and "id" in r:
+                self.note_ids.add(r["id"])
+
+
+# Module-level: xdist runs each worker in its own process and tests sequentially
+# within it, so one shared tracker (cleared per test) is correct.
+_reset_tracker = _ResetTracker()
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -130,6 +174,10 @@ class MCPClient:
             )
             raise RuntimeError(text)
         structured: dict = result["structuredContent"]
+        if tool_name not in _MCP_READ_TOOLS:
+            _reset_tracker.dirty = True
+        if tool_name == "upsert_notes":
+            _reset_tracker.note_results(structured)
         return structured
 
 
@@ -142,6 +190,11 @@ class CLIRunner:
         self._config = config_path
 
     def invoke(self, args: list[str], **kwargs: Any) -> Any:
+        noun, verb = _cli_noun_verb(args)
+        # Anything that isn't a known read command is treated as a mutation
+        # (default-dirty is safe — at worst the reset enumerates needlessly).
+        if not (noun == "info" or verb in _CLI_READ_VERBS):
+            _reset_tracker.dirty = True
         return self._runner.invoke(
             cli,
             ["--config", self._config, "--url", self._url, *args],
@@ -153,6 +206,8 @@ class CLIRunner:
         result = self.invoke(["--json", *args], **kwargs)
         assert result.exit_code == 0, result.output
         data: dict = json.loads(result.output)
+        if _cli_noun_verb(args)[0] == "note":
+            _reset_tracker.note_results(data)  # track ids from `note create/update`
         return data
 
 
@@ -273,13 +328,7 @@ def _snapshot_baseline(url: str) -> Baseline:
     )
 
 
-def _reset_to_baseline(url: str, baseline: Baseline) -> None:
-    """Return a collection to *baseline*: delete every note, then any deck or
-    note type not in the baseline. Notes go first so the decks/(unused) note
-    types become deletable. Best-effort and idempotent."""
-    baseline_decks, baseline_types = baseline
-    client = ShrikeClient(url, autostart=False)
-
+def _delete_all_notes(client: ShrikeClient) -> None:
     # `modified_since` an old date matches all notes; paginate since list_notes
     # caps at 200 and a test may have created more. (delete_notes batches >100.)
     while True:
@@ -288,6 +337,42 @@ def _reset_to_baseline(url: str, baseline: Baseline) -> None:
             break
         client.delete_notes([n.id for n in notes])
 
+
+def _reset_to_baseline(url: str, baseline: Baseline) -> None:
+    """Undo what the current test mutated, returning the collection to *baseline*.
+
+    Read-only tests do nothing. Otherwise: delete the notes we tracked by id (no
+    re-listing), then one `collection_info` gives the deck/type lists *and* a note
+    count — if any untracked note slipped through (e.g. a pretty-mode CLI create),
+    fall back to listing-and-deleting. Finally drop any non-baseline deck / note
+    type. Notes go first so decks/(unused) types become deletable."""
+    if not _reset_tracker.dirty:
+        return  # the test mutated nothing
+
+    baseline_decks, baseline_types = baseline
+    client = ShrikeClient(url, autostart=False)
+
+    if _reset_tracker.note_ids:
+        client.delete_notes(list(_reset_tracker.note_ids))
+
+    ci = client.collection_info(include=["summary", "decks", "note_types"])
+    if ci.summary and ci.summary.notes:
+        _delete_all_notes(client)  # safety net for untracked notes
+
+    extra_decks = [d.name for d in (ci.decks or []) if d.name not in baseline_decks]
+    if extra_decks:
+        client.delete_decks(extra_decks)
+    extra_types = [t.id for t in (ci.note_types or []) if t.name not in baseline_types]
+    if extra_types:
+        client.delete_note_types(extra_types)
+
+
+def _enumerate_reset(url: str, baseline: Baseline) -> None:
+    """Reset by enumeration (independent of the per-test tracker): delete every
+    note, then any non-baseline deck / note type. Used by `scoped_collection`."""
+    baseline_decks, baseline_types = baseline
+    client = ShrikeClient(url, autostart=False)
+    _delete_all_notes(client)
     ci = client.collection_info(include=["decks", "note_types"])
     extra_decks = [d.name for d in (ci.decks or []) if d.name not in baseline_decks]
     if extra_decks:
@@ -302,12 +387,13 @@ def scoped_collection(url: str) -> Iterator[ShrikeClient]:
     """Explicit scope: snapshot the collection on enter, undo any notes / non-
     baseline decks / note types created in the block on exit. Shared-server tests
     get this automatically via the autouse reset; use this to sub-scope within a
-    test, or on an `isolated_server`. Yields a `ShrikeClient` for convenience."""
+    test, or on an `isolated_server`. Yields a `ShrikeClient` for convenience.
+    Enumeration-based, so it works regardless of how the block mutated state."""
     baseline = _snapshot_baseline(url)
     try:
         yield ShrikeClient(url, autostart=False)
     finally:
-        _reset_to_baseline(url, baseline)
+        _enumerate_reset(url, baseline)
 
 
 @pytest.fixture(scope="session")
@@ -336,6 +422,7 @@ def _reset_shared_collection(request: pytest.FixtureRequest) -> Iterator[None]:
     # so this snapshots once, on the first shared-server test's setup).
     request.getfixturevalue("_baseline")
     server: ServerInfo = request.getfixturevalue("server")
+    _reset_tracker.clear()  # start the test with a clean mutation record
     yield
     _reset_to_baseline(server.url, request.getfixturevalue("_baseline"))
 
