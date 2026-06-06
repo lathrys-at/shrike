@@ -3,10 +3,16 @@ from __future__ import annotations
 import base64
 
 import pytest
+from pydantic import ValidationError
 
 from shrike import collection as collection_mod
 from shrike.collection import _resolve_public_ip, _safe_media_name
-from shrike.schemas import CollectionPruneResponse, FetchMediaResponse, StoreMediaResponse
+from shrike.schemas import (
+    CollectionPruneResponse,
+    FetchMediaResponse,
+    StoreMediaItem,
+    StoreMediaResponse,
+)
 
 PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n-fake-image-bytes").decode("ascii")
 
@@ -76,6 +82,60 @@ class TestStoreMedia:
         )
         assert results[0]["status"] == "error"
         assert "non-public" in results[0]["error"]
+
+
+class TestStoreMediaServerPath:
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"path": "/x.png"},  # path alone is valid
+            {"url": "http://h/x.png"},
+            {"data": PNG, "filename": "x.png"},
+        ],
+    )
+    def test_single_source_accepted(self, kwargs):
+        StoreMediaItem(**kwargs)  # no raise
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"data": PNG, "filename": "x.png", "path": "/x.png"},  # two sources
+            {"url": "http://h/x", "path": "/x.png"},
+            {},  # zero sources
+        ],
+    )
+    def test_multi_or_zero_source_rejected(self, kwargs):
+        with pytest.raises(ValidationError, match="exactly one"):
+            StoreMediaItem(**kwargs)
+
+    async def test_path_stored_when_allowed(self, wrapper, tmp_path):
+        src = tmp_path / "local.png"
+        src.write_bytes(b"\x89PNG\r\n\x1a\nserver-local")
+        results = await wrapper.store_media(
+            [{"path": str(src)}], allow_private_fetch=False, allow_server_paths=True
+        )
+        resp = StoreMediaResponse.model_validate({"results": results})
+        assert resp.results[0].status == "stored"
+        assert resp.results[0].filename == "local.png"  # name from the path basename
+        assert resp.results[0].mime == "image/png"
+        assert resp.results[0].size_bytes == len(b"\x89PNG\r\n\x1a\nserver-local")
+        assert (await wrapper.list_media(pattern="local.png", limit=None))["count"] == 1
+
+    async def test_path_refused_when_disabled(self, wrapper, tmp_path):
+        src = tmp_path / "local.png"
+        src.write_bytes(b"x")
+        # default allow_server_paths=False
+        results = await wrapper.store_media([{"path": str(src)}], allow_private_fetch=False)
+        assert results[0]["status"] == "error"
+        assert "not allowed" in results[0]["error"]
+        assert (await wrapper.list_media(pattern="local.png", limit=None))["count"] == 0
+
+    async def test_missing_path_is_per_item_error(self, wrapper):
+        results = await wrapper.store_media(
+            [{"path": "/no/such/file.png"}], allow_private_fetch=False, allow_server_paths=True
+        )
+        assert results[0]["status"] == "error"
+        assert "not found" in results[0]["error"]
 
 
 class TestFetchMedia:

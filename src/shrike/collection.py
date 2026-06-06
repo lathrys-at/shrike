@@ -1562,7 +1562,11 @@ class CollectionWrapper:
     # -- media (#70) ---------------------------------------------------------
 
     async def store_media(
-        self, items: list[dict[str, Any]], *, allow_private_fetch: bool
+        self,
+        items: list[dict[str, Any]],
+        *,
+        allow_private_fetch: bool,
+        allow_server_paths: bool = False,
     ) -> list[dict[str, Any]]:
         """Store a batch of media files; one bad item never sinks the batch.
 
@@ -1571,13 +1575,28 @@ class CollectionWrapper:
         (so a 10-URL batch isn't serialized at the per-fetch timeout) and base64
         items decode off the event loop, with the size cap applied to the encoded
         length *before* decoding (no allocating an oversize payload to then reject
-        it). The prepared bytes are written on the worker thread. Per-item failures
-        (bad base64, unfetchable/SSRF-blocked URL, oversize) become error results.
+        it). The prepared bytes are written on the worker thread.
+
+        A server-local ``path`` item (#164) is only honored when ``allow_server_paths``
+        (the server's purely-local gate) is set — otherwise it's a per-item error;
+        it's stored zero-copy via ``col.media.add_file`` on the worker thread (no
+        read into Python memory). Per-item failures (bad base64, unfetchable/
+        SSRF-blocked URL, disallowed/missing path, oversize) become error results.
         """
 
         async def _prepare(index: int, item: dict[str, Any]) -> dict[str, Any]:
             name = item.get("filename")
             try:
+                if item.get("path") is not None:
+                    if not allow_server_paths:
+                        raise ValueError(
+                            "server-local paths are not allowed: the server is not in a "
+                            "purely-local configuration"
+                        )
+                    src = item["path"]
+                    if not os.path.isfile(src):
+                        raise ValueError(f"file not found: {src}")
+                    return {"index": index, "src_path": src, "name": name}
                 if item.get("data") is not None:
                     raw = await asyncio.to_thread(_decode_media_b64, item["data"])
                     return {"index": index, "raw": raw, "name": name, "content_type": None}
@@ -1624,6 +1643,8 @@ class CollectionWrapper:
         return results
 
     def _write_one_media(self, p: dict[str, Any]) -> dict[str, Any]:
+        if "src_path" in p:
+            return self._add_file_media(p)
         raw: bytes = p["raw"]
         name: str | None = p["name"]
         content_type: str | None = p["content_type"]
@@ -1648,6 +1669,27 @@ class CollectionWrapper:
             # Identical content already present → Anki kept the name, wrote nothing
             # new. A different-content collision instead yields stored != safe.
             "deduped": existed and stored == safe,
+        }
+
+    def _add_file_media(self, p: dict[str, Any]) -> dict[str, Any]:
+        """Store a server-local file zero-copy via Anki's add_file (#164).
+
+        The stored name comes from the source basename (a `filename` override
+        isn't honored for `path` — that would require reading the file to rewrite
+        it, defeating the zero-copy intent). Anki resolves collisions/dedup exactly
+        as write_data does. No size cap: it's a deliberate local-file copy, not a
+        memory-bound base64/URL payload."""
+        src: str = p["src_path"]
+        base = _safe_media_name(os.path.basename(src))
+        existed = bool(base) and self.col.media.have(base)
+        stored = self.col.media.add_file(src)
+        return {
+            "status": "stored",
+            "index": p["index"],
+            "filename": stored,
+            "mime": _guess_mime(stored),
+            "size_bytes": os.path.getsize(src),
+            "deduped": existed and stored == base,
         }
 
     async def fetch_media(self, filenames: list[str]) -> list[dict[str, Any]]:

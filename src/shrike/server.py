@@ -152,6 +152,33 @@ def _build_transport_security(
     )
 
 
+def _server_is_purely_local(
+    host: str,
+    *,
+    allow_remote: bool,
+    no_dns_rebinding_protection: bool,
+    allowed_hosts: list[str] | None,
+    allowed_origins: list[str] | None,
+) -> bool:
+    """Whether the server is in its default, purely-local configuration (#164).
+
+    Gates the server-local ``path`` input to ``store_media``: only when the bind
+    is loopback, ``--allow-remote`` is off, the DNS-rebinding guard is on, and no
+    extra ``--allowed-host``/``--allowed-origin`` was added. Any of those signals
+    possible remote traffic — and crucially, behind a same-host reverse proxy /
+    tailnet (``--no-dns-rebinding-protection`` or an added allow-list) the loopback
+    peer is the proxy, not the real (remote) client — so server-local file reads
+    must stay disabled there.
+    """
+    return (
+        _is_loopback(host)
+        and not allow_remote
+        and not no_dns_rebinding_protection
+        and not allowed_hosts
+        and not allowed_origins
+    )
+
+
 def create_mcp(
     *,
     host: str,
@@ -795,12 +822,27 @@ def main() -> None:
     else:
         url_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
         media_base_url = f"http://{url_host}:{args.port}"
+    # store_media accepts a server-local `path` only when the server is in its
+    # default, purely-local configuration (#164) — any sign of remote exposure
+    # (non-loopback bind, --allow-remote, guard off, or an added allowed host/
+    # origin for a proxy/VPN) disables it, since the loopback peer could then be a
+    # proxy fronting a remote client.
+    allow_server_paths = _server_is_purely_local(
+        args.host,
+        allow_remote=args.allow_remote,
+        no_dns_rebinding_protection=args.no_dns_rebinding_protection,
+        allowed_hosts=args.allowed_host,
+        allowed_origins=args.allowed_origin,
+    )
+    if allow_server_paths:
+        logger.info("store_media server-local paths enabled (purely-local configuration)")
     register_tools(
         mcp,
         wrapper,
         index=index,
         saver=saver,
         allow_private_fetch=allow_private_media_fetch,
+        allow_server_paths=allow_server_paths,
         media_base_url=media_base_url,
     )
     _register_custom_routes(

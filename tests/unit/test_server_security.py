@@ -7,7 +7,7 @@ import logging
 
 import pytest
 
-from shrike.server import _build_transport_security, _is_loopback
+from shrike.server import _build_transport_security, _is_loopback, _server_is_purely_local
 
 
 @pytest.mark.parametrize(
@@ -129,3 +129,38 @@ def test_is_loopback_ipv4_mapped_delegates_to_stdlib() -> None:
     # not a fixed bool, so the test is robust across the supported range.
     mapped = "::ffff:127.0.0.1"
     assert _is_loopback(mapped) is ipaddress.ip_address(mapped).is_loopback
+
+
+# -- _server_is_purely_local (#164): gates the store_media server-local `path` --
+
+
+def _purely_local(**overrides) -> bool:
+    base = {
+        "host": "127.0.0.1",
+        "allow_remote": False,
+        "no_dns_rebinding_protection": False,
+        "allowed_hosts": None,
+        "allowed_origins": None,
+    }
+    base.update(overrides)
+    host = base.pop("host")
+    return _server_is_purely_local(host, **base)
+
+
+def test_default_loopback_is_purely_local() -> None:
+    assert _purely_local() is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"host": "0.0.0.0"},  # non-loopback bind
+        {"host": "192.168.1.10"},
+        {"allow_remote": True},
+        {"no_dns_rebinding_protection": True},  # behind a proxy/tailnet → peer may be the proxy
+        {"allowed_hosts": ["proxy.internal"]},  # added a proxy/VPN host
+        {"allowed_origins": ["https://app.example"]},
+    ],
+)
+def test_any_remote_exposure_signal_disables_server_paths(overrides) -> None:
+    assert _purely_local(**overrides) is False

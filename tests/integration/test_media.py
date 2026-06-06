@@ -106,6 +106,35 @@ class TestMediaTools:
         assert isolated_mcp("list_media", {"pattern": "orphan.png"})["count"] == 0
 
 
+class TestServerLocalPath:
+    """store_media `path` source (#164): a file on the server's disk, stored
+    zero-copy — only on a purely-local daemon."""
+
+    def test_server_path_stored_on_purely_local(self, isolated_mcp, tmp_path):
+        # The isolated server is loopback/default → purely-local → paths enabled.
+        src = tmp_path / "local.png"
+        src.write_bytes(RAW)
+        out = isolated_mcp("store_media", {"items": [{"path": str(src)}]})
+        assert out["results"][0]["status"] == "stored"
+        assert out["results"][0]["filename"] == "local.png"
+        # Stored content is fetchable back.
+        fetched = isolated_mcp("fetch_media", {"filenames": ["local.png"]})
+        assert fetched["results"][0]["status"] == "found"
+        assert httpx.get(fetched["results"][0]["url"]).content == RAW
+
+    def test_server_path_refused_when_not_purely_local(self, server_factory, tmp_path):
+        from .conftest import MCPClient
+
+        # --no-dns-rebinding-protection signals a proxy/tailnet front → not purely
+        # local → server paths disabled (loopback bind, so still reachable here).
+        srv = server_factory("nodns", extra_args=["--no-dns-rebinding-protection"])
+        src = tmp_path / "local.png"
+        src.write_bytes(RAW)
+        out = MCPClient(srv.url)("store_media", {"items": [{"path": str(src)}]})
+        assert out["results"][0]["status"] == "error"
+        assert "not allowed" in out["results"][0]["error"]
+
+
 class TestRedirectRealHttpx:
     """The end-to-end proof the unit fakes can't give: with real httpx, a 302 is
     NOT auto-followed past the guard. Catches a follow_redirects=True regression."""
@@ -252,3 +281,14 @@ class TestMediaCLI:
 
         data = isolated_runner.json(["collection", "check"])
         assert "orphan.png" in data["unused"]
+
+    def test_store_server_path(self, isolated_runner, tmp_path):
+        # --server-path stores a file already on the (co-located) server's disk.
+        src = tmp_path / "on-server.png"
+        src.write_bytes(b"\x89PNG\r\n\x1a\nserver-side")
+        result = isolated_runner.invoke(["media", "store", "--server-path", str(src)])
+        assert result.exit_code == 0, result.output
+        assert "on-server.png" in result.output
+        assert "on-server.png" in [
+            f["filename"] for f in isolated_runner.json(["media", "list"])["files"]
+        ]

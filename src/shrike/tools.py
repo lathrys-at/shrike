@@ -118,6 +118,7 @@ def register_tools(
     saver: IndexSaver | None = None,
     *,
     allow_private_fetch: bool = False,
+    allow_server_paths: bool = False,
     media_base_url: str | None = None,
 ) -> None:
     from urllib.parse import quote
@@ -1574,32 +1575,40 @@ def register_tools(
             Field(
                 min_length=1,
                 max_length=10,
-                description="Media files to store (1-10). Each carries base64 `data` or a `url`.",
+                description="Media files to store (1-10). Each carries base64 `data`, a "
+                "`url`, or a server-local `path`.",
             ),
         ],
     ) -> StoreMediaResponse:
         """Store media files in the collection's media folder (1-10 per call).
 
         Each item provides exactly one source: base64 `data` (requires a
-        `filename` with an extension — the bytes alone don't say what the file is)
-        or a `url` the server fetches (filename derived from the URL or its
-        Content-Type if you omit it). This is the write path for authoring cards
-        with images or audio: store the asset, then reference the returned
-        filename in a note field (`<img src="NAME">` or `[sound:NAME]`).
+        `filename` with an extension — the bytes alone don't say what the file is),
+        a `url` the server fetches (filename derived from the URL or its
+        Content-Type if you omit it), or a server-local `path` (see below). This is
+        the write path for authoring cards with images or audio: store the asset,
+        then reference the returned filename in a note field (`<img src="NAME">` or
+        `[sound:NAME]`).
 
         URL fetches are restricted to http/https and refuse private/loopback
-        addresses by default (an SSRF guard). To store a *local* file, use the CLI
-        `shrike media store PATH`, which reads it and sends the bytes — the tool
-        takes no server-local path.
+        addresses by default (an SSRF guard). A `path` reads a file on the
+        **server's** filesystem and is only honored when the server runs in its
+        default purely-local configuration (loopback bind, no remote exposure); a
+        `path` item is rejected otherwise. To store a local file against any
+        server, the CLI `shrike media store PATH` reads it and sends the bytes.
 
         Anki resolves name collisions: identical content keeps the name (reported
         `deduped`), different content under the same name gets a hashed suffix, so
         the stored `filename` may differ from what you asked for — always reference
-        the returned name. Per-item errors (bad base64, unfetchable URL, oversize)
-        are reported per item and don't sink the batch."""
+        the returned name. Per-item errors (bad base64, unfetchable URL, disallowed
+        or missing path, oversize) are reported per item and don't sink the batch."""
         logger.info("store_media count=%d", len(items))
         item_dicts = [i.model_dump(exclude_none=True) for i in items]
-        results = await wrapper.store_media(item_dicts, allow_private_fetch=allow_private_fetch)
+        results = await wrapper.store_media(
+            item_dicts,
+            allow_private_fetch=allow_private_fetch,
+            allow_server_paths=allow_server_paths,
+        )
         stored = sum(1 for r in results if r.get("status") == "stored")
         errors = len(results) - stored
         logger.info("store_media completed: %d stored, %d errors", stored, errors)

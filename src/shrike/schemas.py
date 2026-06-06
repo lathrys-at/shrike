@@ -499,22 +499,29 @@ class StoreMediaItem(BaseModel):
     filename: str | None = Field(
         default=None,
         description="Desired filename with extension (e.g. 'cell.png'). Required "
-        "with `data`; optional with `url` (derived from the URL if omitted). Anki "
-        "resolves collisions, so the stored name may differ.",
+        "with `data`; optional with `url`/`path` (derived from them if omitted). "
+        "Anki resolves collisions, so the stored name may differ.",
     )
     data: str | None = Field(
-        default=None, description="Base64-encoded file bytes. Mutually exclusive with `url`."
+        default=None,
+        description="Base64-encoded file bytes. Exactly one of data/url/path.",
     )
     url: str | None = Field(
         default=None,
-        description="http(s) URL the server fetches and stores. Mutually exclusive with `data`.",
+        description="http(s) URL the server fetches and stores. Exactly one of data/url/path.",
+    )
+    path: str | None = Field(
+        default=None,
+        description="Path to a file on the **server's** filesystem to store directly "
+        "(zero-copy). Only honored when the server runs in its default purely-local "
+        "configuration; rejected otherwise. Exactly one of data/url/path.",
     )
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> StoreMediaItem:
-        sources = [s for s in (self.data, self.url) if s is not None]
+        sources = [s for s in (self.data, self.url, self.path) if s is not None]
         if len(sources) != 1:
-            raise ValueError("provide exactly one of `data` or `url`")
+            raise ValueError("provide exactly one of `data`, `url`, or `path`")
         if self.data is not None and not self.filename:
             raise ValueError("`filename` (with an extension) is required when `data` is given")
         return self
