@@ -64,6 +64,14 @@ def _name_from_url(url: str, content_type: str | None) -> str:
 @click.option("--name", help="Override the stored filename (single item only).")
 @click.option("--url", "urls", multiple=True, help="URL to fetch and store (repeatable).")
 @click.option(
+    "--server-path",
+    "server_paths",
+    multiple=True,
+    help="Path to a file on the SERVER's filesystem to store zero-copy (repeatable). "
+    "Off by default — the daemon must set --media-path-root (purely-local) and the "
+    "file must be under it.",
+)
+@click.option(
     "--client-fetch",
     is_flag=True,
     help="Download --url files locally and upload the bytes (use when this machine "
@@ -75,14 +83,17 @@ def media_store(
     paths: tuple[str, ...],
     name: str | None,
     urls: tuple[str, ...],
+    server_paths: tuple[str, ...],
     client_fetch: bool,
 ) -> None:
     """Store one or more local PATHs and/or --url files into the media folder.
 
-    Local files are read here and sent as bytes, so this works against a remote
+    Local PATHs are read here and sent as bytes, so this works against a remote
     daemon too. URLs are fetched by the server by default (http/https, private
     addresses refused); pass --client-fetch to download them locally and upload
-    the bytes instead.
+    the bytes instead. --server-path stores a file already on the *server's* disk
+    without sending bytes (zero-copy) — off by default; the daemon must set
+    --media-path-root (on a purely-local config) and the file must be under it.
 
     \b
     Examples:
@@ -90,17 +101,21 @@ def media_store(
       shrike media store a.png b.jpg c.ogg
       shrike media store --url https://example.com/cell.png
       shrike media store --url https://intranet/x.png --client-fetch
+      shrike media store --server-path /data/big-lecture.mp4
     """
-    if name and len(paths) + len(urls) != 1:
+    total = len(paths) + len(urls) + len(server_paths)
+    if name and total != 1:
         raise click.UsageError("--name can only be used with a single file.")
-    if not paths and not urls:
-        raise click.UsageError("Provide at least one PATH or --url.")
+    if not total:
+        raise click.UsageError("Provide at least one PATH, --url, or --server-path.")
 
     items: list[dict[str, str]] = []
     for p in paths:
         with open(p, "rb") as fh:
             data = base64.b64encode(fh.read()).decode("ascii")
         items.append({"data": data, "filename": name or os.path.basename(p)})
+    for sp in server_paths:
+        items.append({"path": sp})  # server reads it; name from the path basename
     for u in urls:
         if client_fetch:
             raw, content_type = _client_fetch(u)

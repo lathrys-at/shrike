@@ -7,7 +7,12 @@ import logging
 
 import pytest
 
-from shrike.server import _build_transport_security, _is_loopback
+from shrike.server import (
+    _build_transport_security,
+    _is_loopback,
+    _server_is_purely_local,
+    _validate_media_path_root,
+)
 
 
 @pytest.mark.parametrize(
@@ -129,3 +134,66 @@ def test_is_loopback_ipv4_mapped_delegates_to_stdlib() -> None:
     # not a fixed bool, so the test is robust across the supported range.
     mapped = "::ffff:127.0.0.1"
     assert _is_loopback(mapped) is ipaddress.ip_address(mapped).is_loopback
+
+
+# -- _server_is_purely_local (#164): gates the store_media server-local `path` --
+
+
+def _purely_local(**overrides) -> bool:
+    base = {
+        "host": "127.0.0.1",
+        "allow_remote": False,
+        "no_dns_rebinding_protection": False,
+        "allowed_hosts": None,
+        "allowed_origins": None,
+    }
+    base.update(overrides)
+    host = base.pop("host")
+    return _server_is_purely_local(host, **base)
+
+
+def test_default_loopback_is_purely_local() -> None:
+    assert _purely_local() is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"host": "0.0.0.0"},  # non-loopback bind
+        {"host": "192.168.1.10"},
+        {"allow_remote": True},
+        {"no_dns_rebinding_protection": True},  # behind a proxy/tailnet → peer may be the proxy
+        {"allowed_hosts": ["proxy.internal"]},  # added a proxy/VPN host
+        {"allowed_origins": ["https://app.example"]},
+    ],
+)
+def test_any_remote_exposure_signal_disables_server_paths(overrides) -> None:
+    assert _purely_local(**overrides) is False
+
+
+# -- _validate_media_path_root (#170): startup validation of --media-path-root --
+
+
+def test_media_path_root_valid_dir_returns_realpath(tmp_path) -> None:
+    import os
+
+    root = tmp_path / "media"
+    root.mkdir()
+    assert _validate_media_path_root(str(root)) == os.path.realpath(str(root))
+
+
+def test_media_path_root_rejects_filesystem_root() -> None:
+    with pytest.raises(ValueError, match="filesystem root"):
+        _validate_media_path_root("/")
+
+
+def test_media_path_root_rejects_nonexistent(tmp_path) -> None:
+    with pytest.raises(ValueError, match="not an existing directory"):
+        _validate_media_path_root(str(tmp_path / "does-not-exist"))
+
+
+def test_media_path_root_rejects_a_file(tmp_path) -> None:
+    f = tmp_path / "file.txt"
+    f.write_text("x")
+    with pytest.raises(ValueError, match="not an existing directory"):
+        _validate_media_path_root(str(f))

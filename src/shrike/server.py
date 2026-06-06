@@ -152,6 +152,49 @@ def _build_transport_security(
     )
 
 
+def _server_is_purely_local(
+    host: str,
+    *,
+    allow_remote: bool,
+    no_dns_rebinding_protection: bool,
+    allowed_hosts: list[str] | None,
+    allowed_origins: list[str] | None,
+) -> bool:
+    """Whether the server is in its default, purely-local configuration (#164).
+
+    Gates the server-local ``path`` input to ``store_media``: only when the bind
+    is loopback, ``--allow-remote`` is off, the DNS-rebinding guard is on, and no
+    extra ``--allowed-host``/``--allowed-origin`` was added. Any of those signals
+    possible remote traffic — and crucially, behind a same-host reverse proxy /
+    tailnet (``--no-dns-rebinding-protection`` or an added allow-list) the loopback
+    peer is the proxy, not the real (remote) client — so server-local file reads
+    must stay disabled there.
+    """
+    return (
+        _is_loopback(host)
+        and not allow_remote
+        and not no_dns_rebinding_protection
+        and not allowed_hosts
+        and not allowed_origins
+    )
+
+
+def _validate_media_path_root(raw: str) -> str:
+    """Canonicalize and validate ``--media-path-root`` at startup (#170), or raise.
+
+    Returns the resolved absolute real path (symlinks collapsed) used for the
+    store_media containment check. Rejects the filesystem root (``dirname(p) == p``
+    is true for ``/``, a Windows drive root, etc. — confining to ``/`` is no
+    confinement) and a root that isn't an existing directory (so it can't 'refuse
+    everything' or spring into existence later)."""
+    resolved = os.path.realpath(os.path.expanduser(raw))
+    if os.path.dirname(resolved) == resolved:
+        raise ValueError(f"refusing the filesystem root '{resolved}' (confines nothing)")
+    if not os.path.isdir(resolved):
+        raise ValueError(f"'{raw}' is not an existing directory")
+    return resolved
+
+
 def create_mcp(
     *,
     host: str,
@@ -524,6 +567,16 @@ def main() -> None:
         "reverse proxy; defaults to the bind host. Also read from SHRIKE_PUBLIC_URL.",
     )
     parser.add_argument(
+        "--media-path-root",
+        action="append",
+        default=None,
+        metavar="DIR",
+        help="Enable store_media's server-local `path` input, confined to files under "
+        "DIR (after resolving symlinks). Repeatable for several locations; a path under "
+        "any one is allowed. Off (path rejected) when unset. Also read from "
+        "SHRIKE_MEDIA_PATH_ROOTS (os.pathsep-separated). Requires a purely-local daemon.",
+    )
+    parser.add_argument(
         "--index-save-delay",
         type=float,
         default=None,
@@ -795,12 +848,51 @@ def main() -> None:
     else:
         url_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
         media_base_url = f"http://{url_host}:{args.port}"
+    # store_media's server-local `path` is OFF by default (#170): honored only
+    # when the operator opts in with one or more --media-path-root, AND the server
+    # is purely local, AND the path is contained in one of those roots. The two
+    # gates compose — purely-local stops a remote/proxied caller from *reaching*
+    # it; the roots bound *what* a permitted caller can read. Roots set on a
+    # non-purely-local server are refused (warn) rather than silently half-enabled.
+    raw_roots = list(args.media_path_root or [])
+    env_roots = os.environ.get("SHRIKE_MEDIA_PATH_ROOTS")
+    if env_roots:
+        raw_roots += [p for p in env_roots.split(os.pathsep) if p]
+    server_path_roots: list[str] = []
+    if raw_roots:
+        # Validate + canonicalize **per element** (dedup, order-preserving): the
+        # containment disjunction means the weakest root governs, so a single bad
+        # one (filesystem root, missing dir) must fail startup, not pass silently.
+        validated: list[str] = []
+        for r in raw_roots:
+            try:
+                resolved = _validate_media_path_root(r)
+            except ValueError as e:
+                logger.error("Invalid --media-path-root %r: %s", r, e)
+                sys.exit(1)
+            if resolved not in validated:
+                validated.append(resolved)
+        if _server_is_purely_local(
+            args.host,
+            allow_remote=args.allow_remote,
+            no_dns_rebinding_protection=args.no_dns_rebinding_protection,
+            allowed_hosts=args.allowed_host,
+            allowed_origins=args.allowed_origin,
+        ):
+            server_path_roots = validated
+            logger.info("store_media server-local paths enabled, confined to %s", validated)
+        else:
+            logger.warning(
+                "--media-path-root is set but the server is not purely-local "
+                "(remote/proxied exposure); store_media server-local paths stay disabled"
+            )
     register_tools(
         mcp,
         wrapper,
         index=index,
         saver=saver,
         allow_private_fetch=allow_private_media_fetch,
+        server_path_roots=server_path_roots,
         media_base_url=media_base_url,
     )
     _register_custom_routes(

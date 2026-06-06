@@ -122,6 +122,28 @@ def _resolve_public_ip(host: str) -> str:
     return vetted
 
 
+def _path_within_any_root(path: str, roots: list[str]) -> bool:
+    """Whether ``path`` is contained in **any** of ``roots`` — on resolved real paths.
+
+    Confines store_media's server-local ``path`` to the configured subtrees
+    (``--media-path-root``, repeatable, #164/#170): allowed iff the target is under
+    any one root (a disjunction — the reachable set is the union). ``realpath``
+    collapses ``..`` and resolves symlinks on both sides (``add_file`` follows
+    symlinks, so the *target's* real path is what matters), and ``commonpath``
+    avoids the ``/srv/media-evil`` vs ``/srv/media`` prefix bug a bare
+    ``startswith`` has. (A TOCTOU between this check and ``add_file`` — swapping a
+    symlink in the gap — is an accepted residual for this local-trust feature.)"""
+    target = os.path.realpath(path)
+    for root in roots:
+        root_real = os.path.realpath(root)
+        try:
+            if os.path.commonpath([root_real, target]) == root_real:
+                return True
+        except ValueError:  # different drives on Windows → not contained
+            continue
+    return False
+
+
 def _host_with_port(host: str, port: int | None) -> str:
     """Format host[:port] for a Host header (bracketing an IPv6 literal)."""
     bracketed = f"[{host}]" if ":" in host else host
@@ -1562,7 +1584,11 @@ class CollectionWrapper:
     # -- media (#70) ---------------------------------------------------------
 
     async def store_media(
-        self, items: list[dict[str, Any]], *, allow_private_fetch: bool
+        self,
+        items: list[dict[str, Any]],
+        *,
+        allow_private_fetch: bool,
+        server_path_roots: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Store a batch of media files; one bad item never sinks the batch.
 
@@ -1571,13 +1597,38 @@ class CollectionWrapper:
         (so a 10-URL batch isn't serialized at the per-fetch timeout) and base64
         items decode off the event loop, with the size cap applied to the encoded
         length *before* decoding (no allocating an oversize payload to then reject
-        it). The prepared bytes are written on the worker thread. Per-item failures
-        (bad base64, unfetchable/SSRF-blocked URL, oversize) become error results.
+        it). The prepared bytes are written on the worker thread.
+
+        A server-local ``path`` item (#164/#170) is honored **only** when
+        ``server_path_roots`` is non-empty (the operator's opt-in, repeatable
+        ``--media-path-root`` on a purely-local daemon) **and** the path is
+        contained in one of those roots after ``..``/symlink resolution; otherwise
+        it's a per-item error. It's stored zero-copy via ``col.media.add_file`` on
+        the worker thread (no read into Python memory). Per-item failures (bad
+        base64, unfetchable/SSRF-blocked URL, disabled/out-of-root/missing path,
+        oversize) become error results.
         """
+        roots = server_path_roots or []
 
         async def _prepare(index: int, item: dict[str, Any]) -> dict[str, Any]:
             name = item.get("filename")
             try:
+                if item.get("path") is not None:
+                    if not roots:
+                        raise ValueError(
+                            "server-local paths are not enabled (set --media-path-root on a "
+                            "purely-local daemon)"
+                        )
+                    # Resolve once; check containment and hand the *resolved* real
+                    # path to add_file so the final component isn't re-resolved
+                    # through a symlink swapped in after the check (shrinks the
+                    # accepted check→copy TOCTOU window — see _add_file_media).
+                    target = os.path.realpath(item["path"])
+                    if not _path_within_any_root(target, roots):
+                        raise ValueError("path is outside the configured media root(s)")
+                    if not os.path.isfile(target):
+                        raise ValueError(f"file not found: {item['path']}")
+                    return {"index": index, "src_path": target, "name": name}
                 if item.get("data") is not None:
                     raw = await asyncio.to_thread(_decode_media_b64, item["data"])
                     return {"index": index, "raw": raw, "name": name, "content_type": None}
@@ -1624,6 +1675,8 @@ class CollectionWrapper:
         return results
 
     def _write_one_media(self, p: dict[str, Any]) -> dict[str, Any]:
+        if "src_path" in p:
+            return self._add_file_media(p)
         raw: bytes = p["raw"]
         name: str | None = p["name"]
         content_type: str | None = p["content_type"]
@@ -1648,6 +1701,32 @@ class CollectionWrapper:
             # Identical content already present → Anki kept the name, wrote nothing
             # new. A different-content collision instead yields stored != safe.
             "deduped": existed and stored == safe,
+        }
+
+    def _add_file_media(self, p: dict[str, Any]) -> dict[str, Any]:
+        """Store a server-local file zero-copy via Anki's add_file (#164/#170).
+
+        ``src_path`` is the **resolved real path** already vetted against the
+        configured roots (the caller realpath'd it before the containment check),
+        so add_file copies the exact vetted file rather than re-resolving the
+        original possibly-symlinked path — shrinking the check→copy TOCTOU window
+        (a remaining race on a path *component* is an accepted local-trust
+        residual). The stored name comes from that path's basename (a `filename`
+        override isn't honored for `path` — rewriting it would mean reading the
+        file, defeating the zero-copy intent). Anki resolves collisions/dedup as
+        write_data does. No size cap: a deliberate local-file copy, not a
+        memory-bound base64/URL payload."""
+        src: str = p["src_path"]
+        base = _safe_media_name(os.path.basename(src))
+        existed = bool(base) and self.col.media.have(base)
+        stored = self.col.media.add_file(src)
+        return {
+            "status": "stored",
+            "index": p["index"],
+            "filename": stored,
+            "mime": _guess_mime(stored),
+            "size_bytes": os.path.getsize(src),
+            "deduped": existed and stored == base,
         }
 
     async def fetch_media(self, filenames: list[str]) -> list[dict[str, Any]]:

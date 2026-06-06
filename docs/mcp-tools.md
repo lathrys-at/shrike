@@ -658,17 +658,21 @@ None.
 
 ## `store_media`
 
-Store media files in the collection's media folder (1–10 per call) — the write path for authoring cards with images or audio. Each item provides exactly one source: base64 `data` (which **requires** a `filename` with an extension, since the bytes alone don't say what the file is) or a `url` the server fetches (filename derived from the URL or its `Content-Type` if you omit it). After storing, reference the returned `filename` in a note field (`<img src="NAME">` or `[sound:NAME]`).
+Store media files in the collection's media folder (1–10 per call) — the write path for authoring cards with images or audio. Each item provides exactly one source: base64 `data` (which **requires** a `filename` with an extension, since the bytes alone don't say what the file is), a `url` the server fetches (filename derived from the URL or its `Content-Type` if you omit it), or a server-local `path` (see below). After storing, reference the returned `filename` in a note field (`<img src="NAME">` or `[sound:NAME]`).
 
-URL fetches are restricted to `http`/`https` and **refuse any non-globally-routable address by default** (an SSRF guard that allowlists public IPs and re-checks each redirect hop; override with the server's `--allow-private-media-fetch` flag or `SHRIKE_MEDIA_ALLOW_PRIVATE_FETCH=1`). To store a **local** file, use the CLI `shrike media store PATH`, which reads it and sends the bytes — this tool takes no server-local path.
+URL fetches are restricted to `http`/`https` and **refuse any non-globally-routable address by default** (an SSRF guard that allowlists public IPs and re-checks each redirect hop; override with the server's `--allow-private-media-fetch` flag or `SHRIKE_MEDIA_ALLOW_PRIVATE_FETCH=1`).
 
-Anki resolves name collisions: identical content keeps the name (reported `deduped: true`), different content under the same name gets a hashed suffix — so the stored `filename` may differ from what you asked for. Per-item errors (bad base64, unfetchable/blocked URL, oversize) are reported per item and don't sink the batch.
+A **`path`** reads a file on the **server's** filesystem and stores it zero-copy (no base64). It is **off by default** and honored only when **all three** hold: the operator set one or more `--media-path-root DIR` on the server (repeatable; config `server.media_path_roots`, env `SHRIKE_MEDIA_PATH_ROOTS`, `os.pathsep`-separated); the daemon is purely-local (loopback bind, no `--allow-remote`, DNS-rebinding guard on, no added `--allowed-host`/`--allowed-origin`); and the path is contained in **one of** those roots after resolving `..`/symlinks. Otherwise the `path` item is a clean per-item error. The stored name comes from the path's basename. To store a local file against *any* server, the CLI `shrike media store PATH` reads it and sends the bytes instead.
+
+> **Security:** within a configured root, `path` is an **arbitrary read of those files at the server user's privileges** (stored, then readable via `fetch_media`/`GET /media/<name>`). It's off unless the operator opts in with one or more narrow `--media-path-root` dirs, and gated to a purely-local daemon, so a remote/proxied caller can't reach it and the blast radius is bounded to the named subtrees — intended for single-user/local use, consistent with Shrike's unauthenticated-loopback trust model.
+
+Anki resolves name collisions: identical content keeps the name (reported `deduped: true`), different content under the same name gets a hashed suffix — so the stored `filename` may differ from what you asked for. Per-item errors (bad base64, unfetchable/blocked URL, disallowed/missing path, oversize) are reported per item and don't sink the batch.
 
 ### Parameters
 
 | Name | Type | Required | Description |
 |---|---|---|---|
-| `items` | `object[]` | **yes** | 1–10 media items. Each: exactly one of `data` (base64 string) or `url` (string), plus `filename` (string; required with `data`, optional with `url`). |
+| `items` | `object[]` | **yes** | 1–10 media items. Each: exactly one of `data` (base64 string), `url` (string), or `path` (server-local file path), plus `filename` (string; required with `data`, optional/derived otherwise). |
 
 ### Response
 
