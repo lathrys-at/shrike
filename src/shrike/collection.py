@@ -1619,15 +1619,16 @@ class CollectionWrapper:
                             "server-local paths are not enabled (set --media-path-root on a "
                             "purely-local daemon)"
                         )
-                    src = item["path"]
-                    # Containment first, on resolved real paths (closes `..` and
-                    # symlink escape — add_file follows symlinks), before touching
-                    # the filesystem further.
-                    if not _path_within_any_root(src, roots):
+                    # Resolve once; check containment and hand the *resolved* real
+                    # path to add_file so the final component isn't re-resolved
+                    # through a symlink swapped in after the check (shrinks the
+                    # accepted check→copy TOCTOU window — see _add_file_media).
+                    target = os.path.realpath(item["path"])
+                    if not _path_within_any_root(target, roots):
                         raise ValueError("path is outside the configured media root(s)")
-                    if not os.path.isfile(src):
-                        raise ValueError(f"file not found: {src}")
-                    return {"index": index, "src_path": src, "name": name}
+                    if not os.path.isfile(target):
+                        raise ValueError(f"file not found: {item['path']}")
+                    return {"index": index, "src_path": target, "name": name}
                 if item.get("data") is not None:
                     raw = await asyncio.to_thread(_decode_media_b64, item["data"])
                     return {"index": index, "raw": raw, "name": name, "content_type": None}
@@ -1703,12 +1704,17 @@ class CollectionWrapper:
         }
 
     def _add_file_media(self, p: dict[str, Any]) -> dict[str, Any]:
-        """Store a server-local file zero-copy via Anki's add_file (#164).
+        """Store a server-local file zero-copy via Anki's add_file (#164/#170).
 
-        The stored name comes from the source basename (a `filename` override
-        isn't honored for `path` — that would require reading the file to rewrite
-        it, defeating the zero-copy intent). Anki resolves collisions/dedup exactly
-        as write_data does. No size cap: it's a deliberate local-file copy, not a
+        ``src_path`` is the **resolved real path** already vetted against the
+        configured roots (the caller realpath'd it before the containment check),
+        so add_file copies the exact vetted file rather than re-resolving the
+        original possibly-symlinked path — shrinking the check→copy TOCTOU window
+        (a remaining race on a path *component* is an accepted local-trust
+        residual). The stored name comes from that path's basename (a `filename`
+        override isn't honored for `path` — rewriting it would mean reading the
+        file, defeating the zero-copy intent). Anki resolves collisions/dedup as
+        write_data does. No size cap: a deliberate local-file copy, not a
         memory-bound base64/URL payload."""
         src: str = p["src_path"]
         base = _safe_media_name(os.path.basename(src))

@@ -513,8 +513,9 @@ class StoreMediaItem(BaseModel):
     path: str | None = Field(
         default=None,
         description="Path to a file on the **server's** filesystem to store directly "
-        "(zero-copy). Only honored when the server runs in its default purely-local "
-        "configuration; rejected otherwise. Exactly one of data/url/path.",
+        "(zero-copy). Off by default — honored only when the server set --media-path-root "
+        "(on a purely-local daemon) and the file is under one of those roots; rejected "
+        "otherwise. Exactly one of data/url/path.",
     )
 
     @model_validator(mode="after")
