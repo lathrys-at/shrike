@@ -36,6 +36,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Routes store_media's server-side URL fetch through a SOCKS proxy (httpx reads
+# ALL_PROXY/HTTPS_PROXY when set). Optional — plain http/https proxies need no extra.
+socks = [
+    "httpx[socks]>=0.27",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

@@ -46,8 +46,17 @@ from tests.integration.model_cache import (
 # untracked note (e.g. a pretty-mode CLI create whose id we can't parse) — so a
 # tracking gap can never leak state, only cost an extra enumeration.
 
-_MCP_READ_TOOLS = frozenset({"collection_info", "list_notes", "search_notes"})
-_CLI_READ_VERBS = frozenset({"list", "show", "search", "status", "logs"})
+_MCP_READ_TOOLS = frozenset(
+    {
+        "collection_info",
+        "list_notes",
+        "search_notes",
+        "fetch_media",
+        "list_media",
+        "collection_check",
+    }
+)
+_CLI_READ_VERBS = frozenset({"list", "show", "search", "status", "logs", "fetch", "check"})
 
 
 def _cli_noun_verb(args: list[str]) -> tuple[str | None, str | None]:

@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # Stable wire marker prefixing a tool's MCP isError text when the call failed
 # because the collection couldn't be acquired (another process holds it, under
@@ -485,6 +485,41 @@ class DeckInput(BaseModel):
     name: str = Field(description='Deck name (e.g., "Japanese::Vocabulary"); "::" denotes nesting.')
 
 
+# -- media (#70) -------------------------------------------------------------
+# One store item carries exactly one source: base64 `data` (which needs an
+# explicit `filename` with an extension — the file's bytes don't tell us what it
+# is) or a `url` the server fetches (name/extension derived from the URL/Content-
+# Type). The model_validator makes the illegal "both/neither source" and
+# "data without filename" states a request rejection (structural), the same way
+# an out-of-range bound is; *execution* failures (bad base64, unfetchable URL)
+# are per-item results, so one bad item doesn't sink the batch.
+
+
+class StoreMediaItem(BaseModel):
+    filename: str | None = Field(
+        default=None,
+        description="Desired filename with extension (e.g. 'cell.png'). Required "
+        "with `data`; optional with `url` (derived from the URL if omitted). Anki "
+        "resolves collisions, so the stored name may differ.",
+    )
+    data: str | None = Field(
+        default=None, description="Base64-encoded file bytes. Mutually exclusive with `url`."
+    )
+    url: str | None = Field(
+        default=None,
+        description="http(s) URL the server fetches and stores. Mutually exclusive with `data`.",
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> StoreMediaItem:
+        sources = [s for s in (self.data, self.url) if s is not None]
+        if len(sources) != 1:
+            raise ValueError("provide exactly one of `data` or `url`")
+        if self.data is not None and not self.filename:
+            raise ValueError("`filename` (with an extension) is required when `data` is given")
+        return self
+
+
 class UpsertDeckOk(BaseModel):
     status: Literal["created", "updated"]
     id: int
@@ -626,11 +661,17 @@ class PruneEmptyCards(BaseModel):
     notes_deleted: list[int] = []  # notes that lost their last card and were deleted
 
 
+class PruneUnusedMedia(BaseModel):
+    removed: int = 0  # media files trashed (or that would be, on dry-run)
+    files: list[str] = []  # the filenames
+
+
 class CollectionPruneResponse(BaseModel):
     dry_run: bool = True
     unused_tags: PruneUnusedTags | None = None  # None = cleanup not requested
     empty_notes: PruneEmptyNotes | None = None
     empty_cards: PruneEmptyCards | None = None
+    unused_media: PruneUnusedMedia | None = None
 
 
 class UpsertDecksResponse(BaseModel):
@@ -641,6 +682,99 @@ class DeleteDecksResponse(BaseModel):
     deleted: list[str] = []
     not_found: list[str] = []
     not_empty: list[str] = []
+
+
+# -- media responses (#70) ---------------------------------------------------
+
+
+class StoreMediaOk(BaseModel):
+    status: Literal["stored"]
+    index: int  # position in the request batch, so callers can correlate
+    filename: str  # final stored name (Anki may rename on a content collision)
+    mime: str | None = None  # mimetypes.guess_type — None for an unknown extension
+    size_bytes: int
+    deduped: bool = False  # Anki kept the requested name (identical content already present)
+
+
+class StoreMediaError(BaseModel):
+    status: Literal["error"]
+    index: int
+    filename: str | None = None
+    error: str
+
+
+StoreMediaResult = Annotated[StoreMediaOk | StoreMediaError, Field(discriminator="status")]
+
+
+class StoreMediaResponse(BaseModel):
+    results: list[StoreMediaResult] = []
+
+
+# fetch: per item, the file is small enough to inline (base64 `data`), too large
+# to inline (path only — read it from disk), or absent. Discriminated so `data`
+# only ever rides the inline variant.
+class MediaInline(BaseModel):
+    status: Literal["inline"]
+    filename: str
+    path: str  # absolute server-side path in the media dir
+    mime: str | None = None
+    size_bytes: int
+    data: str  # base64-encoded file bytes
+
+
+class MediaTooLarge(BaseModel):
+    status: Literal["too_large"]
+    filename: str
+    path: str
+    mime: str | None = None
+    size_bytes: int  # exceeds max_inline_bytes; read from `path` instead
+
+
+class MediaMissing(BaseModel):
+    status: Literal["missing"]
+    filename: str
+
+
+MediaFetchResult = Annotated[
+    MediaInline | MediaTooLarge | MediaMissing, Field(discriminator="status")
+]
+
+
+class FetchMediaResponse(BaseModel):
+    results: list[MediaFetchResult] = []
+
+
+class MediaFileInfo(BaseModel):
+    filename: str
+    mime: str | None = None
+    size_bytes: int
+
+
+class ListMediaResponse(BaseModel):
+    media_dir: str
+    count: int = 0
+    files: list[MediaFileInfo] = []
+
+
+class DeleteMediaResponse(BaseModel):
+    deleted: list[str] = []
+    not_found: list[str] = []
+
+
+class CollectionCheckResponse(BaseModel):
+    """Read-only collection diagnostics (the sibling of collection_prune).
+
+    Wraps Anki's ``col.media.check()``: ``unused`` are media files on disk no note
+    references, ``missing`` are filenames referenced by notes but absent from the
+    media dir, ``missing_media_notes`` are the note ids with such references, and
+    ``have_trash`` reports whether Anki's media trash holds anything.
+    """
+
+    media_dir: str
+    unused: list[str] = []
+    missing: list[str] = []
+    missing_media_notes: list[int] = []
+    have_trash: bool = False
 
 
 class FindReplaceSample(BaseModel):

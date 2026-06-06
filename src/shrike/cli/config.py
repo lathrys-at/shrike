@@ -109,6 +109,8 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
         server_out["cooperative_lock"] = True
     if server.get("lock_hold_seconds") is not None:
         server_out["lock_hold_seconds"] = server["lock_hold_seconds"]
+    if server.get("media_allow_private_fetch"):
+        server_out["media_allow_private_fetch"] = True
     if server_out:
         output["server"] = server_out
 
@@ -423,11 +425,19 @@ def build_server_spec(
     resolved_transport = resolve_transport(config, **(transport_overrides or {}))
     resolved_locking = resolve_locking(config, **(locking_overrides or {}))
 
+    env_private_media = os.environ.get("SHRIKE_MEDIA_ALLOW_PRIVATE_FETCH")
+    allow_private_media = (
+        env_private_media.strip().lower() in ("1", "true", "yes", "on")
+        if env_private_media is not None
+        else bool(server.get("media_allow_private_fetch", False))
+    )
+
     return ServerSpec(
         collection=coll,
         host=host or server.get("host", "127.0.0.1"),
         port=port or server.get("port", 8372),
         allow_remote=bool(server.get("allow_remote", False)),
+        allow_private_media_fetch=allow_private_media,
         allowed_hosts=resolved_transport["allowed_hosts"],
         allowed_origins=resolved_transport["allowed_origins"],
         no_dns_rebinding_protection=resolved_transport["no_dns_rebinding_protection"],

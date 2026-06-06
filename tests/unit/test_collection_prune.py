@@ -42,6 +42,7 @@ def _prune(wrapper, **kw):
     kw.setdefault("unused_tags", False)
     kw.setdefault("empty_notes", False)
     kw.setdefault("empty_cards", False)
+    kw.setdefault("unused_media", False)
     kw.setdefault("dry_run", True)
     return wrapper.run_sync(lambda c: wrapper._prune(**kw))
 

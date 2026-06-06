@@ -24,6 +24,7 @@ _LAZY_COMMANDS: dict[str, str] = {
     "embedding": "shrike.cli.embedding_cmd:embedding",
     "index": "shrike.cli.index_cmd:index",
     "info": "shrike.cli.info_cmd:info",
+    "media": "shrike.cli.media_cmd:media",
     "note": "shrike.cli.note_cmd:note",
     "server": "shrike.cli.server_cmd:server",
     "tag": "shrike.cli.tag_cmd:tag",

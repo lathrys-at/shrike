@@ -42,15 +42,18 @@ from shrike.errors import (
 )
 from shrike.schemas import (
     COLLECTION_BUSY_CODE,
+    CollectionCheckResponse,
     CollectionInfo,
     CollectionPruneResponse,
     DeckInput,
     DeleteDecksResponse,
+    DeleteMediaResponse,
     DeleteNotesResponse,
     DeleteNoteTypesResponse,
     EmbeddingStartResponse,
     EmbeddingStatus,
     EmbeddingStopResponse,
+    FetchMediaResponse,
     FieldMetadataInput,
     FieldOp,
     FindReplaceNoteTypesResponse,
@@ -58,6 +61,7 @@ from shrike.schemas import (
     IndexRebuildResponse,
     IndexSaveResponse,
     IndexStatus,
+    ListMediaResponse,
     ListNotesResponse,
     MigrateNoteTypeResponse,
     NoteInput,
@@ -68,6 +72,8 @@ from shrike.schemas import (
     ServerStatus,
     ShutdownResponse,
     StopResponse,
+    StoreMediaItem,
+    StoreMediaResponse,
     TemplateOp,
     UpdateNoteTagsResponse,
     UpdateNoteTypeFieldMetadataResponse,
@@ -125,6 +131,7 @@ class ServerSpec:
     allowed_hosts: list[str] = field(default_factory=list)
     allowed_origins: list[str] = field(default_factory=list)
     no_dns_rebinding_protection: bool = False
+    allow_private_media_fetch: bool = False
     log_dir: str | None = None
     log_level: str = "info"
     state_dir: str | None = None
@@ -512,6 +519,7 @@ class ShrikeClient:
         unused_tags: bool = False,
         empty_notes: bool = False,
         empty_cards: bool = False,
+        unused_media: bool = False,
         dry_run: bool = True,
     ) -> CollectionPruneResponse:
         return CollectionPruneResponse.model_validate(
@@ -521,10 +529,60 @@ class ShrikeClient:
                     "unused_tags": unused_tags,
                     "empty_notes": empty_notes,
                     "empty_cards": empty_cards,
+                    "unused_media": unused_media,
                     "dry_run": dry_run,
                 },
             )
         )
+
+    # -- media (#70) --------------------------------------------------------
+
+    def store_media(self, items: Sequence[StoreMediaItem | dict[str, Any]]) -> StoreMediaResponse:
+        """Store media files, transparently batching if over the server limit."""
+        payload = [
+            i.model_dump(exclude_none=True) if isinstance(i, StoreMediaItem) else i for i in items
+        ]
+        merged = self._batched_call(
+            "store_media",
+            items=payload,
+            param_key="items",
+            result_key="results",
+            batch_size=10,
+        )
+        return StoreMediaResponse.model_validate(merged)
+
+    def fetch_media(
+        self, filenames: Sequence[str], *, max_inline_bytes: int | None = None
+    ) -> FetchMediaResponse:
+        """Read media files back, transparently batching if over the server limit."""
+        extra = {} if max_inline_bytes is None else {"max_inline_bytes": max_inline_bytes}
+        merged = self._batched_call(
+            "fetch_media",
+            items=list(filenames),
+            param_key="filenames",
+            result_key="results",
+            batch_size=10,
+            extra=extra,
+        )
+        return FetchMediaResponse.model_validate(merged)
+
+    def list_media(
+        self, *, pattern: str | None = None, limit: int | None = None
+    ) -> ListMediaResponse:
+        args: dict[str, Any] = {}
+        if pattern is not None:
+            args["pattern"] = pattern
+        if limit is not None:
+            args["limit"] = limit
+        return ListMediaResponse.model_validate(self._call("list_media", args))
+
+    def delete_media(self, filenames: Sequence[str]) -> DeleteMediaResponse:
+        return DeleteMediaResponse.model_validate(
+            self._call("delete_media", {"filenames": list(filenames)})
+        )
+
+    def collection_check(self) -> CollectionCheckResponse:
+        return CollectionCheckResponse.model_validate(self._call("collection_check", {}))
 
     def upsert_decks(self, decks: Sequence[DeckInput | dict[str, Any]]) -> UpsertDecksResponse:
         """Create or rename decks, transparently batching if over the server limit."""
@@ -765,6 +823,8 @@ class ShrikeClient:
             cmd += ["--allowed-origin", o]
         if spec.no_dns_rebinding_protection:
             cmd.append("--no-dns-rebinding-protection")
+        if spec.allow_private_media_fetch:
+            cmd.append("--allow-private-media-fetch")
         if spec.log_dir:
             cmd += ["--log-dir", spec.log_dir]
         if spec.state_dir:

@@ -9,25 +9,37 @@ from anki.errors import SearchError
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from shrike.collection import CollectionBusyError, CollectionWrapper, substring_info
+from shrike.collection import (
+    DEFAULT_MAX_INLINE_BYTES,
+    MEDIA_MAX_BYTES,
+    CollectionBusyError,
+    CollectionWrapper,
+    substring_info,
+)
 from shrike.index import IndexSaver, IndexState, VectorIndex
 from shrike.schemas import (
+    CollectionCheckResponse,
     CollectionInfo,
     CollectionPruneResponse,
     DeckInput,
     DeleteDecksResponse,
+    DeleteMediaResponse,
     DeleteNotesResponse,
     DeleteNoteTypesResponse,
+    FetchMediaResponse,
     FieldMetadataInput,
     FieldOp,
     FindReplaceNoteTypesResponse,
     FindReplaceResponse,
+    ListMediaResponse,
     ListNotesResponse,
     MigrateNoteTypeResponse,
     NoteInput,
     NoteTypeInput,
     RenameTagResponse,
     SearchResponse,
+    StoreMediaItem,
+    StoreMediaResponse,
     TemplateOp,
     UpdateNoteTagsResponse,
     UpdateNoteTypeFieldMetadataResponse,
@@ -106,6 +118,8 @@ def register_tools(
     wrapper: CollectionWrapper,
     index: VectorIndex | None = None,
     saver: IndexSaver | None = None,
+    *,
+    allow_private_fetch: bool = False,
 ) -> None:
     from shrike.note_types import NoteTypeOpError
     from shrike.note_types import find_and_replace_note_types as _find_and_replace_note_types
@@ -1464,6 +1478,15 @@ def register_tools(
                 )
             ),
         ] = False,
+        unused_media: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Move media files that no note references to Anki's trash "
+                    "(recoverable). See collection_check to preview them without pruning."
+                )
+            ),
+        ] = False,
         dry_run: Annotated[
             bool,
             Field(
@@ -1474,38 +1497,42 @@ def register_tools(
             ),
         ] = True,
     ) -> CollectionPruneResponse:
-        """Clean up the collection: unused tags, empty notes, and empty cards.
+        """Clean up the collection: unused tags, empty notes, empty cards, unused media.
 
         Runs the cleanups you enable. If you set **none** of `unused_tags`,
-        `empty_notes`, or `empty_cards`, all three run. Each enabled cleanup is
-        reported in its own section of the response; a section is absent when its
-        cleanup was not requested.
+        `empty_notes`, `empty_cards`, or `unused_media`, all run. Each enabled
+        cleanup is reported in its own section of the response; a section is
+        absent when its cleanup was not requested.
 
         `dry_run` defaults to **true**, so by default this only previews — it
-        reports the unused tag names, the empty note IDs, and the empty card
-        count (with any notes that would be deleted) without mutating anything.
-        Pass `dry_run: false` to actually remove them. This is destructive and
-        cannot be undone through this tool, so preview first.
+        reports the unused tag names, the empty note IDs, the empty card count
+        (with any notes that would be deleted), and the unused media filenames
+        without mutating anything. Pass `dry_run: false` to actually remove them.
+        This is destructive (media goes to Anki's recoverable trash; notes/cards
+        do not) so preview first.
 
         An empty note is one whose every field is blank, where a field is blank
         only if it has no text *and* no media — so a card that is just an image
         or audio clip is never removed. On apply, empty notes are removed first,
-        then empty cards, then unused tags (so tags freed by the deletions are
-        cleared in the same call)."""
+        then empty cards, then unused tags, then unused media (so tags and media
+        freed by the deletions are cleared in the same call)."""
         # No selection means "prune everything".
-        if not (unused_tags or empty_notes or empty_cards):
-            unused_tags = empty_notes = empty_cards = True
+        if not (unused_tags or empty_notes or empty_cards or unused_media):
+            unused_tags = empty_notes = empty_cards = unused_media = True
         logger.info(
-            "collection_prune unused_tags=%s empty_notes=%s empty_cards=%s dry_run=%s",
+            "collection_prune unused_tags=%s empty_notes=%s empty_cards=%s "
+            "unused_media=%s dry_run=%s",
             unused_tags,
             empty_notes,
             empty_cards,
+            unused_media,
             dry_run,
         )
         result, removed_note_ids = await wrapper.prune(
             unused_tags=unused_tags,
             empty_notes=empty_notes,
             empty_cards=empty_cards,
+            unused_media=unused_media,
             dry_run=dry_run,
         )
         logger.info(
@@ -1530,6 +1557,150 @@ def register_tools(
                 logger.warning("Failed to update index after prune", exc_info=True)
 
         return CollectionPruneResponse.model_validate(result)
+
+    @mcp.tool()
+    @_safe_tool
+    async def store_media(
+        items: Annotated[
+            list[StoreMediaItem],
+            Field(
+                min_length=1,
+                max_length=10,
+                description="Media files to store (1-10). Each carries base64 `data` or a `url`.",
+            ),
+        ],
+    ) -> StoreMediaResponse:
+        """Store media files in the collection's media folder (1-10 per call).
+
+        Each item provides exactly one source: base64 `data` (requires a
+        `filename` with an extension — the bytes alone don't say what the file is)
+        or a `url` the server fetches (filename derived from the URL or its
+        Content-Type if you omit it). This is the write path for authoring cards
+        with images or audio: store the asset, then reference the returned
+        filename in a note field (`<img src="NAME">` or `[sound:NAME]`).
+
+        URL fetches are restricted to http/https and refuse private/loopback
+        addresses by default (an SSRF guard). To store a *local* file, use the CLI
+        `shrike media store PATH`, which reads it and sends the bytes — the tool
+        takes no server-local path.
+
+        Anki resolves name collisions: identical content keeps the name (reported
+        `deduped`), different content under the same name gets a hashed suffix, so
+        the stored `filename` may differ from what you asked for — always reference
+        the returned name. Per-item errors (bad base64, unfetchable URL, oversize)
+        are reported per item and don't sink the batch."""
+        logger.info("store_media count=%d", len(items))
+        item_dicts = [i.model_dump(exclude_none=True) for i in items]
+        results = await wrapper.store_media(item_dicts, allow_private_fetch=allow_private_fetch)
+        stored = sum(1 for r in results if r.get("status") == "stored")
+        errors = len(results) - stored
+        logger.info("store_media completed: %d stored, %d errors", stored, errors)
+        for r in results:
+            if r.get("status") == "error":
+                logger.warning("store_media item %d failed: %s", r.get("index"), r["error"])
+        return StoreMediaResponse.model_validate({"results": results})
+
+    @mcp.tool()
+    @_safe_tool
+    async def fetch_media(
+        filenames: Annotated[
+            list[str],
+            Field(min_length=1, max_length=10, description="Media filenames to read back (1-10)."),
+        ],
+        max_inline_bytes: Annotated[
+            int,
+            Field(
+                ge=1,
+                le=MEDIA_MAX_BYTES,
+                description="Per-file size ceiling for inlining base64 `data`. A larger "
+                "file is returned as `too_large` with its server-side `path` instead.",
+            ),
+        ] = DEFAULT_MAX_INLINE_BYTES,
+    ) -> FetchMediaResponse:
+        """Read media files back from the collection's media folder (1-10 per call).
+
+        Each result is one of: `inline` (base64 `data`, for a file at or under
+        `max_inline_bytes`), `too_large` (the `path` to read from disk, for a file
+        above the cap — avoids base64-bloating a large video into the response), or
+        `missing`. Every present file also reports its `mime` (from the extension),
+        `size_bytes`, and absolute `path`."""
+        logger.info("fetch_media count=%d", len(filenames))
+        results = await wrapper.fetch_media(filenames, max_inline_bytes=max_inline_bytes)
+        logger.info(
+            "fetch_media returned: %d inline, %d too_large, %d missing",
+            sum(1 for r in results if r["status"] == "inline"),
+            sum(1 for r in results if r["status"] == "too_large"),
+            sum(1 for r in results if r["status"] == "missing"),
+        )
+        return FetchMediaResponse.model_validate({"results": results})
+
+    @mcp.tool()
+    @_safe_tool
+    async def list_media(
+        pattern: Annotated[
+            str | None,
+            Field(description="Optional glob (e.g. '*.png', 'cell-*') to filter filenames."),
+        ] = None,
+        limit: Annotated[
+            int,
+            Field(
+                ge=1, le=10000, description="Maximum filenames to return (the total still counts)."
+            ),
+        ] = 1000,
+    ) -> ListMediaResponse:
+        """List filenames in the collection's media folder, and report its path.
+
+        Optionally filter by a glob `pattern`. `count` is the total number of
+        matching files; `files` is capped at `limit` (each with its `mime` and
+        `size_bytes`). `media_dir` is the absolute media-folder path."""
+        logger.info("list_media pattern=%s limit=%d", pattern, limit)
+        result = await wrapper.list_media(pattern=pattern, limit=limit)
+        logger.info("list_media returned %d/%d file(s)", len(result["files"]), result["count"])
+        return ListMediaResponse.model_validate(result)
+
+    @mcp.tool()
+    @_safe_tool
+    async def delete_media(
+        filenames: Annotated[
+            list[str],
+            Field(min_length=1, max_length=1000, description="Media filenames to delete."),
+        ],
+    ) -> DeleteMediaResponse:
+        """Delete media files by name, moving them to Anki's media trash.
+
+        Deletion is recoverable (Anki's trash) and sync-aware; it does not check
+        whether any note still references the file, so removing a referenced asset
+        will leave a broken `<img>`/`[sound:]` — use collection_check to find
+        unreferenced ('unused') media first. Returns `deleted` and `not_found`
+        name lists; a missing file is skipped, not an error."""
+        logger.info("delete_media requested=%d", len(filenames))
+        result = await wrapper.delete_media(filenames)
+        logger.info(
+            "delete_media completed: %d deleted, %d not found",
+            len(result["deleted"]),
+            len(result["not_found"]),
+        )
+        return DeleteMediaResponse.model_validate(result)
+
+    @mcp.tool()
+    @_safe_tool
+    async def collection_check() -> CollectionCheckResponse:
+        """Report collection media-integrity issues (read-only, the sibling of collection_prune).
+
+        Runs Anki's media check and returns `unused` (media files on disk that no
+        note references — candidates for `collection_prune unused_media`), `missing`
+        (filenames referenced by notes but absent from the media folder),
+        `missing_media_notes` (the note IDs with such references), and `have_trash`
+        (whether Anki's media trash holds anything). Nothing is modified."""
+        logger.info("collection_check")
+        result = await wrapper.media_check()
+        logger.info(
+            "collection_check: %d unused, %d missing, trash=%s",
+            len(result["unused"]),
+            len(result["missing"]),
+            result["have_trash"],
+        )
+        return CollectionCheckResponse.model_validate(result)
 
     @mcp.tool()
     @_safe_tool

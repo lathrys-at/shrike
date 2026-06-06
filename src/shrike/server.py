@@ -481,6 +481,13 @@ def main() -> None:
         f"operation before releasing it (default: {DEFAULT_LOCK_HOLD:g})",
     )
     parser.add_argument(
+        "--allow-private-media-fetch",
+        action="store_true",
+        help="Let store_media fetch URLs that resolve to private/loopback addresses "
+        "(off by default — the SSRF guard refuses them). Only for trusted internal "
+        "hosts. Also enabled by SHRIKE_MEDIA_ALLOW_PRIVATE_FETCH=1.",
+    )
+    parser.add_argument(
         "--index-save-delay",
         type=float,
         default=None,
@@ -733,7 +740,17 @@ def main() -> None:
     # Compile each tool schema's JSON Schema validator once instead of per call
     # (the SDK's jsonschema.validate rebuilds it every request — ~5.8ms/call).
     install_validator_cache()
-    register_tools(mcp, wrapper, index=index, saver=saver)
+    allow_private_media_fetch = args.allow_private_media_fetch or (
+        os.environ.get("SHRIKE_MEDIA_ALLOW_PRIVATE_FETCH", "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    if allow_private_media_fetch:
+        logger.warning(
+            "store_media URL fetch may reach private/loopback addresses (SSRF guard off)"
+        )
+    register_tools(
+        mcp, wrapper, index=index, saver=saver, allow_private_fetch=allow_private_media_fetch
+    )
     _register_custom_routes(
         mcp,
         wrapper,

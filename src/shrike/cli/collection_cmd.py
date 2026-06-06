@@ -5,7 +5,7 @@ import click
 from shrike.cli import output
 from shrike.cli.config import resolve_collection
 from shrike.cli.output import output_options
-from shrike.schemas import CollectionPruneResponse
+from shrike.schemas import CollectionCheckResponse, CollectionPruneResponse
 
 
 @click.group("collection", short_help="Collection-wide query and maintenance")
@@ -34,14 +34,20 @@ def _render_preview(r: CollectionPruneResponse) -> int:
         output.console.print(
             f"[yellow]{r.empty_cards.cards_removed}[/yellow] empty card(s){suffix}"
         )
+    if r.unused_media is not None:
+        total += r.unused_media.removed
+        output.console.print(f"[yellow]{r.unused_media.removed}[/yellow] unused media file(s)")
+        for f in r.unused_media.files:
+            output.console.print(f"  [cyan]{f}[/cyan]")
     return total
 
 
-@collection.command("prune", short_help="Remove unused tags, empty notes, and empty cards")
+@collection.command("prune", short_help="Remove unused tags, empty notes/cards, and unused media")
 @output_options
 @click.option("--unused-tags", is_flag=True, help="Remove tag-registry names no note uses.")
 @click.option("--empty-notes", is_flag=True, help="Delete notes whose every field is blank.")
 @click.option("--empty-cards", is_flag=True, help="Remove cards that render empty.")
+@click.option("--unused-media", is_flag=True, help="Trash media files no note references.")
 @click.option("--apply", "apply_", is_flag=True, help="Apply the changes (default: preview only).")
 @click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
 @click.pass_context
@@ -50,23 +56,27 @@ def prune(
     unused_tags: bool,
     empty_notes: bool,
     empty_cards: bool,
+    unused_media: bool,
     apply_: bool,
     yes: bool,
 ) -> None:
-    """Tidy up the collection: unused tags, empty notes, and empty cards.
+    """Tidy up the collection: unused tags, empty notes/cards, and unused media.
 
-    Select cleanups with --unused-tags / --empty-notes / --empty-cards; with
-    none selected, all three run. By default this only previews what would be
-    removed. Pass --apply to actually remove (it previews, asks for
-    confirmation, then applies); --yes skips the prompt.
+    Select cleanups with --unused-tags / --empty-notes / --empty-cards /
+    --unused-media; with none selected, all run. By default this only previews
+    what would be removed. Pass --apply to actually remove (it previews, asks
+    for confirmation, then applies); --yes skips the prompt.
 
     An empty note has every field blank, where a field is blank only if it has
-    no text and no media — an image- or audio-only note is kept.
+    no text and no media — an image- or audio-only note is kept. Unused media
+    goes to Anki's recoverable trash (see 'shrike collection check' to inspect
+    media issues without pruning).
 
     \b
     Examples:
       shrike collection prune                        # preview everything
       shrike collection prune --unused-tags --apply  # clear unused tags
+      shrike collection prune --unused-media --apply # trash orphaned media
       shrike collection prune --apply --yes          # prune all, no prompt
     """
     client = ctx.obj["client"]
@@ -74,6 +84,7 @@ def prune(
         "unused_tags": unused_tags,
         "empty_notes": empty_notes,
         "empty_cards": empty_cards,
+        "unused_media": unused_media,
     }
 
     # JSON mode is non-interactive: --apply applies, otherwise preview.
@@ -101,6 +112,53 @@ def prune(
         result = client.prune(dry_run=False, **selected)
     output.console.print("Pruned.")
     _render_preview(result)
+
+
+def _render_check(r: CollectionCheckResponse) -> None:
+    issues = bool(r.unused or r.missing or r.have_trash)
+    output.console.print(f"[dim]Media folder:[/dim] [cyan]{r.media_dir}[/cyan]")
+    if r.missing:
+        output.console.print(f"[bold red]{len(r.missing)}[/bold red] missing media file(s):")
+        for f in r.missing:
+            output.console.print(f"  [red]{f}[/red]")
+        if r.missing_media_notes:
+            ids = ", ".join(f"#{n}" for n in r.missing_media_notes)
+            output.console.print(f"  [dim]referenced by notes:[/dim] [green]{ids}[/green]")
+    if r.unused:
+        output.console.print(
+            f"[yellow]{len(r.unused)}[/yellow] unused media file(s) "
+            "[dim](shrike collection prune --unused-media)[/dim]:"
+        )
+        for f in r.unused:
+            output.console.print(f"  [cyan]{f}[/cyan]")
+    if r.have_trash:
+        output.console.print("[dim]Anki's media trash is non-empty.[/dim]")
+    if not issues:
+        output.console.print("[dim]No media issues found.[/dim]")
+
+
+@collection.command("check", short_help="Report media-integrity issues (read-only)")
+@output_options
+@click.pass_context
+def check(ctx: click.Context) -> None:
+    """Report collection media issues without changing anything.
+
+    Lists unused media (on disk but unreferenced — prune candidates), missing
+    media (referenced by notes but absent), and whether Anki's media trash holds
+    anything. Read-only; use 'shrike collection prune --unused-media' to remove
+    unused files.
+    """
+    client = ctx.obj["client"]
+    with output.spinner("Checking…"):
+        result = client.collection_check()
+
+    if ctx.obj["json"]:
+        output.emit_json(result)
+        return
+
+    _render_check(result)
+    if result.missing:
+        ctx.exit(1)
 
 
 @collection.command("query", short_help="Find notes with a raw Anki search expression")
