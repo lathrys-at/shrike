@@ -183,13 +183,61 @@ class TestPruneUnusedMedia:
 
 
 class TestSsrfGuard:
-    @pytest.mark.parametrize("host", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "::1"])
-    def test_private_addresses_blocked(self, host):
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",  # cloud metadata
+            "::1",
+            "100.64.0.1",  # carrier-grade NAT — a denylist misses this; is_global catches it
+            "192.0.0.1",
+        ],
+    )
+    def test_non_global_addresses_blocked(self, host):
         with pytest.raises(ValueError, match="non-public address"):
             _check_public_address(host)
 
-    def test_public_address_allowed(self):
-        _check_public_address("8.8.8.8")  # numeric literal: no DNS, no network
+    @pytest.mark.parametrize("host", ["8.8.8.8", "1.1.1.1"])
+    def test_public_address_allowed(self, host):
+        _check_public_address(host)  # numeric literal: no DNS, no network
+
+    def test_redirect_to_private_is_refused(self, monkeypatch):
+        # A public URL that 30x-redirects to a private/metadata address must not
+        # bypass the guard (httpx follow_redirects would; we follow manually).
+        import httpx
+
+        from shrike.collection import _fetch_media_url
+
+        class _FakeStream:
+            def __init__(self, location):
+                self.is_redirect = True
+                self.headers = {"location": location}
+                self.url = httpx.URL("http://8.8.8.8/start")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        class _FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def stream(self, method, url):
+                # first (and only) hop redirects to the metadata IP
+                return _FakeStream("http://169.254.169.254/latest/meta-data/")
+
+        monkeypatch.setattr(httpx, "Client", _FakeClient)
+        with pytest.raises(ValueError, match="non-public address"):
+            _fetch_media_url("http://8.8.8.8/start", allow_private=False)
 
     @pytest.mark.parametrize(
         ("raw", "expected"),

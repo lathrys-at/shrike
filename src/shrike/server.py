@@ -505,6 +505,13 @@ def main() -> None:
         "hosts. Also enabled by SHRIKE_MEDIA_ALLOW_PRIVATE_FETCH=1.",
     )
     parser.add_argument(
+        "--public-url",
+        default=None,
+        help="Externally-visible base URL (e.g. https://anki.example.com) used to "
+        "build media-file links in fetch_media/list_media. Set this when behind a "
+        "reverse proxy; defaults to the bind host. Also read from SHRIKE_PUBLIC_URL.",
+    )
+    parser.add_argument(
         "--index-save-delay",
         type=float,
         default=None,
@@ -765,10 +772,17 @@ def main() -> None:
         logger.warning(
             "store_media URL fetch may reach private/loopback addresses (SSRF guard off)"
         )
-    # Base URL for media-file links in fetch_media/list_media results. A wildcard
-    # bind (0.0.0.0/::) isn't a connectable address, so advertise loopback there.
-    url_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
-    media_base_url = f"http://{url_host}:{args.port}"
+    # Base URL for media-file links in fetch_media/list_media results. Behind a
+    # reverse proxy the bind host isn't reachable, so `--public-url` (or env)
+    # overrides it with the externally-visible origin. Otherwise derive from the
+    # bind host — a wildcard bind (0.0.0.0/::) isn't connectable, so advertise
+    # loopback there.
+    public_url = args.public_url or os.environ.get("SHRIKE_PUBLIC_URL") or ""
+    if public_url:
+        media_base_url = public_url.rstrip("/")
+    else:
+        url_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+        media_base_url = f"http://{url_host}:{args.port}"
     register_tools(
         mcp,
         wrapper,

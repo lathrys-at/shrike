@@ -111,6 +111,8 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
         server_out["lock_hold_seconds"] = server["lock_hold_seconds"]
     if server.get("media_allow_private_fetch"):
         server_out["media_allow_private_fetch"] = True
+    if server.get("public_url"):
+        server_out["public_url"] = server["public_url"]
     if server_out:
         output["server"] = server_out
 
@@ -431,6 +433,7 @@ def build_server_spec(
         if env_private_media is not None
         else bool(server.get("media_allow_private_fetch", False))
     )
+    public_url = os.environ.get("SHRIKE_PUBLIC_URL") or server.get("public_url") or None
 
     return ServerSpec(
         collection=coll,
@@ -438,6 +441,7 @@ def build_server_spec(
         port=port or server.get("port", 8372),
         allow_remote=bool(server.get("allow_remote", False)),
         allow_private_media_fetch=allow_private_media,
+        public_url=public_url,
         allowed_hosts=resolved_transport["allowed_hosts"],
         allowed_origins=resolved_transport["allowed_origins"],
         no_dns_rebinding_protection=resolved_transport["no_dns_rebinding_protection"],

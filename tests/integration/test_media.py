@@ -47,7 +47,11 @@ class TestMediaTools:
     def test_media_endpoint_404s_for_missing_and_traversal(self, isolated_server):
         base = isolated_server.url.rsplit("/", 1)[0]
         assert httpx.get(f"{base}/media/does-not-exist.png").status_code == 404
-        assert httpx.get(f"{base}/media/../../etc/passwd").status_code == 404
+        # Percent-encoded so httpx doesn't normalize the `..` client-side (which
+        # would never reach the route) — this actually exercises _safe_media_name's
+        # traversal guard on the server.
+        resp = httpx.get(f"{base}/media/..%2F..%2Fsecret.txt", follow_redirects=False)
+        assert resp.status_code == 404
 
     def test_store_bad_base64_is_per_item_error(self, isolated_mcp):
         out = isolated_mcp(

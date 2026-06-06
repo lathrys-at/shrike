@@ -24,11 +24,11 @@ def media() -> None:
 
 def _fmt_size(n: int) -> str:
     size = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
+    for unit in ("B", "KB", "MB"):
+        if size < 1024:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
-    return f"{n} B"
+    return f"{size:.1f} GB"
 
 
 def _client_fetch(url: str) -> tuple[bytes, str | None]:
@@ -46,12 +46,8 @@ def _client_fetch(url: str) -> tuple[bytes, str | None]:
 
 
 def _download(url: str) -> bytes:
-    """GET a URL and return its bytes (used to pull a media file's server URL)."""
-    import httpx
-
-    resp = httpx.get(url, follow_redirects=True, timeout=30.0, trust_env=True)
-    resp.raise_for_status()
-    return resp.content
+    """GET a media file's server URL and return its bytes."""
+    return _client_fetch(url)[0]
 
 
 def _name_from_url(url: str, content_type: str | None) -> str:

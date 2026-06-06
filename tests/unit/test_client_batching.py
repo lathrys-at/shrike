@@ -168,3 +168,31 @@ class TestDeleteNotesBatching:
 
         assert len(result.deleted) == 148
         assert len(result.not_found) == 2
+
+
+class TestStoreMediaBatching:
+    def test_index_rebased_across_chunks(self, client):
+        # The server assigns `index` per chunk (0..n within each batch); the client
+        # must re-base it to the global request position when results span batches.
+        items = [{"data": "eA==", "filename": f"f{i}.png"} for i in range(15)]
+
+        def fake_call(tool_name, args):
+            chunk = args["items"]
+            return {
+                "results": [
+                    {
+                        "status": "stored",
+                        "index": i,  # per-chunk index, restarts at 0 each batch
+                        "filename": item["filename"],
+                        "size_bytes": 1,
+                        "deduped": False,
+                    }
+                    for i, item in enumerate(chunk)
+                ]
+            }
+
+        with patch.object(client, "_call", side_effect=fake_call):
+            result = client.store_media(items)
+
+        assert [r.index for r in result.results] == list(range(15))
+        assert [r.filename for r in result.results] == [f"f{i}.png" for i in range(15)]

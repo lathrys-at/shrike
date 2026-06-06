@@ -63,6 +63,17 @@ def _guess_mime(filename: str) -> str | None:
     return mimetypes.guess_type(filename)[0]
 
 
+def _decode_media_b64(data: str) -> bytes:
+    """Decode base64 media bytes, capping on the *encoded* length first.
+
+    base64 is ~4/3 the size of its payload, so the encoded string length bounds
+    the decoded size — checking it up front avoids allocating an oversize payload
+    only to reject it post-decode. Runs in a worker thread (CPU-bound)."""
+    if len(data) > (MEDIA_MAX_BYTES // 3) * 4 + 4:
+        raise ValueError(f"data exceeds the {MEDIA_MAX_BYTES}-byte limit")
+    return base64.b64decode(data, validate=True)
+
+
 def _safe_media_name(name: str) -> str:
     """Reduce a caller-supplied name to a bare basename inside the media dir.
 
@@ -74,14 +85,19 @@ def _safe_media_name(name: str) -> str:
     return "" if base in ("", ".", "..") else base
 
 
-def _check_public_address(host: str) -> None:
-    """Raise ValueError if any address ``host`` resolves to is non-public.
+MAX_MEDIA_REDIRECTS = 5
 
-    SSRF guard for server-side URL fetches: rejects loopback, RFC1918, link-local,
-    reserved, multicast, and unspecified ranges (so a steered fetch can't reach the
-    cloud metadata endpoint or an internal service). Note the resolve-then-connect
-    gap is a known TOCTOU (DNS rebinding / redirects aren't re-validated); pinning
-    the connection to the checked IP is a follow-up.
+
+def _check_public_address(host: str) -> None:
+    """Raise ValueError unless every address ``host`` resolves to is globally routable.
+
+    SSRF guard for server-side URL fetches. An **allowlist** (``is_global``) rather
+    than a hand-rolled denylist: it rejects loopback, RFC1918, link-local
+    (incl. the cloud-metadata IP), reserved, multicast, unspecified, **and**
+    carrier-grade NAT (100.64/10) / benchmarking / `192.0.0.0/24` ranges that a
+    denylist misses — while still permitting public hosts (8.8.8.8, 1.1.1.1, …).
+    Reject if *any* resolved address is non-global, so a name can't smuggle an
+    internal A record alongside a public one.
     """
     try:
         infos = socket.getaddrinfo(host, None)
@@ -89,14 +105,7 @@ def _check_public_address(host: str) -> None:
         raise ValueError(f"could not resolve host '{host}': {e}") from e
     for info in infos:
         addr = ipaddress.ip_address(info[4][0])
-        if (
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_reserved
-            or addr.is_multicast
-            or addr.is_unspecified
-        ):
+        if not addr.is_global:
             raise ValueError(f"refusing to fetch from non-public address {addr} (host '{host}')")
 
 
@@ -111,34 +120,47 @@ def _fetch_media_url(
 
     Off the worker thread (network I/O): callers run it via ``asyncio.to_thread``
     so a 30s fetch never blocks collection ops. Scheme is restricted to http/https,
-    the host is SSRF-checked unless ``allow_private``, the body is capped at
-    ``max_bytes``, and httpx honors proxy env vars (``trust_env``; SOCKS needs the
-    optional ``httpx[socks]`` extra).
-    """
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise ValueError(f"unsupported URL scheme: {parsed.scheme or '(none)'}")
-    if not parsed.hostname:
-        raise ValueError("URL has no host")
-    if not allow_private:
-        _check_public_address(parsed.hostname)
+    the body is capped at ``max_bytes``, and httpx honors proxy env vars
+    (``trust_env``; SOCKS needs the optional ``httpx[socks]`` extra).
 
+    Redirects are followed **manually** with the SSRF guard re-run on every hop's
+    host (httpx's ``follow_redirects`` would jump to an attacker-chosen
+    private/metadata address without re-checking), capped at ``MAX_MEDIA_REDIRECTS``.
+    The residual resolve-then-connect gap (DNS rebinding) is a tracked follow-up —
+    closed by pinning the connection to the vetted IP.
+    """
     import httpx
 
-    chunks: list[bytes] = []
-    total = 0
-    with (
-        httpx.Client(follow_redirects=True, timeout=timeout, trust_env=True) as client,
-        client.stream("GET", url) as resp,
-    ):
-        resp.raise_for_status()
-        for chunk in resp.iter_bytes():
-            total += len(chunk)
-            if total > max_bytes:
-                raise ValueError(f"download exceeds the {max_bytes}-byte limit")
-            chunks.append(chunk)
-        content_type = (resp.headers.get("content-type") or "").split(";")[0].strip() or None
-    return b"".join(chunks), content_type
+    with httpx.Client(follow_redirects=False, timeout=timeout, trust_env=True) as client:
+        for _hop in range(MAX_MEDIA_REDIRECTS + 1):
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                raise ValueError(f"unsupported URL scheme: {parsed.scheme or '(none)'}")
+            if not parsed.hostname:
+                raise ValueError("URL has no host")
+            if not allow_private:
+                _check_public_address(parsed.hostname)
+
+            with client.stream("GET", url) as resp:
+                if resp.is_redirect:
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise ValueError("redirect response without a Location header")
+                    url = str(resp.url.join(location))  # resolve relative, re-check next loop
+                    continue
+                resp.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in resp.iter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError(f"download exceeds the {max_bytes}-byte limit")
+                    chunks.append(chunk)
+                content_type = (resp.headers.get("content-type") or "").split(";")[
+                    0
+                ].strip() or None
+                return b"".join(chunks), content_type
+    raise ValueError(f"too many redirects (>{MAX_MEDIA_REDIRECTS})")
 
 
 # Anki's note.fields_check() failures that are *not* duplicates — these are
@@ -318,10 +340,13 @@ class CollectionWrapper:
         Computed via Anki's ``media_paths_from_col_path`` (the dir is always
         ``<stem>.media`` next to the collection), so the static media HTTP route
         can resolve files without acquiring the collection (no CollectionBusyError
-        under cooperative locking)."""
+        under cooperative locking). **Absolutized**: a daemon started with a
+        relative ``--collection`` would otherwise yield a cwd-relative dir that
+        diverges from ``col.media.dir()`` (an abspath) and breaks if the cwd
+        moves — the route needs a stable path."""
         from anki.media import media_paths_from_col_path
 
-        return media_paths_from_col_path(self._path)[0]
+        return os.path.abspath(media_paths_from_col_path(self._path)[0])
 
     # -- execution primitives ------------------------------------------------
 
@@ -1504,36 +1529,36 @@ class CollectionWrapper:
     ) -> list[dict[str, Any]]:
         """Store a batch of media files; one bad item never sinks the batch.
 
-        URL items are fetched **off the worker thread** (``asyncio.to_thread``) so a
-        slow download doesn't block collection ops; base64 items are decoded here.
-        Both then write to the media folder on the worker thread. Per-item failures
+        Each item is prepared **off the worker thread** and **concurrently**
+        (``asyncio.gather`` over ``to_thread``): URL items download in parallel
+        (so a 10-URL batch isn't serialized at the per-fetch timeout) and base64
+        items decode off the event loop, with the size cap applied to the encoded
+        length *before* decoding (no allocating an oversize payload to then reject
+        it). The prepared bytes are written on the worker thread. Per-item failures
         (bad base64, unfetchable/SSRF-blocked URL, oversize) become error results.
         """
-        prepared: list[dict[str, Any]] = []
-        for index, item in enumerate(items):
+
+        async def _prepare(index: int, item: dict[str, Any]) -> dict[str, Any]:
             name = item.get("filename")
             try:
                 if item.get("data") is not None:
-                    raw = base64.b64decode(item["data"], validate=True)
-                    prepared.append(
-                        {"index": index, "raw": raw, "name": name, "content_type": None}
-                    )
-                else:
-                    url = item["url"]
-                    raw, content_type = await asyncio.to_thread(
-                        _fetch_media_url, url, allow_private=allow_private_fetch
-                    )
-                    prepared.append(
-                        {
-                            "index": index,
-                            "raw": raw,
-                            "name": name or _safe_media_name(urlparse(url).path),
-                            "content_type": content_type,
-                        }
-                    )
+                    raw = await asyncio.to_thread(_decode_media_b64, item["data"])
+                    return {"index": index, "raw": raw, "name": name, "content_type": None}
+                url = item["url"]
+                raw, content_type = await asyncio.to_thread(
+                    _fetch_media_url, url, allow_private=allow_private_fetch
+                )
+                return {
+                    "index": index,
+                    "raw": raw,
+                    "name": name or _safe_media_name(urlparse(url).path),
+                    "content_type": content_type,
+                }
             except Exception as e:
-                prepared.append({"index": index, "error": str(e), "name": name})
-        return await self.run(lambda _c: self._write_media_batch(prepared))
+                return {"index": index, "error": str(e), "name": name}
+
+        prepared = await asyncio.gather(*(_prepare(i, item) for i, item in enumerate(items)))
+        return await self.run(lambda _c: self._write_media_batch(list(prepared)))
 
     def _write_media_batch(self, prepared: list[dict[str, Any]]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
@@ -1602,7 +1627,11 @@ class CollectionWrapper:
         for fn in filenames:
             safe = _safe_media_name(fn)
             path = os.path.join(media_dir, safe) if safe else ""
-            if not safe or not os.path.isfile(path):
+            size: int | None = None
+            if safe and os.path.isfile(path):
+                with contextlib.suppress(OSError):
+                    size = os.path.getsize(path)  # may vanish in the gap (external delete)
+            if size is None:
                 results.append({"status": "missing", "filename": fn})
                 continue
             results.append(
@@ -1611,7 +1640,7 @@ class CollectionWrapper:
                     "filename": safe,
                     "path": path,
                     "mime": _guess_mime(safe),
-                    "size_bytes": os.path.getsize(path),
+                    "size_bytes": size,
                 }
             )
         return results
@@ -1621,24 +1650,26 @@ class CollectionWrapper:
 
     def _list_media(self, pattern: str | None, limit: int | None) -> dict[str, Any]:
         media_dir = self.col.media.dir()
-        if os.path.isdir(media_dir):
-            names = sorted(
-                n for n in os.listdir(media_dir) if os.path.isfile(os.path.join(media_dir, n))
-            )
-        else:
-            names = []
-        if pattern:
-            names = [n for n in names if fnmatch.fnmatch(n, pattern)]
-        count = len(names)
+        # One scandir pass yields is_file() + stat().st_size without a second stat
+        # per file; an entry that vanishes mid-scan is skipped (treated as gone).
+        entries: list[tuple[str, int]] = []
+        # media dir absent → empty listing
+        with contextlib.suppress(OSError), os.scandir(media_dir) as it:
+            for entry in it:
+                if pattern and not fnmatch.fnmatch(entry.name, pattern):
+                    continue
+                try:
+                    if entry.is_file():
+                        entries.append((entry.name, entry.stat().st_size))
+                except OSError:
+                    continue
+        entries.sort(key=lambda e: e[0])
+        count = len(entries)
         if limit is not None:
-            names = names[:limit]
+            entries = entries[:limit]
         files = [
-            {
-                "filename": n,
-                "mime": _guess_mime(n),
-                "size_bytes": os.path.getsize(os.path.join(media_dir, n)),
-            }
-            for n in names
+            {"filename": name, "mime": _guess_mime(name), "size_bytes": size}
+            for name, size in entries
         ]
         return {"media_dir": media_dir, "count": count, "files": files}
 

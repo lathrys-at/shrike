@@ -132,6 +132,7 @@ class ServerSpec:
     allowed_origins: list[str] = field(default_factory=list)
     no_dns_rebinding_protection: bool = False
     allow_private_media_fetch: bool = False
+    public_url: str | None = None
     log_dir: str | None = None
     log_level: str = "info"
     state_dir: str | None = None
@@ -549,6 +550,11 @@ class ShrikeClient:
             result_key="results",
             batch_size=10,
         )
+        # The server assigns `index` per chunk (enumerate restarts at 0 each batch),
+        # so re-base to the global request position when results span >1 batch.
+        # Results come back in request order, one per item.
+        for position, result in enumerate(merged.get("results", [])):
+            result["index"] = position
         return StoreMediaResponse.model_validate(merged)
 
     def fetch_media(self, filenames: Sequence[str]) -> FetchMediaResponse:
@@ -840,6 +846,8 @@ class ShrikeClient:
             cmd.append("--no-dns-rebinding-protection")
         if spec.allow_private_media_fetch:
             cmd.append("--allow-private-media-fetch")
+        if spec.public_url:
+            cmd += ["--public-url", spec.public_url]
         if spec.log_dir:
             cmd += ["--log-dir", spec.log_dir]
         if spec.state_dir:

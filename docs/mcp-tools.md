@@ -660,7 +660,7 @@ None.
 
 Store media files in the collection's media folder (1–10 per call) — the write path for authoring cards with images or audio. Each item provides exactly one source: base64 `data` (which **requires** a `filename` with an extension, since the bytes alone don't say what the file is) or a `url` the server fetches (filename derived from the URL or its `Content-Type` if you omit it). After storing, reference the returned `filename` in a note field (`<img src="NAME">` or `[sound:NAME]`).
 
-URL fetches are restricted to `http`/`https` and **refuse private/loopback addresses by default** (an SSRF guard; override with the server's `--allow-private-media-fetch` flag or `SHRIKE_MEDIA_ALLOW_PRIVATE_FETCH=1`). To store a **local** file, use the CLI `shrike media store PATH`, which reads it and sends the bytes — this tool takes no server-local path.
+URL fetches are restricted to `http`/`https` and **refuse any non-globally-routable address by default** (an SSRF guard that allowlists public IPs and re-checks each redirect hop; override with the server's `--allow-private-media-fetch` flag or `SHRIKE_MEDIA_ALLOW_PRIVATE_FETCH=1`). To store a **local** file, use the CLI `shrike media store PATH`, which reads it and sends the bytes — this tool takes no server-local path.
 
 Anki resolves name collisions: identical content keeps the name (reported `deduped: true`), different content under the same name gets a hashed suffix — so the stored `filename` may differ from what you asked for. Per-item errors (bad base64, unfetchable/blocked URL, oversize) are reported per item and don't sink the batch.
 
