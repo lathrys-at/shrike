@@ -551,6 +551,13 @@ def main() -> None:
         "reverse proxy; defaults to the bind host. Also read from SHRIKE_PUBLIC_URL.",
     )
     parser.add_argument(
+        "--media-path-root",
+        default=None,
+        help="Confine store_media's server-local `path` input to files under this "
+        "directory (after resolving symlinks). Unset = any path the server user can "
+        "read. Useful on a shared/multi-user host. Also read from SHRIKE_MEDIA_PATH_ROOT.",
+    )
+    parser.add_argument(
         "--index-save-delay",
         type=float,
         default=None,
@@ -834,8 +841,12 @@ def main() -> None:
         allowed_hosts=args.allowed_host,
         allowed_origins=args.allowed_origin,
     )
+    media_path_root = args.media_path_root or os.environ.get("SHRIKE_MEDIA_PATH_ROOT") or None
     if allow_server_paths:
-        logger.info("store_media server-local paths enabled (purely-local configuration)")
+        logger.info(
+            "store_media server-local paths enabled (purely-local configuration)%s",
+            f", confined to {media_path_root}" if media_path_root else "",
+        )
     register_tools(
         mcp,
         wrapper,
@@ -843,6 +854,7 @@ def main() -> None:
         saver=saver,
         allow_private_fetch=allow_private_media_fetch,
         allow_server_paths=allow_server_paths,
+        media_path_root=media_path_root,
         media_base_url=media_base_url,
     )
     _register_custom_routes(

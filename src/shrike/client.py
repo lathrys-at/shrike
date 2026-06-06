@@ -133,6 +133,7 @@ class ServerSpec:
     no_dns_rebinding_protection: bool = False
     allow_private_media_fetch: bool = False
     public_url: str | None = None
+    media_path_root: str | None = None
     log_dir: str | None = None
     log_level: str = "info"
     state_dir: str | None = None
@@ -848,6 +849,8 @@ class ShrikeClient:
             cmd.append("--allow-private-media-fetch")
         if spec.public_url:
             cmd += ["--public-url", spec.public_url]
+        if spec.media_path_root:
+            cmd += ["--media-path-root", spec.media_path_root]
         if spec.log_dir:
             cmd += ["--log-dir", spec.log_dir]
         if spec.state_dir:

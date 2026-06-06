@@ -137,6 +137,33 @@ class TestStoreMediaServerPath:
         assert results[0]["status"] == "error"
         assert "not found" in results[0]["error"]
 
+    async def test_media_path_root_confines_and_resists_symlink_escape(self, wrapper, tmp_path):
+        import os
+
+        root = tmp_path / "allowed"
+        root.mkdir()
+        inside = root / "ok.png"
+        inside.write_bytes(b"in")
+        outside = tmp_path / "secret.png"
+        outside.write_bytes(b"out")
+        escape = root / "escape.png"  # symlink inside root pointing outside
+        os.symlink(outside, escape)
+
+        async def store(p):
+            r = await wrapper.store_media(
+                [{"path": str(p)}],
+                allow_private_fetch=False,
+                allow_server_paths=True,
+                media_path_root=str(root),
+            )
+            return r[0]
+
+        assert (await store(inside))["status"] == "stored"
+        out = await store(outside)
+        assert out["status"] == "error" and "outside the configured" in out["error"]
+        esc = await store(escape)  # realpath resolves the symlink → outside → rejected
+        assert esc["status"] == "error" and "outside the configured" in esc["error"]
+
 
 class TestFetchMedia:
     async def test_found_reports_path_never_bytes(self, wrapper):

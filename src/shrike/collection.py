@@ -122,6 +122,17 @@ def _resolve_public_ip(host: str) -> str:
     return vetted
 
 
+def _path_within_root(path: str, root: str) -> bool:
+    """Whether ``path`` resolves inside ``root`` — **after** resolving symlinks.
+
+    Confines store_media's server-local ``path`` to a configured subtree
+    (``--media-path-root``, #164). ``realpath`` resolves symlinks on both sides, so
+    a symlink under ``root`` that points outside is rejected (no escape)."""
+    real = os.path.realpath(path)
+    root_real = os.path.realpath(root)
+    return real == root_real or real.startswith(root_real + os.sep)
+
+
 def _host_with_port(host: str, port: int | None) -> str:
     """Format host[:port] for a Host header (bracketing an IPv6 literal)."""
     bracketed = f"[{host}]" if ":" in host else host
@@ -1567,6 +1578,7 @@ class CollectionWrapper:
         *,
         allow_private_fetch: bool,
         allow_server_paths: bool = False,
+        media_path_root: str | None = None,
     ) -> list[dict[str, Any]]:
         """Store a batch of media files; one bad item never sinks the batch.
 
@@ -1596,6 +1608,8 @@ class CollectionWrapper:
                     src = item["path"]
                     if not os.path.isfile(src):
                         raise ValueError(f"file not found: {src}")
+                    if media_path_root is not None and not _path_within_root(src, media_path_root):
+                        raise ValueError("path is outside the configured media path root")
                     return {"index": index, "src_path": src, "name": name}
                 if item.get("data") is not None:
                     raw = await asyncio.to_thread(_decode_media_b64, item["data"])

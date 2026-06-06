@@ -134,6 +134,25 @@ class TestServerLocalPath:
         assert out["results"][0]["status"] == "error"
         assert "not allowed" in out["results"][0]["error"]
 
+    def test_media_path_root_confines_server_paths(self, server_factory, tmp_path):
+        from .conftest import MCPClient
+
+        root = tmp_path / "allowed"
+        root.mkdir()
+        inside = root / "in.png"
+        inside.write_bytes(RAW)
+        outside = tmp_path / "out.png"
+        outside.write_bytes(RAW)
+
+        srv = server_factory("rooted", extra_args=["--media-path-root", str(root)])
+        mcp = MCPClient(srv.url)
+        assert (
+            mcp("store_media", {"items": [{"path": str(inside)}]})["results"][0]["status"]
+            == "stored"
+        )
+        out = mcp("store_media", {"items": [{"path": str(outside)}]})["results"][0]
+        assert out["status"] == "error" and "outside the configured" in out["error"]
+
 
 class TestRedirectRealHttpx:
     """The end-to-end proof the unit fakes can't give: with real httpx, a 302 is

@@ -119,6 +119,7 @@ def register_tools(
     *,
     allow_private_fetch: bool = False,
     allow_server_paths: bool = False,
+    media_path_root: str | None = None,
     media_base_url: str | None = None,
 ) -> None:
     from urllib.parse import quote
@@ -1608,6 +1609,7 @@ def register_tools(
             item_dicts,
             allow_private_fetch=allow_private_fetch,
             allow_server_paths=allow_server_paths,
+            media_path_root=media_path_root,
         )
         stored = sum(1 for r in results if r.get("status") == "stored")
         errors = len(results) - stored

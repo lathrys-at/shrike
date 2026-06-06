@@ -664,6 +664,8 @@ URL fetches are restricted to `http`/`https` and **refuse any non-globally-routa
 
 A **`path`** reads a file on the **server's** filesystem and stores it zero-copy (no base64). It's only honored when the daemon runs in its **default purely-local configuration** — loopback bind, no `--allow-remote`, DNS-rebinding guard on, and no added `--allowed-host`/`--allowed-origin`; otherwise the `path` item is rejected (a remote/proxied caller must not make the server read its disk). The stored name comes from the path's basename. To store a local file against *any* server, the CLI `shrike media store PATH` reads it and sends the bytes instead.
 
+> **Security:** `path` grants the caller an **arbitrary file read within the server user's privileges** (the file is stored, then readable via `fetch_media`/`GET /media/<name>`). On a single-user machine this is no escalation — the caller already runs as you — but on a **shared/multi-user host** any local user who can reach the loopback socket could read files the daemon user can. It's intended for single-user/local use, consistent with Shrike's unauthenticated-loopback trust model. A shared-host operator can confine it with the server's `--media-path-root DIR` (config `server.media_path_root`, env `SHRIKE_MEDIA_PATH_ROOT`), which restricts `path` to files under `DIR` after resolving symlinks.
+
 Anki resolves name collisions: identical content keeps the name (reported `deduped: true`), different content under the same name gets a hashed suffix — so the stored `filename` may differ from what you asked for. Per-item errors (bad base64, unfetchable/blocked URL, disallowed/missing path, oversize) are reported per item and don't sink the batch.
 
 ### Parameters
