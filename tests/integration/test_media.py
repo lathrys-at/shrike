@@ -44,14 +44,27 @@ class TestMediaTools:
             client.store_media([{"data": PNG, "filename": "cell.png"}])
             assert client.read_media("cell.png") == RAW
 
-    def test_media_endpoint_404s_for_missing_and_traversal(self, isolated_server):
+    def test_media_endpoint_404s_for_missing(self, isolated_server):
         base = isolated_server.url.rsplit("/", 1)[0]
         assert httpx.get(f"{base}/media/does-not-exist.png").status_code == 404
-        # Percent-encoded so httpx doesn't normalize the `..` client-side (which
-        # would never reach the route) — this actually exercises _safe_media_name's
-        # traversal guard on the server.
-        resp = httpx.get(f"{base}/media/..%2F..%2Fsecret.txt", follow_redirects=False)
+
+    def test_media_endpoint_cannot_escape_media_dir(self, isolated_server):
+        # Plant a secret one level above the media dir; a traversal request must
+        # not reach it. Percent-encoded so httpx doesn't normalize `..` away
+        # client-side (it would never hit the route), so this exercises the
+        # server-side _safe_media_name guard for real — stronger than a bare 404,
+        # which a plain not-found would also give.
+        import os
+
+        base = isolated_server.url.rsplit("/", 1)[0]
+        media_dir = os.path.splitext(isolated_server.collection_path)[0] + ".media"
+        secret = os.path.join(os.path.dirname(media_dir), "escape_target.txt")
+        with open(secret, "w") as fh:
+            fh.write("TOP-SECRET-OUTSIDE-MEDIA")
+
+        resp = httpx.get(f"{base}/media/..%2Fescape_target.txt", follow_redirects=False)
         assert resp.status_code == 404
+        assert "TOP-SECRET-OUTSIDE-MEDIA" not in resp.text
 
     def test_store_bad_base64_is_per_item_error(self, isolated_mcp):
         out = isolated_mcp(
@@ -91,6 +104,61 @@ class TestMediaTools:
         applied = isolated_mcp("collection_prune", {"unused_media": True, "dry_run": False})
         assert applied["unused_media"]["removed"] >= 1
         assert isolated_mcp("list_media", {"pattern": "orphan.png"})["count"] == 0
+
+
+class TestRedirectRealHttpx:
+    """The end-to-end proof the unit fakes can't give: with real httpx, a 302 is
+    NOT auto-followed past the guard. Catches a follow_redirects=True regression."""
+
+    def test_real_httpx_does_not_autofollow_past_guard(self, monkeypatch):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        from shrike import collection as collection_mod
+        from shrike.collection import _fetch_media_url
+
+        hits: list[str] = []
+
+        class _Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):  # silence
+                pass
+
+            def do_GET(self):  # noqa: N802 (stdlib API)
+                hits.append(self.path)
+                if self.path == "/start":
+                    self.send_response(302)
+                    self.send_header("Location", "/internal")
+                    self.end_headers()
+                elif self.path == "/internal":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(b"SECRET")
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+        srv = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = srv.server_port
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            # Allow the first hop, refuse the second — so a correct (no-autofollow)
+            # loop re-enters and raises before /internal is fetched.
+            calls = {"n": 0}
+
+            def fake_check(host: str) -> None:
+                calls["n"] += 1
+                if calls["n"] >= 2:
+                    raise ValueError(f"refusing to fetch from non-public address (host '{host}')")
+
+            monkeypatch.setattr(collection_mod, "_check_public_address", fake_check)
+            with pytest.raises(ValueError, match="non-public address"):
+                _fetch_media_url(f"http://127.0.0.1:{port}/start", allow_private=False)
+            assert "/start" in hits
+            assert "/internal" not in hits  # decisive: never fetched
+        finally:
+            srv.shutdown()
 
 
 class TestMediaCLI:

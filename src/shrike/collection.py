@@ -93,11 +93,12 @@ def _check_public_address(host: str) -> None:
 
     SSRF guard for server-side URL fetches. An **allowlist** (``is_global``) rather
     than a hand-rolled denylist: it rejects loopback, RFC1918, link-local
-    (incl. the cloud-metadata IP), reserved, multicast, unspecified, **and**
-    carrier-grade NAT (100.64/10) / benchmarking / `192.0.0.0/24` ranges that a
-    denylist misses — while still permitting public hosts (8.8.8.8, 1.1.1.1, …).
-    Reject if *any* resolved address is non-global, so a name can't smuggle an
-    internal A record alongside a public one.
+    (incl. the cloud-metadata IP), reserved, unspecified, **and** carrier-grade
+    NAT (100.64/10) / benchmarking / `192.0.0.0/24` ranges that a denylist misses
+    — while still permitting public hosts (8.8.8.8, 1.1.1.1, …). Multicast is
+    rejected explicitly because ``is_global`` is True for 224.0.0.0/4. Reject if
+    *any* resolved address is disallowed, so a name can't smuggle an internal A
+    record alongside a public one.
     """
     try:
         infos = socket.getaddrinfo(host, None)
@@ -105,7 +106,7 @@ def _check_public_address(host: str) -> None:
         raise ValueError(f"could not resolve host '{host}': {e}") from e
     for info in infos:
         addr = ipaddress.ip_address(info[4][0])
-        if not addr.is_global:
+        if not addr.is_global or addr.is_multicast:
             raise ValueError(f"refusing to fetch from non-public address {addr} (host '{host}')")
 
 
@@ -295,7 +296,10 @@ class CollectionWrapper:
         hold_seconds: float = DEFAULT_LOCK_HOLD,
         on_acquire: Callable[[Collection], None] | None = None,
     ) -> None:
-        self._path = path
+        # Absolutize once at construction (cwd is the daemon's startup dir): every
+        # downstream use — opening the collection, the lock-free media_dir — is then
+        # cwd-independent by construction, not merely by the daemon never chdir'ing.
+        self._path = os.path.abspath(path)
         self._closed = False
         self._cooperative = cooperative
         self._hold = hold_seconds
@@ -340,13 +344,11 @@ class CollectionWrapper:
         Computed via Anki's ``media_paths_from_col_path`` (the dir is always
         ``<stem>.media`` next to the collection), so the static media HTTP route
         can resolve files without acquiring the collection (no CollectionBusyError
-        under cooperative locking). **Absolutized**: a daemon started with a
-        relative ``--collection`` would otherwise yield a cwd-relative dir that
-        diverges from ``col.media.dir()`` (an abspath) and breaks if the cwd
-        moves — the route needs a stable path."""
+        under cooperative locking). Absolute because ``self._path`` is absolutized
+        in ``__init__`` — matches ``col.media.dir()`` and is cwd-independent."""
         from anki.media import media_paths_from_col_path
 
-        return os.path.abspath(media_paths_from_col_path(self._path)[0])
+        return media_paths_from_col_path(self._path)[0]
 
     # -- execution primitives ------------------------------------------------
 

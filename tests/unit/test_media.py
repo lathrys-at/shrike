@@ -188,56 +188,64 @@ class TestSsrfGuard:
         [
             "127.0.0.1",
             "10.0.0.1",
+            "172.16.0.1",
             "169.254.169.254",  # cloud metadata
             "::1",
             "100.64.0.1",  # carrier-grade NAT — a denylist misses this; is_global catches it
             "192.0.0.1",
+            "0.0.0.0",
+            "224.0.0.1",  # multicast — is_global is True for it, so checked explicitly
+            "240.0.0.1",  # reserved/future
+            "::ffff:169.254.169.254",  # IPv4-mapped IPv6
+            "fd00::1",  # unique-local
+            "fe80::1",  # link-local
+            "::",  # unspecified
         ],
     )
     def test_non_global_addresses_blocked(self, host):
         with pytest.raises(ValueError, match="non-public address"):
             _check_public_address(host)
 
-    @pytest.mark.parametrize("host", ["8.8.8.8", "1.1.1.1"])
+    @pytest.mark.parametrize("host", ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"])
     def test_public_address_allowed(self, host):
         _check_public_address(host)  # numeric literal: no DNS, no network
 
-    def test_redirect_to_private_is_refused(self, monkeypatch):
-        # A public URL that 30x-redirects to a private/metadata address must not
-        # bypass the guard (httpx follow_redirects would; we follow manually).
-        import httpx
+    def test_split_horizon_mixed_records_refused(self, monkeypatch):
+        # A name resolving to [public, private] must be rejected — the guard checks
+        # *every* record, so an internal A-record can't ride alongside a public one.
+        def fake_getaddrinfo(host, *a, **k):
+            return [
+                (0, 0, 0, "", ("1.1.1.1", 0)),
+                (0, 0, 0, "", ("127.0.0.1", 0)),
+            ]
 
-        from shrike.collection import _fetch_media_url
-
-        class _FakeStream:
-            def __init__(self, location):
-                self.is_redirect = True
-                self.headers = {"location": location}
-                self.url = httpx.URL("http://8.8.8.8/start")
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-        class _FakeClient:
-            def __init__(self, *a, **k):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-            def stream(self, method, url):
-                # first (and only) hop redirects to the metadata IP
-                return _FakeStream("http://169.254.169.254/latest/meta-data/")
-
-        monkeypatch.setattr(httpx, "Client", _FakeClient)
+        monkeypatch.setattr(collection_mod.socket, "getaddrinfo", fake_getaddrinfo)
         with pytest.raises(ValueError, match="non-public address"):
-            _fetch_media_url("http://8.8.8.8/start", allow_private=False)
+            _check_public_address("split.example")
+
+    @pytest.mark.parametrize("literal", ["http://2130706433/", "http://0x7f000001/", "http://127.1/"])
+    def test_obfuscated_ipv4_literal_refused(self, monkeypatch, literal):
+        # These decimal/hex/short forms all denote 127.0.0.1; getaddrinfo parsing
+        # varies by platform, so pin it to keep the test hermetic and cross-platform.
+        from urllib.parse import urlparse
+
+        monkeypatch.setattr(
+            collection_mod.socket,
+            "getaddrinfo",
+            lambda *a, **k: [(0, 0, 0, "", ("127.0.0.1", 0))],
+        )
+        with pytest.raises(ValueError, match="non-public address"):
+            _check_public_address(urlparse(literal).hostname or literal)
+
+    def test_unresolvable_host_raises(self, monkeypatch):
+        import socket as _socket
+
+        def boom(*a, **k):
+            raise _socket.gaierror("nope")
+
+        monkeypatch.setattr(collection_mod.socket, "getaddrinfo", boom)
+        with pytest.raises(ValueError, match="could not resolve host"):
+            _check_public_address("nonexistent.invalid")
 
     @pytest.mark.parametrize(
         ("raw", "expected"),
@@ -245,3 +253,250 @@ class TestSsrfGuard:
     )
     def test_safe_media_name(self, raw, expected):
         assert _safe_media_name(raw) == expected
+
+
+# -- Manual redirect-hop handling (the SSRF fix). Fake httpx.Client so no network;
+# every test asserts the forbidden hop is BOTH refused AND never streamed (the
+# "never connected" half pins guard-before-fetch ordering). socket.getaddrinfo on
+# IP literals is network-free, so the address check runs for real. --------------
+
+
+def _make_fake_client(script, *, requested, kwargs_sink):
+    """Return a fake httpx.Client class driving _fetch_media_url's redirect loop.
+
+    ``script[i]`` drives the i-th ``.stream()`` call:
+      {"kind": "redirect", "location": "..."}  or
+      {"kind": "ok", "headers": {...}, "chunks": [b".."]}
+    ``requested`` collects every URL actually streamed; ``kwargs_sink`` captures the
+    ``httpx.Client(**kwargs)`` constructor kwargs (to pin ``follow_redirects=False``).
+    """
+    import httpx
+
+    class _Resp:
+        def __init__(self, entry, url):
+            self._e = entry
+            self.url = httpx.URL(url)
+            self.is_redirect = entry["kind"] == "redirect"
+            self.headers = dict(entry.get("headers", {}))
+            if self.is_redirect and "location" in entry:
+                self.headers["location"] = entry["location"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self):
+            yield from self._e.get("chunks", [b""])
+
+    class _Client:
+        def __init__(self, *a, **k):
+            kwargs_sink.update(k)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def stream(self, method, url):
+            requested.append(url)
+            return _Resp(script[len(requested) - 1], url)
+
+    return _Client
+
+
+class TestRedirectHandling:
+    def _run(self, monkeypatch, script, *, url="http://1.1.1.1/start", **kw):
+        """Drive _fetch_media_url over a scripted fake client; return (result_or_exc,
+        requested, kwargs_sink). Never raises — caller inspects the first element."""
+        import httpx
+
+        from shrike.collection import _fetch_media_url
+
+        requested: list[str] = []
+        kwargs_sink: dict = {}
+        monkeypatch.setattr(
+            httpx, "Client", _make_fake_client(script, requested=requested, kwargs_sink=kwargs_sink)
+        )
+        try:
+            result: object = _fetch_media_url(url, allow_private=False, **kw)
+        except Exception as e:  # noqa: BLE001 — tests inspect the exception
+            result = e
+        return result, requested, kwargs_sink
+
+    def _assert_blocked(self, result, requested, forbidden, *, match="non-public address"):
+        assert isinstance(result, ValueError), f"expected ValueError, got {result!r}"
+        assert match in str(result)
+        assert not any(forbidden in u for u in requested), (
+            f"guard ran too late — {forbidden} was streamed: {requested}"
+        )
+
+    # 1. Guard runs on *every* hop
+    def test_redirect_chain_public_then_private(self, monkeypatch):
+        result, requested, _ = self._run(
+            monkeypatch,
+            [
+                {"kind": "redirect", "location": "http://1.0.0.1/a"},
+                {"kind": "redirect", "location": "http://169.254.169.254/latest/meta-data/"},
+            ],
+        )
+        self._assert_blocked(result, requested, "169.254.169.254")
+
+    @pytest.mark.parametrize("private", ["127.0.0.1", "10.0.0.1", "192.168.1.1"])
+    def test_redirect_to_private(self, monkeypatch, private):
+        result, requested, _ = self._run(
+            monkeypatch, [{"kind": "redirect", "location": f"http://{private}/x"}]
+        )
+        self._assert_blocked(result, requested, private)
+
+    def test_protocol_relative_redirect(self, monkeypatch):
+        # //host inherits the current scheme; the joined host must be re-validated.
+        result, requested, _ = self._run(
+            monkeypatch, [{"kind": "redirect", "location": "//169.254.169.254/latest/"}]
+        )
+        self._assert_blocked(result, requested, "169.254.169.254")
+
+    def test_userinfo_in_redirect_host(self, monkeypatch):
+        # http://expected.public@127.0.0.1/ — hostname is 127.0.0.1, not the userinfo.
+        result, requested, _ = self._run(
+            monkeypatch, [{"kind": "redirect", "location": "http://expected.public@127.0.0.1/"}]
+        )
+        self._assert_blocked(result, requested, "127.0.0.1")
+
+    # 2. Scheme & Location robustness
+    @pytest.mark.parametrize(
+        "location",
+        ["file:///etc/passwd", "gopher://127.0.0.1:6379/_INFO", "dict://127.0.0.1/", "ftp://x/"],
+    )
+    def test_redirect_to_dangerous_scheme(self, monkeypatch, location):
+        result, requested, _ = self._run(
+            monkeypatch, [{"kind": "redirect", "location": location}]
+        )
+        self._assert_blocked(result, requested, location, match="unsupported URL scheme")
+
+    def test_redirect_missing_location(self, monkeypatch):
+        # fake-only: real httpx's is_redirect implies a Location.
+        result, _, _ = self._run(monkeypatch, [{"kind": "redirect"}])
+        assert isinstance(result, ValueError)
+        assert "Location" in str(result)
+
+    def test_redirect_empty_location(self, monkeypatch):
+        result, _, _ = self._run(monkeypatch, [{"kind": "redirect", "location": ""}])
+        assert isinstance(result, ValueError)
+        assert "Location" in str(result)
+
+    def test_scheme_change_http_to_https_allowed(self, monkeypatch):
+        result, requested, _ = self._run(
+            monkeypatch,
+            [
+                {"kind": "redirect", "location": "https://1.1.1.1/secure"},
+                {"kind": "ok", "headers": {"content-type": "image/png"}, "chunks": [b"ok"]},
+            ],
+        )
+        assert result == (b"ok", "image/png")
+        assert requested == ["http://1.1.1.1/start", "https://1.1.1.1/secure"]
+
+    def test_relative_redirect_resolves_same_host(self, monkeypatch):
+        result, requested, _ = self._run(
+            monkeypatch,
+            [
+                {"kind": "redirect", "location": "/b"},
+                {"kind": "ok", "chunks": [b"body"]},
+            ],
+        )
+        assert result == (b"body", None)
+        assert requested == ["http://1.1.1.1/start", "http://1.1.1.1/b"]
+
+    # 3. Redirect counting / loop
+    def test_exactly_max_redirects_succeeds(self, monkeypatch):
+        script = [{"kind": "redirect", "location": f"http://1.1.1.1/{i}"} for i in range(5)]
+        script.append({"kind": "ok", "chunks": [b"final"]})
+        result, requested, _ = self._run(monkeypatch, script)
+        assert result == (b"final", None)
+        assert len(requested) == 6
+
+    def test_one_over_max_redirects_raises(self, monkeypatch):
+        script = [{"kind": "redirect", "location": f"http://1.1.1.1/{i}"} for i in range(6)]
+        result, requested, _ = self._run(monkeypatch, script)
+        assert isinstance(result, ValueError)
+        assert "too many redirects" in str(result)
+        assert len(requested) == 6
+
+    def test_redirect_cycle_terminates(self, monkeypatch):
+        script = [
+            {"kind": "redirect", "location": "http://1.1.1.1/a" if i % 2 else "http://1.0.0.1/b"}
+            for i in range(6)
+        ]
+        result, requested, _ = self._run(monkeypatch, script, url="http://1.1.1.1/a")
+        assert isinstance(result, ValueError)
+        assert "too many redirects" in str(result)
+        assert len(requested) == 6
+
+    # 4. allow_private semantics
+    def test_allow_private_follows_redirect_to_private(self, monkeypatch):
+        import httpx
+
+        from shrike.collection import _fetch_media_url
+
+        requested: list[str] = []
+        kwargs_sink: dict = {}
+        script = [
+            {"kind": "redirect", "location": "http://127.0.0.1/internal"},
+            {"kind": "ok", "chunks": [b"private-ok"]},
+        ]
+        monkeypatch.setattr(
+            httpx, "Client", _make_fake_client(script, requested=requested, kwargs_sink=kwargs_sink)
+        )
+        raw, _ = _fetch_media_url("http://1.1.1.1/start", allow_private=True)
+        assert raw == b"private-ok"
+        assert "http://127.0.0.1/internal" in requested  # the flag disables the check on every hop
+
+    def test_allow_private_still_enforces_scheme(self, monkeypatch):
+        # allow_private gates only the address check, not scheme/host-presence.
+        import httpx
+
+        from shrike.collection import _fetch_media_url
+
+        monkeypatch.setattr(
+            httpx,
+            "Client",
+            _make_fake_client(
+                [{"kind": "redirect", "location": "file:///etc/passwd"}],
+                requested=[],
+                kwargs_sink={},
+            ),
+        )
+        with pytest.raises(ValueError, match="unsupported URL scheme"):
+            _fetch_media_url("http://1.1.1.1/start", allow_private=True)
+
+    # 6. Body size cap
+    def test_size_cap_across_chunks(self, monkeypatch):
+        result, _, _ = self._run(
+            monkeypatch,
+            [{"kind": "ok", "chunks": [b"x" * 6, b"y" * 6]}],
+            max_bytes=10,
+        )
+        assert isinstance(result, ValueError)
+        assert "exceeds" in str(result)
+
+    def test_size_cap_terminal_after_redirects(self, monkeypatch):
+        result, _, _ = self._run(
+            monkeypatch,
+            [
+                {"kind": "redirect", "location": "http://1.1.1.1/a"},
+                {"kind": "ok", "chunks": [b"z" * 50]},
+            ],
+            max_bytes=10,
+        )
+        assert isinstance(result, ValueError)
+        assert "exceeds" in str(result)
+
+    # 7. Invariant the fake can't enforce: follow_redirects must be False.
+    def test_client_constructed_without_follow_redirects(self, monkeypatch):
+        _, _, kwargs_sink = self._run(monkeypatch, [{"kind": "ok", "chunks": [b"x"]}])
+        assert kwargs_sink.get("follow_redirects") is False
