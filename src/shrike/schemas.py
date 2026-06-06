@@ -710,24 +710,29 @@ class StoreMediaResponse(BaseModel):
     results: list[StoreMediaResult] = []
 
 
-# fetch: per item, the file is small enough to inline (base64 `data`), too large
-# to inline (path only — read it from disk), or absent. Discriminated so `data`
-# only ever rides the inline variant.
+# fetch: per item, either the bytes are inlined as base64 `data` (only when the
+# caller opted in via max_inline_bytes and the file fits), or a `link` — fetch it
+# from `url` (HTTP, no base64) or read `path` (if co-located) — or it's missing.
+# Discriminated so `data` only ever rides the inline variant. ``url`` is the
+# server's GET /media/<name> endpoint; it's None when the server didn't advertise
+# a base URL (e.g. direct library use without a running HTTP server).
 class MediaInline(BaseModel):
     status: Literal["inline"]
     filename: str
+    url: str | None = None
     path: str  # absolute server-side path in the media dir
     mime: str | None = None
     size_bytes: int
     data: str  # base64-encoded file bytes
 
 
-class MediaTooLarge(BaseModel):
-    status: Literal["too_large"]
+class MediaLink(BaseModel):
+    status: Literal["link"]
     filename: str
+    url: str | None = None  # GET this (no base64) — the model-friendly retrieval path
     path: str
     mime: str | None = None
-    size_bytes: int  # exceeds max_inline_bytes; read from `path` instead
+    size_bytes: int  # not inlined (over max_inline_bytes, 0 by default)
 
 
 class MediaMissing(BaseModel):
@@ -735,9 +740,7 @@ class MediaMissing(BaseModel):
     filename: str
 
 
-MediaFetchResult = Annotated[
-    MediaInline | MediaTooLarge | MediaMissing, Field(discriminator="status")
-]
+MediaFetchResult = Annotated[MediaInline | MediaLink | MediaMissing, Field(discriminator="status")]
 
 
 class FetchMediaResponse(BaseModel):
@@ -746,6 +749,7 @@ class FetchMediaResponse(BaseModel):
 
 class MediaFileInfo(BaseModel):
     filename: str
+    url: str | None = None  # GET /media/<name> on the server (None for direct lib use)
     mime: str | None = None
     size_bytes: int
 

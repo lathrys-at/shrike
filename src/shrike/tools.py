@@ -120,13 +120,23 @@ def register_tools(
     saver: IndexSaver | None = None,
     *,
     allow_private_fetch: bool = False,
+    media_base_url: str | None = None,
 ) -> None:
+    from urllib.parse import quote
+
     from shrike.note_types import NoteTypeOpError
     from shrike.note_types import find_and_replace_note_types as _find_and_replace_note_types
     from shrike.note_types import update_note_type_field_metadata as _update_field_metadata
     from shrike.note_types import update_note_type_fields as _update_note_type_fields
     from shrike.note_types import update_note_type_templates as _update_note_type_templates
     from shrike.note_types import upsert_note_types as _upsert_note_types
+
+    def _media_url(filename: str) -> str | None:
+        """The GET /media/<name> URL for a media file, or None if the server
+        didn't advertise a base URL (e.g. direct library use)."""
+        if not media_base_url:
+            return None
+        return f"{media_base_url}/media/{quote(filename)}"
 
     @mcp.tool()
     @_safe_tool
@@ -1610,26 +1620,33 @@ def register_tools(
         max_inline_bytes: Annotated[
             int,
             Field(
-                ge=1,
+                ge=0,
                 le=MEDIA_MAX_BYTES,
-                description="Per-file size ceiling for inlining base64 `data`. A larger "
-                "file is returned as `too_large` with its server-side `path` instead.",
+                description="Opt-in cap for inlining base64 `data`. **0 (default) never "
+                "inlines** — base64 blows up a model's context; instead each file comes "
+                "back as a `link` you fetch from its `url`. Set a positive byte count only "
+                "if you truly need the bytes in the response (files at/under it inline).",
             ),
         ] = DEFAULT_MAX_INLINE_BYTES,
     ) -> FetchMediaResponse:
         """Read media files back from the collection's media folder (1-10 per call).
 
-        Each result is one of: `inline` (base64 `data`, for a file at or under
-        `max_inline_bytes`), `too_large` (the `path` to read from disk, for a file
-        above the cap — avoids base64-bloating a large video into the response), or
-        `missing`. Every present file also reports its `mime` (from the extension),
-        `size_bytes`, and absolute `path`."""
-        logger.info("fetch_media count=%d", len(filenames))
+        **By default (`max_inline_bytes` = 0) nothing is inlined** — each present
+        file comes back as a `link` carrying a `url` (the server's `GET /media/<name>`)
+        and a server-side `path`. Fetch the bytes by GETting `url` with your
+        download/fetch tool (no base64 in this response) or, if you share the
+        server's disk, read `path`. Set a positive `max_inline_bytes` to instead get
+        small files back as `inline` base64 `data`. A non-existent file is `missing`.
+        Every present file reports `url`, `path`, `mime`, and `size_bytes`."""
+        logger.info("fetch_media count=%d max_inline_bytes=%d", len(filenames), max_inline_bytes)
         results = await wrapper.fetch_media(filenames, max_inline_bytes=max_inline_bytes)
+        for r in results:
+            if r["status"] != "missing":
+                r["url"] = _media_url(r["filename"])
         logger.info(
-            "fetch_media returned: %d inline, %d too_large, %d missing",
+            "fetch_media returned: %d inline, %d link, %d missing",
             sum(1 for r in results if r["status"] == "inline"),
-            sum(1 for r in results if r["status"] == "too_large"),
+            sum(1 for r in results if r["status"] == "link"),
             sum(1 for r in results if r["status"] == "missing"),
         )
         return FetchMediaResponse.model_validate({"results": results})
@@ -1644,17 +1661,20 @@ def register_tools(
         limit: Annotated[
             int,
             Field(
-                ge=1, le=10000, description="Maximum filenames to return (the total still counts)."
+                ge=1, le=1000, description="Maximum filenames to return (the total still counts)."
             ),
-        ] = 1000,
+        ] = 100,
     ) -> ListMediaResponse:
         """List filenames in the collection's media folder, and report its path.
 
         Optionally filter by a glob `pattern`. `count` is the total number of
-        matching files; `files` is capped at `limit` (each with its `mime` and
-        `size_bytes`). `media_dir` is the absolute media-folder path."""
+        matching files; `files` is capped at `limit` (each with its `url`, `mime`,
+        and `size_bytes`). `media_dir` is the absolute media-folder path; fetch any
+        file's bytes by GETting its `url` (the server's `GET /media/<name>`)."""
         logger.info("list_media pattern=%s limit=%d", pattern, limit)
         result = await wrapper.list_media(pattern=pattern, limit=limit)
+        for f in result["files"]:
+            f["url"] = _media_url(f["filename"])
         logger.info("list_media returned %d/%d file(s)", len(result["files"]), result["count"])
         return ListMediaResponse.model_validate(result)
 

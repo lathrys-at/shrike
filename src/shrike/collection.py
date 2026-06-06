@@ -49,10 +49,13 @@ logger = logging.getLogger("shrike.collection")
 OnDuplicate = Literal["error", "skip", "allow"]
 
 # -- media (#70) -------------------------------------------------------------
-# Default cap on how large a media file fetch_media will inline as base64 (above
-# this the caller reads the returned path instead). The hard ceiling on a single
-# stored / downloaded file. The fetch timeout for server-side URL stores.
-DEFAULT_MAX_INLINE_BYTES = 8 * 1024 * 1024
+# fetch_media does NOT inline base64 by default (0) — base64 in a tool response
+# blows up a model's context; the default retrieval path is the file's `url`
+# (the server's GET /media/<name>) or `path`. A caller opts into inlining by
+# passing a positive max_inline_bytes (files at/under it ride back as base64).
+# MEDIA_MAX_BYTES is the hard ceiling on a single stored / downloaded / inlined
+# file; URL_FETCH_TIMEOUT bounds a server-side URL store.
+DEFAULT_MAX_INLINE_BYTES = 0
 MEDIA_MAX_BYTES = 64 * 1024 * 1024
 URL_FETCH_TIMEOUT = 30.0
 
@@ -309,6 +312,18 @@ class CollectionWrapper:
     def is_open(self) -> bool:
         """Whether the collection is currently held open (vs idle-released)."""
         return self._open_flag
+
+    @property
+    def media_dir(self) -> str:
+        """The media folder path, derived from the collection path — **lock-free**.
+
+        Computed via Anki's ``media_paths_from_col_path`` (the dir is always
+        ``<stem>.media`` next to the collection), so the static media HTTP route
+        can resolve files without acquiring the collection (no CollectionBusyError
+        under cooperative locking)."""
+        from anki.media import media_paths_from_col_path
+
+        return media_paths_from_col_path(self._path)[0]
 
     # -- execution primitives ------------------------------------------------
 
@@ -1581,7 +1596,9 @@ class CollectionWrapper:
         return await self.run(lambda _c: self._fetch_media(filenames, max_inline_bytes))
 
     def _fetch_media(self, filenames: list[str], max_inline_bytes: int) -> list[dict[str, Any]]:
-        """Read each media file back: inline (base64) when small, else path-only."""
+        """Read each media file back: a `link` (fetch via url/path) unless the
+        caller opted into inlining (base64) and the file fits. The `url` field is
+        added by the tool layer (it knows the server's base URL)."""
         media_dir = self.col.media.dir()
         results: list[dict[str, Any]] = []
         for fn in filenames:
@@ -1592,10 +1609,11 @@ class CollectionWrapper:
                 continue
             size = os.path.getsize(path)
             mime = _guess_mime(safe)
+            # max_inline_bytes == 0 (default) never inlines: return a link instead.
             if size > max_inline_bytes:
                 results.append(
                     {
-                        "status": "too_large",
+                        "status": "link",
                         "filename": safe,
                         "path": path,
                         "mime": mime,

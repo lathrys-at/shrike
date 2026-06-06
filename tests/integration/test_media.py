@@ -9,24 +9,47 @@ from __future__ import annotations
 
 import base64
 
+import httpx
 import pytest
 
 pytestmark = pytest.mark.integration
 
-PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n-fake-image-bytes").decode("ascii")
+RAW = b"\x89PNG\r\n\x1a\n-fake-image-bytes"
+PNG = base64.b64encode(RAW).decode("ascii")
 
 
 class TestMediaTools:
-    def test_store_fetch_roundtrip(self, isolated_mcp):
+    def test_store_then_link_and_url_fetch(self, isolated_mcp):
         stored = isolated_mcp("store_media", {"items": [{"data": PNG, "filename": "cell.png"}]})
         assert stored["results"][0]["status"] == "stored"
         assert stored["results"][0]["filename"] == "cell.png"
 
+        # Default fetch does not inline base64 — it returns a link with a url.
         fetched = isolated_mcp("fetch_media", {"filenames": ["cell.png"]})
         result = fetched["results"][0]
-        assert result["status"] == "inline"
-        assert base64.b64decode(result["data"]) == base64.b64decode(PNG)
+        assert result["status"] == "link"
+        assert "data" not in result
         assert result["mime"] == "image/png"
+        assert result["url"] and result["url"].endswith("/media/cell.png")
+
+        # The url serves the actual bytes (the model-friendly, base64-free path).
+        resp = httpx.get(result["url"])
+        assert resp.status_code == 200
+        assert resp.content == RAW
+
+    def test_inline_when_opted_in(self, isolated_mcp):
+        isolated_mcp("store_media", {"items": [{"data": PNG, "filename": "cell.png"}]})
+        fetched = isolated_mcp(
+            "fetch_media", {"filenames": ["cell.png"], "max_inline_bytes": 1048576}
+        )
+        result = fetched["results"][0]
+        assert result["status"] == "inline"
+        assert base64.b64decode(result["data"]) == RAW
+
+    def test_media_endpoint_404s_for_missing_and_traversal(self, isolated_server):
+        base = isolated_server.url.rsplit("/", 1)[0]
+        assert httpx.get(f"{base}/media/does-not-exist.png").status_code == 404
+        assert httpx.get(f"{base}/media/../../etc/passwd").status_code == 404
 
     def test_store_bad_base64_is_per_item_error(self, isolated_mcp):
         out = isolated_mcp(

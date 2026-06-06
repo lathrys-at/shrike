@@ -181,7 +181,9 @@ def _register_custom_routes(
     could drive ``/shutdown`` etc. through a no-preflight POST.
     """
     from starlette.requests import Request
-    from starlette.responses import JSONResponse, Response
+    from starlette.responses import FileResponse, JSONResponse, Response
+
+    from shrike.collection import _safe_media_name
 
     security_mw = TransportSecurityMiddleware(security)
 
@@ -237,6 +239,21 @@ def _register_custom_routes(
         status["collection_held"] = wrapper.is_open
 
         return JSONResponse(status)
+
+    @app.custom_route("/media/{filename:path}", methods=["GET"])
+    @_guard
+    async def handle_media(request: Request) -> Response:
+        # Serve a media file by name — the model-friendly retrieval path that
+        # fetch_media/list_media point at (no base64). Read-only; same Host/Origin
+        # guard as the other custom routes. Filename is reduced to a basename
+        # inside the media dir (traversal guard); the dir is resolved lock-free.
+        safe = _safe_media_name(request.path_params.get("filename", ""))
+        if not safe:
+            return Response(status_code=404)
+        full = os.path.join(wrapper.media_dir, safe)
+        if not os.path.isfile(full):
+            return Response(status_code=404)
+        return FileResponse(full, filename=safe)
 
     @app.custom_route("/index/rebuild", methods=["POST"])
     @_guard
@@ -748,8 +765,17 @@ def main() -> None:
         logger.warning(
             "store_media URL fetch may reach private/loopback addresses (SSRF guard off)"
         )
+    # Base URL for media-file links in fetch_media/list_media results. A wildcard
+    # bind (0.0.0.0/::) isn't a connectable address, so advertise loopback there.
+    url_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+    media_base_url = f"http://{url_host}:{args.port}"
     register_tools(
-        mcp, wrapper, index=index, saver=saver, allow_private_fetch=allow_private_media_fetch
+        mcp,
+        wrapper,
+        index=index,
+        saver=saver,
+        allow_private_fetch=allow_private_media_fetch,
+        media_base_url=media_base_url,
     )
     _register_custom_routes(
         mcp,

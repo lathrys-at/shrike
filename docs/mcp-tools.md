@@ -685,39 +685,41 @@ Anki resolves name collisions: identical content keeps the name (reported `dedup
 
 ## `fetch_media`
 
-Read media files back out of the collection (1–10 per call). Each result is one of: `inline` (base64 `data`, for a file at or under `max_inline_bytes`), `too_large` (the server-side `path` to read from disk, for a file above the cap — avoids base64-bloating a large video into the response), or `missing`. Every present file also reports its `mime`, `size_bytes`, and absolute `path`.
+Read media files back out of the collection (1–10 per call). **By default nothing is base64-inlined** — base64 in a tool response blows up a model's context. Instead each present file comes back as a `link` carrying a `url` (the server's `GET /media/<name>` endpoint) and a server-side `path`. Fetch the bytes by GETting the `url` with your download/fetch tool (no base64 here), or read `path` if you share the server's disk. Set a positive `max_inline_bytes` only when you genuinely need the bytes in the response — files at or under it then come back as `inline` with base64 `data`. A non-existent file is `missing`. Every present file reports `url`, `path`, `mime`, and `size_bytes`.
 
 ### Parameters
 
 | Name | Type | Required | Description |
 |---|---|---|---|
 | `filenames` | `string[]` | **yes** | 1–10 media filenames to read back. |
-| `max_inline_bytes` | `integer` | no | Per-file size ceiling for inlining base64. A larger file returns `too_large` with its `path` instead. Default ~8 MiB. |
+| `max_inline_bytes` | `integer` | no | Opt-in cap for inlining base64. **`0` (default) never inlines** — you get a `link` with a `url`. A positive value inlines files at or under it. |
 
 ### Response
 
 ```jsonc
 {
   "results": [
-    { "status": "inline", "filename": "cell.png", "path": "/…/collection.media/cell.png", "mime": "image/png", "size_bytes": 20481, "data": "iVBORw0…" },
-    { "status": "too_large", "filename": "lecture.mp4", "path": "/…/collection.media/lecture.mp4", "mime": "video/mp4", "size_bytes": 54000000 },
+    { "status": "link", "filename": "cell.png", "url": "http://127.0.0.1:8372/media/cell.png", "path": "/…/collection.media/cell.png", "mime": "image/png", "size_bytes": 20481 },
+    { "status": "inline", "filename": "icon.svg", "url": "http://127.0.0.1:8372/media/icon.svg", "path": "/…/collection.media/icon.svg", "mime": "image/svg+xml", "size_bytes": 612, "data": "PHN2Zy…" },
     { "status": "missing", "filename": "nope.png" }
   ]
 }
 ```
 
+The `url` is the server's media endpoint — `GET /media/{filename}` streams the raw bytes with the right `Content-Type`. It's read-only and behind the same Host/Origin guard as the other custom routes. `url` is `null` only when the server didn't advertise a base URL (e.g. the library is used without a running HTTP server).
+
 ---
 
 ## `list_media`
 
-List filenames in the collection's media folder (with the folder path), optionally filtered by a glob `pattern`. Covers anki-connect's `getMediaFilesNames` and `getMediaDirPath`.
+List filenames in the collection's media folder (with the folder path), optionally filtered by a glob `pattern`. Each file carries a `url` (`GET /media/<name>`) so you can fetch its bytes directly. Covers anki-connect's `getMediaFilesNames` and `getMediaDirPath`.
 
 ### Parameters
 
 | Name | Type | Required | Description |
 |---|---|---|---|
 | `pattern` | `string` | no | Glob to filter filenames (e.g. `"*.png"`, `"cell-*"`). |
-| `limit` | `integer` | no | Maximum filenames to return (`count` still reflects the full total). Default `1000`. |
+| `limit` | `integer` | no | Maximum filenames to return (`count` still reflects the full total). Default `100`. |
 
 ### Response
 
@@ -726,8 +728,8 @@ List filenames in the collection's media folder (with the folder path), optional
   "media_dir": "/path/to/collection.media",
   "count": 2,
   "files": [
-    { "filename": "a.png", "mime": "image/png", "size_bytes": 20481 },
-    { "filename": "b.ogg", "mime": "audio/ogg", "size_bytes": 9123 }
+    { "filename": "a.png", "url": "http://127.0.0.1:8372/media/a.png", "mime": "image/png", "size_bytes": 20481 },
+    { "filename": "b.ogg", "url": "http://127.0.0.1:8372/media/b.ogg", "mime": "audio/ogg", "size_bytes": 9123 }
   ]
 }
 ```

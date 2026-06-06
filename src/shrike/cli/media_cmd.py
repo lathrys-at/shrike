@@ -45,6 +45,15 @@ def _client_fetch(url: str) -> tuple[bytes, str | None]:
     return resp.content, content_type
 
 
+def _download(url: str) -> bytes:
+    """GET a URL and return its bytes (used to pull a media file's server URL)."""
+    import httpx
+
+    resp = httpx.get(url, follow_redirects=True, timeout=30.0, trust_env=True)
+    resp.raise_for_status()
+    return resp.content
+
+
 def _name_from_url(url: str, content_type: str | None) -> str:
     name = os.path.basename(urlparse(url).path)
     if name and "." in name:
@@ -185,17 +194,20 @@ def media_fetch(
         if r.status == "inline":
             with open(dest, "wb") as fh:
                 fh.write(base64.b64decode(r.data))
-        else:  # too_large — read from the server-side path if we share the disk
-            if os.path.isfile(r.path):
-                shutil.copyfile(r.path, dest)
-            else:
-                failed = True
-                output.console.print(
-                    f"[bold red]![/bold red] [cyan]{r.filename}[/cyan] is too large to inline "
-                    f"[dim]({_fmt_size(r.size_bytes)})[/dim]; read it on the server at "
-                    f"[cyan]{r.path}[/cyan]"
-                )
-                continue
+        # `link` (the default): no base64 in the response. Read the server-side
+        # path if we share its disk, else download the file's url over HTTP.
+        elif os.path.isfile(r.path):
+            shutil.copyfile(r.path, dest)
+        elif r.url:
+            with open(dest, "wb") as fh:
+                fh.write(_download(r.url))
+        else:
+            failed = True
+            output.console.print(
+                f"[bold red]![/bold red] [cyan]{r.filename}[/cyan]: no local path and no URL "
+                "to fetch from"
+            )
+            continue
         output.console.print(
             f"[green]+[/green] Wrote [cyan]{dest}[/cyan] [dim]({_fmt_size(r.size_bytes)})[/dim]"
         )
