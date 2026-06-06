@@ -7,6 +7,68 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-06
+
+_Media release: author cards with images and audio end to end. Get assets into
+the collection, read and list them back, clean up unused files, and check media
+integrity, over both MCP and the CLI._
+
+### Added
+- Media support (#70): new MCP tools and a `shrike media` command group for the
+  asset side of card authoring, which until now had no way into the collection
+  (you could write `<img src="x.png">` into a field, but not get the file there).
+  - `store_media` writes files into the collection's media folder in bulk (1 to
+    10 per call), from base64 bytes or an `http(s)` URL the server fetches. Each
+    item reports its own result so one bad item does not sink the batch, and Anki
+    resolves name collisions (identical content keeps the name, different content
+    gets a hashed suffix), so reference the returned filename.
+  - `fetch_media` locates files and returns, per file, a `url` (the server's new
+    `GET /media/<name>` route) and a server-side path, rather than base64 bytes,
+    so a model can pull an asset with its own download tool without bloating its
+    context. The standalone client adds `ShrikeClient.read_media(name)` for
+    programmatic byte access.
+  - `list_media` lists filenames (with the media directory and an optional glob),
+    and `delete_media` moves files to Anki's recoverable trash.
+  - `collection_check` reports media integrity: files on disk that no note
+    references, references to files that are missing, and the note IDs that hold
+    them. `collection_prune` gains an `unused_media` cleanup to trash files no
+    note references.
+  - CLI: `shrike media store|fetch|list|delete`, `shrike collection check`, and
+    `shrike collection prune --unused-media`.
+- `--public-url` (config `server.public_url`, env `SHRIKE_PUBLIC_URL`) sets the
+  externally visible base URL used to build the media links in `fetch_media` /
+  `list_media`, for running behind a reverse proxy where the bind host is not
+  reachable (#70).
+- Optional `socks` install extra (`shrike-mcp[socks]`) for routing the server's
+  media URL fetch through a SOCKS proxy (#70).
+
+### Security
+- `store_media`'s server-side URL fetch is guarded against SSRF: `http`/`https`
+  only; the host is resolved and refused unless every resolved address is globally
+  routable (an allowlist that also rejects carrier-grade NAT, the cloud-metadata
+  address, and other non-public ranges a denylist misses); redirects are followed
+  manually with the guard re-run on each hop; and the connection is pinned to the
+  vetted IP, with TLS still validated against the hostname, so the resolved
+  address cannot change between the check and the connect. Trusted internal hosts
+  can be allowed with `--allow-private-media-fetch` (config
+  `server.media_allow_private_fetch`, env `SHRIKE_MEDIA_ALLOW_PRIVATE_FETCH`)
+  (#70, #165).
+- The `GET /media/<name>` route and the fetch/delete tools confine filenames to
+  the collection's media directory (#70).
+- `store_media` can read a file from the server's own filesystem with a `path`
+  source, but this is **off by default**. It is honored only when the operator
+  configures one or more `--media-path-root` directories (repeatable; config
+  `server.media_path_roots`, env `SHRIKE_MEDIA_PATH_ROOTS`), the daemon is in its
+  default loopback-only configuration, and the file resolves inside one of those
+  roots. This keeps a remote or proxied caller from making the server read its
+  disk, and bounds a permitted local caller to the named directories. The CLI
+  exposes it as `shrike media store --server-path` (#164, #170).
+
+### Changed
+- A server started with DNS-rebinding protection on but no usable Host allow-list
+  (a non-loopback bind given only `--allowed-origin`, which would otherwise reject
+  every request) now logs a warning at startup instead of failing silently (#166).
+
 ## [0.3.5] — 2026-06-05
 
 _Collection-management release: cooperative locking, note-type editing, deck and
