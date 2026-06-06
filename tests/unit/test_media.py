@@ -79,25 +79,20 @@ class TestStoreMedia:
 
 
 class TestFetchMedia:
-    async def test_inline_when_opted_in(self, wrapper):
+    async def test_found_reports_path_never_bytes(self, wrapper):
+        # fetch never returns bytes — only where they live (path; url added by the
+        # tool layer). The model/CLI fetches from there.
         await wrapper.store_media([{"data": PNG, "filename": "a.png"}], allow_private_fetch=False)
-        results = await wrapper.fetch_media(["a.png", "nope.png"], max_inline_bytes=8 * 1024 * 1024)
+        results = await wrapper.fetch_media(["a.png", "nope.png"])
         resp = FetchMediaResponse.model_validate({"results": results})
-        assert resp.results[0].status == "inline"
-        assert base64.b64decode(resp.results[0].data) == base64.b64decode(PNG)
+        assert resp.results[0].status == "found"
+        assert "data" not in results[0]
+        assert resp.results[0].path.endswith("a.png")
+        assert resp.results[0].size_bytes > 0
         assert resp.results[1].status == "missing"
 
-    async def test_default_returns_link_not_base64(self, wrapper):
-        # max_inline_bytes=0 (the tool default) never inlines — base64 is opt-in.
-        await wrapper.store_media([{"data": PNG, "filename": "a.png"}], allow_private_fetch=False)
-        results = await wrapper.fetch_media(["a.png"], max_inline_bytes=0)
-        assert results[0]["status"] == "link"
-        assert "data" not in results[0]
-        assert results[0]["path"].endswith("a.png")
-        assert results[0]["size_bytes"] > 0
-
     async def test_path_traversal_is_missing(self, wrapper):
-        results = await wrapper.fetch_media(["../../etc/passwd"], max_inline_bytes=8 * 1024 * 1024)
+        results = await wrapper.fetch_media(["../../etc/passwd"])
         assert results[0]["status"] == "missing"
 
 

@@ -551,20 +551,35 @@ class ShrikeClient:
         )
         return StoreMediaResponse.model_validate(merged)
 
-    def fetch_media(
-        self, filenames: Sequence[str], *, max_inline_bytes: int | None = None
-    ) -> FetchMediaResponse:
-        """Read media files back, transparently batching if over the server limit."""
-        extra = {} if max_inline_bytes is None else {"max_inline_bytes": max_inline_bytes}
+    def fetch_media(self, filenames: Sequence[str]) -> FetchMediaResponse:
+        """Locate media files (url/path per file), batching over the server limit.
+
+        Returns where each file's bytes live, never the bytes. Use ``read_media``
+        to actually download one.
+        """
         merged = self._batched_call(
             "fetch_media",
             items=list(filenames),
             param_key="filenames",
             result_key="results",
             batch_size=10,
-            extra=extra,
         )
         return FetchMediaResponse.model_validate(merged)
+
+    def read_media(self, filename: str) -> bytes:
+        """Download a media file's raw bytes via the server's GET /media/<name>.
+
+        The programmatic way to get bytes in hand (fetch_media only reports where
+        they live). Raises ServerHTTPError on a non-200 (e.g. 404 for an unknown
+        or path-escaping name).
+        """
+        from urllib.parse import quote
+
+        url = f"{self._base_url}/media/{quote(filename)}"
+        resp = self._http.get(url)
+        if resp.status_code != 200:
+            raise ServerHTTPError(resp.status_code, f"GET {url} returned {resp.status_code}")
+        return resp.content
 
     def list_media(
         self, *, pattern: str | None = None, limit: int | None = None

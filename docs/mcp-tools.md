@@ -685,28 +685,26 @@ Anki resolves name collisions: identical content keeps the name (reported `dedup
 
 ## `fetch_media`
 
-Read media files back out of the collection (1–10 per call). **By default nothing is base64-inlined** — base64 in a tool response blows up a model's context. Instead each present file comes back as a `link` carrying a `url` (the server's `GET /media/<name>` endpoint) and a server-side `path`. Fetch the bytes by GETting the `url` with your download/fetch tool (no base64 here), or read `path` if you share the server's disk. Set a positive `max_inline_bytes` only when you genuinely need the bytes in the response — files at or under it then come back as `inline` with base64 `data`. A non-existent file is `missing`. Every present file reports `url`, `path`, `mime`, and `size_bytes`.
+Locate media files in the collection (1–10 per call). **It never returns the bytes** — base64 in a tool response is useless to a model (it can't render or display it) and wrecks context. Each present file comes back as `found` with a `url` (the server's `GET /media/<name>` endpoint) and a server-side `path`; a non-existent file is `missing`. **To get the actual bytes, GET the `url`** with your download/fetch tool, or read `path` if you share the server's disk. Every `found` file reports `url`, `path`, `mime`, and `size_bytes`.
 
 ### Parameters
 
 | Name | Type | Required | Description |
 |---|---|---|---|
-| `filenames` | `string[]` | **yes** | 1–10 media filenames to read back. |
-| `max_inline_bytes` | `integer` | no | Opt-in cap for inlining base64. **`0` (default) never inlines** — you get a `link` with a `url`. A positive value inlines files at or under it. |
+| `filenames` | `string[]` | **yes** | 1–10 media filenames to look up. |
 
 ### Response
 
 ```jsonc
 {
   "results": [
-    { "status": "link", "filename": "cell.png", "url": "http://127.0.0.1:8372/media/cell.png", "path": "/…/collection.media/cell.png", "mime": "image/png", "size_bytes": 20481 },
-    { "status": "inline", "filename": "icon.svg", "url": "http://127.0.0.1:8372/media/icon.svg", "path": "/…/collection.media/icon.svg", "mime": "image/svg+xml", "size_bytes": 612, "data": "PHN2Zy…" },
+    { "status": "found", "filename": "cell.png", "url": "http://127.0.0.1:8372/media/cell.png", "path": "/…/collection.media/cell.png", "mime": "image/png", "size_bytes": 20481 },
     { "status": "missing", "filename": "nope.png" }
   ]
 }
 ```
 
-The `url` is the server's media endpoint — `GET /media/{filename}` streams the raw bytes with the right `Content-Type`. It's read-only and behind the same Host/Origin guard as the other custom routes. `url` is `null` only when the server didn't advertise a base URL (e.g. the library is used without a running HTTP server).
+The `url` is the server's media endpoint — `GET /media/{filename}` streams the raw bytes with the right `Content-Type`. It's read-only and behind the same Host/Origin guard as the other custom routes. `url` is `null` only when the server didn't advertise a base URL (e.g. the library is used without a running HTTP server). The standalone client offers `ShrikeClient.read_media(name) -> bytes` for programmatic byte access (it GETs this endpoint).
 
 ---
 

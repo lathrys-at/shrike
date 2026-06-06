@@ -49,13 +49,11 @@ logger = logging.getLogger("shrike.collection")
 OnDuplicate = Literal["error", "skip", "allow"]
 
 # -- media (#70) -------------------------------------------------------------
-# fetch_media does NOT inline base64 by default (0) — base64 in a tool response
-# blows up a model's context; the default retrieval path is the file's `url`
-# (the server's GET /media/<name>) or `path`. A caller opts into inlining by
-# passing a positive max_inline_bytes (files at/under it ride back as base64).
-# MEDIA_MAX_BYTES is the hard ceiling on a single stored / downloaded / inlined
-# file; URL_FETCH_TIMEOUT bounds a server-side URL store.
-DEFAULT_MAX_INLINE_BYTES = 0
+# fetch_media never returns bytes — base64 in a tool response is useless to a
+# model and wrecks context; callers get a `url` (the server's GET /media/<name>)
+# or a `path` and fetch the bytes from there. MEDIA_MAX_BYTES is the hard ceiling
+# on a single stored / downloaded file; URL_FETCH_TIMEOUT bounds a server-side
+# URL store.
 MEDIA_MAX_BYTES = 64 * 1024 * 1024
 URL_FETCH_TIMEOUT = 30.0
 
@@ -1590,15 +1588,15 @@ class CollectionWrapper:
             "deduped": existed and stored == safe,
         }
 
-    async def fetch_media(
-        self, filenames: list[str], *, max_inline_bytes: int
-    ) -> list[dict[str, Any]]:
-        return await self.run(lambda _c: self._fetch_media(filenames, max_inline_bytes))
+    async def fetch_media(self, filenames: list[str]) -> list[dict[str, Any]]:
+        return await self.run(lambda _c: self._fetch_media(filenames))
 
-    def _fetch_media(self, filenames: list[str], max_inline_bytes: int) -> list[dict[str, Any]]:
-        """Read each media file back: a `link` (fetch via url/path) unless the
-        caller opted into inlining (base64) and the file fits. The `url` field is
-        added by the tool layer (it knows the server's base URL)."""
+    def _fetch_media(self, filenames: list[str]) -> list[dict[str, Any]]:
+        """Resolve each media filename to where its bytes live — never the bytes.
+
+        A `found` result carries `path` (read directly if co-located); the tool
+        layer adds the `url` (it knows the server's base URL). The bytes are
+        fetched from that url or path, never base64'd into the response."""
         media_dir = self.col.media.dir()
         results: list[dict[str, Any]] = []
         for fn in filenames:
@@ -1607,30 +1605,13 @@ class CollectionWrapper:
             if not safe or not os.path.isfile(path):
                 results.append({"status": "missing", "filename": fn})
                 continue
-            size = os.path.getsize(path)
-            mime = _guess_mime(safe)
-            # max_inline_bytes == 0 (default) never inlines: return a link instead.
-            if size > max_inline_bytes:
-                results.append(
-                    {
-                        "status": "link",
-                        "filename": safe,
-                        "path": path,
-                        "mime": mime,
-                        "size_bytes": size,
-                    }
-                )
-                continue
-            with open(path, "rb") as fh:
-                data = base64.b64encode(fh.read()).decode("ascii")
             results.append(
                 {
-                    "status": "inline",
+                    "status": "found",
                     "filename": safe,
                     "path": path,
-                    "mime": mime,
-                    "size_bytes": size,
-                    "data": data,
+                    "mime": _guess_mime(safe),
+                    "size_bytes": os.path.getsize(path),
                 }
             )
         return results

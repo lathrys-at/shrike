@@ -10,8 +10,6 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from shrike.collection import (
-    DEFAULT_MAX_INLINE_BYTES,
-    MEDIA_MAX_BYTES,
     CollectionBusyError,
     CollectionWrapper,
     substring_info,
@@ -1615,38 +1613,26 @@ def register_tools(
     async def fetch_media(
         filenames: Annotated[
             list[str],
-            Field(min_length=1, max_length=10, description="Media filenames to read back (1-10)."),
+            Field(min_length=1, max_length=10, description="Media filenames to look up (1-10)."),
         ],
-        max_inline_bytes: Annotated[
-            int,
-            Field(
-                ge=0,
-                le=MEDIA_MAX_BYTES,
-                description="Opt-in cap for inlining base64 `data`. **0 (default) never "
-                "inlines** — base64 blows up a model's context; instead each file comes "
-                "back as a `link` you fetch from its `url`. Set a positive byte count only "
-                "if you truly need the bytes in the response (files at/under it inline).",
-            ),
-        ] = DEFAULT_MAX_INLINE_BYTES,
     ) -> FetchMediaResponse:
-        """Read media files back from the collection's media folder (1-10 per call).
+        """Locate media files in the collection's media folder (1-10 per call).
 
-        **By default (`max_inline_bytes` = 0) nothing is inlined** — each present
-        file comes back as a `link` carrying a `url` (the server's `GET /media/<name>`)
-        and a server-side `path`. Fetch the bytes by GETting `url` with your
-        download/fetch tool (no base64 in this response) or, if you share the
-        server's disk, read `path`. Set a positive `max_inline_bytes` to instead get
-        small files back as `inline` base64 `data`. A non-existent file is `missing`.
-        Every present file reports `url`, `path`, `mime`, and `size_bytes`."""
-        logger.info("fetch_media count=%d max_inline_bytes=%d", len(filenames), max_inline_bytes)
-        results = await wrapper.fetch_media(filenames, max_inline_bytes=max_inline_bytes)
+        This resolves names to where their bytes live — it never returns the bytes
+        (base64 is useless to a model and wrecks context). Each present file comes
+        back as `found` with a `url` (the server's `GET /media/<name>`) and a
+        server-side `path`; a non-existent file is `missing`. **To get the actual
+        bytes, GET the `url`** with your download/fetch tool, or read `path` if you
+        share the server's disk. Every `found` file reports `url`, `path`, `mime`,
+        and `size_bytes`."""
+        logger.info("fetch_media count=%d", len(filenames))
+        results = await wrapper.fetch_media(filenames)
         for r in results:
-            if r["status"] != "missing":
+            if r["status"] == "found":
                 r["url"] = _media_url(r["filename"])
         logger.info(
-            "fetch_media returned: %d inline, %d link, %d missing",
-            sum(1 for r in results if r["status"] == "inline"),
-            sum(1 for r in results if r["status"] == "link"),
+            "fetch_media returned: %d found, %d missing",
+            sum(1 for r in results if r["status"] == "found"),
             sum(1 for r in results if r["status"] == "missing"),
         )
         return FetchMediaResponse.model_validate({"results": results})

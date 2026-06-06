@@ -19,32 +19,30 @@ PNG = base64.b64encode(RAW).decode("ascii")
 
 
 class TestMediaTools:
-    def test_store_then_link_and_url_fetch(self, isolated_mcp):
+    def test_store_then_fetch_url_serves_bytes(self, isolated_mcp):
         stored = isolated_mcp("store_media", {"items": [{"data": PNG, "filename": "cell.png"}]})
         assert stored["results"][0]["status"] == "stored"
         assert stored["results"][0]["filename"] == "cell.png"
 
-        # Default fetch does not inline base64 — it returns a link with a url.
+        # fetch never returns bytes — it reports `found` with a url to GET them.
         fetched = isolated_mcp("fetch_media", {"filenames": ["cell.png"]})
         result = fetched["results"][0]
-        assert result["status"] == "link"
+        assert result["status"] == "found"
         assert "data" not in result
         assert result["mime"] == "image/png"
         assert result["url"] and result["url"].endswith("/media/cell.png")
 
-        # The url serves the actual bytes (the model-friendly, base64-free path).
+        # The url serves the actual bytes (the base64-free retrieval path).
         resp = httpx.get(result["url"])
         assert resp.status_code == 200
         assert resp.content == RAW
 
-    def test_inline_when_opted_in(self, isolated_mcp):
-        isolated_mcp("store_media", {"items": [{"data": PNG, "filename": "cell.png"}]})
-        fetched = isolated_mcp(
-            "fetch_media", {"filenames": ["cell.png"], "max_inline_bytes": 1048576}
-        )
-        result = fetched["results"][0]
-        assert result["status"] == "inline"
-        assert base64.b64decode(result["data"]) == RAW
+    def test_client_read_media_downloads_bytes(self, isolated_server):
+        from shrike.client import ShrikeClient
+
+        with ShrikeClient(isolated_server.url, autostart=False) as client:
+            client.store_media([{"data": PNG, "filename": "cell.png"}])
+            assert client.read_media("cell.png") == RAW
 
     def test_media_endpoint_404s_for_missing_and_traversal(self, isolated_server):
         base = isolated_server.url.rsplit("/", 1)[0]

@@ -190,13 +190,10 @@ def media_fetch(
             failed = True
             output.console.print(f"[bold red]![/bold red] Not found: [cyan]{r.filename}[/cyan]")
             continue
+        # `found`: read the server-side path if we share its disk, else download
+        # the file's url over HTTP. The response never carries bytes.
         dest = out or os.path.join(out_dir or ".", r.filename)
-        if r.status == "inline":
-            with open(dest, "wb") as fh:
-                fh.write(base64.b64decode(r.data))
-        # `link` (the default): no base64 in the response. Read the server-side
-        # path if we share its disk, else download the file's url over HTTP.
-        elif os.path.isfile(r.path):
+        if os.path.isfile(r.path):
             shutil.copyfile(r.path, dest)
         elif r.url:
             with open(dest, "wb") as fh:

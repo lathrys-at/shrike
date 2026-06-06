@@ -710,29 +710,19 @@ class StoreMediaResponse(BaseModel):
     results: list[StoreMediaResult] = []
 
 
-# fetch: per item, either the bytes are inlined as base64 `data` (only when the
-# caller opted in via max_inline_bytes and the file fits), or a `link` — fetch it
-# from `url` (HTTP, no base64) or read `path` (if co-located) — or it's missing.
-# Discriminated so `data` only ever rides the inline variant. ``url`` is the
-# server's GET /media/<name> endpoint; it's None when the server didn't advertise
-# a base URL (e.g. direct library use without a running HTTP server).
-class MediaInline(BaseModel):
-    status: Literal["inline"]
+# fetch: per item the file is either ``found`` or ``missing``. fetch never returns
+# bytes — base64 in a tool response is useless to a model (it can't render it) and
+# wrecks context — so a found file carries only where to get the bytes: ``url``
+# (the server's GET /media/<name>, the retrieval path for any caller) and ``path``
+# (read directly if co-located). ``url`` is None only when the server didn't
+# advertise a base URL (direct library use without a running HTTP server).
+class MediaFile(BaseModel):
+    status: Literal["found"]
     filename: str
-    url: str | None = None
+    url: str | None = None  # GET this for the bytes (no base64)
     path: str  # absolute server-side path in the media dir
     mime: str | None = None
     size_bytes: int
-    data: str  # base64-encoded file bytes
-
-
-class MediaLink(BaseModel):
-    status: Literal["link"]
-    filename: str
-    url: str | None = None  # GET this (no base64) — the model-friendly retrieval path
-    path: str
-    mime: str | None = None
-    size_bytes: int  # not inlined (over max_inline_bytes, 0 by default)
 
 
 class MediaMissing(BaseModel):
@@ -740,7 +730,7 @@ class MediaMissing(BaseModel):
     filename: str
 
 
-MediaFetchResult = Annotated[MediaInline | MediaLink | MediaMissing, Field(discriminator="status")]
+MediaFetchResult = Annotated[MediaFile | MediaMissing, Field(discriminator="status")]
 
 
 class FetchMediaResponse(BaseModel):
