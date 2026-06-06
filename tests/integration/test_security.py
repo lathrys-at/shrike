@@ -138,6 +138,36 @@ class TestEscapeHatchesFlipBehavior:
         )
 
 
+class TestEmbeddingStartInputRobustness:
+    """`/embedding/start` best-effort-parses an arbitrary JSON body into
+    `runtime.start(**overrides)`. Within the trust model it must not 500 on
+    garbage: the body parse is suppressed and only *known* keys are forwarded
+    (an unknown key reaching start as **overrides would TypeError → 500). On the
+    shared server (no model configured) every variant lands on the clean 400
+    "no model" path. Placed here, not in the llama-gated test_embedding.py, so it
+    runs in the normal suite — it needs no embedding service."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "not json at all",  # malformed → parse suppressed → overrides={}
+            "[]",  # valid JSON but not a dict → ignored
+            '{"unknown_key": 1, "another": [1, 2, 3]}',  # unknown keys filtered out
+            '{"port": "not-an-int"}',  # wrong-typed known key (never used: no model)
+            '{"model": null}',  # explicit null is skipped
+        ],
+    )
+    def test_garbage_body_yields_clean_400_not_500(self, server: ServerInfo, body: str) -> None:
+        resp = httpx.post(
+            f"{_base_url(server)}/embedding/start",
+            content=body,
+            headers={"Content-Type": "application/json"},
+            timeout=10.0,
+        )
+        assert resp.status_code == 400, resp.text  # no model configured, handled cleanly
+        assert httpx.get(f"{_base_url(server)}/status", timeout=5.0).status_code == 200
+
+
 class TestNonLoopbackGuard:
     """Binding to a non-loopback host requires an explicit opt-in."""
 
