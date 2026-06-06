@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any, Literal, TypeVar
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from anki.collection import Collection
 from anki.consts import MODEL_CLOZE
@@ -88,26 +88,44 @@ def _safe_media_name(name: str) -> str:
 MAX_MEDIA_REDIRECTS = 5
 
 
-def _check_public_address(host: str) -> None:
-    """Raise ValueError unless every address ``host`` resolves to is globally routable.
+def _resolve_public_ip(host: str) -> str:
+    """Resolve ``host`` and return one vetted, globally-routable IP to connect to.
 
     SSRF guard for server-side URL fetches. An **allowlist** (``is_global``) rather
     than a hand-rolled denylist: it rejects loopback, RFC1918, link-local
     (incl. the cloud-metadata IP), reserved, unspecified, **and** carrier-grade
     NAT (100.64/10) / benchmarking / `192.0.0.0/24` ranges that a denylist misses
     — while still permitting public hosts (8.8.8.8, 1.1.1.1, …). Multicast is
-    rejected explicitly because ``is_global`` is True for 224.0.0.0/4. Reject if
+    rejected explicitly because ``is_global`` is True for 224.0.0.0/4. Rejects if
     *any* resolved address is disallowed, so a name can't smuggle an internal A
     record alongside a public one.
+
+    Returns the first resolved address so the caller can **pin the connection to
+    the vetted IP** (rather than letting httpx re-resolve at connect time, which
+    would reopen a DNS-rebinding TOCTOU). Raises ValueError on an unresolvable or
+    disallowed host.
     """
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror as e:
         raise ValueError(f"could not resolve host '{host}': {e}") from e
+    vetted: str | None = None
     for info in infos:
-        addr = ipaddress.ip_address(info[4][0])
+        ip = str(info[4][0])  # sockaddr[0] is the address; str() narrows the stub's str|int
+        addr = ipaddress.ip_address(ip)
         if not addr.is_global or addr.is_multicast:
             raise ValueError(f"refusing to fetch from non-public address {addr} (host '{host}')")
+        if vetted is None:
+            vetted = ip
+    if vetted is None:
+        raise ValueError(f"could not resolve host '{host}'")
+    return vetted
+
+
+def _host_with_port(host: str, port: int | None) -> str:
+    """Format host[:port] for a Host header (bracketing an IPv6 literal)."""
+    bracketed = f"[{host}]" if ":" in host else host
+    return f"{bracketed}:{port}" if port else bracketed
 
 
 def _fetch_media_url(
@@ -124,30 +142,47 @@ def _fetch_media_url(
     the body is capped at ``max_bytes``, and httpx honors proxy env vars
     (``trust_env``; SOCKS needs the optional ``httpx[socks]`` extra).
 
-    Redirects are followed **manually** with the SSRF guard re-run on every hop's
-    host (httpx's ``follow_redirects`` would jump to an attacker-chosen
-    private/metadata address without re-checking), capped at ``MAX_MEDIA_REDIRECTS``.
-    The residual resolve-then-connect gap (DNS rebinding) is a tracked follow-up —
-    closed by pinning the connection to the vetted IP.
+    SSRF hardening (when ``allow_private`` is False): each hop's host is resolved
+    and vetted, then the connection is **pinned to the vetted IP** — the request
+    URL's host is the IP (so httpx connects there and does not re-resolve the name
+    at connect time, closing the DNS-rebinding TOCTOU), the ``Host`` header carries
+    the original name so the server routes correctly, and ``sni_hostname`` carries
+    it too so TLS SNI + certificate validation still verify against the hostname,
+    not the IP. Redirects are followed **manually**, re-vetting every hop (httpx's
+    ``follow_redirects`` would jump to an attacker-chosen address unchecked), capped
+    at ``MAX_MEDIA_REDIRECTS``. With ``allow_private`` the guard and pinning are off
+    (the operator opted into trusted internal hosts).
     """
     import httpx
 
+    logical = url  # hostname-based; redirects resolve against this, not the pinned URL
     with httpx.Client(follow_redirects=False, timeout=timeout, trust_env=True) as client:
         for _hop in range(MAX_MEDIA_REDIRECTS + 1):
-            parsed = urlparse(url)
+            parsed = urlparse(logical)
             if parsed.scheme not in ("http", "https"):
                 raise ValueError(f"unsupported URL scheme: {parsed.scheme or '(none)'}")
-            if not parsed.hostname:
+            host = parsed.hostname
+            if not host:
                 raise ValueError("URL has no host")
-            if not allow_private:
-                _check_public_address(parsed.hostname)
 
-            with client.stream("GET", url) as resp:
+            request_url = logical
+            headers: dict[str, str] | None = None
+            extensions: dict[str, Any] | None = None
+            if not allow_private:
+                ip = _resolve_public_ip(host)
+                netloc = _host_with_port(ip, parsed.port)
+                query = f"?{parsed.query}" if parsed.query else ""
+                request_url = f"{parsed.scheme}://{netloc}{parsed.path or '/'}{query}"
+                headers = {"Host": _host_with_port(host, parsed.port)}
+                if parsed.scheme == "https":
+                    extensions = {"sni_hostname": host}  # TLS verifies the name, not the IP
+
+            with client.stream("GET", request_url, headers=headers, extensions=extensions) as resp:
                 if resp.is_redirect:
                     location = resp.headers.get("location")
                     if not location:
                         raise ValueError("redirect response without a Location header")
-                    url = str(resp.url.join(location))  # resolve relative, re-check next loop
+                    logical = urljoin(logical, location)  # resolve relative, re-vet next loop
                     continue
                 resp.raise_for_status()
                 chunks: list[bytes] = []

@@ -5,7 +5,7 @@ import base64
 import pytest
 
 from shrike import collection as collection_mod
-from shrike.collection import _check_public_address, _safe_media_name
+from shrike.collection import _resolve_public_ip, _safe_media_name
 from shrike.schemas import CollectionPruneResponse, FetchMediaResponse, StoreMediaResponse
 
 PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n-fake-image-bytes").decode("ascii")
@@ -204,11 +204,11 @@ class TestSsrfGuard:
     )
     def test_non_global_addresses_blocked(self, host):
         with pytest.raises(ValueError, match="non-public address"):
-            _check_public_address(host)
+            _resolve_public_ip(host)
 
     @pytest.mark.parametrize("host", ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"])
     def test_public_address_allowed(self, host):
-        _check_public_address(host)  # numeric literal: no DNS, no network
+        _resolve_public_ip(host)  # numeric literal: no DNS, no network
 
     def test_split_horizon_mixed_records_refused(self, monkeypatch):
         # A name resolving to [public, private] must be rejected — the guard checks
@@ -221,7 +221,7 @@ class TestSsrfGuard:
 
         monkeypatch.setattr(collection_mod.socket, "getaddrinfo", fake_getaddrinfo)
         with pytest.raises(ValueError, match="non-public address"):
-            _check_public_address("split.example")
+            _resolve_public_ip("split.example")
 
     @pytest.mark.parametrize(
         "literal", ["http://2130706433/", "http://0x7f000001/", "http://127.1/"]
@@ -237,7 +237,7 @@ class TestSsrfGuard:
             lambda *a, **k: [(0, 0, 0, "", ("127.0.0.1", 0))],
         )
         with pytest.raises(ValueError, match="non-public address"):
-            _check_public_address(urlparse(literal).hostname or literal)
+            _resolve_public_ip(urlparse(literal).hostname or literal)
 
     def test_unresolvable_host_raises(self, monkeypatch):
         import socket as _socket
@@ -247,7 +247,7 @@ class TestSsrfGuard:
 
         monkeypatch.setattr(collection_mod.socket, "getaddrinfo", boom)
         with pytest.raises(ValueError, match="could not resolve host"):
-            _check_public_address("nonexistent.invalid")
+            _resolve_public_ip("nonexistent.invalid")
 
     @pytest.mark.parametrize(
         ("raw", "expected"),
@@ -263,14 +263,16 @@ class TestSsrfGuard:
 # IP literals is network-free, so the address check runs for real. --------------
 
 
-def _make_fake_client(script, *, requested, kwargs_sink):
+def _make_fake_client(script, *, requested, kwargs_sink, calls=None):
     """Return a fake httpx.Client class driving _fetch_media_url's redirect loop.
 
     ``script[i]`` drives the i-th ``.stream()`` call:
       {"kind": "redirect", "location": "..."}  or
       {"kind": "ok", "headers": {...}, "chunks": [b".."]}
-    ``requested`` collects every URL actually streamed; ``kwargs_sink`` captures the
-    ``httpx.Client(**kwargs)`` constructor kwargs (to pin ``follow_redirects=False``).
+    ``requested`` collects every URL actually streamed (the pinned IP URL);
+    ``kwargs_sink`` captures the ``httpx.Client(**kwargs)`` constructor kwargs (to
+    pin ``follow_redirects=False``); ``calls`` (optional) records each stream's
+    ``{"url", "headers", "extensions"}`` so a test can assert the Host header / SNI.
     """
     import httpx
 
@@ -305,8 +307,10 @@ def _make_fake_client(script, *, requested, kwargs_sink):
         def __exit__(self, *a):
             return False
 
-        def stream(self, method, url):
+        def stream(self, method, url, **kwargs):
             requested.append(url)
+            if calls is not None:
+                calls.append({"url": url, **kwargs})
             return _Resp(script[len(requested) - 1], url)
 
     return _Client
@@ -500,3 +504,76 @@ class TestRedirectHandling:
     def test_client_constructed_without_follow_redirects(self, monkeypatch):
         _, _, kwargs_sink = self._run(monkeypatch, [{"kind": "ok", "chunks": [b"x"]}])
         assert kwargs_sink.get("follow_redirects") is False
+
+
+class TestConnectionPinning:
+    """The connection is pinned to the vetted IP (closes the DNS-rebinding TOCTOU):
+    the request dials the resolved IP, the Host header carries the name, and HTTPS
+    SNI/cert validation uses the name via the sni_hostname extension."""
+
+    def _fake(self, monkeypatch, *, resolves_to: str, script):
+        import httpx
+
+        # The name resolves (once, for vetting) to a public IP; pinning must then
+        # dial THAT IP rather than re-resolve the name at connect time.
+        monkeypatch.setattr(
+            collection_mod.socket,
+            "getaddrinfo",
+            lambda host, *a, **k: [(0, 0, 0, "", (resolves_to, 0))],
+        )
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            httpx,
+            "Client",
+            _make_fake_client(script, requested=[], kwargs_sink={}, calls=calls),
+        )
+        return calls
+
+    def test_https_pins_ip_sets_host_and_sni(self, monkeypatch):
+        from shrike.collection import _fetch_media_url
+
+        calls = self._fake(
+            monkeypatch,
+            resolves_to="1.1.1.1",
+            script=[{"kind": "ok", "headers": {"content-type": "image/png"}, "chunks": [b"x"]}],
+        )
+        raw, ct = _fetch_media_url("https://cdn.example/img.png", allow_private=False)
+        assert raw == b"x"
+        # Dialed the vetted IP, not the name — no connect-time re-resolution.
+        assert calls[0]["url"] == "https://1.1.1.1/img.png"
+        assert calls[0]["headers"]["Host"] == "cdn.example"
+        assert calls[0]["extensions"]["sni_hostname"] == "cdn.example"
+
+    def test_http_pins_ip_with_host_no_sni(self, monkeypatch):
+        from shrike.collection import _fetch_media_url
+
+        calls = self._fake(
+            monkeypatch,
+            resolves_to="1.1.1.1",
+            script=[{"kind": "ok", "chunks": [b"y"]}],
+        )
+        _fetch_media_url("http://cdn.example:8080/a/b.png?q=1", allow_private=False)
+        assert calls[0]["url"] == "http://1.1.1.1:8080/a/b.png?q=1"
+        assert calls[0]["headers"]["Host"] == "cdn.example:8080"
+        # Plain HTTP has no TLS, so no sni_hostname extension.
+        assert not calls[0]["extensions"]
+
+    def test_allow_private_does_not_pin(self, monkeypatch):
+        # With the guard off, connect to the URL as given (no IP rewrite / Host
+        # override) — the operator opted into trusted internal hosts.
+        import httpx
+
+        from shrike.collection import _fetch_media_url
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            httpx,
+            "Client",
+            _make_fake_client(
+                [{"kind": "ok", "chunks": [b"z"]}], requested=[], kwargs_sink={}, calls=calls
+            ),
+        )
+        _fetch_media_url("http://intranet.local/x.png", allow_private=True)
+        assert calls[0]["url"] == "http://intranet.local/x.png"
+        assert not calls[0]["headers"]
+        assert not calls[0]["extensions"]

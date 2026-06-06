@@ -143,16 +143,17 @@ class TestRedirectRealHttpx:
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
         try:
-            # Allow the first hop, refuse the second — so a correct (no-autofollow)
-            # loop re-enters and raises before /internal is fetched.
+            # Allow the first hop (return its vetted IP), refuse the second — so a
+            # correct (no-autofollow) loop re-enters and raises before /internal.
             calls = {"n": 0}
 
-            def fake_check(host: str) -> None:
+            def fake_resolve(host: str) -> str:
                 calls["n"] += 1
                 if calls["n"] >= 2:
                     raise ValueError(f"refusing to fetch from non-public address (host '{host}')")
+                return host  # loopback literal — pin straight back to it
 
-            monkeypatch.setattr(collection_mod, "_check_public_address", fake_check)
+            monkeypatch.setattr(collection_mod, "_resolve_public_ip", fake_resolve)
             with pytest.raises(ValueError, match="non-public address"):
                 _fetch_media_url(f"http://127.0.0.1:{port}/start", allow_private=False)
             assert "/start" in hits
