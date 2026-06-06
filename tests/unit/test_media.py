@@ -223,7 +223,9 @@ class TestSsrfGuard:
         with pytest.raises(ValueError, match="non-public address"):
             _check_public_address("split.example")
 
-    @pytest.mark.parametrize("literal", ["http://2130706433/", "http://0x7f000001/", "http://127.1/"])
+    @pytest.mark.parametrize(
+        "literal", ["http://2130706433/", "http://0x7f000001/", "http://127.1/"]
+    )
     def test_obfuscated_ipv4_literal_refused(self, monkeypatch, literal):
         # These decimal/hex/short forms all denote 127.0.0.1; getaddrinfo parsing
         # varies by platform, so pin it to keep the test hermetic and cross-platform.
@@ -374,9 +376,7 @@ class TestRedirectHandling:
         ["file:///etc/passwd", "gopher://127.0.0.1:6379/_INFO", "dict://127.0.0.1/", "ftp://x/"],
     )
     def test_redirect_to_dangerous_scheme(self, monkeypatch, location):
-        result, requested, _ = self._run(
-            monkeypatch, [{"kind": "redirect", "location": location}]
-        )
+        result, requested, _ = self._run(monkeypatch, [{"kind": "redirect", "location": location}])
         self._assert_blocked(result, requested, location, match="unsupported URL scheme")
 
     def test_redirect_missing_location(self, monkeypatch):
