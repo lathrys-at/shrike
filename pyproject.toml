@@ -50,6 +50,7 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.8",
     "types-PyYAML",
+    "trustme>=1.1",  # ephemeral CA/cert for the hermetic TLS test (media SNI-pinning, #165)
 ]
 
 [tool.pytest.ini_options]
