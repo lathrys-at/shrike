@@ -133,9 +133,21 @@ def _build_transport_security(
 
     base_hosts = list(_LOOPBACK_HOSTS) if _is_loopback(host) else []
     base_origins = list(_LOOPBACK_ORIGINS) if _is_loopback(host) else []
+    allow_hosts = base_hosts + extra_hosts
+    if not allow_hosts:
+        # Rebinding protection on with an empty Host allow-list rejects *every*
+        # request's Host (421) — the server is reachable but answers nothing. Only
+        # happens on a non-loopback bind given allowed_origins but no allowed_hosts;
+        # surface the footgun at startup rather than as a silently-bricked server.
+        logger.warning(
+            "Transport guard is on but no allowed Host values are configured "
+            "(non-loopback bind with --allowed-origin but no --allowed-host): every "
+            "request will be rejected with HTTP 421. Add --allowed-host or pass "
+            "--no-dns-rebinding-protection."
+        )
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=base_hosts + extra_hosts,
+        allowed_hosts=allow_hosts,
         allowed_origins=base_origins + extra_origins,
     )
 

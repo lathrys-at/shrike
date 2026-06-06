@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
+import logging
+
 import pytest
 
 from shrike.server import _build_transport_security, _is_loopback
@@ -76,3 +79,53 @@ def test_explicit_allow_list_builds_guard_even_when_non_loopback() -> None:
     assert settings is not None
     assert settings.allowed_hosts == ["proxy.internal"]
     assert settings.allowed_origins == []
+
+
+def test_disable_takes_precedence_over_allow_list() -> None:
+    # disable=True wins even when explicit hosts are given — the operator opted
+    # out of the guard entirely.
+    assert (
+        _build_transport_security("127.0.0.1", allowed_hosts=["proxy.internal"], disable=True)
+        is None
+    )
+
+
+def test_origins_only_non_loopback_is_fail_closed(caplog: pytest.LogCaptureFixture) -> None:
+    # The footgun: a non-loopback bind given allowed_origins but NO allowed_hosts
+    # builds a guard whose Host allow-list is empty — so every request's Host is
+    # rejected (421) and the server answers nothing. Fail-*closed* (not a hole),
+    # but a config trap, so it must warn at build time.
+    with caplog.at_level(logging.WARNING, logger="shrike.server"):
+        settings = _build_transport_security("0.0.0.0", allowed_origins=["https://app.example"])
+    assert settings is not None
+    assert settings.allowed_hosts == []  # nothing matches → 421 for everything
+    assert settings.allowed_origins == ["https://app.example"]
+    assert any("no allowed Host values" in r.message for r in caplog.records)
+
+
+def test_loopback_guard_does_not_warn(caplog: pytest.LogCaptureFixture) -> None:
+    # The normal loopback path has a populated Host list — no footgun, no warning.
+    with caplog.at_level(logging.WARNING, logger="shrike.server"):
+        _build_transport_security("127.0.0.1")
+    assert not any("no allowed Host values" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("0:0:0:0:0:0:0:1", True),  # expanded ::1 — still loopback
+        ("LOCALHOST", False),  # exact "localhost" match only; uppercase is NOT loopback
+    ],
+)
+def test_is_loopback_stable_edges(host: str, expected: bool) -> None:
+    # Pin the Shrike-controlled boundary so a refactor can't silently shift it.
+    assert _is_loopback(host) is expected
+
+
+def test_is_loopback_ipv4_mapped_delegates_to_stdlib() -> None:
+    # ::ffff:127.0.0.1 — Shrike adds no special handling, it defers to
+    # ipaddress.is_loopback, whose result for IPv4-mapped addresses is
+    # *Python-version-dependent* (False <3.12.4, True after). Pin the delegation,
+    # not a fixed bool, so the test is robust across the supported range.
+    mapped = "::ffff:127.0.0.1"
+    assert _is_loopback(mapped) is ipaddress.ip_address(mapped).is_loopback
