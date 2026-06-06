@@ -122,15 +122,26 @@ def _resolve_public_ip(host: str) -> str:
     return vetted
 
 
-def _path_within_root(path: str, root: str) -> bool:
-    """Whether ``path`` resolves inside ``root`` — **after** resolving symlinks.
+def _path_within_any_root(path: str, roots: list[str]) -> bool:
+    """Whether ``path`` is contained in **any** of ``roots`` — on resolved real paths.
 
-    Confines store_media's server-local ``path`` to a configured subtree
-    (``--media-path-root``, #164). ``realpath`` resolves symlinks on both sides, so
-    a symlink under ``root`` that points outside is rejected (no escape)."""
-    real = os.path.realpath(path)
-    root_real = os.path.realpath(root)
-    return real == root_real or real.startswith(root_real + os.sep)
+    Confines store_media's server-local ``path`` to the configured subtrees
+    (``--media-path-root``, repeatable, #164/#170): allowed iff the target is under
+    any one root (a disjunction — the reachable set is the union). ``realpath``
+    collapses ``..`` and resolves symlinks on both sides (``add_file`` follows
+    symlinks, so the *target's* real path is what matters), and ``commonpath``
+    avoids the ``/srv/media-evil`` vs ``/srv/media`` prefix bug a bare
+    ``startswith`` has. (A TOCTOU between this check and ``add_file`` — swapping a
+    symlink in the gap — is an accepted residual for this local-trust feature.)"""
+    target = os.path.realpath(path)
+    for root in roots:
+        root_real = os.path.realpath(root)
+        try:
+            if os.path.commonpath([root_real, target]) == root_real:
+                return True
+        except ValueError:  # different drives on Windows → not contained
+            continue
+    return False
 
 
 def _host_with_port(host: str, port: int | None) -> str:
@@ -1577,8 +1588,7 @@ class CollectionWrapper:
         items: list[dict[str, Any]],
         *,
         allow_private_fetch: bool,
-        allow_server_paths: bool = False,
-        media_path_root: str | None = None,
+        server_path_roots: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Store a batch of media files; one bad item never sinks the batch.
 
@@ -1589,27 +1599,34 @@ class CollectionWrapper:
         length *before* decoding (no allocating an oversize payload to then reject
         it). The prepared bytes are written on the worker thread.
 
-        A server-local ``path`` item (#164) is only honored when ``allow_server_paths``
-        (the server's purely-local gate) is set — otherwise it's a per-item error;
-        it's stored zero-copy via ``col.media.add_file`` on the worker thread (no
-        read into Python memory). Per-item failures (bad base64, unfetchable/
-        SSRF-blocked URL, disallowed/missing path, oversize) become error results.
+        A server-local ``path`` item (#164/#170) is honored **only** when
+        ``server_path_roots`` is non-empty (the operator's opt-in, repeatable
+        ``--media-path-root`` on a purely-local daemon) **and** the path is
+        contained in one of those roots after ``..``/symlink resolution; otherwise
+        it's a per-item error. It's stored zero-copy via ``col.media.add_file`` on
+        the worker thread (no read into Python memory). Per-item failures (bad
+        base64, unfetchable/SSRF-blocked URL, disabled/out-of-root/missing path,
+        oversize) become error results.
         """
+        roots = server_path_roots or []
 
         async def _prepare(index: int, item: dict[str, Any]) -> dict[str, Any]:
             name = item.get("filename")
             try:
                 if item.get("path") is not None:
-                    if not allow_server_paths:
+                    if not roots:
                         raise ValueError(
-                            "server-local paths are not allowed: the server is not in a "
-                            "purely-local configuration"
+                            "server-local paths are not enabled (set --media-path-root on a "
+                            "purely-local daemon)"
                         )
                     src = item["path"]
+                    # Containment first, on resolved real paths (closes `..` and
+                    # symlink escape — add_file follows symlinks), before touching
+                    # the filesystem further.
+                    if not _path_within_any_root(src, roots):
+                        raise ValueError("path is outside the configured media root(s)")
                     if not os.path.isfile(src):
                         raise ValueError(f"file not found: {src}")
-                    if media_path_root is not None and not _path_within_root(src, media_path_root):
-                        raise ValueError("path is outside the configured media path root")
                     return {"index": index, "src_path": src, "name": name}
                 if item.get("data") is not None:
                     raw = await asyncio.to_thread(_decode_media_b64, item["data"])

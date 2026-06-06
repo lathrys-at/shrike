@@ -68,7 +68,8 @@ def _name_from_url(url: str, content_type: str | None) -> str:
     "server_paths",
     multiple=True,
     help="Path to a file on the SERVER's filesystem to store zero-copy (repeatable). "
-    "Only works when the daemon runs in its default purely-local configuration.",
+    "Off by default — the daemon must set --media-path-root (purely-local) and the "
+    "file must be under it.",
 )
 @click.option(
     "--client-fetch",
@@ -91,7 +92,8 @@ def media_store(
     daemon too. URLs are fetched by the server by default (http/https, private
     addresses refused); pass --client-fetch to download them locally and upload
     the bytes instead. --server-path stores a file already on the *server's* disk
-    without sending bytes (zero-copy) — only honored on a purely-local daemon.
+    without sending bytes (zero-copy) — off by default; the daemon must set
+    --media-path-root (on a purely-local config) and the file must be under it.
 
     \b
     Examples:

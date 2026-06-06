@@ -107,51 +107,95 @@ class TestMediaTools:
 
 
 class TestServerLocalPath:
-    """store_media `path` source (#164): a file on the server's disk, stored
-    zero-copy — only on a purely-local daemon."""
+    """store_media `path` source (#164/#170): off by default; enabled only by an
+    explicit --media-path-root on a purely-local daemon, and confined to that root."""
 
-    def test_server_path_stored_on_purely_local(self, isolated_mcp, tmp_path):
-        # The isolated server is loopback/default → purely-local → paths enabled.
+    def test_path_off_by_default(self, isolated_mcp, tmp_path):
+        # The isolated server is purely-local but sets NO --media-path-root → off.
         src = tmp_path / "local.png"
         src.write_bytes(RAW)
         out = isolated_mcp("store_media", {"items": [{"path": str(src)}]})
-        assert out["results"][0]["status"] == "stored"
-        assert out["results"][0]["filename"] == "local.png"
-        # Stored content is fetchable back.
-        fetched = isolated_mcp("fetch_media", {"filenames": ["local.png"]})
-        assert fetched["results"][0]["status"] == "found"
-        assert httpx.get(fetched["results"][0]["url"]).content == RAW
-
-    def test_server_path_refused_when_not_purely_local(self, server_factory, tmp_path):
-        from .conftest import MCPClient
-
-        # --no-dns-rebinding-protection signals a proxy/tailnet front → not purely
-        # local → server paths disabled (loopback bind, so still reachable here).
-        srv = server_factory("nodns", extra_args=["--no-dns-rebinding-protection"])
-        src = tmp_path / "local.png"
-        src.write_bytes(RAW)
-        out = MCPClient(srv.url)("store_media", {"items": [{"path": str(src)}]})
         assert out["results"][0]["status"] == "error"
-        assert "not allowed" in out["results"][0]["error"]
+        assert "not enabled" in out["results"][0]["error"]
 
-    def test_media_path_root_confines_server_paths(self, server_factory, tmp_path):
+    def test_two_roots_disjunction_and_fetchable(self, server_factory, tmp_path):
         from .conftest import MCPClient
 
+        root_a = tmp_path / "a"
+        root_b = tmp_path / "b"
+        root_a.mkdir()
+        root_b.mkdir()
+        (root_a / "in.png").write_bytes(RAW)
+        (root_b / "in2.png").write_bytes(RAW)
+        outside = tmp_path / "out.png"
+        outside.write_bytes(RAW)
+
+        srv = server_factory(
+            "rooted",
+            extra_args=["--media-path-root", str(root_a), "--media-path-root", str(root_b)],
+        )
+        mcp = MCPClient(srv.url)
+        # A path under either root stores (disjunction).
+        for f in ("in.png", "in2.png"):
+            src = (root_a if f == "in.png" else root_b) / f
+            assert mcp("store_media", {"items": [{"path": str(src)}]})["results"][0]["status"] == (
+                "stored"
+            )
+        # Fetchable back.
+        fetched = mcp("fetch_media", {"filenames": ["in.png"]})["results"][0]
+        assert fetched["status"] == "found"
+        assert httpx.get(fetched["url"]).content == RAW
+        # Outside both roots is refused.
+        out = mcp("store_media", {"items": [{"path": str(outside)}]})["results"][0]
+        assert out["status"] == "error" and "outside the configured media root" in out["error"]
+
+    def test_root_set_but_not_purely_local_stays_disabled(self, server_factory, tmp_path):
+        from .conftest import MCPClient
+
+        # --no-dns-rebinding-protection (proxy/tailnet signal) → not purely-local,
+        # so even an in-root path is refused (the two gates compose).
         root = tmp_path / "allowed"
         root.mkdir()
         inside = root / "in.png"
         inside.write_bytes(RAW)
-        outside = tmp_path / "out.png"
-        outside.write_bytes(RAW)
-
-        srv = server_factory("rooted", extra_args=["--media-path-root", str(root)])
-        mcp = MCPClient(srv.url)
-        assert (
-            mcp("store_media", {"items": [{"path": str(inside)}]})["results"][0]["status"]
-            == "stored"
+        srv = server_factory(
+            "rooted-exposed",
+            extra_args=["--media-path-root", str(root), "--no-dns-rebinding-protection"],
         )
-        out = mcp("store_media", {"items": [{"path": str(outside)}]})["results"][0]
-        assert out["status"] == "error" and "outside the configured" in out["error"]
+        out = MCPClient(srv.url)("store_media", {"items": [{"path": str(inside)}]})["results"][0]
+        assert out["status"] == "error" and "not enabled" in out["error"]
+
+    def test_filesystem_root_fails_startup(self, tmp_path):
+        # Per-element validation rejects `/` at startup (fail fast), even though the
+        # bind is otherwise fine — a degenerate root would re-open everything.
+        import subprocess
+        import sys
+
+        for d in ("logs", "state", "cache"):
+            (tmp_path / d).mkdir()
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "shrike.server",
+                "--collection",
+                str(tmp_path / "c.anki2"),
+                "--media-path-root",
+                "/",
+                "--foreground",
+                "--log-dir",
+                str(tmp_path / "logs"),
+                "--state-dir",
+                str(tmp_path / "state"),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 1
+        assert "filesystem root" in (proc.stdout + proc.stderr)
 
 
 class TestRedirectRealHttpx:
@@ -301,13 +345,12 @@ class TestMediaCLI:
         data = isolated_runner.json(["collection", "check"])
         assert "orphan.png" in data["unused"]
 
-    def test_store_server_path(self, isolated_runner, tmp_path):
-        # --server-path stores a file already on the (co-located) server's disk.
+    def test_store_server_path_disabled_by_default(self, isolated_runner, tmp_path):
+        # The CLI sends a {path} item; the default daemon has no --media-path-root,
+        # so the server refuses it (off by default, #170). Exercises the CLI
+        # plumbing + the default-off behavior end-to-end.
         src = tmp_path / "on-server.png"
         src.write_bytes(b"\x89PNG\r\n\x1a\nserver-side")
         result = isolated_runner.invoke(["media", "store", "--server-path", str(src)])
-        assert result.exit_code == 0, result.output
-        assert "on-server.png" in result.output
-        assert "on-server.png" in [
-            f["filename"] for f in isolated_runner.json(["media", "list"])["files"]
-        ]
+        assert result.exit_code == 1
+        assert "not enabled" in result.output

@@ -118,8 +118,7 @@ def register_tools(
     saver: IndexSaver | None = None,
     *,
     allow_private_fetch: bool = False,
-    allow_server_paths: bool = False,
-    media_path_root: str | None = None,
+    server_path_roots: list[str] | None = None,
     media_base_url: str | None = None,
 ) -> None:
     from urllib.parse import quote
@@ -1593,23 +1592,23 @@ def register_tools(
 
         URL fetches are restricted to http/https and refuse private/loopback
         addresses by default (an SSRF guard). A `path` reads a file on the
-        **server's** filesystem and is only honored when the server runs in its
-        default purely-local configuration (loopback bind, no remote exposure); a
-        `path` item is rejected otherwise. To store a local file against any
-        server, the CLI `shrike media store PATH` reads it and sends the bytes.
+        **server's** filesystem and is **off by default**: it is honored only when
+        the operator has configured a `--media-path-root` on a purely-local daemon,
+        and only for files contained in that root; a `path` item is rejected
+        otherwise. To store a local file against any server, the CLI
+        `shrike media store PATH` reads it and sends the bytes.
 
         Anki resolves name collisions: identical content keeps the name (reported
         `deduped`), different content under the same name gets a hashed suffix, so
         the stored `filename` may differ from what you asked for — always reference
-        the returned name. Per-item errors (bad base64, unfetchable URL, disallowed
-        or missing path, oversize) are reported per item and don't sink the batch."""
+        the returned name. Per-item errors (bad base64, unfetchable URL, disabled
+        or out-of-root path, oversize) are reported per item and don't sink the batch."""
         logger.info("store_media count=%d", len(items))
         item_dicts = [i.model_dump(exclude_none=True) for i in items]
         results = await wrapper.store_media(
             item_dicts,
             allow_private_fetch=allow_private_fetch,
-            allow_server_paths=allow_server_paths,
-            media_path_root=media_path_root,
+            server_path_roots=server_path_roots,
         )
         stored = sum(1 for r in results if r.get("status") == "stored")
         errors = len(results) - stored
