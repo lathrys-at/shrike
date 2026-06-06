@@ -421,6 +421,25 @@ working summary.
   neighbours, duplicate detection, full-replace tags) lives in
   [`docs/decisions.md`](docs/decisions.md).
 
+### Review & audit gates — mandatory
+
+These are required, not optional, and run in addition to the CI lint/test gates:
+
+- **Code review on every significant change and feature addition** before merge —
+  not trivial typo/doc/dep-bump PRs, but anything that adds or changes behaviour.
+  Use `/code-review` (escalate to `ultra` for larger changes).
+- **Security review whenever the server API surface changes** — a new/changed MCP
+  tool or custom HTTP route, auth/transport/SSRF/path handling, anything touching
+  the trust boundary. Run it *in addition* to the code review, via
+  `/security-review`.
+- **Before cutting a release**, run a fresh pair of passes over the release
+  candidate: a **security audit** and a **performance audit**. Apply the `rc`
+  label first so the cross-platform CI lane also runs (see the CI notes above).
+
+Reviews/audits are launched by the user (the `ultra`/cloud passes are billed and
+user-triggered — the agent can't start them); the agent's job is to surface that
+a change crosses one of these thresholds and to act on the findings.
+
 ### Defect workflow — follow this when you find a defect or limitation
 
 When you hit a bug, a limitation, or a missing API surface that is **out of scope
