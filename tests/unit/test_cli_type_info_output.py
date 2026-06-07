@@ -9,8 +9,8 @@ import pytest
 from click.testing import CliRunner
 
 from shrike.cli import cli
+from shrike.cli import client as cli_client
 from shrike.cli.type_cmd import _resolve_note_type
-from shrike.client import ShrikeClient
 from shrike.schemas import (
     CollectionInfo,
     DeleteNoteTypesResponse,
@@ -24,7 +24,7 @@ from shrike.schemas import (
 
 @pytest.fixture
 def fake() -> MagicMock:
-    return MagicMock(spec=ShrikeClient)
+    return MagicMock(spec=cli_client.ShrikeClient)
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ def run(tmp_path, fake):
     runner = CliRunner()
 
     def _run(*args: str, **kwargs):
-        with patch("shrike.cli.ShrikeClient", return_value=fake):
+        with patch("shrike.client.ShrikeClient", return_value=fake):
             return runner.invoke(
                 cli,
                 ["--config", str(cfg), *args],
