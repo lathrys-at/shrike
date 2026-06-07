@@ -1,8 +1,9 @@
 name: Warm CI cache
 
-# Populates main's actions/cache scope with the pinned llama-server and GGUF
-# embedding model, so PR embedding runs restore them instead of cold-downloading
-# from HuggingFace (which intermittently 429s). A cache is only restorable from
+# Populates main's actions/cache scope with the pinned llama-server, the GGUF
+# embedding model, and the ONNX embedding model (#172), so PR embedding runs
+# restore them instead of cold-downloading from HuggingFace (which intermittently
+# 429s). A cache is only restorable from
 # the current branch or the default branch; the test workflow runs on PRs only,
 # so without this nothing ever seeds main's scope and every PR misses (#93).
 #
@@ -35,12 +36,12 @@ jobs:
           key: llama-server-${{ runner.os }}-${{ hashFiles('scripts/llama-server.lock') }}
       - name: Warm llama-server
         run: bash .github/scripts/install-llama-server.sh
-      - name: Cache embedding model
+      - name: Cache embedding models
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/shrike-test-models
-          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M
-      - name: Warm embedding model
+          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M-onnx
+      - name: Warm embedding models
         env:
           SHRIKE_TEST_MODEL_DIR: ${{ runner.temp }}/shrike-test-models
         run: |
@@ -53,13 +54,20 @@ jobs:
               EMBEDDING_MODEL_NAME,
               EMBEDDING_MODEL_URL,
               cached_model_path,
+              cached_onnx_model_dir,
               download_with_retry,
           )
 
-          dest = cached_model_path(EMBEDDING_MODEL_NAME, Path(os.environ["RUNNER_TEMP"]) / "models")
+          fallback = Path(os.environ["RUNNER_TEMP"]) / "models"
+          dest = cached_model_path(EMBEDDING_MODEL_NAME, fallback)
           if dest.exists() and dest.stat().st_size > 0:
-              print(f"model already present: {dest}")
+              print(f"GGUF model already present: {dest}")
           else:
               download_with_retry(EMBEDDING_MODEL_URL, dest)
-              print(f"downloaded model: {dest}")
+              print(f"downloaded GGUF model: {dest}")
+
+          # ONNX backend model (model.onnx + tokenizer.json); downloads only the
+          # files that are missing, into the same cached dir.
+          onnx_dir = cached_onnx_model_dir(fallback)
+          print(f"ONNX model dir ready: {onnx_dir}")
           PY

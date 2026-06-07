@@ -103,7 +103,7 @@ class TestEmbeddings:
 
 
 class TestEmbeddingServiceViaShrike:
-    """Test the EmbeddingService.embed() method through a running server."""
+    """Test the LlamaServerBackend.embed_texts() method through a running server."""
 
     def test_embed_method(self, embedding_server):
         from shrike.embedding import EmbeddingService
@@ -114,7 +114,7 @@ class TestEmbeddingServiceViaShrike:
         svc._model_name = None
         svc._process = type("FakeProc", (), {"poll": lambda self: None})()
 
-        result = svc.embed(["hello", "world"])
+        result = svc.embed_texts(["hello", "world"])
         assert len(result) == 2
         assert all(isinstance(v, list) for v in result)
         assert all(isinstance(v[0], float) for v in result)
@@ -128,8 +128,8 @@ class TestEmbeddingServiceViaShrike:
         svc._model_name = None
         svc._process = type("FakeProc", (), {"poll": lambda self: None})()
 
-        r1 = svc.embed(["a single sentence"])
-        r2 = svc.embed(["another sentence", "and one more", "three total"])
+        r1 = svc.embed_texts(["a single sentence"])
+        r2 = svc.embed_texts(["another sentence", "and one more", "three total"])
         assert len(r1[0]) == len(r2[0])
         assert len(r1[0]) == len(r2[1])
 

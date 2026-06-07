@@ -35,8 +35,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "no_dns_rebinding_protection": False,
     },
     "embedding": {
+        # Backend kind: "llama" (llama-server, GGUF/MLX) or "onnx" (in-process
+        # onnxruntime, needs the 'onnx' extra). Default keeps existing behaviour.
+        "backend": "llama",
         "model": None,
         "port": 8373,
+        # onnxruntime execution providers (onnx backend only), in priority order.
+        # Empty means CPUExecutionProvider.
+        "onnx_providers": [],
         "context_size": None,
         "threads": None,
         "gpu_layers": None,
@@ -124,6 +130,9 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
     emb = config.get("embedding", {})
     if emb.get("model"):
         emb_out: dict[str, Any] = {"model": emb["model"]}
+        # Only persist a non-default backend, so a llama-only config stays clean.
+        if emb.get("backend") and emb["backend"] != "llama":
+            emb_out["backend"] = emb["backend"]
         if emb.get("port") and emb["port"] != 8373:
             emb_out["port"] = emb["port"]
         persisted_keys = (
@@ -133,6 +142,7 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
             "pooling",
             "extra_args",
             "llama_server",
+            "onnx_providers",
         )
         for key in persisted_keys:
             if emb.get(key):
@@ -168,9 +178,24 @@ def _resolve_extra_args(flag_args: Sequence[str] | None, emb: dict[str, Any]) ->
     return list(emb.get("extra_args") or [])
 
 
+def _resolve_onnx_providers(flag_providers: Sequence[str] | None, emb: dict[str, Any]) -> list[str]:
+    """onnxruntime providers via flag → env → config (flag wins).
+
+    ``SHRIKE_EMBEDDING_ONNX_PROVIDERS`` is comma-separated. Empty means "let
+    onnxruntime default" (CPUExecutionProvider).
+    """
+    if flag_providers:
+        return list(flag_providers)
+    env = os.environ.get("SHRIKE_EMBEDDING_ONNX_PROVIDERS")
+    if env:
+        return [p.strip() for p in env.split(",") if p.strip()]
+    return list(emb.get("onnx_providers") or [])
+
+
 def resolve_embedding(
     config: dict[str, Any],
     *,
+    backend: str | None = None,
     model: str | None = None,
     port: int | None = None,
     context_size: int | None = None,
@@ -179,19 +204,24 @@ def resolve_embedding(
     pooling: str | None = None,
     extra_args: Sequence[str] | None = None,
     llama_server: str | None = None,
+    onnx_providers: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Resolve embedding parameters via the config → env → flag cascade.
 
     Flag overrides win, then environment variables, then config values. This is
     the same precedence ``shrike server start`` uses for the collection path.
-    Environment variables: ``SHRIKE_EMBEDDING_MODEL``, ``SHRIKE_EMBEDDING_PORT``,
-    ``SHRIKE_EMBEDDING_POOLING``, ``SHRIKE_EMBEDDING_ARGS`` (shlex-split
-    passthrough), and ``LLAMA_SERVER_PATH`` (binary). Paths are user-expanded.
+    Environment variables: ``SHRIKE_EMBEDDING_BACKEND``, ``SHRIKE_EMBEDDING_MODEL``,
+    ``SHRIKE_EMBEDDING_PORT``, ``SHRIKE_EMBEDDING_POOLING``, ``SHRIKE_EMBEDDING_ARGS``
+    (shlex-split passthrough), ``SHRIKE_EMBEDDING_ONNX_PROVIDERS`` (comma-separated),
+    and ``LLAMA_SERVER_PATH`` (binary). Paths are user-expanded.
     """
     emb = config.get("embedding", {})
 
     env_port = os.environ.get("SHRIKE_EMBEDDING_PORT")
     resolved: dict[str, Any] = {
+        "backend": (
+            backend or os.environ.get("SHRIKE_EMBEDDING_BACKEND") or emb.get("backend") or "llama"
+        ),
         "model": model or os.environ.get("SHRIKE_EMBEDDING_MODEL") or emb.get("model"),
         "llama_server": (
             llama_server or os.environ.get("LLAMA_SERVER_PATH") or emb.get("llama_server")
@@ -202,6 +232,7 @@ def resolve_embedding(
         "gpu_layers": gpu_layers or emb.get("gpu_layers"),
         "pooling": (pooling or os.environ.get("SHRIKE_EMBEDDING_POOLING") or emb.get("pooling")),
         "extra_args": _resolve_extra_args(extra_args, emb),
+        "onnx_providers": _resolve_onnx_providers(onnx_providers, emb),
     }
 
     if resolved["model"]:
@@ -372,6 +403,10 @@ def embedding_args(resolved: dict[str, Any], *, no_embedding: bool = False) -> l
     ``resolved`` comes from :func:`resolve_embedding` (config → env → flags).
     """
     args: list[str] = []
+    # Only emit a non-default backend so existing llama-only command lines stay
+    # byte-for-byte unchanged.
+    if resolved.get("backend") and resolved["backend"] != "llama":
+        args.extend(["--embedding-backend", str(resolved["backend"])])
     if resolved.get("llama_server"):
         args.extend(["--llama-server", str(resolved["llama_server"])])
     if resolved.get("model"):
@@ -388,6 +423,8 @@ def embedding_args(resolved: dict[str, Any], *, no_embedding: bool = False) -> l
         args.extend(["--embedding-pooling", str(resolved["pooling"])])
     for token in resolved.get("extra_args") or []:
         args.extend(["--embedding-arg", str(token)])
+    for provider in resolved.get("onnx_providers") or []:
+        args.extend(["--embedding-onnx-provider", str(provider)])
     if no_embedding:
         args.append("--no-embedding")
     return args

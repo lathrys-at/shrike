@@ -58,6 +58,18 @@ shrike server start --collection ~/path/to/collection.anki2 \
 
 If `--llama-server` or `--embedding-model` isn't given on the command line or in your config file, Shrike falls back to `LLAMA_SERVER_PATH` and a `llama-server` on your `PATH` for the binary, and to `SHRIKE_EMBEDDING_MODEL` for the model.
 
+### Running embeddings without llama-server
+
+If you'd rather not run a separate `llama-server` process, Shrike can compute embeddings in-process with the ONNX runtime instead. Install the extra (`pip install 'shrike-mcp[onnx]'`), then point `--embedding-model` at an ONNX model directory (one holding `model.onnx` and `tokenizer.json`, such as [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)):
+
+```bash
+shrike server start --collection ~/path/to/collection.anki2 \
+  --embedding-backend onnx \
+  --embedding-model ~/models/all-MiniLM-L6-v2-onnx
+```
+
+Both backends produce the same kind of search; pick the one that fits your setup. Search quality depends on the model, and text-only models stay fully supported.
+
 Shrike builds an index of your notes in the background. A large collection takes a little while the first time; search will tell you if it's still indexing. Once it's ready:
 
 ```bash

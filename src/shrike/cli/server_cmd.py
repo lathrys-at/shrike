@@ -32,6 +32,7 @@ from shrike.daemon import (
     read_server_meta,
     stop_server,
 )
+from shrike.embedding import SUPPORTED_BACKENDS
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
 from shrike.schemas import ServerStatus
 
@@ -189,9 +190,16 @@ def server() -> None:
     help="Path to llama-server binary (default: LLAMA_SERVER_PATH env or PATH lookup).",
 )
 @click.option(
+    "--embedding-backend",
+    type=click.Choice(list(SUPPORTED_BACKENDS), case_sensitive=False),
+    help="Embedding backend: 'llama' (llama-server, GGUF/MLX) or 'onnx' (in-process "
+    "onnxruntime; needs the 'onnx' optional dependency). Default: llama.",
+)
+@click.option(
     "--embedding-model",
     type=click.Path(),
-    help="Path to GGUF embedding model (enables embedding service).",
+    help="Path to the embedding model: a GGUF file (llama backend) or an ONNX model "
+    "directory with model.onnx + tokenizer.json (onnx backend). Enables embedding.",
 )
 @click.option("--embedding-port", type=int, help="Port for the embedding server (default: 8373).")
 @click.option("--embedding-context-size", type=int, help="Context size for embedding model.")
@@ -211,7 +219,14 @@ def server() -> None:
     multiple=True,
     help="Extra llama-server flag passed through verbatim, repeatable and "
     "shlex-split (e.g. --embedding-arg='--flash-attn'). Runtime-only flags; "
-    "Shrike-owned flags are rejected.",
+    "Shrike-owned flags are rejected. (llama backend only.)",
+)
+@click.option(
+    "--embedding-onnx-provider",
+    "embedding_onnx_provider",
+    multiple=True,
+    help="onnxruntime execution provider(s), repeatable, in priority order "
+    "(e.g. CUDAExecutionProvider). Default: CPUExecutionProvider. (onnx backend only.)",
 )
 @click.option(
     "--no-embedding",
@@ -246,6 +261,7 @@ def server_start(
     cooperative_lock: bool,
     lock_hold_seconds: float | None,
     llama_server: str | None,
+    embedding_backend: str | None,
     embedding_model: str | None,
     embedding_port: int | None,
     embedding_context_size: int | None,
@@ -253,6 +269,7 @@ def server_start(
     embedding_gpu_layers: int | None,
     embedding_pooling: str | None,
     embedding_arg: tuple[str, ...],
+    embedding_onnx_provider: tuple[str, ...],
     no_embedding: bool,
     save_config_flag: bool,
 ) -> None:
@@ -294,6 +311,7 @@ def server_start(
     # spawned server args and the config we persist.
     resolved_embedding = resolve_embedding(
         config,
+        backend=embedding_backend,
         model=embedding_model,
         port=embedding_port,
         context_size=embedding_context_size,
@@ -302,6 +320,7 @@ def server_start(
         pooling=embedding_pooling,
         extra_args=list(embedding_arg) or None,
         llama_server=llama_server,
+        onnx_providers=list(embedding_onnx_provider) or None,
     )
     embedding_cli_args = embedding_args(resolved_embedding, no_embedding=no_embedding)
     remote_args = ["--allow-remote"] if allow_remote else []

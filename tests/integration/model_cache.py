@@ -24,6 +24,20 @@ EMBEDDING_MODEL_URL = (
 )
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2-Q4_K_M.gguf"
 
+# Pinned test ONNX embedding model (text-only), used to exercise the ONNX backend
+# alongside the GGUF/llama-server one. all-MiniLM-L6-v2 in ONNX form gives the same
+# 384-dim space as the GGUF, so the two backends can share semantic assertions.
+# Bump the URLs + dir name together to change it.
+ONNX_MODEL_DIR_NAME = "all-MiniLM-L6-v2-onnx"
+ONNX_MODEL_FILES = {
+    "model.onnx": (
+        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx"
+    ),
+    "tokenizer.json": (
+        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
+    ),
+}
+
 # Statuses worth retrying: HF rate-limit plus transient gateway/server errors.
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
@@ -90,3 +104,23 @@ def cached_model_path(model_name: str, fallback_dir: Path) -> Path:
     base = Path(root) if root else fallback_dir
     base.mkdir(parents=True, exist_ok=True)
     return base / model_name
+
+
+def cached_onnx_model_dir(fallback_dir: Path) -> Path:
+    """Resolve (and populate) the ONNX model directory.
+
+    Like :func:`cached_model_path`, uses ``$SHRIKE_TEST_MODEL_DIR`` when set (a
+    stable, CI-cached dir) else *fallback_dir*. Downloads ``model.onnx`` +
+    ``tokenizer.json`` into ``<base>/<ONNX_MODEL_DIR_NAME>/`` with retry/backoff if
+    missing, and returns that directory (pass it to ``--embedding-model`` with the
+    onnx backend).
+    """
+    root = os.environ.get("SHRIKE_TEST_MODEL_DIR")
+    base = Path(root) if root else fallback_dir
+    model_dir = base / ONNX_MODEL_DIR_NAME
+    model_dir.mkdir(parents=True, exist_ok=True)
+    for name, url in ONNX_MODEL_FILES.items():
+        dest = model_dir / name
+        if not (dest.exists() and dest.stat().st_size > 0):
+            download_with_retry(url, dest)
+    return model_dir

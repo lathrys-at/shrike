@@ -22,7 +22,8 @@ from mcp.server.transport_security import (
 from shrike._mcp_perf import install_validator_cache
 from shrike.collection import DEFAULT_LOCK_HOLD, CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
-from shrike.embedding import EmbeddingRuntime, EmbeddingService
+from shrike.embedding import DEFAULT_BACKEND, SUPPORTED_BACKENDS, EmbeddingRuntime
+from shrike.embedding_base import EmbedderBackend
 from shrike.index import (
     DEFAULT_SAVE_DELAY,
     DEFAULT_SAVE_THRESHOLD,
@@ -51,7 +52,7 @@ def _maybe_rebuild(
     col_mod: int,
     note_ids: list[int],
     texts: list[str],
-    embedding: EmbeddingService,
+    embedding: EmbedderBackend,
 ) -> bool:
     """Reconcile the index in the background if it drifted or the model changed.
 
@@ -374,6 +375,7 @@ def _register_custom_routes(
             body = await request.json()
             if isinstance(body, dict):
                 for key in (
+                    "backend",
                     "model",
                     "port",
                     "context_size",
@@ -382,16 +384,19 @@ def _register_custom_routes(
                     "pooling",
                     "extra_args",
                     "llama_server",
+                    "onnx_providers",
                 ):
                     if body.get(key) is not None:
                         overrides[key] = body[key]
 
         logger.info("Embedding start requested via HTTP from %s", request.client)
         try:
-            # Starting llama-server blocks (model load + health wait); run it off
-            # the event loop so other requests keep flowing.
+            # Starting a backend blocks (model load + health wait); run it off the
+            # event loop so other requests keep flowing.
             svc = await asyncio.to_thread(lambda: runtime.start(**overrides))
-        except ValueError as e:
+        except (ValueError, ImportError) as e:
+            # Unknown backend / no model (ValueError) or a missing ONNX optional
+            # dependency (ImportError) are caller-actionable config errors → 400.
             return JSONResponse({"error": str(e)}, status_code=400)
         except (FileNotFoundError, RuntimeError) as e:
             logger.error("Failed to start embedding service: %s", e)
@@ -596,9 +601,19 @@ def main() -> None:
         help="Path to llama-server binary (default: LLAMA_SERVER_PATH env or PATH lookup)",
     )
     parser.add_argument(
+        "--embedding-backend",
+        default=None,
+        choices=list(SUPPORTED_BACKENDS),
+        help="Embedding backend: 'llama' (llama-server subprocess, GGUF/MLX) or "
+        "'onnx' (in-process onnxruntime; needs the 'onnx' optional dependency). "
+        "Default: llama.",
+    )
+    parser.add_argument(
         "--embedding-model",
         default=None,
-        help="Path to GGUF embedding model (enables embedding service)",
+        help="Path to the embedding model: a GGUF file for the llama backend, or an "
+        "ONNX model directory (with model.onnx + tokenizer.json) for the onnx "
+        "backend. Enables the embedding service.",
     )
     parser.add_argument(
         "--embedding-port",
@@ -641,7 +656,16 @@ def main() -> None:
         "(e.g. --embedding-arg='--flash-attn'). Each value is shlex-split; "
         "Shrike-owned flags (--model/--host/--port/--embeddings) are rejected. "
         "For runtime-only flags — vector-affecting flags belong in typed "
-        "settings like --embedding-pooling.",
+        "settings like --embedding-pooling. (llama backend only.)",
+    )
+    parser.add_argument(
+        "--embedding-onnx-provider",
+        action="append",
+        default=None,
+        metavar="PROVIDER",
+        help="onnxruntime execution provider(s), repeatable, in priority order "
+        "(e.g. CUDAExecutionProvider). Default: CPUExecutionProvider. (onnx backend "
+        "only.)",
     )
     parser.add_argument(
         "--no-embedding",
@@ -744,6 +768,7 @@ def main() -> None:
     resolved_state_dir = state_dir_override or state_dir()
     runtime = EmbeddingRuntime(
         index=index,
+        backend=args.embedding_backend or DEFAULT_BACKEND,
         model=args.embedding_model,
         host="127.0.0.1",
         port=args.embedding_port or 8373,
@@ -755,6 +780,7 @@ def main() -> None:
         extra_args=args.embedding_arg,
         llama_server=args.llama_server,
         pid_file=resolved_state_dir / "embedding.pid",
+        onnx_providers=args.embedding_onnx_provider,
     )
 
     if args.embedding_model and not args.no_embedding:

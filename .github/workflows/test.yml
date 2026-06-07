@@ -59,11 +59,13 @@ jobs:
               - 'src/shrike/**'
               - 'tests/integration/test_embedding.py'
               - 'tests/integration/test_semantic.py'
+              - 'tests/integration/test_backends.py'
               # Shared harness that the embedding lane depends on (model
               # download/cache, server fixtures) and the workflow itself.
               - 'tests/integration/conftest.py'
               - 'tests/integration/model_cache.py'
               - 'tests/unit/test_embedding.py'
+              - 'tests/unit/test_embedding_onnx.py'
               - 'tests/unit/test_index.py'
               - 'tests/unit/test_note_embedding_text.py'
               - 'tests/unit/test_tools_search.py'
@@ -181,14 +183,17 @@ jobs:
       - name: Install llama-server
         run: bash .github/scripts/install-llama-server.sh
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
-      # Persist the GGUF across runs so we don't re-hit HuggingFace every time
-      # (the source of the 429 flake, #83). The fixture reads SHRIKE_TEST_MODEL_DIR.
-      - name: Cache embedding model
+        # [onnx] adds onnxruntime + tokenizers so the embedding lane exercises
+        # BOTH backends (llama-server and ONNX), per test_backends.py (#172).
+        run: uv pip install --system -e ".[dev,onnx]"
+      # Persist the embedding models across runs so we don't re-hit HuggingFace
+      # every time (the source of the 429 flake, #83). The fixtures read
+      # SHRIKE_TEST_MODEL_DIR; it holds both the GGUF and the ONNX model dir.
+      - name: Cache embedding models
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/shrike-test-models
-          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M
+          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M-onnx
       - name: Run embedding tests
         env:
           LD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}

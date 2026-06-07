@@ -359,7 +359,7 @@ class TestHealth:
 class TestEmbed:
     def test_raises_when_not_running(self, svc: EmbeddingService) -> None:
         with pytest.raises(RuntimeError, match="not running"):
-            svc.embed(["hello"])
+            svc.embed_texts(["hello"])
 
     def test_returns_vectors(self, svc: EmbeddingService) -> None:
         mock_proc = MagicMock()
@@ -377,7 +377,7 @@ class TestEmbed:
         mock_resp.raise_for_status = Mock()
 
         with patch("shrike.embedding.httpx.post", return_value=mock_resp):
-            result = svc.embed(["hello", "world"])
+            result = svc.embed_texts(["hello", "world"])
 
         assert len(result) == 2
         assert result[0] == [0.1, 0.2, 0.3]
@@ -397,7 +397,7 @@ class TestEmbed:
             patch("shrike.embedding.httpx.post", return_value=mock_resp),
             pytest.raises(httpx.HTTPStatusError),
         ):
-            svc.embed(["hello"])
+            svc.embed_texts(["hello"])
 
 
 class TestModelInfo:
@@ -441,7 +441,7 @@ class TestEmbeddingDim:
         # No n_embd in meta → probe with a tiny embed and measure the width.
         with (
             patch.object(svc, "model_info", return_value={"id": "m", "meta": {}}),
-            patch.object(svc, "embed", return_value=[[0.0] * 16]) as embed,
+            patch.object(svc, "embed_texts", return_value=[[0.0] * 16]) as embed,
         ):
             assert svc.embedding_dim() == 16
         embed.assert_called_once()
@@ -449,7 +449,7 @@ class TestEmbeddingDim:
     def test_none_when_both_routes_fail(self, svc: EmbeddingService) -> None:
         with (
             patch.object(svc, "model_info", return_value={}),
-            patch.object(svc, "embed", side_effect=RuntimeError("down")),
+            patch.object(svc, "embed_texts", side_effect=RuntimeError("down")),
         ):
             assert svc.embedding_dim() is None
 
@@ -547,7 +547,7 @@ class TestEmbedModelPinning:
         svc._model_name = "m.gguf"
         captured: dict[str, Any] = {}
         with patch("shrike.embedding.httpx.post", side_effect=self._fake_post(captured)):
-            svc.embed(["hi"])
+            svc.embed_texts(["hi"])
         assert captured["json"]["model"] == "m.gguf"
         assert captured["json"]["input"] == ["hi"]
 
@@ -556,7 +556,7 @@ class TestEmbedModelPinning:
         svc._model_name = None
         captured: dict[str, Any] = {}
         with patch("shrike.embedding.httpx.post", side_effect=self._fake_post(captured)):
-            svc.embed(["hi"])
+            svc.embed_texts(["hi"])
         assert "model" not in captured["json"]
 
 
@@ -566,11 +566,11 @@ class TestEmbeddingRuntime:
         runtime = EmbeddingRuntime(index=index, model="/m.gguf")
         fake_svc = MagicMock()
         fake_svc.running = True
-        with patch("shrike.embedding.EmbeddingService", return_value=fake_svc) as ctor:
+        with patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc) as ctor:
             runtime.start()
         ctor.assert_called_once()
         fake_svc.start.assert_called_once()
-        index.set_embedding_service.assert_called_once_with(fake_svc)
+        index.set_backend.assert_called_once_with(fake_svc)
         assert runtime.service is fake_svc
         assert runtime.running is True
 
@@ -583,7 +583,7 @@ class TestEmbeddingRuntime:
         runtime = EmbeddingRuntime(index=MagicMock(), model=None)
         fake_svc = MagicMock()
         fake_svc.running = True
-        with patch("shrike.embedding.EmbeddingService", return_value=fake_svc):
+        with patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc):
             runtime.start(model="/override.gguf")
         assert runtime.model == "/override.gguf"
 
@@ -591,7 +591,7 @@ class TestEmbeddingRuntime:
         runtime = EmbeddingRuntime(index=MagicMock(), model="/m.gguf", extra_args=["--flash-attn"])
         fake_svc = MagicMock()
         fake_svc.running = True
-        with patch("shrike.embedding.EmbeddingService", return_value=fake_svc) as ctor:
+        with patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc) as ctor:
             runtime.start()
         assert ctor.call_args.kwargs["extra_args"] == ["--flash-attn"]
 
@@ -599,8 +599,8 @@ class TestEmbeddingRuntime:
         runtime = EmbeddingRuntime(index=MagicMock(), model="/m.gguf")
         existing = MagicMock()
         existing.running = True
-        runtime._service = existing
-        with patch("shrike.embedding.EmbeddingService") as ctor:
+        runtime._backend = existing
+        with patch("shrike.embedding.LlamaServerBackend") as ctor:
             svc = runtime.start()
         ctor.assert_not_called()
         assert svc is existing
@@ -610,9 +610,9 @@ class TestEmbeddingRuntime:
         runtime = EmbeddingRuntime(index=index, model="/m.gguf")
         fake_svc = MagicMock()
         fake_svc.running = True
-        runtime._service = fake_svc
+        runtime._backend = fake_svc
         assert runtime.stop() is True
-        index.set_embedding_service.assert_called_once_with(None)
+        index.set_backend.assert_called_once_with(None)
         fake_svc.stop.assert_called_once()
         assert runtime.service is None
 
@@ -637,7 +637,7 @@ class TestEmbeddingRuntime:
         fake_svc = MagicMock()
         fake_svc.start.side_effect = RuntimeError("boom")
         with (
-            patch("shrike.embedding.EmbeddingService", return_value=fake_svc),
+            patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc),
             pytest.raises(RuntimeError),
         ):
             runtime.start()

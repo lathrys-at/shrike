@@ -8,6 +8,40 @@ isn't reconstructable from the code.
 
 ## Semantic search & the vector index
 
+### Embedding backends are pluggable behind one small protocol (#172)
+
+The embedder used to *be* llama-server: `VectorIndex` and the server boot path
+talked to a concrete `EmbeddingService` and nothing else. Going multimodal (#162)
+means swapping models and *runtimes* wholesale, and two nearer-term needs pushed
+the same way — an ONNX runtime for deployments where a pinned llama.cpp binary is
+the wrong fit, and a guarantee that **text-only embedding stays first-class
+forever** (the test suite depends on small/fast text-only models). So we landed
+the seam first, ahead of any multimodal model or index change: a minimal
+`EmbedderBackend` protocol (`embed_texts`, `embedding_dim`, `model_fingerprint`,
+`health`, lifecycle, `modalities`) with `LlamaServerBackend` and `OnnxBackend`
+behind it. The index never learns which backend it has — it only calls
+`embed_texts` — so drift, the per-note hash sidecar, and persistence stay
+backend-agnostic.
+
+Three choices worth recording. **The fingerprint is namespaced by family**
+(`onnx:…` vs llama's `meta:`/`file:…`) rather than adding a backend token to the
+existing llama fingerprint: the same model under two runtimes produces different
+vectors and must not share a space, but an existing llama index should *not* be
+forced to rebuild on upgrade — distinct prefixes give the separation for free.
+**`modalities` is a declared capability, not a config flag.** In Phase 1 every
+backend is `{"text"}`, so it changes no behaviour today; its job is to make
+text-only a *named, permanent* capability that a later multimodal backend extends,
+so media-by-content search lights up where vectors exist and silently returns
+nothing where they don't — degrading, never erroring. We deliberately did **not**
+build the media-embedding branch yet (no dead code) nor decide the multi-vector-
+vs-fusion index question — that needs evaluation on a real collection (#162).
+**ONNX pooling is folded into the fingerprint; normalization is not.** Pooling
+(mean/cls/last) changes a vector's direction → vector-affecting → must invalidate
+the index; L2 normalization changes only magnitude, and USearch's `cos` metric is
+scale-invariant, so it never changes ranking — the same reasoning that already
+makes llama's `--embd-normalize` moot. CI runs a minimal embedding subset against
+*both* backends (`test_backends.py`), so neither path can rot.
+
 ### The index is a derived cache, never a co-equal store
 
 The Anki collection (SQLite) is always the source of truth; the USearch index is

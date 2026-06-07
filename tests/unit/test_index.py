@@ -29,13 +29,13 @@ def _fake_embed(texts: list[str]) -> list[list[float]]:
 @pytest.fixture()
 def embedding_service() -> MagicMock:
     svc = MagicMock()
-    svc.embed = MagicMock(side_effect=_fake_embed)
+    svc.embed_texts = MagicMock(side_effect=_fake_embed)
     return svc
 
 
 @pytest.fixture()
 def index(tmp_path: Path, embedding_service: MagicMock) -> VectorIndex:
-    return VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+    return VectorIndex(tmp_path / "index", backend=embedding_service)
 
 
 class TestInit:
@@ -107,7 +107,7 @@ class TestAdd:
 
     def test_calls_embed_service(self, index: VectorIndex, embedding_service: MagicMock) -> None:
         index.add([1, 2], ["hello", "world"])
-        embedding_service.embed.assert_called_once_with(["hello", "world"])
+        embedding_service.embed_texts.assert_called_once_with(["hello", "world"])
 
 
 class TestRemove:
@@ -178,11 +178,11 @@ class TestSearch:
 class TestPersistence:
     def test_save_and_load(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
-        idx1 = VectorIndex(path, embedding_service=embedding_service)
+        idx1 = VectorIndex(path, backend=embedding_service)
         idx1.add([10, 20, 30], ["alpha", "beta", "gamma"])
         idx1.save()
 
-        idx2 = VectorIndex(path, embedding_service=embedding_service)
+        idx2 = VectorIndex(path, backend=embedding_service)
         assert idx2.size == 3
         assert idx2.ndim == NDIM
         assert idx2.contains(10)
@@ -196,7 +196,7 @@ class TestPersistence:
 
     def test_clear_removes_files(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
-        idx = VectorIndex(path, embedding_service=embedding_service)
+        idx = VectorIndex(path, backend=embedding_service)
         idx.add([1], ["hello"])
         idx.save()
         assert (path / "index.usearch").exists()
@@ -209,22 +209,22 @@ class TestPersistence:
 
     def test_search_after_load(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
-        idx1 = VectorIndex(path, embedding_service=embedding_service)
+        idx1 = VectorIndex(path, backend=embedding_service)
         idx1.add([1, 2], ["hello", "world"])
         idx1.save()
 
-        idx2 = VectorIndex(path, embedding_service=embedding_service)
+        idx2 = VectorIndex(path, backend=embedding_service)
         results = idx2.search(["hello"], top_k=1)
         assert results[0][0]["note_id"] == 1
 
     def test_col_mod_persisted(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
-        idx1 = VectorIndex(path, embedding_service=embedding_service)
+        idx1 = VectorIndex(path, backend=embedding_service)
         idx1.add([1], ["hello"])
         idx1.col_mod = 1234567890
         idx1.save()
 
-        idx2 = VectorIndex(path, embedding_service=embedding_service)
+        idx2 = VectorIndex(path, backend=embedding_service)
         assert idx2.col_mod == 1234567890
 
 
@@ -251,10 +251,10 @@ class TestMaterializeEmpty:
 
     def test_persists_to_disk(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
-        idx1 = VectorIndex(path, embedding_service=embedding_service)
+        idx1 = VectorIndex(path, backend=embedding_service)
         idx1.materialize_empty(NDIM, col_mod=99, model_id="m1")
 
-        idx2 = VectorIndex(path, embedding_service=embedding_service)
+        idx2 = VectorIndex(path, backend=embedding_service)
         assert idx2.available is True
         assert idx2.col_mod == 99
         assert idx2.model_id == "m1"
@@ -302,7 +302,7 @@ class TestIndexSaver:
 
     async def test_flushes_on_burst(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         # threshold reached → immediate flush, no waiting for the idle delay.
-        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        idx = VectorIndex(tmp_path / "index", backend=embedding_service)
         saver = IndexSaver(idx, delay=999.0, threshold=3)
         idx.add([1, 2, 3], ["a", "b", "c"])
         idx.col_mod = 555
@@ -311,14 +311,14 @@ class TestIndexSaver:
 
         assert self._idx_path(tmp_path).exists()
         assert idx.pending_changes == 0
-        reloaded = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        reloaded = VectorIndex(tmp_path / "index", backend=embedding_service)
         assert reloaded.size == 3
         assert reloaded.col_mod == 555
 
     async def test_debounces_then_flushes_when_idle(
         self, tmp_path: Path, embedding_service: MagicMock
     ) -> None:
-        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        idx = VectorIndex(tmp_path / "index", backend=embedding_service)
         saver = IndexSaver(idx, delay=0.05, threshold=999)
         idx.add([1], ["a"])
         idx.col_mod = 1
@@ -334,7 +334,7 @@ class TestIndexSaver:
     async def test_new_change_resets_the_idle_timer(
         self, tmp_path: Path, embedding_service: MagicMock
     ) -> None:
-        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        idx = VectorIndex(tmp_path / "index", backend=embedding_service)
         saver = IndexSaver(idx, delay=0.1, threshold=999)
         idx.add([1], ["a"])
         saver.request_save()
@@ -347,7 +347,7 @@ class TestIndexSaver:
     async def test_aclose_flushes_pending_immediately(
         self, tmp_path: Path, embedding_service: MagicMock
     ) -> None:
-        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        idx = VectorIndex(tmp_path / "index", backend=embedding_service)
         saver = IndexSaver(idx, delay=999.0, threshold=999)
         idx.add([1], ["a"])
         idx.col_mod = 9
@@ -360,13 +360,13 @@ class TestIndexSaver:
     async def test_aclose_is_noop_when_clean(
         self, tmp_path: Path, embedding_service: MagicMock
     ) -> None:
-        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        idx = VectorIndex(tmp_path / "index", backend=embedding_service)
         saver = IndexSaver(idx)
         await saver.aclose()  # nothing added — must not error or write
         assert not self._idx_path(tmp_path).exists()
 
     def test_default_threshold(self, tmp_path: Path, embedding_service: MagicMock) -> None:
-        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
+        idx = VectorIndex(tmp_path / "index", backend=embedding_service)
         saver = IndexSaver(idx)
         assert saver._threshold == DEFAULT_SAVE_THRESHOLD
 
@@ -447,12 +447,12 @@ class TestDriftDetection:
 
     def test_drift_after_save_and_load(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
-        idx1 = VectorIndex(path, embedding_service=embedding_service)
+        idx1 = VectorIndex(path, backend=embedding_service)
         idx1.add([1], ["a"])
         idx1.col_mod = 100
         idx1.save()
 
-        idx2 = VectorIndex(path, embedding_service=embedding_service)
+        idx2 = VectorIndex(path, backend=embedding_service)
         assert idx2.check_drift(100) is False
         assert idx2.check_drift(200) is True
 
@@ -472,21 +472,21 @@ class TestDriftDetection:
 class TestModelIdPersistence:
     def test_model_id_round_trips(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
-        idx1 = VectorIndex(path, embedding_service=embedding_service)
+        idx1 = VectorIndex(path, backend=embedding_service)
         idx1.rebuild([1], ["a"], col_mod=100, model_id="meta:42:384:30522")
         assert idx1.model_id == "meta:42:384:30522"
 
-        idx2 = VectorIndex(path, embedding_service=embedding_service)
+        idx2 = VectorIndex(path, backend=embedding_service)
         assert idx2.model_id == "meta:42:384:30522"
         assert idx2.check_drift(100, "meta:42:384:30522") is False
         assert idx2.check_drift(100, "meta:0:0:0") is True
 
 
-class TestSetEmbeddingService:
+class TestSetBackend:
     def test_detach_marks_unavailable(self, index: VectorIndex) -> None:
         index.add([1], ["a"])
         assert index.state == IndexState.READY
-        index.set_embedding_service(None)
+        index.set_backend(None)
         assert index.state == IndexState.UNAVAILABLE
         assert index.available is False
 
@@ -495,14 +495,14 @@ class TestSetEmbeddingService:
     ) -> None:
         idx = VectorIndex(tmp_path / "index")  # no embedder → UNAVAILABLE
         assert idx.state == IndexState.UNAVAILABLE
-        idx.set_embedding_service(embedding_service)
+        idx.set_backend(embedding_service)
         assert idx.state == IndexState.READY
 
     def test_attach_does_not_clobber_building(
         self, index: VectorIndex, embedding_service: MagicMock
     ) -> None:
         index._state = IndexState.BUILDING
-        index.set_embedding_service(embedding_service)
+        index.set_backend(embedding_service)
         assert index.state == IndexState.BUILDING
 
     def test_detached_vectors_survive_reattach(
@@ -510,9 +510,9 @@ class TestSetEmbeddingService:
     ) -> None:
         index.add([1, 2], ["a", "b"])
         size = index.size
-        index.set_embedding_service(None)
+        index.set_backend(None)
         assert index.size == size  # vectors kept on detach
-        index.set_embedding_service(embedding_service)
+        index.set_backend(embedding_service)
         assert index.available is True
         assert index.size == size
 
@@ -535,10 +535,10 @@ class TestRebuild:
 
     def test_rebuild_saves_to_disk(self, tmp_path: Path, embedding_service: MagicMock) -> None:
         path = tmp_path / "index"
-        idx = VectorIndex(path, embedding_service=embedding_service)
+        idx = VectorIndex(path, backend=embedding_service)
         idx.rebuild([1], ["a"], col_mod=100)
 
-        idx2 = VectorIndex(path, embedding_service=embedding_service)
+        idx2 = VectorIndex(path, backend=embedding_service)
         assert idx2.size == 1
         assert idx2.col_mod == 100
 
@@ -555,8 +555,8 @@ class TestRebuild:
     def test_rebuild_sets_error_on_failure(
         self, tmp_path: Path, embedding_service: MagicMock
     ) -> None:
-        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
-        embedding_service.embed.side_effect = RuntimeError("embed failed")
+        idx = VectorIndex(tmp_path / "index", backend=embedding_service)
+        embedding_service.embed_texts.side_effect = RuntimeError("embed failed")
 
         with pytest.raises(RuntimeError, match="embed failed"):
             idx.rebuild([1], ["a"], col_mod=100)
@@ -584,13 +584,13 @@ class TestRebuildInBackground:
         import threading
 
         started = threading.Event()
-        original_embed = index._embedding.embed
+        original_embed = index._embedding.embed_texts
 
         def slow_embed(texts: list[str]) -> list[list[float]]:
             started.set()
             return original_embed(texts)
 
-        index._embedding.embed = slow_embed
+        index._embedding.embed_texts = slow_embed
 
         index.rebuild_in_background([1], ["a"], col_mod=100)
         started.wait(timeout=5)
@@ -607,8 +607,8 @@ class TestRebuildInBackground:
     def test_background_rebuild_handles_error(
         self, tmp_path: Path, embedding_service: MagicMock
     ) -> None:
-        idx = VectorIndex(tmp_path / "index", embedding_service=embedding_service)
-        embedding_service.embed.side_effect = RuntimeError("fail")
+        idx = VectorIndex(tmp_path / "index", backend=embedding_service)
+        embedding_service.embed_texts.side_effect = RuntimeError("fail")
 
         idx.rebuild_in_background([1], ["a"], col_mod=100)
         idx._build_thread.join(timeout=5)  # type: ignore[union-attr]
@@ -623,7 +623,7 @@ def _vectors(idx: VectorIndex) -> dict[int, tuple]:
 
 def _embedded(svc: MagicMock) -> list[str]:
     """Every text passed to embed() since the last reset, flattened."""
-    return [t for call in svc.embed.call_args_list for t in call.args[0]]
+    return [t for call in svc.embed_texts.call_args_list for t in call.args[0]]
 
 
 class TestReconcile:
@@ -633,13 +633,13 @@ class TestReconcile:
     def test_reconcile_matches_full_rebuild(
         self, tmp_path: Path, embedding_service: MagicMock
     ) -> None:
-        idx = VectorIndex(tmp_path / "a", embedding_service=embedding_service)
+        idx = VectorIndex(tmp_path / "a", backend=embedding_service)
         idx.rebuild([1, 2, 3, 4], ["t1", "t2", "t3", "t4"], col_mod=1)
         # change t2, delete 4, add 5; 1 and 3 unchanged.
         new_ids, new_texts = [1, 2, 3, 5], ["t1", "t2-changed", "t3", "t5"]
         idx.reconcile(new_ids, new_texts, col_mod=2)
 
-        ref = VectorIndex(tmp_path / "b", embedding_service=embedding_service)
+        ref = VectorIndex(tmp_path / "b", backend=embedding_service)
         ref.rebuild(new_ids, new_texts, col_mod=2)
 
         assert _vectors(idx) == _vectors(ref)
@@ -649,7 +649,7 @@ class TestReconcile:
         self, index: VectorIndex, embedding_service: MagicMock
     ) -> None:
         index.rebuild([1, 2, 3], ["a", "b", "c"], col_mod=1)
-        embedding_service.embed.reset_mock()
+        embedding_service.embed_texts.reset_mock()
         index.reconcile([1, 2, 3, 4], ["a", "b-new", "c", "d"], col_mod=2)
         assert sorted(_embedded(embedding_service)) == ["b-new", "d"]
 
@@ -663,16 +663,16 @@ class TestReconcile:
         self, index: VectorIndex, embedding_service: MagicMock
     ) -> None:
         index.rebuild([1, 2], ["a", "b"], col_mod=1)
-        embedding_service.embed.reset_mock()
+        embedding_service.embed_texts.reset_mock()
         index.reconcile([1, 2], ["a", "b"], col_mod=99)
-        assert embedding_service.embed.call_count == 0
+        assert embedding_service.embed_texts.call_count == 0
         assert index.col_mod == 99
 
     def test_model_change_falls_back_to_full_rebuild(
         self, index: VectorIndex, embedding_service: MagicMock
     ) -> None:
         index.rebuild([1, 2], ["a", "b"], col_mod=1, model_id="m1")
-        embedding_service.embed.reset_mock()
+        embedding_service.embed_texts.reset_mock()
         index.reconcile([1, 2], ["a", "b"], col_mod=2, model_id="m2")
         assert sorted(_embedded(embedding_service)) == ["a", "b"]  # every vector re-embedded
         assert index.model_id == "m2"
@@ -682,18 +682,18 @@ class TestReconcile:
     ) -> None:
         index.rebuild([1, 2], ["a", "b"], col_mod=1)
         index._note_hashes = None  # simulate an index built before hashes existed
-        embedding_service.embed.reset_mock()
+        embedding_service.embed_texts.reset_mock()
         index.reconcile([1, 2, 3], ["a", "b", "c"], col_mod=2)
         assert sorted(_embedded(embedding_service)) == ["a", "b", "c"]
 
     def test_hashes_persist_across_reload(
         self, tmp_path: Path, embedding_service: MagicMock
     ) -> None:
-        idx = VectorIndex(tmp_path / "i", embedding_service=embedding_service)
+        idx = VectorIndex(tmp_path / "i", backend=embedding_service)
         idx.rebuild([1, 2], ["a", "b"], col_mod=1)
-        reloaded = VectorIndex(tmp_path / "i", embedding_service=embedding_service)
+        reloaded = VectorIndex(tmp_path / "i", backend=embedding_service)
         assert reloaded._note_hashes is not None
-        embedding_service.embed.reset_mock()
+        embedding_service.embed_texts.reset_mock()
         reloaded.reconcile([1, 2], ["a", "b-changed"], col_mod=2)
         assert _embedded(embedding_service) == ["b-changed"]  # only the changed note
 
@@ -702,9 +702,9 @@ class TestReconcile:
     ) -> None:
         # add() maintains hashes, so a reconcile doesn't re-embed notes Shrike
         # itself just upserted.
-        idx = VectorIndex(tmp_path / "i", embedding_service=embedding_service)
+        idx = VectorIndex(tmp_path / "i", backend=embedding_service)
         idx.rebuild([1], ["a"], col_mod=1)
         idx.add([2], ["b"])
-        embedding_service.embed.reset_mock()
+        embedding_service.embed_texts.reset_mock()
         idx.reconcile([1, 2], ["a", "b"], col_mod=2)
-        assert embedding_service.embed.call_count == 0
+        assert embedding_service.embed_texts.call_count == 0
