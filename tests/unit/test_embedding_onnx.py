@@ -9,6 +9,7 @@ against both backends.
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -208,10 +209,16 @@ class TestFingerprint:
 
 class TestLifecycleAndEmbed:
     def _start(self, be: OnnxBackend) -> None:
-        with (
-            patch("onnxruntime.InferenceSession", _FakeSession),
-            patch("tokenizers.Tokenizer", _FakeTokenizerClass),
-        ):
+        # Inject fake onnxruntime/tokenizers modules into sys.modules so these
+        # tests run WITHOUT the optional 'onnx' extra installed — the coverage
+        # lane installs only `.[dev]`. `OnnxBackend.start()` imports both lazily,
+        # so the fakes satisfy `import onnxruntime` / `from tokenizers import
+        # Tokenizer` regardless of whether the real packages are present.
+        fake_ort = types.ModuleType("onnxruntime")
+        fake_ort.InferenceSession = _FakeSession  # type: ignore[attr-defined]
+        fake_tok = types.ModuleType("tokenizers")
+        fake_tok.Tokenizer = _FakeTokenizerClass  # type: ignore[attr-defined]
+        with patch.dict(sys.modules, {"onnxruntime": fake_ort, "tokenizers": fake_tok}):
             be.start()
 
     def test_running_toggles(self, tmp_path: Path) -> None:
