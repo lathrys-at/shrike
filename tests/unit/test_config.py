@@ -78,6 +78,23 @@ class TestEmbeddingArgs:
         assert "/m.gguf" in args
         assert "2048" in args
 
+    def test_backend_emitted_only_when_non_llama(self) -> None:
+        # None or the default "llama" emit nothing (keeps llama command lines
+        # byte-identical and lets the server default apply); "onnx" is emitted.
+        assert "--embedding-backend" not in _embedding_args({"model": "/m.gguf"})
+        assert "--embedding-backend" not in _embedding_args(
+            {"model": "/m.gguf", "backend": "llama"}
+        )
+        args = _embedding_args({"model": "/m.gguf", "backend": "onnx"})
+        assert args[:2] == ["--embedding-backend", "onnx"]
+
+    def test_onnx_providers_one_flag_per_value(self) -> None:
+        args = _embedding_args(
+            {"model": "/m.onnx", "backend": "onnx", "onnx_providers": ["CUDAExecutionProvider"]}
+        )
+        assert args.count("--embedding-onnx-provider") == 1
+        assert "CUDAExecutionProvider" in args
+
     def test_pooling(self) -> None:
         args = _embedding_args({"model": "/m.gguf", "pooling": "last"})
         assert args[-2:] == ["--embedding-pooling", "last"]
@@ -138,6 +155,18 @@ class TestResolveEmbedding:
     def test_no_model_resolves_none(self) -> None:
         resolved = resolve_embedding({"embedding": {}})
         assert resolved["model"] is None
+
+    def test_backend_unset_resolves_none(self) -> None:
+        # Must NOT default to "llama" here: `embedding start` only transmits
+        # non-None values, so a None backend lets a running server keep the one it
+        # booted with (the "llama" default is applied at the consumption sites).
+        assert resolve_embedding({"embedding": {}})["backend"] is None
+
+    def test_backend_from_flag_env_config(self, monkeypatch) -> None:
+        assert resolve_embedding({"embedding": {}}, backend="onnx")["backend"] == "onnx"
+        assert resolve_embedding({"embedding": {"backend": "onnx"}})["backend"] == "onnx"
+        monkeypatch.setenv("SHRIKE_EMBEDDING_BACKEND", "onnx")
+        assert resolve_embedding({"embedding": {}})["backend"] == "onnx"
 
     def test_pooling_from_config(self) -> None:
         resolved = resolve_embedding({"embedding": {"pooling": "last"}})

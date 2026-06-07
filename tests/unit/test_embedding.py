@@ -643,6 +643,14 @@ class TestEmbeddingRuntime:
             runtime.start()
         assert runtime.state == "failed"
 
+    def test_state_failed_on_construction_error(self) -> None:
+        # A failure in _make_backend itself (here: an unknown backend kind) must
+        # also mark the runtime failed, not leave it reporting "stopped".
+        runtime = EmbeddingRuntime(index=MagicMock(), backend="bogus", model="/m.gguf")
+        with pytest.raises(ValueError, match="Unknown embedding backend"):
+            runtime.start()
+        assert runtime.state == "failed"
+
 
 class TestProcessHelpers:
     """Low-level helpers behind orphan reaping."""

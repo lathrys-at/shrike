@@ -50,7 +50,7 @@ Start the server as a background daemon. The collection path can come from `--co
 | `--embedding-backend` | Embedding backend: `llama` (llama-server subprocess, GGUF/MLX) or `onnx` (in-process onnxruntime; needs the `onnx` extra). Default: `llama`. |
 | `--embedding-model PATH` | Path to the embedding model. For the `llama` backend, a GGUF file; for `onnx`, a model directory holding `model.onnx` and `tokenizer.json`. Enables semantic search. |
 | `--embedding-port INTEGER` | Port for the embedding server (default: 8373). `llama` backend only. |
-| `--embedding-context-size INTEGER` | Context size for the embedding model. `llama` backend only. |
+| `--embedding-context-size INTEGER` | Context size for the embedding model. For `onnx` it sets the token-truncation length (default 256). |
 | `--embedding-threads INTEGER` | CPU threads for embedding inference. `llama` backend only. |
 | `--embedding-gpu-layers INTEGER` | Layers to offload to the GPU. `llama` backend only. |
 | `--embedding-pooling` | Pooling type: `mean`, `last`, `cls`, or `none`. For `llama`, defaults to the model's GGUF setting (set `last` for last-token models like Jina v5 / Qwen3-Embedding, whose metadata omits it); for `onnx`, defaults to `mean` and `none` is not accepted. Changing it forces an index rebuild. |

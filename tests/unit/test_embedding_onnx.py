@@ -24,8 +24,9 @@ from shrike.embedding_onnx import OnnxBackend
 
 
 class _FakeInput:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, type_: str = "tensor(int64)") -> None:
         self.name = name
+        self.type = type_
 
 
 class _FakeOutput:
@@ -34,24 +35,48 @@ class _FakeOutput:
 
 
 class _FakeSession:
-    """Returns an all-ones [B, S, H=4] last_hidden_state regardless of input."""
+    """All-ones session: 3D [B, S, H=4] last_hidden_state, int64 inputs.
+
+    Subclasses tweak ``_input_type`` (declared input dtype) and ``_output_ndim``
+    (2 = pre-pooled sentence embedding, 3 = token-level). ``last_feed`` records the
+    most recent feed so tests can assert the fed dtype.
+    """
+
+    _input_type = "tensor(int64)"
+    _output_ndim = 3
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         self._inputs = [
-            _FakeInput("input_ids"),
-            _FakeInput("attention_mask"),
-            _FakeInput("token_type_ids"),
+            _FakeInput(n, self._input_type)
+            for n in ("input_ids", "attention_mask", "token_type_ids")
         ]
+        self.last_feed: dict | None = None
 
     def get_inputs(self) -> list[_FakeInput]:
         return self._inputs
 
     def get_outputs(self) -> list[_FakeOutput]:
-        return [_FakeOutput([None, None, 4])]
+        shape = [None, None, 4] if self._output_ndim == 3 else [None, 4]
+        return [_FakeOutput(shape)]
 
     def run(self, _outputs: object, feed: dict) -> list[np.ndarray]:
+        self.last_feed = feed
         batch, seq = feed["input_ids"].shape
+        if self._output_ndim == 2:
+            return [np.ones((batch, 4), dtype=np.float32)]
         return [np.ones((batch, seq, 4), dtype=np.float32)]
+
+
+class _FakeSession2D(_FakeSession):
+    """Emits an already-pooled [B, H] sentence embedding (no token axis)."""
+
+    _output_ndim = 2
+
+
+class _FakeSessionInt32(_FakeSession):
+    """Declares int32 inputs (onnxruntime won't auto-cast int64 → int32)."""
+
+    _input_type = "tensor(int32)"
 
 
 class _FakeEncoding:
@@ -128,6 +153,12 @@ class TestConstruction:
 
     def test_default_provider_is_cpu(self) -> None:
         assert OnnxBackend(model="x")._providers == ["CPUExecutionProvider"]
+
+    def test_max_length_default_and_override(self) -> None:
+        # None (e.g. no --embedding-context-size) → the 256 default; else honored.
+        assert OnnxBackend(model="x")._max_length == 256
+        assert OnnxBackend(model="x", max_length=None)._max_length == 256
+        assert OnnxBackend(model="x", max_length=512)._max_length == 512
 
 
 # -- File resolution ----------------------------------------------------------
@@ -208,14 +239,14 @@ class TestFingerprint:
 
 
 class TestLifecycleAndEmbed:
-    def _start(self, be: OnnxBackend) -> None:
+    def _start(self, be: OnnxBackend, session_cls: type = _FakeSession) -> None:
         # Inject fake onnxruntime/tokenizers modules into sys.modules so these
         # tests run WITHOUT the optional 'onnx' extra installed — the coverage
         # lane installs only `.[dev]`. `OnnxBackend.start()` imports both lazily,
         # so the fakes satisfy `import onnxruntime` / `from tokenizers import
         # Tokenizer` regardless of whether the real packages are present.
         fake_ort = types.ModuleType("onnxruntime")
-        fake_ort.InferenceSession = _FakeSession  # type: ignore[attr-defined]
+        fake_ort.InferenceSession = session_cls  # type: ignore[attr-defined]
         fake_tok = types.ModuleType("tokenizers")
         fake_tok.Tokenizer = _FakeTokenizerClass  # type: ignore[attr-defined]
         with patch.dict(sys.modules, {"onnxruntime": fake_ort, "tokenizers": fake_tok}):
@@ -243,6 +274,23 @@ class TestLifecycleAndEmbed:
         self._start(be)
         vecs = be.embed_texts(["a"])
         assert all(abs(x - 1.0) < 1e-6 for x in vecs[0])  # raw mean of all-ones
+
+    def test_pre_pooled_2d_output_used_directly(self, tmp_path: Path) -> None:
+        # A model whose first output is already a [B, H] sentence embedding is
+        # used as-is, not pooled — must not crash _pool with an IndexError/ValueError.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)), normalize=False)
+        self._start(be, _FakeSession2D)
+        vecs = be.embed_texts(["a", "b"])
+        assert len(vecs) == 2
+        assert all(len(v) == 4 for v in vecs)
+        assert all(abs(x - 1.0) < 1e-6 for x in vecs[0])  # raw [1,1,1,1], no pooling
+
+    def test_inputs_cast_to_declared_int32(self, tmp_path: Path) -> None:
+        # onnxruntime won't auto-cast; an int32-input graph must be fed int32.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(be, _FakeSessionInt32)
+        be.embed_texts(["a"])
+        assert be._session.last_feed["input_ids"].dtype == np.int32
 
     def test_embed_empty_returns_empty(self, tmp_path: Path) -> None:
         be = OnnxBackend(model=str(_model_dir(tmp_path)))

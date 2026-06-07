@@ -678,8 +678,11 @@ class EmbeddingRuntime:
             if not self._model:
                 raise ValueError("No embedding model configured")
 
-            be = self._make_backend()
             try:
+                # Construction inside the try too, so a bad backend kind or an
+                # OnnxBackend pooling/ImportError marks the runtime failed (state
+                # reports "failed", not "stopped").
+                be = self._make_backend()
                 be.start()
             except Exception:
                 self._last_start_failed = True
@@ -705,6 +708,9 @@ class EmbeddingRuntime:
                 pooling=self._pooling,
                 normalize=self._normalize,
                 providers=self._onnx_providers,
+                # --embedding-context-size doubles as ONNX's token-truncation
+                # length (None → the backend's 256 default).
+                max_length=self._context_size,
                 log_dir=self._log_dir,
             )
         if self._backend_kind == "llama":

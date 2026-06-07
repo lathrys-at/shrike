@@ -786,7 +786,11 @@ def main() -> None:
     if args.embedding_model and not args.no_embedding:
         try:
             svc = runtime.start()
-        except (FileNotFoundError, RuntimeError, ValueError) as e:
+        except (FileNotFoundError, RuntimeError, ValueError, ImportError) as e:
+            # ImportError: the onnx backend was selected without the optional
+            # 'onnx' extra installed. Like a missing model file, degrade — boot
+            # without embedding rather than killing the server (the /embedding/start
+            # handler returns 400 for the same case).
             logger.error("Failed to start embedding service: %s", e)
         else:
             model_id = svc.model_fingerprint()

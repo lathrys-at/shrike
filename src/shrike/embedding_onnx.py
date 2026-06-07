@@ -46,6 +46,10 @@ _POOLINGS = frozenset({"mean", "cls", "last"})
 # Standard BERT/sentence-transformers ONNX input names; only those the session
 # actually declares are fed.
 _KNOWN_INPUTS = ("input_ids", "attention_mask", "token_type_ids")
+# onnxruntime declares input types as strings like "tensor(int64)" and does NOT
+# auto-cast a fed array, so we match each input's declared integer dtype (some
+# mobile/quantized exports use int32 rather than int64).
+_ORT_INT_DTYPES = {"tensor(int64)": np.int64, "tensor(int32)": np.int32}
 
 
 class OnnxBackend:
@@ -63,7 +67,7 @@ class OnnxBackend:
         pooling: str | None = None,
         normalize: bool = True,
         providers: list[str] | None = None,
-        max_length: int = DEFAULT_MAX_LENGTH,
+        max_length: int | None = None,
         log_dir: str | Path | None = None,  # accepted for runtime parity; unused
     ) -> None:
         self._model = model
@@ -76,7 +80,9 @@ class OnnxBackend:
         self._pooling = pool
         self._normalize = normalize
         self._providers = list(providers) if providers else list(DEFAULT_PROVIDERS)
-        self._max_length = max_length
+        # Token truncation length. Plumbed from --embedding-context-size; None
+        # means the default (fine for all-MiniLM's 256-token limit).
+        self._max_length = max_length or DEFAULT_MAX_LENGTH
         self._session: Any = None
         self._tokenizer: Any = None
         self._dim: int | None = None
@@ -154,20 +160,32 @@ class OnnxBackend:
             return []
 
         encodings = self._tokenizer.encode_batch(texts)
-        input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
-        attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
-        token_type_ids = np.array([e.type_ids for e in encodings], dtype=np.int64)
         available = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "token_type_ids": token_type_ids,
+            "input_ids": np.array([e.ids for e in encodings], dtype=np.int64),
+            "attention_mask": np.array([e.attention_mask for e in encodings], dtype=np.int64),
+            "token_type_ids": np.array([e.type_ids for e in encodings], dtype=np.int64),
         }
-        declared = {i.name for i in self._session.get_inputs()}
-        feed = {name: available[name] for name in _KNOWN_INPUTS if name in declared}
+        attention_mask = available["attention_mask"]
+        # Feed only the inputs the graph declares, each cast to that input's
+        # declared integer dtype (onnxruntime won't auto-cast).
+        feed = {
+            inp.name: available[inp.name].astype(_ORT_INT_DTYPES.get(inp.type, np.int64))
+            for inp in self._session.get_inputs()
+            if inp.name in available
+        }
 
-        # outputs[0] is the token-level last_hidden_state: [batch, seq, hidden].
-        token_emb = np.asarray(self._session.run(None, feed)[0], dtype=np.float32)
-        vectors = self._pool(token_emb, attention_mask)
+        out = np.asarray(self._session.run(None, feed)[0], dtype=np.float32)
+        # A token-level last_hidden_state [batch, seq, hidden] needs pooling; some
+        # exports emit an already-pooled sentence embedding [batch, hidden], which
+        # is used directly.
+        if out.ndim == 3:
+            vectors = self._pool(out, attention_mask)
+        elif out.ndim == 2:
+            vectors = out
+        else:
+            raise RuntimeError(
+                f"ONNX model first output has rank {out.ndim}; expected 2 (pooled) or 3 (tokens)"
+            )
         if self._normalize:
             norms = np.linalg.norm(vectors, axis=1, keepdims=True)
             vectors = vectors / np.clip(norms, 1e-12, None)

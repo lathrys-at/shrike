@@ -36,8 +36,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "embedding": {
         # Backend kind: "llama" (llama-server, GGUF/MLX) or "onnx" (in-process
-        # onnxruntime, needs the 'onnx' extra). Default keeps existing behaviour.
-        "backend": "llama",
+        # onnxruntime, needs the 'onnx' extra). ``None`` means "unset" so it
+        # resolves to None and isn't transmitted as an override by `embedding
+        # start`; the built-in "llama" default is applied at the consumption sites
+        # (server `main()` and `embedding_args`).
+        "backend": None,
         "model": None,
         "port": 8373,
         # onnxruntime execution providers (onnx backend only), in priority order.
@@ -219,9 +222,13 @@ def resolve_embedding(
 
     env_port = os.environ.get("SHRIKE_EMBEDDING_PORT")
     resolved: dict[str, Any] = {
-        "backend": (
-            backend or os.environ.get("SHRIKE_EMBEDDING_BACKEND") or emb.get("backend") or "llama"
-        ),
+        # Resolves to None when unspecified — deliberately NOT defaulted to "llama"
+        # here. `shrike embedding start` transmits only non-None resolved values, so
+        # a None backend lets a running server keep the backend it booted with
+        # (matching how model/pooling behave). The "llama" default is applied at the
+        # consumption sites: `embedding_args` emits the flag only for a non-llama
+        # backend, and server `main()` uses `args.embedding_backend or DEFAULT_BACKEND`.
+        "backend": (backend or os.environ.get("SHRIKE_EMBEDDING_BACKEND") or emb.get("backend")),
         "model": model or os.environ.get("SHRIKE_EMBEDDING_MODEL") or emb.get("model"),
         "llama_server": (
             llama_server or os.environ.get("LLAMA_SERVER_PATH") or emb.get("llama_server")
