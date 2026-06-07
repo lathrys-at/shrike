@@ -40,7 +40,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/shrike-test-models
-          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M-onnx
+          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M-onnx-int8
       - name: Warm embedding models
         env:
           SHRIKE_TEST_MODEL_DIR: ${{ runner.temp }}/shrike-test-models

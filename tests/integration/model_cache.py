@@ -25,16 +25,21 @@ EMBEDDING_MODEL_URL = (
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2-Q4_K_M.gguf"
 
 # Pinned test ONNX embedding model (text-only), used to exercise the ONNX backend
-# alongside the GGUF/llama-server one. all-MiniLM-L6-v2 in ONNX form gives the same
-# 384-dim space as the GGUF, so the two backends can share semantic assertions.
-# Bump the URLs + dir name together to change it.
-ONNX_MODEL_DIR_NAME = "all-MiniLM-L6-v2-onnx"
+# alongside the GGUF/llama-server one. Same all-MiniLM-L6-v2 architecture (384-dim,
+# so the two backends share semantic assertions), but the *portable int8-quantized*
+# export from Xenova (transformers.js packaging): ~22 MB vs the 86 MB fp32 export,
+# comparable to the 20 MB GGUF, and — unlike sentence-transformers' ISA-tagged
+# `model_qint8_avx512`/`_arm64` files — a dynamic quantization with no instruction-set
+# assumption, so it runs on the linux-x64 lane, the macOS-arm64 rc lane, and local
+# dev alike. Saved as `model.onnx` so OnnxBackend's dir resolver finds it. Bump the
+# URLs + dir name together (and the CI cache key) to change it.
+ONNX_MODEL_DIR_NAME = "all-MiniLM-L6-v2-onnx-int8"
 ONNX_MODEL_FILES = {
     "model.onnx": (
-        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx"
+        "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx"
     ),
     "tokenizer.json": (
-        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
+        "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
     ),
 }
 
