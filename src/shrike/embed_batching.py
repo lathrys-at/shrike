@@ -121,26 +121,39 @@ def probe_max_safe_batch(
 ) -> int:
     """Return the batch size proven safe (the probe-set size) or 1 (embed serially).
 
-    Embeds each probe text **alone** (the reference), then all of them in **one batch** —
-    the largest, most heterogeneous batch — and compares (max-abs per element). Match within
+    Embeds each probe text **alone** (the serial reference), then all of them in **one batch**
+    — the largest, most heterogeneous batch — and compares (max-abs per element). Match within
     *tol* → the model batches deterministically and is safe up to the probe-set size (the
-    caller caps there); mismatch → 1. Retries the whole probe up to *attempts* times on a
-    transient embed failure, raising :class:`ProbeError` only if every attempt fails.
+    caller caps there); mismatch → 1.
+
+    The two failure modes are kept distinct. The **serial reference** is what the model must be
+    able to do at all; it's retried up to *attempts* times and a persistent failure raises
+    :class:`ProbeError` (so the caller can fail loud — e.g. a model that needs an input we don't
+    supply). A **batch-only** failure (the serial reference succeeded but the batched call
+    didn't — e.g. a graph fixed to batch size 1) is *not* an error: it returns 1, embedding
+    serially.
     """
     texts = list(probe_texts if probe_texts is not None else BATCH_PROBE_TEXTS)
     if len(texts) < 2:
         return 1
+    reference: np.ndarray | None = None
     last_exc: Exception | None = None
     for _ in range(max(1, attempts)):
         try:
             reference = np.asarray([embed_chunk([t])[0] for t in texts], dtype=np.float64)
-            batched = np.asarray(embed_chunk(texts), dtype=np.float64)
-        except Exception as e:  # noqa: BLE001 — any embed failure is retried, then surfaced
+            break
+        except Exception as e:  # noqa: BLE001 — retry the serial reference, then surface
             last_exc = e
-            continue
-        drift = float(np.max(np.abs(reference - batched)))
-        return len(texts) if drift <= tol else 1
-    raise ProbeError(f"batch-safety probe failed after {attempts} attempt(s): {last_exc}")
+    if reference is None:
+        raise ProbeError(f"serial embedding failed after {attempts} attempt(s): {last_exc}")
+    # The model can embed serially. Does it also batch deterministically? A batch-only
+    # failure (e.g. a fixed batch-1 graph) degrades to serial rather than erroring.
+    try:
+        batched = np.asarray(embed_chunk(texts), dtype=np.float64)
+    except Exception:  # noqa: BLE001 — can embed serially but not batched → serial
+        return 1
+    drift = float(np.max(np.abs(reference - batched)))
+    return len(texts) if drift <= tol else 1
 
 
 def max_probe_drift(

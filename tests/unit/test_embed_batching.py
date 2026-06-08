@@ -84,6 +84,27 @@ def test_raises_after_persistent_failure() -> None:
         probe_max_safe_batch(broken)
 
 
+def test_serial_reference_failure_raises_not_serial() -> None:
+    # If even a single-text embed fails, the model can't be driven at all → ProbeError
+    # (so a backend can fail loud), never a silent serial classification.
+    def serial_broken(texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("missing required input")
+
+    with pytest.raises(ProbeError):
+        probe_max_safe_batch(serial_broken)
+
+
+def test_batch_only_failure_falls_back_to_serial() -> None:
+    # Serial reference embeds fine; only the batched call fails (e.g. a fixed batch-1 graph).
+    # That degrades to serial (1), not an error.
+    def batch_only_broken(texts: list[str]) -> list[list[float]]:
+        if len(texts) > 1:
+            raise RuntimeError("model only supports batch size 1")
+        return _deterministic(texts)
+
+    assert probe_max_safe_batch(batch_only_broken) == 1
+
+
 def test_max_probe_drift() -> None:
     assert max_probe_drift(_deterministic) == 0.0
     assert max_probe_drift(_variant) > BATCH_DRIFT_TOL

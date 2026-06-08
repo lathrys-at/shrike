@@ -33,7 +33,7 @@ from typing import Any
 
 import numpy as np
 
-from shrike.embed_batching import probe_max_safe_batch
+from shrike.embed_batching import ProbeError, probe_max_safe_batch
 from shrike.embed_text import EMBED_TEXT_VERSION
 from shrike.embedding_base import TEXT
 
@@ -44,6 +44,11 @@ DEFAULT_PROVIDERS = ("CPUExecutionProvider",)
 # Pooling strategies this backend implements (llama also offers "none", which is
 # meaningless for a single per-note vector and is rejected here).
 _POOLINGS = frozenset({"mean", "cls", "last"})
+# The model inputs this backend supplies (the standard sentence-transformers set). A model
+# with a *required* input outside this set — most commonly `position_ids` — can't be driven,
+# and we'd rather fail loud at start() (below) than silently break embedding. Single source
+# of truth for both the feed in `_embed_chunk` and the start()-time diagnostic.
+_SUPPLIED_INPUTS = frozenset({"input_ids", "attention_mask", "token_type_ids"})
 # onnxruntime declares input types as strings like "tensor(int64)" and does NOT
 # auto-cast a fed array, so we match each input's declared integer dtype (some
 # mobile/quantized exports use int32 rather than int64).
@@ -163,26 +168,32 @@ class OnnxBackend:
 
         # Probe batch-safety once: int8 dynamic-quant exports are batch-variant (a
         # note's vector depends on its batch-mates), fp16/fp32 are not. Batch only as
-        # large as is provably safe; serial otherwise. A probe failure (after its own
-        # retries) falls back to serial rather than failing boot.
+        # large as is provably safe; serial otherwise. Unlike llama's (transient, HTTP)
+        # probe, an ONNX serial-embed failure is deterministic — serial won't help, so we
+        # fail start() loud rather than masquerade as serial. The most common cause is a
+        # model with a required input we don't supply (e.g. position_ids), named below.
         try:
             self._safe_batch = probe_max_safe_batch(self._embed_chunk)
-            if self._safe_batch == 1 and self._batch_cap and self._batch_cap > 1:
-                logger.warning(
-                    "Embedding model is batch-variant; embedding serially (batch size 1) for "
-                    "determinism — use a different model/backend combination for batched "
-                    "throughput."
-                )
-            elif self._batch_cap and self._batch_cap > self._safe_batch:
-                logger.info(
-                    "--embedding-batch-size %d exceeds the probe-verified ceiling %d; "
-                    "capping there.",
-                    self._batch_cap,
-                    self._safe_batch,
-                )
-        except Exception as e:  # noqa: BLE001 — never fail boot on a probe hiccup
-            logger.warning("Batch-safety probe failed (%s); embedding serially.", e)
-            self._safe_batch = 1
+        except ProbeError as e:
+            unsupported = sorted({i.name for i in self._session.get_inputs()} - _SUPPLIED_INPUTS)
+            if unsupported:
+                raise RuntimeError(
+                    f"ONNX model requires input(s) {unsupported} this backend does not supply "
+                    f"(it provides {sorted(_SUPPLIED_INPUTS)}); use a standard "
+                    f"sentence-transformers ONNX export."
+                ) from e
+            raise RuntimeError(f"ONNX embedding model could not be driven: {e}") from e
+        if self._safe_batch == 1 and self._batch_cap and self._batch_cap > 1:
+            logger.warning(
+                "Embedding model is batch-variant; embedding serially (batch size 1) for "
+                "determinism — use a different model/backend combination for batched throughput."
+            )
+        elif self._batch_cap and self._batch_cap > self._safe_batch:
+            logger.info(
+                "--embedding-batch-size %d exceeds the probe-verified ceiling %d; capping there.",
+                self._batch_cap,
+                self._safe_batch,
+            )
         logger.info(
             "ONNX embedding model ready (%s, %s)",
             onnx_path.name,
@@ -236,12 +247,13 @@ class OnnxBackend:
             "token_type_ids": np.array([e.type_ids for e in encodings], dtype=np.int64),
         }
         attention_mask = available["attention_mask"]
-        # Feed only the inputs the graph declares, each cast to that input's declared
-        # integer dtype (onnxruntime won't auto-cast).
+        # Feed only the inputs we supply *and* the graph declares, each cast to that input's
+        # declared integer dtype (onnxruntime won't auto-cast). A required input outside
+        # `_SUPPLIED_INPUTS` is detected at start(); here it's simply absent from the feed.
         feed = {
             inp.name: available[inp.name].astype(_ORT_INT_DTYPES.get(inp.type, np.int64))
             for inp in self._session.get_inputs()
-            if inp.name in available
+            if inp.name in _SUPPLIED_INPUTS
         }
         out = np.asarray(self._session.run(None, feed)[0], dtype=np.float32)
         # A token-level last_hidden_state [batch, seq, hidden] needs pooling; some exports

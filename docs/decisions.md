@@ -101,6 +101,19 @@ real DistilRoBERTa run:
   this; a BERT-tokenizer mock never reaches the `<pad>` branch). Padding is applied
   whenever a batch-safe model embeds a chunk of >1, so this resolution is load-bearing,
   not merely defensive.
+- **A required input we don't supply fails loud at `start()`, not silently at first embed.**
+  The backend feeds a fixed set (`input_ids`/`attention_mask`/`token_type_ids`); a model with
+  a *required* input outside it — most commonly `position_ids` (some optimum/transformers.js
+  exports) — would otherwise boot fine (the startup probe's failure was caught → serial) and
+  then break on the first real embed, with only a generic "probe failed" line. Now an ONNX
+  serial-embed failure (deterministic, unlike llama's transient HTTP) raises from `start()`,
+  naming the unsupported inputs, so it surfaces at boot (ERROR + degrade-to-no-embedding) or as
+  a 500 from `/embedding/start`. We deliberately do **not** auto-supply `position_ids`: correct
+  positions are architecture-specific (RoBERTa offsets by `padding_idx`, BERT uses a plain
+  `arange`), so guessing would silently *corrupt* embeddings — strictly worse than refusing.
+  Same detect-and-refuse principle as the pad-token resolution above. (A *batch-only* failure —
+  serial works, batched doesn't, e.g. a fixed batch-1 graph — is not fatal: it degrades to
+  serial.)
 - **`--embedding-context-size` truncates but is not clamped to the model's ceiling.**
   It sets the ONNX token-truncation length; raising it past the model's
   `max_position_embeddings` is the operator's responsibility (documented in the CLI

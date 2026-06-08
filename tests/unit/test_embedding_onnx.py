@@ -86,6 +86,25 @@ class _FakeSession2Input(_FakeSession):
     _input_names = ("input_ids", "attention_mask")
 
 
+class _FakeSessionRequiresPositionIds(_FakeSession):
+    """Declares a *required* position_ids input the backend doesn't supply: run() raises
+    when it's absent (mimicking onnxruntime's "Required inputs ... are missing")."""
+
+    _input_names = ("input_ids", "attention_mask", "token_type_ids", "position_ids")
+
+    def run(self, _outputs: object, feed: dict) -> list[np.ndarray]:
+        if "position_ids" not in feed:
+            raise RuntimeError("Required inputs (position_ids) are missing from input feed.")
+        return super().run(_outputs, feed)
+
+
+class _FakeSessionOptionalExtra(_FakeSession):
+    """Declares an extra input the backend doesn't supply but the graph doesn't *require* —
+    run() succeeds without it, so start() must NOT reject the model."""
+
+    _input_names = ("input_ids", "attention_mask", "token_type_ids", "extra_optional")
+
+
 class _FakeSessionVariant(_FakeSession):
     """Batch-variant (like int8 dynamic quant): output *direction* depends on batch size,
     so the startup probe detects it and forces serial embedding."""
@@ -381,6 +400,20 @@ class TestLifecycleAndEmbed:
         be._session.run_calls.clear()
         be.embed_texts([f"n{i}" for i in range(be._safe_batch + 8)])
         assert be._session.run_calls == [be._safe_batch, 8]
+
+    def test_required_unsupported_input_fails_loud(self, tmp_path: Path) -> None:
+        # A model with a required input we don't supply (position_ids) must fail start() with
+        # a named error, not boot fine and silently break embedding on the first real call.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        with pytest.raises(RuntimeError, match="position_ids"):
+            self._start(be, _FakeSessionRequiresPositionIds)
+
+    def test_optional_unsupported_input_does_not_reject(self, tmp_path: Path) -> None:
+        # An extra declared input the graph doesn't *require* (run() succeeds without it)
+        # must not be rejected — the guard keys on an actual embed failure, not a name.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(be, _FakeSessionOptionalExtra)  # must not raise
+        assert be.embed_texts(["a", "b"])
 
     def test_health_batch_label_reflects_cap(self, tmp_path: Path) -> None:
         # Safe model, no cap → batched.
