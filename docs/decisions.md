@@ -40,7 +40,36 @@ vs-fusion index question — that needs evaluation on a real collection (#162).
 the index; L2 normalization changes only magnitude, and USearch's `cos` metric is
 scale-invariant, so it never changes ranking — the same reasoning that already
 makes llama's `--embd-normalize` moot. CI runs a minimal embedding subset against
-*both* backends (`test_backends.py`), so neither path can rot.
+*both* backends (`test_backends.py`), plus a second architecturally-different real
+model (DistilRoBERTa, `test_onnx_models.py`) — the real models keep the cheap mocked
+unit tests honest (their assumed onnxruntime input-type strings, output ranks, and
+tokenizer behaviour stay falsifiable instead of drifting from reality).
+
+Three ONNX operational calls came out of the second-model work, all anchored by that
+real DistilRoBERTa run:
+
+- **Pad token resolved across conventions, not hard-coded.** BERT/WordPiece names the
+  pad token `[PAD]`, RoBERTa/BPE uses `<pad>`; `OnnxBackend` resolves `[PAD]` then
+  `<pad>`, falling back to id 0 only if neither exists. This isn't cosmetic: RoBERTa
+  derives position ids from *which tokens ≠ the pad id*, so padding a batch with the
+  wrong id (the old `<s>`=0 fallback) shifts the real tokens' positions and corrupts
+  their embeddings. The real model surfaced it; a BERT-tokenizer mock never reaches
+  the `<pad>` branch. (Padded positions are masked out of `_pool` regardless, so the
+  fill id only ever affects *whether the real tokens are computed correctly*, never a
+  pooled value directly.)
+- **Quantized ONNX is not batch-invariant, and that's fine.** An int8 model embeds a
+  note slightly differently alone vs. in a batch (int8 reduction order differs per
+  batch — even BERT MiniLM drifts ~0.06). So the real masking test asserts *ranking
+  sanity*, never bit-equality; the drift is far below inter-note semantic distances
+  and search ranks correctly. Don't write batched-vs-single `allclose` assertions
+  against a quantized model.
+- **`--embedding-context-size` truncates but is not clamped to the model's ceiling.**
+  It sets the ONNX token-truncation length; raising it past the model's
+  `max_position_embeddings` is the operator's responsibility (documented in the CLI
+  help). We deliberately don't clamp: that limit isn't reliably discoverable from an
+  arbitrary ONNX graph (sometimes a static input shape, sometimes only a sibling
+  `config.json`, sometimes absent). A warn-only `config.json` read is a possible
+  future safety net, not a clamp.
 
 ### The index is a derived cache, never a co-equal store
 

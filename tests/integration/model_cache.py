@@ -43,6 +43,22 @@ ONNX_MODEL_FILES = {
     ),
 }
 
+# A second, architecturally-different ONNX model for the embedding lane (#172
+# review): all-distilroberta-v1 is DistilRoBERTa — **768-dim** (not MiniLM's 384,
+# so its own vector space, no cross-model comparison) and a **BPE tokenizer with no
+# `[PAD]`** (`token_to_id("[PAD]")` is None, so OnnxBackend's `<pad>` resolution
+# fires for real). int8 Xenova export, Apache-2.0. Pins the RoBERTa-only deltas the
+# MiniLM can't reach; ~82 MB, so the embedding lane now caches two onnx models.
+DISTILROBERTA_MODEL_DIR_NAME = "all-distilroberta-v1-onnx-int8"
+DISTILROBERTA_MODEL_FILES = {
+    "model.onnx": (
+        "https://huggingface.co/Xenova/all-distilroberta-v1/resolve/main/onnx/model_quantized.onnx"
+    ),
+    "tokenizer.json": (
+        "https://huggingface.co/Xenova/all-distilroberta-v1/resolve/main/tokenizer.json"
+    ),
+}
+
 # Statuses worth retrying: HF rate-limit plus transient gateway/server errors.
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
@@ -111,21 +127,30 @@ def cached_model_path(model_name: str, fallback_dir: Path) -> Path:
     return base / model_name
 
 
-def cached_onnx_model_dir(fallback_dir: Path) -> Path:
-    """Resolve (and populate) the ONNX model directory.
+def _cached_model_dir(fallback_dir: Path, dir_name: str, files: dict[str, str]) -> Path:
+    """Resolve (and populate) an ONNX model directory.
 
     Like :func:`cached_model_path`, uses ``$SHRIKE_TEST_MODEL_DIR`` when set (a
-    stable, CI-cached dir) else *fallback_dir*. Downloads ``model.onnx`` +
-    ``tokenizer.json`` into ``<base>/<ONNX_MODEL_DIR_NAME>/`` with retry/backoff if
-    missing, and returns that directory (pass it to ``--embedding-model`` with the
-    onnx backend).
+    stable, CI-cached dir) else *fallback_dir*. Downloads each of *files* into
+    ``<base>/<dir_name>/`` with retry/backoff if missing, and returns that directory
+    (pass it to ``--embedding-model`` with the onnx backend).
     """
     root = os.environ.get("SHRIKE_TEST_MODEL_DIR")
     base = Path(root) if root else fallback_dir
-    model_dir = base / ONNX_MODEL_DIR_NAME
+    model_dir = base / dir_name
     model_dir.mkdir(parents=True, exist_ok=True)
-    for name, url in ONNX_MODEL_FILES.items():
+    for name, url in files.items():
         dest = model_dir / name
         if not (dest.exists() and dest.stat().st_size > 0):
             download_with_retry(url, dest)
     return model_dir
+
+
+def cached_onnx_model_dir(fallback_dir: Path) -> Path:
+    """The pinned MiniLM int8 ONNX model dir (384-dim, BERT/WordPiece)."""
+    return _cached_model_dir(fallback_dir, ONNX_MODEL_DIR_NAME, ONNX_MODEL_FILES)
+
+
+def cached_distilroberta_model_dir(fallback_dir: Path) -> Path:
+    """The pinned DistilRoBERTa int8 ONNX model dir (768-dim, BPE, no ``[PAD]``)."""
+    return _cached_model_dir(fallback_dir, DISTILROBERTA_MODEL_DIR_NAME, DISTILROBERTA_MODEL_FILES)

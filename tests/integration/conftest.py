@@ -33,6 +33,7 @@ from shrike.client import ShrikeClient
 from tests.integration.model_cache import (
     EMBEDDING_MODEL_NAME,
     EMBEDDING_MODEL_URL,
+    cached_distilroberta_model_dir,
     cached_model_path,
     cached_onnx_model_dir,
     download_with_retry,
@@ -541,6 +542,16 @@ def onnx_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
     retry/backoff and reused from the CI-cached model dir (``$SHRIKE_TEST_MODEL_DIR``).
     """
     return cached_onnx_model_dir(tmp_path_factory.mktemp("onnx-model"))
+
+
+@pytest.fixture(scope="session")
+def distilroberta_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A second, architecturally-different ONNX model: DistilRoBERTa (768-dim, BPE).
+
+    Its own vector space (not comparable to MiniLM) and no ``[PAD]`` token, so it
+    exercises the RoBERTa-only paths the MiniLM can't (#172). Same retry/cache path.
+    """
+    return cached_distilroberta_model_dir(tmp_path_factory.mktemp("distilroberta-model"))
 
 
 @pytest.fixture(scope="session")

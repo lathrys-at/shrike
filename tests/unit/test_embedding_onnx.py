@@ -44,12 +44,10 @@ class _FakeSession:
 
     _input_type = "tensor(int64)"
     _output_ndim = 3
+    _input_names = ("input_ids", "attention_mask", "token_type_ids")
 
     def __init__(self, *args: object, **kwargs: object) -> None:
-        self._inputs = [
-            _FakeInput(n, self._input_type)
-            for n in ("input_ids", "attention_mask", "token_type_ids")
-        ]
+        self._inputs = [_FakeInput(n, self._input_type) for n in self._input_names]
         self.last_feed: dict | None = None
 
     def get_inputs(self) -> list[_FakeInput]:
@@ -79,6 +77,12 @@ class _FakeSessionInt32(_FakeSession):
     _input_type = "tensor(int32)"
 
 
+class _FakeSession2Input(_FakeSession):
+    """Declares only input_ids + attention_mask (no token_type_ids), like DistilBERT."""
+
+    _input_names = ("input_ids", "attention_mask")
+
+
 class _FakeEncoding:
     def __init__(self, ids: list[int]) -> None:
         self.ids = ids
@@ -87,11 +91,16 @@ class _FakeEncoding:
 
 
 class _FakeTokenizer:
-    def token_to_id(self, _tok: str) -> int:
-        return 0
+    """BERT/WordPiece-style: has a "[PAD]" token (id 5, deliberately non-zero so the
+    fallback id 0 is distinguishable). Records the pad_id passed to enable_padding."""
 
-    def enable_padding(self, **_kwargs: object) -> None:
-        pass
+    padding_pad_id: int | None = None
+
+    def token_to_id(self, tok: str) -> int | None:
+        return 5 if tok == "[PAD]" else 0
+
+    def enable_padding(self, *, pad_id: int = 0, **_kwargs: object) -> None:
+        self.padding_pad_id = pad_id
 
     def enable_truncation(self, **_kwargs: object) -> None:
         pass
@@ -100,10 +109,18 @@ class _FakeTokenizer:
         return [_FakeEncoding([1, 2, 3]) for _ in texts]
 
 
-class _FakeTokenizerClass:
-    @staticmethod
-    def from_file(_path: str) -> _FakeTokenizer:
-        return _FakeTokenizer()
+class _FakeTokenizerRoberta(_FakeTokenizer):
+    """RoBERTa/BPE-style: no "[PAD]" but a "<pad>" (id 1)."""
+
+    def token_to_id(self, tok: str) -> int | None:
+        return 1 if tok == "<pad>" else None
+
+
+class _FakeTokenizerNoPadToken(_FakeTokenizer):
+    """Neither "[PAD]" nor "<pad>" — forces the id-0 final fallback."""
+
+    def token_to_id(self, _tok: str) -> int | None:
+        return None
 
 
 def _model_dir(tmp_path: Path, *, content: bytes = b"onnx-bytes") -> Path:
@@ -239,7 +256,12 @@ class TestFingerprint:
 
 
 class TestLifecycleAndEmbed:
-    def _start(self, be: OnnxBackend, session_cls: type = _FakeSession) -> None:
+    def _start(
+        self,
+        be: OnnxBackend,
+        session_cls: type = _FakeSession,
+        tokenizer_cls: type = _FakeTokenizer,
+    ) -> None:
         # Inject fake onnxruntime/tokenizers modules into sys.modules so these
         # tests run WITHOUT the optional 'onnx' extra installed — the coverage
         # lane installs only `.[dev]`. `OnnxBackend.start()` imports both lazily,
@@ -248,7 +270,13 @@ class TestLifecycleAndEmbed:
         fake_ort = types.ModuleType("onnxruntime")
         fake_ort.InferenceSession = session_cls  # type: ignore[attr-defined]
         fake_tok = types.ModuleType("tokenizers")
-        fake_tok.Tokenizer = _FakeTokenizerClass  # type: ignore[attr-defined]
+
+        class _TokFactory:
+            @staticmethod
+            def from_file(_path: str) -> object:
+                return tokenizer_cls()
+
+        fake_tok.Tokenizer = _TokFactory  # type: ignore[attr-defined]
         with patch.dict(sys.modules, {"onnxruntime": fake_ort, "tokenizers": fake_tok}):
             be.start()
 
@@ -291,6 +319,38 @@ class TestLifecycleAndEmbed:
         self._start(be, _FakeSessionInt32)
         be.embed_texts(["a"])
         assert be._session.last_feed["input_ids"].dtype == np.int32
+
+    def test_feed_filter_drops_undeclared_inputs(self, tmp_path: Path) -> None:
+        # A model declaring only input_ids+attention_mask (DistilBERT/RoBERTa):
+        # token_type_ids must be filtered out of the feed, since onnxruntime rejects
+        # an input the graph doesn't declare.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(be, _FakeSession2Input)
+        be.embed_texts(["a"])
+        assert set(be._session.last_feed) == {"input_ids", "attention_mask"}
+
+    def test_pad_token_used_when_present(self, tmp_path: Path) -> None:
+        # A WordPiece tokenizer with a real "[PAD]" id uses it (the fake's "[PAD]" is
+        # id 5, distinct from both the "<pad>" path and the 0 fallback).
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(be)
+        assert be._tokenizer.padding_pad_id == 5
+
+    def test_pad_token_resolves_roberta_pad(self, tmp_path: Path) -> None:
+        # No "[PAD]" but a "<pad>" (RoBERTa/BPE): resolve it rather than fall to 0 —
+        # RoBERTa's position ids depend on the real pad id. (The real DistilRoBERTa
+        # test exercises this end to end.)
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(be, tokenizer_cls=_FakeTokenizerRoberta)
+        assert be._tokenizer.padding_pad_id == 1
+        assert len(be.embed_texts(["a", "b"])[0]) == 4  # still embeds with padding
+
+    def test_pad_token_fallback_when_none(self, tmp_path: Path) -> None:
+        # Neither "[PAD]" nor "<pad>" in the vocab: final fallback to id 0. (Padded
+        # positions are masked out in _pool regardless — see TestPooling.)
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(be, tokenizer_cls=_FakeTokenizerNoPadToken)
+        assert be._tokenizer.padding_pad_id == 0
 
     def test_embed_empty_returns_empty(self, tmp_path: Path) -> None:
         be = OnnxBackend(model=str(_model_dir(tmp_path)))

@@ -43,9 +43,6 @@ DEFAULT_PROVIDERS = ("CPUExecutionProvider",)
 # Pooling strategies this backend implements (llama also offers "none", which is
 # meaningless for a single per-note vector and is rejected here).
 _POOLINGS = frozenset({"mean", "cls", "last"})
-# Standard BERT/sentence-transformers ONNX input names; only those the session
-# actually declares are fed.
-_KNOWN_INPUTS = ("input_ids", "attention_mask", "token_type_ids")
 # onnxruntime declares input types as strings like "tensor(int64)" and does NOT
 # auto-cast a fed array, so we match each input's declared integer dtype (some
 # mobile/quantized exports use int32 rather than int64).
@@ -141,8 +138,21 @@ class OnnxBackend:
         )
         self._session = ort.InferenceSession(str(onnx_path), providers=self._providers)
         tokenizer = Tokenizer.from_file(str(tok_path))
-        pad_id = tokenizer.token_to_id("[PAD]")
-        tokenizer.enable_padding(pad_id=pad_id if pad_id is not None else 0, pad_token="[PAD]")
+        # Resolve the pad token across tokenizer conventions: BERT/WordPiece names it
+        # "[PAD]", RoBERTa/BART BPE uses "<pad>". The *real* pad id matters because
+        # some architectures (RoBERTa) derive position ids from which tokens != the
+        # pad id, so padding with the wrong id shifts the real tokens' positions and
+        # corrupts their embeddings. Fall back to id 0 only if neither name exists.
+        # Padded positions always carry attention_mask 0 and are masked out of `_pool`
+        # regardless, so the fill token never reaches a pooled note vector — this just
+        # keeps the *real* tokens correct. (A real DistilRoBERTa export surfaced this;
+        # a BERT-tokenizer mock never reaches the "<pad>" branch — see the tests.)
+        pad_id, pad_token = tokenizer.token_to_id("[PAD]"), "[PAD]"
+        if pad_id is None:
+            pad_id, pad_token = tokenizer.token_to_id("<pad>"), "<pad>"
+        if pad_id is None:
+            pad_id, pad_token = 0, "[PAD]"
+        tokenizer.enable_padding(pad_id=pad_id, pad_token=pad_token)
         tokenizer.enable_truncation(max_length=self._max_length)
         self._tokenizer = tokenizer
         logger.info("ONNX embedding model ready (%s)", onnx_path.name)

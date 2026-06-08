@@ -1,14 +1,19 @@
-"""Cross-backend parity tests — the minimal embedding subset run against BOTH
-the llama-server and ONNX backends (#172).
+"""Cross-backend parity tests — the minimal embedding subset run end to end (#172).
 
-A single parameterized fixture spins up a populated, indexed server per backend;
-each test then runs once per backend. The llama param skips without llama-server,
-the onnx param without the 'onnx' extra — so a machine with only one backend still
-exercises that one. The model is the same all-MiniLM-L6-v2 (384-dim) in two
-runtimes, so the semantic assertions hold for both.
+A parameterized fixture spins up a populated, indexed server per param; each test
+runs once per param:
 
-The heavier, llama-specific behaviour (lifecycle, CLI, neighbor edge cases) stays
-in test_semantic.py / test_embedding.py; this module is deliberately small.
+- ``llama`` — llama-server + the GGUF MiniLM (384-dim). Skips without llama-server.
+- ``onnx`` — the ONNX backend + the same MiniLM (384-dim ONNX). Skips without the
+  'onnx' extra. Same vector space as ``llama``, so they share the dimension.
+- ``onnx-roberta`` — the ONNX backend + DistilRoBERTa (768-dim, BPE). A *different*
+  model and vector space — its job is to prove a second, architecturally-different
+  real export loads, indexes, and ranks end to end ("any ONNX dir"); it carries its
+  own expected dimension, no cross-model comparison.
+
+The expected dimension is carried in the param so the dimension assertion stays
+honest across the two models. Heavier llama-specific behaviour (lifecycle, CLI,
+neighbor edge cases) stays in test_semantic.py / test_embedding.py.
 """
 
 from __future__ import annotations
@@ -62,7 +67,6 @@ _CONCEPTS: list[dict[str, Any]] = [
     },
 ]
 _TOTAL_NOTES = sum(len(c["cards"]) for c in _CONCEPTS)
-_NDIM = 384  # all-MiniLM-L6-v2, both GGUF and ONNX
 
 
 def _base_url(server: ServerInfo) -> str:
@@ -83,17 +87,25 @@ def _wait_for_index_ready(server: ServerInfo, timeout: float = 60.0) -> dict:
 @pytest.fixture(
     scope="module",
     params=[
-        pytest.param("llama", marks=requires_llama_server),
-        pytest.param("onnx", marks=requires_onnxruntime),
+        pytest.param(("llama", 384), marks=requires_llama_server, id="llama"),
+        pytest.param(("onnx", 384), marks=requires_onnxruntime, id="onnx"),
+        pytest.param(("onnx-roberta", 768), marks=requires_onnxruntime, id="onnx-roberta"),
     ],
 )
-def backend_server(request: pytest.FixtureRequest, server_factory) -> tuple[ServerInfo, str]:
-    """A populated, indexed server for one embedding backend (param: llama|onnx)."""
-    backend = request.param
+def backend_server(request: pytest.FixtureRequest, server_factory) -> tuple[ServerInfo, str, int]:
+    """A populated, indexed server for one (backend, expected-dim) param."""
+    backend, ndim = request.param
     if backend == "onnx":
         model = request.getfixturevalue("onnx_model")
         srv = server_factory(
             "backend-onnx",
+            embedding_model=str(model),
+            extra_args=["--embedding-backend", "onnx"],
+        )
+    elif backend == "onnx-roberta":
+        model = request.getfixturevalue("distilroberta_model")
+        srv = server_factory(
+            "backend-onnx-roberta",
             embedding_model=str(model),
             extra_args=["--embedding-backend", "onnx"],
         )
@@ -127,34 +139,36 @@ def backend_server(request: pytest.FixtureRequest, server_factory) -> tuple[Serv
 
     httpx.post(f"{base}/index/rebuild", timeout=60.0)
     _wait_for_index_ready(srv)
-    return srv, backend
+    return srv, backend, ndim
 
 
 class TestBackendParity:
-    def test_embedding_available(self, backend_server: tuple[ServerInfo, str]) -> None:
-        srv, _ = backend_server
+    def test_embedding_available(self, backend_server: tuple[ServerInfo, str, int]) -> None:
+        srv, _, _ = backend_server
         status = httpx.get(f"{_base_url(srv)}/status", timeout=5.0).json()
         assert status["embedding"]["available"] is True
 
-    def test_index_dimension(self, backend_server: tuple[ServerInfo, str]) -> None:
-        srv, _ = backend_server
+    def test_index_dimension(self, backend_server: tuple[ServerInfo, str, int]) -> None:
+        srv, _, ndim = backend_server
         idx = _wait_for_index_ready(srv)
         assert idx["size"] >= _TOTAL_NOTES
-        assert idx["ndim"] == _NDIM
+        assert idx["ndim"] == ndim
 
-    def test_model_id_namespaced_by_backend(self, backend_server: tuple[ServerInfo, str]) -> None:
-        # The fingerprint prefix is what keeps the two backends' vectors from ever
-        # colliding for the "same" model (onnx: vs meta:/file:).
-        srv, backend = backend_server
+    def test_model_id_namespaced_by_backend(
+        self, backend_server: tuple[ServerInfo, str, int]
+    ) -> None:
+        # The fingerprint prefix is what keeps a backend's vectors from ever colliding
+        # with another's for the "same" model (onnx: vs meta:/file:).
+        srv, backend, _ = backend_server
         idx = httpx.get(f"{_base_url(srv)}/status", timeout=5.0).json()["index"]
         model_id = idx.get("model_id", "")
-        if backend == "onnx":
+        if backend.startswith("onnx"):
             assert model_id.startswith("onnx:")
         else:
             assert model_id.startswith(("meta:", "file:"))
 
-    def test_semantic_ranking(self, backend_server: tuple[ServerInfo, str]) -> None:
-        srv, _ = backend_server
+    def test_semantic_ranking(self, backend_server: tuple[ServerInfo, str, int]) -> None:
+        srv, _, _ = backend_server
         _wait_for_index_ready(srv)
         mcp = MCPClient(srv.url)
         # threshold=0 so a borderline absolute score doesn't drop the right answer
@@ -169,8 +183,8 @@ class TestBackendParity:
         top_tags = {t for m in matches for t in m.get("tags", [])}
         assert "calculus" in top_tags
 
-    def test_upsert_returns_neighbors(self, backend_server: tuple[ServerInfo, str]) -> None:
-        srv, _ = backend_server
+    def test_upsert_returns_neighbors(self, backend_server: tuple[ServerInfo, str, int]) -> None:
+        srv, _, _ = backend_server
         _wait_for_index_ready(srv)
         mcp = MCPClient(srv.url)
         result = mcp(

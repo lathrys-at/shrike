@@ -1,0 +1,127 @@
+"""Real ONNX models exercised directly through OnnxBackend (#172 review).
+
+This is the *anchor* for the mocked unit tests in `tests/unit/test_embedding_onnx.py`:
+it runs OnnxBackend against actual ONNX exports, so the mocks' assumed
+`get_inputs().type` strings, output ranks, and tokenizer behaviour stay falsifiable
+rather than drifting from reality. No server here — just the backend + a real model.
+
+Two model lineages, by design:
+
+- **MiniLM** (BERT/WordPiece, 384-dim, has `[PAD]`) for the pooling and truncation
+  matrix — the conditions any model varies on.
+- **DistilRoBERTa** (BPE, 768-dim, **no** `[PAD]`) for the RoBERTa-only deltas the
+  MiniLM cannot reach: its own dimensionality, the `[PAD]`-absent pad_id=0 fallback
+  firing for real, and masking keeping a padded batch correct despite `<s>`-as-pad.
+
+The two models do **not** share a vector space, so there is no cross-model comparison.
+Both need onnxruntime/tokenizers (the `onnx` extra), so the module is `embedding`-marked
+and each class carries `requires_onnxruntime`.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from shrike.embedding_onnx import OnnxBackend
+from tests.integration.conftest import requires_onnxruntime
+
+pytestmark = [pytest.mark.integration, pytest.mark.embedding]
+
+_MINILM_NDIM = 384
+_ROBERTA_NDIM = 768
+
+
+@requires_onnxruntime
+class TestOnnxRealMiniLM:
+    """Pooling + truncation against the real pinned MiniLM int8 export."""
+
+    def test_poolings_differ(self, onnx_model: Path) -> None:
+        text = ["the derivative is the instantaneous rate of change of a function"]
+
+        def vec(pooling: str) -> np.ndarray:
+            be = OnnxBackend(model=str(onnx_model), pooling=pooling)
+            be.start()
+            return np.array(be.embed_texts(text)[0])
+
+        mean, cls, last = vec("mean"), vec("cls"), vec("last")
+        assert mean.shape == (_MINILM_NDIM,)
+        # The three strategies pool the same token embeddings differently, so a real
+        # graph must produce genuinely different vectors (not just exercise the branch).
+        assert not np.allclose(mean, cls)
+        assert not np.allclose(mean, last)
+        assert not np.allclose(cls, last)
+
+    def test_context_size_truncates(self, onnx_model: Path) -> None:
+        # Trap 2: both caps are far below the model's positional limit (256/512); we
+        # test that a *lower* cap truncates, never that the cap can exceed the model.
+        long_text = (
+            "the derivative is the instantaneous rate of change of a function "
+            "and the integral is the accumulation of a quantity over an interval"
+        )  # well over 8 tokens
+
+        be8 = OnnxBackend(model=str(onnx_model), pooling="mean", normalize=False, max_length=8)
+        be8.start()
+        be64 = OnnxBackend(model=str(onnx_model), pooling="mean", normalize=False, max_length=64)
+        be64.start()
+
+        cap8 = np.array(be8.embed_texts([long_text])[0])
+        cap64 = np.array(be64.embed_texts([long_text])[0])
+        assert cap8.shape == cap64.shape == (_MINILM_NDIM,)
+        # Truncating to 8 tokens drops most of the note, so the pooled vector differs.
+        assert not np.allclose(cap8, cap64)
+
+
+@requires_onnxruntime
+class TestOnnxRealDistilRoberta:
+    """The RoBERTa-only deltas: 768-dim, no-`[PAD]` fallback, masking."""
+
+    def test_dimension_is_768(self, distilroberta_model: Path) -> None:
+        be = OnnxBackend(model=str(distilroberta_model))
+        be.start()
+        vecs = be.embed_texts(["a sentence about cells", "a sentence about momentum"])
+        assert all(len(v) == _ROBERTA_NDIM for v in vecs)
+        assert be.embedding_dim() == _ROBERTA_NDIM
+
+    def test_pad_absent_fallback_fires_and_embeds(self, distilroberta_model: Path) -> None:
+        # Precondition: this is genuinely a no-`[PAD]` tokenizer (the mock only
+        # approximates it). Then OnnxBackend must still start + embed (pad_id=0
+        # fallback), with padding actually applied (variable-length batch).
+        from tokenizers import Tokenizer
+
+        tok = Tokenizer.from_file(str(distilroberta_model / "tokenizer.json"))
+        assert tok.token_to_id("[PAD]") is None
+
+        be = OnnxBackend(model=str(distilroberta_model))
+        be.start()
+        vecs = be.embed_texts(["short", "a noticeably longer sentence that forces padding"])
+        assert len(vecs) == 2
+        assert all(len(v) == _ROBERTA_NDIM for v in vecs)
+
+    def test_padded_batch_still_ranks_sanely(self, distilroberta_model: Path) -> None:
+        # Quantized ONNX is NOT bit-identical batched vs single (even BERT MiniLM
+        # drifts ~0.06), so we assert ranking sanity, not vector equality: a short
+        # note, padded in a batch with a long unrelated note, still ranks its related
+        # query above an unrelated one. This is what "masking saves correctness" means
+        # for a real non-BERT model whose pad fill isn't `<pad>` until we resolve it.
+        be = OnnxBackend(model=str(distilroberta_model))  # normalize=True
+        be.start()
+        # The short bio note is padded (the second note is much longer).
+        bio = np.array(
+            be.embed_texts(
+                [
+                    "mitochondria are the powerhouse of the cell",
+                    "an unrelated and deliberately long sentence about taxes weather and football",
+                ]
+            )[0]
+        )
+        related, unrelated = (
+            np.array(v)
+            for v in be.embed_texts(
+                ["cellular biology and organelles", "differential calculus and integrals"]
+            )
+        )
+        cos = lambda a, b: float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))  # noqa: E731
+        assert cos(bio, related) > cos(bio, unrelated)

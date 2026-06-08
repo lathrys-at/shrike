@@ -202,7 +202,12 @@ def server() -> None:
     "directory with model.onnx + tokenizer.json (onnx backend). Enables embedding.",
 )
 @click.option("--embedding-port", type=int, help="Port for the embedding server (default: 8373).")
-@click.option("--embedding-context-size", type=int, help="Context size for embedding model.")
+@click.option(
+    "--embedding-context-size",
+    type=int,
+    help="Context size for the embedding model. For onnx it sets the token-truncation "
+    "length (default 256); above the model's positional limit is on you (no clamp).",
+)
 @click.option(
     "--embedding-threads", type=int, help="Number of CPU threads for embedding inference."
 )
