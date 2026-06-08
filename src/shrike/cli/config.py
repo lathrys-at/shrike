@@ -46,6 +46,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # onnxruntime execution providers (onnx backend only), in priority order.
         # Empty means CPUExecutionProvider.
         "onnx_providers": [],
+        # Optional cap on the embedding batch size (any backend). None = batch as
+        # large as the startup batch-safety probe proves safe.
+        "batch_size": None,
         "context_size": None,
         "threads": None,
         "gpu_layers": None,
@@ -146,6 +149,7 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
             "extra_args",
             "llama_server",
             "onnx_providers",
+            "batch_size",
         )
         for key in persisted_keys:
             if emb.get(key):
@@ -208,6 +212,7 @@ def resolve_embedding(
     extra_args: Sequence[str] | None = None,
     llama_server: str | None = None,
     onnx_providers: Sequence[str] | None = None,
+    batch_size: int | None = None,
 ) -> dict[str, Any]:
     """Resolve embedding parameters via the config → env → flag cascade.
 
@@ -216,7 +221,8 @@ def resolve_embedding(
     Environment variables: ``SHRIKE_EMBEDDING_BACKEND``, ``SHRIKE_EMBEDDING_MODEL``,
     ``SHRIKE_EMBEDDING_PORT``, ``SHRIKE_EMBEDDING_POOLING``, ``SHRIKE_EMBEDDING_ARGS``
     (shlex-split passthrough), ``SHRIKE_EMBEDDING_ONNX_PROVIDERS`` (comma-separated),
-    and ``LLAMA_SERVER_PATH`` (binary). Paths are user-expanded.
+    ``SHRIKE_EMBEDDING_BATCH_SIZE``, and ``LLAMA_SERVER_PATH`` (binary). Paths are
+    user-expanded.
     """
     emb = config.get("embedding", {})
 
@@ -240,12 +246,24 @@ def resolve_embedding(
         "pooling": (pooling or os.environ.get("SHRIKE_EMBEDDING_POOLING") or emb.get("pooling")),
         "extra_args": _resolve_extra_args(extra_args, emb),
         "onnx_providers": _resolve_onnx_providers(onnx_providers, emb),
+        "batch_size": (
+            batch_size
+            or (int(env_bs) if (env_bs := os.environ.get("SHRIKE_EMBEDDING_BATCH_SIZE")) else None)
+            or emb.get("batch_size")
+        ),
     }
 
     if resolved["model"]:
         resolved["model"] = os.path.expanduser(str(resolved["model"]))
     if resolved["llama_server"]:
         resolved["llama_server"] = os.path.expanduser(str(resolved["llama_server"]))
+
+    # Reject rather than silently drop/serialize a bad cap (CLI flags are already
+    # IntRange-bounded; this catches a hand-edited config value, where 0 would otherwise
+    # be swallowed by the `or`-cascade and a negative would flow straight through).
+    bs = resolved["batch_size"]
+    if bs is not None and int(bs) < 1:
+        raise ValueError(f"embedding.batch_size must be >= 1 (got {bs})")
 
     return resolved
 
@@ -432,6 +450,8 @@ def embedding_args(resolved: dict[str, Any], *, no_embedding: bool = False) -> l
         args.extend(["--embedding-arg", str(token)])
     for provider in resolved.get("onnx_providers") or []:
         args.extend(["--embedding-onnx-provider", str(provider)])
+    if resolved.get("batch_size"):
+        args.extend(["--embedding-batch-size", str(resolved["batch_size"])])
     if no_embedding:
         args.append("--no-embedding")
     return args

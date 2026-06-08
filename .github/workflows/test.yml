@@ -196,7 +196,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/shrike-test-models
-          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M-onnx-int8-roberta
+          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M-onnx-int8-roberta-fp32
       - name: Run embedding tests
         env:
           LD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}

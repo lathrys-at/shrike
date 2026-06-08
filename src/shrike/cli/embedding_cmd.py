@@ -90,6 +90,12 @@ def embedding_status(ctx: click.Context) -> None:
     "Default: CPUExecutionProvider. (onnx backend only.)",
 )
 @click.option(
+    "--embedding-batch-size",
+    "batch_size",
+    type=click.IntRange(min=1),
+    help="Cap the embedding batch size (any backend), >= 1. Default: as large as safe.",
+)
+@click.option(
     "--background", is_flag=True, help="Return immediately without waiting for any index rebuild."
 )
 @click.pass_context
@@ -105,6 +111,7 @@ def embedding_start(
     pooling: str | None,
     extra_args: tuple[str, ...],
     onnx_providers: tuple[str, ...],
+    batch_size: int | None,
     background: bool,
 ) -> None:
     """Start the embedding service on a running server.
@@ -135,6 +142,7 @@ def embedding_start(
         extra_args=list(extra_args) or None,
         llama_server=llama_server,
         onnx_providers=list(onnx_providers) or None,
+        batch_size=batch_size,
     )
 
     with output.spinner("Starting embedding service…"):
@@ -205,6 +213,8 @@ def _render_embedding(emb: EmbeddingStatus) -> None:
             output.kv("PID", f"[cyan]{emb.pid}[/cyan]", indent=2)
         if emb.model:
             output.kv("Model", f"[cyan]{emb.model}[/cyan]", indent=2)
+        if emb.batch:
+            output.kv("Batching", emb.batch, indent=2)
     else:
         labels = {
             "failed": "[red]failed to start[/red]",

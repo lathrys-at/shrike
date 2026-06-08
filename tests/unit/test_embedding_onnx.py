@@ -16,6 +16,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+from shrike.embed_batching import BATCH_PROBE_TEXTS
 from shrike.embed_text import EMBED_TEXT_VERSION
 from shrike.embedding_base import TEXT
 from shrike.embedding_onnx import OnnxBackend
@@ -83,6 +84,39 @@ class _FakeSession2Input(_FakeSession):
     """Declares only input_ids + attention_mask (no token_type_ids), like DistilBERT."""
 
     _input_names = ("input_ids", "attention_mask")
+
+
+class _FakeSessionRequiresPositionIds(_FakeSession):
+    """Declares a *required* position_ids input the backend doesn't supply: run() raises
+    when it's absent (mimicking onnxruntime's "Required inputs ... are missing")."""
+
+    _input_names = ("input_ids", "attention_mask", "token_type_ids", "position_ids")
+
+    def run(self, _outputs: object, feed: dict) -> list[np.ndarray]:
+        if "position_ids" not in feed:
+            raise RuntimeError("Required inputs (position_ids) are missing from input feed.")
+        return super().run(_outputs, feed)
+
+
+class _FakeSessionOptionalExtra(_FakeSession):
+    """Declares an extra input the backend doesn't supply but the graph doesn't *require* —
+    run() succeeds without it, so start() must NOT reject the model."""
+
+    _input_names = ("input_ids", "attention_mask", "token_type_ids", "extra_optional")
+
+
+class _FakeSessionVariant(_FakeSession):
+    """Batch-variant (like int8 dynamic quant): output *direction* depends on batch size,
+    so the startup probe detects it and forces serial embedding."""
+
+    def run(self, _outputs: object, feed: dict) -> list[np.ndarray]:
+        self.last_feed = feed
+        batch, seq = feed["input_ids"].shape
+        self.run_calls.append(batch)
+        shape = (batch, 4) if self._output_ndim == 2 else (batch, seq, 4)
+        arr = np.ones(shape, dtype=np.float32)
+        arr[..., 0] = float(batch)  # first component scales with batch → direction differs
+        return [arr]
 
 
 class _FakeEncoding:
@@ -322,14 +356,81 @@ class TestLifecycleAndEmbed:
         be.embed_texts(["a"])
         assert be._session.last_feed["input_ids"].dtype == np.int32
 
-    def test_embeds_one_text_per_run(self, tmp_path: Path) -> None:
-        # Per-text embedding: session.run is called once per text, each with a
-        # batch-of-1 feed — so a note's vector can't depend on its batch-mates (the
-        # int8 dynamic-quant batch-variance the real-model determinism test pins).
+    def test_embeds_serially_when_variant(self, tmp_path: Path) -> None:
+        # A batch-variant model (the probe detects it) is embedded serially: one run per
+        # text, each batch-of-1, so a note's vector can't depend on its batch-mates.
         be = OnnxBackend(model=str(_model_dir(tmp_path)))
-        self._start(be)
+        self._start(be, _FakeSessionVariant)
+        assert be._safe_batch == 1
+        be._session.run_calls.clear()  # drop the startup-probe calls
         be.embed_texts(["a", "b", "c"])
         assert be._session.run_calls == [1, 1, 1]
+
+    def test_embeds_batched_when_safe(self, tmp_path: Path) -> None:
+        # A batch-safe model (the all-ones fake) embeds the whole input in one chunk.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(be)
+        assert be._safe_batch >= 2
+        be._session.run_calls.clear()
+        be.embed_texts(["a", "b", "c"])
+        assert be._session.run_calls == [3]
+
+    def test_batch_size_cap_chunks(self, tmp_path: Path) -> None:
+        # --embedding-batch-size caps the chunk size even on a batch-safe model.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)), batch_size=2)
+        self._start(be)
+        be._session.run_calls.clear()
+        be.embed_texts(["a", "b", "c", "d", "e"])
+        assert be._session.run_calls == [2, 2, 1]
+
+    def test_variant_model_warns_when_batch_requested(self, tmp_path: Path) -> None:
+        be = OnnxBackend(model=str(_model_dir(tmp_path)), batch_size=8)
+        with patch("shrike.embedding_onnx.logger.warning") as warn:
+            self._start(be, _FakeSessionVariant)
+        assert be._safe_batch == 1
+        assert any("batch-variant" in str(c.args) for c in warn.call_args_list)
+
+    def test_cap_above_ceiling_clamps_to_probe_size(self, tmp_path: Path) -> None:
+        # The probe-set size is the batch ceiling; a higher cap is logged once and clamped.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)), batch_size=64)
+        with patch("shrike.embedding_onnx.logger.info") as info:
+            self._start(be)
+        assert be._safe_batch == len(BATCH_PROBE_TEXTS)
+        assert any("exceeds the probe-verified ceiling" in str(c.args) for c in info.call_args_list)
+        be._session.run_calls.clear()
+        be.embed_texts([f"n{i}" for i in range(be._safe_batch + 8)])
+        assert be._session.run_calls == [be._safe_batch, 8]
+
+    def test_required_unsupported_input_fails_loud(self, tmp_path: Path) -> None:
+        # A model with a required input we don't supply (position_ids) must fail start() with
+        # a named error, not boot fine and silently break embedding on the first real call.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        with pytest.raises(RuntimeError, match="position_ids"):
+            self._start(be, _FakeSessionRequiresPositionIds)
+
+    def test_optional_unsupported_input_does_not_reject(self, tmp_path: Path) -> None:
+        # An extra declared input the graph doesn't *require* (run() succeeds without it)
+        # must not be rejected — the guard keys on an actual embed failure, not a name.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(be, _FakeSessionOptionalExtra)  # must not raise
+        assert be.embed_texts(["a", "b"])
+
+    def test_health_batch_label_reflects_cap(self, tmp_path: Path) -> None:
+        # Safe model, no cap → batched.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(be)
+        assert be.health()["batch_safe"] is True
+        assert be.health()["batch"] == "batched"
+        # Safe model, cap=1 → the model is still capable (batch_safe), but it embeds serially.
+        capped = OnnxBackend(model=str(_model_dir(tmp_path)), batch_size=1)
+        self._start(capped)
+        assert capped.health()["batch_safe"] is True
+        assert capped.health()["batch"] == "serial"
+        # Variant model → both serial.
+        var = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(var, _FakeSessionVariant)
+        assert var.health()["batch_safe"] is False
+        assert var.health()["batch"] == "serial"
 
     def test_feed_filter_drops_undeclared_inputs(self, tmp_path: Path) -> None:
         # A model declaring only input_ids+attention_mask (DistilBERT/RoBERTa):

@@ -35,6 +35,7 @@ from tests.integration.model_cache import (
     EMBEDDING_MODEL_URL,
     cached_distilroberta_model_dir,
     cached_model_path,
+    cached_onnx_fp32_model_dir,
     cached_onnx_model_dir,
     download_with_retry,
 )
@@ -552,6 +553,13 @@ def distilroberta_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
     exercises the RoBERTa-only paths the MiniLM can't (#172). Same retry/cache path.
     """
     return cached_distilroberta_model_dir(tmp_path_factory.mktemp("distilroberta-model"))
+
+
+@pytest.fixture(scope="session")
+def onnx_fp32_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The fp32 (non-quantized) MiniLM ONNX model — batches bit-exact, so it proves the
+    batch-safety probe lets a safe model batch (#174). Same retry/cache path."""
+    return cached_onnx_fp32_model_dir(tmp_path_factory.mktemp("onnx-fp32-model"))
 
 
 @pytest.fixture(scope="session")

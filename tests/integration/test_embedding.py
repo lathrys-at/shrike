@@ -113,6 +113,8 @@ class TestEmbeddingServiceViaShrike:
         svc._model = "test"
         svc._model_name = None
         svc._process = type("FakeProc", (), {"poll": lambda self: None})()
+        svc._safe_batch = 16  # bypassing start()/__init__, simulate a batch-safe probe
+        svc._batch_cap = None
 
         result = svc.embed_texts(["hello", "world"])
         assert len(result) == 2
@@ -127,6 +129,8 @@ class TestEmbeddingServiceViaShrike:
         svc._model = "test"
         svc._model_name = None
         svc._process = type("FakeProc", (), {"poll": lambda self: None})()
+        svc._safe_batch = 16  # bypassing start()/__init__, simulate a batch-safe probe
+        svc._batch_cap = None
 
         r1 = svc.embed_texts(["a single sentence"])
         r2 = svc.embed_texts(["another sentence", "and one more", "three total"])

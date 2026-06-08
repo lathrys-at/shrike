@@ -26,11 +26,12 @@ def svc(tmp_path: Path) -> EmbeddingService:
 
 
 def _set_running(svc: EmbeddingService, pid: int = 123) -> None:
-    """Make a service look like it has a live llama-server subprocess."""
+    """Make a service look like it has a live, batch-safe llama-server subprocess."""
     proc = MagicMock()
     proc.poll.return_value = None
     proc.pid = pid
     svc._process = proc
+    svc._safe_batch = 16  # as the startup probe would set for fp llama-server
 
 
 class TestInit:
@@ -365,6 +366,7 @@ class TestEmbed:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         svc._process = mock_proc
+        svc._safe_batch = 16  # batch-safe, so both texts go in one request
 
         mock_resp = Mock()
         mock_resp.status_code = 200
@@ -382,6 +384,30 @@ class TestEmbed:
         assert len(result) == 2
         assert result[0] == [0.1, 0.2, 0.3]
         assert result[1] == [0.4, 0.5, 0.6]
+
+    def test_orders_by_response_index(self, svc: EmbeddingService) -> None:
+        # A response whose data items arrive out of order must be reassembled by `index`,
+        # so each input gets its own vector (not a batch-mate's).
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        svc._process = mock_proc
+        svc._safe_batch = 16
+
+        mock_resp = Mock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "data": [
+                {"index": 1, "embedding": [0.4, 0.5]},
+                {"index": 0, "embedding": [0.1, 0.2]},
+            ]
+        }
+        mock_resp.raise_for_status = Mock()
+
+        with patch("shrike.embedding.httpx.post", return_value=mock_resp):
+            result = svc.embed_texts(["first", "second"])
+
+        assert result[0] == [0.1, 0.2]  # index 0
+        assert result[1] == [0.4, 0.5]  # index 1
 
     def test_propagates_http_errors(self, svc: EmbeddingService) -> None:
         mock_proc = MagicMock()

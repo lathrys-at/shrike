@@ -61,6 +61,8 @@ def _render_status(status: ServerStatus) -> None:
             output.kv("PID", f"[cyan]{emb.pid}[/cyan]", indent=2)
         if emb.model:
             output.kv("Model", f"[cyan]{emb.model}[/cyan]", indent=2)
+        if emb.batch:
+            output.kv("Batching", emb.batch, indent=2)
     else:
         labels = {
             "running": "[dim]unavailable[/dim]",
@@ -234,6 +236,13 @@ def server() -> None:
     "(e.g. CUDAExecutionProvider). Default: CPUExecutionProvider. (onnx backend only.)",
 )
 @click.option(
+    "--embedding-batch-size",
+    "embedding_batch_size",
+    type=click.IntRange(min=1),
+    help="Cap the embedding batch size (any backend), >= 1. Default: as large as a startup "
+    "self-check proves safe. A batch-variant model (e.g. int8 ONNX) is embedded serially.",
+)
+@click.option(
     "--no-embedding",
     is_flag=True,
     help="Start the server without the embedding service even if a model is configured "
@@ -275,6 +284,7 @@ def server_start(
     embedding_pooling: str | None,
     embedding_arg: tuple[str, ...],
     embedding_onnx_provider: tuple[str, ...],
+    embedding_batch_size: int | None,
     no_embedding: bool,
     save_config_flag: bool,
 ) -> None:
@@ -326,6 +336,7 @@ def server_start(
         extra_args=list(embedding_arg) or None,
         llama_server=llama_server,
         onnx_providers=list(embedding_onnx_provider) or None,
+        batch_size=embedding_batch_size,
     )
     embedding_cli_args = embedding_args(resolved_embedding, no_embedding=no_embedding)
     remote_args = ["--allow-remote"] if allow_remote else []

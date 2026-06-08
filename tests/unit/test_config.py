@@ -152,6 +152,17 @@ class TestResolveEmbedding:
         resolved = resolve_embedding({"embedding": {}})
         assert resolved["llama_server"] == "/usr/bin/llama-server"
 
+    def test_batch_size_resolves(self) -> None:
+        assert resolve_embedding({"embedding": {"batch_size": 8}})["batch_size"] == 8
+        assert resolve_embedding({"embedding": {}}, batch_size=4)["batch_size"] == 4
+
+    @pytest.mark.parametrize("bad", [0, -5])
+    def test_batch_size_below_one_rejected(self, bad: int) -> None:
+        # A hand-edited config value bypasses the CLI's IntRange; reject it here too
+        # (0 would otherwise be swallowed as "no cap", a negative would crash the index).
+        with pytest.raises(ValueError, match="batch_size must be >= 1"):
+            resolve_embedding({"embedding": {"batch_size": bad}})
+
     def test_no_model_resolves_none(self) -> None:
         resolved = resolve_embedding({"embedding": {}})
         assert resolved["model"] is None

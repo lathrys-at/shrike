@@ -56,6 +56,7 @@ Start the server as a background daemon. The collection path can come from `--co
 | `--embedding-pooling` | Pooling type: `mean`, `last`, `cls`, or `none`. For `llama`, defaults to the model's GGUF setting (set `last` for last-token models like Jina v5 / Qwen3-Embedding, whose metadata omits it); for `onnx`, defaults to `mean` and `none` is not accepted. Changing it forces an index rebuild. |
 | `--embedding-arg TOKENS` | Extra `llama-server` flag passed through verbatim, repeatable and `shlex`-split (e.g. `--embedding-arg='--flash-attn'`). For runtime-only flags; Shrike-owned flags (`--model`/`--host`/`--port`/`--embeddings`) are rejected, and any change forces an index rebuild. Vector-affecting flags belong in typed settings like `--embedding-pooling`. `llama` backend only. |
 | `--embedding-onnx-provider PROVIDER` | onnxruntime execution provider(s), repeatable, in priority order (e.g. `CUDAExecutionProvider`). Default: `CPUExecutionProvider`. `onnx` backend only. |
+| `--embedding-batch-size INTEGER` | Cap the embedding batch size (any backend). Default: batch as large as a startup self-check proves safe. A batch-variant model (e.g. int8 ONNX) is always embedded serially regardless. |
 | `--llama-server PATH` | Path to the `llama-server` binary (default: `LLAMA_SERVER_PATH` or `PATH`). `llama` backend only. |
 | `--no-embedding` | Start without the embedding service even if a model is configured. |
 | `--save-config` | Persist the resolved flags to the config file. Without this, `server start` never writes config — it stays under your control and start always reflects the flags you pass. |
@@ -537,7 +538,8 @@ Show whether the embedding service is running, its URL, PID, and model.
 
 Start the embedding service on a running server. Accepts the same embedding
 options as `shrike server start` (`--embedding-backend`, `--embedding-model`,
-`--embedding-pooling`, `--embedding-onnx-provider`, `--llama-server`, …);
+`--embedding-pooling`, `--embedding-onnx-provider`, `--embedding-batch-size`,
+`--llama-server`, …);
 unspecified ones fall back to the config/env the server booted with. Re-attaches
 the index and rebuilds it if the model changed or the index drifted.
 
