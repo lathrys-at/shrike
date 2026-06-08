@@ -103,8 +103,9 @@ EmbedChunk = Callable[[list[str]], list[list[float]]]
 
 # How many times to (re)run the probe before giving up. The probe issues many embed calls
 # (a serial reference + one batch); a single transient failure shouldn't condemn a session
-# to serial, so we retry the whole probe before raising.
-PROBE_ATTEMPTS = 2
+# to serial, so we retry the whole probe before raising. 3 is a cheap trade for better
+# tolerance of a flaky embedder during startup.
+PROBE_ATTEMPTS = 3
 
 
 class ProbeError(RuntimeError):
