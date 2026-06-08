@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from shrike.embedding import EmbeddingService
+    from shrike.embedding_base import EmbedderBackend
 
 logger = logging.getLogger("shrike.index")
 
@@ -72,13 +72,13 @@ class VectorIndex:
     def __init__(
         self,
         path: str | Path,
-        embedding_service: EmbeddingService | None = None,
+        backend: EmbedderBackend | None = None,
     ) -> None:
         self._dir = Path(path)
         self._index_path = self._dir / "index.usearch"
         self._meta_path = self._dir / "index.meta.json"
         self._hashes_path = self._dir / "index.hashes.json"
-        self._embedding = embedding_service
+        self._embedding = backend
         self._index: Any | None = None
         self._ndim: int | None = None
         self._col_mod: int | None = None
@@ -88,7 +88,7 @@ class VectorIndex:
         # means "no per-note state" (old index / never built) — reconcile then
         # falls back to a full rebuild. Maintained by add/remove/rebuild.
         self._note_hashes: dict[int, str] | None = None
-        self._state = IndexState.UNAVAILABLE if embedding_service is None else IndexState.READY
+        self._state = IndexState.UNAVAILABLE if backend is None else IndexState.READY
         self._build_progress: tuple[int, int] = (0, 0)
         self._build_error: str | None = None
         self._build_thread: threading.Thread | None = None
@@ -135,17 +135,17 @@ class VectorIndex:
     def model_id(self) -> str | None:
         return self._model_id
 
-    def set_embedding_service(self, service: EmbeddingService | None) -> None:
-        """Attach or detach the embedding service at runtime.
+    def set_backend(self, backend: EmbedderBackend | None) -> None:
+        """Attach or detach the embedding backend at runtime.
 
         Detaching (``None``) marks the index ``UNAVAILABLE`` — the on-disk
         vectors are kept, but search/add can't run without an embedder.
         Attaching flips ``UNAVAILABLE`` back to ``READY`` so search can resume;
         a ``BUILDING`` or ``ERROR`` state is left alone (a rebuild, if needed,
-        is the caller's job once the service is up).
+        is the caller's job once the backend is up).
         """
-        self._embedding = service
-        if service is None:
+        self._embedding = backend
+        if backend is None:
             self._state = IndexState.UNAVAILABLE
         elif self._state == IndexState.UNAVAILABLE:
             self._state = IndexState.READY
@@ -254,7 +254,7 @@ class VectorIndex:
             batch_ids = note_ids[i : i + BATCH_SIZE]
             batch_texts = texts[i : i + BATCH_SIZE]
 
-            vectors = self._embedding.embed(list(batch_texts))
+            vectors = self._embedding.embed_texts(list(batch_texts))
             vecs_array = np.array(vectors, dtype=np.float32)
             keys_array = np.array(batch_ids, dtype=np.int64)
 
@@ -303,7 +303,7 @@ class VectorIndex:
         if not self.available or not texts:
             return [[] for _ in texts]
 
-        vectors = self._embedding.embed(texts)  # type: ignore[union-attr]
+        vectors = self._embedding.embed_texts(texts)  # type: ignore[union-attr]
         query_array = np.array(vectors, dtype=np.float32)
 
         assert self._index is not None

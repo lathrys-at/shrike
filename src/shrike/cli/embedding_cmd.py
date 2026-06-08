@@ -7,6 +7,7 @@ from shrike.cli.config import resolve_embedding
 from shrike.cli.index_cmd import _poll_progress
 from shrike.cli.output import output_options
 from shrike.client import ShrikeClient
+from shrike.embedding import SUPPORTED_BACKENDS
 from shrike.schemas import EmbeddingStatus
 
 
@@ -41,7 +42,18 @@ def embedding_status(ctx: click.Context) -> None:
 
 @embedding.command("start", short_help="Start the embedding service")
 @output_options
-@click.option("--embedding-model", "model", type=click.Path(), help="Path to GGUF embedding model.")
+@click.option(
+    "--embedding-backend",
+    "backend",
+    type=click.Choice(list(SUPPORTED_BACKENDS), case_sensitive=False),
+    help="Embedding backend: 'llama' or 'onnx' (needs the 'onnx' extra). Default: llama.",
+)
+@click.option(
+    "--embedding-model",
+    "model",
+    type=click.Path(),
+    help="Path to the embedding model: a GGUF file (llama) or an ONNX model directory (onnx).",
+)
 @click.option(
     "--llama-server", "llama_server", type=click.Path(), help="Path to llama-server binary."
 )
@@ -68,7 +80,14 @@ def embedding_status(ctx: click.Context) -> None:
     multiple=True,
     help="Extra llama-server flag passed through verbatim, repeatable and "
     "shlex-split (e.g. --embedding-arg='--flash-attn'). Runtime-only flags; "
-    "Shrike-owned flags are rejected.",
+    "Shrike-owned flags are rejected. (llama backend only.)",
+)
+@click.option(
+    "--embedding-onnx-provider",
+    "onnx_providers",
+    multiple=True,
+    help="onnxruntime execution provider(s), repeatable, in priority order. "
+    "Default: CPUExecutionProvider. (onnx backend only.)",
 )
 @click.option(
     "--background", is_flag=True, help="Return immediately without waiting for any index rebuild."
@@ -76,6 +95,7 @@ def embedding_status(ctx: click.Context) -> None:
 @click.pass_context
 def embedding_start(
     ctx: click.Context,
+    backend: str | None,
     model: str | None,
     llama_server: str | None,
     port: int | None,
@@ -84,6 +104,7 @@ def embedding_start(
     gpu_layers: int | None,
     pooling: str | None,
     extra_args: tuple[str, ...],
+    onnx_providers: tuple[str, ...],
     background: bool,
 ) -> None:
     """Start the embedding service on a running server.
@@ -104,6 +125,7 @@ def embedding_start(
 
     resolved = resolve_embedding(
         config,
+        backend=backend,
         model=model,
         port=port,
         context_size=context_size,
@@ -112,6 +134,7 @@ def embedding_start(
         pooling=pooling,
         extra_args=list(extra_args) or None,
         llama_server=llama_server,
+        onnx_providers=list(onnx_providers) or None,
     )
 
     with output.spinner("Starting embedding service…"):

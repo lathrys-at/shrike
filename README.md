@@ -44,11 +44,31 @@ shrike server stop
 
 ## Semantic search
 
-`shrike note search` finds notes by meaning instead of keywords. It needs two things you supply yourself: a `llama-server` binary (from llama.cpp) to compute embeddings, and a GGUF embedding model for it to run.
+`shrike note search` finds notes by meaning instead of keywords. You supply an embedding model to turn your notes into vectors, and pick a backend to run it. Shrike has two backends, and which one suits you depends mostly on whether your cards are plain text.
 
-Get llama.cpp by building it or installing it from a package manager; you want the `llama-server` binary it provides. For the model, any GGUF embedding model works. A small one like [all-MiniLM-L6-v2](https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF) is a good default: it runs on CPU and is plenty for finding related cards.
+### Choosing a backend
 
-Start Shrike with both:
+For plain-text cards, which is the common case, the ONNX backend is the simpler choice. It runs inside Shrike, so there's no separate binary to install or process to keep alive, single-card lookups are quick, and a small quantized model keeps memory use low. Reach for this one if you just want related-card search to work.
+
+Pick the llama-server backend if you already use llama.cpp, want to run a GGUF or MLX model, want to offload work to a GPU, or want to follow the multimodal search work (finding image and audio cards by description) as it lands, since that builds on the llama-server path.
+
+Either way the search works the same, text-only models are fully supported on both, and search quality comes from the model you choose rather than the backend.
+
+### ONNX backend
+
+Install the extra, then put an ONNX embedding model in a directory: a `model.onnx` file and its `tokenizer.json`. Good small models live in the [all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2) repository, including quantized exports a few times smaller than the default; download the `.onnx` file you want, save it as `model.onnx`, and put `tokenizer.json` beside it.
+
+```bash
+pip install 'shrike-mcp[onnx]'
+
+shrike server start --collection ~/path/to/collection.anki2 \
+  --embedding-backend onnx \
+  --embedding-model ~/models/all-MiniLM-L6-v2-onnx
+```
+
+### llama-server backend
+
+You supply a `llama-server` binary (from llama.cpp) and a GGUF embedding model. Get llama.cpp by building it or installing it from a package manager. Any GGUF embedding model works; a small one like [all-MiniLM-L6-v2](https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF) runs on CPU and is plenty for finding related cards.
 
 ```bash
 shrike server start --collection ~/path/to/collection.anki2 \

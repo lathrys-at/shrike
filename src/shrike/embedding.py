@@ -1,14 +1,20 @@
-"""Embedding service — manages a llama-server subprocess for local embeddings.
+"""llama-server embedding backend + the runtime that owns its lifecycle.
 
-The Shrike server owns the llama-server process as a direct child. No separate
-lock/PID machinery is needed: the child inherits the parent's process group
-and is terminated on shutdown.
+``LlamaServerBackend`` manages a llama-server subprocess for local text
+embeddings — one implementation of the :class:`~shrike.embedding_base.EmbedderBackend`
+protocol (``OnnxBackend`` is the other, in ``embedding_onnx.py``). The Shrike
+server owns the llama-server process as a direct child; the child inherits the
+parent's process group and is terminated on shutdown.
 
-The service exposes a simple sync interface:
-    svc = EmbeddingService(model="/path/to/model.gguf", log_dir="/path/to/logs")
-    svc.start()          # spawns llama-server, waits for health
-    vecs = svc.embed(["hello", "world"])  # list[list[float]]
-    svc.stop()           # SIGTERM → SIGKILL fallback
+The backend exposes a simple sync interface:
+    be = LlamaServerBackend(model="/path/to/model.gguf", log_dir="/path/to/logs")
+    be.start()                 # spawns llama-server, waits for health
+    vecs = be.embed_texts(["hello", "world"])  # list[list[float]]
+    be.stop()                  # SIGTERM → SIGKILL fallback
+
+``EmbeddingService`` is kept as a backward-compatible alias of
+``LlamaServerBackend``. ``EmbeddingRuntime`` selects a backend by *kind*
+(``llama``/``onnx``) and manages start/stop plus the binding to the index.
 """
 
 from __future__ import annotations
@@ -30,9 +36,14 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from shrike.embed_text import EMBED_TEXT_VERSION
+from shrike.embedding_base import TEXT, EmbedderBackend
 
 if TYPE_CHECKING:
     from shrike.index import VectorIndex
+
+# Embedding backend kinds the runtime can construct (see EmbeddingRuntime).
+SUPPORTED_BACKENDS = ("llama", "onnx")
+DEFAULT_BACKEND = "llama"
 
 logger = logging.getLogger("shrike.embedding")
 
@@ -76,8 +87,15 @@ def _port_in_use(host: str, port: int) -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
-class EmbeddingService:
-    """Manages a llama-server subprocess for computing embeddings."""
+class LlamaServerBackend:
+    """A llama-server subprocess backend for computing text embeddings.
+
+    Implements the :class:`~shrike.embedding_base.EmbedderBackend` protocol. The
+    GGUF/MLX models it serves are text-only, so it advertises ``{TEXT}``.
+    """
+
+    # llama-server here serves text-embedding models only.
+    modalities = frozenset({TEXT})
 
     def __init__(
         self,
@@ -426,7 +444,7 @@ class EmbeddingService:
         if n_embd:
             return int(n_embd)
         try:
-            vectors = self.embed([" "])
+            vectors = self.embed_texts([" "])
         except Exception:
             return None
         return len(vectors[0]) if vectors and vectors[0] else None
@@ -481,7 +499,7 @@ class EmbeddingService:
             base = f"{base}:args={' '.join(passthrough)}"
         return f"{base}:textprep={EMBED_TEXT_VERSION}"
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Compute embeddings for a list of texts.
 
         Returns a list of float vectors, one per input text.
@@ -508,14 +526,23 @@ class EmbeddingService:
         return results
 
 
-class EmbeddingRuntime:
-    """Owns the embedding service lifecycle and its binding to the vector index.
+# Backward-compatible alias: the llama-server backend was the original (and only)
+# embedding service. Existing imports of ``EmbeddingService`` keep working.
+EmbeddingService = LlamaServerBackend
 
-    Lets the llama-server process be started and stopped while the Shrike server
-    keeps running. It holds the parameters needed to (re)start the service, the
-    current :class:`EmbeddingService` (or ``None`` when stopped), and a reference
-    to the index it attaches/detaches. A lock serializes start/stop so concurrent
-    requests can't spawn two llama-servers.
+
+class EmbeddingRuntime:
+    """Owns the embedding backend lifecycle and its binding to the vector index.
+
+    Backend-agnostic: it selects a backend by *kind* (``llama``/``onnx``), holds
+    the parameters needed to (re)start it, the current backend (or ``None`` when
+    stopped), and a reference to the index it attaches/detaches. A lock serializes
+    start/stop so concurrent requests can't spawn two backends.
+
+    Both backends share most params (model, pooling); the rest are backend-scoped
+    and simply ignored by the one they don't apply to (``host``/``port``/
+    ``gpu_layers``/``extra_args``/``llama_server`` are llama-only; ``providers``/
+    ``normalize`` are ONNX-only). ``_make_backend`` builds the right one.
 
     Rebuild orchestration is intentionally *not* here — that needs the collection
     wrapper and lives in the server's request/boot path.
@@ -525,6 +552,7 @@ class EmbeddingRuntime:
         self,
         *,
         index: VectorIndex,
+        backend: str = DEFAULT_BACKEND,
         model: str | None = None,
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
@@ -536,8 +564,11 @@ class EmbeddingRuntime:
         extra_args: Sequence[str] | None = None,
         llama_server: str | None = None,
         pid_file: str | Path | None = None,
+        onnx_providers: Sequence[str] | None = None,
+        normalize: bool = True,
     ) -> None:
         self._index = index
+        self._backend_kind = backend
         self._model = model
         self._host = host
         self._port = port
@@ -549,19 +580,31 @@ class EmbeddingRuntime:
         self._extra_args = list(extra_args) if extra_args else []
         self._llama_server = llama_server
         self._pid_file = Path(pid_file) if pid_file else None
-        self._service: EmbeddingService | None = None
+        self._onnx_providers = list(onnx_providers) if onnx_providers else None
+        self._normalize = normalize
+        self._backend: EmbedderBackend | None = None
         self._lock = threading.Lock()
-        # Tracks why the service isn't running, so status can distinguish a
+        # Tracks why the backend isn't running, so status can distinguish a
         # deliberate stop from a failed start or a missing model.
         self._last_start_failed = False
 
     @property
-    def service(self) -> EmbeddingService | None:
-        return self._service
+    def backend(self) -> EmbedderBackend | None:
+        return self._backend
+
+    @property
+    def backend_kind(self) -> str:
+        return self._backend_kind
+
+    # Backward-compatible alias for the current backend (was ``service`` when the
+    # only backend was llama-server). Returns the active EmbedderBackend or None.
+    @property
+    def service(self) -> EmbedderBackend | None:
+        return self._backend
 
     @property
     def running(self) -> bool:
-        return self._service is not None and self._service.running
+        return self._backend is not None and self._backend.running
 
     @property
     def model(self) -> str | None:
@@ -580,7 +623,7 @@ class EmbeddingRuntime:
 
     def health(self) -> dict[str, Any]:
         info: dict[str, Any] = (
-            {"available": False} if self._service is None else self._service.health()
+            {"available": False} if self._backend is None else self._backend.health()
         )
         info["state"] = self.state
         return info
@@ -588,6 +631,7 @@ class EmbeddingRuntime:
     def start(
         self,
         *,
+        backend: str | None = None,
         model: str | None = None,
         port: int | None = None,
         context_size: int | None = None,
@@ -596,18 +640,22 @@ class EmbeddingRuntime:
         pooling: str | None = None,
         extra_args: Sequence[str] | None = None,
         llama_server: str | None = None,
-    ) -> EmbeddingService:
-        """Start the embedding service and attach it to the index.
+        onnx_providers: Sequence[str] | None = None,
+    ) -> EmbedderBackend:
+        """Start the embedding backend and attach it to the index.
 
         Non-``None`` overrides update the stored params (so a later restart
-        reuses them). If the service is already running, returns it unchanged.
-        Raises ``ValueError`` if no model is configured, or
-        ``FileNotFoundError`` / ``RuntimeError`` if llama-server won't start.
+        reuses them). If a backend is already running, returns it unchanged.
+        Raises ``ValueError`` if no model is configured or the backend kind is
+        unknown, ``FileNotFoundError`` / ``RuntimeError`` if it won't start, or
+        ``ImportError`` if the ONNX optional dependency isn't installed.
         """
         with self._lock:
-            if self._service is not None and self._service.running:
-                return self._service
+            if self._backend is not None and self._backend.running:
+                return self._backend
 
+            if backend is not None:
+                self._backend_kind = backend
             if model is not None:
                 self._model = model
             if port is not None:
@@ -624,11 +672,49 @@ class EmbeddingRuntime:
                 self._extra_args = list(extra_args)
             if llama_server is not None:
                 self._llama_server = llama_server
+            if onnx_providers is not None:
+                self._onnx_providers = list(onnx_providers) or None
 
             if not self._model:
                 raise ValueError("No embedding model configured")
 
-            svc = EmbeddingService(
+            try:
+                # Construction inside the try too, so a bad backend kind or an
+                # OnnxBackend pooling/ImportError marks the runtime failed (state
+                # reports "failed", not "stopped").
+                be = self._make_backend()
+                be.start()
+            except Exception:
+                self._last_start_failed = True
+                raise
+            self._last_start_failed = False
+            self._backend = be
+            self._index.set_backend(be)
+            return be
+
+    def _make_backend(self) -> EmbedderBackend:
+        """Construct (but don't start) the backend for the configured kind.
+
+        The ONNX backend imports its heavy deps lazily, so ``shrike[onnx]`` stays
+        optional — a missing dependency surfaces as ``ImportError`` only when the
+        onnx backend is actually selected.
+        """
+        assert self._model is not None  # callers check before constructing
+        if self._backend_kind == "onnx":
+            from shrike.embedding_onnx import OnnxBackend
+
+            return OnnxBackend(
+                model=self._model,
+                pooling=self._pooling,
+                normalize=self._normalize,
+                providers=self._onnx_providers,
+                # --embedding-context-size doubles as ONNX's token-truncation
+                # length (None → the backend's 256 default).
+                max_length=self._context_size,
+                log_dir=self._log_dir,
+            )
+        if self._backend_kind == "llama":
+            return LlamaServerBackend(
                 model=self._model,
                 host=self._host,
                 port=self._port,
@@ -641,23 +727,18 @@ class EmbeddingRuntime:
                 llama_server=self._llama_server,
                 pid_file=self._pid_file,
             )
-            try:
-                svc.start()
-            except Exception:
-                self._last_start_failed = True
-                raise
-            self._last_start_failed = False
-            self._service = svc
-            self._index.set_embedding_service(svc)
-            return svc
+        raise ValueError(
+            f"Unknown embedding backend {self._backend_kind!r} "
+            f"(expected one of {', '.join(SUPPORTED_BACKENDS)})"
+        )
 
     def stop(self) -> bool:
-        """Detach from the index and stop the service. Returns False if not running."""
+        """Detach from the index and stop the backend. Returns False if not running."""
         with self._lock:
-            if self._service is None:
+            if self._backend is None:
                 return False
-            self._index.set_embedding_service(None)
-            self._service.stop()
-            self._service = None
+            self._index.set_backend(None)
+            self._backend.stop()
+            self._backend = None
             self._last_start_failed = False
             return True

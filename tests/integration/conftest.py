@@ -12,6 +12,7 @@ once per CI run and cached in the pytest tmp directory.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import shutil
 import socket
@@ -32,7 +33,9 @@ from shrike.client import ShrikeClient
 from tests.integration.model_cache import (
     EMBEDDING_MODEL_NAME,
     EMBEDDING_MODEL_URL,
+    cached_distilroberta_model_dir,
     cached_model_path,
+    cached_onnx_model_dir,
     download_with_retry,
 )
 
@@ -515,6 +518,40 @@ requires_llama_server = pytest.mark.skipif(
     not _has_llama_server(),
     reason="llama-server not found on PATH",
 )
+
+
+def _has_onnxruntime() -> bool:
+    return (
+        importlib.util.find_spec("onnxruntime") is not None
+        and importlib.util.find_spec("tokenizers") is not None
+    )
+
+
+requires_onnxruntime = pytest.mark.skipif(
+    not _has_onnxruntime(),
+    reason="onnxruntime/tokenizers not installed (pip install 'shrike[onnx]')",
+)
+
+
+@pytest.fixture(scope="session")
+def onnx_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A small ONNX text-embedding model dir (model.onnx + tokenizer.json).
+
+    Same all-MiniLM-L6-v2 as the GGUF fixture, in ONNX form (384-dim), so the two
+    backends share the same vector space and semantic assertions. Downloaded with
+    retry/backoff and reused from the CI-cached model dir (``$SHRIKE_TEST_MODEL_DIR``).
+    """
+    return cached_onnx_model_dir(tmp_path_factory.mktemp("onnx-model"))
+
+
+@pytest.fixture(scope="session")
+def distilroberta_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A second, architecturally-different ONNX model: DistilRoBERTa (768-dim, BPE).
+
+    Its own vector space (not comparable to MiniLM) and no ``[PAD]`` token, so it
+    exercises the RoBERTa-only paths the MiniLM can't (#172). Same retry/cache path.
+    """
+    return cached_distilroberta_model_dir(tmp_path_factory.mktemp("distilroberta-model"))
 
 
 @pytest.fixture(scope="session")

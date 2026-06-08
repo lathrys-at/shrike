@@ -8,6 +8,81 @@ isn't reconstructable from the code.
 
 ## Semantic search & the vector index
 
+### Embedding backends are pluggable behind one small protocol (#172)
+
+The embedder used to *be* llama-server: `VectorIndex` and the server boot path
+talked to a concrete `EmbeddingService` and nothing else. Going multimodal (#162)
+means swapping models and *runtimes* wholesale, and two nearer-term needs pushed
+the same way — an ONNX runtime for deployments where a pinned llama.cpp binary is
+the wrong fit, and a guarantee that **text-only embedding stays first-class
+forever** (the test suite depends on small/fast text-only models). So we landed
+the seam first, ahead of any multimodal model or index change: a minimal
+`EmbedderBackend` protocol (`embed_texts`, `embedding_dim`, `model_fingerprint`,
+`health`, lifecycle, `modalities`) with `LlamaServerBackend` and `OnnxBackend`
+behind it. The index never learns which backend it has — it only calls
+`embed_texts` — so drift, the per-note hash sidecar, and persistence stay
+backend-agnostic.
+
+Three choices worth recording. **The fingerprint is namespaced by family**
+(`onnx:…` vs llama's `meta:`/`file:…`) rather than adding a backend token to the
+existing llama fingerprint: the same model under two runtimes produces different
+vectors and must not share a space, but an existing llama index should *not* be
+forced to rebuild on upgrade — distinct prefixes give the separation for free.
+**`modalities` is a declared capability, not a config flag.** In Phase 1 every
+backend is `{"text"}`, so it changes no behaviour today; its job is to make
+text-only a *named, permanent* capability that a later multimodal backend extends,
+so media-by-content search lights up where vectors exist and silently returns
+nothing where they don't — degrading, never erroring. We deliberately did **not**
+build the media-embedding branch yet (no dead code) nor decide the multi-vector-
+vs-fusion index question — that needs evaluation on a real collection (#162).
+**ONNX pooling is folded into the fingerprint; normalization is not.** Pooling
+(mean/cls/last) changes a vector's direction → vector-affecting → must invalidate
+the index; L2 normalization changes only magnitude, and USearch's `cos` metric is
+scale-invariant, so it never changes ranking — the same reasoning that already
+makes llama's `--embd-normalize` moot. CI runs a minimal embedding subset against
+*both* backends (`test_backends.py`), plus a second architecturally-different real
+model (DistilRoBERTa, `test_onnx_models.py`) — the real models keep the cheap mocked
+unit tests honest (their assumed onnxruntime input-type strings, output ranks, and
+tokenizer behaviour stay falsifiable instead of drifting from reality).
+
+Three ONNX operational calls came out of the second-model work, all anchored by that
+real DistilRoBERTa run:
+
+- **ONNX embeds one note at a time, for determinism.** This is the headline. int8 ONNX
+  exports use dynamic quantization, which computes activation scales over the *whole
+  batch tensor* — so a batched embed makes a note's vector depend on the *content* of
+  its batch-mates (even BERT MiniLM drifts ~0.06 batched-vs-single; the two-different-
+  same-length-batch-mates control rules out padding; llama-server, computing in fp, is
+  at float noise, confirming it's int8-specific). That would break the index's core
+  invariant that a `reconcile`'s end state is identical to a full rebuild: the same
+  note would embed differently in a rebuild (batch of 64) than in an incremental upsert
+  (batch of 1). So `OnnxBackend` embeds **per-text** (batch of 1), making each vector a
+  pure function of its text — locked by an exact-equality (`np.array_equal`) determinism
+  test against the *real* int8 models, not a mock (a mocked session is trivially batch-
+  independent, so it would prove nothing). Cost is ~1.4× vs batched, negligible in-
+  process (and there's no padding either way). The only thing that would justify re-
+  batching is a future GPU provider (batch-1 underuses the device), as an explicit
+  opt-in trading determinism for throughput — not built now. **Release-ordering:** this
+  changes ONNX vectors and is a fixed backend behavior (not folded into `model_id`), so
+  it had to land before the first ONNX release; if it ever slipped past one it would
+  need a `textprep`-style fingerprint bump to force a one-time re-embed of any
+  in-the-wild ONNX index.
+- **Pad token resolved across conventions, not hard-coded.** BERT/WordPiece names the
+  pad token `[PAD]`, RoBERTa/BPE uses `<pad>`; `OnnxBackend` resolves `[PAD]` then
+  `<pad>`, falling back to id 0 only if neither exists. RoBERTa derives position ids
+  from *which tokens ≠ the pad id*, so padding with the wrong id would shift the real
+  tokens' positions and corrupt their embeddings (the real DistilRoBERTa run surfaced
+  this; a BERT-tokenizer mock never reaches the `<pad>` branch). With per-text
+  embedding above there is no padding to apply today, so this resolution is *defensive*
+  — kept correct so a future batched path (the GPU opt-in) doesn't silently regress.
+- **`--embedding-context-size` truncates but is not clamped to the model's ceiling.**
+  It sets the ONNX token-truncation length; raising it past the model's
+  `max_position_embeddings` is the operator's responsibility (documented in the CLI
+  help). We deliberately don't clamp: that limit isn't reliably discoverable from an
+  arbitrary ONNX graph (sometimes a static input shape, sometimes only a sibling
+  `config.json`, sometimes absent). A warn-only `config.json` read is a possible
+  future safety net, not a clamp.
+
 ### The index is a derived cache, never a co-equal store
 
 The Anki collection (SQLite) is always the source of truth; the USearch index is
