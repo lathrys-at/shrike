@@ -48,7 +48,7 @@ ONNX_MODEL_FILES = {
 # so its own vector space, no cross-model comparison) and a **BPE tokenizer with no
 # `[PAD]`** (`token_to_id("[PAD]")` is None, so OnnxBackend's `<pad>` resolution
 # fires for real). int8 Xenova export, Apache-2.0. Pins the RoBERTa-only deltas the
-# MiniLM can't reach; ~82 MB, so the embedding lane now caches two onnx models.
+# MiniLM can't reach; ~82 MB.
 DISTILROBERTA_MODEL_DIR_NAME = "all-distilroberta-v1-onnx-int8"
 DISTILROBERTA_MODEL_FILES = {
     "model.onnx": (
@@ -57,6 +57,15 @@ DISTILROBERTA_MODEL_FILES = {
     "tokenizer.json": (
         "https://huggingface.co/Xenova/all-distilroberta-v1/resolve/main/tokenizer.json"
     ),
+}
+
+# The fp32 (non-quantized) export of the same MiniLM (#174). Unlike the int8 model it
+# batches **bit-exact** (no dynamic activation quantization), so it's the fixture that
+# proves the batch-safety probe enables batching where it's safe. ~86 MB.
+ONNX_FP32_MODEL_DIR_NAME = "all-MiniLM-L6-v2-onnx-fp32"
+ONNX_FP32_MODEL_FILES = {
+    "model.onnx": "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
+    "tokenizer.json": "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
 }
 
 # Statuses worth retrying: HF rate-limit plus transient gateway/server errors.
@@ -154,3 +163,8 @@ def cached_onnx_model_dir(fallback_dir: Path) -> Path:
 def cached_distilroberta_model_dir(fallback_dir: Path) -> Path:
     """The pinned DistilRoBERTa int8 ONNX model dir (768-dim, BPE, no ``[PAD]``)."""
     return _cached_model_dir(fallback_dir, DISTILROBERTA_MODEL_DIR_NAME, DISTILROBERTA_MODEL_FILES)
+
+
+def cached_onnx_fp32_model_dir(fallback_dir: Path) -> Path:
+    """The pinned fp32 MiniLM ONNX model dir (384-dim, batches bit-exact)."""
+    return _cached_model_dir(fallback_dir, ONNX_FP32_MODEL_DIR_NAME, ONNX_FP32_MODEL_FILES)

@@ -33,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from shrike.embed_batching import probe_max_safe_batch
 from shrike.embed_text import EMBED_TEXT_VERSION
 from shrike.embedding_base import TEXT
 
@@ -65,6 +66,7 @@ class OnnxBackend:
         normalize: bool = True,
         providers: list[str] | None = None,
         max_length: int | None = None,
+        batch_size: int | None = None,
         log_dir: str | Path | None = None,  # accepted for runtime parity; unused
     ) -> None:
         self._model = model
@@ -80,6 +82,10 @@ class OnnxBackend:
         # Token truncation length. Plumbed from --embedding-context-size; None
         # means the default (fine for all-MiniLM's 256-token limit).
         self._max_length = max_length or DEFAULT_MAX_LENGTH
+        # Optional cap on the chunk size (memory/VRAM); None = batch as large as safe.
+        self._batch_cap = batch_size
+        # Largest batch size proven safe by the startup probe; 1 == embed serially.
+        self._safe_batch = 1
         self._session: Any = None
         self._tokenizer: Any = None
         self._dim: int | None = None
@@ -141,12 +147,11 @@ class OnnxBackend:
         # Resolve the pad token across tokenizer conventions: BERT/WordPiece names it
         # "[PAD]", RoBERTa/BART BPE uses "<pad>". The *real* pad id matters because
         # some architectures (RoBERTa) derive position ids from which tokens != the
-        # pad id, so padding with the wrong id shifts the real tokens' positions and
-        # corrupts their embeddings; fall back to id 0 only if neither name exists.
-        # NOTE: `embed_texts` is per-text (batch of 1), so padding is never actually
-        # applied today — this is configured defensively so a future *batched* path
-        # (e.g. a GPU provider) stays correct. (A real DistilRoBERTa export surfaced
-        # the convention; a BERT-tokenizer mock never reaches the "<pad>" branch.)
+        # pad id, so padding a batch with the wrong id shifts the real tokens' positions
+        # and corrupts their embeddings; fall back to id 0 only if neither name exists.
+        # (Padding applies whenever a chunk of >1 is embedded — i.e. for a batch-safe
+        # model. A real DistilRoBERTa run surfaced the convention; a BERT-tokenizer mock
+        # never reaches the "<pad>" branch.)
         pad_id, pad_token = tokenizer.token_to_id("[PAD]"), "[PAD]"
         if pad_id is None:
             pad_id, pad_token = tokenizer.token_to_id("<pad>"), "<pad>"
@@ -155,7 +160,26 @@ class OnnxBackend:
         tokenizer.enable_padding(pad_id=pad_id, pad_token=pad_token)
         tokenizer.enable_truncation(max_length=self._max_length)
         self._tokenizer = tokenizer
-        logger.info("ONNX embedding model ready (%s)", onnx_path.name)
+
+        # Probe batch-safety once: int8 dynamic-quant exports are batch-variant (a
+        # note's vector depends on its batch-mates), fp16/fp32 are not. Batch only as
+        # large as is provably safe; serial otherwise. A probe failure falls back to
+        # serial rather than failing boot.
+        try:
+            self._safe_batch = probe_max_safe_batch(self._embed_chunk)
+        except Exception as e:
+            logger.warning("Batch-safety probe failed (%s); embedding serially.", e)
+            self._safe_batch = 1
+        if self._safe_batch == 1 and self._batch_cap and self._batch_cap > 1:
+            logger.warning(
+                "Embedding model is batch-variant; embedding serially (batch size 1) for "
+                "determinism — use a different model/backend combination for batched throughput."
+            )
+        logger.info(
+            "ONNX embedding model ready (%s, %s)",
+            onnx_path.name,
+            "serial" if self._safe_batch == 1 else "batched",
+        )
 
     def stop(self) -> None:
         """Drop the session and tokenizer."""
@@ -163,32 +187,40 @@ class OnnxBackend:
         self._tokenizer = None
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Embed texts into vectors, one sequence at a time (one vector per input).
+        """Embed texts into vectors (one per input), chunked by the safe batch size.
 
-        Deliberately **not batched**. The int8 ONNX exports use dynamic quantization,
-        which computes activation scales over the whole batch tensor — so a batched
-        embed makes a note's vector depend on the *content* of its batch-mates: the
-        same note embedded during a rebuild (a batch of 64) differs from itself
-        embedded during an incremental upsert (a batch of 1). The index relies on a
-        note's vector being a pure function of its text — that's what makes a
-        ``reconcile``'s end state identical to a full rebuild — so each sequence is
-        embedded alone, making the vector batch-independent (verified by the
-        determinism tests). It also means there's never any padding to mask. The cost
-        is small in-process (~1.4x vs batched, no HTTP round-trip); the only thing
-        that would justify re-batching is a future GPU provider (batch-1 underuses the
-        device), as an opt-in trade of determinism for throughput — not built now.
+        A startup probe decides whether this model batches deterministically. If it does
+        (fp16/fp32 ONNX), texts are embedded in chunks as large as the input (capped by
+        ``--embedding-batch-size``). If it doesn't (int8 dynamic-quant — a note's vector
+        would depend on its batch-mates, breaking the index's reconcile==rebuild
+        invariant), each text is embedded **serially** (batch size 1). So a note's vector
+        is always a pure function of its text, regardless of how the index batched it.
         """
         if not self.running:
             raise RuntimeError("ONNX embedding backend is not running")
-        return [self._embed_one(t) for t in texts]
+        if not texts:
+            return []
+        if self._safe_batch <= 1:
+            bs = 1
+        else:
+            bs = min(self._batch_cap, len(texts)) if self._batch_cap else len(texts)
+        out: list[list[float]] = []
+        for i in range(0, len(texts), bs):
+            out.extend(self._embed_chunk(texts[i : i + bs]))
+        return out
 
-    def _embed_one(self, text: str) -> list[float]:
-        """Embed a single text (batch size 1, so no padding and a fixed quant scale)."""
-        enc = self._tokenizer.encode_batch([text])[0]
+    def _embed_chunk(self, texts: list[str]) -> list[list[float]]:
+        """Embed a list of texts as a single batch (one vector per input).
+
+        A 1-element chunk pads nothing; a multi-element chunk pads to the longest and the
+        attention mask excludes the padding. This is the unit the batch-safety probe and
+        ``embed_texts`` build on.
+        """
+        encodings = self._tokenizer.encode_batch(texts)
         available = {
-            "input_ids": np.array([enc.ids], dtype=np.int64),
-            "attention_mask": np.array([enc.attention_mask], dtype=np.int64),
-            "token_type_ids": np.array([enc.type_ids], dtype=np.int64),
+            "input_ids": np.array([e.ids for e in encodings], dtype=np.int64),
+            "attention_mask": np.array([e.attention_mask for e in encodings], dtype=np.int64),
+            "token_type_ids": np.array([e.type_ids for e in encodings], dtype=np.int64),
         }
         attention_mask = available["attention_mask"]
         # Feed only the inputs the graph declares, each cast to that input's declared
@@ -199,8 +231,8 @@ class OnnxBackend:
             if inp.name in available
         }
         out = np.asarray(self._session.run(None, feed)[0], dtype=np.float32)
-        # A token-level last_hidden_state [1, seq, hidden] needs pooling; some exports
-        # emit an already-pooled sentence embedding [1, hidden], used directly.
+        # A token-level last_hidden_state [batch, seq, hidden] needs pooling; some exports
+        # emit an already-pooled sentence embedding [batch, hidden], used directly.
         if out.ndim == 3:
             vectors = self._pool(out, attention_mask)
         elif out.ndim == 2:
@@ -213,7 +245,7 @@ class OnnxBackend:
             norms = np.linalg.norm(vectors, axis=1, keepdims=True)
             vectors = vectors / np.clip(norms, 1e-12, None)
         self._dim = int(vectors.shape[1])
-        result: list[float] = vectors[0].astype(np.float32).tolist()
+        result: list[list[float]] = vectors.astype(np.float32).tolist()
         return result
 
     def _pool(self, token_emb: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -280,4 +312,6 @@ class OnnxBackend:
             "backend": "onnx",
             "model": self._model,
             "providers": self._providers,
+            "batch_safe": self._safe_batch >= 2,
+            "batch": "serial" if self._safe_batch <= 1 else "batched",
         }

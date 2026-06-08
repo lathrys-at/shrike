@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from shrike.embed_batching import probe_max_safe_batch
 from shrike.embed_text import EMBED_TEXT_VERSION
 from shrike.embedding_base import TEXT, EmbedderBackend
 
@@ -111,6 +112,7 @@ class LlamaServerBackend:
         extra_args: Sequence[str] | None = None,
         llama_server: str | None = None,
         pid_file: str | Path | None = None,
+        batch_size: int | None = None,
     ) -> None:
         self._model = model
         self._host = host
@@ -123,6 +125,10 @@ class LlamaServerBackend:
         # Raw passthrough token strings (each shlex-split at command-build time).
         self._extra_args = list(extra_args) if extra_args else []
         self._llama_server_override = llama_server
+        # Optional cap on the per-request batch (None = whole input); _safe_batch is
+        # set by the startup batch-safety probe (1 == serial). llama is normally safe.
+        self._batch_cap = batch_size
+        self._safe_batch = 1
         # PID file: records the llama-server PID so a later start can reap an
         # orphan left by an unclean Shrike shutdown (it survives a parent SIGKILL).
         self._pid_file = Path(pid_file) if pid_file else None
@@ -336,7 +342,27 @@ class LlamaServerBackend:
         # Cache the model's reported name/alias so embed() can pin it.
         self._model_name = self.model_info().get("id") or Path(self._model).name
 
-        logger.info("Embedding service ready (PID %s)", self._process.pid)
+        # Batch-safety probe (universal across backends): confirm a note's vector is
+        # independent of its batch-mates before batching requests. llama computes in fp,
+        # so it is normally safe; the check guards against a model/config that isn't. A
+        # probe failure (a transient embed error) falls back to serial rather than failing
+        # boot — real usage will surface any deeper problem.
+        try:
+            self._safe_batch = probe_max_safe_batch(self._embed_chunk)
+        except Exception as e:
+            logger.warning("Batch-safety probe failed (%s); embedding serially.", e)
+            self._safe_batch = 1
+        if self._safe_batch == 1 and self._batch_cap and self._batch_cap > 1:
+            logger.warning(
+                "Embedding model is batch-variant; embedding serially (batch size 1) for "
+                "determinism — use a different model/backend combination for batched throughput."
+            )
+
+        logger.info(
+            "Embedding service ready (PID %s, %s)",
+            self._process.pid,
+            "serial" if self._safe_batch == 1 else "batched",
+        )
 
     def _wait_healthy(self) -> bool:
         """Poll GET /health until it returns 200 or we time out."""
@@ -405,6 +431,8 @@ class LlamaServerBackend:
                 "pid": self._process.pid if self._process else None,
                 "url": self._base_url,
                 "model": self._model,
+                "batch_safe": self._safe_batch >= 2,
+                "batch": "serial" if self._safe_batch <= 1 else "batched",
             }
         except (httpx.ConnectError, httpx.TimeoutException):
             return {"available": False, "pid": self._process.pid if self._process else None}
@@ -500,14 +528,28 @@ class LlamaServerBackend:
         return f"{base}:textprep={EMBED_TEXT_VERSION}"
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Compute embeddings for a list of texts.
+        """Compute embeddings for a list of texts (one vector per input).
 
-        Returns a list of float vectors, one per input text.
-        Raises RuntimeError if the service is not running.
+        Chunked by the batch size proven safe at startup: when safe (llama computes in
+        fp, so normally the whole input is one request — unchanged behaviour), capped by
+        ``--embedding-batch-size``; when variant, one text per request. Raises
+        RuntimeError if the service is not running.
         """
         if not self.running:
             raise RuntimeError("Embedding service is not running")
+        if not texts:
+            return []
+        if self._safe_batch <= 1:
+            bs = 1
+        else:
+            bs = min(self._batch_cap, len(texts)) if self._batch_cap else len(texts)
+        out: list[list[float]] = []
+        for i in range(0, len(texts), bs):
+            out.extend(self._embed_chunk(texts[i : i + bs]))
+        return out
 
+    def _embed_chunk(self, texts: list[str]) -> list[list[float]]:
+        """Embed a list of texts as a single ``/v1/embeddings`` request."""
         payload: dict[str, Any] = {"input": texts}
         if self._model_name:
             # Pin the model so a future external multi-model endpoint resolves
@@ -566,6 +608,7 @@ class EmbeddingRuntime:
         pid_file: str | Path | None = None,
         onnx_providers: Sequence[str] | None = None,
         normalize: bool = True,
+        batch_size: int | None = None,
     ) -> None:
         self._index = index
         self._backend_kind = backend
@@ -582,6 +625,7 @@ class EmbeddingRuntime:
         self._pid_file = Path(pid_file) if pid_file else None
         self._onnx_providers = list(onnx_providers) if onnx_providers else None
         self._normalize = normalize
+        self._batch_size = batch_size
         self._backend: EmbedderBackend | None = None
         self._lock = threading.Lock()
         # Tracks why the backend isn't running, so status can distinguish a
@@ -641,6 +685,7 @@ class EmbeddingRuntime:
         extra_args: Sequence[str] | None = None,
         llama_server: str | None = None,
         onnx_providers: Sequence[str] | None = None,
+        batch_size: int | None = None,
     ) -> EmbedderBackend:
         """Start the embedding backend and attach it to the index.
 
@@ -674,6 +719,8 @@ class EmbeddingRuntime:
                 self._llama_server = llama_server
             if onnx_providers is not None:
                 self._onnx_providers = list(onnx_providers) or None
+            if batch_size is not None:
+                self._batch_size = batch_size
 
             if not self._model:
                 raise ValueError("No embedding model configured")
@@ -711,6 +758,7 @@ class EmbeddingRuntime:
                 # --embedding-context-size doubles as ONNX's token-truncation
                 # length (None → the backend's 256 default).
                 max_length=self._context_size,
+                batch_size=self._batch_size,
                 log_dir=self._log_dir,
             )
         if self._backend_kind == "llama":
@@ -726,6 +774,7 @@ class EmbeddingRuntime:
                 extra_args=self._extra_args,
                 llama_server=self._llama_server,
                 pid_file=self._pid_file,
+                batch_size=self._batch_size,
             )
         raise ValueError(
             f"Unknown embedding backend {self._backend_kind!r} "

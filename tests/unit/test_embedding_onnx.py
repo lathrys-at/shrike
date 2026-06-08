@@ -85,6 +85,20 @@ class _FakeSession2Input(_FakeSession):
     _input_names = ("input_ids", "attention_mask")
 
 
+class _FakeSessionVariant(_FakeSession):
+    """Batch-variant (like int8 dynamic quant): output *direction* depends on batch size,
+    so the startup probe detects it and forces serial embedding."""
+
+    def run(self, _outputs: object, feed: dict) -> list[np.ndarray]:
+        self.last_feed = feed
+        batch, seq = feed["input_ids"].shape
+        self.run_calls.append(batch)
+        shape = (batch, 4) if self._output_ndim == 2 else (batch, seq, 4)
+        arr = np.ones(shape, dtype=np.float32)
+        arr[..., 0] = float(batch)  # first component scales with batch → direction differs
+        return [arr]
+
+
 class _FakeEncoding:
     def __init__(self, ids: list[int]) -> None:
         self.ids = ids
@@ -322,14 +336,39 @@ class TestLifecycleAndEmbed:
         be.embed_texts(["a"])
         assert be._session.last_feed["input_ids"].dtype == np.int32
 
-    def test_embeds_one_text_per_run(self, tmp_path: Path) -> None:
-        # Per-text embedding: session.run is called once per text, each with a
-        # batch-of-1 feed — so a note's vector can't depend on its batch-mates (the
-        # int8 dynamic-quant batch-variance the real-model determinism test pins).
+    def test_embeds_serially_when_variant(self, tmp_path: Path) -> None:
+        # A batch-variant model (the probe detects it) is embedded serially: one run per
+        # text, each batch-of-1, so a note's vector can't depend on its batch-mates.
         be = OnnxBackend(model=str(_model_dir(tmp_path)))
-        self._start(be)
+        self._start(be, _FakeSessionVariant)
+        assert be._safe_batch == 1
+        be._session.run_calls.clear()  # drop the startup-probe calls
         be.embed_texts(["a", "b", "c"])
         assert be._session.run_calls == [1, 1, 1]
+
+    def test_embeds_batched_when_safe(self, tmp_path: Path) -> None:
+        # A batch-safe model (the all-ones fake) embeds the whole input in one chunk.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(be)
+        assert be._safe_batch >= 2
+        be._session.run_calls.clear()
+        be.embed_texts(["a", "b", "c"])
+        assert be._session.run_calls == [3]
+
+    def test_batch_size_cap_chunks(self, tmp_path: Path) -> None:
+        # --embedding-batch-size caps the chunk size even on a batch-safe model.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)), batch_size=2)
+        self._start(be)
+        be._session.run_calls.clear()
+        be.embed_texts(["a", "b", "c", "d", "e"])
+        assert be._session.run_calls == [2, 2, 1]
+
+    def test_variant_model_warns_when_batch_requested(self, tmp_path: Path) -> None:
+        be = OnnxBackend(model=str(_model_dir(tmp_path)), batch_size=8)
+        with patch("shrike.embedding_onnx.logger.warning") as warn:
+            self._start(be, _FakeSessionVariant)
+        assert be._safe_batch == 1
+        assert any("batch-variant" in str(c.args) for c in warn.call_args_list)
 
     def test_feed_filter_drops_undeclared_inputs(self, tmp_path: Path) -> None:
         # A model declaring only input_ids+attention_mask (DistilBERT/RoBERTa):

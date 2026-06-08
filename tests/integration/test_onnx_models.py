@@ -5,17 +5,18 @@ it runs OnnxBackend against actual ONNX exports, so the mocks' assumed
 `get_inputs().type` strings, output ranks, and tokenizer behaviour stay falsifiable
 rather than drifting from reality. No server here — just the backend + a real model.
 
-Two model lineages, by design:
+Three model lineages, by design:
 
-- **MiniLM** (BERT/WordPiece, 384-dim, has `[PAD]`) for the pooling and truncation
-  matrix — the conditions any model varies on.
-- **DistilRoBERTa** (BPE, 768-dim, **no** `[PAD]`) for the RoBERTa-only deltas the
-  MiniLM cannot reach: its own dimensionality, the `[PAD]`-absent pad_id=0 fallback
-  firing for real, and masking keeping a padded batch correct despite `<s>`-as-pad.
+- **MiniLM int8** (BERT/WordPiece, 384-dim, has `[PAD]`) for pooling, truncation, and
+  the int8 batch-variant → serial determinism lock.
+- **DistilRoBERTa int8** (BPE, 768-dim, **no** `[PAD]`) for the RoBERTa-only deltas: its
+  own dimensionality, the `<pad>` resolution firing for real, and the same serial lock.
+- **MiniLM fp32** (non-quantized) for the opposite case: the probe finds it batch-**safe**,
+  so it batches, and batched is bit-exact with serial.
 
-The two models do **not** share a vector space, so there is no cross-model comparison.
-Both need onnxruntime/tokenizers (the `onnx` extra), so the module is `embedding`-marked
-and each class carries `requires_onnxruntime`.
+The int8 and fp32 / RoBERTa models do **not** share a vector space, so there's no
+cross-model comparison. All need onnxruntime/tokenizers (the `onnx` extra), so the module
+is `embedding`-marked and each class carries `requires_onnxruntime`.
 """
 
 from __future__ import annotations
@@ -79,10 +80,11 @@ class TestOnnxRealMiniLM:
         # *batched* embed would make a note's vector depend on its batch-mates'
         # content — the same note would embed differently in a rebuild (batch of 64)
         # than in an incremental upsert (batch of 1), breaking the index's contract
-        # that a reconcile's end state is identical to a full rebuild. OnnxBackend
-        # embeds per-text precisely to keep this invariant; this test is the lock.
+        # that a reconcile's end state is identical to a full rebuild. The startup
+        # probe detects int8 is batch-variant and embeds it serially; this is the lock.
         be = OnnxBackend(model=str(onnx_model))
         be.start()
+        assert be._safe_batch == 1  # probe found the int8 model batch-variant → serial
         text = "mitochondria are the powerhouse of the cell"
         alone = np.array(be.embed_texts([text])[0])
         with_others = np.array(
@@ -119,13 +121,46 @@ class TestOnnxRealDistilRoberta:
         assert all(len(v) == _ROBERTA_NDIM for v in vecs)
 
     def test_embedding_is_batch_independent(self, distilroberta_model: Path) -> None:
-        # The same determinism lock as MiniLM, on a second model lineage: a note's
-        # vector is EXACTLY independent of its batch-mates under per-text embedding.
+        # The same determinism lock as MiniLM, on a second model lineage: the probe
+        # finds this int8 model batch-variant and embeds serially, so a note's vector
+        # is EXACTLY independent of its batch-mates.
         be = OnnxBackend(model=str(distilroberta_model))
         be.start()
+        assert be._safe_batch == 1
         text = "mitochondria are the powerhouse of the cell"
         alone = np.array(be.embed_texts([text])[0])
         with_others = np.array(
             be.embed_texts([text, "an unrelated and deliberately long sentence about taxes"])[0]
         )
         assert np.array_equal(alone, with_others)
+
+
+@requires_onnxruntime
+class TestOnnxRealFp32:
+    """The fp32 (non-quantized) MiniLM: the probe finds it batch-safe, so it batches —
+    and batched is bit-exact with serial (no dynamic activation quantization)."""
+
+    def test_probe_finds_batch_safe_and_batched_equals_serial(self, onnx_fp32_model: Path) -> None:
+        be = OnnxBackend(model=str(onnx_fp32_model))
+        be.start()
+        assert be._safe_batch >= 2  # fp32 batches deterministically → probe says safe
+
+        text = "mitochondria are the powerhouse of the cell"
+        serial = np.array(be.embed_texts([text])[0])  # chunk of 1
+        # Embedded in a real batch (chunk of 2), the same note must be bit-identical.
+        batched = np.array(
+            be.embed_texts([text, "an unrelated and deliberately long sentence about taxes"])[0]
+        )
+        assert serial.shape == (_MINILM_NDIM,)
+        assert np.array_equal(serial, batched)
+
+    def test_batch_size_cap_chunks(self, onnx_fp32_model: Path) -> None:
+        # The cap limits chunk size even on a batch-safe model; results are unchanged.
+        capped = OnnxBackend(model=str(onnx_fp32_model), batch_size=2)
+        capped.start()
+        uncapped = OnnxBackend(model=str(onnx_fp32_model))
+        uncapped.start()
+        texts = ["one", "two", "three", "four", "five"]
+        assert np.array_equal(
+            np.array(capped.embed_texts(texts)), np.array(uncapped.embed_texts(texts))
+        )

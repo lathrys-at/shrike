@@ -807,6 +807,10 @@ class EmbeddingRunning(BaseModel):
     pid: int | None = None
     url: str | None = None
     model: str | None = None
+    # Whether the startup batch-safety probe found the model batches deterministically.
+    # ``batch`` is "batched" or "serial"; both absent for a backend that doesn't report them.
+    batch_safe: bool | None = None
+    batch: Literal["serial", "batched"] | None = None
 
 
 class EmbeddingDown(BaseModel):

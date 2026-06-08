@@ -26,11 +26,12 @@ def svc(tmp_path: Path) -> EmbeddingService:
 
 
 def _set_running(svc: EmbeddingService, pid: int = 123) -> None:
-    """Make a service look like it has a live llama-server subprocess."""
+    """Make a service look like it has a live, batch-safe llama-server subprocess."""
     proc = MagicMock()
     proc.poll.return_value = None
     proc.pid = pid
     svc._process = proc
+    svc._safe_batch = 16  # as the startup probe would set for fp llama-server
 
 
 class TestInit:
@@ -365,6 +366,7 @@ class TestEmbed:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         svc._process = mock_proc
+        svc._safe_batch = 16  # batch-safe, so both texts go in one request
 
         mock_resp = Mock()
         mock_resp.status_code = 200

@@ -385,6 +385,7 @@ def _register_custom_routes(
                     "extra_args",
                     "llama_server",
                     "onnx_providers",
+                    "batch_size",
                 ):
                     if body.get(key) is not None:
                         overrides[key] = body[key]
@@ -668,6 +669,14 @@ def main() -> None:
         "only.)",
     )
     parser.add_argument(
+        "--embedding-batch-size",
+        type=int,
+        default=None,
+        help="Cap the embedding batch size (any backend). Default: batch as large as a "
+        "startup self-check proves safe. A batch-variant model (e.g. int8 ONNX) is always "
+        "embedded serially regardless.",
+    )
+    parser.add_argument(
         "--no-embedding",
         action="store_true",
         help="Don't start the embedding service at boot even if a model is configured "
@@ -781,6 +790,7 @@ def main() -> None:
         llama_server=args.llama_server,
         pid_file=resolved_state_dir / "embedding.pid",
         onnx_providers=args.embedding_onnx_provider,
+        batch_size=args.embedding_batch_size,
     )
 
     if args.embedding_model and not args.no_embedding:
