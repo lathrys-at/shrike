@@ -48,21 +48,33 @@ tokenizer behaviour stay falsifiable instead of drifting from reality).
 Three ONNX operational calls came out of the second-model work, all anchored by that
 real DistilRoBERTa run:
 
+- **ONNX embeds one note at a time, for determinism.** This is the headline. int8 ONNX
+  exports use dynamic quantization, which computes activation scales over the *whole
+  batch tensor* — so a batched embed makes a note's vector depend on the *content* of
+  its batch-mates (even BERT MiniLM drifts ~0.06 batched-vs-single; the two-different-
+  same-length-batch-mates control rules out padding; llama-server, computing in fp, is
+  at float noise, confirming it's int8-specific). That would break the index's core
+  invariant that a `reconcile`'s end state is identical to a full rebuild: the same
+  note would embed differently in a rebuild (batch of 64) than in an incremental upsert
+  (batch of 1). So `OnnxBackend` embeds **per-text** (batch of 1), making each vector a
+  pure function of its text — locked by an exact-equality (`np.array_equal`) determinism
+  test against the *real* int8 models, not a mock (a mocked session is trivially batch-
+  independent, so it would prove nothing). Cost is ~1.4× vs batched, negligible in-
+  process (and there's no padding either way). The only thing that would justify re-
+  batching is a future GPU provider (batch-1 underuses the device), as an explicit
+  opt-in trading determinism for throughput — not built now. **Release-ordering:** this
+  changes ONNX vectors and is a fixed backend behavior (not folded into `model_id`), so
+  it had to land before the first ONNX release; if it ever slipped past one it would
+  need a `textprep`-style fingerprint bump to force a one-time re-embed of any
+  in-the-wild ONNX index.
 - **Pad token resolved across conventions, not hard-coded.** BERT/WordPiece names the
   pad token `[PAD]`, RoBERTa/BPE uses `<pad>`; `OnnxBackend` resolves `[PAD]` then
-  `<pad>`, falling back to id 0 only if neither exists. This isn't cosmetic: RoBERTa
-  derives position ids from *which tokens ≠ the pad id*, so padding a batch with the
-  wrong id (the old `<s>`=0 fallback) shifts the real tokens' positions and corrupts
-  their embeddings. The real model surfaced it; a BERT-tokenizer mock never reaches
-  the `<pad>` branch. (Padded positions are masked out of `_pool` regardless, so the
-  fill id only ever affects *whether the real tokens are computed correctly*, never a
-  pooled value directly.)
-- **Quantized ONNX is not batch-invariant, and that's fine.** An int8 model embeds a
-  note slightly differently alone vs. in a batch (int8 reduction order differs per
-  batch — even BERT MiniLM drifts ~0.06). So the real masking test asserts *ranking
-  sanity*, never bit-equality; the drift is far below inter-note semantic distances
-  and search ranks correctly. Don't write batched-vs-single `allclose` assertions
-  against a quantized model.
+  `<pad>`, falling back to id 0 only if neither exists. RoBERTa derives position ids
+  from *which tokens ≠ the pad id*, so padding with the wrong id would shift the real
+  tokens' positions and corrupt their embeddings (the real DistilRoBERTa run surfaced
+  this; a BERT-tokenizer mock never reaches the `<pad>` branch). With per-text
+  embedding above there is no padding to apply today, so this resolution is *defensive*
+  — kept correct so a future batched path (the GPU opt-in) doesn't silently regress.
 - **`--embedding-context-size` truncates but is not clamped to the model's ceiling.**
   It sets the ONNX token-truncation length; raising it past the model's
   `max_position_embeddings` is the operator's responsibility (documented in the CLI

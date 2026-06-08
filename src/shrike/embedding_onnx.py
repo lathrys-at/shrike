@@ -142,11 +142,11 @@ class OnnxBackend:
         # "[PAD]", RoBERTa/BART BPE uses "<pad>". The *real* pad id matters because
         # some architectures (RoBERTa) derive position ids from which tokens != the
         # pad id, so padding with the wrong id shifts the real tokens' positions and
-        # corrupts their embeddings. Fall back to id 0 only if neither name exists.
-        # Padded positions always carry attention_mask 0 and are masked out of `_pool`
-        # regardless, so the fill token never reaches a pooled note vector — this just
-        # keeps the *real* tokens correct. (A real DistilRoBERTa export surfaced this;
-        # a BERT-tokenizer mock never reaches the "<pad>" branch — see the tests.)
+        # corrupts their embeddings; fall back to id 0 only if neither name exists.
+        # NOTE: `embed_texts` is per-text (batch of 1), so padding is never actually
+        # applied today — this is configured defensively so a future *batched* path
+        # (e.g. a GPU provider) stays correct. (A real DistilRoBERTa export surfaced
+        # the convention; a BERT-tokenizer mock never reaches the "<pad>" branch.)
         pad_id, pad_token = tokenizer.token_to_id("[PAD]"), "[PAD]"
         if pad_id is None:
             pad_id, pad_token = tokenizer.token_to_id("<pad>"), "<pad>"
@@ -163,31 +163,44 @@ class OnnxBackend:
         self._tokenizer = None
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Tokenize, run the model, pool, and (optionally) L2-normalize."""
+        """Embed texts into vectors, one sequence at a time (one vector per input).
+
+        Deliberately **not batched**. The int8 ONNX exports use dynamic quantization,
+        which computes activation scales over the whole batch tensor — so a batched
+        embed makes a note's vector depend on the *content* of its batch-mates: the
+        same note embedded during a rebuild (a batch of 64) differs from itself
+        embedded during an incremental upsert (a batch of 1). The index relies on a
+        note's vector being a pure function of its text — that's what makes a
+        ``reconcile``'s end state identical to a full rebuild — so each sequence is
+        embedded alone, making the vector batch-independent (verified by the
+        determinism tests). It also means there's never any padding to mask. The cost
+        is small in-process (~1.4x vs batched, no HTTP round-trip); the only thing
+        that would justify re-batching is a future GPU provider (batch-1 underuses the
+        device), as an opt-in trade of determinism for throughput — not built now.
+        """
         if not self.running:
             raise RuntimeError("ONNX embedding backend is not running")
-        if not texts:
-            return []
+        return [self._embed_one(t) for t in texts]
 
-        encodings = self._tokenizer.encode_batch(texts)
+    def _embed_one(self, text: str) -> list[float]:
+        """Embed a single text (batch size 1, so no padding and a fixed quant scale)."""
+        enc = self._tokenizer.encode_batch([text])[0]
         available = {
-            "input_ids": np.array([e.ids for e in encodings], dtype=np.int64),
-            "attention_mask": np.array([e.attention_mask for e in encodings], dtype=np.int64),
-            "token_type_ids": np.array([e.type_ids for e in encodings], dtype=np.int64),
+            "input_ids": np.array([enc.ids], dtype=np.int64),
+            "attention_mask": np.array([enc.attention_mask], dtype=np.int64),
+            "token_type_ids": np.array([enc.type_ids], dtype=np.int64),
         }
         attention_mask = available["attention_mask"]
-        # Feed only the inputs the graph declares, each cast to that input's
-        # declared integer dtype (onnxruntime won't auto-cast).
+        # Feed only the inputs the graph declares, each cast to that input's declared
+        # integer dtype (onnxruntime won't auto-cast).
         feed = {
             inp.name: available[inp.name].astype(_ORT_INT_DTYPES.get(inp.type, np.int64))
             for inp in self._session.get_inputs()
             if inp.name in available
         }
-
         out = np.asarray(self._session.run(None, feed)[0], dtype=np.float32)
-        # A token-level last_hidden_state [batch, seq, hidden] needs pooling; some
-        # exports emit an already-pooled sentence embedding [batch, hidden], which
-        # is used directly.
+        # A token-level last_hidden_state [1, seq, hidden] needs pooling; some exports
+        # emit an already-pooled sentence embedding [1, hidden], used directly.
         if out.ndim == 3:
             vectors = self._pool(out, attention_mask)
         elif out.ndim == 2:
@@ -200,7 +213,7 @@ class OnnxBackend:
             norms = np.linalg.norm(vectors, axis=1, keepdims=True)
             vectors = vectors / np.clip(norms, 1e-12, None)
         self._dim = int(vectors.shape[1])
-        result: list[list[float]] = vectors.astype(np.float32).tolist()
+        result: list[float] = vectors[0].astype(np.float32).tolist()
         return result
 
     def _pool(self, token_emb: np.ndarray, mask: np.ndarray) -> np.ndarray:

@@ -73,6 +73,23 @@ class TestOnnxRealMiniLM:
         # Truncating to 8 tokens drops most of the note, so the pooled vector differs.
         assert not np.allclose(cap8, cap64)
 
+    def test_embedding_is_batch_independent(self, onnx_model: Path) -> None:
+        # A note's vector is EXACTLY independent of its batch-mates. int8 dynamic
+        # quantization computes activation scales over the whole batch tensor, so a
+        # *batched* embed would make a note's vector depend on its batch-mates'
+        # content — the same note would embed differently in a rebuild (batch of 64)
+        # than in an incremental upsert (batch of 1), breaking the index's contract
+        # that a reconcile's end state is identical to a full rebuild. OnnxBackend
+        # embeds per-text precisely to keep this invariant; this test is the lock.
+        be = OnnxBackend(model=str(onnx_model))
+        be.start()
+        text = "mitochondria are the powerhouse of the cell"
+        alone = np.array(be.embed_texts([text])[0])
+        with_others = np.array(
+            be.embed_texts([text, "an unrelated and deliberately long sentence about taxes"])[0]
+        )
+        assert np.array_equal(alone, with_others)
+
 
 @requires_onnxruntime
 class TestOnnxRealDistilRoberta:
@@ -85,43 +102,30 @@ class TestOnnxRealDistilRoberta:
         assert all(len(v) == _ROBERTA_NDIM for v in vecs)
         assert be.embedding_dim() == _ROBERTA_NDIM
 
-    def test_pad_absent_fallback_fires_and_embeds(self, distilroberta_model: Path) -> None:
-        # Precondition: this is genuinely a no-`[PAD]` tokenizer (the mock only
-        # approximates it). Then OnnxBackend must still start + embed (pad_id=0
-        # fallback), with padding actually applied (variable-length batch).
+    def test_no_pad_token_resolves_and_embeds(self, distilroberta_model: Path) -> None:
+        # Precondition: a genuinely no-`[PAD]` tokenizer (the mock only approximates
+        # it) — token_to_id("[PAD]") is None and "<pad>" exists, so start() resolves
+        # "<pad>". OnnxBackend then starts and embeds without error.
         from tokenizers import Tokenizer
 
         tok = Tokenizer.from_file(str(distilroberta_model / "tokenizer.json"))
         assert tok.token_to_id("[PAD]") is None
+        assert tok.token_to_id("<pad>") is not None
 
         be = OnnxBackend(model=str(distilroberta_model))
         be.start()
-        vecs = be.embed_texts(["short", "a noticeably longer sentence that forces padding"])
+        vecs = be.embed_texts(["short", "a noticeably longer sentence"])
         assert len(vecs) == 2
         assert all(len(v) == _ROBERTA_NDIM for v in vecs)
 
-    def test_padded_batch_still_ranks_sanely(self, distilroberta_model: Path) -> None:
-        # Quantized ONNX is NOT bit-identical batched vs single (even BERT MiniLM
-        # drifts ~0.06), so we assert ranking sanity, not vector equality: a short
-        # note, padded in a batch with a long unrelated note, still ranks its related
-        # query above an unrelated one. This is what "masking saves correctness" means
-        # for a real non-BERT model whose pad fill isn't `<pad>` until we resolve it.
-        be = OnnxBackend(model=str(distilroberta_model))  # normalize=True
+    def test_embedding_is_batch_independent(self, distilroberta_model: Path) -> None:
+        # The same determinism lock as MiniLM, on a second model lineage: a note's
+        # vector is EXACTLY independent of its batch-mates under per-text embedding.
+        be = OnnxBackend(model=str(distilroberta_model))
         be.start()
-        # The short bio note is padded (the second note is much longer).
-        bio = np.array(
-            be.embed_texts(
-                [
-                    "mitochondria are the powerhouse of the cell",
-                    "an unrelated and deliberately long sentence about taxes weather and football",
-                ]
-            )[0]
+        text = "mitochondria are the powerhouse of the cell"
+        alone = np.array(be.embed_texts([text])[0])
+        with_others = np.array(
+            be.embed_texts([text, "an unrelated and deliberately long sentence about taxes"])[0]
         )
-        related, unrelated = (
-            np.array(v)
-            for v in be.embed_texts(
-                ["cellular biology and organelles", "differential calculus and integrals"]
-            )
-        )
-        cos = lambda a, b: float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))  # noqa: E731
-        assert cos(bio, related) > cos(bio, unrelated)
+        assert np.array_equal(alone, with_others)

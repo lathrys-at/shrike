@@ -49,6 +49,7 @@ class _FakeSession:
     def __init__(self, *args: object, **kwargs: object) -> None:
         self._inputs = [_FakeInput(n, self._input_type) for n in self._input_names]
         self.last_feed: dict | None = None
+        self.run_calls: list[int] = []  # batch size of each run() call
 
     def get_inputs(self) -> list[_FakeInput]:
         return self._inputs
@@ -60,6 +61,7 @@ class _FakeSession:
     def run(self, _outputs: object, feed: dict) -> list[np.ndarray]:
         self.last_feed = feed
         batch, seq = feed["input_ids"].shape
+        self.run_calls.append(batch)
         if self._output_ndim == 2:
             return [np.ones((batch, 4), dtype=np.float32)]
         return [np.ones((batch, seq, 4), dtype=np.float32)]
@@ -319,6 +321,15 @@ class TestLifecycleAndEmbed:
         self._start(be, _FakeSessionInt32)
         be.embed_texts(["a"])
         assert be._session.last_feed["input_ids"].dtype == np.int32
+
+    def test_embeds_one_text_per_run(self, tmp_path: Path) -> None:
+        # Per-text embedding: session.run is called once per text, each with a
+        # batch-of-1 feed — so a note's vector can't depend on its batch-mates (the
+        # int8 dynamic-quant batch-variance the real-model determinism test pins).
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(be)
+        be.embed_texts(["a", "b", "c"])
+        assert be._session.run_calls == [1, 1, 1]
 
     def test_feed_filter_drops_undeclared_inputs(self, tmp_path: Path) -> None:
         # A model declaring only input_ids+attention_mask (DistilBERT/RoBERTa):
