@@ -84,17 +84,15 @@ real DistilRoBERTa run:
     raises sensitivity to variant models, never false-positives a safe one. The set's
     sensitivity is **pinned by a test** asserting the probe drift exceeds ~10× `tol` on the real
     int8 MiniLM and DistilRoBERTa fixtures, so a future bland-set regression fails CI.
-  - **We compare against one full batch and cap there.** A single most-heterogeneous batch is
-    the most sensitive configuration *and* matches usage (the earlier escalating 2/4/8/16 sweep
-    could return "safe at 8" while `embed_texts` batched at 64 — a silent soundness gap).
-  - **A deterministic ONNX-specific fallback exists, deliberately not used by default.** The
-    variance *is* dynamic quantization, so scanning the graph for `DynamicQuantizeLinear` /
-    `MatMulInteger` would classify exactly (dynamic-quant nodes → variant; static int8 / fp →
-    safe). It is not the default because enumerating op types needs graph introspection (the
-    `onnx` package or a proto scan) — the heavyweight dep the in-process backend was designed to
-    avoid — and it wouldn't generalize to llama or future backends. The empirical probe stays
-    the universal mechanism; the op-scan is the noted escape hatch if a real false-negative ever
-    surfaces.
+  - **We compare against one full batch, and the probe-set size *is* the batch ceiling.** A
+    single most-heterogeneous batch is the most sensitive configuration *and* matches usage:
+    `embed_texts` never batches larger than the verified set (32 texts; `--embedding-batch-size`
+    caps it lower, and a request above the ceiling is honoured up to it with a one-time log).
+    This closes the earlier gap where an escalating 2/4/8/16 sweep could return "safe at 8"
+    while `embed_texts` batched at 64. (A deterministic ONNX-only fallback — scan the graph for
+    `DynamicQuantizeLinear`/`MatMulInteger` — would classify int8 variance exactly, but it needs
+    graph introspection the in-process backend avoids and wouldn't generalize to llama, so the
+    empirical probe stays the default.)
 - **Pad token resolved across conventions, not hard-coded.** BERT/WordPiece names the
   pad token `[PAD]`, RoBERTa/BPE uses `<pad>`; `OnnxBackend` resolves `[PAD]` then
   `<pad>`, falling back to id 0 only if neither exists. RoBERTa derives position ids

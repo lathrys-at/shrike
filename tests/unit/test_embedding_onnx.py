@@ -16,6 +16,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+from shrike.embed_batching import BATCH_PROBE_TEXTS
 from shrike.embed_text import EMBED_TEXT_VERSION
 from shrike.embedding_base import TEXT
 from shrike.embedding_onnx import OnnxBackend
@@ -369,6 +370,17 @@ class TestLifecycleAndEmbed:
             self._start(be, _FakeSessionVariant)
         assert be._safe_batch == 1
         assert any("batch-variant" in str(c.args) for c in warn.call_args_list)
+
+    def test_cap_above_ceiling_clamps_to_probe_size(self, tmp_path: Path) -> None:
+        # The probe-set size is the batch ceiling; a higher cap is logged once and clamped.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)), batch_size=64)
+        with patch("shrike.embedding_onnx.logger.info") as info:
+            self._start(be)
+        assert be._safe_batch == len(BATCH_PROBE_TEXTS)
+        assert any("exceeds the probe-verified ceiling" in str(c.args) for c in info.call_args_list)
+        be._session.run_calls.clear()
+        be.embed_texts([f"n{i}" for i in range(be._safe_batch + 8)])
+        assert be._session.run_calls == [be._safe_batch, 8]
 
     def test_health_batch_label_reflects_cap(self, tmp_path: Path) -> None:
         # Safe model, no cap → batched.

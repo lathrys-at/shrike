@@ -44,37 +44,58 @@ BATCH_DRIFT_TOL = 1e-3
 
 # Probe texts, spiked for activation magnitude (see module docstring). The content is
 # irrelevant to the result — only whether a text's vector changes with its batch-mates —
-# but the spread of magnitudes is what makes a variant model actually diverge here.
+# but the spread of magnitudes is what makes a variant model actually diverge here. The
+# set's *length* is also the ceiling: the probe verifies a batch of exactly this many texts
+# and the backend never batches larger (it caps `--embedding-batch-size` here), so "proven
+# safe" and "what we batch" stay the same size. 32 trades a fully-amortized batch for a
+# still-trivial in-process startup cost; grow it if a GPU/multimodal path wants larger.
 BATCH_PROBE_TEXTS: list[str] = [
     # Calm anchors (real-note-shaped, low activation range).
     "mitochondria are the powerhouse of the cell",
     "Spaced repetition strengthens long-term memory through timed review.",
     "Newton's second law relates force, mass, and acceleration.",
     "An integral accumulates a quantity over an interval.",
+    "DNA encodes genetic information in sequences of nucleotides.",
+    "Supply and demand determine prices in a competitive market.",
+    "Mitochondrial DNA is inherited maternally in most animals.",
+    "The boiling point of water at sea level is 100 degrees Celsius.",
+    "The French Revolution began in 1789 and reshaped European politics.",
+    "What is the capital of France?",
+    "The quick brown fox jumps over the lazy dog repeatedly.",
+    "Photosynthesis converts light energy into chemical energy in plants.",
     # Long (a wide activation profile over many tokens).
     "the derivative measures the instantaneous rate of change of a function with respect to "
     "its variable, while the definite integral accumulates the signed area under a curve over "
     "an interval, and together by the fundamental theorem of calculus they form inverse "
     "operations that underpin much of classical analysis and its applications in physics, "
     "engineering, economics, and statistics across countless practical and theoretical settings",
+    "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt "
+    "ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud exercitation",
     # Numbers / hex / code (outlier-prone token embeddings).
     "0xDEADBEEF 1234567890 SELECT * FROM t WHERE id=42 AND ratio=3.14159265;",
-    # Symbol soup.
+    "SELECT id, name FROM users WHERE created_at > '2020-01-01' ORDER BY name DESC;",
+    "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25",
+    "kHz MHz GHz THz 3.0e8 m/s 6.022e23 1.602e-19 9.81 273.15 -40",
+    # Markup / structured.
+    "<html><body><h1>Title</h1><p>paragraph &amp; entity</p></body></html>",
+    "user@example.com +1-555-0123 https://test.org/page#anchor?q=1&r=2",
+    "https://example.com/path?q=1&r=2#frag 5f4dcc3b5aa765d61d8327deb882cf99",
+    # Symbol / math soup.
     "!@#$%^&*()_+{}|:\"<>?~`-=[]\\;',./",
+    "Σ Δ Ω α β γ ∫ ∂ ∇ √ ∞ ≈ ≠ ≤ ≥ ± × ÷ → ⇒ ∈ ∀ ∃",
     # Degenerate / repeated tokens (a spike with a tiny activation range of its own).
     "the the the the the the the the the the the the",
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "supercalifragilisticexpialidocious antidisestablishmentarianism",
     # Mixed script / emoji (rare tokens, large embedding norms).
     "café 日本語 Привет мир 🧠🔬🧬 naïve résumé Größe",
-    # URL / hash.
-    "https://example.com/path?q=1&r=2#frag 5f4dcc3b5aa765d61d8327deb882cf99",
+    "🎉🎊🥳 congratulations on completing the course 🏆✨🚀",
+    "ПриветПривет こんにちは こんにちは 안녕하세요 你好世界",
     # ALL CAPS.
     "URGENT WARNING SYSTEM FAILURE IMMINENT EVACUATE THE BUILDING NOW",
-    # A couple more calm/short for length spread.
+    "ALL CAPS SHORT",
+    # Short.
     "x",
-    "What is the capital of France?",
-    "DNA encodes genetic information in sequences of nucleotides.",
-    "Supply and demand determine prices in a competitive market.",
 ]
 
 # Embeds a list of texts as a single batch, returning one vector per input.

@@ -173,6 +173,13 @@ class OnnxBackend:
                     "determinism — use a different model/backend combination for batched "
                     "throughput."
                 )
+            elif self._batch_cap and self._batch_cap > self._safe_batch:
+                logger.info(
+                    "--embedding-batch-size %d exceeds the probe-verified ceiling %d; "
+                    "capping there.",
+                    self._batch_cap,
+                    self._safe_batch,
+                )
         except Exception as e:  # noqa: BLE001 — never fail boot on a probe hiccup
             logger.warning("Batch-safety probe failed (%s); embedding serially.", e)
             self._safe_batch = 1
