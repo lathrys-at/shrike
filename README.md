@@ -50,7 +50,7 @@ shrike server stop
 
 For plain-text cards, which is the common case, the ONNX backend is the simpler choice. It runs inside Shrike, so there's no separate binary to install or process to keep alive, single-card lookups are quick, and a small quantized model keeps memory use low. Reach for this one if you just want related-card search to work.
 
-Pick the llama-server backend if you already use llama.cpp, want to run a GGUF or MLX model, want to offload work to a GPU, or want to follow the multimodal search work (finding image and audio cards by description) as it lands, since that builds on the llama-server path.
+Pick the llama-server backend if you already use llama.cpp, want to run a GGUF or MLX model, or want to follow the multimodal search work (finding image and audio cards by description) as it lands, since that builds on the llama-server path. Both backends can use a GPU; see the ONNX section below for the NVIDIA and Apple paths.
 
 Either way the search works the same, text-only models are fully supported on both, and search quality comes from the model you choose rather than the backend.
 
@@ -65,6 +65,8 @@ shrike server start --collection ~/path/to/collection.anki2 \
   --embedding-backend onnx \
   --embedding-model ~/models/all-MiniLM-L6-v2-onnx
 ```
+
+If you have an NVIDIA GPU, install `shrike-mcp[onnx-gpu]` instead of `[onnx]` (the two onnxruntime builds can't be installed together) and add `--embedding-onnx-provider CUDAExecutionProvider`. On a Mac the plain install already runs on the Apple GPU. Either way, `shrike server status` shows the provider that actually loaded, so you can confirm the accelerator is in use rather than a quiet fall back to the CPU. A floating-point model (rather than a small quantized one) is what makes a GPU worthwhile, since it can embed cards in larger batches.
 
 ### llama-server backend
 

@@ -43,9 +43,18 @@ socks = [
 ]
 # In-process ONNX embedding backend (--embedding-backend onnx). Optional — the
 # default llama-server backend needs neither. onnxruntime runs the graph;
-# tokenizers (HuggingFace, Rust-backed) does the tokenization.
+# tokenizers (HuggingFace, Rust-backed) does the tokenization. The base wheel covers
+# CPU (and CoreML on macOS, i.e. Apple GPU/ANE).
 onnx = [
     "onnxruntime>=1.17",
+    "tokenizers>=0.20",
+]
+# Same backend, CUDA/TensorRT build for NVIDIA GPUs (--embedding-onnx-provider
+# CUDAExecutionProvider). Install INSTEAD of `onnx`, not alongside: the onnxruntime
+# and onnxruntime-gpu wheels conflict (they provide the same package). Windows DirectML
+# is an analogous manual `pip install onnxruntime-directml`.
+onnx-gpu = [
+    "onnxruntime-gpu>=1.17",
     "tokenizers>=0.20",
 ]
 dev = [

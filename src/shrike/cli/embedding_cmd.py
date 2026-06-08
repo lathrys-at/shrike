@@ -213,6 +213,8 @@ def _render_embedding(emb: EmbeddingStatus) -> None:
             output.kv("PID", f"[cyan]{emb.pid}[/cyan]", indent=2)
         if emb.model:
             output.kv("Model", f"[cyan]{emb.model}[/cyan]", indent=2)
+        if emb.provider:
+            output.kv("Provider", emb.provider.replace("ExecutionProvider", ""), indent=2)
         if emb.batch:
             output.kv("Batching", emb.batch, indent=2)
     else:
