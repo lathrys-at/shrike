@@ -163,18 +163,19 @@ class OnnxBackend:
 
         # Probe batch-safety once: int8 dynamic-quant exports are batch-variant (a
         # note's vector depends on its batch-mates), fp16/fp32 are not. Batch only as
-        # large as is provably safe; serial otherwise. A probe failure falls back to
-        # serial rather than failing boot.
+        # large as is provably safe; serial otherwise. A probe failure (after its own
+        # retries) falls back to serial rather than failing boot.
         try:
             self._safe_batch = probe_max_safe_batch(self._embed_chunk)
-        except Exception as e:
+            if self._safe_batch == 1 and self._batch_cap and self._batch_cap > 1:
+                logger.warning(
+                    "Embedding model is batch-variant; embedding serially (batch size 1) for "
+                    "determinism — use a different model/backend combination for batched "
+                    "throughput."
+                )
+        except Exception as e:  # noqa: BLE001 — never fail boot on a probe hiccup
             logger.warning("Batch-safety probe failed (%s); embedding serially.", e)
             self._safe_batch = 1
-        if self._safe_batch == 1 and self._batch_cap and self._batch_cap > 1:
-            logger.warning(
-                "Embedding model is batch-variant; embedding serially (batch size 1) for "
-                "determinism — use a different model/backend combination for batched throughput."
-            )
         logger.info(
             "ONNX embedding model ready (%s, %s)",
             onnx_path.name,
@@ -200,14 +201,19 @@ class OnnxBackend:
             raise RuntimeError("ONNX embedding backend is not running")
         if not texts:
             return []
-        if self._safe_batch <= 1:
-            bs = 1
-        else:
-            bs = min(self._batch_cap, len(texts)) if self._batch_cap else len(texts)
+        bs = self._effective_batch(len(texts))
         out: list[list[float]] = []
         for i in range(0, len(texts), bs):
             out.extend(self._embed_chunk(texts[i : i + bs]))
         return out
+
+    def _effective_batch(self, n: int) -> int:
+        """Chunk size to embed with: 1 if variant/capped-to-serial, else the smaller of the
+        proven-safe batch and the operator's cap, never exceeding what the probe verified."""
+        if self._safe_batch <= 1:
+            return 1
+        limit = min(self._batch_cap, self._safe_batch) if self._batch_cap else self._safe_batch
+        return max(1, min(limit, n))
 
     def _embed_chunk(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of texts as a single batch (one vector per input).
@@ -312,6 +318,8 @@ class OnnxBackend:
             "backend": "onnx",
             "model": self._model,
             "providers": self._providers,
+            # batch_safe is the model's probed capability; batch is the *effective*
+            # behaviour, which a --embedding-batch-size cap of 1 can force back to serial.
             "batch_safe": self._safe_batch >= 2,
-            "batch": "serial" if self._safe_batch <= 1 else "batched",
+            "batch": "batched" if self._effective_batch(2) >= 2 else "serial",
         }

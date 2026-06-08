@@ -258,6 +258,13 @@ def resolve_embedding(
     if resolved["llama_server"]:
         resolved["llama_server"] = os.path.expanduser(str(resolved["llama_server"]))
 
+    # Reject rather than silently drop/serialize a bad cap (CLI flags are already
+    # IntRange-bounded; this catches a hand-edited config value, where 0 would otherwise
+    # be swallowed by the `or`-cascade and a negative would flow straight through).
+    bs = resolved["batch_size"]
+    if bs is not None and int(bs) < 1:
+        raise ValueError(f"embedding.batch_size must be >= 1 (got {bs})")
+
     return resolved
 
 

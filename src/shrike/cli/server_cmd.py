@@ -238,8 +238,8 @@ def server() -> None:
 @click.option(
     "--embedding-batch-size",
     "embedding_batch_size",
-    type=int,
-    help="Cap the embedding batch size (any backend). Default: as large as a startup "
+    type=click.IntRange(min=1),
+    help="Cap the embedding batch size (any backend), >= 1. Default: as large as a startup "
     "self-check proves safe. A batch-variant model (e.g. int8 ONNX) is embedded serially.",
 )
 @click.option(

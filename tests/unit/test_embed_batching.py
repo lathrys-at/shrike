@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-from shrike.embed_batching import BATCH_PROBE_TEXTS, probe_max_safe_batch
+import pytest
+
+from shrike.embed_batching import (
+    BATCH_DRIFT_TOL,
+    BATCH_PROBE_TEXTS,
+    ProbeError,
+    max_probe_drift,
+    probe_max_safe_batch,
+)
+
+_N = len(BATCH_PROBE_TEXTS)
 
 
 def _vec(text: str) -> list[float]:
@@ -21,27 +31,28 @@ def _variant(texts: list[str]) -> list[list[float]]:
     return [[_vec(t)[0] + bias, _vec(t)[1]] for t in texts]
 
 
-def _safe_only_to_2(texts: list[str]) -> list[list[float]]:
-    """Safe at batch sizes 1-2, variant at 3+ (exercises the partial/stop path)."""
-    bias = 1.0 if len(texts) > 2 else 0.0
+def _variant_only_when_large(texts: list[str]) -> list[list[float]]:
+    """Deterministic alone and in small batches, but variant once the batch is large — the
+    case an escalating 2/4/8 sweep could pass while the real (full-batch) runtime diverges."""
+    bias = 1.0 if len(texts) >= 4 else 0.0
     return [[_vec(t)[0] + bias, _vec(t)[1]] for t in texts]
 
 
-def test_deterministic_backend_is_safe_to_max() -> None:
-    assert probe_max_safe_batch(_deterministic) == 16
+def test_deterministic_backend_is_safe_to_set_size() -> None:
+    assert probe_max_safe_batch(_deterministic) == _N
 
 
 def test_variant_backend_falls_back_to_serial() -> None:
     assert probe_max_safe_batch(_variant) == 1
 
 
-def test_partial_safety_returns_last_safe_size() -> None:
-    # Diverges at size 4, so the largest proven-safe size is 2.
-    assert probe_max_safe_batch(_safe_only_to_2) == 2
+def test_variant_only_at_large_batch_is_caught() -> None:
+    # The probe compares against one *full* batch, so a model that only diverges when batched
+    # large is classified serial — the soundness gap a small escalating sweep would miss.
+    assert probe_max_safe_batch(_variant_only_when_large) == 1
 
 
 def test_tolerance_absorbs_float_noise() -> None:
-    # A tiny per-call jitter (well under tol) must still read as safe.
     counter = {"n": 0}
 
     def jittery(texts: list[str]) -> list[list[float]]:
@@ -49,11 +60,39 @@ def test_tolerance_absorbs_float_noise() -> None:
         eps = 1e-6 * counter["n"]
         return [[_vec(t)[0] + eps, _vec(t)[1]] for t in texts]
 
-    assert probe_max_safe_batch(jittery) == 16
+    assert probe_max_safe_batch(jittery) == _N
 
 
-def test_probe_texts_are_varied() -> None:
-    # Mixed lengths so batching actually pads (the condition that triggers variance).
-    lengths = {len(t) for t in BATCH_PROBE_TEXTS}
-    assert len(BATCH_PROBE_TEXTS) >= 16
-    assert len(lengths) >= 8
+def test_retry_survives_a_transient_failure() -> None:
+    raised = {"once": False}
+
+    def flaky(texts: list[str]) -> list[list[float]]:
+        if not raised["once"]:
+            raised["once"] = True
+            raise RuntimeError("transient blip")
+        return _deterministic(texts)
+
+    # First attempt aborts on the blip; the retry completes cleanly.
+    assert probe_max_safe_batch(flaky) == _N
+
+
+def test_raises_after_persistent_failure() -> None:
+    def broken(texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("embedder down")
+
+    with pytest.raises(ProbeError):
+        probe_max_safe_batch(broken)
+
+
+def test_max_probe_drift() -> None:
+    assert max_probe_drift(_deterministic) == 0.0
+    assert max_probe_drift(_variant) > BATCH_DRIFT_TOL
+
+
+def test_probe_texts_are_spiked() -> None:
+    # Spiked for activation magnitude (not just length): a long text, numeric/symbolic, and
+    # non-ASCII content — the inputs that actually drive int8 batch-variance.
+    assert _N >= 12
+    assert any(len(t) > 200 for t in BATCH_PROBE_TEXTS)  # long, wide activation profile
+    assert any(any(c.isdigit() for c in t) for t in BATCH_PROBE_TEXTS)  # numeric/hex
+    assert any(not t.isascii() for t in BATCH_PROBE_TEXTS)  # mixed script / emoji

@@ -58,17 +58,43 @@ real DistilRoBERTa run:
   that a `reconcile`'s end state is identical to a full rebuild (the same note would embed
   differently in a rebuild-of-64 than an upsert-of-1). Rather than guess from a model's
   quantization scheme, **every backend probes at `start()`** (`embed_batching.probe_max_safe_batch`):
-  embed ~16 varied texts serially vs batched at 2/4/8/16 and compare within a tolerance
-  chosen to sit above float noise (~4e-5) and below quant drift (~0.06). A model that
-  matches batches as large as the input (capped by `--embedding-batch-size`); one that
-  doesn't is embedded **serially** (batch size 1), keeping each vector a pure function of
-  its text. Locked by exact-equality (`np.array_equal`) tests against *real* models — int8
-  (serial) and fp32 (batched == serial) — not mocks, which are trivially batch-independent.
-  The check is universal (llama, ONNX, any future backend) and re-confirms the invariant on
-  every boot. **Release-ordering caveat:** batching a *safe* model is bit-exact, so it
-  changes no vectors and needs no fingerprint bump; only a change to the serial-vs-batched
-  *decision* for a given model would, and the probe makes that decision a property of the
-  model, not a stored setting.
+  embed the probe texts serially (the reference) and **all in one batch**, and compare within a
+  tolerance chosen to sit above float noise (~4e-5) and below quant drift (~0.06). Match → the
+  model batches deterministically, safe **up to the probe-set size**; mismatch → embed
+  **serially** (batch size 1). `embed_texts` then never batches larger than that proven size
+  (further capped by `--embedding-batch-size`), so "what we proved" and "what we do" are the
+  same size — no extrapolating from a small sweep to a larger runtime batch. Locked by
+  exact-equality (`np.array_equal`) tests against *real* models — int8 (serial) and fp32
+  (batched == serial) — not mocks, which are trivially batch-independent. Universal across
+  backends (llama, ONNX, any future one) and re-confirmed every boot; it retries a transient
+  embed failure before falling back to serial. **Release-ordering caveat:** batching a *safe*
+  model is bit-exact, so it changes no vectors and needs no fingerprint bump; only a change to
+  the serial-vs-batched *decision* would, and the probe makes that a property of the model, not
+  a stored setting.
+
+  Three design points make the empirical check trustworthy rather than wishful (#174 review):
+  - **It is a heuristic for arbitrary user models, not a proof.** A model that is batch-variant
+    on real notes but happens to drift `<tol` on the probe set would be misclassified safe →
+    silent index non-determinism (the exact invariant this protects). So the probe set is
+    **spiked for activation magnitude**: int8 drift on a text is maximized when it is *calm* and
+    a batch-mate is *spiky* (drives the per-tensor activation min/max), so the set mixes calm
+    anchors with deliberately spiky inputs (a long text, numeric/hex/code, symbol soup, a
+    degenerate repeated token, mixed-script/emoji, ALL CAPS). An fp model has no activation
+    quant, so its batched-vs-serial drift is exactly 0 *regardless of content* — spiking only
+    raises sensitivity to variant models, never false-positives a safe one. The set's
+    sensitivity is **pinned by a test** asserting the probe drift exceeds ~10× `tol` on the real
+    int8 MiniLM and DistilRoBERTa fixtures, so a future bland-set regression fails CI.
+  - **We compare against one full batch and cap there.** A single most-heterogeneous batch is
+    the most sensitive configuration *and* matches usage (the earlier escalating 2/4/8/16 sweep
+    could return "safe at 8" while `embed_texts` batched at 64 — a silent soundness gap).
+  - **A deterministic ONNX-specific fallback exists, deliberately not used by default.** The
+    variance *is* dynamic quantization, so scanning the graph for `DynamicQuantizeLinear` /
+    `MatMulInteger` would classify exactly (dynamic-quant nodes → variant; static int8 / fp →
+    safe). It is not the default because enumerating op types needs graph introspection (the
+    `onnx` package or a proto scan) — the heavyweight dep the in-process backend was designed to
+    avoid — and it wouldn't generalize to llama or future backends. The empirical probe stays
+    the universal mechanism; the op-scan is the noted escape hatch if a real false-negative ever
+    surfaces.
 - **Pad token resolved across conventions, not hard-coded.** BERT/WordPiece names the
   pad token `[PAD]`, RoBERTa/BPE uses `<pad>`; `OnnxBackend` resolves `[PAD]` then
   `<pad>`, falling back to id 0 only if neither exists. RoBERTa derives position ids

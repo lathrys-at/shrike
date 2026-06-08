@@ -92,8 +92,8 @@ def embedding_status(ctx: click.Context) -> None:
 @click.option(
     "--embedding-batch-size",
     "batch_size",
-    type=int,
-    help="Cap the embedding batch size (any backend). Default: as large as safe.",
+    type=click.IntRange(min=1),
+    help="Cap the embedding batch size (any backend), >= 1. Default: as large as safe.",
 )
 @click.option(
     "--background", is_flag=True, help="Return immediately without waiting for any index rebuild."

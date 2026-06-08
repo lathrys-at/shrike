@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from shrike.embed_batching import BATCH_DRIFT_TOL, max_probe_drift
 from shrike.embedding_onnx import OnnxBackend
 from tests.integration.conftest import requires_onnxruntime
 
@@ -92,6 +93,14 @@ class TestOnnxRealMiniLM:
         )
         assert np.array_equal(alone, with_others)
 
+    def test_probe_set_is_sensitive_to_int8_variance(self, onnx_model: Path) -> None:
+        # The spiked probe set must trip the int8 batch-variance with comfortable margin, so
+        # the model is classified serial — a future bland set that drifted under tol would
+        # silently mark it safe and reintroduce the non-determinism. ~10x is the guard.
+        be = OnnxBackend(model=str(onnx_model))
+        be.start()
+        assert max_probe_drift(be._embed_chunk) > 10 * BATCH_DRIFT_TOL
+
 
 @requires_onnxruntime
 class TestOnnxRealDistilRoberta:
@@ -133,6 +142,11 @@ class TestOnnxRealDistilRoberta:
             be.embed_texts([text, "an unrelated and deliberately long sentence about taxes"])[0]
         )
         assert np.array_equal(alone, with_others)
+
+    def test_probe_set_is_sensitive_to_int8_variance(self, distilroberta_model: Path) -> None:
+        be = OnnxBackend(model=str(distilroberta_model))
+        be.start()
+        assert max_probe_drift(be._embed_chunk) > 10 * BATCH_DRIFT_TOL
 
 
 @requires_onnxruntime

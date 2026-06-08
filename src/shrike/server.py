@@ -87,6 +87,14 @@ _LOOPBACK_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 _LOOPBACK_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
 
 
+def _positive_int(raw: str) -> int:
+    """argparse type: a >= 1 integer (e.g. --embedding-batch-size)."""
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1 (got {value})")
+    return value
+
+
 def _is_loopback(host: str) -> bool:
     """True if *host* names the loopback interface (so binding is browser-safe)."""
     if host == "localhost":
@@ -670,9 +678,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--embedding-batch-size",
-        type=int,
+        type=_positive_int,
         default=None,
-        help="Cap the embedding batch size (any backend). Default: batch as large as a "
+        help="Cap the embedding batch size (any backend), >= 1. Default: batch as large as a "
         "startup self-check proves safe. A batch-variant model (e.g. int8 ONNX) is always "
         "embedded serially regardless.",
     )

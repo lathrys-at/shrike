@@ -370,6 +370,23 @@ class TestLifecycleAndEmbed:
         assert be._safe_batch == 1
         assert any("batch-variant" in str(c.args) for c in warn.call_args_list)
 
+    def test_health_batch_label_reflects_cap(self, tmp_path: Path) -> None:
+        # Safe model, no cap → batched.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(be)
+        assert be.health()["batch_safe"] is True
+        assert be.health()["batch"] == "batched"
+        # Safe model, cap=1 → the model is still capable (batch_safe), but it embeds serially.
+        capped = OnnxBackend(model=str(_model_dir(tmp_path)), batch_size=1)
+        self._start(capped)
+        assert capped.health()["batch_safe"] is True
+        assert capped.health()["batch"] == "serial"
+        # Variant model → both serial.
+        var = OnnxBackend(model=str(_model_dir(tmp_path)))
+        self._start(var, _FakeSessionVariant)
+        assert var.health()["batch_safe"] is False
+        assert var.health()["batch"] == "serial"
+
     def test_feed_filter_drops_undeclared_inputs(self, tmp_path: Path) -> None:
         # A model declaring only input_ids+attention_mask (DistilBERT/RoBERTa):
         # token_type_ids must be filtered out of the feed, since onnxruntime rejects

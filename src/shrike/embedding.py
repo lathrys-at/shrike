@@ -344,19 +344,20 @@ class LlamaServerBackend:
 
         # Batch-safety probe (universal across backends): confirm a note's vector is
         # independent of its batch-mates before batching requests. llama computes in fp,
-        # so it is normally safe; the check guards against a model/config that isn't. A
-        # probe failure (a transient embed error) falls back to serial rather than failing
-        # boot — real usage will surface any deeper problem.
+        # so it is normally safe; the check guards against a model/config that isn't. The
+        # probe retries internally; a persistent failure falls back to serial rather than
+        # failing boot — real usage will surface any deeper problem.
         try:
             self._safe_batch = probe_max_safe_batch(self._embed_chunk)
-        except Exception as e:
+            if self._safe_batch == 1 and self._batch_cap and self._batch_cap > 1:
+                logger.warning(
+                    "Embedding model is batch-variant; embedding serially (batch size 1) for "
+                    "determinism — use a different model/backend combination for batched "
+                    "throughput."
+                )
+        except Exception as e:  # noqa: BLE001 — never fail boot on a probe hiccup
             logger.warning("Batch-safety probe failed (%s); embedding serially.", e)
             self._safe_batch = 1
-        if self._safe_batch == 1 and self._batch_cap and self._batch_cap > 1:
-            logger.warning(
-                "Embedding model is batch-variant; embedding serially (batch size 1) for "
-                "determinism — use a different model/backend combination for batched throughput."
-            )
 
         logger.info(
             "Embedding service ready (PID %s, %s)",
@@ -431,8 +432,10 @@ class LlamaServerBackend:
                 "pid": self._process.pid if self._process else None,
                 "url": self._base_url,
                 "model": self._model,
+                # batch_safe is the model's probed capability; batch is the *effective*
+                # behaviour (a --embedding-batch-size cap of 1 forces serial).
                 "batch_safe": self._safe_batch >= 2,
-                "batch": "serial" if self._safe_batch <= 1 else "batched",
+                "batch": "batched" if self._effective_batch(2) >= 2 else "serial",
             }
         except (httpx.ConnectError, httpx.TimeoutException):
             return {"available": False, "pid": self._process.pid if self._process else None}
@@ -539,14 +542,19 @@ class LlamaServerBackend:
             raise RuntimeError("Embedding service is not running")
         if not texts:
             return []
-        if self._safe_batch <= 1:
-            bs = 1
-        else:
-            bs = min(self._batch_cap, len(texts)) if self._batch_cap else len(texts)
+        bs = self._effective_batch(len(texts))
         out: list[list[float]] = []
         for i in range(0, len(texts), bs):
             out.extend(self._embed_chunk(texts[i : i + bs]))
         return out
+
+    def _effective_batch(self, n: int) -> int:
+        """Chunk size to embed with: 1 if variant/capped-to-serial, else the smaller of the
+        proven-safe batch and the operator's cap, never exceeding what the probe verified."""
+        if self._safe_batch <= 1:
+            return 1
+        limit = min(self._batch_cap, self._safe_batch) if self._batch_cap else self._safe_batch
+        return max(1, min(limit, n))
 
     def _embed_chunk(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of texts as a single ``/v1/embeddings`` request."""
@@ -564,7 +572,12 @@ class LlamaServerBackend:
         resp.raise_for_status()
 
         data = resp.json()
-        results: list[list[float]] = [item["embedding"] for item in data["data"]]
+        # Order by the response's own `index` rather than trusting positional order: with
+        # large batches now the norm for safe models, an out-of-order `data` would otherwise
+        # silently assign each note a batch-mate's vector. llama preserves order today; this
+        # is a cheap guard that survives a backend that doesn't.
+        items = sorted(data["data"], key=lambda d: d.get("index", 0))
+        results: list[list[float]] = [item["embedding"] for item in items]
         return results
 
 

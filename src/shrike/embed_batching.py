@@ -2,15 +2,33 @@
 
 Some backends produce a *different* vector for a note depending on what else is in its
 batch. The clearest case is dynamically-quantized int8 ONNX models: onnxruntime computes
-activation scales over the whole batch tensor, so a batch-mate's content shifts every
-element (~0.06). That breaks the index's invariant that a note's vector is a pure function
-of its text — which is what makes a ``reconcile``'s end state identical to a full rebuild.
-Non-quantized models (fp32/fp16) and llama-server batch deterministically.
+a per-tensor activation scale over the *whole batch tensor*, so a batch-mate's content
+shifts every element (~0.06). That breaks the index's invariant that a note's vector is a
+pure function of its text — which is what makes a ``reconcile``'s end state identical to a
+full rebuild. Non-quantized models (fp32/fp16) and llama-server batch deterministically.
 
 Rather than guess from a model's quantization scheme, every backend probes this at startup:
-embed a fixed set of varied texts serially (the reference) and at a few batch sizes, and
-compare. The largest batch size whose results match the reference within a tolerance is the
-backend's safe batch size; 1 means "batch-variant — embed serially."
+embed a fixed set of varied texts **serially** (the reference) and **all in one batch** —
+the largest, most heterogeneous batch, which maximizes any batch-variance — and compare. If
+they match within a tolerance, the model is safe to batch *up to the probe-set size* (which
+the caller then honours as the cap); if not, it embeds serially.
+
+Two deliberate choices make the check trustworthy rather than wishful:
+
+- **The probe set is "spiked" for activation magnitude, not just length.** int8 drift on a
+  text T is maximized when T is calm (no outlier activations) and a batch-mate is spiky
+  (drives a large activation range, moving the per-tensor min/max). So the set mixes calm
+  anchors with deliberately spiky inputs (long, numeric/hex/code, symbol soup, a degenerate
+  repeated token, mixed-script/emoji, ALL CAPS). An fp model has no activation quant, so its
+  batched-vs-serial drift is exactly 0 regardless of content — spiking only raises
+  sensitivity to variant models, never false-positives a safe one. The set's sensitivity is
+  pinned by a test against the real int8 fixtures (`test_onnx_models.py`).
+- **We probe the batch size we actually use.** The probe compares against *one* batch of all
+  probe texts, and the caller never batches larger than the probe-set size — so "proven safe"
+  and "what we do" are the same size (no extrapolating from a small sweep to a larger runtime
+  batch). This is empirical, not a proof for *every* possible model; see `docs/decisions.md`
+  for the heuristic caveat and the ONNX-specific deterministic fallback (scan for
+  `DynamicQuantizeLinear`/`MatMulInteger`).
 """
 
 from __future__ import annotations
@@ -24,62 +42,92 @@ import numpy as np
 # separates a batch-safe backend from a batch-variant one.
 BATCH_DRIFT_TOL = 1e-3
 
-# Varied probe texts (mixed lengths, so batching actually pads). The content is irrelevant —
-# only whether a text's vector changes with its batch-mates.
+# Probe texts, spiked for activation magnitude (see module docstring). The content is
+# irrelevant to the result — only whether a text's vector changes with its batch-mates —
+# but the spread of magnitudes is what makes a variant model actually diverge here.
 BATCH_PROBE_TEXTS: list[str] = [
-    "a",
-    "the cell",
-    "mitochondria produce ATP",
-    "What is the capital of France?",
+    # Calm anchors (real-note-shaped, low activation range).
+    "mitochondria are the powerhouse of the cell",
     "Spaced repetition strengthens long-term memory through timed review.",
-    "Photosynthesis converts light energy into chemical energy in plants.",
-    "x",
-    "two words",
     "Newton's second law relates force, mass, and acceleration.",
     "An integral accumulates a quantity over an interval.",
+    # Long (a wide activation profile over many tokens).
+    "the derivative measures the instantaneous rate of change of a function with respect to "
+    "its variable, while the definite integral accumulates the signed area under a curve over "
+    "an interval, and together by the fundamental theorem of calculus they form inverse "
+    "operations that underpin much of classical analysis and its applications in physics, "
+    "engineering, economics, and statistics across countless practical and theoretical settings",
+    # Numbers / hex / code (outlier-prone token embeddings).
+    "0xDEADBEEF 1234567890 SELECT * FROM t WHERE id=42 AND ratio=3.14159265;",
+    # Symbol soup.
+    "!@#$%^&*()_+{}|:\"<>?~`-=[]\\;',./",
+    # Degenerate / repeated tokens (a spike with a tiny activation range of its own).
+    "the the the the the the the the the the the the",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    # Mixed script / emoji (rare tokens, large embedding norms).
+    "café 日本語 Привет мир 🧠🔬🧬 naïve résumé Größe",
+    # URL / hash.
+    "https://example.com/path?q=1&r=2#frag 5f4dcc3b5aa765d61d8327deb882cf99",
+    # ALL CAPS.
+    "URGENT WARNING SYSTEM FAILURE IMMINENT EVACUATE THE BUILDING NOW",
+    # A couple more calm/short for length spread.
+    "x",
+    "What is the capital of France?",
     "DNA encodes genetic information in sequences of nucleotides.",
-    "short",
-    "a slightly longer sentence than the previous one here",
-    "Quantum entanglement links the states of two particles.",
     "Supply and demand determine prices in a competitive market.",
-    "The mitochondrion is often called the powerhouse of the cell.",
 ]
 
 # Embeds a list of texts as a single batch, returning one vector per input.
 EmbedChunk = Callable[[list[str]], list[list[float]]]
 
+# How many times to (re)run the probe before giving up. The probe issues many embed calls
+# (a serial reference + one batch); a single transient failure shouldn't condemn a session
+# to serial, so we retry the whole probe before raising.
+PROBE_ATTEMPTS = 2
 
-def _chunked(embed_chunk: EmbedChunk, texts: list[str], size: int) -> list[list[float]]:
-    out: list[list[float]] = []
-    for i in range(0, len(texts), size):
-        out.extend(embed_chunk(texts[i : i + size]))
-    return out
+
+class ProbeError(RuntimeError):
+    """The batch-safety probe could not complete (every attempt's embed calls failed)."""
 
 
 def probe_max_safe_batch(
     embed_chunk: EmbedChunk,
     *,
-    sizes: Sequence[int] = (2, 4, 8, 16),
     tol: float = BATCH_DRIFT_TOL,
-    probe_texts: list[str] | None = None,
+    probe_texts: Sequence[str] | None = None,
+    attempts: int = PROBE_ATTEMPTS,
 ) -> int:
-    """Return the largest batch size at which *embed_chunk* matches serial embedding.
+    """Return the batch size proven safe (the probe-set size) or 1 (embed serially).
 
-    Embeds the probe texts serially (the reference), then chunked at each candidate *size*,
-    and returns the largest size whose results match the reference within *tol* (max-abs per
-    element). Returns 1 ("embed serially") if even size 2 diverges. By the mechanism this is
-    effectively binary (safe-at-2 implies safe), but the sweep guards against a size-dependent
-    surprise — the first size that diverges stops the search, since larger sizes can't be safer.
+    Embeds each probe text **alone** (the reference), then all of them in **one batch** —
+    the largest, most heterogeneous batch — and compares (max-abs per element). Match within
+    *tol* → the model batches deterministically and is safe up to the probe-set size (the
+    caller caps there); mismatch → 1. Retries the whole probe up to *attempts* times on a
+    transient embed failure, raising :class:`ProbeError` only if every attempt fails.
     """
-    texts = probe_texts if probe_texts is not None else BATCH_PROBE_TEXTS
+    texts = list(probe_texts if probe_texts is not None else BATCH_PROBE_TEXTS)
+    if len(texts) < 2:
+        return 1
+    last_exc: Exception | None = None
+    for _ in range(max(1, attempts)):
+        try:
+            reference = np.asarray([embed_chunk([t])[0] for t in texts], dtype=np.float64)
+            batched = np.asarray(embed_chunk(texts), dtype=np.float64)
+        except Exception as e:  # noqa: BLE001 — any embed failure is retried, then surfaced
+            last_exc = e
+            continue
+        drift = float(np.max(np.abs(reference - batched)))
+        return len(texts) if drift <= tol else 1
+    raise ProbeError(f"batch-safety probe failed after {attempts} attempt(s): {last_exc}")
+
+
+def max_probe_drift(
+    embed_chunk: EmbedChunk,
+    *,
+    probe_texts: Sequence[str] | None = None,
+) -> float:
+    """Max-abs serial-vs-batched drift over the probe set — for sensitivity tests."""
+    texts = list(probe_texts if probe_texts is not None else BATCH_PROBE_TEXTS)
     reference = np.asarray([embed_chunk([t])[0] for t in texts], dtype=np.float64)
-    safe = 1
-    for size in sizes:
-        if size > len(texts):
-            break
-        batched = np.asarray(_chunked(embed_chunk, texts, size), dtype=np.float64)
-        if float(np.max(np.abs(reference - batched))) <= tol:
-            safe = size
-        else:
-            break
-    return safe
+    batched = np.asarray(embed_chunk(texts), dtype=np.float64)
+    return float(np.max(np.abs(reference - batched)))
