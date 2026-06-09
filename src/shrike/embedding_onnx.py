@@ -36,6 +36,7 @@ import numpy as np
 from shrike.embed_batching import ProbeError, probe_max_safe_batch
 from shrike.embed_text import EMBED_TEXT_VERSION
 from shrike.embedding_base import TEXT
+from shrike.embedding_onnx_common import ORT_INT_DTYPES, resolve_execution_providers
 
 logger = logging.getLogger("shrike.embedding")
 
@@ -49,10 +50,9 @@ _POOLINGS = frozenset({"mean", "cls", "last"})
 # and we'd rather fail loud at start() (below) than silently break embedding. Single source
 # of truth for both the feed in `_embed_chunk` and the start()-time diagnostic.
 _SUPPLIED_INPUTS = frozenset({"input_ids", "attention_mask", "token_type_ids"})
-# onnxruntime declares input types as strings like "tensor(int64)" and does NOT
-# auto-cast a fed array, so we match each input's declared integer dtype (some
-# mobile/quantized exports use int32 rather than int64).
-_ORT_INT_DTYPES = {"tensor(int64)": np.int64, "tensor(int32)": np.int32}
+# Match each input's declared integer dtype (some quantized exports use int32). Shared with the
+# CLIP backend; aliased so the feed in `_embed_chunk` reads unchanged.
+_ORT_INT_DTYPES = ORT_INT_DTYPES
 
 
 class OnnxBackend:
@@ -148,11 +148,7 @@ class OnnxBackend:
         # silent CPU fallback — and always keep CPU as the final fallback so an unavailable
         # accelerator degrades instead of hard-erroring.
         available = list(ort.get_available_providers())
-        resolved: list[str] = []
-        for p in [*self._providers, "CPUExecutionProvider"]:
-            if p in available and p not in resolved:
-                resolved.append(p)
-        dropped = [p for p in self._providers if p not in available]
+        resolved, dropped = resolve_execution_providers(available, self._providers)
         if dropped:
             logger.warning(
                 "Requested ONNX execution provider(s) %s not available (have %s); using %s.",

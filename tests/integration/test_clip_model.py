@@ -3,9 +3,9 @@
 Mocked mechanics live in ``tests/unit/test_embedding_clip.py``; here we run ``ClipBackend``
 against the actual ``Xenova/clip-vit-base-patch32`` ONNX graphs so the preprocessing, I/O, and
 the shared-space property are exercised for real. The semantic assertion uses solid-colour
-images (deterministic, no network beyond the cached model) — CLIP reliably places a red image
-nearer "a solid red image" than "a solid blue image", proving a text query retrieves by image
-content. (Richer image-by-text quality was measured in the Phase-3a eval, #193.)
+images (deterministic, no network beyond the cached model): a colour image lands nearer its own
+colour word than unrelated concepts, proving a text query retrieves by image content. (Richer
+image-by-text quality was measured in the Phase-3a eval, #193.)
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ _UNRELATED = ["a photograph of a cat", "a circuit diagram schematic", "a page of
 
 
 def _backend(clip_model: Path) -> ClipBackend:
-    be = ClipBackend(model=str(clip_model), variant="quantized")
+    be = ClipBackend(model=str(clip_model))  # auto-discovers the quantized graphs
     be.start()
     return be
 

@@ -27,6 +27,7 @@ import numpy as np
 from shrike.embed_batching import probe_max_safe_batch
 from shrike.embed_text import EMBED_TEXT_VERSION
 from shrike.embedding_base import IMAGE, TEXT
+from shrike.embedding_onnx_common import ORT_INT_DTYPES, resolve_execution_providers
 
 logger = logging.getLogger("shrike.embedding")
 
@@ -36,24 +37,32 @@ CLIP_CONTEXT = 77
 # Bump if the image-preprocessing pipeline changes (folds into model_fingerprint, like
 # EMBED_TEXT_VERSION does for text — a change must invalidate the image vectors).
 IMAGE_PREP_VERSION = 1
+# CLIP exports ship a graph at several precisions; auto-discovery prefers full precision (best
+# quality, and it batches) and falls back to a quantized one, picking the first precision for
+# which *both* graphs exist (so text and vision stay the same precision — no mixed-precision pair).
+# Explicit operator selection of a precision is tracked in #210.
+_VARIANT_SUFFIXES = ("", "_fp16", "_quantized", "_int8", "_uint8", "_q4", "_bnb4")
+
+# The text inputs this backend can supply; whichever the graph declares are fed (CLIP text usually
+# declares only input_ids, but some exports also take attention_mask). Mirrors OnnxBackend.
+_SUPPLIED_TEXT_INPUTS = frozenset({"input_ids", "attention_mask"})
 
 # An image accepted by embed_images: a PIL image, a filesystem path, or raw bytes.
 ImageInput = Any
 
 
-def resolve_execution_providers(
-    available: list[str], requested: list[str]
-) -> tuple[list[str], list[str]]:
-    """Intersect requested providers with what onnxruntime has, append CPU as the final
-    fallback, dedup. Returns (resolved, dropped). Mirrors OnnxBackend's resolution so an
-    unavailable accelerator degrades with a warning rather than onnxruntime's silent CPU fallback.
+def _read_edge(value: Any, keys: tuple[str, ...], default: int) -> int:
+    """Read an image dimension from a preprocessor_config field that may be a dict
+    (``{"shortest_edge": 224}`` / ``{"height": 224, "width": 224}``) or a bare scalar (``224``).
     """
-    resolved: list[str] = []
-    for p in [*requested, "CPUExecutionProvider"]:
-        if p in available and p not in resolved:
-            resolved.append(p)
-    dropped = [p for p in requested if p not in available]
-    return resolved, dropped
+    if isinstance(value, dict):
+        for k in keys:
+            if value.get(k):
+                return int(value[k])
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    return default
 
 
 class ClipBackend:
@@ -71,22 +80,20 @@ class ClipBackend:
         model: str,
         providers: list[str] | None = None,
         batch_size: int | None = None,
-        variant: str | None = None,
         log_dir: str | Path | None = None,  # accepted for runtime parity; unused
     ) -> None:
         self._model = model
         self._providers = list(providers) if providers else list(DEFAULT_PROVIDERS)
         self._active_providers: list[str] = []
         self._batch_cap = batch_size
-        # A graph-file suffix, e.g. "quantized" → text_model_quantized.onnx (None = plain).
-        self._variant = variant
         self._safe_batch = 1
         self._text_sess: Any = None
         self._vis_sess: Any = None
         self._tokenizer: Any = None
         self._mean: np.ndarray | None = None
         self._std: np.ndarray | None = None
-        self._crop = 224
+        self._resize = 224  # shortest-edge resize target (preprocessor "size")
+        self._crop = 224  # center-crop size (preprocessor "crop_size")
         self._dim: int | None = None
         self._text_path: Path | None = None
         self._vis_path: Path | None = None
@@ -97,35 +104,40 @@ class ClipBackend:
         return self._text_sess is not None and self._vis_sess is not None
 
     def _resolve_files(self) -> tuple[Path, Path, Path, Path]:
-        """Locate text graph, vision graph, tokenizer.json, preprocessor_config.json."""
+        """Locate the text graph, vision graph, tokenizer.json, preprocessor_config.json.
+
+        The graphs are auto-discovered across precisions (``_VARIANT_SUFFIXES``): the first
+        precision for which *both* ``text_model`` and ``vision_model`` exist wins, so a full export
+        loads its full-precision pair and a quantized-only export (the CI fixture) loads that —
+        without a mixed-precision pair (which would break the one-probe-governs-both assumption).
+        """
         root = Path(self._model)
         if not root.is_dir():
             raise FileNotFoundError(f"CLIP model path is not a directory: {root}")
-        suffix = f"_{self._variant}" if self._variant else ""
 
-        def _graph(stem: str) -> Path:
-            for rel in (f"onnx/{stem}{suffix}.onnx", f"{stem}{suffix}.onnx"):
-                if (root / rel).is_file():
-                    return root / rel
-            raise FileNotFoundError(f"No {stem}{suffix}.onnx under {root}")
+        def _find(name: str) -> Path | None:
+            return next((root / r for r in (f"onnx/{name}", name) if (root / r).is_file()), None)
 
-        tok = next(
-            (root / r for r in ("tokenizer.json", "onnx/tokenizer.json") if (root / r).is_file()),
-            None,
-        )
+        text_path = vis_path = None
+        for suffix in _VARIANT_SUFFIXES:
+            text_path = _find(f"text_model{suffix}.onnx")
+            vis_path = _find(f"vision_model{suffix}.onnx")
+            if text_path and vis_path:
+                if suffix:
+                    logger.info("CLIP: loading the '%s' graph variant", suffix.lstrip("_"))
+                break
+        if not (text_path and vis_path):
+            raise FileNotFoundError(
+                f"No matching text_model*.onnx + vision_model*.onnx under {root}"
+            )
+
+        tok = _find("tokenizer.json")
         if tok is None:
             raise FileNotFoundError(f"No tokenizer.json under {root}")
-        pp = next(
-            (
-                root / r
-                for r in ("preprocessor_config.json", "onnx/preprocessor_config.json")
-                if (root / r).is_file()
-            ),
-            None,
-        )
+        pp = _find("preprocessor_config.json")
         if pp is None:
             raise FileNotFoundError(f"No preprocessor_config.json under {root}")
-        return _graph("text_model"), _graph("vision_model"), tok, pp
+        return text_path, vis_path, tok, pp
 
     def start(self) -> None:
         """Load both inference sessions, the tokenizer, and the image preprocessing config."""
@@ -176,10 +188,16 @@ class ClipBackend:
         pp = json.loads(pp_path.read_text())
         self._mean = np.array(pp["image_mean"], dtype=np.float32)
         self._std = np.array(pp["image_std"], dtype=np.float32)
-        crop = pp.get("crop_size", {})
-        self._crop = int(crop.get("height") or crop.get("width") or 224)
+        # CLIP preprocessing has two independent knobs: resize the shortest edge to `size`, then
+        # center-crop to `crop_size`. Each may be a dict or a bare scalar across exports.
+        self._resize = _read_edge(pp.get("size"), ("shortest_edge", "height", "width"), 224)
+        self._crop = _read_edge(pp.get("crop_size"), ("height", "width"), self._resize)
 
-        # Both graphs share the model's quantization, so one probe on the text path governs both.
+        # Both graphs are auto-discovered at the *same* precision (_resolve_files), so one probe on
+        # the text path governs the vision path too. (A hand-assembled mixed-precision pair — fp
+        # text + int8 vision — would batch the vision graph non-deterministically; that's
+        # unsupported, which is why _resolve_files refuses to mix precisions. Probing the vision
+        # path directly is tracked in #211.)
         try:
             self._safe_batch = probe_max_safe_batch(self._embed_text_chunk)
             if self._safe_batch == 1 and self._batch_cap and self._batch_cap > 1:
@@ -225,9 +243,18 @@ class ClipBackend:
 
     def _embed_text_chunk(self, texts: list[str]) -> list[list[float]]:
         encodings = self._tokenizer.encode_batch(texts)
-        input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
-        # CLIP text graph declares only input_ids (it finds the EOS position internally).
-        feed = {self._text_sess.get_inputs()[0].name: input_ids}
+        # Feed whichever of input_ids/attention_mask the graph declares, each cast to its declared
+        # integer dtype (onnxruntime won't auto-cast). CLIP text usually declares only input_ids,
+        # but some exports also take attention_mask — mirrors OnnxBackend's feed-what's-declared.
+        supplied = {
+            "input_ids": np.array([e.ids for e in encodings], dtype=np.int64),
+            "attention_mask": np.array([e.attention_mask for e in encodings], dtype=np.int64),
+        }
+        feed = {
+            inp.name: supplied[inp.name].astype(ORT_INT_DTYPES.get(inp.type, np.int64))
+            for inp in self._text_sess.get_inputs()
+            if inp.name in _SUPPLIED_TEXT_INPUTS
+        }
         out = np.asarray(self._text_sess.run(None, feed)[0], dtype=np.float32)
         return self._normalize(out)
 
@@ -263,13 +290,14 @@ class ClipBackend:
         else:
             img = image  # assume a PIL image
         img = img.convert("RGB")
-        s = self._crop
+        # Resize the shortest edge to `_resize`, then center-crop to `_crop` (independent knobs).
         w, h = img.size
-        scale = s / min(w, h)
+        scale = self._resize / min(w, h)
         img = img.resize((round(w * scale), round(h * scale)), self._Image.Resampling.BICUBIC)
         w, h = img.size
-        left, top = (w - s) // 2, (h - s) // 2
-        img = img.crop((left, top, left + s, top + s))
+        c = self._crop
+        left, top = (w - c) // 2, (h - c) // 2
+        img = img.crop((left, top, left + c, top + c))
         arr = (np.asarray(img, dtype=np.float32) / 255.0 - self._mean) / self._std
         chw: np.ndarray = arr.transpose(2, 0, 1)  # HWC → CHW
         return chw
@@ -288,6 +316,11 @@ class ClipBackend:
             return self._dim
         if not self.running:
             return None
+        # Prefer the graph's static output dim (text_embeds is [batch, dim]); embed only if dynamic.
+        shape = self._text_sess.get_outputs()[0].shape
+        if shape and isinstance(shape[-1], int):
+            self._dim = int(shape[-1])
+            return self._dim
         return len(self.embed_texts([" "])[0])
 
     def model_fingerprint(self) -> str:

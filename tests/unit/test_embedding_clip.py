@@ -19,7 +19,8 @@ import numpy as np
 import pytest
 
 from shrike.embedding_base import IMAGE, TEXT
-from shrike.embedding_clip import ClipBackend, resolve_execution_providers
+from shrike.embedding_clip import ClipBackend
+from shrike.embedding_onnx_common import resolve_execution_providers
 
 _DIM = 8
 
@@ -28,8 +29,14 @@ _DIM = 8
 
 
 class _FakeInput:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, type: str = "tensor(int64)") -> None:
         self.name = name
+        self.type = type
+
+
+class _FakeOutput:
+    def __init__(self, shape: list) -> None:
+        self.shape = shape
 
 
 class _FakeTextSession:
@@ -40,6 +47,9 @@ class _FakeTextSession:
 
     def get_inputs(self) -> list[_FakeInput]:
         return [_FakeInput("input_ids")]  # CLIP text declares only input_ids
+
+    def get_outputs(self) -> list[_FakeOutput]:
+        return [_FakeOutput(["batch", _DIM])]  # text_embeds [batch, dim], static dim
 
     def get_providers(self) -> list[str]:
         return self._providers
@@ -54,7 +64,7 @@ class _FakeTextSession:
 
 class _FakeVisionSession(_FakeTextSession):
     def get_inputs(self) -> list[_FakeInput]:
-        return [_FakeInput("pixel_values")]
+        return [_FakeInput("pixel_values", "tensor(float)")]
 
     def run(self, _outputs: object, feed: dict) -> list[np.ndarray]:
         self.last_feed = feed
@@ -73,6 +83,16 @@ class _FakeVariantTextSession(_FakeTextSession):
         arr = np.ones((n, _DIM), dtype=np.float32)
         arr[:, 0] = float(n)
         return [arr]
+
+
+class _FakeMaskedTextSession(_FakeTextSession):
+    """Declares both input_ids (int32) and attention_mask (int64) — exercises the F3 feed path."""
+
+    def get_inputs(self) -> list[_FakeInput]:
+        return [
+            _FakeInput("input_ids", "tensor(int32)"),
+            _FakeInput("attention_mask", "tensor(int64)"),
+        ]
 
 
 class _FakeEncoding:
@@ -127,6 +147,8 @@ def _model_dir(tmp_path: Path, *, variant: str = "") -> Path:
     (tmp_path / "preprocessor_config.json").write_text(
         json.dumps(
             {
+                # size (resize) deliberately != crop_size, so a test can tell they're read apart.
+                "size": {"shortest_edge": 256},
                 "crop_size": {"height": 224, "width": 224},
                 "image_mean": [0.48145466, 0.4578275, 0.40821073],
                 "image_std": [0.26862954, 0.26130258, 0.27577711],
@@ -238,10 +260,54 @@ class TestClipBackend:
         assert fp.startswith("clip:text_model.onnx:")
         assert "vision_model.onnx:" in fp and "imgprep=" in fp and "textprep=" in fp
 
-    def test_variant_resolves_quantized(self, tmp_path: Path) -> None:
-        be = ClipBackend(model=str(_model_dir(tmp_path, variant="quantized")), variant="quantized")
+    def test_auto_discovers_quantized_only(self, tmp_path: Path) -> None:
+        # A quantized-only export (the CI fixture's shape) loads without any variant param (F1).
+        be = ClipBackend(model=str(_model_dir(tmp_path, variant="quantized")))
         _start(be)
         assert be._text_path is not None and be._text_path.name == "text_model_quantized.onnx"
+        assert be._vis_path is not None and be._vis_path.name == "vision_model_quantized.onnx"
+
+    def test_prefers_full_precision_over_quantized(self, tmp_path: Path) -> None:
+        # A dir with both → the full-precision pair wins (better quality, and it batches).
+        d = _model_dir(tmp_path)  # plain text_model.onnx + vision_model.onnx
+        (d / "onnx" / "text_model_quantized.onnx").write_bytes(b"q")
+        (d / "onnx" / "vision_model_quantized.onnx").write_bytes(b"q")
+        be = ClipBackend(model=str(d))
+        _start(be)
+        assert be._text_path is not None and be._text_path.name == "text_model.onnx"
+
+    def test_reads_size_and_crop_independently(self, tmp_path: Path) -> None:
+        # F2: resize target is the `size`/`shortest_edge` field, crop is `crop_size` — not the same.
+        be = ClipBackend(model=str(_model_dir(tmp_path)))
+        _start(be)
+        assert be._resize == 256 and be._crop == 224
+
+    def test_scalar_size_and_crop(self, tmp_path: Path) -> None:
+        # F5: the bare-scalar `crop_size`/`size` form (some exports) must not crash start().
+        d = _model_dir(tmp_path)
+        (d / "preprocessor_config.json").write_text(
+            json.dumps(
+                {
+                    "size": 248,
+                    "crop_size": 224,
+                    "image_mean": [0.5, 0.5, 0.5],
+                    "image_std": [0.5, 0.5, 0.5],
+                }
+            )
+        )
+        be = ClipBackend(model=str(d))
+        _start(be)
+        assert be._resize == 248 and be._crop == 224
+
+    def test_feeds_declared_attention_mask_with_dtype(self, tmp_path: Path) -> None:
+        # F3: a text graph declaring input_ids(int32)+attention_mask gets both, each its dtype.
+        be = ClipBackend(model=str(_model_dir(tmp_path)))
+        _start(be, text_session=_FakeMaskedTextSession)
+        be.embed_texts(["a cat"])
+        feed = be._text_sess.last_feed
+        assert set(feed) == {"input_ids", "attention_mask"}
+        assert feed["input_ids"].dtype == np.int32  # declared int32 → cast down
+        assert feed["attention_mask"].dtype == np.int64
 
     def test_health(self, tmp_path: Path) -> None:
         be = ClipBackend(model=str(_model_dir(tmp_path)))
