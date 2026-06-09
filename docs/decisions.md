@@ -8,6 +8,20 @@ isn't reconstructable from the code.
 
 ## Semantic search & the vector index
 
+### USearch stays the index; revisit only on a measured, specific trigger
+
+USearch (HNSW + quantization) is the vector index, and the cross-platform plan keeps
+it. No native option beats it for a zero-server, local-first design: Apple offers only
+a brute-force kNN primitive (`BNNS.NearestNeighbors`), Android has no first-party ANN,
+and the portable third-party alternatives don't win on portability *and* performance
+together. USearch already runs natively on desktop and on both mobile platforms, so a
+future port carries the same index rather than swapping it. Revisit **only** on a
+specific, measured trigger — SQLite-transactional co-location of vectors (→ evaluate
+`sqlite-vec`), or Android object-DB ergonomics (→ evaluate ObjectBox) — and only on a
+demonstrated win, not on spec. (This is the index *engine* choice; that the index is a
+per-device derived cache rebuilt from synced cards is a separate decision — see "The
+index is a derived cache" below and the Sync epic, #38.)
+
 ### Embedding backends are pluggable behind one small protocol (#172)
 
 The embedder used to *be* llama-server: `VectorIndex` and the server boot path
