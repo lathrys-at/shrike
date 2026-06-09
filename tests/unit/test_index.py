@@ -13,12 +13,14 @@ import pytest
 
 from shrike.embedding_base import IMAGE, TEXT
 from shrike.index import (
+    CALIB_MIN,
     DEFAULT_SAVE_THRESHOLD,
     INDEX_SCHEMA_VERSION,
     IndexSaver,
     IndexState,
     NoteEmbedInput,
     VectorIndex,
+    activation_floor,
 )
 
 NDIM = 8
@@ -991,3 +993,129 @@ class TestPerModalityMigration:
         idx.rebuild(_inp([1], ["cat"]), col_mod=2, model_id="m2")
         assert set(idx._indexes) == {TEXT}
         assert not (tmp_path / "i" / "index.image.usearch").exists()
+
+
+def _aligned_backend() -> MagicMock:
+    """A CLIP-like backend where text token ``kN`` and image bytes ``b"kN"`` map to the *same* unit
+    vector — so a note's own image is its own nearest image neighbour. That makes self-exclusion in
+    activation calibration observable: if self weren't excluded, every pseudo-query's best image
+    match would be itself (cosine 1.0)."""
+
+    def _vec_for(token: str) -> list[float]:
+        seed = int(hashlib.blake2b(token.encode(), digest_size=4).hexdigest(), 16)
+        v = np.random.default_rng(seed).standard_normal(NDIM).astype(np.float32)
+        return (v / np.linalg.norm(v)).tolist()
+
+    svc = MagicMock()
+    svc.embed_texts = MagicMock(side_effect=lambda texts: [_vec_for(t) for t in texts])
+    svc.embed_images = MagicMock(side_effect=lambda imgs: [_vec_for(b.decode()) for b in imgs])
+    svc.modalities = frozenset({TEXT, IMAGE})
+    return svc
+
+
+def _aligned_inputs(n: int) -> list[NoteEmbedInput]:
+    # note i: text "kI" + one image "imgI.png"; the resolver maps it to b"kI" (same vector as text).
+    return [NoteEmbedInput(i, f"k{i}", [f"img{i}.png"]) for i in range(n)]
+
+
+def _aligned_resolver(n: int):
+    store = {f"img{i}.png": f"k{i}".encode() for i in range(n)}
+    return lambda name: store.get(name)
+
+
+class TestActivationCalibration:
+    """Offline activation-gate calibration (#201b): per-non-text-modality best-match {n, mean, std},
+    sampled from the index with self-matches excluded."""
+
+    def _build(self, tmp_path: Path, n: int) -> VectorIndex:
+        idx = VectorIndex(tmp_path / "i", backend=_aligned_backend())
+        idx.set_image_resolver(_aligned_resolver(n))
+        idx.rebuild(_aligned_inputs(n), col_mod=1, model_id="m")
+        return idx
+
+    def test_floor_pure_function(self) -> None:
+        assert activation_floor(None, 2.0) is None
+        assert activation_floor({}, 2.0) is None
+        assert activation_floor({"n": 40.0, "mean": 0.3, "std": 0.1}, 2.0) == pytest.approx(0.5)
+
+    def test_calibration_produces_image_stats(self, tmp_path: Path) -> None:
+        idx = self._build(tmp_path, 40)
+        stats = idx.activation_stats
+        assert set(stats) == {"image"}
+        assert stats["image"]["n"] == 40.0
+        assert stats["image"]["std"] > 0.0  # the best-match distribution has spread
+        # Self-excluded: a note's own image (cosine 1.0) is NOT the recorded best match, so the mean
+        # of nearest *non-self* matches sits well below 1.0. A broken self-exclusion → mean ~1.0.
+        assert 0.0 < stats["image"]["mean"] < 0.95
+
+    def test_text_only_index_has_no_activation_stats(
+        self, tmp_path: Path, embedding_service: MagicMock
+    ) -> None:
+        idx = VectorIndex(tmp_path / "i", backend=embedding_service)
+        idx.rebuild(_inp(list(range(40)), [f"t{i}" for i in range(40)]), col_mod=1, model_id="m")
+        assert idx.activation_stats == {}  # no non-text modality → nothing to calibrate
+
+    def test_too_few_images_yields_no_stats(self, tmp_path: Path) -> None:
+        # Fewer than CALIB_MIN non-self best-matches → the modality is left uncalibrated (gate off).
+        idx = self._build(tmp_path, CALIB_MIN - 1)
+        assert idx.activation_stats == {}
+
+    def test_stats_persist_and_reload(self, tmp_path: Path) -> None:
+        idx = self._build(tmp_path, 40)
+        saved = idx.activation_stats["image"]
+        meta = json.loads((tmp_path / "i" / "index.meta.json").read_text())
+        assert "activation" in meta  # written to the on-disk meta
+        reloaded = VectorIndex(tmp_path / "i", backend=_aligned_backend())
+        assert reloaded.activation_stats["image"] == saved  # survives a reload byte-for-byte
+
+    def test_recompute_on_model_change(self, tmp_path: Path) -> None:
+        idx = self._build(tmp_path, 40)
+        assert idx.activation_stats  # present after the first build
+        # A model change forces a full rebuild, which recalibrates from scratch.
+        idx.set_image_resolver(_aligned_resolver(40))
+        idx.reconcile(_aligned_inputs(40), col_mod=2, model_id="m2")
+        assert set(idx.activation_stats) == {"image"}
+        assert idx.model_id == "m2"
+
+    def test_ensure_calibrated_fills_missing_stats(self, tmp_path: Path) -> None:
+        # Simulate a pre-#201b index: image vectors present, but no activation stats recorded (so
+        # the meta has no `activation` key and calibration is marked never-attempted).
+        idx = self._build(tmp_path, 40)
+        idx._activation_stats = {}
+        idx._calibration_attempted = False
+        meta = {"ndim": NDIM, "schema": INDEX_SCHEMA_VERSION, "col_mod": 1, "model_id": "m"}
+        (tmp_path / "i" / "index.meta.json").write_text(json.dumps(meta))
+        idx.ensure_calibrated()
+        assert set(idx.activation_stats) == {"image"}
+        # ...and it persisted, so the next load is already calibrated.
+        assert "activation" in json.loads((tmp_path / "i" / "index.meta.json").read_text())
+
+    def test_ensure_calibrated_noop_when_already_calibrated(self, tmp_path: Path) -> None:
+        idx = self._build(tmp_path, 40)
+        before = idx.activation_stats["image"]
+        idx.ensure_calibrated()  # already calibrated → no recompute
+        assert idx.activation_stats["image"] == before
+
+    def test_sub_threshold_calibration_is_one_shot(self, tmp_path: Path) -> None:
+        # A multimodal collection below CALIB_MIN persists an empty marker, so a reload treats it as
+        # already-attempted and ensure_calibrated doesn't re-sample every boot (review F3).
+        idx = self._build(tmp_path, CALIB_MIN - 1)
+        assert idx.activation_stats == {}
+        assert idx._calibration_attempted is True
+        meta = json.loads((tmp_path / "i" / "index.meta.json").read_text())
+        assert meta.get("activation") == {}  # the empty marker is persisted (key present, no stats)
+        reloaded = VectorIndex(tmp_path / "i", backend=_aligned_backend())
+        assert reloaded._calibration_attempted is True  # marker seen → ensure_calibrated will no-op
+
+    def test_metadata_only_reconcile_calibrates_pre_201b_index(self, tmp_path: Path) -> None:
+        # Review F2: a pre-#201b index whose only drift is metadata (no re-embed) still gets
+        # calibrated in reconcile's early-return branch, rather than persisting a new col_mod with
+        # the gate left off for the session.
+        idx = self._build(tmp_path, 40)
+        idx._activation_stats = {}
+        idx._calibration_attempted = False  # simulate the pre-#201b (never-calibrated) state
+        idx.set_image_resolver(_aligned_resolver(40))
+        # Same inputs → no fingerprint changes → the metadata-only reconcile path.
+        idx.reconcile(_aligned_inputs(40), col_mod=2, model_id="m")
+        assert set(idx.activation_stats) == {"image"}
+        assert idx.col_mod == 2

@@ -61,6 +61,9 @@ def mock_index():
     # search_notes ranks per modality; the upsert neighbour path still uses plain search().
     idx.search_by_modality = MagicMock(return_value=[])
     idx.search = MagicMock(return_value=[])
+    # Uncalibrated by default → no activation floor → the #201b image gate is off (= #201a
+    # behaviour); the gate-specific tests set this explicitly.
+    idx.activation_stats = {}
     idx.col_mod = 0
     idx.size = 100
     return idx
@@ -364,6 +367,83 @@ class TestUnifiedSearch:
         ]
         m = _call(mcp_app, "search_notes", {"queries": ["alpha query"]})["results"][0]["matches"][0]
         assert m["score"] == 0.9  # max(0.90 text, 0.30 image)
+
+    def test_image_gate_passes_strong_match(self, wrapper, mock_index, mcp_app):
+        # #201b: calibrated floor = mean + ACTIVATION_MARGIN·std = 0.20 + 1.0·0.05 = 0.25. A best
+        # image sim of 0.30 clears it → the (image-only) note surfaces, scored by the image sim.
+        nid = self._seed_front(wrapper, "krebs cycle diagram")
+        mock_index.activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        mock_index.search_by_modality.return_value = [
+            {"image": [{"note_id": nid, "distance": 0.70}]}  # sim 0.30 > 0.25
+        ]
+        m = _call(mcp_app, "search_notes", {"queries": ["mitochondria"]})["results"][0]["matches"]
+        assert [x["id"] for x in m] == [nid]
+        assert m[0]["score"] == 0.3
+
+    def test_image_gate_drops_weak_match(self, wrapper, mock_index, mcp_app):
+        # Best image sim 0.20 is below the 0.25 floor → the image modality is gated out, so an
+        # image-only match does not surface (no spurious image card for an off-topic query).
+        nid = self._seed_front(wrapper, "krebs cycle diagram")
+        mock_index.activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        mock_index.search_by_modality.return_value = [
+            {"image": [{"note_id": nid, "distance": 0.80}]}  # sim 0.20 <= 0.25
+        ]
+        m = _call(mcp_app, "search_notes", {"queries": ["mitochondria"]})["results"][0]["matches"]
+        assert m == []
+
+    def test_image_gate_keeps_text_matched_note(self, wrapper, mock_index, mcp_app):
+        # Gating the image modality must not drop a note that *also* matches text above threshold;
+        # it surfaces with the text score, and the gated image sim is not folded into `score`.
+        nid = self._seed_front(wrapper, "alpha")
+        mock_index.activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        mock_index.search_by_modality.return_value = [
+            {
+                "text": [{"note_id": nid, "distance": 0.20}],  # sim 0.80 (above threshold)
+                "image": [{"note_id": nid, "distance": 0.80}],  # sim 0.20 (gated out)
+            }
+        ]
+        m = _call(mcp_app, "search_notes", {"queries": ["alpha query"]})["results"][0]["matches"][0]
+        assert m["id"] == nid
+        assert m["score"] == 0.8  # text sim only; the gated image sim is not the max
+
+    def test_image_gate_judges_surviving_hit(self, wrapper, mock_index, mcp_app):
+        # #201b review F1: the gate must judge the best image hit that *survives* exclusion/scope,
+        # not the raw rank-1. Here the strong rank-1 image hit is the excluded anchor; the only
+        # surviving image hit is weak (below the 0.25 floor) → the modality must be gated out.
+        anchor = self._seed_front(wrapper, "anchor card")
+        weak = self._seed_front(wrapper, "weakly related card")
+        mock_index.activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        mock_index.search_by_modality.return_value = [
+            {
+                "image": [
+                    {"note_id": anchor, "distance": 0.65},  # sim 0.35 > floor, but excluded
+                    {"note_id": weak, "distance": 0.80},  # sim 0.20 <= floor → the surviving best
+                ]
+            }
+        ]
+        m = _call(mcp_app, "search_notes", {"queries": ["q"], "exclude_ids": [anchor]})["results"][
+            0
+        ]["matches"]
+        assert m == []  # gated on the surviving (weak) hit, so nothing surfaces
+
+    def test_image_gate_passes_strong_surviving_hit(self, wrapper, mock_index, mcp_app):
+        # The mirror: with the strong anchor excluded, a surviving hit that itself clears the floor
+        # still surfaces — the gate isn't fooled in either direction.
+        anchor = self._seed_front(wrapper, "anchor card")
+        strong = self._seed_front(wrapper, "strongly matching card")
+        mock_index.activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        mock_index.search_by_modality.return_value = [
+            {
+                "image": [
+                    {"note_id": anchor, "distance": 0.55},  # sim 0.45, excluded
+                    {"note_id": strong, "distance": 0.66},  # sim 0.34 > floor → surfaces
+                ]
+            }
+        ]
+        m = _call(mcp_app, "search_notes", {"queries": ["q"], "exclude_ids": [anchor]})["results"][
+            0
+        ]["matches"]
+        assert [x["id"] for x in m] == [strong]
 
 
 class TestUpsertNeighbors:

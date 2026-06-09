@@ -10,6 +10,7 @@ image-by-text quality was measured in the Phase-3a eval, #193.)
 
 from __future__ import annotations
 
+import colorsys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -17,6 +18,8 @@ import numpy as np
 import pytest
 
 from shrike.embedding_clip import ClipBackend
+from shrike.index import CALIB_MIN, activation_floor
+from shrike.tools import ACTIVATION_MARGIN
 from tests.integration.conftest import requires_clip
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedding]
@@ -181,6 +184,67 @@ class TestClipImageIndex:
                 model_id=mid,
             )
             assert idx.size == 2  # red: text only now ; rome: text
+        finally:
+            w.close()
+
+    @staticmethod
+    def _colour_collection(tmp_path: Path, n: int):
+        """A collection of ``n`` cards, each a distinct solid-colour image with colour-neutral text
+        (card 0 is red). Enough cards to calibrate the activation gate on the real model."""
+        import os
+
+        from PIL import Image
+
+        from shrike.collection import CollectionWrapper
+
+        w = CollectionWrapper(str(tmp_path / "c.anki2"))
+        os.makedirs(w.media_dir, exist_ok=True)
+        ids: list[int] = []
+        for i in range(n):
+            r, g, b = colorsys.hsv_to_rgb(i / n, 0.85, 0.9)  # hue 0 (card 0) is red
+            rgb = (int(r * 255), int(g * 255), int(b * 255))
+            fn = f"c{i}.png"
+            Image.new("RGB", (96, 96), rgb).save(os.path.join(w.media_dir, fn))
+            note = {
+                "deck": "Test",
+                "note_type": "Basic",
+                "fields": {"Front": f'study card number {i} <img src="{fn}">', "Back": "."},
+            }
+            nid = w.run_sync(lambda _c, note=note: w._upsert_notes([note]))[0]["id"]
+            ids.append(nid)
+        return w, ids
+
+    def test_activation_gate_calibrates_and_passes_genuine_match(
+        self, be: ClipBackend, tmp_path: Path
+    ) -> None:
+        from shrike.collection import CollectionWrapper
+
+        # A ≥CALIB_MIN colour collection so calibration produces image stats on the real CLIP model.
+        w, ids = self._colour_collection(tmp_path, CALIB_MIN + 2)
+        try:
+            idx = self._index(be, tmp_path, w)
+            inputs = w.run_sync(lambda c: CollectionWrapper._note_embed_inputs(c, ids))
+            idx.rebuild(inputs, col_mod=1, model_id=be.model_fingerprint())
+
+            # Offline calibration (#201b) ran on the real model and produced image-modality stats.
+            stats = idx.activation_stats
+            assert stats["image"]["n"] >= CALIB_MIN
+            assert stats["image"]["std"] > 0.0
+            floor = activation_floor(stats["image"], ACTIVATION_MARGIN)
+            assert floor is not None
+
+            def _best_image_sim(query: str) -> float:
+                ranking = idx.search_by_modality([query], top_k=1)[0]["image"]
+                return 1.0 - ranking[0]["distance"]
+
+            # A genuine colour-content query clears the floor → its image card passes the gate (the
+            # gate must not suppress real matches), and it's distinctly stronger than an off-topic
+            # query — which falls toward/below the floor and is gated out (the deterministic drop is
+            # unit-tested in test_tools_search.py; colour-vs-unrelated is the robust ~0.09 regime).
+            red_best = _best_image_sim("a solid red colour image")
+            noise_best = _best_image_sim("a circuit diagram schematic")
+            assert red_best > floor
+            assert red_best > noise_best
         finally:
             w.close()
 

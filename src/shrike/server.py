@@ -104,12 +104,17 @@ def _maybe_rebuild(
     if index.check_drift(col_mod, model_id):
         if inputs:
             index.reconcile_in_background(inputs, col_mod, model_id=model_id)
-            return True
+            return True  # the background reconcile recalibrates the activation gate at its tail
         ndim = embedding.embedding_dim()
         if ndim is not None:
             index.materialize_empty(ndim, col_mod, model_id)
         else:
             logger.info("Collection is empty and embedding dim unknown, skipping index rebuild")
+    # No background rebuild was started (the index loaded clean, or the collection is empty). Make
+    # sure a clean index that predates the activation gate (#201b) gets calibrated now rather than
+    # waiting for the next drift; a no-op when it's already calibrated or has no non-text modality.
+    # We're already off the event loop here (callers run _maybe_rebuild via asyncio.to_thread).
+    index.ensure_calibrated()
     return False
 
 

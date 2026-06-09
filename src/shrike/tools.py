@@ -15,7 +15,7 @@ from shrike.collection import (
     CollectionWrapper,
     substring_info,
 )
-from shrike.index import IndexSaver, IndexState, VectorIndex
+from shrike.index import IndexSaver, IndexState, VectorIndex, activation_floor
 from shrike.schemas import (
     CollectionCheckResponse,
     CollectionInfo,
@@ -58,6 +58,14 @@ logger = logging.getLogger("shrike.tools")
 # fusion. Equal today; the tuning harness + further signals (n-gram #98, tag #179) will make these
 # config/`--search-*` knobs. The exact-match override (priority tier) is orthogonal to the weight.
 SEARCH_WEIGHTS = {"text": 1.0, "image": 1.0, "exact": 1.0}
+
+# Intra-modal activation gate (#201b). A non-text modality's ranking is fed to the fusion only when
+# its best match for the query exceeds `mean + ACTIVATION_MARGIN·std` of that modality's calibrated
+# typical best match (index.activation_stats) — otherwise the modality "had no good match" and its
+# top-k would just inject noise. Higher margin = stricter (fewer image cards surface). Like RRF_K, a
+# module constant today; becomes a `--search-*` knob under the tuning harness. Uncalibrated stats
+# (a text-only or pre-#201b index) yield no floor, so the gate is simply off.
+ACTIVATION_MARGIN = 1.0
 
 
 class ToolInputError(Exception):
@@ -501,6 +509,14 @@ def register_tools(
             raw = index.search_by_modality([t for (_, _, t) in text_sources], top_k=fetch_k)
             sem_by_source = dict(enumerate(raw))
 
+        # Activation gate (#201b): the floor the image ranking's best match must clear to count.
+        # None (text-only / pre-#201b / uncalibrated index) → no gating, i.e. #201a behaviour.
+        image_floor = (
+            activation_floor(index.activation_stats.get("image"), ACTIVATION_MARGIN)
+            if index is not None
+            else None
+        )
+
         def _in_scope(note_data: dict[str, Any]) -> bool:
             if deck and note_data.get("deck") != deck:
                 return False
@@ -577,9 +593,25 @@ def register_tools(
             ranking_text = await _rank_modality(
                 modality_hits.get("text", []), note_data, sem_score, thresholded=True
             )
+            # Image modality, then the activation gate (#201b). Rank into a scratch score first so
+            # the gate is judged on the best image hit that *survives* exclusion + deck/tag scope —
+            # not the raw rank-1, which might be the excluded anchor or an out-of-scope note and
+            # would let the gate open for weaker in-scope hits it exists to suppress.
+            image_score: dict[int, float] = {}
             ranking_image = await _rank_modality(
-                modality_hits.get("image", []), note_data, sem_score, thresholded=False
+                modality_hits.get("image", []), note_data, image_score, thresholded=False
             )
+            if (
+                ranking_image
+                and image_floor is not None
+                and image_score[ranking_image[0]] <= image_floor
+            ):
+                ranking_image = []  # no good-enough *surviving* image match → gate the modality out
+                image_score = {}
+            # Fold the kept image sims into the shared (max-over-modalities) surfaced score.
+            for nid, isim in image_score.items():
+                prev = sem_score.get(nid)
+                sem_score[nid] = isim if prev is None else max(prev, isim)
 
             # Exact ranking = every candidate whose content literally contains the query (the
             # `substring` annotation), so annotation ⟺ floated. Pre-filter hits already carry it.

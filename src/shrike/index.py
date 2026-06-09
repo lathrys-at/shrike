@@ -54,6 +54,28 @@ INDEX_SCHEMA_VERSION = 2
 # keeps the original index.usearch filename). Extend this tuple when a new media modality lands.
 _INDEX_MODALITIES = (TEXT, IMAGE)
 
+# Activation-gate calibration (#201b): a non-text modality's ranking only contributes to search
+# fusion when its best match for a query meaningfully beats that modality's *typical* best match,
+# estimated offline by sampling text vectors already in the index as pseudo-queries. CALIB_SAMPLE
+# pseudo-queries are used; a modality needs at least CALIB_MIN non-self best-matches to get stats
+# (otherwise the gate stays off for it — a tiny media collection isn't worth calibrating).
+CALIB_SAMPLE = 256
+CALIB_MIN = 30
+
+
+def activation_floor(stats: dict[str, float] | None, margin: float) -> float | None:
+    """Similarity a modality's best match must exceed to activate: ``mean + margin·std``.
+
+    ``stats`` is one modality's calibrated ``{n, mean, std}`` (or ``None`` when uncalibrated — then
+    there is no floor and the gate is disabled, i.e. the modality always contributes). Pure: no
+    index or embedding state, so it is unit-testable in isolation and shared by the gate in
+    ``tools.py`` (#201b).
+    """
+    if not stats:
+        return None
+    return stats["mean"] + margin * stats["std"]
+
+
 # An image resolver maps a media filename to its bytes (None = missing/unreadable → skipped).
 ImageResolver = Callable[[str], "bytes | None"]
 # A cheap presence check for a media filename (a stat, not a byte read) — folded into the hash.
@@ -134,6 +156,13 @@ class VectorIndex:
         # On-disk schema of the loaded index (INDEX_SCHEMA_VERSION for a freshly-built one). A v1
         # index loaded by an image-capable backend can't be split per modality → drift-rebuild.
         self._schema = INDEX_SCHEMA_VERSION
+        # Per-(non-text-)modality best-match {n, mean, std}, calibrated offline from the index, for
+        # the activation gate (#201b). Empty until calibrated (text-only collections stay empty).
+        self._activation_stats: dict[str, dict[str, float]] = {}
+        # Whether activation calibration has run for a multimodal index — persisted (the meta key's
+        # presence) so a collection that legitimately produced *no* stats (too few media notes)
+        # isn't re-sampled every boot. Distinct from `_activation_stats` being empty.
+        self._calibration_attempted = False
         # note_id -> embedding-text hash for the vectors currently in the index.
         # Drives incremental reconcile (re-embed only changed notes). ``None``
         # means "no per-note state" (old index / never built) — reconcile then
@@ -192,6 +221,15 @@ class VectorIndex:
     @property
     def model_id(self) -> str | None:
         return self._model_id
+
+    @property
+    def activation_stats(self) -> dict[str, dict[str, float]]:
+        """Per-(non-text-)modality best-match ``{n, mean, std}`` for the activation gate (#201b).
+
+        Empty for a text-only or uncalibrated index, in which case the gate is disabled (every
+        modality always contributes). Read by ``tools.py`` via :func:`activation_floor`.
+        """
+        return self._activation_stats
 
     def set_backend(self, backend: EmbedderBackend | None) -> None:
         """Attach or detach the embedding backend at runtime.
@@ -268,6 +306,10 @@ class VectorIndex:
             self._model_id = meta.get("model_id")
             # marker absent → pre-#201a (v1) single-index layout
             self._schema = meta.get("schema", 1)
+            # absent on a pre-#201b index → {} → gate disabled until ensure_calibrated/next rebuild.
+            # The key's *presence* (even as {}) records that calibration already ran (one-shot).
+            self._activation_stats = meta.get("activation", {})
+            self._calibration_attempted = "activation" in meta
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning("Corrupt index metadata at %s: %s", self._meta_path, e)
             return
@@ -557,6 +599,89 @@ class VectorIndex:
                         rankings[i][modality] = ranking
         return rankings
 
+    def _calibrate_activation(self) -> None:
+        """Recompute per-(non-text-)modality best-match statistics for the activation gate (#201b).
+
+        Samples up to ``CALIB_SAMPLE`` text vectors *already in the text sub-index* (no re-embed) as
+        pseudo-queries, searches each non-text modality with each, and records the best
+        (min-distance) match **excluding the pseudo-query's own note** (a note's own image isn't a
+        match). The ``{n, mean, std}`` of those best-match similarities per modality is what the
+        gate compares a real query's best match against. Sampling is deterministic (seeded) so the
+        calibration is stable across runs over the same index. A modality with fewer than
+        ``CALIB_MIN`` non-self best-matches (or an empty sub-index) gets no stats → gate disabled.
+        """
+        with self._lock:
+            text_idx = self._indexes.get(TEXT)
+            non_text = {m: idx for m, idx in self._indexes.items() if m != TEXT and len(idx) > 0}
+            if text_idx is None or len(text_idx) == 0 or not non_text:
+                self._activation_stats = {}
+                return  # text-only / empty → nothing to calibrate; don't mark attempted
+            # A genuine multimodal calibration ran (even if it ends up below CALIB_MIN): record it
+            # so ensure_calibrated treats this as one-shot rather than re-sampling every boot.
+            self._calibration_attempted = True
+
+            all_keys = np.array([int(k) for k in text_idx.keys], dtype=np.int64)
+            rng = np.random.default_rng(0)  # deterministic → calibration is stable across runs
+            sample = (
+                rng.choice(all_keys, size=CALIB_SAMPLE, replace=False)
+                if len(all_keys) > CALIB_SAMPLE
+                else all_keys
+            )
+
+            # Pull the sampled text vectors straight from the index (one per note in the text idx).
+            query_rows: list[np.ndarray] = []
+            query_ids: list[int] = []
+            for k in sample:
+                kid = int(k)
+                vec = text_idx.get(kid)
+                if vec is None:
+                    continue
+                query_rows.append(np.atleast_2d(np.asarray(vec, dtype=np.float32))[0])
+                query_ids.append(kid)
+            if not query_rows:
+                self._activation_stats = {}
+                return
+            query_array = np.array(query_rows, dtype=np.float32)
+
+            stats: dict[str, dict[str, float]] = {}
+            for modality, idx in non_text.items():
+                # k>1 so a pseudo-query whose own image is the nearest hit still has a non-self hit.
+                raw = idx.search(query_array, min(5, len(idx)))
+                per_query = (
+                    [raw] if len(query_ids) == 1 else [raw[i] for i in range(len(query_ids))]
+                )
+                best_sims: list[float] = []
+                for qi, matches in enumerate(per_query):
+                    self_id = query_ids[qi]
+                    for key, dist in zip(matches.keys, matches.distances, strict=True):
+                        if int(key) == self_id:
+                            continue  # exclude the pseudo-query's own note (self-match)
+                        best_sims.append(1.0 - float(dist))
+                        break  # nearest non-self hit = this pseudo-query's best match
+                if len(best_sims) >= CALIB_MIN:
+                    arr = np.array(best_sims, dtype=np.float64)
+                    stats[modality] = {
+                        "n": float(len(best_sims)),
+                        "mean": float(arr.mean()),
+                        "std": float(arr.std()),
+                    }
+            self._activation_stats = stats
+        logger.info("Calibrated activation stats: %s", self._activation_stats or "none")
+
+    def ensure_calibrated(self) -> None:
+        """Calibrate the activation gate if a non-text modality has vectors but no stats yet.
+
+        A no-op when already calibrated or when there's no non-text modality (text-only). Lets a
+        pre-#201b index — loaded without ``activation`` in its meta — turn the gate on without
+        waiting for the next drift rebuild. Cheap (a sample of HNSW searches); safe to call at boot.
+        """
+        has_non_text = any(m != TEXT and len(idx) > 0 for m, idx in self._indexes.items())
+        if not has_non_text or self._calibration_attempted:
+            return
+        self._calibrate_activation()
+        if self._calibration_attempted:  # persist the attempt (stats or the {} marker) → one-shot
+            self.save()
+
     def contains(self, note_id: int) -> bool:
         """Check if a note ID is in the index (every indexed note has a text vector)."""
         text_idx = self._indexes.get(TEXT)
@@ -575,6 +700,8 @@ class VectorIndex:
             meta["col_mod"] = self._col_mod
         if self._model_id is not None:
             meta["model_id"] = self._model_id
+        if self._calibration_attempted:  # write the key (stats, or {} marker) once calibration ran
+            meta["activation"] = self._activation_stats
         # Whole save under the lock so concurrent callers (a debounced save on a
         # worker thread, the signal-handler save, /embedding/stop, a manual
         # /index/save) can't interleave a sub-index write with the metadata write
@@ -694,6 +821,7 @@ class VectorIndex:
             self._col_mod = col_mod
             if model_id is not None:
                 self._model_id = model_id
+            self._calibrate_activation()  # stats land in the same meta write as the vectors
             self.save()
             self._state = IndexState.READY
             logger.info("Index rebuild complete: %d vectors, %d dims", self.size, self._ndim or 0)
@@ -740,7 +868,12 @@ class VectorIndex:
         if not to_embed and not to_remove:
             # A non-embedding edit (tags/deck/template) bumped col.mod without
             # changing any note's embedding fingerprint: just advance the watermark.
+            # The modality distributions are unchanged, so only calibrate if it never has been (a
+            # pre-#201b index reaching us via a metadata-only drift, which would otherwise persist a
+            # fresh col_mod with no stats and leave the gate off for the session).
             self._col_mod = col_mod
+            if not self._calibration_attempted:
+                self._calibrate_activation()
             self.save()
             logger.info("Index reconcile: no embedding changes (col_mod=%d)", col_mod)
             return
@@ -766,6 +899,7 @@ class VectorIndex:
             self._col_mod = col_mod
             if model_id is not None:
                 self._model_id = model_id
+            self._calibrate_activation()  # the changed set may have shifted a modality distribution
             self.save()
             self._state = IndexState.READY
             logger.info("Index reconcile complete: %d vectors", self.size)
@@ -831,6 +965,8 @@ class VectorIndex:
             info["col_mod"] = self._col_mod
         if self._model_id is not None:
             info["model_id"] = self._model_id
+        if self._activation_stats:
+            info["activation"] = self._activation_stats
         if self._state == IndexState.BUILDING:
             indexed, total = self._build_progress
             info["progress"] = {"indexed": indexed, "total": total}

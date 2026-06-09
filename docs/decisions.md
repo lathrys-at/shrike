@@ -8,6 +8,39 @@ isn't reconstructable from the code.
 
 ## Semantic search & the vector index
 
+### The activation gate floors a modality by its own typical match, calibrated offline (#201b)
+
+#201a made `image` a separate RRF signal but fed it **unfloored**: RRF fuses rank positions, so it
+neutralizes the modality gap's *constant* offset but is blind to *magnitude within* a modality — it
+can't tell "this query's best image match is genuinely good" from "this query has no good image
+match, here's the least-bad one." Unfloored, a multimodal collection injects its top-k image cards
+into *every* query. The fix is an **intra-modal activation gate**: a non-text modality contributes
+only when its best match for the query clears `mean + margin·std` of that modality's *typical* best
+match. Three decisions made it tractable:
+
+- **Calibrate offline from the index, not from query traffic.** "Typical best match per modality" is
+  a property of the embedding *space* (the gap offset and its spread), not of who queries. So
+  `_calibrate_activation` samples stored text vectors as pseudo-queries, searches each non-text
+  modality, and records the best **non-self** match (a note's own image isn't a match) as
+  `{n, mean, std}` in `index.meta.json`. This is cold-start-safe (ready the moment the index builds),
+  BYO-robust (recomputed on a model change, which forces a rebuild), and independent of sparse,
+  unrepresentative end-user search logs. Reading the vectors already in the text index means no
+  re-embedding. Pseudo-queries are note texts rather than search strings; accepted, because the gap
+  offset dominates and is query-length-insensitive.
+- **Gate is binary per modality, keyed on the best match** — not a per-hit floor. It answers "should
+  this modality speak at all for this query"; RRF already down-weights ranks 2+. Simpler, and it
+  matches what the calibration measures (a best-match distribution). A per-hit floor is a later
+  refinement if needed.
+- **Text is never gated.** Text is the always-relevant primary signal with its own user-facing
+  `threshold`; the gap is a *cross-modal* artifact, so calibrating-and-gating text would change
+  text-only behaviour for no benefit. Off-text means a text-only collection has nothing to calibrate
+  and the gate is fully inert there — byte-for-byte unchanged.
+
+Pure addition, no schema bump: `activation` is an optional meta key, and its absence (a pre-#201b
+index, or text-only) yields no floor, so the gate is simply off until the next rebuild/reconcile (or
+a boot-time `ensure_calibrated`) computes it. The margin is a module constant (`ACTIVATION_MARGIN`,
+like `RRF_K`) pending the search-tuning harness.
+
 ### Per-modality retrieval splits the index, not the score (#201a)
 
 The 3c multi-vector index stored a note's text + image vectors under one `note_id` key in one
@@ -28,10 +61,9 @@ RRF as its **own signal**. Because RRF fuses rank *positions*, the gap's constan
 Two sub-decisions. **The image ranking is not thresholded.** The `threshold` knob is a *text*-cosine
 floor (~0.5); applied to gap-depressed image cosines (~0.3) it would floor every image hit, defeating
 the point. So #201a passes image hits through unfloored, and deciding *when a modality's matches are
-good enough to contribute* is left to the offline-calibrated intra-modal activation gate, **#201b** —
-a separate, harder problem (it needs per-modality best-match statistics, not a global constant). The
-documented cost until #201b: a text query on a multimodal collection surfaces some weakly-matching
-image notes. Text-only collections are unaffected (their image sub-index is empty → no image signal).
+good enough to contribute* is the job of the offline-calibrated intra-modal activation gate, **#201b**
+(above) — a separate problem (it needs per-modality best-match statistics, not a global constant).
+Text-only collections are unaffected either way (their image sub-index is empty → no image signal).
 **Migration is a one-way schema bump, not a format converter.** `index.meta.json` gains a `schema`
 marker; a pre-#201a (v1) index has none. A *text-only* v1 index is byte-identical to a v2 text
 sub-index (all its vectors are text, its file already *is* `index.usearch`), so it loads losslessly
