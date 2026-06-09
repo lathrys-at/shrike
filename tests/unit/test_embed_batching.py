@@ -117,3 +117,12 @@ def test_probe_texts_are_spiked() -> None:
     assert any(len(t) > 200 for t in BATCH_PROBE_TEXTS)  # long, wide activation profile
     assert any(any(c.isdigit() for c in t) for t in BATCH_PROBE_TEXTS)  # numeric/hex
     assert any(not t.isascii() for t in BATCH_PROBE_TEXTS)  # mixed script / emoji
+
+
+def test_probe_ceiling_covers_index_chunk() -> None:
+    # The probe-set size is the batch ceiling, and the index hands embed_texts chunks of up to
+    # BATCH_SIZE. If the set were smaller, a probe-safe model would be capped below the chunk —
+    # never incorrect, but a silent throughput regression. Pin the "probe at the size we use".
+    from shrike.index import BATCH_SIZE
+
+    assert len(BATCH_PROBE_TEXTS) >= BATCH_SIZE

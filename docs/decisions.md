@@ -86,13 +86,30 @@ real DistilRoBERTa run:
     int8 MiniLM and DistilRoBERTa fixtures, so a future bland-set regression fails CI.
   - **We compare against one full batch, and the probe-set size *is* the batch ceiling.** A
     single most-heterogeneous batch is the most sensitive configuration *and* matches usage:
-    `embed_texts` never batches larger than the verified set (32 texts; `--embedding-batch-size`
-    caps it lower, and a request above the ceiling is honoured up to it with a one-time log).
-    This closes the earlier gap where an escalating 2/4/8/16 sweep could return "safe at 8"
-    while `embed_texts` batched at 64. (A deterministic ONNX-only fallback — scan the graph for
+    `embed_texts` never batches larger than the verified set — sized to **64**, the index's
+    `BATCH_SIZE` chunk, so a probe-safe (fp / non-dynamic-quant) model batches at the full chunk
+    a GPU favours, while `--embedding-batch-size` caps it lower and a request above the ceiling is
+    honoured up to it with a one-time log. This closes the earlier gap where an escalating
+    2/4/8/16 sweep could return "safe at 8" while `embed_texts` batched at 64. (Batching past 64
+    would also need `index.BATCH_SIZE` raised — a later slice. A deterministic ONNX-only
+    fallback — scan the graph for
     `DynamicQuantizeLinear`/`MatMulInteger` — would classify int8 variance exactly, but it needs
     graph introspection the in-process backend avoids and wouldn't generalize to llama, so the
     empirical probe stays the default.)
+- **"Bit-exact" is a CPU property; accelerators and llama are search-stable float noise.** The
+  `reconcile`==full-rebuild invariant is *byte-identical* only on `CPUExecutionProvider` (int8
+  serial; fp32 batched at exactly 0 drift). On a GPU provider (CUDA/CoreML) an fp model's
+  batched-vs-serial result differs by ~1e-5 (measured on CoreML; different matmul kernels are
+  chosen per batch shape) — the same float-noise tier llama-server already occupies (~4e-5). The
+  probe's `BATCH_DRIFT_TOL` (1e-3) sits above all of this, so such a model still measures
+  batch-safe and batches; the difference is far below cosine-ranking resolution, so search is
+  identical. The execution provider is therefore **deliberately not in `model_fingerprint`** (the
+  same call as normalization and the llama-server build version): a CPU↔GPU switch produces
+  vectors that differ at float noise, never enough to warrant a re-embed, and a mixed index ranks
+  identically. The `np.array_equal` determinism tests assert the *CPU* bit-exact property
+  specifically (CI is CPU); a future GPU test lane would assert `allclose(atol≈1e-4)` / identical
+  ranking, not byte-equality. It also vindicates the empirical probe: on any provider it *measures*
+  (fp→batch, int8→serial) rather than guessing what the accelerator does to quantization.
 - **Pad token resolved across conventions, not hard-coded.** BERT/WordPiece names the
   pad token `[PAD]`, RoBERTa/BPE uses `<pad>`; `OnnxBackend` resolves `[PAD]` then
   `<pad>`, falling back to id 0 only if neither exists. RoBERTa derives position ids
@@ -121,6 +138,18 @@ real DistilRoBERTa run:
   arbitrary ONNX graph (sometimes a static input shape, sometimes only a sibling
   `config.json`, sometimes absent). A warn-only `config.json` read is a possible
   future safety net, not a clamp.
+- **Execution providers resolve gracefully and the active one is visible.** A requested
+  `--embedding-onnx-provider` (e.g. `CUDAExecutionProvider`) is intersected with
+  onnxruntime's `get_available_providers()`; an unavailable one is dropped **with a warning**
+  (not onnxruntime's silent CPU fallback), and `CPUExecutionProvider` is always appended as the
+  final fallback so an absent accelerator degrades rather than hard-errors. After construction
+  we read `session.get_providers()` — what *actually* loaded — and warn if a requested provider
+  was available but failed to initialise. `health()`/`server status` surface the effective
+  provider, so "I asked for CUDA but it's running on CPU" is visible instead of a silent
+  performance cliff. Packaging mirrors how onnxruntime ships: `shrike[onnx]` is the base wheel
+  (CPU + CoreML on macOS); `shrike[onnx-gpu]` is `onnxruntime-gpu` (CUDA/TensorRT) and is
+  installed *instead of* `[onnx]` (the two wheels conflict); Windows DirectML is a manual
+  `onnxruntime-directml`.
 
 ### The index is a derived cache, never a co-equal store
 

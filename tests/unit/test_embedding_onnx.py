@@ -51,6 +51,11 @@ class _FakeSession:
         self._inputs = [_FakeInput(n, self._input_type) for n in self._input_names]
         self.last_feed: dict | None = None
         self.run_calls: list[int] = []  # batch size of each run() call
+        # Like onnxruntime: echo back the providers it was constructed with (what loaded).
+        self._loaded_providers = list(kwargs.get("providers") or ["CPUExecutionProvider"])
+
+    def get_providers(self) -> list[str]:
+        return self._loaded_providers
 
     def get_inputs(self) -> list[_FakeInput]:
         return self._inputs
@@ -103,6 +108,14 @@ class _FakeSessionOptionalExtra(_FakeSession):
     run() succeeds without it, so start() must NOT reject the model."""
 
     _input_names = ("input_ids", "attention_mask", "token_type_ids", "extra_optional")
+
+
+class _FakeSessionDropsProvider(_FakeSession):
+    """Mimics a provider that's available but fails to initialise: get_providers() omits it,
+    falling back to CPU (what onnxruntime reports when an accelerator can't load)."""
+
+    def get_providers(self) -> list[str]:
+        return ["CPUExecutionProvider"]
 
 
 class _FakeSessionVariant(_FakeSession):
@@ -297,6 +310,7 @@ class TestLifecycleAndEmbed:
         be: OnnxBackend,
         session_cls: type = _FakeSession,
         tokenizer_cls: type = _FakeTokenizer,
+        available_providers: list[str] | None = None,
     ) -> None:
         # Inject fake onnxruntime/tokenizers modules into sys.modules so these
         # tests run WITHOUT the optional 'onnx' extra installed — the coverage
@@ -305,6 +319,8 @@ class TestLifecycleAndEmbed:
         # Tokenizer` regardless of whether the real packages are present.
         fake_ort = types.ModuleType("onnxruntime")
         fake_ort.InferenceSession = session_cls  # type: ignore[attr-defined]
+        _avail = available_providers or ["CPUExecutionProvider"]
+        fake_ort.get_available_providers = lambda: list(_avail)  # type: ignore[attr-defined]
         fake_tok = types.ModuleType("tokenizers")
 
         class _TokFactory:
@@ -391,8 +407,8 @@ class TestLifecycleAndEmbed:
         assert any("batch-variant" in str(c.args) for c in warn.call_args_list)
 
     def test_cap_above_ceiling_clamps_to_probe_size(self, tmp_path: Path) -> None:
-        # The probe-set size is the batch ceiling; a higher cap is logged once and clamped.
-        be = OnnxBackend(model=str(_model_dir(tmp_path)), batch_size=64)
+        # The probe-set size is the batch ceiling; a cap *above* it is logged once and clamped.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)), batch_size=len(BATCH_PROBE_TEXTS) * 2)
         with patch("shrike.embedding_onnx.logger.info") as info:
             self._start(be)
         assert be._safe_batch == len(BATCH_PROBE_TEXTS)
@@ -489,8 +505,38 @@ class TestLifecycleAndEmbed:
         with pytest.raises(ImportError, match="onnx"):
             be.start()
 
+    # -- Health -------------------------------------------------------------------
 
-# -- Health -------------------------------------------------------------------
+    def test_unavailable_provider_falls_back_to_cpu_with_warning(self, tmp_path: Path) -> None:
+        be = OnnxBackend(model=str(_model_dir(tmp_path)), providers=["CUDAExecutionProvider"])
+        with patch("shrike.embedding_onnx.logger.warning") as warn:
+            self._start(be, available_providers=["CPUExecutionProvider"])
+        assert be.health()["active_providers"] == ["CPUExecutionProvider"]
+        assert be.health()["provider"] == "CPUExecutionProvider"
+        assert any("not available" in str(c.args) for c in warn.call_args_list)
+
+    def test_available_provider_is_resolved_and_surfaced(self, tmp_path: Path) -> None:
+        be = OnnxBackend(model=str(_model_dir(tmp_path)), providers=["CoreMLExecutionProvider"])
+        with patch("shrike.embedding_onnx.logger.warning") as warn:
+            self._start(be, available_providers=["CoreMLExecutionProvider", "CPUExecutionProvider"])
+        h = be.health()
+        assert h["requested_providers"] == ["CoreMLExecutionProvider"]
+        # CPU is appended as the final fallback; the requested provider stays first.
+        assert h["active_providers"] == ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+        assert h["provider"] == "CoreMLExecutionProvider"
+        assert not any("not available" in str(c.args) for c in warn.call_args_list)
+
+    def test_available_but_unloaded_provider_warns(self, tmp_path: Path) -> None:
+        # Requested + available, but the session reports it didn't load (init failed) → warn.
+        be = OnnxBackend(model=str(_model_dir(tmp_path)), providers=["CUDAExecutionProvider"])
+        with patch("shrike.embedding_onnx.logger.warning") as warn:
+            self._start(
+                be,
+                _FakeSessionDropsProvider,
+                available_providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            )
+        assert be.health()["provider"] == "CPUExecutionProvider"
+        assert any("did not load" in str(c.args) for c in warn.call_args_list)
 
 
 class TestHealth:
@@ -498,4 +544,6 @@ class TestHealth:
         h = OnnxBackend(model="x").health()
         assert h["available"] is False
         assert h["backend"] == "onnx"
-        assert h["providers"] == ["CPUExecutionProvider"]
+        assert h["requested_providers"] == ["CPUExecutionProvider"]
+        assert h["active_providers"] == []  # nothing loaded until start()
+        assert h["provider"] is None

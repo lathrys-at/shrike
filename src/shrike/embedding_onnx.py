@@ -84,6 +84,8 @@ class OnnxBackend:
         self._pooling = pool
         self._normalize = normalize
         self._providers = list(providers) if providers else list(DEFAULT_PROVIDERS)
+        # The execution providers onnxruntime actually loaded (set at start()).
+        self._active_providers: list[str] = []
         # Token truncation length. Plumbed from --embedding-context-size; None
         # means the default (fine for all-MiniLM's 256-token limit).
         self._max_length = max_length or DEFAULT_MAX_LENGTH
@@ -141,13 +143,41 @@ class OnnxBackend:
             ) from e
 
         onnx_path, tok_path = self._resolve_files()
+        # Resolve providers against what onnxruntime actually has: drop any requested
+        # provider that isn't available — with a clear warning, rather than onnxruntime's
+        # silent CPU fallback — and always keep CPU as the final fallback so an unavailable
+        # accelerator degrades instead of hard-erroring.
+        available = list(ort.get_available_providers())
+        resolved: list[str] = []
+        for p in [*self._providers, "CPUExecutionProvider"]:
+            if p in available and p not in resolved:
+                resolved.append(p)
+        dropped = [p for p in self._providers if p not in available]
+        if dropped:
+            logger.warning(
+                "Requested ONNX execution provider(s) %s not available (have %s); using %s.",
+                dropped,
+                available,
+                resolved,
+            )
         logger.info(
             "Loading ONNX embedding model: %s (providers=%s, pooling=%s)",
             onnx_path,
-            ",".join(self._providers),
+            ",".join(resolved),
             self._pooling,
         )
-        self._session = ort.InferenceSession(str(onnx_path), providers=self._providers)
+        self._session = ort.InferenceSession(str(onnx_path), providers=resolved)
+        # What actually loaded (a provider available-but-failed-to-init won't be here).
+        self._active_providers = list(self._session.get_providers())
+        unloaded = [
+            p for p in resolved if p != "CPUExecutionProvider" and p not in self._active_providers
+        ]
+        if unloaded:
+            logger.warning(
+                "ONNX execution provider(s) %s did not load; running on %s.",
+                unloaded,
+                self._active_providers,
+            )
         tokenizer = Tokenizer.from_file(str(tok_path))
         # Resolve the pad token across tokenizer conventions: BERT/WordPiece names it
         # "[PAD]", RoBERTa/BART BPE uses "<pad>". The *real* pad id matters because
@@ -336,7 +366,11 @@ class OnnxBackend:
             "available": self.running,
             "backend": "onnx",
             "model": self._model,
-            "providers": self._providers,
+            "requested_providers": self._providers,
+            "active_providers": self._active_providers,
+            # The effective execution provider (the highest-priority one that loaded), so
+            # status can show "running on CPU" when a requested accelerator silently fell back.
+            "provider": self._active_providers[0] if self._active_providers else None,
             # batch_safe is the model's probed capability; batch is the *effective*
             # behaviour, which a --embedding-batch-size cap of 1 can force back to serial.
             "batch_safe": self._safe_batch >= 2,

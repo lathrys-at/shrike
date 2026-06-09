@@ -47,8 +47,16 @@ BATCH_DRIFT_TOL = 1e-3
 # but the spread of magnitudes is what makes a variant model actually diverge here. The
 # set's *length* is also the ceiling: the probe verifies a batch of exactly this many texts
 # and the backend never batches larger (it caps `--embedding-batch-size` here), so "proven
-# safe" and "what we batch" stay the same size. 32 trades a fully-amortized batch for a
-# still-trivial in-process startup cost; grow it if a GPU/multimodal path wants larger.
+# safe" and "what we batch" stay the same size. Sized to 64 — the index's `BATCH_SIZE` chunk
+# — so a probe-safe (fp / non-dynamic-quant) model batches at the full chunk a GPU favours.
+# The cost is a one-time serial reference of this many embeds at each start(): trivial
+# in-process (ONNX), ~0.7 s for a *local* llama-server subprocess (the default), and network
+# latency × 64 for a remote one. The ceiling is sized for ONNX's GPU appetite, so llama pays
+# it even though it is always batch-safe — acceptable as a one-time boot cost; if remote-llama
+# startup ever matters, the serial reference can verify a *subset* within the full 64-batch
+# (a calm text in a spiky batch is the most sensitive check) rather than every text. Batching
+# past 64 would also need `index.BATCH_SIZE` raised — a later slice (a unit test pins
+# `len(BATCH_PROBE_TEXTS) >= index.BATCH_SIZE` so the ceiling can't fall behind the chunk).
 BATCH_PROBE_TEXTS: list[str] = [
     # Calm anchors (real-note-shaped, low activation range).
     "mitochondria are the powerhouse of the cell",
@@ -96,6 +104,54 @@ BATCH_PROBE_TEXTS: list[str] = [
     "ALL CAPS SHORT",
     # Short.
     "x",
+    # --- second half (to reach the 64-text / batch-64 ceiling) ---
+    # More calm anchors.
+    "The speed of sound in dry air is about 343 meters per second.",
+    "Shakespeare wrote thirty-seven plays and over one hundred fifty sonnets.",
+    "Water is composed of two hydrogen atoms and one oxygen atom.",
+    "The Pacific Ocean is the largest and deepest of Earth's oceans.",
+    "A leap year occurs every four years to keep the calendar aligned.",
+    "Insulin regulates the level of glucose in the bloodstream.",
+    "The Great Wall of China stretches thousands of kilometers.",
+    "Gravity causes objects to accelerate toward the center of the Earth.",
+    "The human heart pumps roughly five liters of blood per minute.",
+    "Tectonic plates drift slowly across the planet's molten mantle.",
+    "Vaccines train the immune system to recognize specific pathogens.",
+    "Electrons occupy discrete energy levels around an atomic nucleus.",
+    "The periodic table organizes elements by their atomic number.",
+    # More numbers / code.
+    "def f(x): return x**2 + 3*x - 7  # a simple quadratic",
+    "git commit -m 'fix: off-by-one in loop bound' && git push origin main",
+    "3.141592653589793 2.718281828459045 1.618033988749895 0.5772156649",
+    "IPv4 192.168.0.1 IPv6 2001:0db8:85a3:0000:0000:8a2e:0370:7334 :8080",
+    # More symbol / math / structured.
+    "∮ E·dl = -dΦ/dt    ∇×B = μ₀J + μ₀ε₀ ∂E/∂t",
+    '{ "key": [1, 2, 3], "nested": { "a": true, "b": null } }',
+    # More mixed script / emoji.
+    "中文 العربية हिन्दी ไทย Ελληνικά עברית 한국어 русский язык",
+    "😀😃😄😁😆😅😂🤣☺️😊😇🙂🙃😉😌😍🥰😘🤗",
+    "Zürich Köln München São Paulo Bogotá Reykjavík İstanbul",
+    # More long.
+    "in computer science a hash table implements an associative array abstract data type, a "
+    "structure that maps keys to values using a hash function to compute an index into an array "
+    "of buckets from which the desired value can be found, offering average constant-time "
+    "complexity for insertion, deletion, and lookup under a good hash distribution and load",
+    "a regular expression is a sequence of characters that specifies a search pattern in text, "
+    "used by string-searching algorithms for find and replace operations or input validation, "
+    "and supported with varying syntax across editors, command-line tools, and programming "
+    "languages from grep and sed to Perl, Python, and the Rust regex crate among many others",
+    # More ALL CAPS.
+    "BREAKING NEWS MARKETS RALLY AS INFLATION COOLS FASTER THAN EXPECTED",
+    "TODO FIXME XXX HACK NOTE WARNING DEPRECATED REVIEW",
+    # More degenerate / repeated.
+    "na na na na na na na na na na na batman",
+    "0000000000000000000000000000000000000000",
+    # More short.
+    "ok",
+    "42",
+    # Misc.
+    "e = mc²   F = ma   PV = nRT   a² + b² = c²",
+    "colorless green ideas sleep furiously",
 ]
 
 # Embeds a list of texts as a single batch, returning one vector per input.
