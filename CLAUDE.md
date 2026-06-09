@@ -103,19 +103,33 @@ pytest tests/integration -v -m integration     # Integration tests (starts a ser
 
 #### Coverage
 
-CI enforces a coverage gate (`fail_under` in `[tool.coverage.report]`). The
-integration suite runs the server as a `python -m shrike.server` subprocess, so
-reproducing the real number locally needs subprocess coverage enabled — install
-the hook once, then run both suites under `coverage` and combine:
+Coverage lives in its own workflow (`.github/workflows/coverage.yml`), **off the
+per-PR path and never a CI gate** — it's reported, never enforced. It runs on
+**`rc`-labelled PRs** (so a release candidate carries a fresh number — skipped on every
+other PR), **3x/week on `main`**, and on demand (`workflow_dispatch`); every run uploads
+an `htmlcov` artifact + a job-summary report and never fails on a threshold (`coverage
+report --fail-under=0`). The **main/scheduled runs also publish the README badge** (a
+shields-endpoint JSON force-pushed to the orphan `badges` branch). The `fail_under` in
+`[tool.coverage.report]` is the **target**, and **`scripts/coverage.sh` enforces it
+locally** (exits non-zero below it) — that's the proactive self-check. Every PR still
+runs the full suite as the correctness gate, just *plain* (no tracer, in `test.yml`).
+So **run coverage locally** to keep the number healthy:
+
+```bash
+scripts/coverage.sh            # full suite; prints the report, exits non-zero below fail_under
+scripts/coverage.sh --html     # also writes a browsable htmlcov/index.html
+```
+
+The script enables subprocess coverage and runs the exact CI command. The hook
+matters because the integration suite runs the server as a `python -m shrike.server`
+subprocess; without it ~all of `server.py`/`daemon.py` reads as uncovered. It's a
+`.pth` that only imports coverage when `COVERAGE_PROCESS_START` is set, so it costs
+nothing on other interpreter starts (same guard coverage's own auto-`.pth` uses).
+By hand it's:
 
 ```bash
 SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
-# The hook only imports coverage when COVERAGE_PROCESS_START is set, so it costs
-# nothing on every other `python`/`shrike`/`pytest` startup in the venv (a plain
-# `import coverage; coverage.process_startup()` would import coverage — ~30ms —
-# on every interpreter start). Same guard coverage's own auto `.pth` uses.
 echo 'import os; os.getenv("COVERAGE_PROCESS_START") and __import__("coverage").process_startup()' > "$SITE/coverage_subprocess.pth"
-
 export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
 coverage run --parallel-mode -m pytest tests/unit tests/integration -q -m "not embedding" -n auto
 coverage combine && coverage report      # exits non-zero below fail_under
@@ -123,10 +137,11 @@ coverage combine && coverage report      # exits non-zero below fail_under
 
 Both suites run in one combined `-n auto` invocation (xdist balances them, so
 workers don't idle between phases — faster than two separate runs); `-m "not
-embedding"` drops the embedding-gated tests. This is exactly what CI runs.
+embedding"` drops the embedding-gated tests. `coverage.yml` and `scripts/coverage.sh`
+run this identical command, so the numbers are comparable.
 
 A plain `pytest tests/unit --cov=shrike` reads ~18 points lower because it can't
-see the server subprocess — use the combined flow above when checking the gate.
+see the server subprocess — use `scripts/coverage.sh` when checking the number.
 
 **`-n auto`** (pytest-xdist) parallelizes the suite across cores — the integration
 suite is server-spawn-bound and roughly halves (each server gets its own free
@@ -165,7 +180,7 @@ ruff format --check src/shrike/    # Format check
 mypy src/shrike/                   # Type check
 ```
 
-All three must pass cleanly. CI (`.github/workflows/test.yml`) runs, on every PR (Linux x64 only): a `lint` job, a `test` job (unit + non-embedding integration under the coverage gate), and an `embedding` job. macOS and ARM run the full integration suite via the `cross-platform` job, gated on `contains(github.event.pull_request.labels.*.name, 'rc')` — i.e. **only** on a PR labelled `rc` (release candidate), never on plain PRs and never on merge to `main`. Actions minutes are limited and macOS bills at 10×, so these lanes stay off the normal iterate-and-merge loop entirely; apply the `rc` label before tagging a release to get cross-platform coverage first. The PR trigger lists `labeled` in its `types` so adding the label re-triggers CI.
+All three must pass cleanly. CI (`.github/workflows/test.yml`) runs, on every PR (Linux x64 only): a `lint` job, a `test` job (unit + non-embedding integration, run **plain** — no coverage tracer, for speed), and an `embedding` job. **Coverage is reported but never gated**, and lives in its own workflow (`.github/workflows/coverage.yml`, off the per-PR path entirely): it runs on `rc`-labelled PRs so a release candidate carries a fresh number, *and* 3x/week on `main` + on demand (`workflow_dispatch`) — each uploads an `htmlcov` artifact + a job-summary report and never fails on a threshold, and the main/scheduled runs publish the README coverage badge to the orphan `badges` branch. It is deliberately separate from `ci-ok` (it must not block a merge). The `fail_under` target is enforced only locally by `scripts/coverage.sh` — see the Coverage section above. macOS and ARM run the full integration suite via the `cross-platform` job, gated on `contains(github.event.pull_request.labels.*.name, 'rc')` — i.e. **only** on a PR labelled `rc` (release candidate), never on plain PRs and never on merge to `main`. Actions minutes are limited and macOS bills at 10×, so these lanes stay off the normal iterate-and-merge loop entirely; apply the `rc` label before tagging a release to get cross-platform coverage first. The PR trigger lists `labeled` in its `types` so adding the label re-triggers CI.
 
 The embedding/cross-platform jobs **cache** the pinned llama-server and the GGUF test model (`actions/cache`) so they aren't re-downloaded every run. But an `actions/cache` entry is only restorable from the run's own branch or the **default branch** — and `test.yml` runs on PRs only, so nothing ever seeds `main`'s cache scope and every PR would cold-download the model from HuggingFace (which intermittently `429`s). A separate **cache-warmer** (`.github/workflows/warm-cache.yml`) closes that gap: it runs on `main` twice weekly (and via `workflow_dispatch`), downloads the pinned llama-server + model, and lets `actions/cache` save them into `main`'s scope, which every PR then restores from. It uses the *same* cache paths/keys as the embedding job; llama-server stays pinned via `scripts/llama-server.lock` and the model via the `EMBEDDING_MODEL_*` constants in `tests/integration/model_cache.py` (both bumped manually). The fixture's `download_with_retry` (backoff on `429`/5xx) remains the backstop for a cold/evicted run (#83, #93).
 

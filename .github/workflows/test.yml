@@ -106,13 +106,13 @@ jobs:
       - name: Mypy
         run: mypy src/shrike/
 
-  # Unit + non-embedding integration on Linux x64, under coverage with the
-  # subprocess hook (so the spawned server is counted), enforcing the gate.
-  # Folds the old unit/coverage/integration-ubuntu jobs into one runner. Always
-  # runs the FULL suite when it runs — the coverage gate needs the whole picture,
-  # so selection happens at the job level (run or skip), never within the suite.
+  # Unit + non-embedding integration on Linux x64. Runs the FULL suite as the
+  # per-PR correctness gate — but WITHOUT the coverage tracer, which ~2-3x'd this
+  # lane on every PR for a number that only needs checking at release time. The
+  # coverage measurement + fail_under gate moved off the per-PR path to the
+  # `coverage` job below (rc-labelled PRs) and the scheduled coverage.yml run.
   test:
-    name: Tests & coverage (linux)
+    name: Tests (linux)
     needs: changes
     # `|| rc-label` forces this lane even on a docs-only diff the path filter
     # would skip, so a release candidate runs the full suite at the PR level
@@ -134,27 +134,13 @@ jobs:
           cache-dependency-glob: pyproject.toml
       - name: Install dependencies
         run: uv pip install --system -e ".[dev]"
-      - name: Enable subprocess coverage
-        run: |
-          SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
-          # Guard the import on COVERAGE_PROCESS_START (set below) so the hook
-          # adds nothing to interpreter startup outside the coverage run.
-          echo 'import os; os.getenv("COVERAGE_PROCESS_START") and __import__("coverage").process_startup()' > "$SITE/coverage_subprocess.pth"
       # One combined `-n auto` run over both suites: xdist balances the work so
       # quick unit tests keep workers busy while integration servers spawn,
-      # instead of two phases that each leave workers idle (measured faster than
-      # two separate runs). `-m "not embedding"` keeps the embedding-gated tests
-      # out; unit tests carry no marker so all of them run. The subprocess `.pth`
-      # hook fires for each xdist worker and each spawned server, so
-      # `coverage combine` still merges everything (verified: identical totals).
-      - name: Run unit + integration under coverage
-        env:
-          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
-        run: coverage run --parallel-mode -m pytest tests/unit tests/integration -q -m "not embedding" -n auto
-      - name: Combine and report (enforces fail_under)
-        run: |
-          coverage combine
-          coverage report
+      # instead of two phases that each leave workers idle. `-m "not embedding"`
+      # keeps the embedding-gated tests out; unit tests carry no marker so all of
+      # them run. No coverage tracer here — see the `coverage` job.
+      - name: Run unit + integration
+        run: pytest tests/unit tests/integration -q -m "not embedding" -n auto
 
   embedding:
     name: Embedding tests (linux)
@@ -260,6 +246,8 @@ jobs:
   ci-ok:
     name: CI passed
     if: ${{ always() }}
+    # Coverage is intentionally NOT aggregated here — it lives in its own workflow
+    # (coverage.yml) and only ever reports, never gates, so it must not block the merge.
     needs: [changes, lint, test, embedding, cross-platform]
     runs-on: ubuntu-latest
     steps:

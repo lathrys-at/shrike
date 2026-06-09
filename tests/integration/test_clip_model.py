@@ -10,6 +10,7 @@ image-by-text quality was measured in the Phase-3a eval, #193.)
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -28,18 +29,22 @@ _CLIP_DIM = 512
 _UNRELATED = ["a photograph of a cat", "a circuit diagram schematic", "a page of printed text"]
 
 
-def _backend(clip_model: Path) -> ClipBackend:
-    be = ClipBackend(model=str(clip_model))  # auto-discovers the quantized graphs
-    be.start()
-    return be
-
-
 @requires_clip
 class TestClipModel:
-    def test_shared_space_retrieves_by_image(self, clip_model: Path) -> None:
+    # One started backend for the whole class: every test here exercises the *same*
+    # default quantized graphs read-only (embed/health/_safe_batch), so a per-test
+    # ClipBackend.start() would reload the ~147 MB text+vision model 4× for no reason
+    # — the dominant cost in this lane. Class-scoped, torn down once.
+    @pytest.fixture(scope="class")
+    def be(self, clip_model: Path) -> Iterator[ClipBackend]:
+        backend = ClipBackend(model=str(clip_model))  # auto-discovers the quantized graphs
+        backend.start()
+        yield backend
+        backend.stop()
+
+    def test_shared_space_retrieves_by_image(self, be: ClipBackend) -> None:
         from PIL import Image
 
-        be = _backend(clip_model)
         for color, name in [((220, 30, 30), "red"), ((30, 30, 220), "blue")]:
             iv = np.array(be.embed_images([Image.new("RGB", (256, 256), color)])[0])
             match = float(iv @ np.array(be.embed_texts([f"a solid {name} colour image"])[0]))
@@ -47,10 +52,9 @@ class TestClipModel:
             # A text query lands nearer the matching image than unrelated ones — image-by-text.
             assert match > max(others) + 0.03, f"{name}: match={match:.3f} others={others}"
 
-    def test_dims_normalized_and_distinct(self, clip_model: Path) -> None:
+    def test_dims_normalized_and_distinct(self, be: ClipBackend) -> None:
         from PIL import Image
 
-        be = _backend(clip_model)
         assert be.embedding_dim() == _CLIP_DIM
         tvecs = be.embed_texts(["a cat", "a dog"])
         ivec = np.array(be.embed_images([Image.new("RGB", (300, 200), (10, 200, 10))])[0])
@@ -60,14 +64,12 @@ class TestClipModel:
         # The encoders actually run (distinct inputs → distinct vectors).
         assert not np.allclose(tvecs[0], tvecs[1])
 
-    def test_int8_clip_is_serial(self, clip_model: Path) -> None:
+    def test_int8_clip_is_serial(self, be: ClipBackend) -> None:
         # The quantized graphs are batch-variant (dynamic int8), so the probe forces serial.
-        be = _backend(clip_model)
         assert be._safe_batch == 1
         assert be.health()["batch"] == "serial"
 
-    def test_health(self, clip_model: Path) -> None:
-        be = _backend(clip_model)
+    def test_health(self, be: ClipBackend) -> None:
         h = be.health()
         assert h["available"] is True
         assert h["backend"] == "clip"

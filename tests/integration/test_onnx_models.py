@@ -21,6 +21,7 @@ is `embedding`-marked and each class carries `requires_onnxruntime`.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,15 @@ _ROBERTA_NDIM = 768
 @requires_onnxruntime
 class TestOnnxRealMiniLM:
     """Pooling + truncation against the real pinned MiniLM int8 export."""
+
+    @pytest.fixture(scope="class")
+    def be(self, onnx_model: Path) -> Iterator[OnnxBackend]:
+        """One started default backend, shared by the tests that need no special config
+        (so the int8 model + batch-safety probe load once, not per test)."""
+        backend = OnnxBackend(model=str(onnx_model))
+        backend.start()
+        yield backend
+        backend.stop()
 
     def test_poolings_differ(self, onnx_model: Path) -> None:
         text = ["the derivative is the instantaneous rate of change of a function"]
@@ -75,7 +85,7 @@ class TestOnnxRealMiniLM:
         # Truncating to 8 tokens drops most of the note, so the pooled vector differs.
         assert not np.allclose(cap8, cap64)
 
-    def test_embedding_is_batch_independent(self, onnx_model: Path) -> None:
+    def test_embedding_is_batch_independent(self, be: OnnxBackend) -> None:
         # A note's vector is EXACTLY independent of its batch-mates. int8 dynamic
         # quantization computes activation scales over the whole batch tensor, so a
         # *batched* embed would make a note's vector depend on its batch-mates'
@@ -83,8 +93,6 @@ class TestOnnxRealMiniLM:
         # than in an incremental upsert (batch of 1), breaking the index's contract
         # that a reconcile's end state is identical to a full rebuild. The startup
         # probe detects int8 is batch-variant and embeds it serially; this is the lock.
-        be = OnnxBackend(model=str(onnx_model))
-        be.start()
         assert be._safe_batch == 1  # probe found the int8 model batch-variant → serial
         text = "mitochondria are the powerhouse of the cell"
         alone = np.array(be.embed_texts([text])[0])
@@ -93,12 +101,10 @@ class TestOnnxRealMiniLM:
         )
         assert np.array_equal(alone, with_others)
 
-    def test_probe_set_is_sensitive_to_int8_variance(self, onnx_model: Path) -> None:
+    def test_probe_set_is_sensitive_to_int8_variance(self, be: OnnxBackend) -> None:
         # The spiked probe set must trip the int8 batch-variance with comfortable margin, so
         # the model is classified serial — a future bland set that drifted under tol would
         # silently mark it safe and reintroduce the non-determinism. ~10x is the guard.
-        be = OnnxBackend(model=str(onnx_model))
-        be.start()
         assert max_probe_drift(be._embed_chunk) > 10 * BATCH_DRIFT_TOL
 
 
@@ -106,35 +112,40 @@ class TestOnnxRealMiniLM:
 class TestOnnxRealDistilRoberta:
     """The RoBERTa-only deltas: 768-dim, no-`[PAD]` fallback, masking."""
 
-    def test_dimension_is_768(self, distilroberta_model: Path) -> None:
-        be = OnnxBackend(model=str(distilroberta_model))
-        be.start()
+    @pytest.fixture(scope="class")
+    def be(self, distilroberta_model: Path) -> Iterator[OnnxBackend]:
+        """One started default backend for the whole class — every test here uses the
+        default config, so the int8 model + probe load once instead of per test."""
+        backend = OnnxBackend(model=str(distilroberta_model))
+        backend.start()
+        yield backend
+        backend.stop()
+
+    def test_dimension_is_768(self, be: OnnxBackend) -> None:
         vecs = be.embed_texts(["a sentence about cells", "a sentence about momentum"])
         assert all(len(v) == _ROBERTA_NDIM for v in vecs)
         assert be.embedding_dim() == _ROBERTA_NDIM
 
-    def test_no_pad_token_resolves_and_embeds(self, distilroberta_model: Path) -> None:
+    def test_no_pad_token_resolves_and_embeds(
+        self, be: OnnxBackend, distilroberta_model: Path
+    ) -> None:
         # Precondition: a genuinely no-`[PAD]` tokenizer (the mock only approximates
         # it) — token_to_id("[PAD]") is None and "<pad>" exists, so start() resolves
-        # "<pad>". OnnxBackend then starts and embeds without error.
+        # "<pad>". The shared backend already started cleanly and embeds without error.
         from tokenizers import Tokenizer
 
         tok = Tokenizer.from_file(str(distilroberta_model / "tokenizer.json"))
         assert tok.token_to_id("[PAD]") is None
         assert tok.token_to_id("<pad>") is not None
 
-        be = OnnxBackend(model=str(distilroberta_model))
-        be.start()
         vecs = be.embed_texts(["short", "a noticeably longer sentence"])
         assert len(vecs) == 2
         assert all(len(v) == _ROBERTA_NDIM for v in vecs)
 
-    def test_embedding_is_batch_independent(self, distilroberta_model: Path) -> None:
+    def test_embedding_is_batch_independent(self, be: OnnxBackend) -> None:
         # The same determinism lock as MiniLM, on a second model lineage: the probe
         # finds this int8 model batch-variant and embeds serially, so a note's vector
         # is EXACTLY independent of its batch-mates.
-        be = OnnxBackend(model=str(distilroberta_model))
-        be.start()
         assert be._safe_batch == 1
         text = "mitochondria are the powerhouse of the cell"
         alone = np.array(be.embed_texts([text])[0])
@@ -143,9 +154,7 @@ class TestOnnxRealDistilRoberta:
         )
         assert np.array_equal(alone, with_others)
 
-    def test_probe_set_is_sensitive_to_int8_variance(self, distilroberta_model: Path) -> None:
-        be = OnnxBackend(model=str(distilroberta_model))
-        be.start()
+    def test_probe_set_is_sensitive_to_int8_variance(self, be: OnnxBackend) -> None:
         assert max_probe_drift(be._embed_chunk) > 10 * BATCH_DRIFT_TOL
 
 
@@ -161,9 +170,16 @@ class TestOnnxRealFp32:
     GPU test lane would assert ``allclose(atol≈1e-4)`` / identical ranking, not byte-equality
     (see docs/decisions.md, "Bit-exact is a CPU property")."""
 
-    def test_probe_finds_batch_safe_and_batched_equals_serial(self, onnx_fp32_model: Path) -> None:
-        be = OnnxBackend(model=str(onnx_fp32_model))
-        be.start()
+    @pytest.fixture(scope="class")
+    def be(self, onnx_fp32_model: Path) -> Iterator[OnnxBackend]:
+        """The default (uncapped) fp32 backend, shared across the class — it doubles as
+        the uncapped baseline in the batch-cap test, so the model loads once."""
+        backend = OnnxBackend(model=str(onnx_fp32_model))
+        backend.start()
+        yield backend
+        backend.stop()
+
+    def test_probe_finds_batch_safe_and_batched_equals_serial(self, be: OnnxBackend) -> None:
         assert be._safe_batch >= 2  # fp32 batches deterministically → probe says safe
 
         text = "mitochondria are the powerhouse of the cell"
@@ -175,13 +191,11 @@ class TestOnnxRealFp32:
         assert serial.shape == (_MINILM_NDIM,)
         assert np.array_equal(serial, batched)
 
-    def test_batch_size_cap_chunks(self, onnx_fp32_model: Path) -> None:
+    def test_batch_size_cap_chunks(self, be: OnnxBackend, onnx_fp32_model: Path) -> None:
         # The cap limits chunk size even on a batch-safe model; results are unchanged.
+        # `be` is the uncapped baseline; only the capped instance needs its own load.
         capped = OnnxBackend(model=str(onnx_fp32_model), batch_size=2)
         capped.start()
-        uncapped = OnnxBackend(model=str(onnx_fp32_model))
-        uncapped.start()
         texts = ["one", "two", "three", "four", "five"]
-        assert np.array_equal(
-            np.array(capped.embed_texts(texts)), np.array(uncapped.embed_texts(texts))
-        )
+        assert np.array_equal(np.array(capped.embed_texts(texts)), np.array(be.embed_texts(texts)))
+        capped.stop()

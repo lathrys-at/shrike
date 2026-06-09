@@ -1,0 +1,134 @@
+name: Coverage
+
+# Coverage lives entirely here, OFF the per-PR critical path, and is **never a gate** —
+# it reports a number, it never fails a build on a threshold. Three entry points:
+#
+#   - pull_request (rc-labelled only): a release candidate carries a fresh coverage
+#     report. The job is skipped on every non-rc PR, so this costs ~nothing there.
+#   - schedule (3x/week on main): an ongoing record as work lands between releases.
+#     These runs (and manual ones) ALSO publish the README badge to the `badges` branch.
+#   - workflow_dispatch: a one-off run whenever you want the current number / to (re)seed
+#     the badge.
+#
+# The measured command matches the tests' scope (-m "not embedding") and
+# `scripts/coverage.sh`, so the numbers are comparable. The fail_under in pyproject is
+# a target enforced only by that local script — never here.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    # Mon / Wed / Fri 06:00 UTC — 3x/week between releases.
+    - cron: "0 6 * * 1,3,5"
+  workflow_dispatch:
+
+# Cancel a PR's in-flight coverage run on a new push (same scoping as test.yml);
+# scheduled/manual runs group by the main ref and don't fight the PR ones.
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: Measure coverage
+    # Skip on non-rc PRs; always run on schedule / manual.
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'rc')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      pct: ${{ steps.fields.outputs.pct }}
+      color: ${{ steps.fields.outputs.color }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags so hatch-vcs can derive the version at install
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Install dependencies
+        run: uv pip install --system -e ".[dev]"
+      - name: Enable subprocess coverage
+        # The integration suite runs the server as a `python -m shrike.server`
+        # subprocess; this .pth (guarded on COVERAGE_PROCESS_START) makes each
+        # subprocess start coverage too, so `coverage combine` captures the server.
+        run: |
+          SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
+          echo 'import os; os.getenv("COVERAGE_PROCESS_START") and __import__("coverage").process_startup()' > "$SITE/coverage_subprocess.pth"
+      # One combined `-n auto` run over both suites (xdist balances them); the .pth
+      # hook fires for each worker and each spawned server, so combine merges to one
+      # total. Kept identical to scripts/coverage.sh.
+      - name: Run unit + integration under coverage
+        env:
+          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
+        run: coverage run --parallel-mode -m pytest tests/unit tests/integration -q -m "not embedding" -n auto
+      - name: Combine
+        run: coverage combine
+      # Surface the number in the run summary. `--fail-under=0` prints the table but
+      # never exits non-zero — this workflow reports, it does not gate.
+      - name: Report to summary
+        run: |
+          {
+            echo '### Coverage'
+            echo ''
+            echo '```'
+            coverage report --fail-under=0
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # Total % + a shields colour, exposed as job outputs for the badge job.
+      - name: Compute badge fields
+        id: fields
+        run: |
+          coverage json -q  # writes coverage.json
+          PCT=$(python -c "import json; print(json.load(open('coverage.json'))['totals']['percent_covered_display'])")
+          if   [ "$PCT" -ge 90 ]; then COLOR=brightgreen
+          elif [ "$PCT" -ge 80 ]; then COLOR=green
+          elif [ "$PCT" -ge 70 ]; then COLOR=yellowgreen
+          elif [ "$PCT" -ge 60 ]; then COLOR=yellow
+          else                        COLOR=red
+          fi
+          echo "pct=$PCT" >> "$GITHUB_OUTPUT"
+          echo "color=$COLOR" >> "$GITHUB_OUTPUT"
+          echo "coverage: ${PCT}% (${COLOR})"
+      # Leave a browsable line-by-line report so keeping coverage healthy is easy.
+      - name: Build HTML report
+        run: coverage html
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: htmlcov/
+          retention-days: 14
+
+  # Publish the README badge (a shields-endpoint JSON on the orphan `badges` branch).
+  # ONLY the standalone main runs do this — never a PR (an rc PR reports, it doesn't
+  # move main's badge). Force-pushes a single-commit orphan so the branch never grows.
+  badge:
+    name: Publish coverage badge
+    needs: coverage
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Write shields endpoint JSON to the `badges` branch
+        env:
+          PCT: ${{ needs.coverage.outputs.pct }}
+          COLOR: ${{ needs.coverage.outputs.color }}
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+        run: |
+          tmp=$(mktemp -d) && cd "$tmp"
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' "$PCT" "$COLOR" > coverage.json
+          git checkout -q --orphan badges
+          git add coverage.json
+          git commit -q -m "coverage: ${PCT}% [skip ci]"
+          git push -q -f "https://x-access-token:${TOKEN}@github.com/${REPO}.git" badges
+          echo "Published coverage badge: ${PCT}% (${COLOR})"

@@ -131,8 +131,11 @@ pytest tests/unit -q
 pytest tests/integration -q -m "integration and not embedding"
 ```
 
-See `CLAUDE.md` for the coverage-gate reproduction and the embedding/integration
-suites that need a local `llama-server`.
+`scripts/coverage.sh` runs the coverage measurement locally and enforces the
+`fail_under` target (the per-PR CI lane runs tests *without* the tracer for speed,
+and CI only ever *reports* coverage — rc PRs + 3x/week on `main` — it never gates on
+it). So check it locally as you work. See `CLAUDE.md` for the details and the
+embedding/integration suites that need a local `llama-server`.
 
 ### Faster inner loop (optional)
 
@@ -141,8 +144,9 @@ runs only the tests affected by your uncommitted changes — it tracks which cod
 each test exercises in a local `.testmondata` (gitignored) and skips the rest.
 
 It's a **local convenience only**, never run in CI, for two reasons: CI always
-runs the full suite for the coverage gate, and impact analysis can produce false
-negatives — it can miss a test whose dependency it didn't capture, notably the
+runs the full suite (the per-PR correctness gate, and the rc/scheduled coverage
+run), and impact analysis can produce false negatives — it can miss a test whose
+dependency it didn't capture, notably the
 integration suite, which drives a *separate* server subprocess that testmon's
 in-process tracking can't see. So always do a full `pytest` run before you push.
 

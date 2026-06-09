@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Local coverage run — the same measurement CI does on rc PRs and 3x/week on main
+# (.github/workflows/coverage.yml), so the number matches. CI runs *plain* tests on
+# every PR for speed (no tracer) and only enforces the fail_under gate on rc, so run
+# this locally to keep coverage healthy as you work rather than discovering a drop at
+# release time.
+#
+# Usage:
+#   scripts/coverage.sh                 # full suite, prints report, exits non-zero below fail_under
+#   scripts/coverage.sh -k upsert       # subset (the % will be lower — partial run)
+#   scripts/coverage.sh --html          # also write a browsable htmlcov/ report
+#
+# Run from the repo root inside your venv (the one with `pip install -e ".[dev]"`).
+set -euo pipefail
+
+want_html=0
+pytest_args=()
+for arg in "$@"; do
+  if [ "$arg" = "--html" ]; then
+    want_html=1
+  else
+    pytest_args+=("$arg")
+  fi
+done
+
+# The integration suite drives a `python -m shrike.server` subprocess; without this
+# the server's lines read as uncovered. The .pth only imports coverage when
+# COVERAGE_PROCESS_START is set, so it costs nothing on other interpreter starts —
+# the same guard coverage's own auto-.pth uses. Idempotent.
+SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
+HOOK="$SITE/coverage_subprocess.pth"
+if [ ! -f "$HOOK" ]; then
+  echo 'import os; os.getenv("COVERAGE_PROCESS_START") and __import__("coverage").process_startup()' >"$HOOK"
+fi
+
+export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
+
+# Combined `-n auto` run over both suites, matching CI. `-m "not embedding"` keeps
+# the embedding-gated tests out (they need a local llama-server and aren't part of
+# the measured number). The .pth fires for each xdist worker and each spawned
+# server, so `coverage combine` merges everything to one total.
+coverage erase
+coverage run --parallel-mode -m pytest tests/unit tests/integration \
+  -q -m "not embedding" -n auto "${pytest_args[@]}"
+coverage combine
+
+if [ "$want_html" -eq 1 ]; then
+  coverage html
+  echo "HTML report: htmlcov/index.html"
+fi
+
+# Prints the per-file table (show_missing) and exits non-zero below fail_under,
+# exactly like the rc gate.
+coverage report

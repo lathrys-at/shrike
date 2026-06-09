@@ -18,29 +18,19 @@ pytestmark = [pytest.mark.integration, pytest.mark.embedding, requires_llama_ser
 class TestEmbeddingHealth:
     """Verify the embedding service starts and reports health."""
 
-    def test_status_reports_embedding_available(self, embedding_server):
+    def test_status_reports_embedding_fields(self, embedding_server):
+        # One /status fetch, every field of the embedding block asserted together — these
+        # are all properties of the same response, so separate tests just re-fetch it.
         status_url = embedding_server.url.rsplit("/", 1)[0] + "/status"
         resp = httpx.get(status_url, timeout=5.0)
         assert resp.status_code == 200
         body = resp.json()
         assert "embedding" in body
-        assert body["embedding"]["available"] is True
-
-    def test_status_embedding_has_pid(self, embedding_server):
-        status_url = embedding_server.url.rsplit("/", 1)[0] + "/status"
-        body = httpx.get(status_url, timeout=5.0).json()
-        assert body["embedding"]["pid"] is not None
-        assert isinstance(body["embedding"]["pid"], int)
-
-    def test_status_embedding_has_url(self, embedding_server):
-        status_url = embedding_server.url.rsplit("/", 1)[0] + "/status"
-        body = httpx.get(status_url, timeout=5.0).json()
-        assert body["embedding"]["url"] == f"http://127.0.0.1:{embedding_server.embedding_port}"
-
-    def test_status_embedding_has_model(self, embedding_server):
-        status_url = embedding_server.url.rsplit("/", 1)[0] + "/status"
-        body = httpx.get(status_url, timeout=5.0).json()
-        assert body["embedding"]["model"].endswith(".gguf")
+        emb = body["embedding"]
+        assert emb["available"] is True
+        assert isinstance(emb["pid"], int)
+        assert emb["url"] == f"http://127.0.0.1:{embedding_server.embedding_port}"
+        assert emb["model"].endswith(".gguf")
 
     def test_llama_server_health_endpoint(self, embedding_server):
         resp = httpx.get(f"{embedding_server.embedding_url}/health", timeout=5.0)
