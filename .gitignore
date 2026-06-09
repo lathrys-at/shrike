@@ -25,3 +25,6 @@ tests/qa/eval/runs/
 
 # QA skill-variant A/B copies — throwaway; the swap script (use-variant.sh) is tracked
 tests/qa/eval/variants/*/
+
+# Multimodal eval image-bytes cache (URLs are pinned in resolved_urls.json)
+eval/multimodal/cache/
