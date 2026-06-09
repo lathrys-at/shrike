@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 load("@rules_rust//rust:defs.bzl", "rust_shared_library")
 
@@ -25,12 +26,13 @@ rust_shared_library(
 
 # Python imports `_demo` from a file literally named `_demo.so`; rules_rust emits
 # lib<name>.dylib/.so, so copy it to the import name. (.dylib -> .so is fine —
-# CPython on macOS loads a Mach-O .so extension module.)
-genrule(
+# CPython on macOS loads a Mach-O .so extension module.) copy_file states the
+# intent directly and is portable, unlike shelling out to `cp`.
+copy_file(
     name = "demo_so",
-    srcs = [":demo_native"],
-    outs = ["_demo.so"],
-    cmd = "cp -- $(location :demo_native) $@",
+    src = ":demo_native",
+    out = "_demo.so",
+    allow_symlink = False,
 )
 
 # Put _demo.so on the import path for dependents.

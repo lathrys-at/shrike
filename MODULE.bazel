@@ -43,6 +43,7 @@ use_repo(pip, "shrike_pip")
 # toolchain's own cargo — no system Rust required.
 bazel_dep(name = "rules_rust", version = "0.70.0")
 bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")  # copy_file (the .so rename)
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(edition = "2021")

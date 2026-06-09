@@ -226,8 +226,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/shrike
-          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
-          restore-keys: bazel-${{ runner.os }}-
+          key: bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
+          restore-keys: bazel-${{ runner.os }}-${{ runner.arch }}-
       - name: Bazel test
         run: |
           ./bazel test //... \
@@ -281,6 +281,21 @@ jobs:
           DYLD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
           SHRIKE_TEST_MODEL_DIR: ${{ runner.temp }}/shrike-test-models
         run: pytest tests/integration -v -m integration
+      # Verify the Bazel graph on these platforms too — crucially the macOS-only
+      # PyO3 link path (-undefined dynamic_lookup) + the .so rename, which the
+      # per-PR linux bazel lane can't reach (#247 review), plus the foundation on
+      # macOS/linux-arm64. rc-gated, so the macOS 10x cost is paid only at release.
+      - name: Cache Bazel
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shrike
+          key: bazel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
+          restore-keys: bazel-${{ runner.os }}-${{ runner.arch }}-
+      - name: Bazel test
+        run: |
+          ./bazel test //... \
+            --disk_cache="$HOME/.cache/shrike/bazel-disk" \
+            --repository_cache="$HOME/.cache/shrike/bazel-repo"
 
   # Single required status check. Always runs, and passes iff every gated job
   # either succeeded or was legitimately skipped (its paths didn't change / not
