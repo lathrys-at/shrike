@@ -446,6 +446,77 @@ class TestUnifiedSearch:
         assert [x["id"] for x in m] == [strong]
 
 
+class TestProvenance:
+    """Per-result provenance (#182): which signals surfaced each match, at what rank."""
+
+    def _seed_front(self, wrapper, front: str) -> int:
+        note = {"deck": "Test", "note_type": "Basic", "fields": {"Front": front, "Back": "x"}}
+        return _seed(wrapper, [note])[0]["id"]
+
+    @staticmethod
+    def _matches(mcp_app, query: str) -> list[dict]:
+        return _call(mcp_app, "search_notes", {"queries": [query]})["results"][0]["matches"]
+
+    def test_text_only(self, wrapper, mock_index, mcp_app):
+        nid = self._seed_front(wrapper, "mitochondria powerhouse")
+        mock_index.search_by_modality.return_value = _text_hits(
+            [[{"note_id": nid, "distance": 0.2}]]
+        )
+        m = self._matches(mcp_app, "cellular energy")[0]
+        assert [(p["signal"], p["rank"]) for p in m["provenance"]] == [("text", 1)]
+        assert m["score"] == 0.8  # back-compat field stays, consistent with the text signal
+
+    def test_image_modality_facet(self, wrapper, mock_index, mcp_app):
+        # The semantic signal name *is* the matched-modality facet — `image` ⇒ "matched on image".
+        nid = self._seed_front(wrapper, "krebs cycle diagram card")
+        mock_index.search_by_modality.return_value = [
+            {"image": [{"note_id": nid, "distance": 0.7}]}  # uncalibrated → gate off → surfaces
+        ]
+        m = self._matches(mcp_app, "mitochondria")[0]
+        assert [p["signal"] for p in m["provenance"]] == ["image"]
+        assert m["score"] == 0.3
+
+    def test_exact_only(self, wrapper, mock_index, mcp_app):
+        self._seed_front(wrapper, "unique exact phrase")
+        mock_index.search_by_modality.return_value = _text_hits([[]])  # no semantic hit
+        m = self._matches(mcp_app, "exact phrase")[0]
+        assert [p["signal"] for p in m["provenance"]] == ["exact"]
+        assert m["score"] is None  # back-compat: exact-only carries no score
+        assert m["substring"] is not None  # ...but the substring detail stays
+
+    def test_text_and_exact(self, wrapper, mock_index, mcp_app):
+        nid = self._seed_front(wrapper, "Electron transport chain")
+        mock_index.search_by_modality.return_value = _text_hits(
+            [[{"note_id": nid, "distance": 0.1}]]
+        )
+        m = self._matches(mcp_app, "transport")[0]
+        # Both fire at rank 1 → ordered by signal name (exact < text); back-compat fields agree.
+        assert {p["signal"]: p["rank"] for p in m["provenance"]} == {"text": 1, "exact": 1}
+        assert m["score"] == 0.9
+        assert m["substring"] is not None
+
+    def test_ordered_by_rank_then_signal(self, wrapper, mock_index, mcp_app):
+        a = self._seed_front(wrapper, "alpha card")
+        b = self._seed_front(wrapper, "beta card")
+        nid = self._seed_front(wrapper, "gamma card")
+        # nid trails a, b in text (rank 3) but leads the image ranking (rank 1).
+        mock_index.search_by_modality.return_value = [
+            {
+                "text": [
+                    {"note_id": a, "distance": 0.10},
+                    {"note_id": b, "distance": 0.15},
+                    {"note_id": nid, "distance": 0.20},
+                ],
+                "image": [{"note_id": nid, "distance": 0.65}],
+            }
+        ]
+        matches = self._matches(mcp_app, "q")
+        assert all(m["provenance"] for m in matches)  # every returned match carries provenance
+        prov = {m["id"]: [(p["signal"], p["rank"]) for p in m["provenance"]] for m in matches}
+        assert prov[nid] == [("image", 1), ("text", 3)]  # strongest (lowest-rank) signal first
+        assert prov[a] == [("text", 1)]
+
+
 class TestUpsertNeighbors:
     def test_neighbors_attached_on_create(self, wrapper, mock_index, mcp_app):
         existing = _seed(wrapper, [BASIC_NOTE])[0]["id"]

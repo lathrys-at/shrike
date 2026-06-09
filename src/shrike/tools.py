@@ -629,8 +629,18 @@ def register_tools(
                 priority_signals=frozenset({"exact"}),
             )
 
+            # Provenance (#182): which signals surfaced each result, strongest-contributing first.
+            # hit.signals is already {signal_name: 1-based rank} from rrf_fuse — just rename keys.
             matches = [
-                {**note_data[hit.note_id], "score": sem_score.get(hit.note_id)} for hit in fused
+                {
+                    **note_data[hit.note_id],
+                    "score": sem_score.get(hit.note_id),
+                    "provenance": [
+                        {"signal": sig, "rank": rank}
+                        for sig, rank in sorted(hit.signals.items(), key=lambda kv: (kv[1], kv[0]))
+                    ],
+                }
+                for hit in fused
             ]
             results.append({"source": label, "matches": matches})
 
