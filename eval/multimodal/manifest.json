@@ -1,0 +1,35 @@
+{
+  "_about": "Labelled eval set for image<->text retrieval (Phase 3a of #162). image_notes: the answer lives in the IMAGE (note `text` deliberately does NOT name it), so a correct retrieval of `query` must come from the image vector, not the text. `search_term` is resolved to a real current Wikimedia Commons image via the MediaWiki API (robust to filename drift). text_notes: answerable by text, used to compare the CLIP text encoder against the MiniLM baseline.",
+  "image_notes": [
+    {"id": 1,  "search_term": "citric acid cycle diagram",      "text": "Metabolism review, lecture 4",            "query": "the Krebs cycle / citric acid cycle pathway diagram"},
+    {"id": 2,  "search_term": "human heart anatomy diagram",      "text": "Cardiovascular figure, exam 2",            "query": "a labelled diagram of the heart chambers and valves"},
+    {"id": 3,  "search_term": "world map continents",             "text": "Geography reference card",                 "query": "a map of the world showing the continents"},
+    {"id": 4,  "search_term": "water cycle diagram",              "text": "Earth science process, unit 3",           "query": "evaporation, condensation and precipitation water cycle"},
+    {"id": 5,  "search_term": "periodic table of elements",       "text": "Chemistry reference sheet",                "query": "the periodic table of the chemical elements"},
+    {"id": 6,  "search_term": "plant cell diagram labelled",      "text": "Cell biology figure",                      "query": "a labelled plant cell with chloroplasts and a vacuole"},
+    {"id": 7,  "search_term": "human skeleton anterior",          "text": "Skeletal system card",                     "query": "the human skeleton bones, front view"},
+    {"id": 8,  "search_term": "neuron diagram axon dendrite",     "text": "Neuroscience figure, week 6",              "query": "a diagram of a neuron with axon and dendrites"},
+    {"id": 9,  "search_term": "DNA double helix structure",       "text": "Molecular biology card",                   "query": "the double helix structure of DNA"},
+    {"id": 10, "search_term": "human eye cross section diagram",  "text": "Sensory anatomy figure",                   "query": "a cross-section of the human eye showing the retina and lens"},
+    {"id": 11, "search_term": "domestic cat photograph",          "text": "Pet card",                                 "query": "a photograph of a domestic cat"},
+    {"id": 12, "search_term": "Eiffel Tower Paris",               "text": "Landmark card, France trip",               "query": "a photo of the Eiffel Tower in Paris"},
+    {"id": 13, "search_term": "acoustic guitar",                  "text": "Music instrument card",                    "query": "a six-string acoustic guitar"},
+    {"id": 14, "search_term": "stratovolcano cross section diagram", "text": "Geology figure",                        "query": "a cross-section of a volcano showing the magma chamber"},
+    {"id": 15, "search_term": "resistor capacitor circuit schematic", "text": "Electronics lab, RC circuit",          "query": "a simple resistor and capacitor circuit schematic"},
+    {"id": 16, "search_term": "monarch butterfly",               "text": "Insect identification card",              "query": "a photo of an orange and black monarch butterfly"}
+  ],
+  "text_notes": [
+    {"id": 101, "text": "The mitochondrion is a membrane-bound organelle that generates most of a cell's supply of ATP through oxidative phosphorylation.", "query": "which organelle produces most of the cell's energy"},
+    {"id": 102, "text": "Photosynthesis converts light energy, water, and carbon dioxide into glucose and oxygen in the chloroplasts of green plants.", "query": "how plants turn sunlight into chemical energy"},
+    {"id": 103, "text": "Newton's second law states that the acceleration of an object is proportional to the net force acting on it and inversely proportional to its mass.", "query": "the relationship between force, mass, and acceleration"},
+    {"id": 104, "text": "The French Revolution began in 1789 and led to the end of the absolute monarchy and the rise of the French Republic.", "query": "when did the monarchy fall in France"},
+    {"id": 105, "text": "Insulin is a hormone produced by the pancreas that regulates blood glucose by promoting its uptake into cells.", "query": "the hormone that controls blood sugar"},
+    {"id": 106, "text": "A leap year has 366 days, adding February 29th, and occurs roughly every four years to keep the calendar aligned with Earth's orbit.", "query": "why we add an extra day in February some years"},
+    {"id": 107, "text": "The speed of light in a vacuum is approximately 299,792 kilometres per second, a universal physical constant denoted c.", "query": "how fast light travels in empty space"},
+    {"id": 108, "text": "Plate tectonics describes the slow movement of large sections of Earth's lithosphere, causing earthquakes, volcanoes, and mountain formation.", "query": "what causes earthquakes and mountain ranges"},
+    {"id": 109, "text": "Vaccines work by training the immune system to recognise and respond to a specific pathogen without causing the disease itself.", "query": "how do vaccines protect against illness"},
+    {"id": 110, "text": "The boiling point of water at sea level is 100 degrees Celsius, decreasing at higher altitudes where atmospheric pressure is lower.", "query": "the temperature at which water boils"},
+    {"id": 111, "text": "Supply and demand is the economic model where the price of a good settles where the quantity buyers want equals the quantity sellers offer.", "query": "what determines prices in a free market"},
+    {"id": 112, "text": "DNA encodes genetic information in sequences of four nucleotide bases: adenine, thymine, guanine, and cytosine.", "query": "the four building blocks of the genetic code"}
+  ]
+}
