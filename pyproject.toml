@@ -123,7 +123,7 @@ module = ["jsonschema.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["onnxruntime.*", "tokenizers.*"]
+module = ["onnxruntime.*", "tokenizers.*", "PIL.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
