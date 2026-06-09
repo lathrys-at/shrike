@@ -79,3 +79,20 @@ class TestRrfFuse:
         hits = {h.note_id: h for h in rrf_fuse({"a": [10, 20], "b": [20]})}
         assert hits[10].signals == {"a": 1}
         assert hits[20].signals == {"a": 2, "b": 1}
+
+    def test_three_signal_score_input_order_independent(self) -> None:
+        # Float addition isn't associative, so a note in 3+ signals would get a score differing by
+        # ~1 ULP with the input dict's order — enough to flip a near-tie. Canonical (sorted)
+        # accumulation makes it bit-identical (#236 review F2). Note 7 sits at ranks 1, 2, 8.
+        ranked = {"a": [7], "b": [99, 7], "c": [91, 92, 93, 94, 95, 96, 97, 7]}
+        reordered = {"c": ranked["c"], "a": ranked["a"], "b": ranked["b"]}
+        assert {h.note_id: h.score for h in rrf_fuse(ranked)}[7] == (
+            {h.note_id: h.score for h in rrf_fuse(reordered)}[7]
+        )  # bit-identical, not just close
+
+    def test_fused_hit_is_hashable(self) -> None:
+        # FusedHit is advertised as the provenance object (#182); "frozen ⇒ hashable" must hold
+        # despite the dict field (#236 review F3).
+        hit = rrf_fuse({"a": [1, 2]})[0]
+        assert hash(hit) == hash(hit)  # does not raise
+        assert hit in {hit}  # usable in a set

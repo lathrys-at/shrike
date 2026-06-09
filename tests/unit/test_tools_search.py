@@ -194,6 +194,28 @@ class TestUnifiedSearch:
         ids = [x["id"] for x in m]
         assert ids[0] == exact_nid  # literal hit ranks first despite no score
 
+    def test_literal_hit_missed_by_prefilter_still_floats(self, wrapper, mock_index, mcp_app):
+        # #236 review F1: the exact tier follows the `substring` annotation, not search_substring
+        # membership — so a literal hit Anki's normalized *term* pre-filter misses (markup text) or
+        # that fell beyond its limit still floats. Simulate the miss by emptying the pre-filter; the
+        # note's content still literally contains the query, so the semantic recompute floats it.
+        from unittest.mock import AsyncMock
+
+        literal = self._seed_front(wrapper, "alpha beta gamma")
+        sem_only = self._seed_front(wrapper, "unrelated content")
+        wrapper.search_substring = AsyncMock(return_value=[])  # pre-filter "misses" everything
+        mock_index.search.return_value = [
+            [
+                {"note_id": sem_only, "distance": 0.05},  # 0.95 — strong semantic, no literal
+                {"note_id": literal, "distance": 0.20},  # 0.80 — weaker, but literal "beta gamma"
+            ]
+        ]
+        m = _call(mcp_app, "search_notes", {"queries": ["beta gamma"], "threshold": 0.5})[
+            "results"
+        ][0]["matches"]
+        assert [x["id"] for x in m][0] == literal  # floats above the stronger-semantic non-literal
+        assert m[0]["substring"] is not None
+
     def test_tags_filter(self, wrapper, mock_index, mcp_app, basic_note):
         mock_index.search.return_value = [[{"note_id": basic_note, "distance": 0.1}]]
         result = _call(mcp_app, "search_notes", {"queries": ["test"], "tags": ["nonexistent-tag"]})

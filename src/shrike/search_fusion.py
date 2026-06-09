@@ -43,7 +43,9 @@ class FusedHit:
 
     note_id: int
     score: float
-    signals: dict[str, int] = field(default_factory=dict)
+    # Excluded from eq/hash: a dict field would make this frozen dataclass unhashable, and a later
+    # provenance consumer (#182) may reasonably expect "frozen ⇒ hashable". Identity is (id, score).
+    signals: dict[str, int] = field(default_factory=dict, compare=False)
 
 
 def rrf_fuse(
@@ -66,7 +68,11 @@ def rrf_fuse(
     scores: dict[int, float] = defaultdict(float)
     contributions: dict[int, dict[str, int]] = {}
 
-    for signal, ids in rankings.items():
+    # Accumulate in a canonical (sorted) signal order, not the input dict's order: float addition
+    # isn't associative, so a note in 3+ signals would otherwise get a score differing by ~1 ULP
+    # with the dict order — enough to flip a near-tie and silently weaken "stable across queries".
+    for signal in sorted(rankings):
+        ids = rankings[signal]
         w = weights.get(signal, 1.0)
         seen: set[int] = set()
         for pos, note_id in enumerate(ids):

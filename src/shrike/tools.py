@@ -415,8 +415,9 @@ def register_tools(
 
         Exact substring matches are returned even when the embedding index is
         unavailable (the response carries a `message` noting semantic ranking was
-        skipped) and are not subject to `threshold`. Within a group, matches that
-        contain the text literally are listed first, then by descending score.
+        skipped) and are not subject to `threshold`. Within a group, results are
+        ordered by Reciprocal Rank Fusion of the signals, with every literal
+        (`substring`) hit floated above non-literal ones, then by fused rank.
 
         Use this for conceptual queries keyword search can't handle and for
         finding exact wording. At least one of `queries` or `ids` is required."""
@@ -509,17 +510,19 @@ def register_tools(
         for i, (kind, label, text) in enumerate(text_sources):
             # Each signal ranks its own candidates (best-first); rrf_fuse blends them by rank and
             # the exact-match override tiers literal hits above the rest (the one place RRF's
-            # magnitude-blindness is wrong). note_data caches each candidate's full dict.
+            # magnitude-blindness is wrong). note_data caches every in-scope candidate's full dict.
             note_data: dict[int, dict[str, Any]] = {}
 
-            # Exact-substring ranking (query sources only; deck/tags/exclude applied inside, and
-            # each note already carries its `substring` annotation). Order: Anki's find order.
+            # Literal-substring candidates (query sources only). Anki's "*term*" search is a fast,
+            # scoped pre-filter; `substring_info` (recomputed below over every candidate) is the
+            # *authority* for what counts as a literal hit — so a literal match Anki's normalized
+            # search misses (text in markup/attributes) or that fell beyond its limit is still
+            # floated, keeping the annotation and the exact tier in lockstep.
             if kind == "query":
                 for note in await wrapper.search_substring(
                     text, deck=deck, tags=tags or None, exclude_ids=list(exclude_set), limit=top_k
                 ):
                     note_data[note["id"]] = note
-            exact_ids = list(note_data)
 
             # Semantic ranking (scoped, thresholded, excluded), distance-ascending.
             sem_ids: list[int] = []
@@ -533,18 +536,29 @@ def register_tools(
                     break  # raw is distance-ascending → the rest are below threshold
                 if nid not in note_data:
                     try:
-                        note_data[nid] = await wrapper.note_to_dict(nid, "full")
+                        data = await wrapper.note_to_dict(nid, "full")
                     except Exception:
                         logger.debug(
                             "search_notes: skipping unreadable note %s", nid, exc_info=True
                         )
                         continue
-                if not _in_scope(note_data[nid]):
-                    continue
+                    if not _in_scope(data):
+                        continue  # out of deck/tag scope — keep it out of note_data entirely
+                    note_data[nid] = data
                 sem_ids.append(nid)
                 sem_score[nid] = score
                 if len(sem_ids) >= top_k:
                     break
+
+            # Exact ranking = every candidate whose content literally contains the query (the
+            # `substring` annotation), so annotation ⟺ floated. Pre-filter hits already carry it.
+            exact_ids: list[int] = []
+            if kind == "query":
+                for nid, data in note_data.items():
+                    if "substring" not in data:
+                        data["substring"] = substring_info(data.get("content"), text)
+                    if data.get("substring") is not None:
+                        exact_ids.append(nid)
 
             fused = rrf_fuse(
                 {"semantic": sem_ids, "exact": exact_ids},
@@ -552,15 +566,9 @@ def register_tools(
                 priority_signals=frozenset({"exact"}),
             )
 
-            matches: list[dict[str, Any]] = []
-            for hit in fused:
-                data = note_data.get(hit.note_id)
-                if data is None:
-                    continue
-                entry = {**data, "score": sem_score.get(hit.note_id)}
-                if kind == "query" and "substring" not in entry:
-                    entry["substring"] = substring_info(data.get("content"), text)
-                matches.append(entry)
+            matches = [
+                {**note_data[hit.note_id], "score": sem_score.get(hit.note_id)} for hit in fused
+            ]
             results.append({"source": label, "matches": matches})
 
         logger.info(
