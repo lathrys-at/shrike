@@ -1,0 +1,20 @@
+[package]
+name = "shrike-native-demo"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Trivial PyO3 extension proving the Bazel polyglot seam (#247)."
+
+[lib]
+# A Python extension module is a cdylib. The module is imported as `_demo`
+# (the .so is renamed from this crate's lib output by the BUILD rule), so the
+# crate/lib name here is free — kept descriptive.
+name = "shrike_native_demo"
+crate-type = ["cdylib"]
+
+[dependencies]
+# extension-module: don't link libpython (symbols resolved by the host at import).
+# abi3-py312: build against the stable ABI for 3.12+, so the build needs no Python
+# interpreter — the key property for a hermetic Bazel build (and one wheel works
+# across 3.12+). Matches the hermetic toolchain's minor.
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py312"] }

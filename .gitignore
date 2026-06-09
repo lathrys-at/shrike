@@ -21,6 +21,10 @@ src/shrike/_version.py
 /bazel-*
 .bazelrc.user
 
+# Rust/cargo build output (native extensions — #247). Cargo.lock IS committed
+# (crate_universe resolves against it); only the build dir is ignored.
+target/
+
 # QA harness working dir — regenerated each launch (see scripts/launch-qa-server.sh)
 tests/qa/run/
 

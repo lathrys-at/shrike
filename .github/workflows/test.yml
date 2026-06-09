@@ -58,6 +58,7 @@ jobs:
               - 'src/**'
               - 'bin/**'
               - 'tools/**'
+              - 'native/**'
               - 'MODULE.bazel'
               - 'MODULE.bazel.lock'
               - 'BUILD.bazel'

@@ -34,3 +34,26 @@ pip.parse(
     requirements_lock = "//:requirements_lock.txt",
 )
 use_repo(pip, "shrike_pip")
+
+# ── Rust toolchain + crates: the polyglot proof (#247) ──────────────────────
+# Proves the cross-language seam — rules_rust builds a PyO3 extension linked
+# against the hermetic CPython, importable from a py_test (//native/_demo). The
+# native-backend epics (#219 compiled extension, #224 PyO3 host) build on this.
+# crate deps resolve from native/_demo's Cargo.toml/Cargo.lock via the rust
+# toolchain's own cargo — no system Rust required.
+bazel_dep(name = "rules_rust", version = "0.70.0")
+bazel_dep(name = "platforms", version = "1.0.0")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(edition = "2021")
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//native/_demo:Cargo.lock",
+    manifests = ["//native/_demo:Cargo.toml"],
+)
+use_repo(crate, "crates")
