@@ -3,12 +3,19 @@ name: Tests
 on:
   # PRs only. `main` is reached exclusively through PRs (squash merge), so a
   # push-to-main trigger would just re-run what the PR already validated — pure
-  # redundant spend. `labeled` is included so applying the `rc` label re-triggers
-  # CI (the default types don't fire on label changes); it gates the expensive
-  # cross-platform job.
+  # redundant spend.
+  #
+  # CI is GATED on the `ci` label: nothing but the tiny `ci-ok` sentinel runs
+  # until a PR carries `ci` (or `rc`, which implies full CI for a release
+  # candidate). This defers every remote run until code review is complete, so a
+  # PR that churns through review doesn't re-run the whole suite on each push —
+  # the free-tier Actions budget is spent once, at the end, when you add `ci`.
+  # `labeled` is in the trigger types so adding `ci`/`rc` re-fires the workflow
+  # (the default types don't fire on label changes); `unlabeled` so removing the
+  # label re-evaluates the `ci-ok` gate (flips it back to "add the ci label").
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 # `contents: read` for checkout; `pull-requests: read` so the `changes` job's
 # paths-filter can list this PR's changed files via the API (the default token
@@ -37,6 +44,12 @@ jobs:
   # jobs — a skipped required check blocks the merge forever.
   changes:
     name: Detect changed paths
+    # The `ci`-label gate. `changes` is the root of the dependency graph
+    # (lint/test/embedding/bazel all `needs: changes`), so skipping it here when
+    # the PR lacks `ci`/`rc` cascades — every downstream lane is skipped too, and
+    # not a single test runner spins up. `cross-platform` is the only lane outside
+    # this graph; it stays `rc`-gated (and `rc` is part of this condition anyway).
+    if: contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
@@ -309,6 +322,16 @@ jobs:
     needs: [changes, lint, test, embedding, bazel, cross-platform]
     runs-on: ubuntu-latest
     steps:
+      # Gate: CI must be opted in via the `ci` (or `rc`) label. Without it the
+      # whole graph above is skipped, so this required check fails with an
+      # actionable message — the PR can't merge until someone adds `ci` and the
+      # suite actually runs. This is the enforcement half of the deferral: CI is
+      # deferred, not skipped — it must still pass before merge.
+      - name: Require the ci (or rc) label
+        if: ${{ !(contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'rc')) }}
+        run: |
+          echo "::error::CI is gated on the 'ci' label — add the 'ci' label once code review is complete to run the suite (or 'rc' for a release candidate)."
+          exit 1
       - name: Verify gated jobs passed or were skipped
         run: |
           if [ "${{ needs.changes.result }}" != "success" ]; then
