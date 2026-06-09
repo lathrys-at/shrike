@@ -15,7 +15,7 @@ from shrike.collection import (
     CollectionWrapper,
     substring_info,
 )
-from shrike.index import IndexSaver, IndexState, VectorIndex
+from shrike.index import IndexSaver, IndexState, VectorIndex, activation_floor
 from shrike.schemas import (
     CollectionCheckResponse,
     CollectionInfo,
@@ -58,6 +58,14 @@ logger = logging.getLogger("shrike.tools")
 # fusion. Equal today; the tuning harness + further signals (n-gram #98, tag #179) will make these
 # config/`--search-*` knobs. The exact-match override (priority tier) is orthogonal to the weight.
 SEARCH_WEIGHTS = {"text": 1.0, "image": 1.0, "exact": 1.0}
+
+# Intra-modal activation gate (#201b). A non-text modality's ranking is fed to the fusion only when
+# its best match for the query exceeds `mean + ACTIVATION_MARGIN·std` of that modality's calibrated
+# typical best match (index.activation_stats) — otherwise the modality "had no good match" and its
+# top-k would just inject noise. Higher margin = stricter (fewer image cards surface). Like RRF_K, a
+# module constant today; becomes a `--search-*` knob under the tuning harness. Uncalibrated stats
+# (a text-only or pre-#201b index) yield no floor, so the gate is simply off.
+ACTIVATION_MARGIN = 1.0
 
 
 class ToolInputError(Exception):
@@ -501,6 +509,21 @@ def register_tools(
             raw = index.search_by_modality([t for (_, _, t) in text_sources], top_k=fetch_k)
             sem_by_source = dict(enumerate(raw))
 
+        # Activation gate (#201b): the floor the image ranking's best match must clear to count.
+        # None (text-only / pre-#201b / uncalibrated index) → no gating, i.e. #201a behaviour.
+        image_floor = (
+            activation_floor(index.activation_stats.get("image"), ACTIVATION_MARGIN)
+            if index is not None
+            else None
+        )
+
+        def _image_gated_out(hits: list[dict[str, Any]]) -> bool:
+            # True when this query has no good-enough image match, so the modality shouldn't speak:
+            # its best (rank-1) similarity doesn't clear the calibrated floor.
+            if image_floor is None or not hits:
+                return False
+            return float(1.0 - hits[0]["distance"]) <= image_floor
+
         def _in_scope(note_data: dict[str, Any]) -> bool:
             if deck and note_data.get("deck") != deck:
                 return False
@@ -577,8 +600,14 @@ def register_tools(
             ranking_text = await _rank_modality(
                 modality_hits.get("text", []), note_data, sem_score, thresholded=True
             )
+            # Gate the image modality (#201b): drop it entirely when this query has no good image
+            # match, so its top-k doesn't inject noise. Gating before _rank_modality keeps the
+            # dropped sims out of note_data and the surfaced `score`.
+            image_hits = modality_hits.get("image", [])
+            if _image_gated_out(image_hits):
+                image_hits = []
             ranking_image = await _rank_modality(
-                modality_hits.get("image", []), note_data, sem_score, thresholded=False
+                image_hits, note_data, sem_score, thresholded=False
             )
 
             # Exact ranking = every candidate whose content literally contains the query (the
