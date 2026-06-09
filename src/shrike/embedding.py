@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from shrike.index import VectorIndex
 
 # Embedding backend kinds the runtime can construct (see EmbeddingRuntime).
-SUPPORTED_BACKENDS = ("llama", "onnx")
+SUPPORTED_BACKENDS = ("llama", "onnx", "clip")
 DEFAULT_BACKEND = "llama"
 
 logger = logging.getLogger("shrike.embedding")
@@ -762,9 +762,9 @@ class EmbeddingRuntime:
     def _make_backend(self) -> EmbedderBackend:
         """Construct (but don't start) the backend for the configured kind.
 
-        The ONNX backend imports its heavy deps lazily, so ``shrike[onnx]`` stays
-        optional — a missing dependency surfaces as ``ImportError`` only when the
-        onnx backend is actually selected.
+        The onnx/clip backends import their heavy deps lazily, so ``shrike[onnx]`` /
+        ``shrike[clip]`` stay optional — a missing dependency surfaces as ``ImportError``
+        only when that backend is actually selected.
         """
         assert self._model is not None  # callers check before constructing
         if self._backend_kind == "onnx":
@@ -778,6 +778,15 @@ class EmbeddingRuntime:
                 # --embedding-context-size doubles as ONNX's token-truncation
                 # length (None → the backend's 256 default).
                 max_length=self._context_size,
+                batch_size=self._batch_size,
+                log_dir=self._log_dir,
+            )
+        if self._backend_kind == "clip":
+            from shrike.embedding_clip import ClipBackend
+
+            return ClipBackend(
+                model=self._model,
+                providers=self._onnx_providers,
                 batch_size=self._batch_size,
                 log_dir=self._log_dir,
             )
