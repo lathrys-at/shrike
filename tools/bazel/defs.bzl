@@ -3,8 +3,9 @@
 Wraps rules_python's py_test with the shared pytest launcher
 (//tools/bazel:pytest_runner.py), so a test file runs under `bazel test` the same
 way it does under plain pytest. Always pulls in pytest + pytest-asyncio and the
-shrike library; per-test extras (e.g. the onnx/clip backends) go in `extra_reqs`,
-and the package's conftest goes in `deps` (so pytest finds it in runfiles).
+shrike library; a test needing more (a genuine third-party wheel) adds it via
+`deps`, and the package's conftest goes in `deps` too (so pytest finds it in
+runfiles).
 """
 
 load("@rules_python//python:defs.bzl", "py_test")
@@ -12,7 +13,7 @@ load("@shrike_pip//:requirements.bzl", "requirement")
 
 _RUNNER = "//tools/bazel:pytest_runner.py"
 
-def pytest_test(name, src, deps = [], data = [], extra_reqs = [], args = [], size = "small", **kwargs):
+def pytest_test(name, src, deps = [], data = [], args = [], size = "small", **kwargs):
     py_test(
         name = name,
         size = size,
@@ -25,7 +26,7 @@ def pytest_test(name, src, deps = [], data = [], extra_reqs = [], args = [], siz
             "//src/shrike",
             requirement("pytest"),
             requirement("pytest-asyncio"),
-        ] + [requirement(r) for r in extra_reqs],
+        ],
         data = data,
         **kwargs
     )

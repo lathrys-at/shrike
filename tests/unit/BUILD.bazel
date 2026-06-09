@@ -11,12 +11,6 @@ py_library(
     deps = ["//src/shrike"],
 )
 
-# Per-test extras beyond the shrike library's own deps (the optional backends).
-_EXTRA_REQS = {
-    "test_embedding_onnx.py": ["onnxruntime", "tokenizers"],
-    "test_embedding_clip.py": ["onnxruntime", "tokenizers", "pillow"],
-}
-
 # Excluded from the Bazel unit suite for now (the pip `test` lane still runs both):
 #  - test_model_cache.py imports tests.integration.model_cache, built in the
 #    integration/embedding migration (#244 Phase 2b/2c).
@@ -34,7 +28,6 @@ _PIP_ONLY = [
         name = f[:-len(".py")],
         src = f,
         deps = [":conftest"],
-        extra_reqs = _EXTRA_REQS.get(f, []),
     )
     for f in glob(["test_*.py"], exclude = _PIP_ONLY)
 ]

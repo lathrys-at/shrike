@@ -27,7 +27,10 @@ def main() -> int:
     if test_tmpdir:
         args += ["--basetemp", os.path.join(test_tmpdir, "pytest")]
 
-    # Honor Bazel's test filter (`--test_filter=expr` -> -k expr).
+    # Honor Bazel's test filter (`--test_filter=expr` -> pytest `-k expr`). Note:
+    # Bazel's --test_filter is conventionally a regex, but pytest -k is a
+    # substring / boolean-expression grammar — plain test names work; a regex
+    # won't mean what you'd expect.
     test_filter = os.environ.get("TESTBRIDGE_TEST_ONLY")
     if test_filter:
         args += ["-k", test_filter]
@@ -35,7 +38,13 @@ def main() -> int:
     # The macro passes the test file path(s) as args.
     args += sys.argv[1:]
 
-    return int(pytest.main(args))
+    ret = pytest.main(args)
+    # Bazel applies --test_filter to every target in a `//pkg/...` pattern, so a
+    # file with no matching test returns NO_TESTS_COLLECTED (5). For that target,
+    # "nothing matched this file" is success, not failure.
+    if ret == pytest.ExitCode.NO_TESTS_COLLECTED and test_filter:
+        return 0
+    return int(ret)
 
 
 if __name__ == "__main__":
