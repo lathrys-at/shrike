@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from shrike.embedding_base import IMAGE
+from shrike.embedding_base import IMAGE, TEXT
 
 if TYPE_CHECKING:
     from shrike.embedding_base import EmbedderBackend
@@ -40,6 +40,19 @@ BATCH_SIZE = 64
 # single-vector index for image-heavy notes) — a smarter fetch bound is a rank-fusion concern,
 # #180.
 SEARCH_OVERFETCH = 4
+
+# On-disk index schema version, stamped into index.meta.json as "schema". v1 (implicit — the marker
+# absent) is the pre-#201a single-index layout: a 3c index stored a note's text + image vectors
+# mixed under one note_id key in one file, which can't be split per modality after the fact. v2
+# (this module) is the per-modality layout — a separate USearch sub-index file per modality. A
+# text-only v1 index loads losslessly as the v2 text index (its file *is* index.usearch, holding
+# only text vectors), so text-only users never rebuild on upgrade; an image-capable backend meeting
+# a v1 index can't unmix it, so it rebuilds once (see check_drift / reconcile).
+INDEX_SCHEMA_VERSION = 2
+
+# Modalities that get their own on-disk sub-index, in load order (TEXT first — it's mandatory and
+# keeps the original index.usearch filename). Extend this tuple when a new media modality lands.
+_INDEX_MODALITIES = (TEXT, IMAGE)
 
 # An image resolver maps a media filename to its bytes (None = missing/unreadable → skipped).
 ImageResolver = Callable[[str], "bytes | None"]
@@ -110,10 +123,17 @@ class VectorIndex:
         self._embedding = backend
         self._read_image: ImageResolver | None = None
         self._image_exists_fn: ImageExists | None = None
-        self._index: Any | None = None
+        # One USearch sub-index per modality (TEXT, IMAGE), each keyed by note_id. Split because a
+        # USearch hit reveals only the note_id, not which vector matched — separate indexes are the
+        # only way to rank a query per modality (see search_by_modality). The TEXT index persists as
+        # index.usearch (back-compat with the pre-#201a single index); IMAGE as index.image.usearch.
+        self._indexes: dict[str, Any] = {}
         self._ndim: int | None = None
         self._col_mod: int | None = None
         self._model_id: str | None = None
+        # On-disk schema of the loaded index (INDEX_SCHEMA_VERSION for a freshly-built one). A v1
+        # index loaded by an image-capable backend can't be split per modality → drift-rebuild.
+        self._schema = INDEX_SCHEMA_VERSION
         # note_id -> embedding-text hash for the vectors currently in the index.
         # Drives incremental reconcile (re-embed only changed notes). ``None``
         # means "no per-note state" (old index / never built) — reconcile then
@@ -135,15 +155,22 @@ class VectorIndex:
     def available(self) -> bool:
         return (
             self._state == IndexState.READY
-            and self._index is not None
+            and TEXT in self._indexes
             and self._embedding is not None
         )
 
     @property
     def size(self) -> int:
-        if self._index is None:
-            return 0
-        return len(self._index)
+        """Total vectors across every modality sub-index (text + images)."""
+        return sum(len(idx) for idx in self._indexes.values())
+
+    def _modality_path(self, modality: str) -> Path:
+        """On-disk file for a modality's sub-index.
+
+        TEXT keeps the original ``index.usearch`` name so a pre-#201a index loads unchanged as the
+        text sub-index; other modalities get ``index.<modality>.usearch`` (``index.image.usearch``).
+        """
+        return self._index_path if modality == TEXT else self._dir / f"index.{modality}.usearch"
 
     @property
     def ndim(self) -> int | None:
@@ -229,7 +256,7 @@ class VectorIndex:
         return self._build_progress
 
     def _load(self) -> None:
-        """Load an existing index from disk, if present."""
+        """Load existing per-modality sub-indexes from disk, if present."""
         if not self._index_path.exists() or not self._meta_path.exists():
             logger.debug("No existing index at %s", self._dir)
             return
@@ -239,24 +266,36 @@ class VectorIndex:
             self._ndim = meta["ndim"]
             self._col_mod = meta.get("col_mod")
             self._model_id = meta.get("model_id")
+            # marker absent → pre-#201a (v1) single-index layout
+            self._schema = meta.get("schema", 1)
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning("Corrupt index metadata at %s: %s", self._meta_path, e)
             return
 
-        try:
-            from usearch.index import Index
+        from usearch.index import Index
 
-            self._index = Index.restore(str(self._index_path))
-            logger.info(
-                "Loaded vector index: %d vectors, %d dims",
-                len(self._index),  # type: ignore[arg-type]
-                self._ndim,
-            )
-        except Exception as e:
-            logger.warning("Failed to load index from %s: %s", self._index_path, e)
-            self._index = None
-            self._ndim = None
-            return
+        # The TEXT sub-index (index.usearch) is mandatory — a pre-#201a file restores here directly.
+        # Every other modality's file is optional: a text-only collection simply has none. A corrupt
+        # *present* file clears everything (so the next check_drift forces a full rebuild) rather
+        # than silently serving from a half-loaded index.
+        for modality in _INDEX_MODALITIES:
+            path = self._modality_path(modality)
+            if not path.exists():
+                continue
+            try:
+                self._indexes[modality] = Index.restore(str(path))
+            except Exception as e:
+                logger.warning("Failed to load %s index from %s: %s", modality, path, e)
+                self._indexes = {}
+                self._ndim = None
+                return
+
+        logger.info(
+            "Loaded vector index: %d vectors, %d dims (schema v%d)",
+            self.size,
+            self._ndim,
+            self._schema,
+        )
 
         # Per-note hashes are an optional sidecar: a missing or corrupt file (or
         # an index built before this existed) leaves _note_hashes None, so the
@@ -269,10 +308,11 @@ class VectorIndex:
             except (json.JSONDecodeError, ValueError) as e:
                 logger.warning("Corrupt index hashes at %s: %s", self._hashes_path, e)
 
-    def _ensure_index(self, ndim: int) -> Any:
-        """Create the USearch index if it doesn't exist yet."""
-        if self._index is not None:
-            return self._index
+    def _ensure_index(self, ndim: int, modality: str) -> Any:
+        """Create the USearch sub-index for a modality if it doesn't exist yet."""
+        existing = self._indexes.get(modality)
+        if existing is not None:
+            return existing
 
         from usearch.index import Index
 
@@ -283,16 +323,16 @@ class VectorIndex:
         # --embd-normalize moot here; normalization is deliberately *not* a typed
         # setting. If the metric ever changes to one that isn't scale-invariant
         # (l2sq, ip), normalization becomes vector-affecting and must be typed +
-        # folded into model_id like pooling.
-        # multi=True: a note maps to several vectors under one note_id key (its text vector + one
-        # per image). A text-only backend simply stores one vector per key — identical behaviour —
-        # so the flag is always on; search dedups multi-hits back to one result per note. The flag
-        # persists in the saved index, so a pre-3c single-vector index loads as multi=False and is
-        # rebuilt into a multi=True one when an image-capable backend attaches (see check_drift).
-        self._index = Index(ndim=ndim, metric="cos", dtype="f32", multi=True)
+        # folded into model_id like pooling. All modality sub-indexes share one
+        # ndim — text and image vectors live in the same CLIP space.
+        # multi=True: a note maps to several vectors under one note_id key — its single text vector
+        # in the text index, one vector per image in the image index — so remove(note_id) drops them
+        # all and search dedups multi-hits back to one result per note.
+        idx = Index(ndim=ndim, metric="cos", dtype="f32", multi=True)
+        self._indexes[modality] = idx
         self._dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Created new vector index: %d dims", ndim)
-        return self._index
+        logger.info("Created new %s sub-index: %d dims", modality, ndim)
+        return idx
 
     def materialize_empty(self, ndim: int, col_mod: int, model_id: str | None) -> None:
         """Create an empty, ready index for an empty collection.
@@ -307,10 +347,10 @@ class VectorIndex:
         No-op if an index already exists (drift on a non-empty-to-empty change is
         the reconcile path's job, not this one).
         """
-        if self._index is not None:
+        if self._indexes:
             return
         with self._lock:
-            self._ensure_index(ndim)
+            self._ensure_index(ndim, TEXT)
             if self._note_hashes is None:
                 self._note_hashes = {}
             self._col_mod = col_mod
@@ -338,16 +378,15 @@ class VectorIndex:
         for i in range(0, len(inputs), BATCH_SIZE):
             batch = inputs[i : i + BATCH_SIZE]
 
-            note_ids = [
-                inp.note_id for inp in batch
-            ]  # one source of truth: remove keys + text keys
+            note_ids = [inp.note_id for inp in batch]
+            note_ids_arr = np.array(note_ids, dtype=np.int64)
             text_vecs = self._embedding.embed_texts([inp.text for inp in batch])
-            keys: list[int] = list(note_ids)
-            vecs: list[list[float]] = list(text_vecs)
+            text_array = np.array(text_vecs, dtype=np.float32)
 
+            img_vecs: list[list[float]] = []
+            img_keys: list[int] = []
             if read_image is not None:
                 img_bytes: list[bytes] = []
-                img_keys: list[int] = []
                 for inp in batch:
                     for name in inp.image_names:
                         data = read_image(name)
@@ -364,14 +403,24 @@ class VectorIndex:
                             f"image embedding dim {len(img_vecs[0])} != text dim "
                             f"{len(text_vecs[0])}; backend image/text spaces must match"
                         )
-                    vecs.extend(img_vecs)
-                    keys.extend(img_keys)
 
-            vecs_array = np.array(vecs, dtype=np.float32)
             with self._lock:
-                idx = self._ensure_index(vecs_array.shape[1])
-                idx.remove(np.array(note_ids, dtype=np.int64))
-                idx.add(np.array(keys, dtype=np.int64), vecs_array)
+                ndim = text_array.shape[1]
+                tidx = self._ensure_index(ndim, TEXT)
+                tidx.remove(note_ids_arr)
+                tidx.add(note_ids_arr, text_array)
+                # Drop any stale image vectors for these notes first — a re-add may have changed or
+                # dropped a note's images — then add the fresh set. The remove is unconditional so a
+                # note that lost all its images doesn't keep orphaned image vectors.
+                existing_img = self._indexes.get(IMAGE)
+                if existing_img is not None:
+                    existing_img.remove(note_ids_arr)
+                if img_vecs:
+                    iidx = self._ensure_index(ndim, IMAGE)
+                    iidx.add(
+                        np.array(img_keys, dtype=np.int64),
+                        np.array(img_vecs, dtype=np.float32),
+                    )
                 if self._note_hashes is not None:
                     for inp in batch:
                         self._note_hashes[int(inp.note_id)] = self._note_hash(
@@ -384,31 +433,72 @@ class VectorIndex:
         return added
 
     def remove(self, note_ids: list[int]) -> int:
-        """Remove vectors by note ID. Returns count removed."""
-        if self._index is None or not note_ids:
+        """Remove every vector (text + images) for the given note IDs across all sub-indexes.
+
+        Returns the count removed from the *text* index — one text vector per note, so that's the
+        number of notes actually present (image removals are incidental).
+        """
+        if not self._indexes or not note_ids:
             return 0
 
+        ids_arr = np.array(note_ids, dtype=np.int64)
         with self._lock:
-            # Batch remove returns the count actually removed and ignores ids not
-            # in the index — no need for a per-id membership check.
-            removed = int(self._index.remove(np.array(note_ids, dtype=np.int64)))
+            # Batch remove returns the count actually removed and ignores ids not in the index —
+            # no per-id membership check needed. Remove from every modality so a note's images go
+            # with its text.
+            removed = 0
+            for modality, idx in self._indexes.items():
+                count = int(idx.remove(ids_arr))
+                if modality == TEXT:
+                    removed = count
             if self._note_hashes is not None:
                 for nid in note_ids:
                     self._note_hashes.pop(int(nid), None)
 
         self._dirty += removed
-        logger.debug("Removed %d vectors from index (total: %d)", removed, self.size)
+        logger.debug("Removed %d notes from index (total vectors: %d)", removed, self.size)
         return removed
+
+    def _dedup_per_note(
+        self, raw: Any, n_queries: int, top_k: int, index_size: int
+    ) -> list[list[dict[str, Any]]]:
+        """Reduce one sub-index's batched matches to top_k distinct notes per query (max-sim).
+
+        ``raw`` is what ``Index.search`` returns — ``Matches`` for one query, ``BatchMatches``
+        (indexable per query) for several. Matches come back nearest-first, so the first time a
+        note_id appears is its best (smallest) distance — its other vectors under that key (a note's
+        several images) are dropped. That min-distance-per-note *is* the max-sim-over-items
+        aggregation. Truncate to top_k distinct notes.
+        """
+        per_query = [raw] if n_queries == 1 else [raw[i] for i in range(n_queries)]
+        out: list[list[dict[str, Any]]] = []
+        for matches in per_query:
+            result_list: list[dict[str, Any]] = []
+            seen: set[int] = set()
+            for key, dist in zip(matches.keys, matches.distances, strict=True):
+                nid = int(key)
+                if nid in seen:
+                    continue
+                # An empty USearch index can return a phantom (key 0, distance 0) match — drop it.
+                if nid == 0 and float(dist) == 0.0 and index_size == 0:
+                    continue
+                seen.add(nid)
+                result_list.append({"note_id": nid, "distance": float(dist)})
+                if len(result_list) >= top_k:
+                    break
+            out.append(result_list)
+        return out
 
     def search(
         self,
         texts: list[str],
         top_k: int = 10,
     ) -> list[list[dict[str, Any]]]:
-        """Embed query texts and return nearest neighbors.
+        """Embed query texts and return nearest **text** neighbors (text-similarity).
 
-        Returns one result list per query text. Each result is a dict
-        with ``note_id`` (int) and ``distance`` (float, 0 = identical).
+        Returns one result list per query text, each a dict with ``note_id`` (int) and ``distance``
+        (float, 0 = identical). Backed by the text sub-index only — this is the text-neighbour path
+        (upsert similar-note suggestions); per-modality retrieval is :meth:`search_by_modality`.
         """
         if not self.available or not texts:
             return [[] for _ in texts]
@@ -420,72 +510,97 @@ class VectorIndex:
         # still yields up to top_k notes; usearch caps k at the index size internally.
         fetch = max(top_k * SEARCH_OVERFETCH, top_k)
 
-        assert self._index is not None
-        results: list[list[dict[str, Any]]] = []
+        text_idx = self._indexes[TEXT]
         with self._lock:
-            # One batched search over all queries — usearch parallelises across
-            # them internally, versus a Python loop of single-query searches. It
-            # returns Matches for a single query, BatchMatches (indexable per
-            # query) for several.
-            raw = self._index.search(query_array, fetch)
-            per_query = [raw] if len(texts) == 1 else [raw[i] for i in range(len(texts))]
-            for matches in per_query:
-                # Matches come back nearest-first, so the first time a note_id appears is its best
-                # (smallest) distance — its other (text/image) vectors are dropped. Truncate to
-                # top_k distinct notes.
-                result_list: list[dict[str, Any]] = []
-                seen: set[int] = set()
-                for key, dist in zip(matches.keys, matches.distances, strict=True):
-                    nid = int(key)
-                    if nid in seen:
-                        continue
-                    if nid == 0 and float(dist) == 0.0 and self.size == 0:
-                        continue
-                    seen.add(nid)
-                    result_list.append({"note_id": nid, "distance": float(dist)})
-                    if len(result_list) >= top_k:
-                        break
-                results.append(result_list)
+            # One batched search over all queries — usearch parallelises across them internally,
+            # versus a Python loop of single-query searches.
+            raw = text_idx.search(query_array, fetch)
+            return self._dedup_per_note(raw, len(texts), top_k, len(text_idx))
 
-        return results
+    def search_by_modality(
+        self,
+        texts: list[str],
+        top_k: int = 10,
+    ) -> list[dict[str, list[dict[str, Any]]]]:
+        """Embed each query once and rank notes **per modality** against it.
+
+        Returns one entry per query: a ``{modality: [{note_id, distance}, ...]}`` map, each list a
+        max-sim-per-note ranking (best-first) over that modality's sub-index. The query is always
+        text — searching the image sub-index compares the text query vector against image vectors in
+        the shared CLIP space (cross-modal retrieval). A text query that matches a card's *image*
+        thus surfaces in ``ranking[i]["image"]``; the modality gap (image distances sit a constant
+        offset above text ones) is harmless here because the caller feeds each modality into RRF as
+        its own rank-based signal (#180/#201). Modalities with an empty sub-index are omitted.
+        """
+        if not self.available or not texts:
+            return [{} for _ in texts]
+
+        vectors = self._embedding.embed_texts(texts)  # type: ignore[union-attr]
+        query_array = np.array(vectors, dtype=np.float32)
+        fetch = max(top_k * SEARCH_OVERFETCH, top_k)
+
+        rankings: list[dict[str, list[dict[str, Any]]]] = [{} for _ in texts]
+        with self._lock:
+            for modality, idx in self._indexes.items():
+                if len(idx) == 0:
+                    continue
+                raw = idx.search(query_array, fetch)
+                per_query = self._dedup_per_note(raw, len(texts), top_k, len(idx))
+                for i, ranking in enumerate(per_query):
+                    if ranking:
+                        rankings[i][modality] = ranking
+        return rankings
 
     def contains(self, note_id: int) -> bool:
-        """Check if a note ID is in the index."""
-        if self._index is None:
+        """Check if a note ID is in the index (every indexed note has a text vector)."""
+        text_idx = self._indexes.get(TEXT)
+        if text_idx is None:
             return False
-        return note_id in self._index
+        return note_id in text_idx
 
     def save(self) -> None:
-        """Persist the index and metadata to disk."""
-        if self._index is None or self._ndim is None:
+        """Persist every modality sub-index and the shared metadata to disk."""
+        if not self._indexes or self._ndim is None:
             return
 
         self._dir.mkdir(parents=True, exist_ok=True)
-        meta: dict[str, Any] = {"ndim": self._ndim}
+        meta: dict[str, Any] = {"ndim": self._ndim, "schema": INDEX_SCHEMA_VERSION}
         if self._col_mod is not None:
             meta["col_mod"] = self._col_mod
         if self._model_id is not None:
             meta["model_id"] = self._model_id
         # Whole save under the lock so concurrent callers (a debounced save on a
         # worker thread, the signal-handler save, /embedding/stop, a manual
-        # /index/save) can't interleave the index write with the metadata write
-        # and leave a torn meta.json. Both files are small; the lock is brief.
+        # /index/save) can't interleave a sub-index write with the metadata write
+        # and leave a torn meta.json. The files are small; the lock is brief.
         with self._lock:
-            self._index.save(str(self._index_path))
+            for modality, idx in self._indexes.items():
+                idx.save(str(self._modality_path(modality)))
+            # Delete a sub-index file for a modality no longer present (e.g. a CLIP→text-only
+            # backend switch rebuilt without images) so it isn't reloaded as a phantom on restart.
+            for modality in _INDEX_MODALITIES:
+                if modality not in self._indexes:
+                    stale = self._modality_path(modality)
+                    if stale.exists():
+                        stale.unlink()
             self._meta_path.write_text(json.dumps(meta))
             if self._note_hashes is not None:
                 self._hashes_path.write_text(json.dumps(self._note_hashes))
+            self._schema = INDEX_SCHEMA_VERSION
             self._dirty = 0
-        logger.debug("Saved vector index: %d vectors to %s", self.size, self._index_path)
+        logger.debug("Saved vector index: %d vectors to %s", self.size, self._dir)
 
     def clear(self) -> None:
         """Remove all vectors and delete the index files."""
         with self._lock:
-            self._index = None
+            modalities = list(self._indexes)
+            self._indexes = {}
             self._ndim = None
             self._model_id = None
             self._note_hashes = None
-        for path in (self._index_path, self._meta_path, self._hashes_path):
+        paths = [self._modality_path(m) for m in modalities]
+        paths += [self._index_path, self._meta_path, self._hashes_path]
+        for path in paths:
             if path.exists():
                 path.unlink()
         logger.info("Cleared vector index at %s", self._dir)
@@ -497,7 +612,7 @@ class VectorIndex:
         the embedding model (``model_id``) invalidates every vector — the old
         embeddings live in a different space — so it forces a full rebuild.
         """
-        if self._index is None:
+        if not self._indexes:
             logger.info("No index loaded, rebuild needed")
             return True
 
@@ -513,10 +628,14 @@ class VectorIndex:
             )
             return True
 
-        if self._embeds_images() and not getattr(self._index, "multi", False):
-            # An image-capable backend attached to a single-vector index (e.g. one built before
-            # 3c, or by a text backend): it must become multi-vector to hold image vectors.
-            logger.info("Backend embeds images but index is single-vector; rebuild needed")
+        if self._embeds_images() and self._schema < INDEX_SCHEMA_VERSION:
+            # An image-capable backend attached to a pre-#201a (v1) index: a v1 CLIP index stored a
+            # note's text + image vectors mixed under one key in one file, which can't be split per
+            # modality after the fact — rebuild once into the v2 per-modality layout. (A v1
+            # *text-only* index never reaches here: a text-only backend doesn't embed images.)
+            logger.info(
+                "Backend embeds images but index predates per-modality layout; rebuild needed"
+            )
             return True
 
         if self._col_mod != current_col_mod:
@@ -548,8 +667,9 @@ class VectorIndex:
 
         try:
             with self._lock:
-                self._index = None
+                self._indexes = {}
                 self._ndim = None
+                self._schema = INDEX_SCHEMA_VERSION  # rebuilds always land on the current layout
                 # Start fresh — add() repopulates per-note hashes as it embeds.
                 self._note_hashes = {}
 
@@ -591,16 +711,13 @@ class VectorIndex:
 
         Falls back to ``rebuild`` when there's no prior per-note hash state (an index built before
         this existed, or never built), no index is loaded, the model changed (every vector moves to
-        a different space), or the backend now embeds images but the index is still single-vector.
+        a different space), or an image-capable backend meets a pre-#201a (single-index) layout that
+        can't be split per modality.
         """
         old = self._note_hashes
         model_changed = model_id is not None and self._model_id != model_id
-        needs_multi = (
-            self._embeds_images()
-            and self._index is not None
-            and not getattr(self._index, "multi", False)
-        )
-        if old is None or self._index is None or model_changed or needs_multi:
+        needs_restructure = self._embeds_images() and self._schema < INDEX_SCHEMA_VERSION
+        if old is None or not self._indexes or model_changed or needs_restructure:
             self.rebuild(inputs, col_mod, model_id=model_id, on_progress=on_progress)
             return
 

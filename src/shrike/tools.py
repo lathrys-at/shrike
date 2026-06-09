@@ -52,10 +52,12 @@ from shrike.search_fusion import rrf_fuse
 
 logger = logging.getLogger("shrike.tools")
 
-# Per-signal RRF weights for search_notes' fusion (#180). Equal today (semantic + exact); the
-# tuning harness + further signals (n-gram #98, tag #179, per-modality #201) will make these
+# Per-signal RRF weights for search_notes' fusion (#180/#201). The semantic retriever is now
+# per-modality — `text` and `image` are separate rank-based signals (search_by_modality), so the
+# CLIP modality gap (image cosines sit a constant offset below text ones) is invisible to the
+# fusion. Equal today; the tuning harness + further signals (n-gram #98, tag #179) will make these
 # config/`--search-*` knobs. The exact-match override (priority tier) is orthogonal to the weight.
-SEARCH_WEIGHTS = {"semantic": 1.0, "exact": 1.0}
+SEARCH_WEIGHTS = {"text": 1.0, "image": 1.0, "exact": 1.0}
 
 
 class ToolInputError(Exception):
@@ -484,9 +486,11 @@ def register_tools(
         if not text_sources:
             return SearchResponse(message="No valid queries or note IDs to search.")
 
-        # Semantic pass (batched). Over-fetch to cover excluded ids and post-hoc
-        # deck/tag/substring filtering, which can otherwise under-return.
-        sem_raw: dict[int, list[dict[str, Any]]] = {}
+        # Semantic pass (batched), per modality. Over-fetch to cover excluded ids and post-hoc
+        # deck/tag/substring filtering, which can otherwise under-return. search_by_modality returns
+        # one {modality: [{note_id, distance}, ...]} map per source — each modality a separate
+        # rank-based RRF signal, so the CLIP modality gap can't bury image hits under text ones.
+        sem_by_source: dict[int, dict[str, list[dict[str, Any]]]] = {}
         if semantic_ok:
             assert index is not None
             fetch_k = top_k + len(exclude_set)
@@ -494,8 +498,8 @@ def register_tools(
                 fetch_k = max(fetch_k, top_k * 10)
                 if index.size:
                     fetch_k = min(fetch_k, index.size)
-            raw = index.search([t for (_, _, t) in text_sources], top_k=fetch_k)
-            sem_raw = dict(enumerate(raw))
+            raw = index.search_by_modality([t for (_, _, t) in text_sources], top_k=fetch_k)
+            sem_by_source = dict(enumerate(raw))
 
         def _in_scope(note_data: dict[str, Any]) -> bool:
             if deck and note_data.get("deck") != deck:
@@ -505,6 +509,47 @@ def register_tools(
                 if not all(t in note_tags for t in tags):
                     return False
             return True
+
+        async def _rank_modality(
+            hits: list[dict[str, Any]],
+            note_data: dict[int, dict[str, Any]],
+            sem_score: dict[int, float],
+            *,
+            thresholded: bool,
+        ) -> list[int]:
+            """One modality's hits → a scoped, deduped note ranking (best-first), capped at top_k.
+
+            Populates ``note_data`` for any new in-scope candidate and folds each note's similarity
+            into ``sem_score`` as the running max over the modalities it matched (the surfaced
+            score). ``thresholded`` gates on the (text-calibrated) cosine ``threshold`` — applied to
+            the text ranking, but **not** the image one, where the gap makes that threshold
+            meaningless (flooring image hits is the #201b activation gate's job).
+            """
+            ranking: list[int] = []
+            for m in hits:
+                nid = m["note_id"]
+                if nid in exclude_set:
+                    continue
+                score = round(1.0 - m["distance"], 3)
+                if thresholded and score < threshold:
+                    break  # raw is distance-ascending → the rest are below threshold
+                if nid not in note_data:
+                    try:
+                        data = await wrapper.note_to_dict(nid, "full")
+                    except Exception:
+                        logger.debug(
+                            "search_notes: skipping unreadable note %s", nid, exc_info=True
+                        )
+                        continue
+                    if not _in_scope(data):
+                        continue  # out of deck/tag scope — keep it out of note_data entirely
+                    note_data[nid] = data
+                ranking.append(nid)
+                prev = sem_score.get(nid)
+                sem_score[nid] = score if prev is None else max(prev, score)
+                if len(ranking) >= top_k:
+                    break
+            return ranking
 
         results: list[dict[str, Any]] = []
         for i, (kind, label, text) in enumerate(text_sources):
@@ -524,31 +569,17 @@ def register_tools(
                 ):
                     note_data[note["id"]] = note
 
-            # Semantic ranking (scoped, thresholded, excluded), distance-ascending.
-            sem_ids: list[int] = []
+            # Per-modality semantic rankings (scoped, excluded), distance-ascending. The text
+            # ranking is thresholded as before; the image ranking is not (see _rank_modality). Each
+            # note's surfaced score is its running max similarity over the modalities it matched.
+            modality_hits = sem_by_source.get(i, {})
             sem_score: dict[int, float] = {}
-            for m in sem_raw.get(i, []):
-                nid = m["note_id"]
-                if nid in exclude_set:
-                    continue
-                score = round(1.0 - m["distance"], 3)
-                if score < threshold:
-                    break  # raw is distance-ascending → the rest are below threshold
-                if nid not in note_data:
-                    try:
-                        data = await wrapper.note_to_dict(nid, "full")
-                    except Exception:
-                        logger.debug(
-                            "search_notes: skipping unreadable note %s", nid, exc_info=True
-                        )
-                        continue
-                    if not _in_scope(data):
-                        continue  # out of deck/tag scope — keep it out of note_data entirely
-                    note_data[nid] = data
-                sem_ids.append(nid)
-                sem_score[nid] = score
-                if len(sem_ids) >= top_k:
-                    break
+            ranking_text = await _rank_modality(
+                modality_hits.get("text", []), note_data, sem_score, thresholded=True
+            )
+            ranking_image = await _rank_modality(
+                modality_hits.get("image", []), note_data, sem_score, thresholded=False
+            )
 
             # Exact ranking = every candidate whose content literally contains the query (the
             # `substring` annotation), so annotation ⟺ floated. Pre-filter hits already carry it.
@@ -561,7 +592,7 @@ def register_tools(
                         exact_ids.append(nid)
 
             fused = rrf_fuse(
-                {"semantic": sem_ids, "exact": exact_ids},
+                {"text": ranking_text, "image": ranking_image, "exact": exact_ids},
                 weights=SEARCH_WEIGHTS,
                 priority_signals=frozenset({"exact"}),
             )

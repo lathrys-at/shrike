@@ -79,7 +79,8 @@ class TestClipModel:
 
 @requires_clip
 class TestClipImageIndex:
-    """End-to-end multi-vector index (#162 Phase 3c): a text query retrieves a note by its image."""
+    """End-to-end per-modality index (#162 Phase 3c → search #201a): a text query retrieves a note
+    by its image, and the per-modality image ranker surfaces it at rank-1 across the gap."""
 
     # Class-scoped started backend (same rationale as TestClipModel, #215): load the ~147 MB CLIP
     # once for the class. Each test builds its own (cheap) collection + index against it.
@@ -134,7 +135,7 @@ class TestClipImageIndex:
         idx.set_image_resolver(*_make_image_resolver(w.media_dir))
         return idx
 
-    def test_note_image_is_indexed_and_retrievable(self, be: ClipBackend, tmp_path: Path) -> None:
+    def test_image_note_rank_one_via_image_ranker(self, be: ClipBackend, tmp_path: Path) -> None:
         from shrike.collection import CollectionWrapper
 
         w, red, other = self._collection(tmp_path)
@@ -142,14 +143,22 @@ class TestClipImageIndex:
             idx = self._index(be, tmp_path, w)
             inputs = w.run_sync(lambda c: CollectionWrapper._note_embed_inputs(c, [red, other]))
             idx.rebuild(inputs, col_mod=1, model_id=be.model_fingerprint())
-            # The image vector is indexed (red: text + image = 2 vectors; other: text = 1).
+            # red: text + image = 2 vectors (image in its own sub-index); other: text = 1.
             assert idx.size == 3
-            # The image-bearing note is retrievable. NB: *ranking* image hits above competing text
-            # across CLIP's modality gap (text-text cos ~0.72 vs text-image ~0.32) is rank fusion —
-            # the Search epic (#180) / Phase 3d. 3c stores the image vectors so fusion can use them;
-            # here we assert the data layer (indexed + retrievable; differentiation tested below).
-            nids = [r["note_id"] for r in idx.search(["a solid red colour image"], top_k=2)[0]]
-            assert red in nids
+            assert len(idx._indexes["image"]) == 1  # exactly the red note's image vector
+
+            # Per-modality retrieval (#201a): the image ranking is a separate signal, so the
+            # image-bearing note surfaces at rank-1 *in that ranking* regardless of CLIP's modality
+            # gap (text-text cos ~0.72 vs text-image ~0.32) — which a single deduped cosine ranking
+            # could not deliver (the red note's own TEXT is "study card", naming no colour).
+            matching = idx.search_by_modality(["a solid red colour image"], top_k=2)[0]
+            assert matching["image"][0]["note_id"] == red
+
+            # And it retrieves by image *content*: the red note's image vector is nearer the
+            # matching colour query than an unrelated-concept query (the robust colour-vs-unrelated
+            # regime — colour-vs-colour is ~0.05 and flips across int8 builds, so it's avoided).
+            unrelated = idx.search_by_modality(["a circuit diagram schematic"], top_k=2)[0]
+            assert matching["image"][0]["distance"] < unrelated["image"][0]["distance"]
         finally:
             w.close()
 

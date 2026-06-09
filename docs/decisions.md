@@ -8,10 +8,42 @@ isn't reconstructable from the code.
 
 ## Semantic search & the vector index
 
+### Per-modality retrieval splits the index, not the score (#201a)
+
+The 3c multi-vector index stored a note's text + image vectors under one `note_id` key in one
+`multi=True` USearch index. The problem: a USearch hit returns the `note_id` and the distance but
+**not which vector matched** — so `search_notes` could build only *one* deduped semantic ranking,
+and across the CLIP modality gap (text-text cos ~0.7 vs text-image ~0.3) a text query ranks every
+note's text vector above every image vector. Image hits were additive but never rank-1: a card whose
+*meaning lives in its image* couldn't be found by a text query. The fix is **per-modality
+sub-indexes** — `VectorIndex` keeps one USearch `Index` per modality (`text`, `image`), text vectors
+in `index.usearch`, image vectors in `index.image.usearch`. Separate indexes are the *only* way to
+recover a per-modality ranking from USearch given that limitation; a composite-key or filter scheme
+on one index can't, because the hit still wouldn't say which modality it came from.
+`search_by_modality` then ranks notes per modality (max-sim over a note's items of that modality —
+late-interaction style: a note scores as its single best-matching aspect) and each modality enters
+RRF as its **own signal**. Because RRF fuses rank *positions*, the gap's constant offset is invisible
+(see the #180 entry) — this is what makes the split pay off rather than just re-expose the gap.
+
+Two sub-decisions. **The image ranking is not thresholded.** The `threshold` knob is a *text*-cosine
+floor (~0.5); applied to gap-depressed image cosines (~0.3) it would floor every image hit, defeating
+the point. So #201a passes image hits through unfloored, and deciding *when a modality's matches are
+good enough to contribute* is left to the offline-calibrated intra-modal activation gate, **#201b** —
+a separate, harder problem (it needs per-modality best-match statistics, not a global constant). The
+documented cost until #201b: a text query on a multimodal collection surfaces some weakly-matching
+image notes. Text-only collections are unaffected (their image sub-index is empty → no image signal).
+**Migration is a one-way schema bump, not a format converter.** `index.meta.json` gains a `schema`
+marker; a pre-#201a (v1) index has none. A *text-only* v1 index is byte-identical to a v2 text
+sub-index (all its vectors are text, its file already *is* `index.usearch`), so it loads losslessly
+with no rebuild — text-only users pay nothing on upgrade. A *CLIP* v1 index mixed text + image vectors
+under one key and **can't be unmixed**, so an image-capable backend meeting a v1 index rebuilds once
+(reusing the existing drift-rebuild path). Detecting this by the schema marker rather than the old
+`multi`-flag check is what lets the text-only case skip the rebuild.
+
 ### Search fuses signals by rank (RRF), not normalized score (#180)
 
-`search_notes` blends retrieval signals — today semantic cosine + exact substring, soon n-gram
-fuzzy (#98), tag-centroid (#179), and per-modality semantic rankers (#201). They live on
+`search_notes` blends retrieval signals — semantic cosine (now per-modality `text`/`image`, #201a) +
+exact substring, soon n-gram fuzzy (#98) and tag-centroid (#179). They live on
 incommensurable scales: cosine clusters in a narrow ~0.3–0.7 band, exact match is near-binary, a
 cross-modal (text-query↔image-vector) cosine sits a roughly *constant offset* below within-modal.
 **Normalize-and-sum inherits every pathology** — min-max stretches cosine's narrow band so trivial
@@ -25,9 +57,9 @@ right" property in search UX. What RRF gives up is magnitude, which matters in e
 literal exact hit should outrank a merely-similar note regardless of rank gap — so the combiner
 carries a **priority tier** (`priority_signals`) that floats exact hits above the rest, RRF-ordered
 within. The decisive property for the multimodal arc: because RRF fuses *rank positions*, the
-per-modality constant cosine offset (the CLIP modality gap) is **invisible** to it — so #201's
-`ranking_image` neutralizes the gap with no normalization or calibration, which is why the multimodal
-addendum left the fusion backbone unchanged. The combiner (`search_fusion.rrf_fuse`) is pure (ints in,
+per-modality constant cosine offset (the CLIP modality gap) is **invisible** to it — so #201a's
+separate `text`/`image` rankings neutralize the gap with no normalization or calibration, which is
+why the multimodal addendum landed as new signals over an unchanged fusion backbone. The combiner (`search_fusion.rrf_fuse`) is pure (ints in,
 ranked ints out) and returns per-note which signals contributed at what rank — the seam provenance
 (#182) reads. This first slice ships the backbone over the two existing signals (near
 behaviour-equivalent today, since RRF over one semantic ranking == rank order); its worth is the

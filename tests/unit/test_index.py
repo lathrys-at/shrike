@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -13,6 +14,7 @@ import pytest
 from shrike.embedding_base import IMAGE, TEXT
 from shrike.index import (
     DEFAULT_SAVE_THRESHOLD,
+    INDEX_SCHEMA_VERSION,
     IndexSaver,
     IndexState,
     NoteEmbedInput,
@@ -648,17 +650,17 @@ class TestRebuildInBackground:
 
 
 def _vectors(idx: VectorIndex) -> dict[int, frozenset]:
-    """The index's {note_id: set of rounded vectors} — for asserting two indexes match.
-
-    multi=True keys repeat (once per vector) and ``get(key)`` returns all of a note's vectors as a
-    2D array, so dedup the keys and collapse each note's vectors into an order-independent set.
+    """The index's {note_id: set of rounded vectors across every modality sub-index} — for
+    asserting two indexes match. Each sub-index is multi=True so keys repeat (once per vector) and
+    ``get(key)`` returns all of a note's vectors as a 2D array; collapse each note's vectors (text +
+    images, across sub-indexes) into one order-independent set.
     """
-    keys = {int(k) for k in idx._index.keys}  # type: ignore[union-attr]
-    out: dict[int, frozenset] = {}
-    for k in keys:
-        vecs = np.atleast_2d(np.asarray(idx._index.get(k)))  # type: ignore[union-attr]
-        out[k] = frozenset(tuple(np.round(row, 5)) for row in vecs)
-    return out
+    out: dict[int, set] = {}
+    for sub in idx._indexes.values():
+        for k in {int(key) for key in sub.keys}:
+            vecs = np.atleast_2d(np.asarray(sub.get(k)))
+            out.setdefault(k, set()).update(tuple(np.round(row, 5)) for row in vecs)
+    return {k: frozenset(v) for k, v in out.items()}
 
 
 def _embedded(svc: MagicMock) -> list[str]:
@@ -808,26 +810,26 @@ class TestMultiVector:
         image_index.reconcile([NoteEmbedInput(1, "cat", ["a.png"])], col_mod=2, model_id="m")
         assert image_index.size == 2  # text + image after the image was added
 
-    def test_check_drift_rebuilds_single_vector_index_for_image_backend(
+    def test_check_drift_rebuilds_pre_restructure_index_for_image_backend(
         self, tmp_path: Path, image_backend: MagicMock
     ) -> None:
         from usearch.index import Index
 
         idx = VectorIndex(tmp_path / "index", backend=image_backend)
-        idx._index = Index(ndim=NDIM, metric="cos", dtype="f32", multi=False)  # simulate pre-3c
-        idx._col_mod, idx._model_id = 5, "m"
-        # Same col_mod + model, but a non-multi index can't hold the image vectors → rebuild.
+        idx._indexes = {TEXT: Index(ndim=NDIM, metric="cos", dtype="f32", multi=True)}
+        idx._col_mod, idx._model_id, idx._schema = 5, "m", 1  # pre-#201a (v1) single-index layout
+        # Same col_mod + model, but a v1 index mixed text+image under one key → rebuild to split.
         assert idx.check_drift(5, "m") is True
 
-    def test_check_drift_no_rebuild_for_text_backend_single_vector(
+    def test_check_drift_no_rebuild_for_text_backend_pre_restructure(
         self, tmp_path: Path, embedding_service: MagicMock
     ) -> None:
         from usearch.index import Index
 
         idx = VectorIndex(tmp_path / "index", backend=embedding_service)
-        idx._index = Index(ndim=NDIM, metric="cos", dtype="f32", multi=False)
-        idx._col_mod, idx._model_id = 5, "m"
-        # A text-only backend is happy with a single-vector index → no upgrade rebuild.
+        idx._indexes = {TEXT: Index(ndim=NDIM, metric="cos", dtype="f32", multi=True)}
+        idx._col_mod, idx._model_id, idx._schema = 5, "m", 1  # pre-#201a (v1) layout
+        # A text-only backend never triggers a per-modality restructure → no upgrade rebuild.
         assert idx.check_drift(5, "m") is False
 
     def test_late_arriving_image_reembeds_on_reconcile(self, image_index: VectorIndex) -> None:
@@ -852,3 +854,125 @@ class TestMultiVector:
         image_index.reconcile([NoteEmbedInput(1, "cat", ["gone.png"])], col_mod=2, model_id="m")
         assert image_index.size == 1
         image_index._embedding.embed_texts.assert_not_called()  # no spurious re-embed
+
+
+class TestPerModality:
+    """Per-modality sub-indexes + search_by_modality (#201a): text and image vectors live in
+    separate USearch sub-indexes, so a query can be ranked independently per modality."""
+
+    def test_add_routes_text_and_image_to_separate_subindexes(
+        self, image_index: VectorIndex
+    ) -> None:
+        image_index.set_image_resolver(_resolver({"a.png": b"AAA", "b.png": b"BBB"}))
+        image_index.add(
+            [NoteEmbedInput(1, "cat", ["a.png", "b.png"]), NoteEmbedInput(2, "dog", [])]
+        )
+        assert len(image_index._indexes[TEXT]) == 2  # one text vector per note
+        assert len(image_index._indexes[IMAGE]) == 2  # two image vectors, both under note 1
+        assert 1 in image_index._indexes[IMAGE]
+        assert 2 not in image_index._indexes[IMAGE]  # note 2 has no images
+
+    def test_text_only_backend_makes_no_image_subindex(self, index: VectorIndex) -> None:
+        index.add(_inp([1, 2], ["cat", "dog"]))
+        assert set(index._indexes) == {TEXT}
+
+    def test_search_by_modality_ranks_each_modality(self, image_index: VectorIndex) -> None:
+        image_index.set_image_resolver(_resolver({"a.png": b"AAA"}))
+        image_index.add([NoteEmbedInput(1, "cat", ["a.png"]), NoteEmbedInput(2, "dog", [])])
+        rankings = image_index.search_by_modality(["cat"], top_k=5)
+        assert len(rankings) == 1
+        r = rankings[0]
+        # The text query matches its own note's text vector best → note 1 leads the text ranking;
+        # both text notes appear.
+        assert r["text"][0]["note_id"] == 1
+        assert {h["note_id"] for h in r["text"]} == {1, 2}
+        # Only note 1 has an image, so the image ranking contains just note 1.
+        assert [h["note_id"] for h in r["image"]] == [1]
+
+    def test_image_ranking_dedups_to_best_per_note(self, image_index: VectorIndex) -> None:
+        # Max-sim-over-items: a note with several images appears once, at its best (min) distance.
+        image_index.set_image_resolver(_resolver({"a.png": b"AAA", "b.png": b"BBB"}))
+        image_index.add([NoteEmbedInput(1, "cat", ["a.png", "b.png"])])
+        img = image_index.search_by_modality(["cat"], top_k=5)[0]["image"]
+        assert [h["note_id"] for h in img] == [1]
+
+    def test_search_by_modality_omits_empty_modalities(self, index: VectorIndex) -> None:
+        index.add(_inp([1, 2], ["cat", "dog"]))
+        rankings = index.search_by_modality(["cat"], top_k=5)
+        assert set(rankings[0]) == {"text"}  # no image sub-index → no image key
+
+    def test_search_uses_text_vectors_not_image(self, image_index: VectorIndex) -> None:
+        # The neighbour search() path is text-backed: querying "cat" self-matches note 1's *text*
+        # vector at distance ~0, not its (unrelated, nonzero-distance) image vector.
+        image_index.set_image_resolver(_resolver({"a.png": b"AAA"}))
+        image_index.add([NoteEmbedInput(1, "cat", ["a.png"])])
+        results = image_index.search(["cat"], top_k=5)[0]
+        assert results[0]["note_id"] == 1
+        assert results[0]["distance"] == pytest.approx(0.0, abs=1e-4)
+
+    def test_remove_clears_every_subindex(self, image_index: VectorIndex) -> None:
+        image_index.set_image_resolver(_resolver({"a.png": b"AAA"}))
+        image_index.add([NoteEmbedInput(1, "cat", ["a.png"])])
+        assert len(image_index._indexes[IMAGE]) == 1
+        image_index.remove([1])
+        assert len(image_index._indexes[TEXT]) == 0
+        assert len(image_index._indexes[IMAGE]) == 0
+
+    def test_readd_with_fewer_images_drops_stale_image_vectors(
+        self, image_index: VectorIndex
+    ) -> None:
+        # Re-adding a note that lost its images must not leave orphaned image vectors behind.
+        image_index.set_image_resolver(_resolver({"a.png": b"AAA"}))
+        image_index.add([NoteEmbedInput(1, "cat", ["a.png"])])
+        assert len(image_index._indexes[IMAGE]) == 1
+        image_index.add([NoteEmbedInput(1, "cat", [])])  # same note, no images now
+        assert len(image_index._indexes[IMAGE]) == 0
+        assert len(image_index._indexes[TEXT]) == 1
+
+
+class TestPerModalityMigration:
+    """v1 (pre-#201a) → v2 (per-modality) index migration and on-disk layout (#201a)."""
+
+    def test_image_index_persists_per_modality_files(
+        self, tmp_path: Path, image_backend: MagicMock
+    ) -> None:
+        idx = VectorIndex(tmp_path / "i", backend=image_backend)
+        idx.set_image_resolver(_resolver({"a.png": b"AAA"}))
+        idx.rebuild([NoteEmbedInput(1, "cat", ["a.png"])], col_mod=1, model_id="m")
+        assert (tmp_path / "i" / "index.usearch").exists()  # text sub-index keeps the original name
+        assert (tmp_path / "i" / "index.image.usearch").exists()  # image sub-index is a new file
+        reloaded = VectorIndex(tmp_path / "i", backend=image_backend)
+        assert reloaded.size == 2
+        assert reloaded._schema == INDEX_SCHEMA_VERSION
+        assert "image" in reloaded.search_by_modality(["cat"], top_k=5)[0]
+
+    def test_text_only_v1_index_loads_as_text_without_rebuild(
+        self, tmp_path: Path, embedding_service: MagicMock
+    ) -> None:
+        idx = VectorIndex(tmp_path / "i", backend=embedding_service)
+        idx.rebuild(_inp([1, 2], ["a", "b"]), col_mod=1, model_id="m")
+        # Strip the schema marker to simulate a pre-#201a (v1) index on disk.
+        meta_path = tmp_path / "i" / "index.meta.json"
+        meta = json.loads(meta_path.read_text())
+        del meta["schema"]
+        meta_path.write_text(json.dumps(meta))
+
+        reloaded = VectorIndex(tmp_path / "i", backend=embedding_service)
+        assert reloaded._schema == 1  # recognised as v1
+        assert reloaded.size == 2  # the v1 index.usearch loaded straight into the text sub-index
+        assert set(reloaded._indexes) == {TEXT}
+        assert reloaded.check_drift(1, "m") is False  # text-only → no restructure rebuild
+
+    def test_save_removes_stale_image_file_after_backend_switch(
+        self, tmp_path: Path, image_backend: MagicMock, embedding_service: MagicMock
+    ) -> None:
+        idx = VectorIndex(tmp_path / "i", backend=image_backend)
+        idx.set_image_resolver(_resolver({"a.png": b"AAA"}))
+        idx.rebuild([NoteEmbedInput(1, "cat", ["a.png"])], col_mod=1, model_id="m")
+        assert (tmp_path / "i" / "index.image.usearch").exists()
+        # Switch to a text-only backend and rebuild: no image sub-index, and the stale file is gone
+        # so it isn't reloaded as a phantom image index on the next startup.
+        idx.set_backend(embedding_service)
+        idx.rebuild(_inp([1], ["cat"]), col_mod=2, model_id="m2")
+        assert set(idx._indexes) == {TEXT}
+        assert not (tmp_path / "i" / "index.image.usearch").exists()

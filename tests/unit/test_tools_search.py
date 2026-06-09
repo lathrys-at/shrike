@@ -45,12 +45,21 @@ def _upsert(mcp: FastMCP, notes: list[dict], **extra: Any) -> dict[str, Any]:
     return _call(mcp, "upsert_notes", {"notes": notes, **extra})
 
 
+def _text_hits(per_query: list[list[dict]]) -> list[dict[str, list[dict]]]:
+    """Wrap legacy ``[[hit, ...], ...]`` semantic returns as per-modality ``{"text": [...]}`` maps —
+    the shape ``search_by_modality`` returns (one per query). Tests that want an image-modality
+    ranking build the dict directly."""
+    return [{"text": hits} for hits in per_query]
+
+
 @pytest.fixture()
 def mock_index():
     idx = MagicMock(spec=VectorIndex)
     idx.state = IndexState.READY
     idx.available = True
     idx.build_progress = (0, 0)
+    # search_notes ranks per modality; the upsert neighbour path still uses plain search().
+    idx.search_by_modality = MagicMock(return_value=[])
     idx.search = MagicMock(return_value=[])
     idx.col_mod = 0
     idx.size = 100
@@ -114,7 +123,9 @@ class TestSearchNotesStates:
 
 class TestSearchNotesResults:
     def test_text_query(self, wrapper, mock_index, mcp_app, basic_note):
-        mock_index.search.return_value = [[{"note_id": basic_note, "distance": 0.1}]]
+        mock_index.search_by_modality.return_value = _text_hits(
+            [[{"note_id": basic_note, "distance": 0.1}]]
+        )
         result = _call(mcp_app, "search_notes", {"queries": ["math question"]})
         assert len(result["results"]) == 1
         assert result["results"][0]["source"] == "math question"
@@ -127,7 +138,9 @@ class TestSearchNotesResults:
         other = _seed(
             wrapper, [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Q", "Back": "A"}}]
         )[0]["id"]
-        mock_index.search.return_value = [[{"note_id": other, "distance": 0.2}]]
+        mock_index.search_by_modality.return_value = _text_hits(
+            [[{"note_id": other, "distance": 0.2}]]
+        )
         result = _call(mcp_app, "search_notes", {"ids": [basic_note]})
         assert len(result["results"]) == 1
         assert result["results"][0]["source"] == f"note #{basic_note}"
@@ -136,18 +149,22 @@ class TestSearchNotesResults:
         other = _seed(
             wrapper, [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Q", "Back": "A"}}]
         )[0]["id"]
-        mock_index.search.return_value = [
+        mock_index.search_by_modality.return_value = _text_hits(
             [
-                {"note_id": basic_note, "distance": 0.05},
-                {"note_id": other, "distance": 0.2},
+                [
+                    {"note_id": basic_note, "distance": 0.05},
+                    {"note_id": other, "distance": 0.2},
+                ]
             ]
-        ]
+        )
         result = _call(mcp_app, "search_notes", {"queries": ["test"], "exclude_ids": [basic_note]})
         matches = result["results"][0]["matches"]
         assert all(m["id"] != basic_note for m in matches)
 
     def test_deck_filter(self, wrapper, mock_index, mcp_app, basic_note):
-        mock_index.search.return_value = [[{"note_id": basic_note, "distance": 0.1}]]
+        mock_index.search_by_modality.return_value = _text_hits(
+            [[{"note_id": basic_note, "distance": 0.1}]]
+        )
         result = _call(mcp_app, "search_notes", {"queries": ["test"], "deck": "Nonexistent"})
         assert result["results"][0]["matches"] == []
 
@@ -160,7 +177,7 @@ class TestUnifiedSearch:
         return _seed(wrapper, [note])[0]["id"]
 
     def test_exact_match_without_semantic(self, wrapper, mock_index, mcp_app):
-        mock_index.search.return_value = [[]]  # no semantic hits
+        mock_index.search_by_modality.return_value = _text_hits([[]])  # no semantic hits
         self._seed_front(wrapper, "Electron transport chain")
         m = _call(mcp_app, "search_notes", {"queries": ["transport"]})["results"][0]["matches"]
         assert len(m) == 1
@@ -169,7 +186,9 @@ class TestUnifiedSearch:
 
     def test_both_score_and_substring(self, wrapper, mock_index, mcp_app):
         nid = self._seed_front(wrapper, "Electron transport chain")
-        mock_index.search.return_value = [[{"note_id": nid, "distance": 0.1}]]  # score 0.9
+        mock_index.search_by_modality.return_value = _text_hits(
+            [[{"note_id": nid, "distance": 0.1}]]
+        )  # score 0.9
         m = _call(mcp_app, "search_notes", {"queries": ["transport"]})["results"][0]["matches"][0]
         assert m["score"] == 0.9
         assert m["substring"] is not None
@@ -177,7 +196,9 @@ class TestUnifiedSearch:
     def test_threshold_does_not_drop_exact(self, wrapper, mock_index, mcp_app):
         nid = self._seed_front(wrapper, "unique phrase here")
         # Semantic score 0.01 is below threshold → not attached; exact still includes it.
-        mock_index.search.return_value = [[{"note_id": nid, "distance": 0.99}]]
+        mock_index.search_by_modality.return_value = _text_hits(
+            [[{"note_id": nid, "distance": 0.99}]]
+        )
         m = _call(mcp_app, "search_notes", {"queries": ["unique phrase"], "threshold": 0.5})[
             "results"
         ][0]["matches"]
@@ -189,7 +210,9 @@ class TestUnifiedSearch:
         exact_nid = self._seed_front(wrapper, "alpha beta gamma")
         sem_only = self._seed_front(wrapper, "unrelated content")
         # semantic returns the unrelated note with a high score; exact match has none
-        mock_index.search.return_value = [[{"note_id": sem_only, "distance": 0.05}]]  # 0.95
+        mock_index.search_by_modality.return_value = _text_hits(
+            [[{"note_id": sem_only, "distance": 0.05}]]
+        )  # 0.95
         m = _call(mcp_app, "search_notes", {"queries": ["beta gamma"]})["results"][0]["matches"]
         ids = [x["id"] for x in m]
         assert ids[0] == exact_nid  # literal hit ranks first despite no score
@@ -204,12 +227,14 @@ class TestUnifiedSearch:
         literal = self._seed_front(wrapper, "alpha beta gamma")
         sem_only = self._seed_front(wrapper, "unrelated content")
         wrapper.search_substring = AsyncMock(return_value=[])  # pre-filter "misses" everything
-        mock_index.search.return_value = [
+        mock_index.search_by_modality.return_value = _text_hits(
             [
-                {"note_id": sem_only, "distance": 0.05},  # 0.95 — strong semantic, no literal
-                {"note_id": literal, "distance": 0.20},  # 0.80 — weaker, but literal "beta gamma"
+                [
+                    {"note_id": sem_only, "distance": 0.05},  # 0.95 — strong semantic, no literal
+                    {"note_id": literal, "distance": 0.20},  # 0.80 — weaker, literal "beta gamma"
+                ]
             ]
-        ]
+        )
         m = _call(mcp_app, "search_notes", {"queries": ["beta gamma"], "threshold": 0.5})[
             "results"
         ][0]["matches"]
@@ -217,12 +242,16 @@ class TestUnifiedSearch:
         assert m[0]["substring"] is not None
 
     def test_tags_filter(self, wrapper, mock_index, mcp_app, basic_note):
-        mock_index.search.return_value = [[{"note_id": basic_note, "distance": 0.1}]]
+        mock_index.search_by_modality.return_value = _text_hits(
+            [[{"note_id": basic_note, "distance": 0.1}]]
+        )
         result = _call(mcp_app, "search_notes", {"queries": ["test"], "tags": ["nonexistent-tag"]})
         assert result["results"][0]["matches"] == []
 
     def test_result_includes_content(self, wrapper, mock_index, mcp_app, basic_note):
-        mock_index.search.return_value = [[{"note_id": basic_note, "distance": 0.1}]]
+        mock_index.search_by_modality.return_value = _text_hits(
+            [[{"note_id": basic_note, "distance": 0.1}]]
+        )
         result = _call(mcp_app, "search_notes", {"queries": ["test"]})
         match = result["results"][0]["matches"][0]
         assert "content" in match
@@ -232,7 +261,7 @@ class TestUnifiedSearch:
         """top_k is schema-constrained (ge=1, le=50); out-of-range is rejected."""
         from mcp.server.fastmcp.exceptions import ToolError
 
-        mock_index.search.return_value = [[]]
+        mock_index.search_by_modality.return_value = _text_hits([[]])
         with pytest.raises(ToolError):
             _call(mcp_app, "search_notes", {"queries": ["test"], "top_k": 0})
 
@@ -240,7 +269,7 @@ class TestUnifiedSearch:
         """queries is capped at 50 (schema max_length) to bound embedding load."""
         from mcp.server.fastmcp.exceptions import ToolError
 
-        mock_index.search.return_value = [[]]
+        mock_index.search_by_modality.return_value = _text_hits([[]])
         with pytest.raises(ToolError):
             _call(mcp_app, "search_notes", {"queries": [f"q{i}" for i in range(51)]})
 
@@ -248,21 +277,21 @@ class TestUnifiedSearch:
         """ids (search anchors) is likewise capped at 50."""
         from mcp.server.fastmcp.exceptions import ToolError
 
-        mock_index.search.return_value = [[]]
+        mock_index.search_by_modality.return_value = _text_hits([[]])
         with pytest.raises(ToolError):
             _call(mcp_app, "search_notes", {"ids": list(range(51))})
 
     def test_deck_filter_overfetches(self, mcp_app, mock_index):
         """With a deck filter, search over-fetches a wider window (2.3)."""
-        mock_index.search.return_value = [[]]
+        mock_index.search_by_modality.return_value = _text_hits([[]])
         _call(mcp_app, "search_notes", {"queries": ["test"], "deck": "D", "top_k": 5})
-        assert mock_index.search.call_args[1]["top_k"] >= 50  # >= top_k * 10
+        assert mock_index.search_by_modality.call_args[1]["top_k"] >= 50  # >= top_k * 10
 
     def test_no_overfetch_without_filter(self, mcp_app, mock_index):
         """Without deck/tag filters, the window is just top_k (+ excludes)."""
-        mock_index.search.return_value = [[]]
+        mock_index.search_by_modality.return_value = _text_hits([[]])
         _call(mcp_app, "search_notes", {"queries": ["test"], "top_k": 5})
-        assert mock_index.search.call_args[1]["top_k"] == 5
+        assert mock_index.search_by_modality.call_args[1]["top_k"] == 5
 
     def test_deck_filter_returns_deep_in_scope_match(
         self, wrapper, mock_index, mcp_app, basic_note
@@ -278,21 +307,63 @@ class TestUnifiedSearch:
             wrapper,
             [{"deck": "Other", "note_type": "Basic", "fields": {"Front": "O", "Back": "A"}}],
         )[0]["id"]
-        mock_index.search.return_value = [
+        mock_index.search_by_modality.return_value = _text_hits(
             [
-                {"note_id": other, "distance": 0.05},
-                {"note_id": basic_note, "distance": 0.20},
+                [
+                    {"note_id": other, "distance": 0.05},
+                    {"note_id": basic_note, "distance": 0.20},
+                ]
             ]
-        ]
+        )
         result = _call(mcp_app, "search_notes", {"queries": ["q"], "deck": "Test"})
         matches = result["results"][0]["matches"]
         assert [m["id"] for m in matches] == [basic_note]
 
     def test_score_rounded_to_3_decimals(self, wrapper, mock_index, mcp_app, basic_note):
-        mock_index.search.return_value = [[{"note_id": basic_note, "distance": 0.12345}]]
+        mock_index.search_by_modality.return_value = _text_hits(
+            [[{"note_id": basic_note, "distance": 0.12345}]]
+        )
         result = _call(mcp_app, "search_notes", {"queries": ["test"]})
         score = result["results"][0]["matches"][0]["score"]
         assert score == round(1.0 - 0.12345, 3)
+
+    def test_image_modality_hit_surfaces_unthresholded(self, wrapper, mock_index, mcp_app):
+        # An image-modality match with no text match still surfaces the note: the image ranking is
+        # its own RRF signal and is NOT thresholded (the text-calibrated threshold is meaningless
+        # across the CLIP gap; flooring image hits is the #201b activation gate's job). The surfaced
+        # score is the (gap-depressed but real) image cosine.
+        nid = self._seed_front(wrapper, "diagram of the krebs cycle")
+        mock_index.search_by_modality.return_value = [
+            {"image": [{"note_id": nid, "distance": 0.7}]}  # 0.30 sim — below threshold, still kept
+        ]
+        m = _call(mcp_app, "search_notes", {"queries": ["mitochondria"], "threshold": 0.5})[
+            "results"
+        ][0]["matches"]
+        assert [x["id"] for x in m] == [nid]
+        assert m[0]["score"] == 0.3
+
+    def test_text_modality_stays_thresholded(self, wrapper, mock_index, mcp_app):
+        # The text ranking keeps its threshold: a weak text-only hit with no literal match drops.
+        nid = self._seed_front(wrapper, "unrelated content here")
+        mock_index.search_by_modality.return_value = _text_hits(
+            [[{"note_id": nid, "distance": 0.9}]]  # 0.10 sim — below threshold
+        )
+        m = _call(mcp_app, "search_notes", {"queries": ["xyz"], "threshold": 0.5})["results"][0][
+            "matches"
+        ]
+        assert m == []
+
+    def test_score_is_max_over_matched_modalities(self, wrapper, mock_index, mcp_app):
+        # A note matching in both text and image gets the *max* similarity as its surfaced score.
+        nid = self._seed_front(wrapper, "alpha")
+        mock_index.search_by_modality.return_value = [
+            {
+                "text": [{"note_id": nid, "distance": 0.1}],  # 0.90 text
+                "image": [{"note_id": nid, "distance": 0.7}],  # 0.30 image
+            }
+        ]
+        m = _call(mcp_app, "search_notes", {"queries": ["alpha query"]})["results"][0]["matches"][0]
+        assert m["score"] == 0.9  # max(0.90 text, 0.30 image)
 
 
 class TestUpsertNeighbors:
