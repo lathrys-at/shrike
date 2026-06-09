@@ -47,26 +47,38 @@ def _collect_for_rebuild(c: Any) -> tuple[list[NoteEmbedInput], int]:
     return CollectionWrapper._note_embed_inputs(c, note_ids), c.mod
 
 
-def _make_image_resolver(media_dir: str) -> Callable[[str], bytes | None]:
-    """A resolver mapping an image filename to its bytes from the media dir (None = missing).
+def _make_image_resolver(
+    media_dir: str,
+) -> tuple[Callable[[str], bytes | None], Callable[[str], bool]]:
+    """A ``(read, exists)`` pair over the media dir for the index's image resolver.
 
     Closes over the (lock-free, path-derived) media dir so the index can read image bytes on its
-    own embed thread without touching the Anki collection. Sanitizes to a basename inside the dir
-    (``_safe_media_name``), so a name can only ever resolve inside the media folder.
+    own embed thread without touching the Anki collection. Both sanitize to a basename inside the
+    dir (``_safe_media_name``), so a name can only ever resolve inside the media folder. ``exists``
+    is a cheap stat (no byte read) the index folds into the per-note hash, so an image stored after
+    its note re-embeds on reconcile instead of being skipped.
     """
     from shrike.collection import _safe_media_name
 
-    def _read(name: str) -> bytes | None:
+    def _path(name: str) -> str | None:
         safe = _safe_media_name(name)
-        if not safe:
+        return os.path.join(media_dir, safe) if safe else None
+
+    def _read(name: str) -> bytes | None:
+        path = _path(name)
+        if path is None:
             return None
         try:
-            with open(os.path.join(media_dir, safe), "rb") as f:
+            with open(path, "rb") as f:
                 return f.read()
         except OSError:
             return None
 
-    return _read
+    def _exists(name: str) -> bool:
+        path = _path(name)
+        return path is not None and os.path.isfile(path)
+
+    return _read, _exists
 
 
 def _maybe_rebuild(
@@ -787,9 +799,11 @@ def main() -> None:
     # attached, so the embedding lifecycle can be cycled at runtime.
     cache_base = Path(args.cache_dir) if args.cache_dir else cache_dir()
     index = VectorIndex(path=cache_base / "index")
-    # Let the index read image bytes (lock-free, off the worker thread) for a CLIP-style backend;
-    # inert for a text-only backend. media_dir is path-derived, so this is safe before open.
-    index.set_image_resolver(_make_image_resolver(wrapper.media_dir))
+    # Let the index read image bytes + cheaply check presence (lock-free, off the worker thread)
+    # for a CLIP-style backend; inert for a text-only backend. media_dir is path-derived → safe
+    # before open.
+    _read_img, _img_exists = _make_image_resolver(wrapper.media_dir)
+    index.set_image_resolver(_read_img, _img_exists)
     logger.info("Vector index: %d vectors, %d dims", index.size, index.ndim or 0)
 
     # Debounced persistence: incremental edits flush after a quiet period (or a

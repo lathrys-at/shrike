@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import logging
@@ -685,7 +686,7 @@ def register_tools(
                 neighbors_ok = False
                 try:
                     inputs = await wrapper.note_embed_inputs(changed_ids)
-                    index.add(inputs)
+                    await asyncio.to_thread(index.add, inputs)
                     index.col_mod = await wrapper.run(lambda c: c.mod)
                     logger.debug("Index updated: %d notes added/replaced", len(changed_ids))
                     neighbors_ok = await _attach_neighbors(
@@ -1206,7 +1207,7 @@ def register_tools(
             # (best-effort, like upsert_notes).
             try:
                 inputs = await wrapper.note_embed_inputs(changed_ids)
-                index.add(inputs)
+                await asyncio.to_thread(index.add, inputs)
                 index.col_mod = await wrapper.run(lambda c: c.mod)
                 if saver is not None:
                     saver.request_save()
@@ -1311,7 +1312,7 @@ def register_tools(
             # notes (their IDs are unchanged) — best-effort, like find_replace_notes.
             try:
                 inputs = await wrapper.note_embed_inputs(changed)
-                index.add(inputs)
+                await asyncio.to_thread(index.add, inputs)
                 index.col_mod = await wrapper.run(lambda c: c.mod)
                 if saver is not None:
                     saver.request_save()

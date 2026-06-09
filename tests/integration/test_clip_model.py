@@ -131,7 +131,7 @@ class TestClipImageIndex:
         from shrike.server import _make_image_resolver
 
         idx = VectorIndex(tmp_path / "index", backend=be)
-        idx.set_image_resolver(_make_image_resolver(w.media_dir))
+        idx.set_image_resolver(*_make_image_resolver(w.media_dir))
         return idx
 
     def test_note_image_is_indexed_and_retrievable(self, be: ClipBackend, tmp_path: Path) -> None:

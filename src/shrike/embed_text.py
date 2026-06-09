@@ -37,8 +37,9 @@ rebuild rather than silently mixing old- and new-style vectors.
 
 from __future__ import annotations
 
-import html
+import contextlib
 import re
+from html.parser import HTMLParser
 
 # Bump on any change to normalize_for_embedding's output (incl. an Anki upgrade
 # whose stripper changes). v1 is the first normalized scheme — it replaces the
@@ -114,11 +115,22 @@ def normalize_for_embedding(value: str) -> str:
 # empty-note rule (#89), not by embedding (which strips media out entirely).
 _MEDIA_RE = re.compile(r"(?i)<\s*(?:img|audio|video|object|embed|source)\b|\[sound:")
 
-# An <img>'s src (double-, single-, or unquoted). Used to extract a note's image filenames for
-# multimodal embedding (#162) — distinct from _MEDIA_RE (which only *detects* media presence).
-_IMG_SRC_RE = re.compile(
-    r"""(?ix) < \s* img \b [^>]*? \b src \s* = \s* (?: "([^"]*)" | '([^']*)' | ([^\s>]+) )"""
-)
+
+class _ImgSrcParser(HTMLParser):
+    """Collect ``<img>`` ``src`` attribute values. A real parser (not a regex) so an earlier
+    ``data-src=`` or a ``src=`` *inside another attribute's value* can't be mistaken for the tag's
+    own ``src`` — the failure modes a regex over ``<img …>`` hits on lazy-load / web-pasted markup.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.srcs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "img":
+            for name, val in attrs:
+                if name == "src" and val:
+                    self.srcs.append(val)
 
 
 def extract_image_refs(value: str) -> list[str]:
@@ -132,10 +144,13 @@ def extract_image_refs(value: str) -> list[str]:
     """
     if not value or "<img" not in value.lower():
         return []
+    parser = _ImgSrcParser()
+    with contextlib.suppress(Exception):  # malformed markup must not break extraction
+        parser.feed(value)
     names: list[str] = []
     seen: set[str] = set()
-    for m in _IMG_SRC_RE.finditer(value):
-        src = html.unescape(m.group(1) or m.group(2) or m.group(3) or "").strip()
+    for raw in parser.srcs:
+        src = raw.strip()  # HTMLParser already unescapes entities in attribute values
         if not src or "://" in src:  # empty or a remote URL → not local media
             continue
         name = src.rsplit("/", 1)[-1]  # basename; Anki's media dir is flat

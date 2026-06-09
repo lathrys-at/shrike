@@ -143,6 +143,17 @@ class TestExtractImageRefs:
 
         assert extract_image_refs("plain <b>text</b> [sound:x.mp3]") == []
 
+    def test_data_src_decoy_ignored(self):
+        # A real parser must not grab the earlier data-src= as the tag's src (regex did, #213).
+        from shrike.embed_text import extract_image_refs
+
+        assert extract_image_refs('<img data-src="decoy.png" src="real.png">') == ["real.png"]
+
+    def test_src_inside_other_attribute_value_ignored(self):
+        from shrike.embed_text import extract_image_refs
+
+        assert extract_image_refs('<img alt="x src=y" src="real.png">') == ["real.png"]
+
 
 class TestNoteEmbedInputs:
     """CollectionWrapper.note_embed_inputs — text + image names per note (#162)."""

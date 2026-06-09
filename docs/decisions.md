@@ -172,10 +172,14 @@ real DistilRoBERTa run:
   image bytes are read lazily and lock-free** — the media dir is path-derived (resolves without the
   Anki lock, #70), so the index reads bytes on its own embed thread via an injected resolver, only
   for the notes it's (re-)embedding, never pre-reading every image on a drift check. **(2) The
-  reconcile fingerprint hashes image *filenames*, not bytes** — Anki content-addresses media (a
-  filename is a stable content identity), so this detects add/remove/swap cheaply (DB text + a
-  regex) and is folded in *only* for an image-capable backend, leaving text-only hashes byte-
-  identical to the pre-3c scheme (no spurious upgrade rebuild). **(3) No index schema marker is
+  reconcile fingerprint hashes the *filenames of a note's resolvable images*, not bytes** — Anki
+  content-addresses media (a filename is a stable content identity), so this detects
+  add/remove/swap/late-arrival cheaply (DB text + a regex + a presence `stat`, no byte read) and is
+  folded in *only* for an image-capable backend, leaving text-only hashes byte-identical to the
+  pre-3c scheme (no spurious upgrade rebuild). Hashing only *resolvable* names (the resolver's
+  cheap `exists` half) is what keeps reconcile == a full rebuild even for a note authored before
+  its media landed — the name of an unstored image isn't folded in, so the image re-embeds once it
+  appears rather than being claimed-but-absent forever. **(3) No index schema marker is
   needed** — USearch persists the `multi` flag, so a pre-3c `multi=False` index is detected on load
   and rebuilt into a multi-vector one *only when* an image-capable backend attaches (`check_drift`);
   a text-only user keeps their single-vector index untouched. **Scope:** 3c indexes image vectors

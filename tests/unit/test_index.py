@@ -829,3 +829,26 @@ class TestMultiVector:
         idx._col_mod, idx._model_id = 5, "m"
         # A text-only backend is happy with a single-vector index → no upgrade rebuild.
         assert idx.check_drift(5, "m") is False
+
+    def test_late_arriving_image_reembeds_on_reconcile(self, image_index: VectorIndex) -> None:
+        # F1: a note authored *before* its image is stored. The name-only hash must NOT claim the
+        # image (it didn't embed), so a later reconcile (once the image lands) re-embeds it —
+        # keeping reconcile == full rebuild. A read-based resolver doubles as the presence check.
+        store: dict[str, bytes] = {}
+        image_index.set_image_resolver(lambda n: store.get(n))
+        image_index.rebuild([NoteEmbedInput(1, "cat", ["late.png"])], col_mod=1, model_id="m")
+        assert image_index.size == 1  # image missing at embed time → text vector only
+        store["late.png"] = b"LATE"  # the media is stored later (store_media)
+        image_index.reconcile([NoteEmbedInput(1, "cat", ["late.png"])], col_mod=2, model_id="m")
+        assert image_index.size == 2  # reconcile noticed missing->present and embedded the image
+
+    def test_permanently_missing_image_does_not_loop(self, image_index: VectorIndex) -> None:
+        # The flip side of F1: a referenced-but-never-stored image must NOT re-embed every drift
+        # (its name isn't folded into the hash, so the hash is stable).
+        image_index.set_image_resolver(lambda _n: None)  # nothing ever resolves
+        image_index.rebuild([NoteEmbedInput(1, "cat", ["gone.png"])], col_mod=1, model_id="m")
+        assert image_index.size == 1
+        image_index._embedding.embed_texts.reset_mock()
+        image_index.reconcile([NoteEmbedInput(1, "cat", ["gone.png"])], col_mod=2, model_id="m")
+        assert image_index.size == 1
+        image_index._embedding.embed_texts.assert_not_called()  # no spurious re-embed

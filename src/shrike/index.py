@@ -36,11 +36,15 @@ BATCH_SIZE = 64
 # Search over-fetches this multiple of top_k raw vectors before deduping to distinct notes — a
 # note can contribute several vectors (text + images) under one key, so the raw top-k can dedup
 # to fewer notes. A small factor covers the common few-images-per-note case; a note with more
-# images than this could in principle still under-fill, which is acceptable for search recall.
+# images than this could in principle still under-fill (a real but minor recall reduction vs a
+# single-vector index for image-heavy notes) — a smarter fetch bound is a rank-fusion concern,
+# #180.
 SEARCH_OVERFETCH = 4
 
 # An image resolver maps a media filename to its bytes (None = missing/unreadable → skipped).
 ImageResolver = Callable[[str], "bytes | None"]
+# A cheap presence check for a media filename (a stat, not a byte read) — folded into the hash.
+ImageExists = Callable[[str], bool]
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,7 @@ class VectorIndex:
         self._hashes_path = self._dir / "index.hashes.json"
         self._embedding = backend
         self._read_image: ImageResolver | None = None
+        self._image_exists_fn: ImageExists | None = None
         self._index: Any | None = None
         self._ndim: int | None = None
         self._col_mod: int | None = None
@@ -176,30 +181,47 @@ class VectorIndex:
         elif self._state == IndexState.UNAVAILABLE:
             self._state = IndexState.READY
 
-    def set_image_resolver(self, resolver: ImageResolver | None) -> None:
-        """Attach the media-byte resolver the index uses to read images for embedding.
+    def set_image_resolver(
+        self, resolver: ImageResolver | None, exists: ImageExists | None = None
+    ) -> None:
+        """Attach the media resolver the index uses to read/locate images for embedding.
 
-        ``resolver(filename) -> bytes | None`` (``None`` = missing/unreadable → skipped). The
-        server closes it over ``CollectionWrapper.media_dir``; reads are lock-free (the media dir
-        resolves without the Anki lock), so the index reads bytes on its own embed thread, only
-        for the notes it's (re-)embedding. Without it, an image-capable backend embeds text only.
+        ``resolver(filename) -> bytes | None`` (``None`` = missing/unreadable → skipped) reads the
+        bytes for embedding. ``exists(filename) -> bool`` is a *cheap* presence check (a stat, no
+        byte read) folded into the per-note fingerprint, so the hash reflects which images actually
+        resolve — that's what makes a later-stored image (note authored before the media landed)
+        re-embed on reconcile instead of being skipped forever. The server closes both over
+        ``CollectionWrapper.media_dir`` (lock-free). When ``exists`` is omitted, presence falls
+        back to the byte read; with neither resolver, an image-capable backend embeds text only.
         """
         self._read_image = resolver
+        self._image_exists_fn = exists
 
     def _embeds_images(self) -> bool:
         """True when the attached backend embeds images (so the index must be multi-vector)."""
         return self._embedding is not None and IMAGE in self._embedding.modalities
 
+    def _image_exists(self, name: str) -> bool:
+        """Whether an image resolves (cheaply) — drives both the hash and what gets embedded."""
+        if self._image_exists_fn is not None:
+            return self._image_exists_fn(name)
+        if self._read_image is not None:
+            return self._read_image(name) is not None
+        return True  # no resolver attached → can't check; assume present (direct-hash unit tests)
+
     def _note_hash(self, text: str, image_names: Sequence[str]) -> str:
         """Per-note change fingerprint. Folds image filenames in **only** when the backend embeds
-        images — so a text-only backend's hashes are byte-identical to the pre-3c text-only scheme
-        (no spurious re-embed on upgrade), while a CLIP backend re-embeds a note when its image set
-        changes. Anki content-addresses media (a filename is a stable content identity), so hashing
-        names — not bytes — detects add/remove/swap without reading any file.
+        images *and the image resolves* — so the hash matches what ``add`` actually embedded, and a
+        full rebuild over the same notes lands on the identical state (the reconcile==rebuild
+        invariant holds even for a note whose image is stored after it). A text-only backend's hash
+        is byte-identical to the pre-3c text-only scheme (no spurious re-embed on upgrade). Anki
+        content-addresses media (a filename is a stable content identity), so hashing the names of
+        the *present* images detects add/remove/swap/late-arrival cheaply (a stat, no byte read).
         """
-        if self._embeds_images() and image_names:
-            joined = "\x1f".join(sorted(image_names))
-            return _hash_text(f"{text}\x1f{joined}")
+        if self._embeds_images():
+            present = sorted(n for n in image_names if self._image_exists(n))
+            if present:
+                return _hash_text(f"{text}\x1f" + "\x1f".join(present))
         return _hash_text(text)
 
     @property
@@ -316,8 +338,11 @@ class VectorIndex:
         for i in range(0, len(inputs), BATCH_SIZE):
             batch = inputs[i : i + BATCH_SIZE]
 
+            note_ids = [
+                inp.note_id for inp in batch
+            ]  # one source of truth: remove keys + text keys
             text_vecs = self._embedding.embed_texts([inp.text for inp in batch])
-            keys: list[int] = [inp.note_id for inp in batch]
+            keys: list[int] = list(note_ids)
             vecs: list[list[float]] = list(text_vecs)
 
             if read_image is not None:
@@ -331,13 +356,21 @@ class VectorIndex:
                             img_keys.append(inp.note_id)
                 if img_bytes:
                     img_vecs = self._embedding.embed_images(img_bytes)  # type: ignore[attr-defined]
+                    # Image and text vectors share the CLIP space; guard the (latent) case where a
+                    # backend's image dim differs from its text dim — np.array would raise a cryptic
+                    # ragged-array error and fail the whole (background) rebuild.
+                    if img_vecs and len(img_vecs[0]) != len(text_vecs[0]):
+                        raise ValueError(
+                            f"image embedding dim {len(img_vecs[0])} != text dim "
+                            f"{len(text_vecs[0])}; backend image/text spaces must match"
+                        )
                     vecs.extend(img_vecs)
                     keys.extend(img_keys)
 
             vecs_array = np.array(vecs, dtype=np.float32)
             with self._lock:
                 idx = self._ensure_index(vecs_array.shape[1])
-                idx.remove(np.array([inp.note_id for inp in batch], dtype=np.int64))
+                idx.remove(np.array(note_ids, dtype=np.int64))
                 idx.add(np.array(keys, dtype=np.int64), vecs_array)
                 if self._note_hashes is not None:
                     for inp in batch:
