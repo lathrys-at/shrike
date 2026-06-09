@@ -58,7 +58,8 @@ if [ ! -x "$bin" ] || ! verify "$bin" "$expected"; then
   url="https://github.com/bazelbuild/bazelisk/releases/download/${BAZELISK_VERSION}/bazelisk-${plat}"
   tmp="${bin}.tmp.$$"
   echo "shrike ./bazel: fetching bazelisk ${BAZELISK_VERSION} (${plat})…" >&2
-  curl -fsSL "$url" -o "$tmp"
+  curl -fsSL --retry 5 --retry-connrefused --retry-delay 2 \
+    --connect-timeout 30 --max-time 300 "$url" -o "$tmp"
   if ! verify "$tmp" "$expected"; then
     echo "shrike ./bazel: checksum mismatch for bazelisk-${plat}" >&2
     rm -f "$tmp"
@@ -66,6 +67,20 @@ if [ ! -x "$bin" ] || ! verify "$bin" "$expected"; then
   fi
   chmod +x "$tmp"
   mv -f "$tmp" "$bin"
+fi
+
+# Pin the final hop too: hand bazelisk the expected Bazel-binary sha so its
+# download is hash-verified, not just HTTPS (mirrors scripts/llama-server.lock).
+# Only when the lock's BAZEL_VERSION matches .bazelversion — otherwise a version
+# bump that hasn't refreshed the lock would falsely fail, so warn and fall back
+# to HTTPS-only instead of hard-breaking.
+pinned_version="$(tr -d '[:space:]' < "$repo_root/.bazelversion" 2>/dev/null || true)"
+bazel_sha_var="BAZEL_SHA256_${plat_os}_${plat_arch}"
+bazel_expected="${!bazel_sha_var:-}"
+if [ "${BAZEL_VERSION:-}" = "$pinned_version" ] && [ -n "$bazel_expected" ]; then
+  export BAZELISK_VERIFY_SHA256="$bazel_expected"
+elif [ -n "$pinned_version" ]; then
+  echo "shrike ./bazel: .bazelversion ($pinned_version) != tools/bazel.lock BAZEL_VERSION (${BAZEL_VERSION:-unset}); skipping Bazel sha pin (HTTPS only). Run tools/update-bazel-lock.sh." >&2
 fi
 
 # bazelisk reads .bazelversion in the repo root; keep its own download cache

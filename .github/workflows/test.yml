@@ -41,6 +41,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       embedding: ${{ steps.filter.outputs.embedding }}
+      bazel: ${{ steps.filter.outputs.bazel }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -51,6 +52,20 @@ jobs:
               - 'src/**'
               - 'tests/**'
               - 'pyproject.toml'
+              - '.github/workflows/test.yml'
+            bazel:
+              # Anything the Bazel graph builds/tests from, plus the bootstrap.
+              - 'src/**'
+              - 'bin/**'
+              - 'tools/**'
+              - 'MODULE.bazel'
+              - 'MODULE.bazel.lock'
+              - 'BUILD.bazel'
+              - '**/BUILD.bazel'
+              - '.bazelversion'
+              - '.bazelrc'
+              - 'bazel'
+              - 'requirements_lock.txt'
               - '.github/workflows/test.yml'
             embedding:
               # Conservative: any source change can reach the server the
@@ -191,6 +206,33 @@ jobs:
           SHRIKE_TEST_MODEL_DIR: ${{ runner.temp }}/shrike-test-models
         run: pytest tests/integration -v -m embedding
 
+  # Bazel build/test on linux — proves the make-or-break native-dep import spike
+  # (#242) resolves + dlopens anki/usearch/onnxruntime on the hermetic toolchain
+  # on linux too (macOS arm64 is proven locally). The committed ./bazel launcher
+  # bootstraps bazelisk + Bazel; no setup-python (the toolchain is hermetic).
+  # Minimal seed — the full cached, multi-platform Bazel lane is Phase 4 (#246).
+  bazel:
+    name: Bazel build/test (linux)
+    needs: changes
+    if: needs.changes.outputs.bazel == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Persist Bazel's caches (bazelisk + the Bazel binary, the repository cache,
+      # and the action disk cache — all under ~/.cache/shrike) so this isn't a
+      # cold build every run. Keyed on the pins; partial-restore on a lock change.
+      - name: Cache Bazel
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shrike
+          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
+          restore-keys: bazel-${{ runner.os }}-
+      - name: Bazel test
+        run: |
+          ./bazel test //... \
+            --disk_cache="$HOME/.cache/shrike/bazel-disk" \
+            --repository_cache="$HOME/.cache/shrike/bazel-repo"
+
   # macOS + ARM are expensive (macOS bills at 10x), so they NEVER run on plain
   # PRs or on merges to main — only when a PR carries the `rc` (release
   # candidate) label. Apply the label when you're about to tag a release and want
@@ -248,7 +290,7 @@ jobs:
     if: ${{ always() }}
     # Coverage is intentionally NOT aggregated here — it lives in its own workflow
     # (coverage.yml) and only ever reports, never gates, so it must not block the merge.
-    needs: [changes, lint, test, embedding, cross-platform]
+    needs: [changes, lint, test, embedding, bazel, cross-platform]
     runs-on: ubuntu-latest
     steps:
       - name: Verify gated jobs passed or were skipped
@@ -260,6 +302,7 @@ jobs:
             "lint=${{ needs.lint.result }}" \
             "test=${{ needs.test.result }}" \
             "embedding=${{ needs.embedding.result }}" \
+            "bazel=${{ needs.bazel.result }}" \
             "cross-platform=${{ needs.cross-platform.result }}"; do
             case "${r#*=}" in
               success|skipped) echo "ok: $r" ;;

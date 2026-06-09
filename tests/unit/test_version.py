@@ -34,11 +34,24 @@ def _latest_release_tag() -> str | None:
 
 
 def test_version_is_derived() -> None:
-    """hatch-vcs wrote a real version into _version.py — not the import fallback."""
-    assert shrike.__version__ != "0.0.0+unknown", (
-        "shrike._version was not generated — the package wasn't built "
-        "(run `pip install -e .`) or hatch-vcs is misconfigured"
-    )
+    """The build hook generated _version.py — asserted *directly*.
+
+    ``shrike.__version__`` now falls back to installed-distribution metadata when
+    ``_version.py`` is absent (#243), so a bare ``!= "0.0.0+unknown"`` check would
+    pass on an *unbuilt* checkout that merely has ``shrike-mcp`` installed
+    elsewhere — masking the #44 drift this guard exists to catch. So check
+    generation at the source: import the generated module (its absence means the
+    build hook didn't run) and confirm the package re-exports exactly it.
+    """
+    try:
+        from shrike._version import __version__ as generated
+    except ImportError:
+        pytest.fail(
+            "shrike._version was not generated — the package wasn't built "
+            "(run `pip install -e .`) or hatch-vcs is misconfigured"
+        )
+    assert shrike.__version__ == generated, "package didn't re-export the generated version"
+    assert shrike.__version__ != "0.0.0+unknown"
     # PEP 440-ish: at least N.N, optionally with a dev/local suffix.
     assert re.match(r"^\d+\.\d+", shrike.__version__), shrike.__version__
 

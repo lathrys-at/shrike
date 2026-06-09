@@ -9,10 +9,15 @@
 # embedding backends). onnx-gpu is excluded on purpose: it conflicts with onnx.
 set -euo pipefail
 
+# Pin the resolver so the lock is reproducible regardless of the contributor's
+# installed uv: uvx fetches this exact version. Bump deliberately (and commit the
+# regenerated lock). Mirrors the pin-everything bootstrap (bazelisk, llama-server).
+UV_VERSION=0.11.19
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-exec uv pip compile pyproject.toml \
+exec uvx "uv@${UV_VERSION}" pip compile pyproject.toml \
   --python-version 3.12 \
   --universal \
   --generate-hashes \
