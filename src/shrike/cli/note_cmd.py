@@ -517,6 +517,24 @@ def note_delete(ctx: click.Context, note_ids: tuple[int, ...], yes: bool) -> Non
         output.console.print(f"[dim]Not found: {ids_str}[/dim]")
 
 
+def _search_match_badges(m: SearchMatch) -> str:
+    """The ` · `-joined evidence badges for one search match (`note search` pretty output).
+
+    Provenance (#182) surfaces only the signals the other badges don't already imply — `text` is
+    covered by the score, `exact` by the `match:` field list — so the new, otherwise-invisible facet
+    (a non-text modality like `image`, or a future lexical signal `fuzzy`/`tag`) shows on its own.
+    """
+    bits = []
+    facet = [p.signal for p in m.provenance if p.signal not in ("text", "exact")]
+    if facet:
+        bits.append(", ".join(facet))
+    if m.score is not None:
+        bits.append(f"{m.score:.2f}")
+    if m.substring is not None:
+        bits.append("match: " + ", ".join(m.substring.matched_fields))
+    return " · ".join(bits)
+
+
 @note.command("search", short_help="Semantic search over notes")
 @output_options
 @click.argument("queries", nargs=-1)
@@ -591,24 +609,10 @@ def note_search(
             output.console.print("[dim]No results.[/dim]")
         return
 
-    def _badges(m: SearchMatch) -> str:
-        bits = []
-        # Provenance (#182): surface only the signals the other badges don't already imply — `text`
-        # is covered by the score, `exact` by the `match:` field list. The new, otherwise-invisible
-        # facet is a non-text modality (`image`) or a future lexical signal (`fuzzy`/`tag`).
-        facet = [p.signal for p in m.provenance if p.signal not in ("text", "exact")]
-        if facet:
-            bits.append(", ".join(facet))
-        if m.score is not None:
-            bits.append(f"{m.score:.2f}")
-        if m.substring is not None:
-            bits.append("match: " + ", ".join(m.substring.matched_fields))
-        return " · ".join(bits)
-
     for group in result.results:
         output.console.print(f"\nResults for: [cyan]{group.source}[/cyan]")
         for m in group.matches:
-            badges = _badges(m)
+            badges = _search_match_badges(m)
             if brief:
                 tag = f"\\[{badges}] " if badges else ""
                 output.console.print(f"  {tag}[green]#{m.id}[/green] ([cyan]{m.deck}[/cyan])")
