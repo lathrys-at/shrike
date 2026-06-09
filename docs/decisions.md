@@ -96,6 +96,20 @@ real DistilRoBERTa run:
     `DynamicQuantizeLinear`/`MatMulInteger` — would classify int8 variance exactly, but it needs
     graph introspection the in-process backend avoids and wouldn't generalize to llama, so the
     empirical probe stays the default.)
+- **"Bit-exact" is a CPU property; accelerators and llama are search-stable float noise.** The
+  `reconcile`==full-rebuild invariant is *byte-identical* only on `CPUExecutionProvider` (int8
+  serial; fp32 batched at exactly 0 drift). On a GPU provider (CUDA/CoreML) an fp model's
+  batched-vs-serial result differs by ~1e-5 (measured on CoreML; different matmul kernels are
+  chosen per batch shape) — the same float-noise tier llama-server already occupies (~4e-5). The
+  probe's `BATCH_DRIFT_TOL` (1e-3) sits above all of this, so such a model still measures
+  batch-safe and batches; the difference is far below cosine-ranking resolution, so search is
+  identical. The execution provider is therefore **deliberately not in `model_fingerprint`** (the
+  same call as normalization and the llama-server build version): a CPU↔GPU switch produces
+  vectors that differ at float noise, never enough to warrant a re-embed, and a mixed index ranks
+  identically. The `np.array_equal` determinism tests assert the *CPU* bit-exact property
+  specifically (CI is CPU); a future GPU test lane would assert `allclose(atol≈1e-4)` / identical
+  ranking, not byte-equality. It also vindicates the empirical probe: on any provider it *measures*
+  (fp→batch, int8→serial) rather than guessing what the accelerator does to quantization.
 - **Pad token resolved across conventions, not hard-coded.** BERT/WordPiece names the
   pad token `[PAD]`, RoBERTa/BPE uses `<pad>`; `OnnxBackend` resolves `[PAD]` then
   `<pad>`, falling back to id 0 only if neither exists. RoBERTa derives position ids

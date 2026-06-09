@@ -48,9 +48,15 @@ BATCH_DRIFT_TOL = 1e-3
 # set's *length* is also the ceiling: the probe verifies a batch of exactly this many texts
 # and the backend never batches larger (it caps `--embedding-batch-size` here), so "proven
 # safe" and "what we batch" stay the same size. Sized to 64 — the index's `BATCH_SIZE` chunk
-# — so a probe-safe (fp / non-dynamic-quant) model batches at the full chunk a GPU favours;
-# the cost is a one-time serial reference at startup (trivial in-process; ~0.7 s for a remote
-# llama-server). Batching past 64 would also need `index.BATCH_SIZE` raised — a later slice.
+# — so a probe-safe (fp / non-dynamic-quant) model batches at the full chunk a GPU favours.
+# The cost is a one-time serial reference of this many embeds at each start(): trivial
+# in-process (ONNX), ~0.7 s for a *local* llama-server subprocess (the default), and network
+# latency × 64 for a remote one. The ceiling is sized for ONNX's GPU appetite, so llama pays
+# it even though it is always batch-safe — acceptable as a one-time boot cost; if remote-llama
+# startup ever matters, the serial reference can verify a *subset* within the full 64-batch
+# (a calm text in a spiky batch is the most sensitive check) rather than every text. Batching
+# past 64 would also need `index.BATCH_SIZE` raised — a later slice (a unit test pins
+# `len(BATCH_PROBE_TEXTS) >= index.BATCH_SIZE` so the ceiling can't fall behind the chunk).
 BATCH_PROBE_TEXTS: list[str] = [
     # Calm anchors (real-note-shaped, low activation range).
     "mitochondria are the powerhouse of the cell",

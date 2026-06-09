@@ -152,7 +152,14 @@ class TestOnnxRealDistilRoberta:
 @requires_onnxruntime
 class TestOnnxRealFp32:
     """The fp32 (non-quantized) MiniLM: the probe finds it batch-safe, so it batches —
-    and batched is bit-exact with serial (no dynamic activation quantization)."""
+    and batched is bit-exact with serial (no dynamic activation quantization).
+
+    NOTE: the bit-exact (``np.array_equal``) assertion below is **CPU-specific** — CI runs on
+    CPUExecutionProvider. On a GPU provider (CUDA/CoreML) an fp model's batched-vs-serial result
+    differs by ~1e-5 (different matmul kernels per batch shape), the same float-noise tier
+    llama-server occupies and far below the probe tol, so it still measures batch-safe. A future
+    GPU test lane would assert ``allclose(atol≈1e-4)`` / identical ranking, not byte-equality
+    (see docs/decisions.md, "Bit-exact is a CPU property")."""
 
     def test_probe_finds_batch_safe_and_batched_equals_serial(self, onnx_fp32_model: Path) -> None:
         be = OnnxBackend(model=str(onnx_fp32_model))
@@ -161,7 +168,7 @@ class TestOnnxRealFp32:
 
         text = "mitochondria are the powerhouse of the cell"
         serial = np.array(be.embed_texts([text])[0])  # chunk of 1
-        # Embedded in a real batch (chunk of 2), the same note must be bit-identical.
+        # Embedded in a real batch (chunk of 2), the same note must be bit-identical (on CPU).
         batched = np.array(
             be.embed_texts([text, "an unrelated and deliberately long sentence about taxes"])[0]
         )
