@@ -963,6 +963,21 @@ class TestPerModalityMigration:
         assert set(reloaded._indexes) == {TEXT}
         assert reloaded.check_drift(1, "m") is False  # text-only → no restructure rebuild
 
+    def test_clear_removes_unloaded_modality_files(
+        self, tmp_path: Path, image_backend: MagicMock
+    ) -> None:
+        idx = VectorIndex(tmp_path / "i", backend=image_backend)
+        idx.set_image_resolver(_resolver({"a.png": b"AAA"}))
+        idx.rebuild([NoteEmbedInput(1, "cat", ["a.png"])], col_mod=1, model_id="m")
+        assert (tmp_path / "i" / "index.image.usearch").exists()
+        # Simulate the image sub-index file present on disk but *not* loaded in memory (e.g. a
+        # corrupt-restore early-return in _load, which clears _indexes): clear() must still unlink
+        # it from disk, not just the modalities currently loaded, or it reloads as a phantom.
+        idx._indexes.pop(IMAGE)
+        idx.clear()
+        assert not (tmp_path / "i" / "index.image.usearch").exists()
+        assert not (tmp_path / "i" / "index.usearch").exists()
+
     def test_save_removes_stale_image_file_after_backend_switch(
         self, tmp_path: Path, image_backend: MagicMock, embedding_service: MagicMock
     ) -> None:

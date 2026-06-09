@@ -510,8 +510,14 @@ class VectorIndex:
         # still yields up to top_k notes; usearch caps k at the index size internally.
         fetch = max(top_k * SEARCH_OVERFETCH, top_k)
 
-        text_idx = self._indexes[TEXT]
         with self._lock:
+            # Look up the text index *inside* the lock: a background rebuild can clear self._indexes
+            # between the lock-free `available` check / embed_texts round-trip above and here, so a
+            # bare subscript would KeyError. Guarding with .get mirrors search_by_modality (which
+            # also reads _indexes under the lock) and contains() — mid-rebuild degrades to empty.
+            text_idx = self._indexes.get(TEXT)
+            if text_idx is None:
+                return [[] for _ in texts]
             # One batched search over all queries — usearch parallelises across them internally,
             # versus a Python loop of single-query searches.
             raw = text_idx.search(query_array, fetch)
@@ -593,13 +599,16 @@ class VectorIndex:
     def clear(self) -> None:
         """Remove all vectors and delete the index files."""
         with self._lock:
-            modalities = list(self._indexes)
             self._indexes = {}
             self._ndim = None
             self._model_id = None
             self._note_hashes = None
-        paths = [self._modality_path(m) for m in modalities]
-        paths += [self._index_path, self._meta_path, self._hashes_path]
+        # Unlink every *known* modality's file (like save()), not just the ones currently loaded —
+        # a present-but-unloaded sub-index file (e.g. a corrupt-restore early-return in _load left
+        # _indexes empty) would otherwise survive and reload as a phantom on the next startup.
+        # _modality_path(TEXT) is index.usearch, so the text file is covered.
+        paths = [self._modality_path(m) for m in _INDEX_MODALITIES]
+        paths += [self._meta_path, self._hashes_path]
         for path in paths:
             if path.exists():
                 path.unlink()
