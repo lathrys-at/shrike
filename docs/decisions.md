@@ -8,6 +8,31 @@ isn't reconstructable from the code.
 
 ## Semantic search & the vector index
 
+### Search fuses signals by rank (RRF), not normalized score (#180)
+
+`search_notes` blends retrieval signals — today semantic cosine + exact substring, soon n-gram
+fuzzy (#98), tag-centroid (#179), and per-modality semantic rankers (#201). They live on
+incommensurable scales: cosine clusters in a narrow ~0.3–0.7 band, exact match is near-binary, a
+cross-modal (text-query↔image-vector) cosine sits a roughly *constant offset* below within-modal.
+**Normalize-and-sum inherits every pathology** — min-max stretches cosine's narrow band so trivial
+gaps look huge, the binary exact signal dominates or vanishes with its weight, and normalized scores
+depend on *what else* was retrieved, so a card's order wobbles between queries. We chose **Reciprocal
+Rank Fusion**: each signal ranks its own candidates and a note's score is `Σ w_s·1/(k+rank_s)` (k=60).
+Rank position discards raw magnitude (never reconcile cosine-0.7 vs a binary hit); a note absent from
+a signal is rank-∞ → contributes nothing, which *is* the graceful degradation we want for
+untagged / no-match cards; and orderings are **stable across queries** — the single biggest "feels
+right" property in search UX. What RRF gives up is magnitude, which matters in exactly one place: a
+literal exact hit should outrank a merely-similar note regardless of rank gap — so the combiner
+carries a **priority tier** (`priority_signals`) that floats exact hits above the rest, RRF-ordered
+within. The decisive property for the multimodal arc: because RRF fuses *rank positions*, the
+per-modality constant cosine offset (the CLIP modality gap) is **invisible** to it — so #201's
+`ranking_image` neutralizes the gap with no normalization or calibration, which is why the multimodal
+addendum left the fusion backbone unchanged. The combiner (`search_fusion.rrf_fuse`) is pure (ints in,
+ranked ints out) and returns per-note which signals contributed at what rank — the seam provenance
+(#182) reads. This first slice ships the backbone over the two existing signals (near
+behaviour-equivalent today, since RRF over one semantic ranking == rank order); its worth is the
+extensible architecture every later signal plugs into by just producing a ranking.
+
 ### USearch stays the index; revisit only on a measured, specific trigger
 
 USearch (HNSW + quantization) is the vector index, and the cross-platform plan keeps

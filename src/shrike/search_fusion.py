@@ -1,0 +1,83 @@
+"""Reciprocal Rank Fusion (RRF) — the signal-agnostic combiner behind multi-signal search (#180).
+
+`search_notes` blends several retrieval signals (semantic cosine, exact substring, and — later —
+n-gram fuzzy #98, tag-centroid #179, per-modality semantic #201). Those live on incommensurable
+scales: cosine clusters in a narrow ~0.3–0.7 band, exact match is near-binary, a per-modality
+cosine sits a constant offset below within-modal. Normalize-and-sum inherits every pathology — a
+card's order wobbles with *what else* was retrieved.
+
+RRF sidesteps all of it by fusing on **rank position**, not raw score::
+
+    score(note) = Σ_signals  w_s · 1 / (k + rank_s(note))        # rank_s is 1-based; k ≈ 60
+
+Why it fits: it never reconciles a cosine-0.7 against a binary hit (magnitude is discarded); a note
+absent from a signal contributes nothing (rank = ∞), which *is* the graceful degradation we want
+for untagged / no-match cards; orderings are stable across queries; and a per-modality constant
+offset is invisible to a rank-based combiner, so the multimodal rankers (#201) plug in with no
+normalization. The one thing RRF gives up is magnitude — an exact literal hit should outrank a
+merely-similar one regardless of its rank gap — so the combiner supports a *priority tier*
+(`priority_signals`) that floats notes carrying a chosen signal above the rest, RRF-ordered within.
+
+This module is pure: rankings of ints in, fused order out. No embedding / index / Anki deps.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+
+# RRF dampening constant. ~60 is the standard from Cormack et al. — large enough that the gap
+# between rank 1 and 2 isn't dramatic (a single signal can't unilaterally dominate the fusion),
+# small enough that early ranks still matter. Becomes a `--search-*` knob with the tuning harness.
+RRF_K = 60
+
+
+@dataclass(frozen=True)
+class FusedHit:
+    """One note's fused result: its score and which signals contributed at what rank.
+
+    ``signals`` maps each contributing signal name to the note's 1-based rank in that signal — the
+    seam per-result provenance (#182) reads to report *why* a result surfaced and to debug/tune.
+    """
+
+    note_id: int
+    score: float
+    signals: dict[str, int] = field(default_factory=dict)
+
+
+def rrf_fuse(
+    rankings: Mapping[str, Sequence[int]],
+    *,
+    weights: Mapping[str, float] | None = None,
+    k: int = RRF_K,
+    priority_signals: frozenset[str] = frozenset(),
+) -> list[FusedHit]:
+    """Fuse per-signal rankings of note ids into one ordered list by Reciprocal Rank Fusion.
+
+    ``rankings`` maps a signal name to its candidate note ids **best-first**. ``weights`` scales
+    each signal's contribution (default 1.0; a signal absent from ``weights`` uses 1.0). A note
+    listed twice by one signal counts once, at its best (first) rank. ``priority_signals`` floats
+    any note carrying one of those signals above all others (the exact-match override) — within a
+    tier, by fused score. Ordering is deterministic: ``(tier, -score, note_id)``, so the result is
+    independent of the input dict's iteration order.
+    """
+    weights = weights or {}
+    scores: dict[int, float] = defaultdict(float)
+    contributions: dict[int, dict[str, int]] = {}
+
+    for signal, ids in rankings.items():
+        w = weights.get(signal, 1.0)
+        seen: set[int] = set()
+        for pos, note_id in enumerate(ids):
+            nid = int(note_id)
+            if nid in seen:
+                continue  # one signal, one rank per note (its best)
+            seen.add(nid)
+            rank = pos + 1  # 1-based
+            scores[nid] += w / (k + rank)
+            contributions.setdefault(nid, {})[signal] = rank
+
+    hits = [FusedHit(nid, scores[nid], contributions[nid]) for nid in scores]
+    hits.sort(key=lambda h: (0 if priority_signals & h.signals.keys() else 1, -h.score, h.note_id))
+    return hits
