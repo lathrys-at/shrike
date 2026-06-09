@@ -1,0 +1,40 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("//tools/bazel:defs.bzl", "pytest_test")
+
+package(default_testonly = True)
+
+# conftest.py (the wrapper/basic_note fixtures) goes in every test's runfiles so
+# pytest's per-directory conftest discovery finds it.
+py_library(
+    name = "conftest",
+    srcs = ["conftest.py"],
+    deps = ["//src/shrike"],
+)
+
+# Per-test extras beyond the shrike library's own deps (the optional backends).
+_EXTRA_REQS = {
+    "test_embedding_onnx.py": ["onnxruntime", "tokenizers"],
+    "test_embedding_clip.py": ["onnxruntime", "tokenizers", "pillow"],
+}
+
+# Excluded from the Bazel unit suite for now (the pip `test` lane still runs both):
+#  - test_model_cache.py imports tests.integration.model_cache, built in the
+#    integration/embedding migration (#244 Phase 2b/2c).
+#  - test_version.py asserts hatch-vcs generated _version.py; under Bazel the
+#    version comes from stamping (Phase 3 / #245), so it stays on the pip lane
+#    until that lands.
+_PIP_ONLY = [
+    "test_model_cache.py",
+    "test_version.py",
+]
+
+# One py_test per file: parallel execution, granular caching, clear attribution.
+[
+    pytest_test(
+        name = f[:-len(".py")],
+        src = f,
+        deps = [":conftest"],
+        extra_reqs = _EXTRA_REQS.get(f, []),
+    )
+    for f in glob(["test_*.py"], exclude = _PIP_ONLY)
+]

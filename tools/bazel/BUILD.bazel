@@ -1,0 +1,3 @@
+# Shared Bazel test machinery (#244). The pytest launcher is exported so each
+# pytest_test target can list it in srcs/main from any package.
+exports_files(["pytest_runner.py"])
