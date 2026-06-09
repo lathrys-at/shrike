@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Committed Bazel launcher — the ONLY build-system bootstrap dependency.
+#
+# Downloads a pinned, checksum-verified bazelisk (per tools/bazel.lock) into a
+# user cache, then execs it; bazelisk in turn fetches the Bazel version pinned in
+# .bazelversion. Result: `./bazel build //...` works from a clean checkout with
+# nothing pre-installed (no brew, no system bazel). CI and IDEs run this same
+# launcher, so everyone uses identical Bazel + bazelisk.
+#
+# Escape hatch: SHRIKE_BAZEL=/path/to/bazel(isk) uses your own instead.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -n "${SHRIKE_BAZEL:-}" ]; then
+  exec "$SHRIKE_BAZEL" "$@"
+fi
+
+# shellcheck source=tools/bazel.lock
+. "$repo_root/tools/bazel.lock"
+
+os="$(uname -s)"
+arch="$(uname -m)"
+case "$os" in
+  Darwin) plat_os=darwin ;;
+  Linux) plat_os=linux ;;
+  *) echo "shrike ./bazel: unsupported OS '$os'" >&2; exit 1 ;;
+esac
+case "$arch" in
+  arm64 | aarch64) plat_arch=arm64 ;;
+  x86_64 | amd64) plat_arch=amd64 ;;
+  *) echo "shrike ./bazel: unsupported arch '$arch'" >&2; exit 1 ;;
+esac
+plat="${plat_os}-${plat_arch}"
+
+sha_var="SHA256_${plat_os}_${plat_arch}"
+expected="${!sha_var:-}"
+if [ -z "$expected" ]; then
+  echo "shrike ./bazel: no pinned checksum for $plat in tools/bazel.lock" >&2
+  exit 1
+fi
+
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/shrike/bazelisk/${BAZELISK_VERSION}"
+bin="${cache_dir}/bazelisk-${plat}"
+
+verify() { # $1=file $2=expected_sha256
+  local actual
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$1" | awk '{print $1}')"
+  else
+    actual="$(shasum -a 256 "$1" | awk '{print $1}')"
+  fi
+  [ "$actual" = "$2" ]
+}
+
+if [ ! -x "$bin" ] || ! verify "$bin" "$expected"; then
+  mkdir -p "$cache_dir"
+  url="https://github.com/bazelbuild/bazelisk/releases/download/${BAZELISK_VERSION}/bazelisk-${plat}"
+  tmp="${bin}.tmp.$$"
+  echo "shrike ./bazel: fetching bazelisk ${BAZELISK_VERSION} (${plat})…" >&2
+  curl -fsSL "$url" -o "$tmp"
+  if ! verify "$tmp" "$expected"; then
+    echo "shrike ./bazel: checksum mismatch for bazelisk-${plat}" >&2
+    rm -f "$tmp"
+    exit 1
+  fi
+  chmod +x "$tmp"
+  mv -f "$tmp" "$bin"
+fi
+
+# bazelisk reads .bazelversion in the repo root; keep its own download cache
+# under ours so it's easy to find/clear.
+export BAZELISK_HOME="${BAZELISK_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/shrike/bazelisk-home}"
+exec "$bin" "$@"

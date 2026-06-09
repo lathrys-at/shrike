@@ -16,6 +16,11 @@ htmlcov/
 # Generated at build time by hatch-vcs (see pyproject.toml)
 src/shrike/_version.py
 
+# Bazel (epic #241): convenience symlinks + machine-local rc. The pinned
+# launcher (./bazel) and bazelisk caches live under ~/.cache, not the repo.
+/bazel-*
+.bazelrc.user
+
 # QA harness working dir — regenerated each launch (see scripts/launch-qa-server.sh)
 tests/qa/run/
 

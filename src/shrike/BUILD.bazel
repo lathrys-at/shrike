@@ -1,0 +1,28 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@shrike_pip//:requirements.bzl", "requirement")
+
+package(default_visibility = ["//visibility:public"])
+
+# The Shrike Python package. src-layout: imports=[".."] puts src/ on sys.path so
+# this imports as `shrike` (not `src.shrike`). The optional embedding backends
+# (onnx/clip) import their heavy deps lazily, so onnxruntime/tokenizers/pillow are
+# NOT hard deps here — the test targets that exercise them add those extras
+# (Phase 2, #244). The runnable entry points live in //bin (thin launchers), kept
+# out of this package so a binary target never collides with a subpackage dir.
+py_library(
+    name = "shrike",
+    srcs = glob(["**/*.py"]),
+    imports = [".."],
+    deps = [
+        requirement("anki"),
+        requirement("mcp"),
+        requirement("click"),
+        requirement("filelock"),
+        requirement("httpx"),
+        requirement("platformdirs"),
+        requirement("pyyaml"),
+        requirement("rich"),
+        requirement("usearch"),
+        requirement("numpy"),
+    ],
+)

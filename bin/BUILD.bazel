@@ -1,0 +1,22 @@
+load("@rules_python//python:defs.bzl", "py_binary")
+
+# Runnable entry points (thin launchers over //src/shrike:shrike). Kept in their
+# own package so a binary's output path never collides with a package subdir.
+#   ./bazel run //bin:server -- --collection /path/to/collection.anki2
+#   ./bazel run //bin:shrike -- info
+
+py_binary(
+    name = "server",
+    srcs = ["server.py"],
+    main = "server.py",
+    visibility = ["//visibility:public"],
+    deps = ["//src/shrike:shrike"],
+)
+
+py_binary(
+    name = "shrike",
+    srcs = ["shrike.py"],
+    main = "shrike.py",
+    visibility = ["//visibility:public"],
+    deps = ["//src/shrike:shrike"],
+)

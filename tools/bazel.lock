@@ -1,0 +1,13 @@
+# Pinned bazelisk launcher — the only build-system bootstrap dependency.
+#
+# The committed `./bazel` wrapper downloads + checksum-verifies this bazelisk,
+# then bazelisk fetches the Bazel version pinned in .bazelversion. So a clean
+# checkout builds with nothing pre-installed. Mirrors scripts/llama-server.lock.
+#
+# Bump with tools/update-bazel-lock.sh (or by hand): set the version, then refresh
+# every SHA256_* from the release's per-asset .sha256 files.
+BAZELISK_VERSION=v1.29.0
+SHA256_darwin_arm64=cee851f726789227d5561004e9904a52be45c3efb56f8b38b6993d6adbaa0409
+SHA256_darwin_amd64=16c3d7aa15323a9fb69f56c7ec5733ed18bedb786680d0ba13bb12a3c8083007
+SHA256_linux_amd64=5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992
+SHA256_linux_arm64=e20e8b0f4f240091b7a55bf17b9398bd4f40ee70ae0208dff95dd4c445fb4010

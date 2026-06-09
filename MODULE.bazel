@@ -1,0 +1,36 @@
+"""Shrike build module (bzlmod).
+
+Bazel is the polyglot build/test/package entry point (epic #241). This module
+wires the hermetic Python toolchain and the PyPI dependency set; later phases add
+rules_rust + a PyO3 extension (#247) behind the same graph. The legacy WORKSPACE
+file is intentionally absent — bzlmod only.
+"""
+
+module(
+    name = "shrike",
+    # Build-system module version only. The *wheel* version is stamped from the
+    # git tag at package time (Phase 3, #245), not taken from here.
+    version = "0.0.0",
+)
+
+bazel_dep(name = "rules_python", version = "2.0.2")
+
+# Hermetic CPython, matching .python-version's minor (3.12). The patch level is
+# whatever python-build-standalone build rules_python bundles for this version;
+# pinning the *minor* is what governs manylinux/macOS wheel compatibility.
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    python_version = "3.12",
+    is_default = True,
+)
+
+# Third-party Python deps come from PyPI as wheels — including the native ones
+# (anki's bundled Rust backend, usearch C++, onnxruntime C++, tokenizers Rust) —
+# resolved against a pinned, hashed lock. Bazel never rebuilds them from source.
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "shrike_pip",
+    python_version = "3.12",
+    requirements_lock = "//:requirements_lock.txt",
+)
+use_repo(pip, "shrike_pip")

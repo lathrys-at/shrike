@@ -1,0 +1,29 @@
+load("@rules_python//python:defs.bzl", "py_test")
+load("@shrike_pip//:requirements.bzl", "requirement")
+
+# Phase 0 make-or-break spike (#242): the native-dependency wheels must import and
+# run on Bazel's hermetic CPython toolchain, on every target platform. If this
+# fails, the "consume native deps as wheels" assumption is wrong. See
+# tools/import_spike.py for what it exercises.
+py_test(
+    name = "import_spike",
+    size = "small",
+    srcs = ["tools/import_spike.py"],
+    main = "tools/import_spike.py",
+    deps = [
+        requirement("anki"),
+        requirement("usearch"),
+        requirement("onnxruntime"),
+        requirement("numpy"),
+    ],
+)
+
+# Phase 1 smoke (#243): the shrike library + its declared deps import cleanly and
+# a pure function runs. Broader pytest migration is Phase 2 (#244).
+py_test(
+    name = "library_smoke",
+    size = "small",
+    srcs = ["tools/library_smoke.py"],
+    main = "tools/library_smoke.py",
+    deps = ["//src/shrike:shrike"],
+)
