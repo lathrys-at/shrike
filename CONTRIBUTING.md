@@ -18,8 +18,13 @@ Trunk-based. `main` is always releasable — no `develop` branch, no Gitflow.
   iterate-and-merge loop off the 10×-billed macOS runners. See
   [`.github/workflows/test.yml`](.github/workflows/test.yml).
 - Branch names are `‹type›/‹issue#›-‹slug›`, where `‹type›` is one of `feat`,
-  `fix`, `docs`, `chore`, `refactor`, `test` — e.g. `fix/44-version-tag-drift`,
-  `feat/33-ankiweb-sync`. The issue number ties the branch to its tracking issue.
+  `fix`, `docs`, `chore`, `refactor`, `test`, `xfail` — e.g.
+  `fix/44-version-tag-drift`, `feat/33-ankiweb-sync`,
+  `xfail/214-search-notes-neighbor-n1`. The issue number ties the branch to its
+  tracking issue. An `xfail/` branch carries **only** a red-by-design reproducing
+  test (no fix) — the handoff spec produced by the performance audit and the defect
+  workflow below; whoever picks it up lands the actual fix on a `fix/` branch that
+  flips the test green.
 
 Release branches (`release/0.x`) are **not** used yet. They get cut reactively,
 from the release tag, the first time an old version line genuinely needs a
@@ -99,7 +104,9 @@ resumable state**, not a mental note or a prose TODO:
    expected vs. actual, and scope — or, for a missing feature, the intended API
    surface and why it's wanted.
 2. **Create a branch** `fix/‹issue#›-‹slug›` (or `feat/…` when the work is a
-   missing capability rather than a bug).
+   missing capability rather than a bug). When you're only capturing the
+   reproducing spec and not fixing it yet — as the weekly performance audit does —
+   use `xfail/‹issue#›-‹slug›` instead, to signal "red spec, no fix attached".
 3. **Add failing test(s)** that exercise the defect, demonstrate the limitation,
    or pin the intended API. Write the test asserting the *desired* behaviour and
    mark it `@pytest.mark.xfail(strict=True, reason="#‹n›: …")`. `strict=True`

@@ -452,7 +452,9 @@ prose note. Capture it as resumable state:
 
 1. Open a GitHub issue with a clear problem statement (repro / expected vs actual /
    scope, or the intended API surface that's missing).
-2. Create a branch `fix/‹issue#›-‹slug›` (or `feat/…` for a missing capability).
+2. Create a branch `fix/‹issue#›-‹slug›` (or `feat/…` for a missing capability;
+   `xfail/‹issue#›-‹slug›` when you're only capturing the red reproducing spec
+   without a fix — e.g. the weekly performance audit).
 3. Add failing test(s) that exercise the defect / pin the intended API —
    asserting the *desired* behaviour and marked
    `@pytest.mark.xfail(strict=True, reason="#‹n›: …")` so the branch's CI stays
