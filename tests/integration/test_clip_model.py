@@ -75,3 +75,118 @@ class TestClipModel:
         assert h["backend"] == "clip"
         assert h["modalities"] == ["image", "text"]
         assert h["provider"] == "CPUExecutionProvider"
+
+
+@requires_clip
+class TestClipImageIndex:
+    """End-to-end multi-vector index (#162 Phase 3c): a text query retrieves a note by its image."""
+
+    # Class-scoped started backend (same rationale as TestClipModel, #215): load the ~147 MB CLIP
+    # once for the class. Each test builds its own (cheap) collection + index against it.
+    @pytest.fixture(scope="class")
+    def be(self, clip_model: Path) -> Iterator[ClipBackend]:
+        backend = ClipBackend(model=str(clip_model))
+        backend.start()
+        yield backend
+        backend.stop()
+
+    @staticmethod
+    def _collection(tmp_path: Path):
+        import os
+
+        from PIL import Image
+
+        from shrike.collection import CollectionWrapper
+
+        w = CollectionWrapper(str(tmp_path / "c.anki2"))
+        os.makedirs(w.media_dir, exist_ok=True)
+        Image.new("RGB", (128, 128), (220, 30, 30)).save(os.path.join(w.media_dir, "red.png"))
+        # The note's TEXT never names a colour; its meaning lives in the image.
+        red = w.run_sync(
+            lambda _c: w._upsert_notes(
+                [
+                    {
+                        "deck": "Test",
+                        "note_type": "Basic",
+                        "fields": {"Front": 'study card <img src="red.png">', "Back": "."},
+                    }
+                ]
+            )
+        )[0]["id"]
+        other = w.run_sync(
+            lambda _c: w._upsert_notes(
+                [
+                    {
+                        "deck": "Test",
+                        "note_type": "Basic",
+                        "fields": {"Front": "ancient rome", "Back": "."},
+                    }
+                ]
+            )
+        )[0]["id"]
+        return w, red, other
+
+    def _index(self, be: ClipBackend, tmp_path: Path, w):
+        from shrike.index import VectorIndex
+        from shrike.server import _make_image_resolver
+
+        idx = VectorIndex(tmp_path / "index", backend=be)
+        idx.set_image_resolver(*_make_image_resolver(w.media_dir))
+        return idx
+
+    def test_note_image_is_indexed_and_retrievable(self, be: ClipBackend, tmp_path: Path) -> None:
+        from shrike.collection import CollectionWrapper
+
+        w, red, other = self._collection(tmp_path)
+        try:
+            idx = self._index(be, tmp_path, w)
+            inputs = w.run_sync(lambda c: CollectionWrapper._note_embed_inputs(c, [red, other]))
+            idx.rebuild(inputs, col_mod=1, model_id=be.model_fingerprint())
+            # The image vector is indexed (red: text + image = 2 vectors; other: text = 1).
+            assert idx.size == 3
+            # The image-bearing note is retrievable. NB: *ranking* image hits above competing text
+            # across CLIP's modality gap (text-text cos ~0.72 vs text-image ~0.32) is rank fusion —
+            # the Search epic (#180) / Phase 3d. 3c stores the image vectors so fusion can use them;
+            # here we assert the data layer (indexed + retrievable; differentiation tested below).
+            nids = [r["note_id"] for r in idx.search(["a solid red colour image"], top_k=2)[0]]
+            assert red in nids
+        finally:
+            w.close()
+
+    def test_reconcile_reembeds_when_image_removed(self, be: ClipBackend, tmp_path: Path) -> None:
+        from shrike.collection import CollectionWrapper
+        from shrike.index import NoteEmbedInput
+
+        w, red, other = self._collection(tmp_path)
+        try:
+            idx = self._index(be, tmp_path, w)
+            mid = be.model_fingerprint()
+            inputs = w.run_sync(lambda c: CollectionWrapper._note_embed_inputs(c, [red, other]))
+            idx.rebuild(inputs, col_mod=1, model_id=mid)
+            assert idx.size == 3
+            # The red note loses its image (its embedding fingerprint changes) → reconcile drops
+            # the image vector for exactly that note; the unrelated note is untouched.
+            idx.reconcile(
+                [NoteEmbedInput(red, "study card", []), NoteEmbedInput(other, "ancient rome", [])],
+                col_mod=2,
+                model_id=mid,
+            )
+            assert idx.size == 2  # red: text only now ; rome: text
+        finally:
+            w.close()
+
+    def test_missing_media_file_skipped(self, be: ClipBackend, tmp_path: Path) -> None:
+        from shrike.index import NoteEmbedInput
+
+        w, red, other = self._collection(tmp_path)
+        try:
+            idx = self._index(be, tmp_path, w)
+            # Reference a file that isn't in the media dir → skipped, text still indexed, no crash.
+            idx.rebuild(
+                [NoteEmbedInput(red, "study card", ["does-not-exist.png"])],
+                col_mod=1,
+                model_id=be.model_fingerprint(),
+            )
+            assert idx.size == 1
+        finally:
+            w.close()

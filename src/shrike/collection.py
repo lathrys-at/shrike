@@ -23,7 +23,8 @@ from anki.consts import MODEL_CLOZE
 from anki.errors import DBError, NotFoundError
 from anki.notes import NoteFieldsCheckResult
 
-from shrike.embed_text import field_is_blank, normalize_for_embedding
+from shrike.embed_text import extract_image_refs, field_is_blank, normalize_for_embedding
+from shrike.index import NoteEmbedInput
 from shrike.schemas import COLLECTION_BUSY_CODE
 
 
@@ -1924,6 +1925,47 @@ class CollectionWrapper:
         """
         return await self.run(lambda c: self.note_texts(c, note_ids))
 
+    async def note_embed_inputs(self, note_ids: Sequence[int]) -> list[NoteEmbedInput]:
+        """Return each note's embedding input — normalized text + image filenames (#162).
+
+        The multimodal counterpart of ``note_texts_for_embedding``: also collects the ``<img src>``
+        filenames a CLIP-style backend embeds. One DB pass on the worker thread; no media files are
+        read here (the index reads bytes lazily, only for notes it embeds). Missing ids yield an
+        empty input at the same position.
+        """
+        return await self.run(lambda c: self._note_embed_inputs(c, note_ids))
+
+    @staticmethod
+    def _render_embed_text(names: Sequence[str], values: Sequence[str]) -> str:
+        """Render a note's embedding text: each non-empty normalized field as ``Name: text``,
+        newline-joined. The **single source of truth** for both ``note_texts`` (the search/query
+        path) and ``_note_embed_inputs`` (the index path) — they must render identically, or query
+        vectors silently diverge from the indexed vectors.
+        """
+        return "\n".join(
+            f"{k}: {cleaned}"
+            for k, v in zip(names, values, strict=False)
+            if (cleaned := normalize_for_embedding(v))
+        )
+
+    @staticmethod
+    def _note_embed_inputs(col: Collection, note_ids: Sequence[int]) -> list[NoteEmbedInput]:
+        """Build ``NoteEmbedInput``s (text + image names) per note id. Worker-thread only.
+
+        Reuses ``_note_field_rows`` (one query): the text is rendered by ``_render_embed_text``
+        (shared with ``note_texts``); image names come from the raw field values via
+        ``extract_image_refs`` (normalization strips ``<img>`` from the text, so the names must be
+        read from the unnormalized value), de-duplicated across fields in order.
+        """
+        by_id: dict[int, NoteEmbedInput] = {}
+        for nid, names, values in CollectionWrapper._note_field_rows(col, note_ids):
+            text = CollectionWrapper._render_embed_text(names, values)
+            images = list(dict.fromkeys(n for v in values for n in extract_image_refs(v)))
+            by_id[nid] = NoteEmbedInput(note_id=nid, text=text, image_names=images)
+        return [
+            by_id.get(nid, NoteEmbedInput(note_id=nid, text="", image_names=[])) for nid in note_ids
+        ]
+
     @staticmethod
     def note_texts(col: Collection, note_ids: Sequence[int]) -> list[str]:
         """Normalized field text for each note id. Must run on the worker thread.
@@ -1936,14 +1978,11 @@ class CollectionWrapper:
 
         Built on ``_note_field_rows`` (one query, no per-note ``get_note``), which
         runs once per note on every index rebuild. Missing ids yield "" at the
-        same position.
+        same position. The per-note render is shared with ``_note_embed_inputs``
+        via ``_render_embed_text``.
         """
         rendered = {
-            nid: "\n".join(
-                f"{k}: {cleaned}"
-                for k, v in zip(names, values, strict=False)
-                if (cleaned := normalize_for_embedding(v))
-            )
+            nid: CollectionWrapper._render_embed_text(names, values)
             for nid, names, values in CollectionWrapper._note_field_rows(col, note_ids)
         }
         return [rendered.get(nid, "") for nid in note_ids]

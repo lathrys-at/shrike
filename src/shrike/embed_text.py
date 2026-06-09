@@ -37,7 +37,9 @@ rebuild rather than silently mixing old- and new-style vectors.
 
 from __future__ import annotations
 
+import contextlib
 import re
+from html.parser import HTMLParser
 
 # Bump on any change to normalize_for_embedding's output (incl. an Anki upgrade
 # whose stripper changes). v1 is the first normalized scheme — it replaces the
@@ -112,6 +114,50 @@ def normalize_for_embedding(value: str) -> str:
 # <video>, <object>, <embed>, <source>, and [sound:…]. Used by collection_prune's
 # empty-note rule (#89), not by embedding (which strips media out entirely).
 _MEDIA_RE = re.compile(r"(?i)<\s*(?:img|audio|video|object|embed|source)\b|\[sound:")
+
+
+class _ImgSrcParser(HTMLParser):
+    """Collect ``<img>`` ``src`` attribute values. A real parser (not a regex) so an earlier
+    ``data-src=`` or a ``src=`` *inside another attribute's value* can't be mistaken for the tag's
+    own ``src`` — the failure modes a regex over ``<img …>`` hits on lazy-load / web-pasted markup.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.srcs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "img":
+            for name, val in attrs:
+                if name == "src" and val:
+                    self.srcs.append(val)
+
+
+def extract_image_refs(value: str) -> list[str]:
+    """Image filenames referenced by a field's ``<img src>`` tags — in order, de-duplicated.
+
+    Returns each src's basename (the flat form ``store_media`` returns and the media dir keys on);
+    remote srcs (``scheme://…``) are skipped (not local media). Only ``<img>`` — the embeddable
+    image modality; ``[sound:]``/``<audio>``/``<video>`` are other modalities for a later slice.
+    The collection resolves these names to bytes via the media dir before handing them to a
+    CLIP-style backend; ``normalize_for_embedding`` still strips ``<img>`` out of the *text*.
+    """
+    if not value or "<img" not in value.lower():
+        return []
+    parser = _ImgSrcParser()
+    with contextlib.suppress(Exception):  # malformed markup must not break extraction
+        parser.feed(value)
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in parser.srcs:
+        src = raw.strip()  # HTMLParser already unescapes entities in attribute values
+        if not src or "://" in src:  # empty or a remote URL → not local media
+            continue
+        name = src.rsplit("/", 1)[-1]  # basename; Anki's media dir is flat
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
 
 
 def field_is_blank(value: str) -> bool:

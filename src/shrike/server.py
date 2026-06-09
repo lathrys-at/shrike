@@ -28,6 +28,7 @@ from shrike.index import (
     DEFAULT_SAVE_DELAY,
     DEFAULT_SAVE_THRESHOLD,
     IndexSaver,
+    NoteEmbedInput,
     VectorIndex,
 )
 from shrike.log import configure_logging
@@ -37,21 +38,54 @@ from shrike.tools import register_tools
 logger = logging.getLogger("shrike.server")
 
 
-def _collect_for_rebuild(c: Any) -> tuple[list[int], int, list[str]]:
-    """Gather all note ids, the collection mod stamp, and embedding texts.
+def _collect_for_rebuild(c: Any) -> tuple[list[NoteEmbedInput], int]:
+    """Gather every note's embedding input (text + image names) and the collection mod stamp.
 
     Runs on the collection worker thread (receives the live ``Collection``).
     """
     note_ids = list(c.find_notes("deck:*"))
-    return note_ids, c.mod, CollectionWrapper.note_texts(c, note_ids)
+    return CollectionWrapper._note_embed_inputs(c, note_ids), c.mod
+
+
+def _make_image_resolver(
+    media_dir: str,
+) -> tuple[Callable[[str], bytes | None], Callable[[str], bool]]:
+    """A ``(read, exists)`` pair over the media dir for the index's image resolver.
+
+    Closes over the (lock-free, path-derived) media dir so the index can read image bytes on its
+    own embed thread without touching the Anki collection. Both sanitize to a basename inside the
+    dir (``_safe_media_name``), so a name can only ever resolve inside the media folder. ``exists``
+    is a cheap stat (no byte read) the index folds into the per-note hash, so an image stored after
+    its note re-embeds on reconcile instead of being skipped.
+    """
+    from shrike.collection import _safe_media_name
+
+    def _path(name: str) -> str | None:
+        safe = _safe_media_name(name)
+        return os.path.join(media_dir, safe) if safe else None
+
+    def _read(name: str) -> bytes | None:
+        path = _path(name)
+        if path is None:
+            return None
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def _exists(name: str) -> bool:
+        path = _path(name)
+        return path is not None and os.path.isfile(path)
+
+    return _read, _exists
 
 
 def _maybe_rebuild(
     index: VectorIndex,
     model_id: str,
     col_mod: int,
-    note_ids: list[int],
-    texts: list[str],
+    inputs: list[NoteEmbedInput],
     embedding: EmbedderBackend,
 ) -> bool:
     """Reconcile the index in the background if it drifted or the model changed.
@@ -68,8 +102,8 @@ def _maybe_rebuild(
     a restart (#148).
     """
     if index.check_drift(col_mod, model_id):
-        if note_ids:
-            index.reconcile_in_background(note_ids, texts, col_mod, model_id=model_id)
+        if inputs:
+            index.reconcile_in_background(inputs, col_mod, model_id=model_id)
             return True
         ndim = embedding.embedding_dim()
         if ndim is not None:
@@ -338,16 +372,16 @@ def _register_custom_routes(
             )
 
         model_id = await asyncio.to_thread(svc.model_fingerprint)
-        all_note_ids, col_mod, texts = await wrapper.run(_collect_for_rebuild)
-        if not all_note_ids:
-            index.rebuild([], [], col_mod, model_id=model_id)
+        inputs, col_mod = await wrapper.run(_collect_for_rebuild)
+        if not inputs:
+            index.rebuild([], col_mod, model_id=model_id)
             return JSONResponse({"status": "complete", "size": 0})
 
-        index.rebuild_in_background(all_note_ids, texts, col_mod, model_id=model_id)
+        index.rebuild_in_background(inputs, col_mod, model_id=model_id)
         return JSONResponse(
             {
                 "status": "started",
-                "total": len(all_note_ids),
+                "total": len(inputs),
             }
         )
 
@@ -412,8 +446,8 @@ def _register_custom_routes(
             return JSONResponse({"error": str(e)}, status_code=500)
 
         model_id = await asyncio.to_thread(svc.model_fingerprint)
-        all_note_ids, col_mod, texts = await wrapper.run(_collect_for_rebuild)
-        await asyncio.to_thread(_maybe_rebuild, index, model_id, col_mod, all_note_ids, texts, svc)
+        inputs, col_mod = await wrapper.run(_collect_for_rebuild)
+        await asyncio.to_thread(_maybe_rebuild, index, model_id, col_mod, inputs, svc)
 
         return JSONResponse(
             {
@@ -449,9 +483,9 @@ def _register_custom_routes(
         svc = runtime.service
         if svc is not None and svc.running:
             model_id = await asyncio.to_thread(svc.model_fingerprint)
-            all_note_ids, new_col_mod, texts = await wrapper.run(_collect_for_rebuild)
+            inputs, new_col_mod = await wrapper.run(_collect_for_rebuild)
             rebuilding = await asyncio.to_thread(
-                _maybe_rebuild, index, model_id, new_col_mod, all_note_ids, texts, svc
+                _maybe_rebuild, index, model_id, new_col_mod, inputs, svc
             )
 
         return JSONResponse({"status": "reloaded", "col_mod": col_mod, "rebuilding": rebuilding})
@@ -765,6 +799,11 @@ def main() -> None:
     # attached, so the embedding lifecycle can be cycled at runtime.
     cache_base = Path(args.cache_dir) if args.cache_dir else cache_dir()
     index = VectorIndex(path=cache_base / "index")
+    # Let the index read image bytes + cheaply check presence (lock-free, off the worker thread)
+    # for a CLIP-style backend; inert for a text-only backend. media_dir is path-derived → safe
+    # before open.
+    _read_img, _img_exists = _make_image_resolver(wrapper.media_dir)
+    index.set_image_resolver(_read_img, _img_exists)
     logger.info("Vector index: %d vectors, %d dims", index.size, index.ndim or 0)
 
     # Debounced persistence: incremental edits flush after a quiet period (or a
@@ -812,8 +851,8 @@ def main() -> None:
             logger.error("Failed to start embedding service: %s", e)
         else:
             model_id = svc.model_fingerprint()
-            all_note_ids, col_mod, texts = wrapper.run_sync(_collect_for_rebuild)
-            _maybe_rebuild(index, model_id, col_mod, all_note_ids, texts, svc)
+            inputs, col_mod = wrapper.run_sync(_collect_for_rebuild)
+            _maybe_rebuild(index, model_id, col_mod, inputs, svc)
     elif args.no_embedding and args.embedding_model:
         logger.info("Embedding service disabled at boot (--no-embedding); model configured")
 
@@ -828,11 +867,9 @@ def main() -> None:
             svc_now = runtime.service
             if svc_now is None or not svc_now.running:
                 return
-            note_ids, changed_mod, texts = _collect_for_rebuild(col)
+            inputs, changed_mod = _collect_for_rebuild(col)
             logger.info("Collection changed while idle (col_mod=%d); rebuilding index", changed_mod)
-            index.rebuild_in_background(
-                note_ids, texts, changed_mod, model_id=svc_now.model_fingerprint()
-            )
+            index.rebuild_in_background(inputs, changed_mod, model_id=svc_now.model_fingerprint())
 
         wrapper.set_acquire_hook(_acquire_hook)
         # Release now so a freshly-booted, never-touched idle daemon doesn't hold

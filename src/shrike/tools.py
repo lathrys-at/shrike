@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import logging
@@ -684,12 +685,16 @@ def register_tools(
                 # otherwise an embedding failure leaves `texts` unbound.
                 neighbors_ok = False
                 try:
-                    texts = await wrapper.note_texts_for_embedding(changed_ids)
-                    index.add(changed_ids, texts)
+                    inputs = await wrapper.note_embed_inputs(changed_ids)
+                    await asyncio.to_thread(index.add, inputs)
                     index.col_mod = await wrapper.run(lambda c: c.mod)
-                    logger.debug("Index updated: %d vectors added/replaced", len(changed_ids))
+                    logger.debug("Index updated: %d notes added/replaced", len(changed_ids))
                     neighbors_ok = await _attach_neighbors(
-                        results, changed_ids, texts, top_k_neighbors, neighbor_threshold
+                        results,
+                        changed_ids,
+                        [inp.text for inp in inputs],
+                        top_k_neighbors,
+                        neighbor_threshold,
                     )
                     # Schedule a debounced flush so a hard kill while idle
                     # doesn't force a full re-embed. Non-blocking and last in
@@ -1201,12 +1206,12 @@ def register_tools(
             # Field bodies are embedding text, so re-embed the changed notes
             # (best-effort, like upsert_notes).
             try:
-                texts = await wrapper.note_texts_for_embedding(changed_ids)
-                index.add(changed_ids, texts)
+                inputs = await wrapper.note_embed_inputs(changed_ids)
+                await asyncio.to_thread(index.add, inputs)
                 index.col_mod = await wrapper.run(lambda c: c.mod)
                 if saver is not None:
                     saver.request_save()
-                logger.debug("Index updated after find_replace: %d vectors", len(changed_ids))
+                logger.debug("Index updated after find_replace: %d notes", len(changed_ids))
             except Exception:
                 logger.warning("Failed to update index after find_replace", exc_info=True)
 
@@ -1306,8 +1311,8 @@ def register_tools(
             # Remapped fields change the embedding text, so re-embed the migrated
             # notes (their IDs are unchanged) — best-effort, like find_replace_notes.
             try:
-                texts = await wrapper.note_texts_for_embedding(changed)
-                index.add(changed, texts)
+                inputs = await wrapper.note_embed_inputs(changed)
+                await asyncio.to_thread(index.add, inputs)
                 index.col_mod = await wrapper.run(lambda c: c.mod)
                 if saver is not None:
                     saver.request_save()

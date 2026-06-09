@@ -403,8 +403,8 @@ class TestUpsertIndexUpdate:
         result = _upsert(mcp_app, [BASIC_NOTE])
         nid = result["results"][0]["id"]
         mock_index.add.assert_called_once()
-        call_ids = mock_index.add.call_args[0][0]
-        assert nid in call_ids
+        call_inputs = mock_index.add.call_args[0][0]
+        assert nid in [i.note_id for i in call_inputs]
 
     def test_updates_col_mod_after_upsert(self, wrapper, mock_index, mcp_app):
         mock_index.search.return_value = [[]]
@@ -436,7 +436,7 @@ class TestUpsertIndexUpdate:
         async def boom(_ids):
             raise RuntimeError("embedding text build failed")
 
-        wrapper.note_texts_for_embedding = boom
+        wrapper.note_embed_inputs = boom
         result = _upsert(mcp_app, [BASIC_NOTE])
         r = result["results"][0]
         assert r["status"] == "created"

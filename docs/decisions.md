@@ -164,6 +164,30 @@ real DistilRoBERTa run:
   don't implement it, so callers gate on `IMAGE in modalities`. The GO and the chosen embedding
   unit (multi-vector per note, `multi=True`) came from the Phase-3a eval (#193). `jina-clip-v2` is
   the production-quality option; a small `clip-vit-base-patch32` is the CI fixture.
+- **The multi-vector index stores a note's text + image vectors under one key (#162 Phase 3c).**
+  USearch `Index(..., multi=True)` lets a `note_id` key hold several vectors (its text vector + one
+  per image); `remove(note_id)` drops them all, and search dedups multi-hits back to one result per
+  note (over-fetch, keep the best distance per note). The flag is always on — a text-only backend
+  just stores one vector per key (identical behaviour). Three decisions are load-bearing: **(1)
+  image bytes are read lazily and lock-free** — the media dir is path-derived (resolves without the
+  Anki lock, #70), so the index reads bytes on its own embed thread via an injected resolver, only
+  for the notes it's (re-)embedding, never pre-reading every image on a drift check. **(2) The
+  reconcile fingerprint hashes the *filenames of a note's resolvable images*, not bytes** — Anki
+  content-addresses media (a filename is a stable content identity), so this detects
+  add/remove/swap/late-arrival cheaply (DB text + a regex + a presence `stat`, no byte read) and is
+  folded in *only* for an image-capable backend, leaving text-only hashes byte-identical to the
+  pre-3c scheme (no spurious upgrade rebuild). Hashing only *resolvable* names (the resolver's
+  cheap `exists` half) is what keeps reconcile == a full rebuild even for a note authored before
+  its media landed — the name of an unstored image isn't folded in, so the image re-embeds once it
+  appears rather than being claimed-but-absent forever. **(3) No index schema marker is
+  needed** — USearch persists the `multi` flag, so a pre-3c `multi=False` index is detected on load
+  and rebuilt into a multi-vector one *only when* an image-capable backend attaches (`check_drift`);
+  a text-only user keeps their single-vector index untouched. **Scope:** 3c indexes image vectors
+  so they're retrievable and maintained, but the CLIP **modality gap** (text-text cos ~0.7 vs
+  text-image ~0.3) means a text query ranks text vectors above image vectors at rank-1 — image hits
+  are *additive*, not dominant. Ranking them across the gap is **rank fusion (the Search epic #180,
+  Phase 3d)**, deliberately not 3c; the integration test asserts the data layer (indexed,
+  reconciled, retrievable), and the eval (#193) measured the rank reality.
 
 ### The index is a derived cache, never a co-equal store
 
