@@ -593,10 +593,12 @@ def note_search(
 
     def _badges(m: SearchMatch) -> str:
         bits = []
-        # Provenance (#182): which signals surfaced this, strongest first — `image`/`text` is the
-        # matched-modality facet a bare score can't show.
-        if m.provenance:
-            bits.append(", ".join(p.signal for p in m.provenance))
+        # Provenance (#182): surface only the signals the other badges don't already imply — `text`
+        # is covered by the score, `exact` by the `match:` field list. The new, otherwise-invisible
+        # facet is a non-text modality (`image`) or a future lexical signal (`fuzzy`/`tag`).
+        facet = [p.signal for p in m.provenance if p.signal not in ("text", "exact")]
+        if facet:
+            bits.append(", ".join(facet))
         if m.score is not None:
             bits.append(f"{m.score:.2f}")
         if m.substring is not None:

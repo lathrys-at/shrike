@@ -204,7 +204,7 @@ At least one of `queries` or `ids` must be provided.
 
 ### Response
 
-Each match is a note annotated with the evidence that produced it: `score` (semantic, `null`/omitted when only an exact hit), `substring` (`{matched_fields, snippet}`, absent when there was no literal hit), and `provenance` — the list of signals that surfaced this result, strongest-contributing first.
+Each match is a note annotated with the evidence that produced it: `score` (semantic, `null`/omitted when only an exact hit), `substring` (`{matched_fields, snippet}`, absent when there was no literal hit), and `provenance` — the list of signals that surfaced this result, best-ranked signal first.
 
 Each `provenance` entry is `{signal, rank}`. `signal` names the retrieval signal: `text` and `image` are the per-modality semantic rankers (so the name doubles as the matched-modality facet — `image` means the query matched the note's *image* content, on a multimodal backend), and `exact` is a literal substring hit (`fuzzy` and `tag` signals will appear here as they land). `rank` is the note's 1-based position in that signal's own ranking. `provenance` is always present and non-empty for a returned match; `score`/`substring` remain the per-signal detail (the cosine magnitude, the matched fields/snippet) and stay consistent with it (`exact` in `provenance` ⟺ `substring` is set; a semantic signal present ⟺ `score` is non-null).
 
@@ -226,7 +226,7 @@ Each `provenance` entry is `{signal, rank}`. `signal` names the retrieval signal
             "matched_fields": ["Front"],
             "snippet": "…electron transport chain…"
           },
-          "provenance": [                // why it surfaced, strongest signal first
+          "provenance": [                // why it surfaced, best-ranked signal first
             { "signal": "exact", "rank": 1 },
             { "signal": "text",  "rank": 2 }
           ]
