@@ -88,6 +88,14 @@ def _render_status(status: ServerStatus) -> None:
         output.kv("Index", "[dim]unavailable[/dim]")
     if idx.col_mod is not None:
         output.kv("Collection mod", str(idx.col_mod), indent=2)
+    if idx.activation:
+        # Per-modality activation-gate calibration (#201b): the typical best-match a query beats.
+        for modality, s in idx.activation.items():
+            output.kv(
+                f"Activation ({modality})",
+                f"μ={s['mean']:.3f} σ={s['std']:.3f} (n={int(s['n'])})",
+                indent=2,
+            )
     if idx.path:
         output.kv("Path", f"[cyan]{idx.path}[/cyan]", indent=2)
 

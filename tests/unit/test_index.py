@@ -1078,9 +1078,11 @@ class TestActivationCalibration:
         assert idx.model_id == "m2"
 
     def test_ensure_calibrated_fills_missing_stats(self, tmp_path: Path) -> None:
-        # Simulate a pre-#201b index: image vectors present, but no activation stats recorded.
+        # Simulate a pre-#201b index: image vectors present, but no activation stats recorded (so
+        # the meta has no `activation` key and calibration is marked never-attempted).
         idx = self._build(tmp_path, 40)
         idx._activation_stats = {}
+        idx._calibration_attempted = False
         meta = {"ndim": NDIM, "schema": INDEX_SCHEMA_VERSION, "col_mod": 1, "model_id": "m"}
         (tmp_path / "i" / "index.meta.json").write_text(json.dumps(meta))
         idx.ensure_calibrated()
@@ -1093,3 +1095,27 @@ class TestActivationCalibration:
         before = idx.activation_stats["image"]
         idx.ensure_calibrated()  # already calibrated → no recompute
         assert idx.activation_stats["image"] == before
+
+    def test_sub_threshold_calibration_is_one_shot(self, tmp_path: Path) -> None:
+        # A multimodal collection below CALIB_MIN persists an empty marker, so a reload treats it as
+        # already-attempted and ensure_calibrated doesn't re-sample every boot (review F3).
+        idx = self._build(tmp_path, CALIB_MIN - 1)
+        assert idx.activation_stats == {}
+        assert idx._calibration_attempted is True
+        meta = json.loads((tmp_path / "i" / "index.meta.json").read_text())
+        assert meta.get("activation") == {}  # the empty marker is persisted (key present, no stats)
+        reloaded = VectorIndex(tmp_path / "i", backend=_aligned_backend())
+        assert reloaded._calibration_attempted is True  # marker seen → ensure_calibrated will no-op
+
+    def test_metadata_only_reconcile_calibrates_pre_201b_index(self, tmp_path: Path) -> None:
+        # Review F2: a pre-#201b index whose only drift is metadata (no re-embed) still gets
+        # calibrated in reconcile's early-return branch, rather than persisting a new col_mod with
+        # the gate left off for the session.
+        idx = self._build(tmp_path, 40)
+        idx._activation_stats = {}
+        idx._calibration_attempted = False  # simulate the pre-#201b (never-calibrated) state
+        idx.set_image_resolver(_aligned_resolver(40))
+        # Same inputs → no fingerprint changes → the metadata-only reconcile path.
+        idx.reconcile(_aligned_inputs(40), col_mod=2, model_id="m")
+        assert set(idx.activation_stats) == {"image"}
+        assert idx.col_mod == 2

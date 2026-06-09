@@ -406,6 +406,45 @@ class TestUnifiedSearch:
         assert m["id"] == nid
         assert m["score"] == 0.8  # text sim only; the gated image sim is not the max
 
+    def test_image_gate_judges_surviving_hit(self, wrapper, mock_index, mcp_app):
+        # #201b review F1: the gate must judge the best image hit that *survives* exclusion/scope,
+        # not the raw rank-1. Here the strong rank-1 image hit is the excluded anchor; the only
+        # surviving image hit is weak (below the 0.25 floor) → the modality must be gated out.
+        anchor = self._seed_front(wrapper, "anchor card")
+        weak = self._seed_front(wrapper, "weakly related card")
+        mock_index.activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        mock_index.search_by_modality.return_value = [
+            {
+                "image": [
+                    {"note_id": anchor, "distance": 0.65},  # sim 0.35 > floor, but excluded
+                    {"note_id": weak, "distance": 0.80},  # sim 0.20 <= floor → the surviving best
+                ]
+            }
+        ]
+        m = _call(mcp_app, "search_notes", {"queries": ["q"], "exclude_ids": [anchor]})["results"][
+            0
+        ]["matches"]
+        assert m == []  # gated on the surviving (weak) hit, so nothing surfaces
+
+    def test_image_gate_passes_strong_surviving_hit(self, wrapper, mock_index, mcp_app):
+        # The mirror: with the strong anchor excluded, a surviving hit that itself clears the floor
+        # still surfaces — the gate isn't fooled in either direction.
+        anchor = self._seed_front(wrapper, "anchor card")
+        strong = self._seed_front(wrapper, "strongly matching card")
+        mock_index.activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        mock_index.search_by_modality.return_value = [
+            {
+                "image": [
+                    {"note_id": anchor, "distance": 0.55},  # sim 0.45, excluded
+                    {"note_id": strong, "distance": 0.66},  # sim 0.34 > floor → surfaces
+                ]
+            }
+        ]
+        m = _call(mcp_app, "search_notes", {"queries": ["q"], "exclude_ids": [anchor]})["results"][
+            0
+        ]["matches"]
+        assert [x["id"] for x in m] == [strong]
+
 
 class TestUpsertNeighbors:
     def test_neighbors_attached_on_create(self, wrapper, mock_index, mcp_app):

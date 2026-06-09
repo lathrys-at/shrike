@@ -845,6 +845,9 @@ class _IndexBase(BaseModel):
     path: str | None = None
     col_mod: int | None = None
     model_id: str | None = None
+    # Per-(non-text-)modality activation-gate calibration {modality: {n, mean, std}} (#201b); absent
+    # until a multimodal index is calibrated (text-only / uncalibrated indexes have none).
+    activation: dict[str, dict[str, float]] | None = None
 
 
 class IndexUnavailable(_IndexBase):

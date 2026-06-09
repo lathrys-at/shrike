@@ -517,13 +517,6 @@ def register_tools(
             else None
         )
 
-        def _image_gated_out(hits: list[dict[str, Any]]) -> bool:
-            # True when this query has no good-enough image match, so the modality shouldn't speak:
-            # its best (rank-1) similarity doesn't clear the calibrated floor.
-            if image_floor is None or not hits:
-                return False
-            return float(1.0 - hits[0]["distance"]) <= image_floor
-
         def _in_scope(note_data: dict[str, Any]) -> bool:
             if deck and note_data.get("deck") != deck:
                 return False
@@ -600,15 +593,25 @@ def register_tools(
             ranking_text = await _rank_modality(
                 modality_hits.get("text", []), note_data, sem_score, thresholded=True
             )
-            # Gate the image modality (#201b): drop it entirely when this query has no good image
-            # match, so its top-k doesn't inject noise. Gating before _rank_modality keeps the
-            # dropped sims out of note_data and the surfaced `score`.
-            image_hits = modality_hits.get("image", [])
-            if _image_gated_out(image_hits):
-                image_hits = []
+            # Image modality, then the activation gate (#201b). Rank into a scratch score first so
+            # the gate is judged on the best image hit that *survives* exclusion + deck/tag scope —
+            # not the raw rank-1, which might be the excluded anchor or an out-of-scope note and
+            # would let the gate open for weaker in-scope hits it exists to suppress.
+            image_score: dict[int, float] = {}
             ranking_image = await _rank_modality(
-                image_hits, note_data, sem_score, thresholded=False
+                modality_hits.get("image", []), note_data, image_score, thresholded=False
             )
+            if (
+                ranking_image
+                and image_floor is not None
+                and image_score[ranking_image[0]] <= image_floor
+            ):
+                ranking_image = []  # no good-enough *surviving* image match → gate the modality out
+                image_score = {}
+            # Fold the kept image sims into the shared (max-over-modalities) surfaced score.
+            for nid, isim in image_score.items():
+                prev = sem_score.get(nid)
+                sem_score[nid] = isim if prev is None else max(prev, isim)
 
             # Exact ranking = every candidate whose content literally contains the query (the
             # `substring` annotation), so annotation ⟺ floated. Pre-filter hits already carry it.

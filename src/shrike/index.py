@@ -159,6 +159,10 @@ class VectorIndex:
         # Per-(non-text-)modality best-match {n, mean, std}, calibrated offline from the index, for
         # the activation gate (#201b). Empty until calibrated (text-only collections stay empty).
         self._activation_stats: dict[str, dict[str, float]] = {}
+        # Whether activation calibration has run for a multimodal index — persisted (the meta key's
+        # presence) so a collection that legitimately produced *no* stats (too few media notes)
+        # isn't re-sampled every boot. Distinct from `_activation_stats` being empty.
+        self._calibration_attempted = False
         # note_id -> embedding-text hash for the vectors currently in the index.
         # Drives incremental reconcile (re-embed only changed notes). ``None``
         # means "no per-note state" (old index / never built) — reconcile then
@@ -302,8 +306,10 @@ class VectorIndex:
             self._model_id = meta.get("model_id")
             # marker absent → pre-#201a (v1) single-index layout
             self._schema = meta.get("schema", 1)
-            # absent on a pre-#201b index → {} → gate disabled until ensure_calibrated/next rebuild
+            # absent on a pre-#201b index → {} → gate disabled until ensure_calibrated/next rebuild.
+            # The key's *presence* (even as {}) records that calibration already ran (one-shot).
             self._activation_stats = meta.get("activation", {})
+            self._calibration_attempted = "activation" in meta
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning("Corrupt index metadata at %s: %s", self._meta_path, e)
             return
@@ -609,7 +615,10 @@ class VectorIndex:
             non_text = {m: idx for m, idx in self._indexes.items() if m != TEXT and len(idx) > 0}
             if text_idx is None or len(text_idx) == 0 or not non_text:
                 self._activation_stats = {}
-                return
+                return  # text-only / empty → nothing to calibrate; don't mark attempted
+            # A genuine multimodal calibration ran (even if it ends up below CALIB_MIN): record it
+            # so ensure_calibrated treats this as one-shot rather than re-sampling every boot.
+            self._calibration_attempted = True
 
             all_keys = np.array([int(k) for k in text_idx.keys], dtype=np.int64)
             rng = np.random.default_rng(0)  # deterministic → calibration is stable across runs
@@ -667,10 +676,10 @@ class VectorIndex:
         waiting for the next drift rebuild. Cheap (a sample of HNSW searches); safe to call at boot.
         """
         has_non_text = any(m != TEXT and len(idx) > 0 for m, idx in self._indexes.items())
-        if not has_non_text or self._activation_stats:
+        if not has_non_text or self._calibration_attempted:
             return
         self._calibrate_activation()
-        if self._activation_stats:
+        if self._calibration_attempted:  # persist the attempt (stats or the {} marker) → one-shot
             self.save()
 
     def contains(self, note_id: int) -> bool:
@@ -691,7 +700,7 @@ class VectorIndex:
             meta["col_mod"] = self._col_mod
         if self._model_id is not None:
             meta["model_id"] = self._model_id
-        if self._activation_stats:
+        if self._calibration_attempted:  # write the key (stats, or {} marker) once calibration ran
             meta["activation"] = self._activation_stats
         # Whole save under the lock so concurrent callers (a debounced save on a
         # worker thread, the signal-handler save, /embedding/stop, a manual
@@ -859,7 +868,12 @@ class VectorIndex:
         if not to_embed and not to_remove:
             # A non-embedding edit (tags/deck/template) bumped col.mod without
             # changing any note's embedding fingerprint: just advance the watermark.
+            # The modality distributions are unchanged, so only calibrate if it never has been (a
+            # pre-#201b index reaching us via a metadata-only drift, which would otherwise persist a
+            # fresh col_mod with no stats and leave the gate off for the session).
             self._col_mod = col_mod
+            if not self._calibration_attempted:
+                self._calibrate_activation()
             self.save()
             logger.info("Index reconcile: no embedding changes (col_mod=%d)", col_mod)
             return
