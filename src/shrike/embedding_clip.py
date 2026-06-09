@@ -90,6 +90,7 @@ class ClipBackend:
         self._dim: int | None = None
         self._text_path: Path | None = None
         self._vis_path: Path | None = None
+        self._Image: Any = None  # the PIL.Image module, captured at start()
 
     @property
     def running(self) -> bool:
@@ -134,7 +135,7 @@ class ClipBackend:
             import json
 
             import onnxruntime as ort
-            from PIL import Image  # noqa: F401 — imported here so a missing dep surfaces at start
+            from PIL import Image
             from tokenizers import Tokenizer
         except ImportError as e:
             raise ImportError(
@@ -142,6 +143,7 @@ class ClipBackend:
                 "Install it with: pip install 'shrike[clip]'"
             ) from e
 
+        self._Image = Image  # captured so _preprocess doesn't re-import per image
         self._text_path, self._vis_path, tok_path, pp_path = self._resolve_files()
 
         available = list(ort.get_available_providers())
@@ -251,21 +253,20 @@ class ClipBackend:
 
     def _preprocess(self, image: ImageInput) -> np.ndarray:
         """CLIP preprocessing → CHW float32 (resize shortest-edge, center-crop, rescale, normalize)."""  # noqa: E501
-        from PIL import Image
 
         assert self._mean is not None and self._std is not None  # set in start()
         img: Any
         if isinstance(image, bytes):
-            img = Image.open(io.BytesIO(image))
+            img = self._Image.open(io.BytesIO(image))
         elif isinstance(image, (str, Path)):
-            img = Image.open(image)
+            img = self._Image.open(image)
         else:
             img = image  # assume a PIL image
         img = img.convert("RGB")
         s = self._crop
         w, h = img.size
         scale = s / min(w, h)
-        img = img.resize((round(w * scale), round(h * scale)), Image.Resampling.BICUBIC)
+        img = img.resize((round(w * scale), round(h * scale)), self._Image.Resampling.BICUBIC)
         w, h = img.size
         left, top = (w - s) // 2, (h - s) // 2
         img = img.crop((left, top, left + s, top + s))

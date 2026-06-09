@@ -33,6 +33,7 @@ from shrike.client import ShrikeClient
 from tests.integration.model_cache import (
     EMBEDDING_MODEL_NAME,
     EMBEDDING_MODEL_URL,
+    cached_clip_model_dir,
     cached_distilroberta_model_dir,
     cached_model_path,
     cached_onnx_fp32_model_dir,
@@ -534,6 +535,16 @@ requires_onnxruntime = pytest.mark.skipif(
 )
 
 
+def _has_clip() -> bool:
+    return _has_onnxruntime() and importlib.util.find_spec("PIL") is not None
+
+
+requires_clip = pytest.mark.skipif(
+    not _has_clip(),
+    reason="onnxruntime/tokenizers/pillow not installed (pip install 'shrike[clip]')",
+)
+
+
 @pytest.fixture(scope="session")
 def onnx_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A small ONNX text-embedding model dir (model.onnx + tokenizer.json).
@@ -560,6 +571,15 @@ def onnx_fp32_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """The fp32 (non-quantized) MiniLM ONNX model — batches bit-exact, so it proves the
     batch-safety probe lets a safe model batch (#174). Same retry/cache path."""
     return cached_onnx_fp32_model_dir(tmp_path_factory.mktemp("onnx-fp32-model"))
+
+
+@pytest.fixture(scope="session")
+def clip_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A small CLIP (int8 text+vision graphs) for image<->text tests (#162 Phase 3b).
+
+    Use with ``ClipBackend(model=str(clip_model), variant="quantized")``. Same retry/cache path.
+    """
+    return cached_clip_model_dir(tmp_path_factory.mktemp("clip-model"))
 
 
 @pytest.fixture(scope="session")

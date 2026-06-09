@@ -150,6 +150,20 @@ real DistilRoBERTa run:
   (CPU + CoreML on macOS); `shrike[onnx-gpu]` is `onnxruntime-gpu` (CUDA/TensorRT) and is
   installed *instead of* `[onnx]` (the two wheels conflict); Windows DirectML is a manual
   `onnxruntime-directml`.
+- **The CLIP backend is a *dual* encoder behind the same seam (#162 Phase 3b).** Multimodal
+  search (a text query retrieving a card by its image) needs image and text in *one* vector
+  space. `ClipBackend` (`embedding_clip.py`) loads two ONNX graphs — text (`input_ids → text_embeds`)
+  and vision (`pixel_values → image_embeds`) — both projecting into the same space (L2-normalize,
+  no pooling: unlike the text-only `OnnxBackend`, both graphs emit a pre-pooled projected vector).
+  Image preprocessing (resize → center-crop → rescale → normalize) is read from the model's
+  `preprocessor_config.json` and done in PIL + numpy — **no torch/torchvision** (the eval's
+  dependency pain). It reuses `OnnxBackend`'s provider resolution and the batch-safety probe: the
+  two graphs come from one export with one quantization, so **a single text-path probe governs
+  both** (int8 CLIP → serial; fp CLIP → batches). It advertises `modalities={text,image}` (the
+  graceful-degradation seam) and exposes an extra `embed_images()` method — text-only backends
+  don't implement it, so callers gate on `IMAGE in modalities`. The GO and the chosen embedding
+  unit (multi-vector per note, `multi=True`) came from the Phase-3a eval (#193). `jina-clip-v2` is
+  the production-quality option; a small `clip-vit-base-patch32` is the CI fixture.
 
 ### The index is a derived cache, never a co-equal store
 

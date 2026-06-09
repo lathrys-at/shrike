@@ -47,7 +47,7 @@ Start the server as a background daemon. The collection path can come from `--co
 | `--index-save-threshold INTEGER` | Unsaved index changes that force an immediate flush (default: 100). |
 | `--cooperative-lock` | Release the collection lock when idle and re-open on demand, so an idle daemon doesn't block launching Anki (opt-in; default holds the lock for the daemon's lifetime). |
 | `--lock-hold-seconds FLOAT` | In cooperative mode, seconds to hold the collection after the last operation before releasing it (default: 5). |
-| `--embedding-backend` | Embedding backend: `llama` (llama-server subprocess, GGUF/MLX) or `onnx` (in-process onnxruntime; needs the `onnx` extra). Default: `llama`. |
+| `--embedding-backend` | Embedding backend: `llama` (llama-server subprocess, GGUF/MLX), `onnx` (in-process onnxruntime, text-only; needs the `onnx` extra), or `clip` (in-process CLIP for image↔text search; needs the `clip` extra). Default: `llama`. |
 | `--embedding-model PATH` | Path to the embedding model. For the `llama` backend, a GGUF file; for `onnx`, a model directory holding `model.onnx` and `tokenizer.json`. Enables semantic search. |
 | `--embedding-port INTEGER` | Port for the embedding server (default: 8373). `llama` backend only. |
 | `--embedding-context-size INTEGER` | Context size for the embedding model. For `onnx` it sets the token-truncation length (default 256); setting it above the model's own positional limit is on you (Shrike does not clamp it). |

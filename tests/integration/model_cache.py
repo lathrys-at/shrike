@@ -68,6 +68,19 @@ ONNX_FP32_MODEL_FILES = {
     "tokenizer.json": "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
 }
 
+# The small CLIP (image<->text) for the clip backend (#162 Phase 3b): an int8 dual-encoder
+# (separate text + vision graphs) + the CLIP tokenizer + image-preprocessing config. Graphs are
+# stored flat (the backend's _resolve_files finds them at the dir root via the `variant` suffix).
+# ~147 MB. jina-clip-v2 is the production-quality option; this is the CI/test fixture.
+CLIP_MODEL_DIR_NAME = "clip-vit-base-patch32-onnx"
+_CLIP_BASE = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main"
+CLIP_MODEL_FILES = {
+    "text_model_quantized.onnx": f"{_CLIP_BASE}/onnx/text_model_quantized.onnx",
+    "vision_model_quantized.onnx": f"{_CLIP_BASE}/onnx/vision_model_quantized.onnx",
+    "tokenizer.json": f"{_CLIP_BASE}/tokenizer.json",
+    "preprocessor_config.json": f"{_CLIP_BASE}/preprocessor_config.json",
+}
+
 # Statuses worth retrying: HF rate-limit plus transient gateway/server errors.
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
@@ -168,3 +181,8 @@ def cached_distilroberta_model_dir(fallback_dir: Path) -> Path:
 def cached_onnx_fp32_model_dir(fallback_dir: Path) -> Path:
     """The pinned fp32 MiniLM ONNX model dir (384-dim, batches bit-exact)."""
     return _cached_model_dir(fallback_dir, ONNX_FP32_MODEL_DIR_NAME, ONNX_FP32_MODEL_FILES)
+
+
+def cached_clip_model_dir(fallback_dir: Path) -> Path:
+    """The pinned small CLIP dir (int8 text+vision graphs, 512-dim shared space)."""
+    return _cached_model_dir(fallback_dir, CLIP_MODEL_DIR_NAME, CLIP_MODEL_FILES)
