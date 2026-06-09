@@ -63,7 +63,7 @@ class TestReembed:
         result = _call(mcp_app, "find_replace_notes", args)
         assert result["notes_changed"] == 1
         mock_index.add.assert_called_once()
-        assert mock_index.add.call_args[0][0] == [nid]  # only the changed note
+        assert [i.note_id for i in mock_index.add.call_args[0][0]] == [nid]  # only the changed note
         assert mock_index.col_mod == wrapper.col.mod
         mock_saver.request_save.assert_called_once()
 

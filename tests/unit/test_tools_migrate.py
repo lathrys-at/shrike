@@ -70,7 +70,7 @@ class TestMigrateNoteTypeTool:
         )
         assert result["changed"] == [nid]
         mock_index.add.assert_called_once()
-        assert mock_index.add.call_args.args[0] == [nid]
+        assert [i.note_id for i in mock_index.add.call_args.args[0]] == [nid]
         assert mock_index.col_mod == wrapper.col.mod
         mock_saver.request_save.assert_called_once()
 

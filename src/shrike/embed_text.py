@@ -37,6 +37,7 @@ rebuild rather than silently mixing old- and new-style vectors.
 
 from __future__ import annotations
 
+import html
 import re
 
 # Bump on any change to normalize_for_embedding's output (incl. an Anki upgrade
@@ -112,6 +113,36 @@ def normalize_for_embedding(value: str) -> str:
 # <video>, <object>, <embed>, <source>, and [sound:…]. Used by collection_prune's
 # empty-note rule (#89), not by embedding (which strips media out entirely).
 _MEDIA_RE = re.compile(r"(?i)<\s*(?:img|audio|video|object|embed|source)\b|\[sound:")
+
+# An <img>'s src (double-, single-, or unquoted). Used to extract a note's image filenames for
+# multimodal embedding (#162) — distinct from _MEDIA_RE (which only *detects* media presence).
+_IMG_SRC_RE = re.compile(
+    r"""(?ix) < \s* img \b [^>]*? \b src \s* = \s* (?: "([^"]*)" | '([^']*)' | ([^\s>]+) )"""
+)
+
+
+def extract_image_refs(value: str) -> list[str]:
+    """Image filenames referenced by a field's ``<img src>`` tags — in order, de-duplicated.
+
+    Returns each src's basename (the flat form ``store_media`` returns and the media dir keys on);
+    remote srcs (``scheme://…``) are skipped (not local media). Only ``<img>`` — the embeddable
+    image modality; ``[sound:]``/``<audio>``/``<video>`` are other modalities for a later slice.
+    The collection resolves these names to bytes via the media dir before handing them to a
+    CLIP-style backend; ``normalize_for_embedding`` still strips ``<img>`` out of the *text*.
+    """
+    if not value or "<img" not in value.lower():
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for m in _IMG_SRC_RE.finditer(value):
+        src = html.unescape(m.group(1) or m.group(2) or m.group(3) or "").strip()
+        if not src or "://" in src:  # empty or a remote URL → not local media
+            continue
+        name = src.rsplit("/", 1)[-1]  # basename; Anki's media dir is flat
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
 
 
 def field_is_blank(value: str) -> bool:

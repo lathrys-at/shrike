@@ -19,10 +19,13 @@ import json
 import logging
 import threading
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+from shrike.embedding_base import IMAGE
 
 if TYPE_CHECKING:
     from shrike.embedding_base import EmbedderBackend
@@ -30,6 +33,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger("shrike.index")
 
 BATCH_SIZE = 64
+# Search over-fetches this multiple of top_k raw vectors before deduping to distinct notes — a
+# note can contribute several vectors (text + images) under one key, so the raw top-k can dedup
+# to fewer notes. A small factor covers the common few-images-per-note case; a note with more
+# images than this could in principle still under-fill, which is acceptable for search recall.
+SEARCH_OVERFETCH = 4
+
+# An image resolver maps a media filename to its bytes (None = missing/unreadable → skipped).
+ImageResolver = Callable[[str], "bytes | None"]
+
+
+@dataclass(frozen=True)
+class NoteEmbedInput:
+    """One note's embedding inputs: its normalized text plus any image filenames.
+
+    Produced by ``CollectionWrapper.note_embed_inputs`` (a cheap DB + regex pass, no file reads);
+    the index turns it into a text vector and — for an image-capable backend — one vector per
+    resolvable image, all stored under the ``note_id`` key.
+    """
+
+    note_id: int
+    text: str
+    image_names: list[str] = field(default_factory=list)
 
 
 def _hash_text(text: str) -> str:
@@ -79,6 +104,7 @@ class VectorIndex:
         self._meta_path = self._dir / "index.meta.json"
         self._hashes_path = self._dir / "index.hashes.json"
         self._embedding = backend
+        self._read_image: ImageResolver | None = None
         self._index: Any | None = None
         self._ndim: int | None = None
         self._col_mod: int | None = None
@@ -150,6 +176,32 @@ class VectorIndex:
         elif self._state == IndexState.UNAVAILABLE:
             self._state = IndexState.READY
 
+    def set_image_resolver(self, resolver: ImageResolver | None) -> None:
+        """Attach the media-byte resolver the index uses to read images for embedding.
+
+        ``resolver(filename) -> bytes | None`` (``None`` = missing/unreadable → skipped). The
+        server closes it over ``CollectionWrapper.media_dir``; reads are lock-free (the media dir
+        resolves without the Anki lock), so the index reads bytes on its own embed thread, only
+        for the notes it's (re-)embedding. Without it, an image-capable backend embeds text only.
+        """
+        self._read_image = resolver
+
+    def _embeds_images(self) -> bool:
+        """True when the attached backend embeds images (so the index must be multi-vector)."""
+        return self._embedding is not None and IMAGE in self._embedding.modalities
+
+    def _note_hash(self, text: str, image_names: Sequence[str]) -> str:
+        """Per-note change fingerprint. Folds image filenames in **only** when the backend embeds
+        images — so a text-only backend's hashes are byte-identical to the pre-3c text-only scheme
+        (no spurious re-embed on upgrade), while a CLIP backend re-embeds a note when its image set
+        changes. Anki content-addresses media (a filename is a stable content identity), so hashing
+        names — not bytes — detects add/remove/swap without reading any file.
+        """
+        if self._embeds_images() and image_names:
+            joined = "\x1f".join(sorted(image_names))
+            return _hash_text(f"{text}\x1f{joined}")
+        return _hash_text(text)
+
     @property
     def build_progress(self) -> tuple[int, int]:
         return self._build_progress
@@ -210,7 +262,12 @@ class VectorIndex:
         # setting. If the metric ever changes to one that isn't scale-invariant
         # (l2sq, ip), normalization becomes vector-affecting and must be typed +
         # folded into model_id like pooling.
-        self._index = Index(ndim=ndim, metric="cos", dtype="f32")
+        # multi=True: a note maps to several vectors under one note_id key (its text vector + one
+        # per image). A text-only backend simply stores one vector per key — identical behaviour —
+        # so the flag is always on; search dedups multi-hits back to one result per note. The flag
+        # persists in the saved index, so a pre-3c single-vector index loads as multi=False and is
+        # rebuilt into a multi=True one when an image-capable backend attaches (see check_drift).
+        self._index = Index(ndim=ndim, metric="cos", dtype="f32", multi=True)
         self._dir.mkdir(parents=True, exist_ok=True)
         logger.info("Created new vector index: %d dims", ndim)
         return self._index
@@ -240,37 +297,57 @@ class VectorIndex:
         self.save()
         logger.info("Materialized empty index (%d dims, col_mod=%d)", ndim, col_mod)
 
-    def add(self, note_ids: Sequence[int], texts: Sequence[str]) -> int:
-        """Embed texts and add them to the index. Returns count added."""
+    def add(self, inputs: Sequence[NoteEmbedInput]) -> int:
+        """Embed notes and add their vectors. Returns the count of notes added.
+
+        Each note contributes a text vector and — when the backend embeds images and a resolver is
+        attached — one vector per resolvable image, all under the ``note_id`` key. A note already
+        in the index is replaced: its existing vectors (all of them, multi remove-by-key) are
+        dropped before the fresh set is added. Image bytes are read lazily, only here.
+        """
         if not self._embedding:
             raise RuntimeError("No embedding service available")
-        if not note_ids:
+        if not inputs:
             return 0
-        if len(note_ids) != len(texts):
-            raise ValueError("note_ids and texts must have the same length")
 
+        # Local (narrowed) resolver: non-None only when the backend embeds images and one is set.
+        read_image = self._read_image if self._embeds_images() else None
         added = 0
-        for i in range(0, len(texts), BATCH_SIZE):
-            batch_ids = note_ids[i : i + BATCH_SIZE]
-            batch_texts = texts[i : i + BATCH_SIZE]
+        for i in range(0, len(inputs), BATCH_SIZE):
+            batch = inputs[i : i + BATCH_SIZE]
 
-            vectors = self._embedding.embed_texts(list(batch_texts))
-            vecs_array = np.array(vectors, dtype=np.float32)
-            keys_array = np.array(batch_ids, dtype=np.int64)
+            text_vecs = self._embedding.embed_texts([inp.text for inp in batch])
+            keys: list[int] = [inp.note_id for inp in batch]
+            vecs: list[list[float]] = list(text_vecs)
 
+            if read_image is not None:
+                img_bytes: list[bytes] = []
+                img_keys: list[int] = []
+                for inp in batch:
+                    for name in inp.image_names:
+                        data = read_image(name)
+                        if data:
+                            img_bytes.append(data)
+                            img_keys.append(inp.note_id)
+                if img_bytes:
+                    img_vecs = self._embedding.embed_images(img_bytes)  # type: ignore[attr-defined]
+                    vecs.extend(img_vecs)
+                    keys.extend(img_keys)
+
+            vecs_array = np.array(vecs, dtype=np.float32)
             with self._lock:
                 idx = self._ensure_index(vecs_array.shape[1])
-                # Drop any keys already present in one call (batch remove ignores
-                # keys not in the index) so a re-add replaces rather than dupes.
-                idx.remove(keys_array)
-                idx.add(keys_array, vecs_array)
+                idx.remove(np.array([inp.note_id for inp in batch], dtype=np.int64))
+                idx.add(np.array(keys, dtype=np.int64), vecs_array)
                 if self._note_hashes is not None:
-                    for nid, text in zip(batch_ids, batch_texts, strict=True):
-                        self._note_hashes[int(nid)] = _hash_text(text)
-            added += len(batch_ids)
+                    for inp in batch:
+                        self._note_hashes[int(inp.note_id)] = self._note_hash(
+                            inp.text, inp.image_names
+                        )
+            added += len(batch)
 
         self._dirty += added
-        logger.debug("Added %d vectors to index (total: %d)", added, self.size)
+        logger.debug("Added %d notes to index (total vectors: %d)", added, self.size)
         return added
 
     def remove(self, note_ids: list[int]) -> int:
@@ -306,6 +383,10 @@ class VectorIndex:
         vectors = self._embedding.embed_texts(texts)  # type: ignore[union-attr]
         query_array = np.array(vectors, dtype=np.float32)
 
+        # Over-fetch so the dedup-to-distinct-notes (a note can match via several of its vectors)
+        # still yields up to top_k notes; usearch caps k at the index size internally.
+        fetch = max(top_k * SEARCH_OVERFETCH, top_k)
+
         assert self._index is not None
         results: list[list[dict[str, Any]]] = []
         with self._lock:
@@ -313,14 +394,24 @@ class VectorIndex:
             # them internally, versus a Python loop of single-query searches. It
             # returns Matches for a single query, BatchMatches (indexable per
             # query) for several.
-            raw = self._index.search(query_array, top_k)
+            raw = self._index.search(query_array, fetch)
             per_query = [raw] if len(texts) == 1 else [raw[i] for i in range(len(texts))]
             for matches in per_query:
+                # Matches come back nearest-first, so the first time a note_id appears is its best
+                # (smallest) distance — its other (text/image) vectors are dropped. Truncate to
+                # top_k distinct notes.
                 result_list: list[dict[str, Any]] = []
+                seen: set[int] = set()
                 for key, dist in zip(matches.keys, matches.distances, strict=True):
-                    if int(key) == 0 and float(dist) == 0.0 and self.size == 0:
+                    nid = int(key)
+                    if nid in seen:
                         continue
-                    result_list.append({"note_id": int(key), "distance": float(dist)})
+                    if nid == 0 and float(dist) == 0.0 and self.size == 0:
+                        continue
+                    seen.add(nid)
+                    result_list.append({"note_id": nid, "distance": float(dist)})
+                    if len(result_list) >= top_k:
+                        break
                 results.append(result_list)
 
         return results
@@ -389,6 +480,12 @@ class VectorIndex:
             )
             return True
 
+        if self._embeds_images() and not getattr(self._index, "multi", False):
+            # An image-capable backend attached to a single-vector index (e.g. one built before
+            # 3c, or by a text backend): it must become multi-vector to hold image vectors.
+            logger.info("Backend embeds images but index is single-vector; rebuild needed")
+            return True
+
         if self._col_mod != current_col_mod:
             logger.info(
                 "Index drift detected: stored col_mod=%d, current=%d",
@@ -402,15 +499,14 @@ class VectorIndex:
 
     def rebuild(
         self,
-        note_ids: Sequence[int],
-        texts: Sequence[str],
+        inputs: Sequence[NoteEmbedInput],
         col_mod: int,
         *,
         model_id: str | None = None,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> None:
-        """Full rebuild: clear the index and re-embed all notes."""
-        total = len(note_ids)
+        """Full rebuild: clear the index and re-embed all notes (text + images)."""
+        total = len(inputs)
         self._state = IndexState.BUILDING
         self._build_progress = (0, total)
         self._build_error = None
@@ -426,10 +522,9 @@ class VectorIndex:
 
             indexed = 0
             for i in range(0, total, BATCH_SIZE):
-                batch_ids = note_ids[i : i + BATCH_SIZE]
-                batch_texts = texts[i : i + BATCH_SIZE]
-                self.add(batch_ids, batch_texts)
-                indexed += len(batch_ids)
+                batch = inputs[i : i + BATCH_SIZE]
+                self.add(batch)
+                indexed += len(batch)
                 self._build_progress = (indexed, total)
                 if on_progress:
                     on_progress(indexed, total)
@@ -448,8 +543,7 @@ class VectorIndex:
 
     def reconcile(
         self,
-        note_ids: Sequence[int],
-        texts: Sequence[str],
+        inputs: Sequence[NoteEmbedInput],
         col_mod: int,
         *,
         model_id: str | None = None,
@@ -457,32 +551,39 @@ class VectorIndex:
     ) -> None:
         """Incrementally bring the index up to date on drift.
 
-        Re-embeds only the notes whose embedding *text* changed (by hash) plus
-        new notes, removes deleted ones, and leaves every unchanged vector in
-        place — instead of re-embedding the whole collection. The end state is
-        identical to a full rebuild over the same notes.
+        Re-embeds only the notes whose embedding fingerprint changed (text, or — for an
+        image-capable backend — the note's image set) plus new notes, removes deleted ones, and
+        leaves every unchanged vector in place. The end state is identical to a full rebuild over
+        the same notes.
 
-        Falls back to ``rebuild`` when there's no prior per-note hash state (an
-        index built before this existed, or never built), no index is loaded, or
-        the model changed (which moves every vector to a different space).
+        Falls back to ``rebuild`` when there's no prior per-note hash state (an index built before
+        this existed, or never built), no index is loaded, the model changed (every vector moves to
+        a different space), or the backend now embeds images but the index is still single-vector.
         """
         old = self._note_hashes
         model_changed = model_id is not None and self._model_id != model_id
-        if old is None or self._index is None or model_changed:
-            self.rebuild(note_ids, texts, col_mod, model_id=model_id, on_progress=on_progress)
+        needs_multi = (
+            self._embeds_images()
+            and self._index is not None
+            and not getattr(self._index, "multi", False)
+        )
+        if old is None or self._index is None or model_changed or needs_multi:
+            self.rebuild(inputs, col_mod, model_id=model_id, on_progress=on_progress)
             return
 
-        new_hashes = {int(nid): _hash_text(t) for nid, t in zip(note_ids, texts, strict=True)}
-        text_by_id = {int(nid): t for nid, t in zip(note_ids, texts, strict=True)}
+        new_hashes = {
+            int(inp.note_id): self._note_hash(inp.text, inp.image_names) for inp in inputs
+        }
+        input_by_id = {int(inp.note_id): inp for inp in inputs}
         to_embed = [nid for nid, h in new_hashes.items() if old.get(nid) != h]
         to_remove = [nid for nid in old if nid not in new_hashes]
 
         if not to_embed and not to_remove:
             # A non-embedding edit (tags/deck/template) bumped col.mod without
-            # changing any note's embedding text: just advance the watermark.
+            # changing any note's embedding fingerprint: just advance the watermark.
             self._col_mod = col_mod
             self.save()
-            logger.info("Index reconcile: no embedding-text changes (col_mod=%d)", col_mod)
+            logger.info("Index reconcile: no embedding changes (col_mod=%d)", col_mod)
             return
 
         logger.info(
@@ -499,7 +600,7 @@ class VectorIndex:
             if to_remove:
                 self.remove(to_remove)
             if to_embed:
-                self.add(to_embed, [text_by_id[nid] for nid in to_embed])
+                self.add([input_by_id[nid] for nid in to_embed])
             # add/remove already maintain hashes incrementally; set the full
             # current state as the authoritative record before saving.
             self._note_hashes = new_hashes
@@ -517,8 +618,7 @@ class VectorIndex:
 
     def reconcile_in_background(
         self,
-        note_ids: Sequence[int],
-        texts: Sequence[str],
+        inputs: Sequence[NoteEmbedInput],
         col_mod: int,
         *,
         model_id: str | None = None,
@@ -530,16 +630,15 @@ class VectorIndex:
 
         def _run() -> None:
             with contextlib.suppress(Exception):
-                self.reconcile(note_ids, texts, col_mod, model_id=model_id)
+                self.reconcile(inputs, col_mod, model_id=model_id)
 
         self._build_thread = threading.Thread(target=_run, name="index-reconcile", daemon=True)
         self._build_thread.start()
-        logger.info("Background index reconcile started (%d notes)", len(note_ids))
+        logger.info("Background index reconcile started (%d notes)", len(inputs))
 
     def rebuild_in_background(
         self,
-        note_ids: Sequence[int],
-        texts: Sequence[str],
+        inputs: Sequence[NoteEmbedInput],
         col_mod: int,
         *,
         model_id: str | None = None,
@@ -554,11 +653,11 @@ class VectorIndex:
             # suppress here only to keep the daemon thread from dumping a
             # traceback for an error that's already been handled and surfaced.
             with contextlib.suppress(Exception):
-                self.rebuild(note_ids, texts, col_mod, model_id=model_id)
+                self.rebuild(inputs, col_mod, model_id=model_id)
 
         self._build_thread = threading.Thread(target=_run, name="index-rebuild", daemon=True)
         self._build_thread.start()
-        logger.info("Background index rebuild started (%d notes)", len(note_ids))
+        logger.info("Background index rebuild started (%d notes)", len(inputs))
 
     def status(self) -> dict[str, Any]:
         """Return index status for diagnostics."""

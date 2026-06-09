@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from shrike.embedding import EmbeddingService
-from shrike.index import VectorIndex
+from shrike.index import NoteEmbedInput, VectorIndex
 from shrike.server import _maybe_rebuild
 
 
@@ -26,14 +26,19 @@ class TestMaybeRebuild:
         # Drift reconciles incrementally (reconcile falls back to a full rebuild
         # internally when the model changed or there's no prior per-note state).
         idx = _index(drift=True)
-        assert _maybe_rebuild(idx, "model", 123, [1, 2], ["a", "b"], _embedding()) is True
+        assert (
+            _maybe_rebuild(
+                idx, "model", 123, [NoteEmbedInput(1, "a"), NoteEmbedInput(2, "b")], _embedding()
+            )
+            is True
+        )
         idx.reconcile_in_background.assert_called_once()
         idx.rebuild_in_background.assert_not_called()
         idx.materialize_empty.assert_not_called()
 
     def test_no_work_without_drift(self):
         idx = _index(drift=False)
-        assert _maybe_rebuild(idx, "model", 123, [1], ["a"], _embedding()) is False
+        assert _maybe_rebuild(idx, "model", 123, [NoteEmbedInput(1, "a")], _embedding()) is False
         idx.reconcile_in_background.assert_not_called()
         idx.materialize_empty.assert_not_called()
 
@@ -43,7 +48,7 @@ class TestMaybeRebuild:
         # work, so the return is still False.
         idx = _index(drift=True)
         svc = _embedding(dim=8)
-        assert _maybe_rebuild(idx, "model", 123, [], [], svc) is False
+        assert _maybe_rebuild(idx, "model", 123, [], svc) is False
         idx.reconcile_in_background.assert_not_called()
         idx.materialize_empty.assert_called_once_with(8, 123, "model")
 
@@ -52,5 +57,5 @@ class TestMaybeRebuild:
         # skip behaviour rather than guessing a width.
         idx = _index(drift=True)
         svc = _embedding(dim=None)
-        assert _maybe_rebuild(idx, "model", 123, [], [], svc) is False
+        assert _maybe_rebuild(idx, "model", 123, [], svc) is False
         idx.materialize_empty.assert_not_called()
