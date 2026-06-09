@@ -1322,6 +1322,11 @@ class TestCooperativeLocking:
     def test_status_reports_and_idle_release(self, server_factory):
         from shrike.client import ShrikeClient
 
+        def wait_for_release(client: ShrikeClient, deadline: float) -> bool:
+            while client.status().collection_held and time.time() < deadline:
+                time.sleep(0.2)
+            return not client.status().collection_held
+
         info = server_factory(
             "coop", extra_args=["--cooperative-lock", "--lock-hold-seconds", "2.0"]
         )
@@ -1329,17 +1334,15 @@ class TestCooperativeLocking:
 
         st = client.status()
         assert st.locking == "cooperative"
-        assert st.collection_held is False  # released right after boot
+        # Boot release may not have landed yet — poll with a short deadline (#250).
+        assert wait_for_release(client, time.time() + 8)
 
         # An MCP op re-acquires the collection.
         client.query("deck:*")
         assert client.status().collection_held is True
 
         # After the idle window it releases again (poll, timing-tolerant).
-        deadline = time.time() + 8
-        while client.status().collection_held and time.time() < deadline:
-            time.sleep(0.2)
-        assert client.status().collection_held is False
+        assert wait_for_release(client, time.time() + 8)
 
         # Re-acquire still works after release.
         assert client.query("deck:*").total == 0
