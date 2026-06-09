@@ -81,6 +81,9 @@ def _resolve_url(term: str, resolved: dict[str, str], refresh: bool) -> str | No
             "gsrlimit": 1,
             "prop": "imageinfo",
             "iiprop": "url",
+            # A width *hint* only: Commons may serve a larger standard rendition (the pins are
+            # mostly 960px), which is harmless — jina-clip downscales to 512x512 regardless, and
+            # a pinned replay uses the URL verbatim. --refresh re-resolves at this hint.
             "iiurlwidth": 640,
         },
     )
@@ -288,7 +291,10 @@ def _minilm_embedder() -> tuple[Any, int] | None:
     import sys
 
     sys.path.insert(0, str(ROOT))
-    from tests.integration.model_cache import ONNX_FP32_MODEL_DIR_NAME, ONNX_MODEL_DIR_NAME
+    try:
+        from tests.integration.model_cache import ONNX_FP32_MODEL_DIR_NAME, ONNX_MODEL_DIR_NAME
+    except ImportError:
+        return None  # tests/ not importable (e.g. run outside the repo) → skip the baseline
 
     cache = os.environ.get("SHRIKE_TEST_MODEL_DIR") or os.path.expanduser(
         "~/.cache/shrike-test-models"
