@@ -263,14 +263,14 @@
         "usagesDigest": "CtAWBUgPdQIk4ZLRdQHEZRv6t1LInnToKO/KfWV/soU=",
         "recordedFileInputs": {
           "@@//native/Cargo.lock": "5de209f4c3c17c4f27dc28a1feff4c878b1b65f526cd2b9c12e33323547fcb04",
-          "@@//native/Cargo.toml": "e5c7f352586eb45757c9d5fd6bb9ca5bfdb121e692043a3861947d28bd86b338",
+          "@@//native/Cargo.toml": "9155ee8206bb998621f3d76cefdc3ad3d509c99835f0ffa0a9c00370affd821a",
           "@@//native/_demo/Cargo.toml": "833ef01900b52b84364fe729393a63aa0b2c92cb3e017f3f39ca1ea8d60531b5",
           "@@//native/shrike-compute/Cargo.toml": "f16d78ba87ff0ae79db40b856350ade9d8ac1593bce44c191e44e141701e8e62",
-          "@@//native/shrike-derived/Cargo.toml": "f707a7cdb1d2d25e0ef46b90391d3e77a856e767dc40df7e4ece58d428cd2f6a",
+          "@@//native/shrike-derived/Cargo.toml": "0484a1a9db1ada6783702c8ed10dbd6431fdba42c468b48083f498cb7810dfc9",
           "@@//native/shrike-embed/Cargo.toml": "a2666368f78f931f1c62d35c980d352639b289515662a896bf9928e07d755053",
           "@@//native/shrike-ffi/Cargo.toml": "dc17c2f604b3780dbca9aa41011351ad078ac90abb4ca46884bc277c3083502e",
           "@@//native/shrike-index/Cargo.toml": "11e1945651b21fc0ad15c17e5890db9f5787db3612b2e205c1c4860e84be410c",
-          "@@//native/shrike-py/Cargo.toml": "cd9708d03087cfea527efcc5506923eb91101c4d52387fd6d26a4d2def436b02"
+          "@@//native/shrike-py/Cargo.toml": "37cb9fc0d4d3664ff04f091fbcdcd35c6cbf31772505d68ba113ffa62fbe27ba"
         },
         "recordedDirentsInputs": {},
         "envVariables": {

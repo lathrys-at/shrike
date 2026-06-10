@@ -55,6 +55,16 @@ cd native && cargo build && cargo test
 scripts/build-native.sh            # debug; --release for optimized
 ```
 
+**SQLite linkage (#300):** `shrike-derived` bundles its own SQLite by default
+(FTS5 + trigram guaranteed — the #281 property; release wheels keep this).
+`scripts/build-native.sh --system-sqlite` (or
+`cargo build -p shrike-py --no-default-features`) links the platform
+libsqlite3 instead — any sqlite3-ABI-compatible library works via the standard
+libsqlite3-sys overrides (pkg-config / `SQLITE3_LIB_DIR`), including libsql
+builds exposing the sqlite3 C API. Under platform linkage FTS5/trigram are
+probed at runtime (`shrike_native.derived_fts5_probe`), and the store degrades
+to the `find_notes` fallback exactly like the stdlib engine when they're absent.
+
 After changing any `Cargo.toml`: `cd native && cargo generate-lockfile` (or
 `cargo update -p <crate>`), then commit `Cargo.lock` — MODULE.bazel pins the
 Bazel crate graph to it.
