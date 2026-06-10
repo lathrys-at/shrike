@@ -69,12 +69,14 @@ class BackendCase:
     marks: tuple[Any, ...] = field(default=())
 
 
-def _make_onnx(model_fixture: str) -> Callable[[pytest.FixtureRequest], EmbedderBackend]:
+def _make_onnx(
+    model_fixture: str, *, native: bool = False
+) -> Callable[[pytest.FixtureRequest], EmbedderBackend]:
     def make(request: pytest.FixtureRequest) -> EmbedderBackend:
         from shrike.embedding_onnx import OnnxBackend
 
         model: Path = request.getfixturevalue(model_fixture)
-        return OnnxBackend(model=str(model))
+        return OnnxBackend(model=str(model), native=native)
 
     return make
 
@@ -107,9 +109,48 @@ def cases() -> list[BackendCase]:
         requires_clip,
         requires_llama_server,
         requires_onnxruntime,
+        requires_shrike_native,
     )
 
     return [
+        # The Rust engine (#270) under the same OnnxBackend facade, compared
+        # against the Python implementation it replaces. Measured: vectors are
+        # float-noise-different (pooling summation order), NOT bit-exact — so it
+        # does not claim the onnx: namespace (epic convention 7) and the parity
+        # test asserts the fingerprints differ + vectors agree within tolerance.
+        BackendCase(
+            id="onnx-rs-minilm-int8",
+            ndim=384,
+            fingerprint_prefixes=("onnx-rs:",),
+            make=_make_onnx("onnx_model", native=True),
+            restart_exact=True,
+            batch_exact=True,
+            parity_ref=_make_onnx("onnx_model"),
+            claims_reference_namespace=False,
+            marks=(requires_onnxruntime, requires_shrike_native),
+        ),
+        BackendCase(
+            id="onnx-rs-minilm-fp32",
+            ndim=384,
+            fingerprint_prefixes=("onnx-rs:",),
+            make=_make_onnx("onnx_fp32_model", native=True),
+            restart_exact=True,
+            batch_exact=True,
+            parity_ref=_make_onnx("onnx_fp32_model"),
+            claims_reference_namespace=False,
+            marks=(requires_onnxruntime, requires_shrike_native),
+        ),
+        BackendCase(
+            id="onnx-rs-distilroberta-int8",
+            ndim=768,
+            fingerprint_prefixes=("onnx-rs:",),
+            make=_make_onnx("distilroberta_model", native=True),
+            restart_exact=True,
+            batch_exact=True,
+            parity_ref=_make_onnx("distilroberta_model"),
+            claims_reference_namespace=False,
+            marks=(requires_onnxruntime, requires_shrike_native),
+        ),
         BackendCase(
             id="onnx-minilm-int8",
             ndim=384,

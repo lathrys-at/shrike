@@ -1,0 +1,23 @@
+[package]
+name = "shrike-embed"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Native embedding backends: ort + tokenizers + pooling (#270)."
+
+[lib]
+name = "shrike_embed"
+
+# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py.
+[dependencies]
+shrike-ffi = { workspace = true }
+# load-dynamic (no download-binaries): the onnxruntime shared library is dlopened
+# at runtime from the *pinned onnxruntime Python wheel* the Python backend already
+# installs (decision recorded in native/README.md + #269) — no duplicated runtime,
+# guaranteed version match for the Phase-1 parity bake.
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24", "coreml", "cuda", "tensorrt", "directml"] }
+# The same Rust crate the Python `tokenizers` package wraps — tokenization parity
+# is structural. onig matches the python wheel's regex engine.
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+ndarray = "0.17"

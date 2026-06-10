@@ -127,6 +127,14 @@ check_untyped_defs = true
 module = ["anki.*"]
 ignore_missing_imports = true
 
+# The native extension is an optional install (built by scripts/build-native.sh
+# or the shrike-native wheel); the facades import it lazily. Where it IS
+# installed its .pyi stubs apply (and stubtest gates them); where it isn't,
+# mypy must not fail on the lazy import.
+[[tool.mypy.overrides]]
+module = ["shrike_native", "shrike_native.*"]
+ignore_missing_imports = true
+
 [[tool.mypy.overrides]]
 module = ["usearch.*"]
 ignore_missing_imports = true

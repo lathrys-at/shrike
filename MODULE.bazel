@@ -72,6 +72,7 @@ crate.from_cargo(
     manifests = [
         "//native:Cargo.toml",
         "//native/_demo:Cargo.toml",
+        "//native/shrike-embed:Cargo.toml",
         "//native/shrike-ffi:Cargo.toml",
         "//native/shrike-py:Cargo.toml",
     ],

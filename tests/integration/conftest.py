@@ -700,6 +700,16 @@ requires_clip = pytest.mark.skipif(
 )
 
 
+def _has_shrike_native() -> bool:
+    return importlib.util.find_spec("shrike_native") is not None
+
+
+requires_shrike_native = pytest.mark.skipif(
+    not _has_shrike_native(),
+    reason="shrike_native extension not installed (scripts/build-native.sh)",
+)
+
+
 @pytest.fixture(scope="session")
 def onnx_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A small ONNX text-embedding model dir (model.onnx + tokenizer.json).

@@ -15,4 +15,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { workspace = true }
+shrike-embed = { path = "../shrike-embed" }
 shrike-ffi = { workspace = true }

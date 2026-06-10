@@ -43,7 +43,11 @@ if TYPE_CHECKING:
     from shrike.index import VectorIndex
 
 # Embedding backend kinds the runtime can construct (see EmbeddingRuntime).
-SUPPORTED_BACKENDS = ("llama", "onnx", "clip")
+# "onnx-rs" is the Rust engine behind the same OnnxBackend facade (#270): same
+# models, same provider resolution, in-crate tokenization/pooling — it coexists
+# with "onnx" through the parity bake (vectors are float-noise-different, so the
+# kinds keep distinct fingerprint namespaces and never mix index spaces).
+SUPPORTED_BACKENDS = ("llama", "onnx", "onnx-rs", "clip")
 DEFAULT_BACKEND = "llama"
 
 logger = logging.getLogger("shrike.embedding")
@@ -767,7 +771,7 @@ class EmbeddingRuntime:
         only when that backend is actually selected.
         """
         assert self._model is not None  # callers check before constructing
-        if self._backend_kind == "onnx":
+        if self._backend_kind in ("onnx", "onnx-rs"):
             from shrike.embedding_onnx import OnnxBackend
 
             return OnnxBackend(
@@ -780,6 +784,7 @@ class EmbeddingRuntime:
                 max_length=self._context_size,
                 batch_size=self._batch_size,
                 log_dir=self._log_dir,
+                native=self._backend_kind == "onnx-rs",
             )
         if self._backend_kind == "clip":
             from shrike.embedding_clip import ClipBackend

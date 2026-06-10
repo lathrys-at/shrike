@@ -89,6 +89,77 @@ fn checked_div(py: Python<'_>, a: f64, b: f64) -> PyResult<f64> {
     .map_err(to_py_err)
 }
 
+// ── Embedding (#270) ─────────────────────────────────────────────────────────
+
+/// Point the ort runtime at a specific onnxruntime shared library (process-wide,
+/// idempotent). The facade passes the dylib from the installed onnxruntime
+/// Python wheel, so native and Python backends run the same runtime build.
+#[pyfunction]
+fn init_onnx_runtime(py: Python<'_>, dylib_path: String) -> PyResult<()> {
+    py.detach(move || shrike_embed::init_runtime(&dylib_path))
+        .map_err(to_py_err)
+}
+
+/// The native ONNX text-embedding engine under the `OnnxBackend` facade.
+///
+/// Coarse, batched calls (one `embed_chunk` per chunk), GIL released for the
+/// whole tokenize→run→pool pipeline. Construction loads the session+tokenizer;
+/// dropping the object frees them (the facade's `stop()` just drops its
+/// reference).
+#[pyclass(frozen)]
+struct OnnxTextEmbedder {
+    inner: shrike_embed::TextEmbedder,
+}
+
+#[pymethods]
+impl OnnxTextEmbedder {
+    #[new]
+    #[pyo3(signature = (model_path, tokenizer_path, *, providers, pooling, normalize, max_length))]
+    fn new(
+        py: Python<'_>,
+        model_path: String,
+        tokenizer_path: String,
+        providers: Vec<String>,
+        pooling: &str,
+        normalize: bool,
+        max_length: usize,
+    ) -> PyResult<Self> {
+        let pooling = shrike_embed::Pooling::parse(pooling).map_err(to_py_err)?;
+        let cfg = shrike_embed::TextEmbedderConfig {
+            model_path,
+            tokenizer_path,
+            providers,
+            pooling,
+            normalize,
+            max_length,
+        };
+        let inner = py
+            .detach(move || shrike_embed::TextEmbedder::load(cfg))
+            .map_err(to_py_err)?;
+        Ok(Self { inner })
+    }
+
+    /// Embed one chunk of texts as a single batch (one vector per input).
+    fn embed_chunk(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<Vec<f32>>> {
+        py.detach(|| self.inner.embed_chunk(&texts)).map_err(to_py_err)
+    }
+
+    /// The embedding width, once known (set by the first embed).
+    fn dim(&self) -> Option<usize> {
+        self.inner.dim()
+    }
+
+    /// Execution providers actually registered on the session, in order.
+    fn active_providers(&self) -> Vec<String> {
+        self.inner.active_providers().to_vec()
+    }
+
+    /// Graph inputs outside the supplied sentence-transformers set (diagnostic).
+    fn unsupported_inputs(&self) -> Vec<String> {
+        self.inner.unsupported_inputs().to_vec()
+    }
+}
+
 /// The module init. Its name MUST match the imported module / the `.so`
 /// filename (`_native`), since PyO3 exports `PyInit__native` from it.
 #[pymodule]
@@ -97,6 +168,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
     m.add_function(wrap_pyfunction!(parallel_sum, m)?)?;
     m.add_function(wrap_pyfunction!(checked_div, m)?)?;
+    m.add_function(wrap_pyfunction!(init_onnx_runtime, m)?)?;
+    m.add_class::<OnnxTextEmbedder>()?;
     m.add("NativeInputError", py.get_type::<NativeInputError>())?;
     m.add("NativeUnavailableError", py.get_type::<NativeUnavailableError>())?;
     m.add("NativeInternalError", py.get_type::<NativeInternalError>())?;

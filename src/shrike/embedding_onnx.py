@@ -55,10 +55,42 @@ _SUPPLIED_INPUTS = frozenset({"input_ids", "attention_mask", "token_type_ids"})
 _ORT_INT_DTYPES = ORT_INT_DTYPES
 
 
+def locate_ort_dylib() -> Path:
+    """The onnxruntime shared library inside the installed onnxruntime wheel.
+
+    The native (Rust ``ort``) engine dlopens this exact library — the pinned
+    runtime the Python backend already uses — so the two engines always run the
+    same onnxruntime build (#269's linkage decision; no duplicated runtime).
+    """
+    import onnxruntime
+
+    capi = Path(onnxruntime.__file__).parent / "capi"
+    for p in sorted(capi.iterdir()):
+        name = p.name
+        if "providers" in name:
+            continue
+        if name.startswith("libonnxruntime.") and (".so" in name or name.endswith(".dylib")):
+            return p
+        if name == "onnxruntime.dll":
+            return p
+    raise FileNotFoundError(f"no onnxruntime shared library found under {capi}")
+
+
 class OnnxBackend:
     """In-process onnxruntime text-embedding backend (text-only).
 
     Implements the :class:`~shrike.embedding_base.EmbedderBackend` protocol.
+
+    Two engines under one facade: the default Python engine (onnxruntime-python
+    + tokenizers + numpy pooling) and, with ``native=True`` (the ``onnx-rs``
+    backend kind, #270), the Rust engine in ``shrike_native`` (ort + the same
+    tokenizers crate + ndarray pooling) — same model layout, same provider
+    resolution, same batch-safety probe, driven through the same onnxruntime
+    shared library. Measured parity: the native engine's vectors differ from
+    the Python engine's only at float-noise level (~3e-08, pooling summation
+    order), which by epic #265 convention 7 is **not** bit-exact — so the
+    native fingerprint is namespaced ``onnx-rs:`` and switching kinds rebuilds
+    the index once rather than ever silently mixing the two spaces.
     """
 
     modalities = frozenset({TEXT})
@@ -73,6 +105,7 @@ class OnnxBackend:
         max_length: int | None = None,
         batch_size: int | None = None,
         log_dir: str | Path | None = None,  # accepted for runtime parity; unused
+        native: bool = False,
     ) -> None:
         self._model = model
         pool = pooling or "mean"
@@ -93,12 +126,17 @@ class OnnxBackend:
         self._batch_cap = batch_size
         # Largest batch size proven safe by the startup probe; 1 == embed serially.
         self._safe_batch = 1
+        # Engine selection (#270): False = onnxruntime-python, True = shrike_native.
+        self._native = native
+        self._native_engine: Any = None
         self._session: Any = None
         self._tokenizer: Any = None
         self._dim: int | None = None
 
     @property
     def running(self) -> bool:
+        if self._native:
+            return self._native_engine is not None
         return self._session is not None and self._tokenizer is not None
 
     def _resolve_files(self) -> tuple[Path, Path]:
@@ -130,12 +168,11 @@ class OnnxBackend:
         raise FileNotFoundError(f"ONNX model path not found: {p}")
 
     def start(self) -> None:
-        """Load the inference session and tokenizer (in-process)."""
+        """Load the inference engine and tokenizer (in-process)."""
         if self.running:
             return
         try:
             import onnxruntime as ort
-            from tokenizers import Tokenizer
         except ImportError as e:
             raise ImportError(
                 "The ONNX embedding backend needs the 'onnx' optional dependency. "
@@ -146,7 +183,8 @@ class OnnxBackend:
         # Resolve providers against what onnxruntime actually has: drop any requested
         # provider that isn't available — with a clear warning, rather than onnxruntime's
         # silent CPU fallback — and always keep CPU as the final fallback so an unavailable
-        # accelerator degrades instead of hard-erroring.
+        # accelerator degrades instead of hard-erroring. The same resolution governs both
+        # engines (the native one receives the already-resolved list).
         available = list(ort.get_available_providers())
         resolved, dropped = resolve_execution_providers(available, self._providers)
         if dropped:
@@ -157,11 +195,25 @@ class OnnxBackend:
                 resolved,
             )
         logger.info(
-            "Loading ONNX embedding model: %s (providers=%s, pooling=%s)",
+            "Loading ONNX embedding model: %s (providers=%s, pooling=%s, engine=%s)",
             onnx_path,
             ",".join(resolved),
             self._pooling,
+            "native" if self._native else "python",
         )
+
+        if self._native:
+            self._start_native(onnx_path, tok_path, resolved)
+            self._finish_start(onnx_path)
+            return
+
+        try:
+            from tokenizers import Tokenizer
+        except ImportError as e:
+            raise ImportError(
+                "The ONNX embedding backend needs the 'onnx' optional dependency. "
+                "Install it with: pip install 'shrike[onnx]'"
+            ) from e
         self._session = ort.InferenceSession(str(onnx_path), providers=resolved)
         # What actually loaded (a provider available-but-failed-to-init won't be here).
         self._active_providers = list(self._session.get_providers())
@@ -191,17 +243,56 @@ class OnnxBackend:
         tokenizer.enable_padding(pad_id=pad_id, pad_token=pad_token)
         tokenizer.enable_truncation(max_length=self._max_length)
         self._tokenizer = tokenizer
+        self._finish_start(onnx_path)
 
-        # Probe batch-safety once: int8 dynamic-quant exports are batch-variant (a
-        # note's vector depends on its batch-mates), fp16/fp32 are not. Batch only as
-        # large as is provably safe; serial otherwise. Unlike llama's (transient, HTTP)
-        # probe, an ONNX serial-embed failure is deterministic — serial won't help, so we
-        # fail start() loud rather than masquerade as serial. The most common cause is a
-        # model with a required input we don't supply (e.g. position_ids), named below.
+    def _start_native(self, onnx_path: Path, tok_path: Path, resolved: list[str]) -> None:
+        """Bring up the Rust engine (#270): same model, same resolved providers,
+        the same onnxruntime shared library (dlopened from the installed wheel),
+        with tokenization/pooling/normalization done crate-side."""
+        try:
+            import shrike_native
+        except ImportError as e:
+            raise ImportError(
+                "The onnx-rs embedding backend needs the shrike-native extension. "
+                "Install the shrike-native wheel, or build it from a checkout with "
+                "scripts/build-native.sh."
+            ) from e
+
+        shrike_native.init_onnx_runtime(str(locate_ort_dylib()))
+        self._native_engine = shrike_native.OnnxTextEmbedder(
+            str(onnx_path),
+            str(tok_path),
+            providers=resolved,
+            pooling=self._pooling,
+            normalize=self._normalize,
+            max_length=self._max_length,
+        )
+        self._active_providers = list(self._native_engine.active_providers())
+
+    def _unsupported_inputs(self) -> list[str]:
+        """Graph inputs outside the supplied sentence-transformers set (diagnostics)."""
+        if self._native:
+            if self._native_engine is None:
+                return []
+            return sorted(self._native_engine.unsupported_inputs())
+        if self._session is None:
+            return []
+        return sorted({i.name for i in self._session.get_inputs()} - _SUPPLIED_INPUTS)
+
+    def _finish_start(self, onnx_path: Path) -> None:
+        """The engine-agnostic tail of start(): the batch-safety probe + logging.
+
+        Probe batch-safety once: int8 dynamic-quant exports are batch-variant (a
+        note's vector depends on its batch-mates), fp16/fp32 are not. Batch only as
+        large as is provably safe; serial otherwise. Unlike llama's (transient, HTTP)
+        probe, an ONNX serial-embed failure is deterministic — serial won't help, so we
+        fail start() loud rather than masquerade as serial. The most common cause is a
+        model with a required input we don't supply (e.g. position_ids), named below.
+        """
         try:
             self._safe_batch = probe_max_safe_batch(self._embed_chunk)
         except ProbeError as e:
-            unsupported = sorted({i.name for i in self._session.get_inputs()} - _SUPPLIED_INPUTS)
+            unsupported = self._unsupported_inputs()
             if unsupported:
                 raise RuntimeError(
                     f"ONNX model requires input(s) {unsupported} this backend does not supply "
@@ -227,9 +318,10 @@ class OnnxBackend:
         )
 
     def stop(self) -> None:
-        """Drop the session and tokenizer."""
+        """Drop the engine (session/tokenizer, or the native embedder)."""
         self._session = None
         self._tokenizer = None
+        self._native_engine = None
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Embed texts into vectors (one per input), chunked by the safe batch size.
@@ -266,6 +358,11 @@ class OnnxBackend:
         attention mask excludes the padding. This is the unit the batch-safety probe and
         ``embed_texts`` build on.
         """
+        if self._native:
+            vectors_native: list[list[float]] = self._native_engine.embed_chunk(texts)
+            if vectors_native:
+                self._dim = len(vectors_native[0])
+            return vectors_native
         encodings = self._tokenizer.encode_batch(texts)
         available = {
             "input_ids": np.array([e.ids for e in encodings], dtype=np.int64),
@@ -325,6 +422,11 @@ class OnnxBackend:
         """
         if self._dim is not None:
             return self._dim
+        if self._native and self._native_engine is not None:
+            dim = self._native_engine.dim()
+            if dim is not None:
+                self._dim = int(dim)
+                return self._dim
         if self._session is not None:
             shape = self._session.get_outputs()[0].shape
             if shape and isinstance(shape[-1], int):
@@ -354,13 +456,18 @@ class OnnxBackend:
             name, size = onnx_path.name, onnx_path.stat().st_size
         except OSError:
             name, size = path.name, -1
-        return f"onnx:{name}:{size}:pool={self._pooling}:textprep={EMBED_TEXT_VERSION}"
+        # The native engine's vectors are float-noise-different from the Python
+        # engine's (pooling summation order) — not bit-exact, so it gets its own
+        # namespace (epic #265 convention 7): switching engines rebuilds once,
+        # never mixes spaces.
+        family = "onnx-rs" if self._native else "onnx"
+        return f"{family}:{name}:{size}:pool={self._pooling}:textprep={EMBED_TEXT_VERSION}"
 
     def health(self) -> dict[str, Any]:
         """Status dict for ``/status`` (carries at least ``available``)."""
         return {
             "available": self.running,
-            "backend": "onnx",
+            "backend": "onnx-rs" if self._native else "onnx",
             "model": self._model,
             "requested_providers": self._providers,
             "active_providers": self._active_providers,
