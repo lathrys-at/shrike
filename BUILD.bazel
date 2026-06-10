@@ -30,8 +30,8 @@ py_test(
 )
 
 # The release wheel (#245). Version is stamped from the git tag (STABLE_VERSION via
-# tools/workspace_status.sh) — exactly X.Y.Z on a clean tag, replacing hatch-vcs as
-# the artifact builder. strip_path_prefixes drops the `src/` of the src layout so
+# tools/workspace_status.sh) — the exact tag version on a clean release/rc tag,
+# replacing hatch-vcs as the artifact builder. strip_path_prefixes drops `src/` so
 # the wheel ships `shrike/...`. Metadata mirrors pyproject.toml (the source of
 # truth on the coexisting pip path); a parity gate diffs the two builds before the
 # release path cuts over to this one.
@@ -61,6 +61,10 @@ py_wheel(
         "usearch>=2.12",
         "numpy>=1.26",
     ],
+    # Mirrors pyproject's [project.optional-dependencies] exactly (incl. `dev`, which
+    # hatchling emits as Provides-Extra) so the two wheels' metadata matches for the
+    # parity gate. pyproject declares no [project] classifiers, so neither wheel
+    # carries any (the SPDX `license` field is the source of truth — PEP 639).
     extra_requires = {
         "socks": ["httpx[socks]>=0.27"],
         "onnx": [
@@ -76,14 +80,25 @@ py_wheel(
             "tokenizers>=0.20",
             "pillow>=10",
         ],
+        "dev": [
+            "pytest>=8.0",
+            "pytest-asyncio>=0.24",
+            "pytest-cov>=5.0",
+            "pytest-xdist>=3.6",
+            "pytest-testmon>=2.1",
+            "mypy>=1.10",
+            "ruff>=0.8",
+            "types-PyYAML",
+            "trustme>=1.1",
+        ],
     },
     entry_points = {
         "console_scripts": ["shrike = shrike.cli:cli"],
     },
-    classifiers = [
-        "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
-        "Programming Language :: Python :: 3.12",
-    ],
+    # `manual` so the per-PR `bazel test //...` lane doesn't build this release
+    # artifact (and run `git describe` for it) on a shallow, tagless checkout —
+    # release.yml and tools/build-wheel.sh name //:wheel explicitly.
+    tags = ["manual"],
     strip_path_prefixes = ["src"],
     deps = ["//src/shrike:shrike"],
 )
