@@ -8,14 +8,10 @@ exports_files(["Cargo.toml"])
 # index + derived store + fusion. Natively async, owns no threads, assumes
 # no runtime (#308/#310) — serialization and execution are injected. NO pyo3
 # in this dep tree (the layering check + the no-CPython smoke are the proof).
-#
-# `manual` like shrike-collection: the anki tree needs protoc on the build
-# host. The cargo lane covers it locally (`cargo test -p shrike-kernel`).
 rust_library(
     name = "shrike_kernel",
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
-    tags = ["manual"],
     deps = [
         "//native/shrike-collection:shrike_collection",
         "//native/shrike-compute:shrike_compute",
@@ -34,5 +30,4 @@ rust_test(
     name = "shrike_kernel_test",
     size = "medium",
     crate = ":shrike_kernel",
-    tags = ["manual"],
 )

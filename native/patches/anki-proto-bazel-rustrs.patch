@@ -1,0 +1,48 @@
+Companion to anki-proto-bazel-buildrs.patch (#278 cutover) — the rust.rs
+half: generate via prost compile_fds from the pinned descriptor set when
+DESCRIPTORS_BIN is set (Bazel), keeping the protoc path for plain cargo.
+
+--- a/rust.rs
++++ b/rust.rs
+@@ -16,11 +16,10 @@
+ 
+ pub fn write_rust_protos(descriptors_path: PathBuf) -> Result<DescriptorPool> {
+     set_protoc_path();
+-    let proto_dir = PathBuf::from("../../proto");
+-    let paths = gather_proto_paths(&proto_dir)?;
+     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+     let tmp_descriptors = out_dir.join("descriptors.tmp");
+-    prost_build::Config::new()
++    let mut config = prost_build::Config::new();
++    config
+         .out_dir(&out_dir)
+         .file_descriptor_set_path(&tmp_descriptors)
+         .type_attribute(
+@@ -49,8 +48,25 @@
+             "ImportAnkiPackageUpdateCondition",
+             "#[derive(serde::Deserialize, serde::Serialize)]",
+         )
+-        .compile_protos(paths.as_slice(), &[proto_dir])
+-        .context("prost build")?;
++;
++    if let Ok(pinned) = env::var("DESCRIPTORS_BIN") {
++        // Bazel: generate from the pinned descriptor set — no protoc and no
++        // access to the source repo's proto/ tree, neither of which exists in
++        // the build-script sandbox. compile_fds runs no protoc, so write the
++        // descriptor copy ourselves.
++        use prost_reflect::prost::Message;
++        let bytes = read_file(&pinned)?;
++        let fds = prost_reflect::prost_types::FileDescriptorSet::decode(bytes.as_ref())
++            .context("decode pinned descriptors")?;
++        config.compile_fds(fds).context("prost build")?;
++        anki_io::write_file(&tmp_descriptors, &bytes)?;
++    } else {
++        let proto_dir = PathBuf::from("../../proto");
++        let paths = gather_proto_paths(&proto_dir)?;
++        config
++            .compile_protos(paths.as_slice(), &[proto_dir])
++            .context("prost build")?;
++    }
+ 
+     let descriptors = read_file(&tmp_descriptors)?;
+     create_dir_all(

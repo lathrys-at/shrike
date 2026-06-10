@@ -1,0 +1,16 @@
+Bazel-sandbox fix for the anki crate (#278 cutover): version() include_str!'s
+the repo-root .version file, which the per-crate Bazel package doesn't carry.
+Pin the literal — KEEP IN SYNC with the anki tag on bumps
+(scripts/update-anki-descriptors.sh reminds you).
+
+--- a/src/version.rs
++++ b/src/version.rs
+@@ -5,7 +5,7 @@
+ use std::sync::LazyLock;
+
+ pub fn version() -> &'static str {
+-    include_str!("../../.version").trim()
++    "25.09.4"
+ }
+
+ pub fn buildhash() -> &'static str {

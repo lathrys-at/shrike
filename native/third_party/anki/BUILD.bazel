@@ -1,0 +1,18 @@
+# The anki protobuf descriptor set for the PINNED tag (#278 cutover).
+#
+# anki's two build scripts hand this file off via cargo's shared
+# `target/…/build/` layout (`OUT_DIR/../../anki_descriptors.bin`), which does
+# not exist across Bazel sandboxes. The `anki` crate honors a DESCRIPTORS_BIN
+# env override, so under Bazel it reads THIS checked-in copy (injected by the
+# crate annotation in MODULE.bazel) while the anki_proto build script writes
+# its own into its private OUT_DIR (see
+# //native/patches:anki-proto-bazel-sandbox.patch).
+#
+# Pin policy: regenerate on every anki tag bump (scripts/update-anki-descriptors.sh
+# copies it out of a cargo build); the shrike-collection tripwire tests run
+# under Bazel too, so a stale descriptor set fails loudly instead of silently
+# shuffling the generated service dispatcher.
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["anki_descriptors.bin"])

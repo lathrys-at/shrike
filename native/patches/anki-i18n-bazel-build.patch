@@ -1,0 +1,16 @@
+Bazel-sandbox fix for the anki_i18n build script (#278 cutover).
+Drop the generated ts/py interface writers (they write into the
+read-only source repo; Shrike consumes the Rust backend only).
+
+--- a/build.rs
++++ b/build.rs
+@@ -28,9 +28,6 @@
+     let modules = get_modules(&map);
+     write_strings(&map, &modules);
+ 
+-    typescript::write_ts_interface(&modules)?;
+-    python::write_py_interface(&modules)?;
+-
+     // write strings.json file to requested path
+     println!("cargo:rerun-if-env-changed=STRINGS_JSON");
+     if let Ok(path) = env::var("STRINGS_JSON") {

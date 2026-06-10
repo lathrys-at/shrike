@@ -108,5 +108,7 @@ jobs:
           workspaces: native
           shared-key: rust-lint
           cache-on-failure: true
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - name: Clippy (warms the dependency build)
-        run: cd native && cargo clippy --workspace --exclude shrike-collection --exclude shrike-kernel --all-targets -- -D warnings
+        run: cd native && cargo clippy --workspace --all-targets -- -D warnings

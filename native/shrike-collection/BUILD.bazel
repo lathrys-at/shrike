@@ -7,23 +7,25 @@ exports_files(["Cargo.toml"])
 # Rust collection core over anki's protobuf service layer (#278, slice 1).
 # Pure Rust — NO pyo3 (enforced by //native:layering_check).
 #
-# `manual`: building this crate compiles the whole anki dependency tree and its
-# protobuf codegen needs `protoc` on the build host, which the per-PR native
-# lane doesn't provide. The cargo lane covers it locally
-# (`cd native && cargo test -p shrike-collection`); the Bazel/protoc wiring is
-# tracked on #278.
+# Builds the whole anki dependency tree; its protobuf codegen runs the
+# hermetic protoc external (//native/third_party/protoc) via the crate
+# annotations in MODULE.bazel — on the regular build graph since the cutover.
 rust_library(
     name = "shrike_collection",
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
-    tags = ["manual"],
     deps = [
         "//native/shrike-ffi:shrike_ffi",
         "@crates//:anki",
         "@crates//:anki_proto",
+        "@crates//:base64",
+        "@crates//:fancy-regex",
         "@crates//:prost",
+        "@crates//:regex",
         "@crates//:serde_json",
         "@crates//:tokio",
+        "@crates//:ureq",
+        "@crates//:url",
     ],
 )
 
@@ -31,5 +33,4 @@ rust_test(
     name = "shrike_collection_test",
     size = "medium",
     crate = ":shrike_collection",
-    tags = ["manual"],
 )

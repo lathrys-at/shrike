@@ -90,7 +90,71 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = ["//native/patches:usearch-bazel-cxxbridge-symlink.patch"],
 )
+# The anki tree under Bazel (#278 cutover): both anki build scripts run off
+# the CHECKED-IN pinned protobuf descriptor set (//native/third_party/anki,
+# refreshed by scripts/update-anki-descriptors.sh on tag bumps, tripwire-tested
+# under Bazel) instead of cargo's shared-target-dir handoff, which doesn't
+# exist across Bazel sandboxes. anki_proto is additionally patched (Bazel-only;
+# cargo builds the unpatched checkout) to generate via prost's compile_fds —
+# no protoc and no source-repo proto/ access, neither of which the sandbox
+# has — and to stop writing generated py/ts interfaces into the read-only
+# source repo.
+crate.annotation(
+    crate = "anki_proto",
+    build_script_data = ["@@//native/third_party/anki:anki_descriptors.bin"],
+    build_script_env = {
+        "DESCRIPTORS_BIN": "$(execpath @@//native/third_party/anki:anki_descriptors.bin)",
+    },
+    patch_args = ["-p1"],
+    patches = [
+        "//native/patches:anki-proto-bazel-buildrs.patch",
+        "//native/patches:anki-proto-bazel-rustrs.patch",
+    ],
+)
+crate.annotation(
+    crate = "anki_i18n",
+    build_script_data = ["@@+_repo_rules+anki_src//:ftl"],
+    build_script_env = {
+        # The pinned source archive's ftl tree (see @anki_src). EXTRA_FTL_ROOT
+        # being set selects the no-qt branch of get_ftl_data; the patched
+        # gather.rs tolerates the dir not existing.
+        "EXTRA_FTL_ROOT": "_absent_",
+        "FTL_BASE": "$(execpath @@+_repo_rules+anki_src//:ftl)",
+    },
+    patch_args = ["-p1"],
+    patches = [
+        "//native/patches:anki-i18n-bazel-build.patch",
+        "//native/patches:anki-i18n-bazel-gather.patch",
+    ],
+)
+crate.annotation(
+    crate = "anki",
+    build_script_data = ["@@//native/third_party/anki:anki_descriptors.bin"],
+    patch_args = ["-p1"],
+    patches = ["//native/patches:anki-version-bazel.patch"],
+    build_script_env = {
+        "DESCRIPTORS_BIN": "$(execpath @@//native/third_party/anki:anki_descriptors.bin)",
+    },
+)
 use_repo(crate, "crates")
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# The pinned anki SOURCE archive (#278 cutover): the anki_i18n build script
+# needs the repo's ftl/ template strings, which the per-crate Bazel package
+# doesn't carry. The github tag tarball is pinned + checksummed (no submodules
+# — the translation repos are tolerated as absent; English-only strings, which
+# is all the backend needs).
+http_archive(
+    name = "anki_src",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+exports_files(["ftl"])
+""",
+    sha256 = "e9fda82b3b57fba3a416d8f91cf4db64368dd2f0bc02090d626df081572333c6",
+    strip_prefix = "anki-25.09.4",
+    urls = ["https://github.com/ankitects/anki/archive/refs/tags/25.09.4.tar.gz"],
+)
 
 # ── Embedding-test model fixtures as pinned externals (#244 Phase 2c) ────────
 # The embedding tests' models, fetched once + checksum-verified instead of
@@ -171,11 +235,10 @@ http_file(
     urls = ["https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-Q4_K_M.gguf"],
 )
 
+
 # The pinned llama-server binary (+ its shared libs, flat beside it) as a per-platform
 # http_archive — tag + shas from scripts/llama-server.lock. The conftest puts the
 # host one on PATH + the lib path for the embedding_server fixture. Lazily fetched.
-http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
 _LLAMA_FILES = 'filegroup(name = "files", srcs = glob(["**"]), visibility = ["//visibility:public"])'
 
 http_archive(

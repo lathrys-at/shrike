@@ -180,14 +180,16 @@ jobs:
       - name: Rust format check
         if: needs.changes.outputs.native == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
         run: cd native && cargo fmt --check
-      # shrike-collection and shrike-kernel (which depends on it) are excluded
-      # here for the same reason their Bazel targets are `manual`: they pull the
-      # whole anki tree, whose protobuf codegen needs protoc and whose build is
-      # too heavy for the per-PR path. The cargo lane lints them locally; CI
-      # coverage rides the gated-lane follow-up on #278.
+      # Since the cutover the collection core + kernel are on the default
+      # build, so clippy covers the whole workspace; the anki tree's protobuf
+      # codegen needs protoc on the runner, and the rust-cache above (#319)
+      # absorbs the dependency-cone compile across runs.
+      - name: Install protoc
+        if: needs.changes.outputs.native == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
+        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - name: Rust clippy
         if: needs.changes.outputs.native == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
-        run: cd native && cargo clippy --workspace --exclude shrike-collection --exclude shrike-kernel --all-targets -- -D warnings
+        run: cd native && cargo clippy --workspace --all-targets -- -D warnings
 
   # The authoritative test lane: the unit + non-embedding integration suites run
   # under Bazel (`//... -//native/...` = the unit/integration aggregates + the

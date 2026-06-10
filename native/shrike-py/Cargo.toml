@@ -16,14 +16,12 @@ crate-type = ["cdylib"]
 [features]
 # Forwarded to shrike-derived (#300): default = bundled SQLite (FTS5 + trigram
 # guaranteed). Build with --no-default-features to link the platform SQLite.
-default = ["bundled-sqlite"]
+default = ["bundled-sqlite", "anki-core"]
 bundled-sqlite = ["shrike-derived/bundled"]
-# The anki collection core binding (#278 series, step 1). DEFAULT OFF: it
-# pulls the whole anki tree (protoc at build time), and the wholesale facade
-# cutover is forbidden until the op inventory completes — the binding exists
-# for the parity harness (tests/native), built via
-# `scripts/build-native.sh --anki-core`. Gated symbols are covered by the
-# stubtest allowlist (stubtest runs against default builds).
+# The anki collection core binding (#278). DEFAULT ON since the cutover:
+# CollectionWrapper runs on the native core, so every shrike_native build
+# carries it (protoc required at build time; Bazel provides a hermetic one).
+# Still a named feature so a compute-only embed/index build remains possible.
 anki-core = ["dep:shrike-collection"]
 
 [dependencies]

@@ -1,0 +1,32 @@
+Bazel-sandbox fix for the anki_i18n build script (#278 cutover).
+FTL_BASE env override (the Bazel crate package has no ../../ftl) and
+tolerance for the missing translation submodules - English template
+strings only, which is all the backend needs (Shrike sets lang en).
+
+--- a/gather.rs	2026-06-10 15:53:48
++++ b/gather.rs	2026-06-10 15:53:48
+@@ -59,6 +59,11 @@
+ /// If ignore_templates is true, the templates/ folder will be ignored, on the
+ /// assumption the templates were extracted from the source tree.
+ fn add_translation_root(map: &mut TranslationsByLang, root: &Path, ignore_templates: bool) {
++    // Tolerate a missing root: the translation submodules aren't part of the
++    // source archive the Bazel build reads — English template strings only.
++    if !root.exists() {
++        return;
++    }
+     for entry in fs::read_dir(root).unwrap() {
+         let entry = entry.unwrap();
+         let lang = entry.file_name().to_string_lossy().to_string();
+@@ -70,7 +75,11 @@
+ }
+ 
+ fn source_tree_root() -> PathBuf {
+-    PathBuf::from("../../ftl")
++    // Bazel: the crate package is materialized without the repo's ftl tree;
++    // the annotation points FTL_BASE at the pinned source archive instead.
++    std::env::var("FTL_BASE")
++        .map(PathBuf::from)
++        .unwrap_or_else(|_| PathBuf::from("../../ftl"))
+ }
+ 
+ fn extra_ftl_root() -> Option<PathBuf> {
