@@ -25,8 +25,8 @@ permissions:
   pull-requests: read
 
 # Cancel a PR's in-flight run when a new commit is pushed to it: every follow-up
-# commit otherwise lets the older run (lint + test + maybe embedding) finish on a
-# commit nobody will merge, burning Actions minutes. Grouped by `github.ref`
+# commit otherwise lets the older run (lint + tests) finish on a commit nobody
+# will merge, burning Actions minutes. Grouped by `github.ref`
 # (`refs/pull/<n>/merge`), so cancellation is scoped to the same PR — never across
 # PRs. The release workflow deliberately has no such group (a tag build must run
 # to completion).
@@ -45,10 +45,10 @@ jobs:
   changes:
     name: Detect changed paths
     # The `ci`-label gate. `changes` is the root of the dependency graph
-    # (lint/test/embedding/bazel all `needs: changes`), so skipping it here when
-    # the PR lacks `ci`/`rc` cascades — every downstream lane is skipped too, and
-    # not a single test runner spins up. `cross-platform` is the only lane outside
-    # this graph; it stays `rc`-gated (and `rc` is part of this condition anyway).
+    # (lint/bazel/embedding all `needs: changes`), so skipping it here when the PR
+    # lacks `ci`/`rc` cascades — every downstream lane is skipped too, and not a
+    # single test runner spins up. `cross-platform` is the only lane outside this
+    # graph; it stays `rc`-gated (and `rc` is part of this condition anyway).
     if: contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     outputs:
@@ -99,7 +99,7 @@ jobs:
             embedding:
               # Conservative: any source change can reach the server the
               # embedding/search tests drive, so gate on all of src/shrike plus
-              # the embedding-specific tests and the llama-server install path.
+              # the embedding-specific tests.
               - 'src/shrike/**'
               - 'tests/integration/test_embedding.py'
               - 'tests/integration/test_semantic.py'
@@ -116,7 +116,15 @@ jobs:
               - 'tests/unit/test_index.py'
               - 'tests/unit/test_note_embedding_text.py'
               - 'tests/unit/test_tools_search.py'
-              - '.github/scripts/install-llama-server.sh'
+              # The Bazel inputs that build the embedding target: the pinned model
+              # + llama-server externals (MODULE.bazel), the target definition, and
+              # the bootstrap.
+              - 'MODULE.bazel'
+              - 'MODULE.bazel.lock'
+              - 'tests/integration/BUILD.bazel'
+              - '.bazelversion'
+              - 'bazel'
+              - 'tools/bazel.lock'
               - '.github/workflows/test.yml'
               - 'pyproject.toml'
 
@@ -150,98 +158,15 @@ jobs:
       - name: Mypy
         run: mypy src/shrike/
 
-  # Unit + non-embedding integration on Linux x64. Runs the FULL suite as the
-  # per-PR correctness gate — but WITHOUT the coverage tracer, which ~2-3x'd this
-  # lane on every PR for a number that only needs checking at release time. The
-  # coverage measurement + fail_under gate moved off the per-PR path to the
-  # `coverage` job below (rc-labelled PRs) and the scheduled coverage.yml run.
-  test:
-    name: Tests (linux)
-    needs: changes
-    # `|| rc-label` forces this lane even on a docs-only diff the path filter
-    # would skip, so a release candidate runs the full suite at the PR level
-    # rather than first at the v* tag (#152).
-    if: needs.changes.outputs.code == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # full history + tags so hatch-vcs can derive the version at install
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      # uv installs deps ~3x faster than pip (parallel + hardlinked cache),
-      # cutting the per-job dependency install that runs in every lane.
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: pyproject.toml
-      - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
-      # One combined `-n auto` run over both suites: xdist balances the work so
-      # quick unit tests keep workers busy while integration servers spawn,
-      # instead of two phases that each leave workers idle. `-m "not embedding"`
-      # keeps the embedding-gated tests out; unit tests carry no marker so all of
-      # them run. No coverage tracer here — see the `coverage` job.
-      - name: Run unit + integration
-        run: pytest tests/unit tests/integration -q -m "not embedding" -n auto
-
-  embedding:
-    name: Embedding tests (linux)
-    needs: changes
-    # Same rc-label escape hatch as the lint/test lanes (#152).
-    if: needs.changes.outputs.embedding == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # full history + tags so hatch-vcs can derive the version at install
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      # uv installs deps ~3x faster than pip (parallel + hardlinked cache),
-      # cutting the per-job dependency install that runs in every lane.
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: pyproject.toml
-      # Cache the pinned llama-server build so we don't re-download the release
-      # tarball every run (#83). Keyed on the lock file (tag + SHA256), so a bump
-      # invalidates it; install-llama-server.sh skips the download on a hit.
-      - name: Cache llama-server
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/llama-server
-          key: llama-server-${{ runner.os }}-${{ hashFiles('scripts/llama-server.lock') }}
-      - name: Install llama-server
-        run: bash .github/scripts/install-llama-server.sh
-      - name: Install dependencies
-        # [onnx] + [clip] add onnxruntime + tokenizers + pillow so the embedding lane
-        # exercises all three backends (llama-server, ONNX text, CLIP image<->text) per
-        # test_backends.py / test_onnx_models.py (#172) and test_clip_model.py (#162).
-        run: uv pip install --system -e ".[dev,onnx,clip]"
-      # Persist the embedding models across runs so we don't re-hit HuggingFace
-      # every time (the source of the 429 flake, #83). The fixtures read
-      # SHRIKE_TEST_MODEL_DIR; it holds the GGUF plus both ONNX model dirs (MiniLM +
-      # DistilRoBERTa) — bump the key whenever that set changes.
-      - name: Cache embedding models
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/shrike-test-models
-          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M-onnx-int8-roberta-fp32-clip
-      - name: Run embedding tests
-        env:
-          LD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
-          SHRIKE_TEST_MODEL_DIR: ${{ runner.temp }}/shrike-test-models
-        run: pytest tests/integration -v -m embedding
-
-  # Bazel build/test on linux — proves the make-or-break native-dep import spike
-  # (#242) resolves + dlopens anki/usearch/onnxruntime on the hermetic toolchain
-  # on linux too (macOS arm64 is proven locally). The committed ./bazel launcher
-  # bootstraps bazelisk + Bazel; no setup-python (the toolchain is hermetic).
-  # Minimal seed — the full cached, multi-platform Bazel lane is Phase 4 (#246).
+  # The authoritative test lane: the unit + non-embedding integration suites run
+  # under Bazel (`//... -//native/...` = the unit/integration aggregates + the
+  # import spike + the library smoke; the wheel/sdist are `manual`, the embedding
+  # target is `manual` + runs in its own lane below). This replaces the old pip
+  # pytest lane — `bazel test` caches unchanged results, so a re-push only re-runs
+  # what changed. The committed ./bazel launcher bootstraps bazelisk + Bazel; no
+  # setup-python (the toolchain is hermetic).
   bazel:
-    name: Bazel build/test (linux)
+    name: Bazel test (linux)
     needs: changes
     if: needs.changes.outputs.bazel == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
@@ -271,10 +196,11 @@ jobs:
           path: ~/.cache/shrike/bazel-disk
           key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: bazel-disk-${{ runner.os }}-${{ runner.arch }}-
-      # The Python graph: the unit suite + the native-dep import spike + the
-      # library smoke. The Rust/PyO3 seam is excluded here and built in the next
-      # step only when it changed, so the common source/unit-test PR never pays
-      # the Rust toolchain + crate-universe cold-start.
+      # The Python graph: the unit + non-embedding integration suites + the
+      # native-dep import spike + the library smoke. The Rust/PyO3 seam is excluded
+      # here and built in the next step only when it changed, so the common
+      # source/unit-test PR never pays the Rust toolchain + crate-universe
+      # cold-start.
       - name: Bazel test (Python graph)
         run: |
           ./bazel test \
@@ -291,12 +217,49 @@ jobs:
             --repository_cache="$HOME/.cache/shrike/bazel-repo" \
             -- //native/...
 
+  # Embedding tests under Bazel (#262). Runs the `manual` //tests/integration:embedding
+  # aggregate — llama-server + the GGUF/ONNX/CLIP models are pinned, checksummed
+  # Bazel externals (#244 Phase 2c), fetched into the repository cache instead of
+  # cold-downloaded from HuggingFace at test time (no more #83/#93 429 flake, and
+  # no llama-server install step). Restores main's warmed Bazel cache (warm-cache.yml
+  # fetches the embedding externals there), so a PR run doesn't re-fetch them.
+  embedding:
+    name: Bazel embedding tests (linux)
+    needs: changes
+    if: needs.changes.outputs.embedding == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Bazel toolchains + repo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/shrike/bazelisk
+            ~/.cache/shrike/bazelisk-home
+            ~/.cache/shrike/bazel-repo
+          key: bazel-repo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
+          restore-keys: bazel-repo-${{ runner.os }}-${{ runner.arch }}-
+      - name: Cache Bazel action results
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shrike/bazel-disk
+          key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: bazel-disk-${{ runner.os }}-${{ runner.arch }}-
+      - name: Bazel test (embedding)
+        run: |
+          ./bazel test \
+            --disk_cache="$HOME/.cache/shrike/bazel-disk" \
+            --repository_cache="$HOME/.cache/shrike/bazel-repo" \
+            //tests/integration:embedding
+
   # macOS + ARM are expensive (macOS bills at 10x), so they NEVER run on plain
   # PRs or on merges to main — only when a PR carries the `rc` (release
   # candidate) label. Apply the label when you're about to tag a release and want
-  # full cross-platform coverage first. Each runs the full integration suite
-  # (including embedding) for that platform. Label-gated regardless of paths: a
-  # release candidate gets full coverage no matter how small the diff.
+  # full cross-platform coverage first. Runs the whole Bazel graph (including the
+  # `manual` embedding target + the Rust/PyO3 seam) for that platform — the
+  # macOS-only PyO3 link path (-undefined dynamic_lookup) + the .so rename can't
+  # be reached on the per-PR linux lane (#247 review). Label-gated regardless of
+  # paths: a release candidate gets full coverage no matter how small the diff.
   cross-platform:
     name: Cross-platform (${{ matrix.os }})
     if: contains(github.event.pull_request.labels.*.name, 'rc')
@@ -307,41 +270,6 @@ jobs:
         os: [ubuntu-24.04-arm, macos-latest]
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # full history + tags so hatch-vcs can derive the version at install
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      # uv installs deps ~3x faster than pip (parallel + hardlinked cache),
-      # cutting the per-job dependency install that runs in every lane.
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: pyproject.toml
-      - name: Cache llama-server
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/llama-server
-          key: llama-server-${{ matrix.os }}-${{ hashFiles('scripts/llama-server.lock') }}
-      - name: Install llama-server
-        run: bash .github/scripts/install-llama-server.sh
-      - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
-      - name: Cache embedding model
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/shrike-test-models
-          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M-${{ matrix.os }}
-      - name: Run integration + embedding tests
-        env:
-          LD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
-          DYLD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
-          SHRIKE_TEST_MODEL_DIR: ${{ runner.temp }}/shrike-test-models
-        run: pytest tests/integration -v -m integration
-      # Verify the Bazel graph on these platforms too — crucially the macOS-only
-      # PyO3 link path (-undefined dynamic_lookup) + the .so rename, which the
-      # per-PR linux bazel lane can't reach (#247 review), plus the foundation on
-      # macOS/linux-arm64. rc-gated, so the macOS 10x cost is paid only at release.
       # Same split caches as the per-PR lane (different os/arch key scope, so no
       # collision): lock-keyed toolchains+repo, run-id-keyed action results so the
       # disk cache accumulates instead of freezing after its first save.
@@ -360,15 +288,14 @@ jobs:
           path: ~/.cache/shrike/bazel-disk
           key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: bazel-disk-${{ runner.os }}-${{ runner.arch }}-
-      # Full //... here (including the Rust/PyO3 seam) — this lane is the
-      # cross-platform proof, and the macOS-only link path can't be reached on the
-      # per-PR linux lane.
+      # Full //... (incl. the Rust/PyO3 seam) plus the manual embedding target —
+      # this lane is the cross-platform proof.
       - name: Bazel test
         run: |
           ./bazel test \
             --disk_cache="$HOME/.cache/shrike/bazel-disk" \
             --repository_cache="$HOME/.cache/shrike/bazel-repo" \
-            -- //...
+            -- //... //tests/integration:embedding
 
   # Single required status check. Always runs, and passes iff every gated job
   # either succeeded or was legitimately skipped (its paths didn't change / not
@@ -379,7 +306,7 @@ jobs:
     if: ${{ always() }}
     # Coverage is intentionally NOT aggregated here — it lives in its own workflow
     # (coverage.yml) and only ever reports, never gates, so it must not block the merge.
-    needs: [changes, lint, test, embedding, bazel, cross-platform]
+    needs: [changes, lint, bazel, embedding, cross-platform]
     runs-on: ubuntu-latest
     steps:
       # Gate: CI must be opted in via the `ci` (or `rc`) label. Without it the
@@ -399,9 +326,8 @@ jobs:
           fi
           for r in \
             "lint=${{ needs.lint.result }}" \
-            "test=${{ needs.test.result }}" \
-            "embedding=${{ needs.embedding.result }}" \
             "bazel=${{ needs.bazel.result }}" \
+            "embedding=${{ needs.embedding.result }}" \
             "cross-platform=${{ needs.cross-platform.result }}"; do
             case "${r#*=}" in
               success|skipped) echo "ok: $r" ;;
