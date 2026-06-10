@@ -10,6 +10,9 @@
 #   --release         optimized build (default: debug, fastest compile)
 #   --system-sqlite   link the platform SQLite instead of bundling (#300);
 #                     FTS5/trigram availability is then probed at runtime
+#   --anki-core       compile the feature-gated CollectionCore binding (#278);
+#                     pulls the anki tree (needs protoc on PATH) and enables
+#                     the tests/native parity harness
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,6 +22,7 @@ for arg in "$@"; do
   case "$arg" in
     --release) PROFILE="release"; CARGO_FLAGS+=(--release) ;;
     --system-sqlite) CARGO_FLAGS+=(--no-default-features) ;;
+    --anki-core) CARGO_FLAGS+=(--features anki-core) ;;
     *) echo "unknown arg: $arg" >&2; exit 1 ;;
   esac
 done

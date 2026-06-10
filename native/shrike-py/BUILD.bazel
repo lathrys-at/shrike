@@ -14,7 +14,13 @@ exports_files(["Cargo.toml"])
 # import), same as the _demo proof.
 rust_shared_library(
     name = "shrike_py_native",
-    srcs = ["src/lib.rs"],
+    # anki_core.rs is the feature-gated (#278) collection binding; this target
+    # builds default features (anki-core off), so it's cfg'd out here — listed
+    # for completeness/sandbox correctness.
+    srcs = [
+        "src/anki_core.rs",
+        "src/lib.rs",
+    ],
     edition = "2021",
     rustc_flags = select({
         "@platforms//os:macos": [
@@ -78,6 +84,7 @@ py_test(
     name = "stubtest",
     size = "medium",
     srcs = ["stubtest_runner.py"],
+    data = ["stubtest_allowlist.txt"],
     main = "stubtest_runner.py",
     deps = [
         ":shrike_native",

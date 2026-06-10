@@ -18,9 +18,17 @@ crate-type = ["cdylib"]
 # guaranteed). Build with --no-default-features to link the platform SQLite.
 default = ["bundled-sqlite"]
 bundled-sqlite = ["shrike-derived/bundled"]
+# The anki collection core binding (#278 series, step 1). DEFAULT OFF: it
+# pulls the whole anki tree (protoc at build time), and the wholesale facade
+# cutover is forbidden until the op inventory completes — the binding exists
+# for the parity harness (tests/native), built via
+# `scripts/build-native.sh --anki-core`. Gated symbols are covered by the
+# stubtest allowlist (stubtest runs against default builds).
+anki-core = ["dep:shrike-collection"]
 
 [dependencies]
 pyo3 = { workspace = true }
+shrike-collection = { path = "../shrike-collection", optional = true }
 shrike-compute = { path = "../shrike-compute" }
 shrike-derived = { path = "../shrike-derived", default-features = false }
 shrike-embed = { path = "../shrike-embed" }

@@ -4962,6 +4962,7 @@ version = "0.0.0"
 dependencies = [
  "pyo3",
  "pyo3-log",
+ "shrike-collection",
  "shrike-compute",
  "shrike-derived",
  "shrike-embed",

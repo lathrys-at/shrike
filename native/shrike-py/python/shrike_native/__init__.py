@@ -7,6 +7,8 @@ directly. The package ships ``.pyi`` stubs + ``py.typed``; ``mypy.stubtest``
 in the native CI lane keeps them honest.
 """
 
+import contextlib
+
 from shrike_native._native import (
     IMAGE_PREP_VERSION_RS,
     ClipEmbedder,
@@ -28,6 +30,13 @@ from shrike_native._native import (
     rrf_fuse,
     version,
 )
+
+# Feature-gated (#278 series, step 1): present only in `anki-core` builds
+# (scripts/build-native.sh --anki-core). Deliberately outside __all__ — the
+# parity harness (tests/native) imports it explicitly; on a default build the
+# name simply doesn't exist (the harness skips).
+with contextlib.suppress(ImportError):
+    from shrike_native._native import CollectionCore  # noqa: F401
 
 __all__ = [
     "ClipEmbedder",
