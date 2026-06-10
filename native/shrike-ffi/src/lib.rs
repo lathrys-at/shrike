@@ -38,6 +38,8 @@
 use std::error::Error;
 use std::fmt;
 
+use tracing_error::SpanTrace;
+
 /// The expected-vs-bug split every native error declares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -63,31 +65,57 @@ impl ErrorKind {
 }
 
 /// The error type every Shrike native crate returns across the FFI seam.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Constructors capture the current `tracing` span trace (#308): with the
+/// harness-installed subscriber active, [`NativeError::trace`] renders the
+/// span context the error crossed (which op, which batch, which engine), and
+/// the binding layer attaches it to the Python exception (PEP 678 notes) — so
+/// a native failure is debuggable from the harness without native logging.
+#[derive(Debug, Clone)]
 pub struct NativeError {
     pub kind: ErrorKind,
     pub message: String,
+    span_trace: SpanTrace,
 }
 
+impl PartialEq for NativeError {
+    fn eq(&self, other: &Self) -> bool {
+        // The captured trace is diagnostics, not identity.
+        self.kind == other.kind && self.message == other.message
+    }
+}
+
+impl Eq for NativeError {}
+
 impl NativeError {
-    pub fn invalid_input(message: impl Into<String>) -> Self {
+    fn new(kind: ErrorKind, message: String) -> Self {
         Self {
-            kind: ErrorKind::InvalidInput,
-            message: message.into(),
+            kind,
+            message,
+            span_trace: SpanTrace::capture(),
         }
+    }
+
+    pub fn invalid_input(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::InvalidInput, message.into())
     }
 
     pub fn unavailable(message: impl Into<String>) -> Self {
-        Self {
-            kind: ErrorKind::Unavailable,
-            message: message.into(),
-        }
+        Self::new(ErrorKind::Unavailable, message.into())
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
-        Self {
-            kind: ErrorKind::Internal,
-            message: message.into(),
+        Self::new(ErrorKind::Internal, message.into())
+    }
+
+    /// The rendered span trace, or None when no spans were active (no
+    /// subscriber installed, or the error arose outside any span).
+    pub fn trace(&self) -> Option<String> {
+        let rendered = self.span_trace.to_string();
+        if rendered.is_empty() {
+            None
+        } else {
+            Some(rendered)
         }
     }
 }

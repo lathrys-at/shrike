@@ -4,6 +4,7 @@ Hand-written against native/shrike-py/src/lib.rs; mypy.stubtest in the native
 CI lane fails if a Rust signature drifts from these.
 """
 
+from collections.abc import Callable
 from typing import final
 
 # pyo3's #[pymodule] auto-generates __all__ from the registered names.
@@ -13,6 +14,7 @@ __all__ = [
     "parallel_sum",
     "checked_div",
     "init_onnx_runtime",
+    "init_tracing",
     "rrf_fuse",
     "fused_search_text",
     "fused_add_text",
@@ -39,6 +41,9 @@ def build_info() -> str: ...
 def parallel_sum(values: list[float]) -> float: ...
 def checked_div(a: float, b: float) -> float: ...
 def init_onnx_runtime(dylib_path: str) -> None: ...
+def init_tracing(
+    callback: Callable[[str, str, str], object],
+) -> None: ...
 def derived_fts5_probe() -> bool: ...
 def derived_sqlite_bundled() -> bool: ...
 def rrf_fuse(

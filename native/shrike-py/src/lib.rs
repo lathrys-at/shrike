@@ -46,12 +46,90 @@ pyo3::create_exception!(
 );
 
 /// Map the shared native error taxonomy onto the module's exception classes.
+/// The captured Rust span trace rides along as a PEP 678 note (#308), so the
+/// native context shows up in the Python traceback the Pythonic way.
 fn to_py_err(e: NativeError) -> PyErr {
-    match e.kind {
+    let trace = e.trace();
+    let err = match e.kind {
         ErrorKind::InvalidInput => NativeInputError::new_err(e.message),
         ErrorKind::Unavailable => NativeUnavailableError::new_err(e.message),
         ErrorKind::Internal => NativeInternalError::new_err(e.message),
+    };
+    if let Some(trace) = trace {
+        Python::attach(|py| {
+            let value = err.value(py);
+            let _ = value.call_method1("add_note", (format!("native trace:\n{trace}"),));
+        });
     }
+    err
+}
+
+/// The harness-injected tracing sink (#308): native code emits spans/events
+/// with no subscriber; this installs one that forwards each event (and span
+/// open/close at debug level) to a Python callable `(level, target, message)`,
+/// which the harness rigs to its logging (the Python host maps it onto the
+/// `logging` module; a mobile host installs its own subscriber instead).
+/// Idempotent-ish: the first installation wins (a process-wide global).
+#[pyfunction]
+fn init_tracing(callback: Py<pyo3::types::PyAny>) -> PyResult<()> {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    struct PyForwarder {
+        callback: Py<pyo3::types::PyAny>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PyForwarder {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Collect(String);
+            impl tracing::field::Visit for Collect {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write;
+                    if !self.0.is_empty() {
+                        self.0.push(' ');
+                    }
+                    let _ = write!(self.0, "{}={:?}", field.name(), value);
+                }
+            }
+            let mut fields = Collect(String::new());
+            event.record(&mut fields);
+            let level = event.metadata().level().as_str();
+            let target = event.metadata().target().to_string();
+            Python::attach(|py| {
+                let _ = self.callback.call1(py, (level, target, fields.0.clone()));
+            });
+        }
+
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let level = attrs.metadata().level().as_str();
+            let target = attrs.metadata().target().to_string();
+            let name = attrs.metadata().name();
+            Python::attach(|py| {
+                let _ = self
+                    .callback
+                    .call1(py, (level, target, format!("span open: {name}")));
+            });
+        }
+    }
+
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_error::ErrorLayer::default())
+        .with(PyForwarder { callback });
+    // First install wins; a second call is a no-op (process-wide global).
+    let _ = tracing::subscriber::set_global_default(subscriber);
+    Ok(())
 }
 
 /// One derived-store MATCH row: (note_id, source, ref, txt, snippet).
@@ -516,6 +594,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parallel_sum, m)?)?;
     m.add_function(wrap_pyfunction!(checked_div, m)?)?;
     m.add_function(wrap_pyfunction!(init_onnx_runtime, m)?)?;
+    m.add_function(wrap_pyfunction!(init_tracing, m)?)?;
     m.add_class::<OnnxTextEmbedder>()?;
     m.add_class::<ClipEmbedder>()?;
     m.add_class::<NativeIndexEngine>()?;

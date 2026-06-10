@@ -12,4 +12,10 @@ name = "shrike_ffi"
 # Pure Rust by design — NO pyo3 here (epic #265 convention 5). The Python
 # exception mapping for this crate's error taxonomy lives in shrike-py, the one
 # crate allowed to see pyo3.
+#
+# tracing (#308): native code emits spans/events with NO subscriber installed —
+# the harness injects the sink. tracing-error captures span traces into
+# NativeError so failures carry context out through the FFI.
 [dependencies]
+tracing = "0.1"
+tracing-error = "0.2"

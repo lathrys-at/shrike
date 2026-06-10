@@ -264,6 +264,8 @@ impl DerivedEngine {
         limit: i64,
         with_text: bool,
     ) -> NativeResult<Vec<MatchRow>> {
+        let span = tracing::debug_span!("derived.match", limit, with_text);
+        let _enter = span.enter();
         let conn = self.lock();
         let txt_col = if with_text { "idx.txt" } else { "NULL" };
         let sql = format!(

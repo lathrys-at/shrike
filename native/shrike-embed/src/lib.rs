@@ -316,6 +316,10 @@ impl TextEmbedder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
+        // The GIL is released across this whole call (the binding detaches);
+        // this span is the harness's visibility into that window (#308).
+        let span = tracing::debug_span!("embed.text_chunk", batch = texts.len());
+        let _enter = span.enter();
         let encodings = self
             .tokenizer
             .encode_batch(texts.to_vec(), true)
