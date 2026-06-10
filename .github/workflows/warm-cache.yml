@@ -16,11 +16,15 @@ name: Warm CI caches
 # its own warmed entry in main's scope.
 #
 # Runs on the default branch twice a week — comfortably under the 7-day cache
-# eviction window — on demand via workflow_dispatch, AND on every merge to main
-# that touches the native tree or its pins (#319): a crate-pin bump otherwise
-# leaves every subsequent PR cold-compiling the same dependency delta until the
-# next scheduled warm. One incremental warm build on main (linux 1x, on top of
-# the restored caches) replaces N cold deltas on PRs — it saves minutes net.
+# eviction window — on demand via workflow_dispatch, AND on a merge to main that
+# changes the DEPENDENCY CONE (#319): the lock/pin files only, deliberately not
+# `native/**`. Every cache here is keyed on the locks, so a source-only merge
+# (the common single-commit PR) invalidates nothing — the next PR still restores
+# the same warmed dependency entries and only rebuilds the workspace crates
+# themselves, which is the normal cheap incremental cost. Only a lock change
+# leaves followers cold, so only a lock change triggers a re-warm; toolchain
+# drift without a lock change (a runner-image rustc bump rotating rust-cache
+# keys) is covered by the schedule.
 on:
   schedule:
     - cron: "17 4 * * 1,4" # Mon & Thu, 04:17 UTC
@@ -28,7 +32,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "native/**"
+      - "native/Cargo.lock"
       - "MODULE.bazel"
       - "MODULE.bazel.lock"
       - "requirements_lock.txt"
