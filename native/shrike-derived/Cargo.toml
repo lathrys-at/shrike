@@ -25,3 +25,4 @@ shrike-ffi = { workspace = true }
 # 0.36 to match anki's pin: only one crate may link sqlite3 (the links attr),
 # and the anki workspace (shrike-collection, #278) brings rusqlite 0.36.
 rusqlite = { version = "0.36" }
+tracing = "0.1"

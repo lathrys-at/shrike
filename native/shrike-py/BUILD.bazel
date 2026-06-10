@@ -30,6 +30,9 @@ rust_shared_library(
         "//native/shrike-ffi:shrike_ffi",
         "//native/shrike-index:shrike_index",
         "@crates//:pyo3",
+        "@crates//:tracing",
+        "@crates//:tracing-error",
+        "@crates//:tracing-subscriber",
     ],
 )
 

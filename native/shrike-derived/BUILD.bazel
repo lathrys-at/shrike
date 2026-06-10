@@ -13,6 +13,7 @@ rust_library(
     deps = [
         "//native/shrike-ffi:shrike_ffi",
         "@crates//:rusqlite",
+        "@crates//:tracing",
     ],
 )
 

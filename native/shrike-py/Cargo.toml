@@ -26,3 +26,6 @@ shrike-derived = { path = "../shrike-derived", default-features = false }
 shrike-embed = { path = "../shrike-embed" }
 shrike-ffi = { workspace = true }
 shrike-index = { path = "../shrike-index" }
+tracing = "0.1"
+tracing-error = "0.2"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }

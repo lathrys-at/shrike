@@ -4883,6 +4883,7 @@ version = "0.0.0"
 dependencies = [
  "rusqlite",
  "shrike-ffi",
+ "tracing",
 ]
 
 [[package]]
@@ -4894,17 +4895,23 @@ dependencies = [
  "ort",
  "shrike-ffi",
  "tokenizers",
+ "tracing",
 ]
 
 [[package]]
 name = "shrike-ffi"
 version = "0.0.0"
+dependencies = [
+ "tracing",
+ "tracing-error",
+]
 
 [[package]]
 name = "shrike-index"
 version = "0.0.0"
 dependencies = [
  "shrike-ffi",
+ "tracing",
  "usearch",
 ]
 
@@ -4918,6 +4925,7 @@ dependencies = [
  "shrike-embed",
  "shrike-ffi",
  "shrike-index",
+ "tracing",
 ]
 
 [[package]]
@@ -4937,6 +4945,9 @@ dependencies = [
  "shrike-embed",
  "shrike-ffi",
  "shrike-index",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5607,6 +5618,16 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
  "valuable",
+]
+
+[[package]]
+name = "tracing-error"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b1581020d7a273442f5b45074a6a57d5757ad0a47dac0e9f0bd57b81936f3db"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

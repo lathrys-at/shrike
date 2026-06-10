@@ -10,6 +10,10 @@ rust_library(
     name = "shrike_ffi",
     srcs = ["src/lib.rs"],
     edition = "2021",
+    deps = [
+        "@crates//:tracing",
+        "@crates//:tracing-error",
+    ],
 )
 
 rust_test(

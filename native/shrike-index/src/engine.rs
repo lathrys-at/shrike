@@ -301,6 +301,8 @@ impl MultiModalIndex {
         k: usize,
         modalities: Option<&[String]>,
     ) -> NativeResult<Vec<BTreeMap<String, ModalityRanking>>> {
+        let span = tracing::debug_span!("index.search", queries = queries.len(), k);
+        let _enter = span.enter();
         let state = self.lock();
         let fetch = (k * SEARCH_OVERFETCH).max(k);
         let mut out: Vec<BTreeMap<String, ModalityRanking>> =

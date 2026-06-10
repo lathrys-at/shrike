@@ -14,6 +14,7 @@ rust_library(
     deps = [
         "//native/shrike-ffi:shrike_ffi",
         "@crates//:usearch",
+        "@crates//:tracing",
     ],
 )
 

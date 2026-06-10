@@ -2,11 +2,14 @@
 //!
 //! This crate composes the native compute plane into the embedded-host shape
 //! #224 specs: it owns the collection core (anki via its protobuf service
-//! layer, #278), the vector index engine, the derived-text store, the fusion,
-//! and **its own threading** — a dedicated collection-owning thread with a
-//! FIFO channel, exactly the #224 invariant (the collection is opened *on* its
-//! owning thread; no live handle crosses; a collection job never waits on
-//! another collection job).
+//! layer, #278), the vector index engine, the derived-text store, and the
+//! fusion — and **no threading at all** (#308). The kernel never spawns a
+//! thread and assumes nothing about the runtime (no tokio assumption; anki's
+//! internal runtime is its own business behind the service layer). Scheduling
+//! is *injected* by the harness through the [`SerialExecutor`] contract,
+//! exactly as the harness plugs transports: collection ops need serialization
+//! with respect to each other, not a dedicated thread — execution may migrate
+//! across threads between jobs so long as the contract holds.
 //!
 //! There is **no pyo3 anywhere in this dependency tree** (epic #265 convention
 //! 5, enforced by `//native:layering_check`); the no-CPython smoke test in
@@ -20,8 +23,7 @@
 //! transitional Python schedulers from #275.
 
 use std::collections::BTreeMap;
-use std::sync::mpsc;
-use std::thread::JoinHandle;
+use std::sync::{Arc, Mutex};
 
 use shrike_collection::{CollectionCore, CreateOutcome, DuplicatePolicy};
 use shrike_derived::DerivedEngine;
@@ -41,71 +43,76 @@ impl Embedder for shrike_embed::TextEmbedder {
     }
 }
 
-type CollectionJob = Box<dyn FnOnce(&CollectionCore) + Send>;
-
-/// The collection's owning thread: jobs run FIFO, the core never leaves it.
-struct CollectionThread {
-    sender: Option<mpsc::Sender<CollectionJob>>,
-    handle: Option<JoinHandle<()>>,
+/// The scheduling contract the harness injects (#308). The kernel never
+/// spawns threads or assumes a runtime; whoever assembles a kernel supplies
+/// this, exactly as it plugs transports.
+///
+/// **Contract:**
+/// - Jobs submitted through one executor run **serialized FIFO** with respect
+///   to each other — never concurrently. (The collection's consistency model
+///   requires serialization, not thread affinity.)
+/// - Execution may happen on any thread, and may **migrate across threads
+///   between jobs** — anki's service layer is internally synchronized, so no
+///   thread-affinity is required, only mutual exclusion + ordering.
+/// - `execute` blocks until the job has run (the kernel's ops are synchronous;
+///   asynchronous harnesses wrap kernel calls, not the executor).
+/// - **Re-entrancy is forbidden**: a job must never submit to (and wait on)
+///   its own executor — with any conforming implementation that is a deadlock
+///   by contract, not an executor bug. Compute (embedding, index, derived
+///   work) runs *outside* collection jobs for exactly this reason.
+pub trait SerialExecutor: Send + Sync {
+    fn execute(&self, job: Box<dyn FnOnce() + Send + '_>);
 }
 
-impl CollectionThread {
-    fn spawn(collection_path: String) -> NativeResult<Self> {
-        let (sender, receiver) = mpsc::channel::<CollectionJob>();
-        let (ready_tx, ready_rx) = mpsc::channel::<NativeResult<()>>();
-        let handle = std::thread::Builder::new()
-            .name("shrike-kernel-collection".into())
-            .spawn(move || {
-                // Open ON the owning thread (#224's invariant).
-                let core = match CollectionCore::open(&collection_path) {
-                    Ok(core) => {
-                        let _ = ready_tx.send(Ok(()));
-                        core
-                    }
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e));
-                        return;
-                    }
-                };
-                while let Ok(job) = receiver.recv() {
-                    job(&core);
-                }
-                let _ = core.close();
-            })
-            .map_err(|e| NativeError::internal(format!("collection thread: {e}")))?;
-        ready_rx
-            .recv()
-            .map_err(|_| NativeError::internal("collection thread died during open"))??;
-        Ok(Self {
-            sender: Some(sender),
-            handle: Some(handle),
-        })
+/// The simplest conforming executor: mutual exclusion on the calling thread.
+/// Serialized (the mutex), thread-agnostic (runs wherever the caller is), no
+/// threads owned. A real harness may instead pin a worker thread (the Python
+/// host), use a thread pool with an ordered queue, or an actor — anything
+/// honoring the contract.
+#[derive(Default)]
+pub struct MutexExecutor {
+    gate: Mutex<()>,
+}
+
+impl SerialExecutor for MutexExecutor {
+    fn execute(&self, job: Box<dyn FnOnce() + Send + '_>) {
+        let _guard = self.gate.lock().expect("executor gate poisoned");
+        job();
+    }
+}
+
+/// The collection behind the injected executor: every access is one submitted
+/// job; the core never escapes. (CollectionCore is Send: anki's Backend is
+/// internally synchronized, which is what makes thread migration safe.)
+struct SerializedCollection {
+    core: CollectionCore,
+    executor: Arc<dyn SerialExecutor>,
+}
+
+impl SerializedCollection {
+    fn open(collection_path: &str, executor: Arc<dyn SerialExecutor>) -> NativeResult<Self> {
+        // Open through the executor too: the open IS a collection op.
+        let mut opened: Option<NativeResult<CollectionCore>> = None;
+        executor.execute(Box::new(|| {
+            opened = Some(CollectionCore::open(collection_path));
+        }));
+        let core =
+            opened.ok_or_else(|| NativeError::internal("executor dropped the open job"))??;
+        Ok(Self { core, executor })
     }
 
-    /// Run a job on the owning thread, blocking for its result.
-    fn run<T: Send + 'static>(
-        &self,
-        job: impl FnOnce(&CollectionCore) -> T + Send + 'static,
-    ) -> NativeResult<T> {
-        let (tx, rx) = mpsc::channel();
-        let sender = self
-            .sender
-            .as_ref()
-            .ok_or_else(|| NativeError::unavailable("kernel is closed"))?;
-        sender
-            .send(Box::new(move |core| {
-                let _ = tx.send(job(core));
-            }))
-            .map_err(|_| NativeError::unavailable("collection thread gone"))?;
-        rx.recv()
-            .map_err(|_| NativeError::internal("collection job lost"))
+    /// Run a job against the collection, serialized, blocking for its result.
+    fn run<T: Send>(&self, job: impl FnOnce(&CollectionCore) -> T + Send) -> NativeResult<T> {
+        let mut out: Option<T> = None;
+        let core = &self.core;
+        self.executor.execute(Box::new(|| {
+            out = Some(job(core));
+        }));
+        out.ok_or_else(|| NativeError::internal("executor dropped a collection job"))
     }
 
-    fn close(&mut self) {
-        self.sender.take(); // channel closes → thread drains, closes the core, exits
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+    fn close(&self) -> NativeResult<()> {
+        self.run(|core| core.close())?
     }
 }
 
@@ -120,7 +127,7 @@ pub struct KernelHit {
 /// The kernel: one open collection + the derived/vector stores + fusion,
 /// behind its own threading. No transport, no Python.
 pub struct Kernel<E: Embedder> {
-    collection: CollectionThread,
+    collection: SerializedCollection,
     index: MultiModalIndex,
     derived: DerivedEngine,
     embedder: E,
@@ -131,11 +138,17 @@ const FIELD_SOURCE: &str = "field";
 
 impl<E: Embedder> Kernel<E> {
     /// Open a collection and its sidecar stores (cache_dir holds the derived
-    /// store, like the Python host's cache layout).
-    pub fn open(collection_path: &str, cache_dir: &str, embedder: E) -> NativeResult<Self> {
+    /// store, like the Python host's cache layout). `executor` is the
+    /// harness-injected scheduling (see [`SerialExecutor`]).
+    pub fn open(
+        collection_path: &str,
+        cache_dir: &str,
+        embedder: E,
+        executor: Arc<dyn SerialExecutor>,
+    ) -> NativeResult<Self> {
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
-        let collection = CollectionThread::spawn(collection_path.to_string())?;
+        let collection = SerializedCollection::open(collection_path, executor)?;
         let index = MultiModalIndex::new(vec![TEXT.to_string(), "image".to_string()])?;
         let derived =
             DerivedEngine::open(&format!("{}/shrike.db", cache_dir.trim_end_matches('/')), 1)?;
@@ -173,6 +186,8 @@ impl<E: Embedder> Kernel<E> {
             .enumerate()
             .map(|(i, value)| (format!("F{i}"), value.clone()))
             .collect();
+        let span = tracing::debug_span!("kernel.upsert_note", notetype_id, deck_id);
+        let _enter = span.enter();
         let outcome = self
             .collection
             .run(move |core| core.create_note(notetype_id, deck_id, &fields, &tags, policy))??;
@@ -200,6 +215,8 @@ impl<E: Embedder> Kernel<E> {
     /// rank their own candidates; RRF blends them with the exact tier on top —
     /// the same semantics as the Python host's search_notes spine.
     pub fn search(&self, query: &str, top_k: usize) -> NativeResult<Vec<KernelHit>> {
+        let span = tracing::debug_span!("kernel.search", top_k);
+        let _enter = span.enter();
         // Semantic signal.
         let qvec = self.embedder.embed(&[query.to_string()])?;
         let semantic = self.index.search_by_modality(&qvec, top_k, None)?;
@@ -262,9 +279,8 @@ impl<E: Embedder> Kernel<E> {
             .collect())
     }
 
-    pub fn close(mut self) -> NativeResult<()> {
-        self.collection.close();
-        Ok(())
+    pub fn close(self) -> NativeResult<()> {
+        self.collection.close()
     }
 }
 
@@ -320,8 +336,15 @@ mod no_cpython_smoke {
         let dir = temp_dir();
         let col = dir.join("collection.anki2");
         let cache = dir.join("cache");
-        let kernel =
-            Kernel::open(col.to_str().unwrap(), cache.to_str().unwrap(), HashEmbedder).unwrap();
+        // The harness assembles the scheduling: here the thread-free
+        // MutexExecutor — serialized, no owned threads, runs on the caller.
+        let kernel = Kernel::open(
+            col.to_str().unwrap(),
+            cache.to_str().unwrap(),
+            HashEmbedder,
+            Arc::new(MutexExecutor::default()),
+        )
+        .unwrap();
 
         let basic = kernel.notetype_id("Basic").unwrap();
         let make = |front: &str, back: &str| {
