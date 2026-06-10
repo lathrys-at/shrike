@@ -1,0 +1,22 @@
+# Dev-local packaging for the shrike_native extension package (#269).
+#
+# The CANONICAL release artifact is the Bazel py_wheel (//native/shrike-py:wheel,
+# abi3 platform wheel). This file exists so `scripts/build-native.sh` can
+# `pip install -e` the package into a working venv after a cargo build drops
+# `_native.so` into the package dir — the pip-lane tests then exercise the
+# facades against the real extension without Bazel in the loop.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "shrike-native"
+version = "0.0.0"
+description = "Shrike native compute extension (dev-local build; release wheels come from Bazel)"
+requires-python = ">=3.12"
+license = "AGPL-3.0-or-later"
+
+[tool.hatch.build.targets.wheel]
+packages = ["shrike_native"]
+# The compiled extension is dropped in by scripts/build-native.sh, not tracked in git.
+artifacts = ["shrike_native/*.so"]

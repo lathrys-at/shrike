@@ -1,0 +1,150 @@
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:packaging.bzl", "py_wheel")
+load("@rules_rust//rust:defs.bzl", "rust_shared_library")
+load("@shrike_pip//:requirements.bzl", "requirement")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+# The Shrike PyO3 binding crate (#269) — the ONE crate that sees pyo3. Built as
+# a cdylib against the stable ABI (abi3-py312, no libpython linked); on macOS
+# the Python symbols stay undefined at link time (resolved by the host at
+# import), same as the _demo proof.
+rust_shared_library(
+    name = "shrike_py_native",
+    srcs = ["src/lib.rs"],
+    edition = "2021",
+    rustc_flags = select({
+        "@platforms//os:macos": [
+            "-Clink-arg=-undefined",
+            "-Clink-arg=dynamic_lookup",
+        ],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//native/shrike-ffi:shrike_ffi",
+        "@crates//:pyo3",
+    ],
+)
+
+# Python imports `shrike_native._native` from a file literally named
+# `_native.so`; rules_rust emits lib<name>.dylib/.so, so copy it to the import
+# name inside the package dir (runfiles merge it with the source __init__.py).
+copy_file(
+    name = "native_so",
+    src = ":shrike_py_native",
+    out = "python/shrike_native/_native.so",
+    allow_symlink = False,
+)
+
+# The importable shrike_native package: facade __init__ + stubs + py.typed +
+# the compiled extension.
+py_library(
+    name = "shrike_native",
+    srcs = ["python/shrike_native/__init__.py"],
+    data = [
+        "python/shrike_native/__init__.pyi",
+        "python/shrike_native/_native.pyi",
+        "python/shrike_native/py.typed",
+        ":native_so",
+    ],
+    imports = ["python"],
+)
+
+# Conventions smoke: the FFI exemplars round-trip (marshaling, GIL release,
+# error taxonomy → exception classes).
+py_test(
+    name = "smoke_test",
+    size = "small",
+    srcs = ["smoke_test.py"],
+    main = "smoke_test.py",
+    deps = [":shrike_native"],
+)
+
+# Typing gate (#269): mypy.stubtest verifies the shipped .pyi stubs against the
+# real compiled module, so a Rust signature drifting from its stub fails CI
+# instead of silently degrading call sites to Any.
+py_test(
+    name = "stubtest",
+    size = "medium",
+    srcs = ["stubtest_runner.py"],
+    main = "stubtest_runner.py",
+    deps = [
+        ":shrike_native",
+        requirement("mypy"),
+    ],
+)
+
+# Platform config_settings for the wheel tag.
+config_setting(
+    name = "macos_arm64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:arm64",
+    ],
+)
+
+config_setting(
+    name = "macos_x86_64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "linux_x86_64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:arm64",
+    ],
+)
+
+filegroup(
+    name = "wheel_files",
+    srcs = [
+        "python/shrike_native/__init__.py",
+        "python/shrike_native/__init__.pyi",
+        "python/shrike_native/_native.pyi",
+        "python/shrike_native/py.typed",
+        ":native_so",
+    ],
+)
+
+# The shrike-native platform wheel (#269, extending the #245 py_wheel work).
+# abi3 (cp312/abi3): one wheel per platform works across CPython 3.12+. The
+# linux tags are the plain linux_* ones for now — manylinux auditing
+# (auditwheel) is deferred until PyPI publishing is wired up (#43); these
+# wheels install from GitHub releases / local builds where plain tags are
+# accepted. `manual` keeps the release artifact off the per-PR `//...` lane
+# (the #261/#263 finding); release tooling names it explicitly.
+py_wheel(
+    name = "wheel",
+    distribution = "shrike-native",
+    version = "{STABLE_VERSION}",
+    stamp = 1,
+    python_tag = "cp312",
+    abi = "abi3",
+    platform = select({
+        ":macos_arm64": "macosx_11_0_arm64",
+        ":macos_x86_64": "macosx_11_0_x86_64",
+        ":linux_x86_64": "linux_x86_64",
+        ":linux_arm64": "linux_aarch64",
+    }),
+    summary = "Shrike native compute extension (PyO3)",
+    license = "AGPL-3.0-or-later",
+    python_requires = ">=3.12",
+    tags = ["manual"],
+    strip_path_prefixes = ["native/shrike-py/python"],
+    deps = [":wheel_files"],
+)

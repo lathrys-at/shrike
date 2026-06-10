@@ -47,12 +47,13 @@ pip.parse(
 )
 use_repo(pip, "shrike_sdist_pip")
 
-# ── Rust toolchain + crates: the polyglot proof (#247) ──────────────────────
-# Proves the cross-language seam — rules_rust builds a PyO3 extension linked
-# against the hermetic CPython, importable from a py_test (//native/_demo). The
-# native-backend epics (#219 compiled extension, #224 PyO3 host) build on this.
-# crate deps resolve from native/_demo's Cargo.toml/Cargo.lock via the rust
-# toolchain's own cargo — no system Rust required.
+# ── Rust toolchain + crates: the native compute workspace (#247 → #269) ─────
+# rules_rust builds the Shrike native crates (native/Cargo.toml workspace)
+# against the hermetic CPython. The PyO3 binding crate (shrike-py) and the
+# polyglot-proof demo are the only crates that see pyo3 (//native:layering_check
+# enforces it); compute crates stay pure Rust. crate deps resolve from the
+# workspace's single Cargo.lock via the rust toolchain's own cargo — no system
+# Rust required.
 bazel_dep(name = "rules_rust", version = "0.70.0")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "bazel_skylib", version = "1.8.2")  # copy_file (the .so rename)
@@ -67,8 +68,13 @@ register_toolchains("@rust_toolchains//:all")
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
     name = "crates",
-    cargo_lockfile = "//native/_demo:Cargo.lock",
-    manifests = ["//native/_demo:Cargo.toml"],
+    cargo_lockfile = "//native:Cargo.lock",
+    manifests = [
+        "//native:Cargo.toml",
+        "//native/_demo:Cargo.toml",
+        "//native/shrike-ffi:Cargo.toml",
+        "//native/shrike-py:Cargo.toml",
+    ],
 )
 use_repo(crate, "crates")
 

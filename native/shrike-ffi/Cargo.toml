@@ -1,0 +1,15 @@
+[package]
+name = "shrike-ffi"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "FFI conventions shared by every Shrike native crate: error taxonomy + marshaling rules (#269)."
+
+[lib]
+name = "shrike_ffi"
+
+# Pure Rust by design — NO pyo3 here (epic #265 convention 5). The Python
+# exception mapping for this crate's error taxonomy lives in shrike-py, the one
+# crate allowed to see pyo3.
+[dependencies]

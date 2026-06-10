@@ -1,0 +1,18 @@
+[package]
+name = "shrike-py"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The Shrike PyO3 binding crate — the ONLY crate that sees pyo3 (#269)."
+
+[lib]
+# A Python extension module is a cdylib. Imported as `shrike_native._native`
+# (the .so is renamed by the BUILD rule / build script), so the lib name here is
+# free — kept descriptive.
+name = "shrike_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true }
+shrike-ffi = { workspace = true }

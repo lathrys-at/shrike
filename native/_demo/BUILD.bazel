@@ -49,3 +49,7 @@ py_test(
     main = "demo_smoke.py",
     deps = [":demo"],
 )
+
+# The workspace layering check (//native:layering_check) reads every crate
+# manifest; the demo is one of the two crates allowed to see pyo3.
+exports_files(["Cargo.toml"])

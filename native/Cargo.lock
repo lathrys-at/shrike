@@ -103,10 +103,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "shrike-ffi"
+version = "0.0.0"
+
+[[package]]
 name = "shrike-native-demo"
 version = "0.0.0"
 dependencies = [
  "pyo3",
+]
+
+[[package]]
+name = "shrike-py"
+version = "0.0.0"
+dependencies = [
+ "pyo3",
+ "shrike-ffi",
 ]
 
 [[package]]

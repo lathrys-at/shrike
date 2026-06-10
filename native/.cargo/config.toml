@@ -1,0 +1,9 @@
+# Plain-cargo builds of the PyO3 cdylibs on macOS: leave Python symbols
+# undefined at link time (the host interpreter resolves them at import) —
+# the same flags the Bazel rust_shared_library rules pass via rustc_flags.
+# Bazel ignores this file; it exists for local `cargo build/test`.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
