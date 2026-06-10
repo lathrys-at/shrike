@@ -26,6 +26,13 @@ shrike-derived = { path = "../shrike-derived", default-features = false }
 shrike-embed = { path = "../shrike-embed" }
 shrike-ffi = { workspace = true }
 shrike-index = { path = "../shrike-index" }
-tracing = "0.1"
+# First-class observability bridges (#310): pyo3-log forwards `log` records to
+# Python's stdlib `logging`; tracing's `log-always` compat feature makes every
+# native tracing event emit such a record even with a tracing subscriber set
+# (the ErrorLayer registry stays installed for NativeError span traces).
+# Feature unification applies `log-always` to every tracing emitter in this
+# build graph, so no compute crate needs its own bridge code.
+pyo3-log = "0.13"
+tracing = { version = "0.1", features = ["log-always"] }
 tracing-error = "0.2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }

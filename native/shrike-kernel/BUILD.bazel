@@ -5,8 +5,9 @@ package(default_visibility = ["//native:__subpackages__"])
 exports_files(["Cargo.toml"])
 
 # The pure-Rust kernel (#279): collection (via anki's protobuf services) +
-# index + derived store + fusion, with its own threading. NO pyo3 in this
-# dep tree (the layering check + the no-CPython smoke are the proof).
+# index + derived store + fusion. Natively async, owns no threads, assumes
+# no runtime (#308/#310) — serialization and execution are injected. NO pyo3
+# in this dep tree (the layering check + the no-CPython smoke are the proof).
 #
 # `manual` like shrike-collection: the anki tree needs protoc on the build
 # host. The cargo lane covers it locally (`cargo test -p shrike-kernel`).
@@ -22,6 +23,8 @@ rust_library(
         "//native/shrike-embed:shrike_embed",
         "//native/shrike-ffi:shrike_ffi",
         "//native/shrike-index:shrike_index",
+        "@crates//:futures",
+        "@crates//:tracing",
     ],
 )
 

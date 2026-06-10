@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import functools
 import ipaddress
 import logging
@@ -636,6 +637,17 @@ def main() -> None:
         log_dir_override=args.log_dir,
         log_level_override=args.log_level,
     )
+
+    # Rig native observability into this process's logging (#308/#310): the
+    # Rust crates emit tracing events but never log directly — init_logging
+    # bridges them onto stdlib `logging` (logger name = the Rust target) and
+    # installs the span-trace subscriber behind the exception notes. Must run
+    # *after* configure_logging (pyo3-log caches effective levels). A missing
+    # native install just means no native logs to bridge.
+    with contextlib.suppress(ImportError):
+        import shrike_native
+
+        shrike_native.init_logging()
 
     # Refuse non-loopback binds unless explicitly opted in: every endpoint is
     # unauthenticated, so a non-loopback host hands the full collection API to

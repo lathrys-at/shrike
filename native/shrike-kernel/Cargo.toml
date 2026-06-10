@@ -11,7 +11,9 @@ name = "shrike_kernel"
 
 # Pure Rust — NO pyo3 anywhere in this dep tree (epic #265 convention 5; the
 # layering check + the no-CPython smoke test below are the proof). This crate
-# IS the embedded host #224 specs: it owns its own threading.
+# IS the embedded host #224 specs. It owns NO threads and assumes NO runtime
+# (#308/#310): serialization is injected via SerialExecutor, and every op is
+# an async fn the harness drives on its runtime of choice.
 [dependencies]
 shrike-collection = { path = "../shrike-collection" }
 shrike-compute = { path = "../shrike-compute" }
@@ -20,3 +22,7 @@ shrike-embed = { path = "../shrike-embed" }
 shrike-ffi = { workspace = true }
 shrike-index = { path = "../shrike-index" }
 tracing = "0.1"
+# Runtime-AGNOSTIC async building blocks (#310): futures is the abstraction
+# library, not a runtime — no tokio (or any executor) assumption in this crate.
+# The harness picks the runtime; tests drive ops with futures::executor.
+futures = { version = "0.3", features = ["executor"] }
