@@ -11,6 +11,13 @@
 //! with respect to each other, not a dedicated thread — execution may migrate
 //! across threads between jobs so long as the contract holds.
 //!
+//! **Natively async (#310):** every kernel op is an `async fn`; the
+//! transitions between collection ops are awaits that chain/fan out through
+//! the compute layer (embed → index add → derived ingest). Nothing here
+//! blocks by assumption and nothing names a runtime — the futures are
+//! runtime-agnostic, so the harness runs them on its executor of choice
+//! (asyncio via pyo3-async-runtimes, a mobile runtime, or a plain block_on).
+//!
 //! There is **no pyo3 anywhere in this dependency tree** (epic #265 convention
 //! 5, enforced by `//native:layering_check`); the no-CPython smoke test in
 //! this crate links the kernel without Python and runs open → upsert → search
@@ -25,6 +32,10 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use futures::channel::oneshot;
+use futures::future::BoxFuture;
+use tracing::Instrument;
+
 use shrike_collection::{CollectionCore, CreateOutcome, DuplicatePolicy};
 use shrike_derived::DerivedEngine;
 use shrike_ffi::{NativeError, NativeResult};
@@ -33,13 +44,16 @@ use shrike_index::MultiModalIndex;
 /// The embedder seam the kernel needs — the Rust counterpart of the Python
 /// `EmbedderBackend` protocol's compute slice. `shrike_embed::TextEmbedder`
 /// satisfies it for real models; tests use a deterministic stub.
-pub trait Embedder: Send + 'static {
-    fn embed(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>>;
+pub trait Embedder: Send + Sync + 'static {
+    /// Embed a batch. Async so a harness can supply a genuinely asynchronous
+    /// embedder (a remote service, a platform ML API); CPU-bound embedders
+    /// return a ready future.
+    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>>;
 }
 
 impl Embedder for shrike_embed::TextEmbedder {
-    fn embed(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>> {
-        self.embed_chunk(texts)
+    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+        Box::pin(async move { self.embed_chunk(&texts) })
     }
 }
 
@@ -54,14 +68,17 @@ impl Embedder for shrike_embed::TextEmbedder {
 /// - Execution may happen on any thread, and may **migrate across threads
 ///   between jobs** — anki's service layer is internally synchronized, so no
 ///   thread-affinity is required, only mutual exclusion + ordering.
-/// - `execute` blocks until the job has run (the kernel's ops are synchronous;
-///   asynchronous harnesses wrap kernel calls, not the executor).
-/// - **Re-entrancy is forbidden**: a job must never submit to (and wait on)
-///   its own executor — with any conforming implementation that is a deadlock
-///   by contract, not an executor bug. Compute (embedding, index, derived
-///   work) runs *outside* collection jobs for exactly this reason.
+/// - `submit` returns a **runtime-agnostic future** that resolves once the
+///   job has run; the executor decides where/when (inline, a worker, a pool —
+///   anything honoring serialization). The kernel never blocks on it; it
+///   awaits.
+/// - **Re-entrancy is forbidden**: a job must never submit to (and await)
+///   its own executor from within itself — with any conforming implementation
+///   that is a deadlock by contract, not an executor bug. Compute (embedding,
+///   index, derived work) runs *outside* collection jobs for exactly this
+///   reason.
 pub trait SerialExecutor: Send + Sync {
-    fn execute(&self, job: Box<dyn FnOnce() + Send + '_>);
+    fn submit(&self, job: Box<dyn FnOnce() + Send + 'static>) -> BoxFuture<'static, ()>;
 }
 
 /// The simplest conforming executor: mutual exclusion on the calling thread.
@@ -75,9 +92,13 @@ pub struct MutexExecutor {
 }
 
 impl SerialExecutor for MutexExecutor {
-    fn execute(&self, job: Box<dyn FnOnce() + Send + '_>) {
+    fn submit(&self, job: Box<dyn FnOnce() + Send + 'static>) -> BoxFuture<'static, ()> {
+        // Degenerate-but-conforming: run inline under the gate, return ready.
+        // A real harness suspends instead (queue + wake) — the contract only
+        // fixes serialization, not where the work happens.
         let _guard = self.gate.lock().expect("executor gate poisoned");
         job();
+        Box::pin(async {})
     }
 }
 
@@ -85,34 +106,50 @@ impl SerialExecutor for MutexExecutor {
 /// job; the core never escapes. (CollectionCore is Send: anki's Backend is
 /// internally synchronized, which is what makes thread migration safe.)
 struct SerializedCollection {
-    core: CollectionCore,
+    core: Arc<CollectionCore>,
     executor: Arc<dyn SerialExecutor>,
 }
 
 impl SerializedCollection {
-    fn open(collection_path: &str, executor: Arc<dyn SerialExecutor>) -> NativeResult<Self> {
+    async fn open(
+        collection_path: String,
+        executor: Arc<dyn SerialExecutor>,
+    ) -> NativeResult<Self> {
         // Open through the executor too: the open IS a collection op.
-        let mut opened: Option<NativeResult<CollectionCore>> = None;
-        executor.execute(Box::new(|| {
-            opened = Some(CollectionCore::open(collection_path));
-        }));
-        let core =
-            opened.ok_or_else(|| NativeError::internal("executor dropped the open job"))??;
-        Ok(Self { core, executor })
+        let (tx, rx) = oneshot::channel();
+        executor
+            .submit(Box::new(move || {
+                let _ = tx.send(CollectionCore::open(&collection_path));
+            }))
+            .await;
+        let core = rx
+            .await
+            .map_err(|_| NativeError::internal("executor dropped the open job"))??;
+        Ok(Self {
+            core: Arc::new(core),
+            executor,
+        })
     }
 
-    /// Run a job against the collection, serialized, blocking for its result.
-    fn run<T: Send>(&self, job: impl FnOnce(&CollectionCore) -> T + Send) -> NativeResult<T> {
-        let mut out: Option<T> = None;
-        let core = &self.core;
-        self.executor.execute(Box::new(|| {
-            out = Some(job(core));
-        }));
-        out.ok_or_else(|| NativeError::internal("executor dropped a collection job"))
+    /// Run a job against the collection, serialized; the await IS the
+    /// transition point ops chain continuations onto.
+    async fn run<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(&CollectionCore) -> T + Send + 'static,
+    ) -> NativeResult<T> {
+        let core = Arc::clone(&self.core);
+        let (tx, rx) = oneshot::channel();
+        self.executor
+            .submit(Box::new(move || {
+                let _ = tx.send(job(&core));
+            }))
+            .await;
+        rx.await
+            .map_err(|_| NativeError::internal("executor dropped a collection job"))
     }
 
-    fn close(&self) -> NativeResult<()> {
-        self.run(|core| core.close())?
+    async fn close(&self) -> NativeResult<()> {
+        self.run(|core| core.close()).await?
     }
 }
 
@@ -125,7 +162,8 @@ pub struct KernelHit {
 }
 
 /// The kernel: one open collection + the derived/vector stores + fusion,
-/// behind its own threading. No transport, no Python.
+/// every op an async fn over the injected executor. No threads owned, no
+/// runtime assumed, no transport, no Python.
 pub struct Kernel<E: Embedder> {
     collection: SerializedCollection,
     index: MultiModalIndex,
@@ -140,7 +178,7 @@ impl<E: Embedder> Kernel<E> {
     /// Open a collection and its sidecar stores (cache_dir holds the derived
     /// store, like the Python host's cache layout). `executor` is the
     /// harness-injected scheduling (see [`SerialExecutor`]).
-    pub fn open(
+    pub async fn open(
         collection_path: &str,
         cache_dir: &str,
         embedder: E,
@@ -148,7 +186,7 @@ impl<E: Embedder> Kernel<E> {
     ) -> NativeResult<Self> {
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
-        let collection = SerializedCollection::open(collection_path, executor)?;
+        let collection = SerializedCollection::open(collection_path.to_string(), executor).await?;
         let index = MultiModalIndex::new(vec![TEXT.to_string(), "image".to_string()])?;
         let derived =
             DerivedEngine::open(&format!("{}/shrike.db", cache_dir.trim_end_matches('/')), 1)?;
@@ -160,19 +198,21 @@ impl<E: Embedder> Kernel<E> {
         })
     }
 
-    pub fn col_mod(&self) -> NativeResult<i64> {
-        self.collection.run(|core| core.col_mod())?
+    pub async fn col_mod(&self) -> NativeResult<i64> {
+        self.collection.run(|core| core.col_mod()).await?
     }
 
-    pub fn notetype_id(&self, name: &str) -> NativeResult<i64> {
+    pub async fn notetype_id(&self, name: &str) -> NativeResult<i64> {
         let name = name.to_string();
-        self.collection.run(move |core| core.notetype_id(&name))?
+        self.collection
+            .run(move |core| core.notetype_id(&name))
+            .await?
     }
 
     /// Create a note (the #77 duplicate policy applies) and index it: the
     /// embedding + vector add and the derived-text ingest happen *off* the
     /// collection thread — compute never routes back through the queue.
-    pub fn upsert_note(
+    pub async fn upsert_note(
         &self,
         notetype_id: i64,
         deck_id: i64,
@@ -180,31 +220,44 @@ impl<E: Embedder> Kernel<E> {
         tags: Vec<String>,
         policy: DuplicatePolicy,
     ) -> NativeResult<CreateOutcome> {
-        let text = fields.join(" ");
-        let refs: Vec<(String, String)> = fields
-            .iter()
-            .enumerate()
-            .map(|(i, value)| (format!("F{i}"), value.clone()))
-            .collect();
+        // `.instrument`, never an entered guard across an await: the span
+        // follows the future across polls (and threads), and the future stays
+        // Send — spawnable on any multithreaded runtime.
         let span = tracing::debug_span!("kernel.upsert_note", notetype_id, deck_id);
-        let _enter = span.enter();
-        let outcome = self
-            .collection
-            .run(move |core| core.create_note(notetype_id, deck_id, &fields, &tags, policy))??;
-        if let CreateOutcome::Created(note_id) = outcome {
-            let vectors = self.embedder.embed(std::slice::from_ref(&text))?;
-            self.index.remove(&[note_id])?;
-            self.index.add(TEXT, &[note_id], &vectors)?;
-            self.derived.ingest(note_id, FIELD_SOURCE, &refs)?;
-            let col_mod = self.collection.run(|core| core.col_mod())??;
-            self.derived.set_col_mod(col_mod)?;
+        async move {
+            let text = fields.join(" ");
+            let refs: Vec<(String, String)> = fields
+                .iter()
+                .enumerate()
+                .map(|(i, value)| (format!("F{i}"), value.clone()))
+                .collect();
+            // The collection write, then the compute fan-out — each transition
+            // an await, never a block: embed → index add → derived ingest →
+            // watermark.
+            let outcome = self
+                .collection
+                .run(move |core| core.create_note(notetype_id, deck_id, &fields, &tags, policy))
+                .await??;
+            if let CreateOutcome::Created(note_id) = outcome {
+                let vectors = self.embedder.embed(vec![text]).await?;
+                self.index.remove(&[note_id])?;
+                self.index.add(TEXT, &[note_id], &vectors)?;
+                self.derived.ingest(note_id, FIELD_SOURCE, &refs)?;
+                let col_mod = self.collection.run(|core| core.col_mod()).await??;
+                self.derived.set_col_mod(col_mod)?;
+            }
+            Ok(outcome)
         }
-        Ok(outcome)
+        .instrument(span)
+        .await
     }
 
-    pub fn delete_notes(&self, note_ids: Vec<i64>) -> NativeResult<usize> {
+    pub async fn delete_notes(&self, note_ids: Vec<i64>) -> NativeResult<usize> {
         let ids = note_ids.clone();
-        let removed = self.collection.run(move |core| core.delete_notes(&ids))??;
+        let removed = self
+            .collection
+            .run(move |core| core.delete_notes(&ids))
+            .await??;
         self.index.remove(&note_ids)?;
         self.derived.remove(&note_ids, None)?;
         Ok(removed)
@@ -214,73 +267,78 @@ impl<E: Embedder> Kernel<E> {
     /// and the lexical rankings (the derived store's substring + fuzzy) each
     /// rank their own candidates; RRF blends them with the exact tier on top —
     /// the same semantics as the Python host's search_notes spine.
-    pub fn search(&self, query: &str, top_k: usize) -> NativeResult<Vec<KernelHit>> {
+    pub async fn search(&self, query: &str, top_k: usize) -> NativeResult<Vec<KernelHit>> {
         let span = tracing::debug_span!("kernel.search", top_k);
-        let _enter = span.enter();
-        // Semantic signal.
-        let qvec = self.embedder.embed(&[query.to_string()])?;
-        let semantic = self.index.search_by_modality(&qvec, top_k, None)?;
-        let mut rankings: Vec<(String, Vec<i64>)> = Vec::new();
-        if let Some(per_query) = semantic.first() {
-            for (modality, (ids, _dists)) in per_query {
-                rankings.push((modality.clone(), ids.clone()));
+        async move {
+            // Semantic signal — the embed is the await; the engine/derived reads
+            // are fast in-memory/SQLite calls chained after it.
+            let qvec = self.embedder.embed(vec![query.to_string()]).await?;
+            let semantic = self.index.search_by_modality(&qvec, top_k, None)?;
+            let mut rankings: Vec<(String, Vec<i64>)> = Vec::new();
+            if let Some(per_query) = semantic.first() {
+                for (modality, (ids, _dists)) in per_query {
+                    rankings.push((modality.clone(), ids.clone()));
+                }
             }
-        }
 
-        // Lexical signals (substring authority + fuzzy), from the derived store.
-        let quoted = format!("\"{}\"", query.replace('"', "\"\""));
-        let exact: Vec<i64> = self
-            .derived
-            .match_rows(&quoted, top_k as i64, false)?
-            .into_iter()
-            .map(|(nid, ..)| nid)
-            .collect();
-        rankings.push(("exact".to_string(), exact));
-
-        let grams: Vec<String> = {
-            let lower = query.to_lowercase();
-            let chars: Vec<char> = lower.chars().collect();
-            (0..chars.len().saturating_sub(2))
-                .map(|i| chars[i..i + 3].iter().collect::<String>())
-                .collect()
-        };
-        if grams.len() >= 2 {
-            let expr = grams
-                .iter()
-                .map(|g| format!("\"{}\"", g.replace('"', "\"\"")))
-                .collect::<Vec<_>>()
-                .join(" OR ");
-            let fuzzy: Vec<i64> = self
+            // Lexical signals (substring authority + fuzzy), from the derived store.
+            let quoted = format!("\"{}\"", query.replace('"', "\"\""));
+            let exact: Vec<i64> = self
                 .derived
-                .match_rows(&expr, (top_k * 4) as i64, false)?
+                .match_rows(&quoted, top_k as i64, false)?
                 .into_iter()
                 .map(|(nid, ..)| nid)
                 .collect();
-            rankings.push(("fuzzy".to_string(), fuzzy));
-        }
+            rankings.push(("exact".to_string(), exact));
 
-        // Fuse (the frozen #274 semantics: weights, exact tier, determinism).
-        let mut weights = BTreeMap::new();
-        weights.insert("text".to_string(), 1.0);
-        weights.insert("image".to_string(), 1.0);
-        weights.insert("exact".to_string(), 1.0);
-        weights.insert("fuzzy".to_string(), 0.5);
-        let mut priority = std::collections::HashSet::new();
-        priority.insert("exact".to_string());
-        let fused = shrike_compute::rrf_fuse(&rankings, &weights, shrike_compute::RRF_K, &priority);
-        Ok(fused
-            .into_iter()
-            .take(top_k)
-            .map(|(note_id, score, signals)| KernelHit {
-                note_id,
-                score,
-                signals,
-            })
-            .collect())
+            let grams: Vec<String> = {
+                let lower = query.to_lowercase();
+                let chars: Vec<char> = lower.chars().collect();
+                (0..chars.len().saturating_sub(2))
+                    .map(|i| chars[i..i + 3].iter().collect::<String>())
+                    .collect()
+            };
+            if grams.len() >= 2 {
+                let expr = grams
+                    .iter()
+                    .map(|g| format!("\"{}\"", g.replace('"', "\"\"")))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                let fuzzy: Vec<i64> = self
+                    .derived
+                    .match_rows(&expr, (top_k * 4) as i64, false)?
+                    .into_iter()
+                    .map(|(nid, ..)| nid)
+                    .collect();
+                rankings.push(("fuzzy".to_string(), fuzzy));
+            }
+
+            // Fuse (the frozen #274 semantics: weights, exact tier, determinism).
+            let mut weights = BTreeMap::new();
+            weights.insert("text".to_string(), 1.0);
+            weights.insert("image".to_string(), 1.0);
+            weights.insert("exact".to_string(), 1.0);
+            weights.insert("fuzzy".to_string(), 0.5);
+            let mut priority = std::collections::HashSet::new();
+            priority.insert("exact".to_string());
+            let fused =
+                shrike_compute::rrf_fuse(&rankings, &weights, shrike_compute::RRF_K, &priority);
+            Ok(fused
+                .into_iter()
+                .take(top_k)
+                .map(|(note_id, score, signals)| KernelHit {
+                    note_id,
+                    score,
+                    signals,
+                })
+                .collect())
+        }
+        .instrument(span)
+        .await
     }
 
-    pub fn close(self) -> NativeResult<()> {
-        self.collection.close()
+    pub async fn close(self) -> NativeResult<()> {
+        self.collection.close().await
     }
 }
 
@@ -298,9 +356,9 @@ mod no_cpython_smoke {
     /// tokens → close vectors; no model, no network, no Python.
     struct HashEmbedder;
 
-    impl Embedder for HashEmbedder {
-        fn embed(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>> {
-            Ok(texts
+    impl HashEmbedder {
+        fn embed_sync(texts: &[String]) -> Vec<Vec<f32>> {
+            texts
                 .iter()
                 .map(|t| {
                     let mut v = vec![0.0f32; 64];
@@ -315,7 +373,13 @@ mod no_cpython_smoke {
                     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
                     v.iter().map(|x| x / norm).collect()
                 })
-                .collect())
+                .collect()
+        }
+    }
+
+    impl Embedder for HashEmbedder {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            Box::pin(async move { Ok(Self::embed_sync(&texts)) })
         }
     }
 
@@ -331,8 +395,22 @@ mod no_cpython_smoke {
         dir
     }
 
+    /// Compile-time pin: every kernel future is Send, so a harness may spawn
+    /// kernel ops on any multithreaded runtime (the #310 contract — a !Send
+    /// regression, e.g. an entered span guard held across an await, fails
+    /// here instead of downstream).
+    fn assert_send<F: std::future::Future + Send>(f: F) -> F {
+        f
+    }
+
     #[test]
     fn open_upsert_search_close_without_python() {
+        // The harness picks the runtime: here futures' minimal block_on —
+        // no tokio, nothing owned by the kernel.
+        futures::executor::block_on(assert_send(smoke()));
+    }
+
+    async fn smoke() {
         let dir = temp_dir();
         let col = dir.join("collection.anki2");
         let cache = dir.join("cache");
@@ -344,10 +422,16 @@ mod no_cpython_smoke {
             HashEmbedder,
             Arc::new(MutexExecutor::default()),
         )
+        .await
         .unwrap();
 
-        let basic = kernel.notetype_id("Basic").unwrap();
-        let make = |front: &str, back: &str| {
+        let basic = kernel.notetype_id("Basic").await.unwrap();
+        async fn make(
+            kernel: &Kernel<HashEmbedder>,
+            basic: i64,
+            front: &str,
+            back: &str,
+        ) -> CreateOutcome {
             kernel
                 .upsert_note(
                     basic,
@@ -356,28 +440,48 @@ mod no_cpython_smoke {
                     vec!["smoke".to_string()],
                     DuplicatePolicy::Error,
                 )
+                .await
                 .unwrap()
-        };
-        let CreateOutcome::Created(mito) =
-            make("the mitochondria powerhouse", "energy of the cell")
+        }
+        let CreateOutcome::Created(mito) = make(
+            &kernel,
+            basic,
+            "the mitochondria powerhouse",
+            "energy of the cell",
+        )
+        .await
         else {
             panic!("create failed")
         };
-        make("newton laws of motion", "classical mechanics");
-        make("paris is the capital of france", "geography");
+        make(
+            &kernel,
+            basic,
+            "newton laws of motion",
+            "classical mechanics",
+        )
+        .await;
+        make(
+            &kernel,
+            basic,
+            "paris is the capital of france",
+            "geography",
+        )
+        .await;
 
         // Duplicate policy is live end to end.
-        let dup = kernel.upsert_note(
-            basic,
-            1,
-            vec!["the mitochondria powerhouse".into(), "x".into()],
-            vec![],
-            DuplicatePolicy::Skip,
-        );
+        let dup = kernel
+            .upsert_note(
+                basic,
+                1,
+                vec!["the mitochondria powerhouse".into(), "x".into()],
+                vec![],
+                DuplicatePolicy::Skip,
+            )
+            .await;
         assert_eq!(dup.unwrap(), CreateOutcome::SkippedDuplicate);
 
         // Search: semantic + lexical signals both contribute to the winner.
-        let hits = kernel.search("mitochondria powerhouse", 5).unwrap();
+        let hits = kernel.search("mitochondria powerhouse", 5).await.unwrap();
         assert_eq!(hits[0].note_id, mito);
         let signals: Vec<&str> = hits[0].signals.iter().map(|(s, _)| s.as_str()).collect();
         assert!(
@@ -390,15 +494,15 @@ mod no_cpython_smoke {
         );
 
         // A typo'd query still finds it through the fuzzy lexical signal.
-        let fuzzy_hits = kernel.search("mitochondira powerhose", 5).unwrap();
+        let fuzzy_hits = kernel.search("mitochondira powerhose", 5).await.unwrap();
         assert!(fuzzy_hits.iter().any(|h| h.note_id == mito));
 
         // Delete propagates to every store.
-        assert_eq!(kernel.delete_notes(vec![mito]).unwrap(), 1);
-        let after = kernel.search("mitochondria powerhouse", 5).unwrap();
+        assert_eq!(kernel.delete_notes(vec![mito]).await.unwrap(), 1);
+        let after = kernel.search("mitochondria powerhouse", 5).await.unwrap();
         assert!(after.iter().all(|h| h.note_id != mito));
 
-        kernel.close().unwrap();
+        kernel.close().await.unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
 }
