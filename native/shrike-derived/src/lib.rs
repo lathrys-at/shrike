@@ -58,18 +58,29 @@ impl DerivedEngine {
     /// cache). Errors are `unavailable` — the facade recovers by discarding.
     pub fn open(path: &str, schema_version: i64) -> NativeResult<Self> {
         let conn = Connection::open(path).map_err(db_err)?;
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(db_err)?;
-
-        conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value)", [])
+        conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(db_err)?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value)",
+            [],
+        )
+        .map_err(db_err)?;
         let version: Option<i64> = conn
-            .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
             .ok();
         if let Some(v) = version {
             if v != schema_version {
-                conn.execute("DROP TABLE IF EXISTS idx", []).map_err(db_err)?;
-                conn.execute("DROP TABLE IF EXISTS rowmap", []).map_err(db_err)?;
-                conn.execute("DELETE FROM meta WHERE key='col_mod'", []).map_err(db_err)?;
+                conn.execute("DROP TABLE IF EXISTS idx", [])
+                    .map_err(db_err)?;
+                conn.execute("DROP TABLE IF EXISTS rowmap", [])
+                    .map_err(db_err)?;
+                conn.execute("DELETE FROM meta WHERE key='col_mod'", [])
+                    .map_err(db_err)?;
             }
         }
         conn.execute(
@@ -84,14 +95,19 @@ impl DerivedEngine {
             [],
         )
         .map_err(db_err)?;
-        conn.execute("CREATE INDEX IF NOT EXISTS rowmap_note ON rowmap(note_id, source)", [])
-            .map_err(db_err)?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS rowmap_note ON rowmap(note_id, source)",
+            [],
+        )
+        .map_err(db_err)?;
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?1)",
             [schema_version],
         )
         .map_err(db_err)?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -100,26 +116,29 @@ impl DerivedEngine {
 
     pub fn get_col_mod(&self) -> Option<i64> {
         let conn = self.lock();
-        conn.query_row("SELECT value FROM meta WHERE key='col_mod'", [], |r| r.get(0)).ok()
+        conn.query_row("SELECT value FROM meta WHERE key='col_mod'", [], |r| {
+            r.get(0)
+        })
+        .ok()
     }
 
     pub fn set_col_mod(&self, value: i64) -> NativeResult<()> {
         let conn = self.lock();
-        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('col_mod', ?1)", [value])
-            .map_err(db_err)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('col_mod', ?1)",
+            [value],
+        )
+        .map_err(db_err)?;
         Ok(())
     }
 
     pub fn count(&self) -> i64 {
         let conn = self.lock();
-        conn.query_row("SELECT count(*) FROM rowmap", [], |r| r.get(0)).unwrap_or(0)
+        conn.query_row("SELECT count(*) FROM rowmap", [], |r| r.get(0))
+            .unwrap_or(0)
     }
 
-    fn delete_rows(
-        conn: &Connection,
-        note_ids: &[i64],
-        source: Option<&str>,
-    ) -> NativeResult<()> {
+    fn delete_rows(conn: &Connection, note_ids: &[i64], source: Option<&str>) -> NativeResult<()> {
         if note_ids.is_empty() {
             return Ok(());
         }
@@ -139,9 +158,10 @@ impl DerivedEngine {
             params.push(Box::new(s.to_string()));
         }
         let rowids: Vec<i64> = stmt
-            .query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), |r| {
-                r.get(0)
-            })
+            .query_map(
+                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                |r| r.get(0),
+            )
             .map_err(db_err)?
             .collect::<Result<_, _>>()
             .map_err(db_err)?;
@@ -172,7 +192,8 @@ impl DerivedEngine {
             if text.trim().is_empty() {
                 continue;
             }
-            conn.execute("INSERT INTO idx(txt) VALUES(?1)", [text]).map_err(db_err)?;
+            conn.execute("INSERT INTO idx(txt) VALUES(?1)", [text])
+                .map_err(db_err)?;
             let rowid = conn.last_insert_rowid();
             conn.execute(
                 "INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?1,?2,?3,?4)",
@@ -208,11 +229,7 @@ impl DerivedEngine {
 
     /// Full (re)build from (note_id, source, ref, text) rows; stamps col_mod.
     /// One transaction — a failure rolls everything back.
-    pub fn build(
-        &self,
-        rows: &[(i64, String, String, String)],
-        col_mod: i64,
-    ) -> NativeResult<()> {
+    pub fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
         tx.execute("DELETE FROM idx", []).map_err(db_err)?;
@@ -221,7 +238,8 @@ impl DerivedEngine {
             if text.trim().is_empty() {
                 continue;
             }
-            tx.execute("INSERT INTO idx(txt) VALUES(?1)", [text]).map_err(db_err)?;
+            tx.execute("INSERT INTO idx(txt) VALUES(?1)", [text])
+                .map_err(db_err)?;
             let rowid = tx.last_insert_rowid();
             tx.execute(
                 "INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?1,?2,?3,?4)",
@@ -229,8 +247,11 @@ impl DerivedEngine {
             )
             .map_err(db_err)?;
         }
-        tx.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('col_mod', ?1)", [col_mod])
-            .map_err(db_err)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('col_mod', ?1)",
+            [col_mod],
+        )
+        .map_err(db_err)?;
         tx.commit().map_err(db_err)
     }
 
@@ -310,7 +331,12 @@ mod tests {
         e.build(
             &[
                 (1, "field".into(), "Front".into(), "the mitochondria".into()),
-                (2, "field".into(), "Front".into(), "powerhouse of the cell".into()),
+                (
+                    2,
+                    "field".into(),
+                    "Front".into(),
+                    "powerhouse of the cell".into(),
+                ),
                 (3, "field".into(), "Back".into(), "   ".into()), // blank → skipped
             ],
             100,
@@ -319,7 +345,8 @@ mod tests {
         assert_eq!(e.count(), 2);
         assert_eq!(e.get_col_mod(), Some(100));
 
-        e.ingest(1, "field", &[("Front".into(), "the chloroplast".into())]).unwrap();
+        e.ingest(1, "field", &[("Front".into(), "the chloroplast".into())])
+            .unwrap();
         assert_eq!(e.count(), 2);
         let hits = e.match_rows("\"chloroplast\"", 10, false).unwrap();
         assert_eq!(hits.len(), 1);
@@ -335,7 +362,11 @@ mod tests {
     #[test]
     fn match_returns_snippet_and_text_when_asked() {
         let (e, dir) = store();
-        e.build(&[(7, "field".into(), "F".into(), "alpha beta gamma".into())], 1).unwrap();
+        e.build(
+            &[(7, "field".into(), "F".into(), "alpha beta gamma".into())],
+            1,
+        )
+        .unwrap();
         let rows = e.match_rows("\"beta\"", 10, true).unwrap();
         assert_eq!(rows[0].3.as_deref(), Some("alpha beta gamma"));
         assert!(rows[0].4.as_deref().unwrap().contains("beta"));
@@ -345,7 +376,8 @@ mod tests {
     #[test]
     fn bad_match_expression_is_invalid_input() {
         let (e, dir) = store();
-        e.build(&[(1, "field".into(), "F".into(), "abc".into())], 1).unwrap();
+        e.build(&[(1, "field".into(), "F".into(), "abc".into())], 1)
+            .unwrap();
         let err = e.match_rows("AND AND (", 10, false).unwrap_err();
         assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
         std::fs::remove_dir_all(dir).ok();
@@ -354,7 +386,8 @@ mod tests {
     #[test]
     fn schema_version_bump_resets_data() {
         let (e, dir) = store();
-        e.build(&[(1, "field".into(), "F".into(), "abc".into())], 9).unwrap();
+        e.build(&[(1, "field".into(), "F".into(), "abc".into())], 9)
+            .unwrap();
         drop(e);
         let path = dir.join("shrike.db");
         let e2 = DerivedEngine::open(path.to_str().unwrap(), 2).unwrap();

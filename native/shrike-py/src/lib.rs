@@ -54,6 +54,13 @@ fn to_py_err(e: NativeError) -> PyErr {
     }
 }
 
+/// One derived-store MATCH row: (note_id, source, ref, txt, snippet).
+type MatchRow = (i64, String, String, Option<String>, Option<String>);
+/// Per-query, per-modality parallel rankings: {modality: (note_ids, distances)}.
+type ModalityRankings = Vec<std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>>;
+/// One fused hit: (note_id, score, [(signal, 1-based rank)...]).
+type FusedHit = (i64, f64, Vec<(String, i64)>);
+
 /// The native package version (the Cargo workspace version).
 #[pyfunction]
 fn version() -> String {
@@ -141,7 +148,8 @@ impl OnnxTextEmbedder {
 
     /// Embed one chunk of texts as a single batch (one vector per input).
     fn embed_chunk(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<Vec<f32>>> {
-        py.detach(|| self.inner.embed_chunk(&texts)).map_err(to_py_err)
+        py.detach(|| self.inner.embed_chunk(&texts))
+            .map_err(to_py_err)
     }
 
     /// The embedding width, once known (set by the first embed).
@@ -205,16 +213,14 @@ impl ClipEmbedder {
     }
 
     fn embed_text_chunk(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<Vec<f32>>> {
-        py.detach(|| self.inner.embed_text_chunk(&texts)).map_err(to_py_err)
+        py.detach(|| self.inner.embed_text_chunk(&texts))
+            .map_err(to_py_err)
     }
 
     /// Embed one chunk of images, each given as encoded bytes.
-    fn embed_image_chunk(
-        &self,
-        py: Python<'_>,
-        images: Vec<Vec<u8>>,
-    ) -> PyResult<Vec<Vec<f32>>> {
-        py.detach(|| self.inner.embed_image_chunk(&images)).map_err(to_py_err)
+    fn embed_image_chunk(&self, py: Python<'_>, images: Vec<Vec<u8>>) -> PyResult<Vec<Vec<f32>>> {
+        py.detach(|| self.inner.embed_image_chunk(&images))
+            .map_err(to_py_err)
     }
 
     fn dim(&self) -> Option<usize> {
@@ -303,7 +309,8 @@ impl DerivedTextEngine {
         rows: Vec<(i64, String, String, String)>,
         col_mod: i64,
     ) -> PyResult<()> {
-        py.detach(|| self.inner.build(&rows, col_mod)).map_err(to_py_err)
+        py.detach(|| self.inner.build(&rows, col_mod))
+            .map_err(to_py_err)
     }
 
     fn match_rows(
@@ -312,7 +319,7 @@ impl DerivedTextEngine {
         expr: String,
         limit: i64,
         with_text: bool,
-    ) -> PyResult<Vec<(i64, String, String, Option<String>, Option<String>)>> {
+    ) -> PyResult<Vec<MatchRow>> {
         py.detach(|| self.inner.match_rows(&expr, limit, with_text))
             .map_err(to_py_err)
     }
@@ -380,7 +387,8 @@ impl NativeIndexEngine {
         keys: Vec<i64>,
         vectors: Vec<Vec<f32>>,
     ) -> PyResult<()> {
-        py.detach(|| self.inner.add(modality, &keys, &vectors)).map_err(to_py_err)
+        py.detach(|| self.inner.add(modality, &keys, &vectors))
+            .map_err(to_py_err)
     }
 
     fn remove(&self, py: Python<'_>, keys: Vec<i64>) -> PyResult<usize> {
@@ -396,9 +404,12 @@ impl NativeIndexEngine {
         queries: Vec<Vec<f32>>,
         k: usize,
         modalities: Option<Vec<String>>,
-    ) -> PyResult<Vec<std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>>> {
-        py.detach(|| self.inner.search_by_modality(&queries, k, modalities.as_deref()))
-            .map_err(to_py_err)
+    ) -> PyResult<ModalityRankings> {
+        py.detach(|| {
+            self.inner
+                .search_by_modality(&queries, k, modalities.as_deref())
+        })
+        .map_err(to_py_err)
     }
 
     fn contains(&self, key: i64) -> bool {
@@ -451,7 +462,7 @@ fn rrf_fuse(
     weights: std::collections::BTreeMap<String, f64>,
     k: i64,
     priority_signals: Vec<String>,
-) -> Vec<(i64, f64, Vec<(String, i64)>)> {
+) -> Vec<FusedHit> {
     py.detach(move || {
         let priority: std::collections::HashSet<String> = priority_signals.into_iter().collect();
         shrike_compute::rrf_fuse(&rankings, &weights, k, &priority)
@@ -469,7 +480,7 @@ fn fused_search_text(
     texts: Vec<String>,
     k: usize,
     modalities: Option<Vec<String>>,
-) -> PyResult<Vec<std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>>> {
+) -> PyResult<ModalityRankings> {
     let e = embedder.get();
     let ix = engine.get();
     py.detach(|| {
@@ -518,7 +529,10 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // fingerprint by the facade (a pixel-math change must invalidate vectors).
     m.add("IMAGE_PREP_VERSION_RS", shrike_embed::IMAGE_PREP_VERSION_RS)?;
     m.add("NativeInputError", py.get_type::<NativeInputError>())?;
-    m.add("NativeUnavailableError", py.get_type::<NativeUnavailableError>())?;
+    m.add(
+        "NativeUnavailableError",
+        py.get_type::<NativeUnavailableError>(),
+    )?;
     m.add("NativeInternalError", py.get_type::<NativeInternalError>())?;
     Ok(())
 }
