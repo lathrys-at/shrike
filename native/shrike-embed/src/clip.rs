@@ -60,8 +60,7 @@ impl ClipEmbedder {
                 "image_mean/image_std must each have 3 channels",
             ));
         }
-        let (text_session, active) =
-            crate::build_session(&cfg.text_model_path, &cfg.providers)?;
+        let (text_session, active) = crate::build_session(&cfg.text_model_path, &cfg.providers)?;
         let (vision_session, _) = crate::build_session(&cfg.vision_model_path, &cfg.providers)?;
 
         // Feed whichever of input_ids/attention_mask the text graph declares,
@@ -129,7 +128,10 @@ impl ClipEmbedder {
             mask.extend(enc.get_attention_mask().iter().map(|&v| v as i64));
         }
 
-        let mut session = self.text_session.lock().expect("text session lock poisoned");
+        let mut session = self
+            .text_session
+            .lock()
+            .expect("text session lock poisoned");
         let mut feed: Vec<(String, ort::value::DynValue)> = Vec::new();
         for input in &self.text_inputs {
             let data = match input.name.as_str() {
@@ -137,7 +139,10 @@ impl ClipEmbedder {
                 "attention_mask" => &mask,
                 _ => continue,
             };
-            feed.push((input.name.clone(), crate::int_tensor(batch, seq, data, input.int32)?));
+            feed.push((
+                input.name.clone(),
+                crate::int_tensor(batch, seq, data, input.int32)?,
+            ));
         }
         let outputs = session
             .run(feed)
@@ -158,13 +163,13 @@ impl ClipEmbedder {
         for bytes in images {
             pixels.extend(self.preprocess(bytes)?);
         }
-        let tensor = ort::value::Tensor::from_array((
-            [images.len(), 3, c, c],
-            pixels,
-        ))
-        .map_err(|e| NativeError::internal(format!("pixel tensor: {e}")))?;
+        let tensor = ort::value::Tensor::from_array(([images.len(), 3, c, c], pixels))
+            .map_err(|e| NativeError::internal(format!("pixel tensor: {e}")))?;
 
-        let mut session = self.vision_session.lock().expect("vision session lock poisoned");
+        let mut session = self
+            .vision_session
+            .lock()
+            .expect("vision session lock poisoned");
         let feed: Vec<(String, ort::value::DynValue)> =
             vec![(self.vision_input_name.clone(), tensor.into_dyn())];
         let outputs = session

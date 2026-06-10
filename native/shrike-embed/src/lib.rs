@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 pub use clip::{ClipEmbedder, ClipEmbedderConfig, IMAGE_PREP_VERSION_RS};
 
-use ndarray::{Array1, Array2, ArrayD, Axis, Ix3, s};
+use ndarray::{s, Array1, Array2, ArrayD, Axis, Ix3};
 use shrike_ffi::{NativeError, NativeResult};
 use tokenizers::Tokenizer;
 
@@ -124,7 +124,9 @@ pub(crate) fn build_session(
     providers: &[String],
 ) -> NativeResult<(ort::session::Session, Vec<String>)> {
     if !Path::new(model_path).is_file() {
-        return Err(NativeError::unavailable(format!("ONNX model not found: {model_path}")));
+        return Err(NativeError::unavailable(format!(
+            "ONNX model not found: {model_path}"
+        )));
     }
     let mut builder = ort::session::Session::builder()
         .map_err(|e| NativeError::internal(format!("session builder: {e}")))?;
@@ -146,10 +148,7 @@ pub(crate) fn build_session(
 }
 
 /// The graph's declared inputs among `supplied`, at their declared int widths.
-pub(crate) fn graph_inputs(
-    session: &ort::session::Session,
-    supplied: &[&str],
-) -> Vec<GraphInput> {
+pub(crate) fn graph_inputs(session: &ort::session::Session, supplied: &[&str]) -> Vec<GraphInput> {
     use ort::value::{TensorElementType, ValueType};
 
     session
@@ -160,7 +159,10 @@ pub(crate) fn graph_inputs(
             name: i.name().to_string(),
             int32: matches!(
                 i.dtype(),
-                ValueType::Tensor { ty: TensorElementType::Int32, .. }
+                ValueType::Tensor {
+                    ty: TensorElementType::Int32,
+                    ..
+                }
             ),
         })
         .collect()
@@ -245,20 +247,47 @@ impl TextEmbedder {
         use ort::value::{TensorElementType, ValueType};
 
         let mut spec = GraphInputs {
-            input_ids: InputSpec { wanted: false, int32: false },
-            attention_mask: InputSpec { wanted: false, int32: false },
-            token_type_ids: InputSpec { wanted: false, int32: false },
+            input_ids: InputSpec {
+                wanted: false,
+                int32: false,
+            },
+            attention_mask: InputSpec {
+                wanted: false,
+                int32: false,
+            },
+            token_type_ids: InputSpec {
+                wanted: false,
+                int32: false,
+            },
             unsupported: Vec::new(),
         };
         for input in session.inputs() {
             let int32 = matches!(
                 input.dtype(),
-                ValueType::Tensor { ty: TensorElementType::Int32, .. }
+                ValueType::Tensor {
+                    ty: TensorElementType::Int32,
+                    ..
+                }
             );
             match input.name() {
-                "input_ids" => spec.input_ids = InputSpec { wanted: true, int32 },
-                "attention_mask" => spec.attention_mask = InputSpec { wanted: true, int32 },
-                "token_type_ids" => spec.token_type_ids = InputSpec { wanted: true, int32 },
+                "input_ids" => {
+                    spec.input_ids = InputSpec {
+                        wanted: true,
+                        int32,
+                    }
+                }
+                "attention_mask" => {
+                    spec.attention_mask = InputSpec {
+                        wanted: true,
+                        int32,
+                    }
+                }
+                "token_type_ids" => {
+                    spec.token_type_ids = InputSpec {
+                        wanted: true,
+                        int32,
+                    }
+                }
                 other => spec.unsupported.push(other.to_string()),
             }
         }
@@ -330,8 +359,18 @@ impl TextEmbedder {
             Ok(())
         };
         push(&mut feed, "input_ids", self.inputs.input_ids, &ids)?;
-        push(&mut feed, "attention_mask", self.inputs.attention_mask, &mask)?;
-        push(&mut feed, "token_type_ids", self.inputs.token_type_ids, &type_ids)?;
+        push(
+            &mut feed,
+            "attention_mask",
+            self.inputs.attention_mask,
+            &mask,
+        )?;
+        push(
+            &mut feed,
+            "token_type_ids",
+            self.inputs.token_type_ids,
+            &type_ids,
+        )?;
 
         let outputs = session
             .run(feed)
@@ -360,7 +399,11 @@ impl TextEmbedder {
             }
         };
 
-        let vectors = if self.normalize { l2_normalize(vectors) } else { vectors };
+        let vectors = if self.normalize {
+            l2_normalize(vectors)
+        } else {
+            vectors
+        };
         *self.dim.lock().expect("dim lock poisoned") = Some(vectors.ncols());
         Ok(vectors.rows().into_iter().map(|r| r.to_vec()).collect())
     }

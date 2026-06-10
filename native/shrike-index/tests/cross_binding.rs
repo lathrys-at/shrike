@@ -13,7 +13,11 @@ fn loads_python_written_index_and_writes_back() {
     };
     let index = new_index(8).unwrap();
     index.load(&format!("{dir}/py-written.usearch")).unwrap();
-    assert_eq!(index.size(), 4, "python wrote 4 vectors (multi key 1 has 2)");
+    assert_eq!(
+        index.size(),
+        4,
+        "python wrote 4 vectors (multi key 1 has 2)"
+    );
     assert_eq!(index.count(1), 2);
     assert_eq!(index.count(2), 1);
     assert_eq!(index.dimensions(), 8);

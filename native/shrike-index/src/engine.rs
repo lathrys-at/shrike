@@ -47,7 +47,11 @@ struct Sub {
 
 impl Sub {
     fn new(index: Index) -> Self {
-        Self { index, counts: BTreeMap::new(), keys_known: true }
+        Self {
+            index,
+            counts: BTreeMap::new(),
+            keys_known: true,
+        }
     }
 }
 
@@ -92,7 +96,10 @@ impl MultiModalIndex {
         Ok(Self {
             modalities,
             text,
-            state: Mutex::new(State { indexes: BTreeMap::new(), ndim: None }),
+            state: Mutex::new(State {
+                indexes: BTreeMap::new(),
+                ndim: None,
+            }),
         })
     }
 
@@ -109,7 +116,11 @@ impl MultiModalIndex {
     }
 
     pub fn modality_sizes(&self) -> Vec<(String, usize)> {
-        self.lock().indexes.iter().map(|(m, s)| (m.clone(), s.index.size())).collect()
+        self.lock()
+            .indexes
+            .iter()
+            .map(|(m, s)| (m.clone(), s.index.size()))
+            .collect()
     }
 
     pub fn modality_names(&self) -> Vec<String> {
@@ -119,7 +130,9 @@ impl MultiModalIndex {
     pub fn ensure(&self, modality: &str, ndim: usize) -> NativeResult<()> {
         let mut state = self.lock();
         if !state.indexes.contains_key(modality) {
-            state.indexes.insert(modality.to_string(), Sub::new(new_index(ndim)?));
+            state
+                .indexes
+                .insert(modality.to_string(), Sub::new(new_index(ndim)?));
             state.ndim = Some(ndim);
         }
         Ok(())
@@ -237,7 +250,9 @@ impl MultiModalIndex {
         let ndim = vectors[0].len();
         let mut state = self.lock();
         if !state.indexes.contains_key(modality) {
-            state.indexes.insert(modality.to_string(), Sub::new(new_index(ndim)?));
+            state
+                .indexes
+                .insert(modality.to_string(), Sub::new(new_index(ndim)?));
             state.ndim = Some(ndim);
         }
         let sub = state.indexes.get_mut(modality).expect("just ensured");
@@ -365,10 +380,12 @@ impl MultiModalIndex {
     /// repeat) — mirroring the Python binding's `Index.keys` view.
     pub fn modality_keys(&self, modality: &str) -> Vec<i64> {
         let state = self.lock();
-        let Some(sub) = state.indexes.get(modality) else { return Vec::new() };
+        let Some(sub) = state.indexes.get(modality) else {
+            return Vec::new();
+        };
         let mut keys: Vec<i64> = Vec::new();
         for (key, count) in &sub.counts {
-            keys.extend(std::iter::repeat(*key).take(*count as usize));
+            keys.extend(std::iter::repeat_n(*key, *count as usize));
         }
         keys
     }
@@ -387,7 +404,11 @@ impl MultiModalIndex {
         let ndim = index.dimensions();
         let mut buf = vec![0.0f32; count * ndim];
         let copied = index.get(key, &mut buf).ok()?;
-        Some((0..copied).map(|i| buf[i * ndim..(i + 1) * ndim].to_vec()).collect())
+        Some(
+            (0..copied)
+                .map(|i| buf[i * ndim..(i + 1) * ndim].to_vec())
+                .collect(),
+        )
     }
 
     /// Per-(non-text-)modality best-match stats for the activation gate
@@ -422,7 +443,9 @@ impl MultiModalIndex {
         let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
         let n = sample.len();
         for i in (1..n).rev() {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let j = (rng >> 33) as usize % (i + 1);
             sample.swap(i, j);
         }
@@ -452,7 +475,11 @@ impl MultiModalIndex {
             if best_sims.len() >= min_count {
                 let count = best_sims.len() as f64;
                 let mean = best_sims.iter().sum::<f64>() / count;
-                let var = best_sims.iter().map(|s| (s - mean) * (s - mean)).sum::<f64>() / count;
+                let var = best_sims
+                    .iter()
+                    .map(|s| (s - mean) * (s - mean))
+                    .sum::<f64>()
+                    / count;
                 stats.push((modality.clone(), count, mean, var.sqrt()));
             }
         }
@@ -468,7 +495,9 @@ mod tests {
         let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(99);
         let mut v: Vec<f32> = (0..ndim)
             .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 ((state >> 33) as f32 / (1u64 << 31) as f32) - 1.0
             })
             .collect();
@@ -509,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_with_candidates_round_trip(){
+    fn restore_with_candidates_round_trip() {
         let dir = std::env::temp_dir().join(format!("shrike-engine-rt-{}", std::process::id()));
         let dirs = dir.to_str().unwrap();
         std::fs::create_dir_all(&dir).unwrap();

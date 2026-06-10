@@ -157,6 +157,17 @@ jobs:
         run: ruff format --check src/shrike/ tests/
       - name: Mypy
         run: mypy src/shrike/
+      # Rust lint (#304): the idiomatic gates for the native workspace —
+      # rustfmt and clippy-as-errors. Gated on the native path filter so a
+      # pure-Python PR doesn't pay for a Rust toolchain or a clippy build;
+      # rc-labelled PRs run it regardless (full-suite release posture). The
+      # GitHub runner ships rustup; sync to the repo's pinned toolchain default.
+      - name: Rust format check
+        if: needs.changes.outputs.native == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
+        run: cd native && cargo fmt --check
+      - name: Rust clippy
+        if: needs.changes.outputs.native == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
+        run: cd native && cargo clippy --workspace --all-targets -- -D warnings
 
   # The authoritative test lane: the unit + non-embedding integration suites run
   # under Bazel (`//... -//native/...` = the unit/integration aggregates + the

@@ -71,15 +71,24 @@ pub struct NativeError {
 
 impl NativeError {
     pub fn invalid_input(message: impl Into<String>) -> Self {
-        Self { kind: ErrorKind::InvalidInput, message: message.into() }
+        Self {
+            kind: ErrorKind::InvalidInput,
+            message: message.into(),
+        }
     }
 
     pub fn unavailable(message: impl Into<String>) -> Self {
-        Self { kind: ErrorKind::Unavailable, message: message.into() }
+        Self {
+            kind: ErrorKind::Unavailable,
+            message: message.into(),
+        }
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
-        Self { kind: ErrorKind::Internal, message: message.into() }
+        Self {
+            kind: ErrorKind::Internal,
+            message: message.into(),
+        }
     }
 }
 
@@ -110,7 +119,10 @@ mod tests {
         let e = NativeError::invalid_input("bad batch");
         assert_eq!(e.kind, ErrorKind::InvalidInput);
         assert_eq!(e.to_string(), "invalid_input: bad batch");
-        assert_eq!(NativeError::unavailable("no model").kind, ErrorKind::Unavailable);
+        assert_eq!(
+            NativeError::unavailable("no model").kind,
+            ErrorKind::Unavailable
+        );
         assert_eq!(NativeError::internal("oops").kind, ErrorKind::Internal);
     }
 }
