@@ -23,6 +23,9 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use shrike_ffi::{ErrorKind, NativeError};
 
+#[cfg(feature = "anki-core")]
+mod anki_core;
+
 pyo3::create_exception!(
     _native,
     NativeInputError,
@@ -48,7 +51,7 @@ pyo3::create_exception!(
 /// Map the shared native error taxonomy onto the module's exception classes.
 /// The captured Rust span trace rides along as a PEP 678 note (#308), so the
 /// native context shows up in the Python traceback the Pythonic way.
-fn to_py_err(e: NativeError) -> PyErr {
+pub(crate) fn to_py_err(e: NativeError) -> PyErr {
     let trace = e.trace();
     let err = match e.kind {
         ErrorKind::InvalidInput => NativeInputError::new_err(e.message),
@@ -561,6 +564,10 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ClipEmbedder>()?;
     m.add_class::<NativeIndexEngine>()?;
     m.add_class::<DerivedTextEngine>()?;
+    // Feature-gated (#278): present only in `anki-core` builds; the stubtest
+    // allowlist covers its absence from default builds.
+    #[cfg(feature = "anki-core")]
+    m.add_class::<anki_core::CollectionCore>()?;
     m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;
     m.add_function(wrap_pyfunction!(rrf_fuse, m)?)?;

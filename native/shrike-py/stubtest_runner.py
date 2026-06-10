@@ -18,8 +18,19 @@ def main() -> int:
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
     env["MYPY_CACHE_DIR"] = tempfile.mkdtemp(prefix="stubtest-cache-")
+    # Feature-gated symbols (anki-core, #278) are stub-declared but absent
+    # from default builds; the allowlist covers them either way.
+    allowlist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stubtest_allowlist.txt")
     return subprocess.call(
-        [sys.executable, "-m", "mypy.stubtest", "shrike_native"],
+        [
+            sys.executable,
+            "-m",
+            "mypy.stubtest",
+            "shrike_native",
+            "--allowlist",
+            allowlist,
+            "--ignore-unused-allowlist",
+        ],
         env=env,
         cwd=tempfile.mkdtemp(prefix="stubtest-cwd-"),
     )
