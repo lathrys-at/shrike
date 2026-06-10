@@ -225,20 +225,31 @@ impl<E: Embedder> Kernel<E> {
         // Send — spawnable on any multithreaded runtime.
         let span = tracing::debug_span!("kernel.upsert_note", notetype_id, deck_id);
         async move {
-            let text = fields.join(" ");
-            let refs: Vec<(String, String)> = fields
-                .iter()
-                .enumerate()
-                .map(|(i, value)| (format!("F{i}"), value.clone()))
-                .collect();
             // The collection write, then the compute fan-out — each transition
-            // an await, never a block: embed → index add → derived ingest →
-            // watermark.
+            // an await, never a block: read embed text → embed → index add →
+            // derived ingest → watermark.
             let outcome = self
                 .collection
                 .run(move |core| core.create_note(notetype_id, deck_id, &fields, &tags, policy))
                 .await??;
             if let CreateOutcome::Created(note_id) = outcome {
+                // The SAME normalized render + raw field rows the Python host
+                // uses (#278 step 2) — embedding text and derived rows come
+                // from the read surface, not an ad-hoc join.
+                let (text, refs) = self
+                    .collection
+                    .run(
+                        move |core| -> NativeResult<(String, Vec<(String, String)>)> {
+                            let text = core.note_texts(&[note_id])?.remove(0);
+                            let refs = core
+                                .derived_field_rows(&[note_id])?
+                                .into_iter()
+                                .map(|(_, _, name, value)| (name, value))
+                                .collect();
+                            Ok((text, refs))
+                        },
+                    )
+                    .await??;
                 let vectors = self.embedder.embed(vec![text]).await?;
                 self.index.remove(&[note_id])?;
                 self.index.add(TEXT, &[note_id], &vectors)?;

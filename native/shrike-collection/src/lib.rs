@@ -18,8 +18,11 @@
 //! Pin policy: the anki git tag equals the pip wheel version; bumped together.
 
 mod adapter;
+pub mod embed_text;
+mod read;
 
 pub use adapter::{FieldsState, ServiceAdapter, ServiceNote};
+pub use embed_text::{extract_image_refs, EMBED_TEXT_VERSION};
 use shrike_ffi::{NativeError, NativeResult};
 
 /// What `create_note` did about a first-field duplicate (mirrors the Python
@@ -56,6 +59,7 @@ pub enum CreateOutcome {
 /// CollectionWrapper lifecycle it will eventually back.
 pub struct CollectionCore {
     adapter: ServiceAdapter,
+    collection_path: String,
 }
 
 impl CollectionCore {
@@ -71,7 +75,10 @@ impl CollectionCore {
             &format!("{base}.media"),
             &format!("{base}.media.db2"),
         )?;
-        Ok(Self { adapter })
+        Ok(Self {
+            adapter,
+            collection_path: collection_path.to_string(),
+        })
     }
 
     pub fn close(&self) -> NativeResult<()> {
@@ -294,6 +301,133 @@ mod tests {
         let after = core.col_mod().unwrap();
         assert!(after >= before, "col.mod must not move backwards");
         assert!(after > 0);
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn read_surface_round_trip() {
+        // Tripwires for the step-2 (service, method) indices — deck_names,
+        // deck_tree, all_tags, notetype, strip_html, db_rows — plus the
+        // shape of the ported readers, all against a real temp collection.
+        let (core, dir) = temp_core();
+        let basic = core.notetype_id("Basic").unwrap();
+        let CreateOutcome::Created(nid) = core
+            .create_note(
+                basic,
+                DEFAULT_DECK,
+                &[
+                    "the <b>mitochondria</b>&nbsp;powerhouse".into(),
+                    "energy of the cell<br>line2".into(),
+                ],
+                &["bio".into()],
+                DuplicatePolicy::Error,
+            )
+            .unwrap()
+        else {
+            panic!("create failed")
+        };
+
+        // note_texts: cloze revealed, HTML stripped, NBSP folded, block tag
+        // spaced, "Name: text" render.
+        let texts = core.note_texts(&[nid, 999]).unwrap();
+        assert_eq!(
+            texts[0],
+            "Front: the mitochondria powerhouse\nBack: energy of the cell line2"
+        );
+        assert_eq!(texts[1], ""); // missing id → empty at position
+
+        // Cloze reveal + sound/math wrappers through the REAL service
+        // stripper (fields_check forbids cloze markup in a Basic note, so the
+        // normalization is pinned directly).
+        assert_eq!(
+            core.normalize_text("{{c1::energy::hint}} of [sound:x.mp3] \\(E\\)")
+                .unwrap(),
+            "energy of E"
+        );
+
+        // note_embed_inputs + derived_field_rows shapes.
+        let inputs = core.note_embed_inputs(&[nid]).unwrap();
+        assert_eq!(inputs[0].0, nid);
+        assert!(inputs[0].2.is_empty()); // no images
+        let rows = core.derived_field_rows(&[nid]).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1, "field");
+        assert_eq!(rows[0].2, "Front");
+
+        // list_notes: tag filter, full fields, serialization shape.
+        let listed: serde_json::Value = serde_json::from_str(
+            &core
+                .list_notes(None, None, Some(&["bio".into()]), None, None, true, 50)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(listed["total"], 1);
+        let note = &listed["notes"][0];
+        assert_eq!(note["id"], nid);
+        assert_eq!(note["note_type"], "Basic");
+        assert_eq!(note["deck"], "Default");
+        assert_eq!(note["tags"][0], "bio");
+        assert!(note["content"]["Front"]
+            .as_str()
+            .unwrap()
+            .contains("mitochondria"));
+        assert!(note["modified"].as_str().unwrap().ends_with("+00:00"));
+
+        // deck reference forms: name, id, #id, unknown #id.
+        let by_id: serde_json::Value = serde_json::from_str(
+            &core
+                .list_notes(None, Some("1"), None, None, None, false, 50)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(by_id["total"], 1);
+        let unknown: serde_json::Value = serde_json::from_str(
+            &core
+                .list_notes(None, Some("#424242"), None, None, None, false, 50)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(unknown["total"], 0);
+
+        // No filter at all → the expected-input error tier.
+        let err = core
+            .list_notes(None, None, None, None, None, false, 50)
+            .unwrap_err();
+        assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
+
+        // collection_info: all sections, summary/stats/decks coherent.
+        let info: serde_json::Value = serde_json::from_str(
+            &core
+                .collection_info(&["all".to_string()], &["Basic".to_string()])
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(info["summary"]["notes"], 1);
+        assert_eq!(info["summary"]["path"], core.collection_path.as_str());
+        assert!(info["tags"].as_array().unwrap().iter().any(|t| t == "bio"));
+        let basic_nt = info["note_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|nt| nt["name"] == "Basic")
+            .unwrap();
+        assert_eq!(basic_nt["type"], "standard");
+        assert_eq!(basic_nt["fields"][0], "Front");
+        assert!(basic_nt["detail"]["templates"][0]["front"]
+            .as_str()
+            .unwrap()
+            .contains("{{Front}}"));
+        let default_deck = info["decks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == "Default")
+            .unwrap();
+        assert_eq!(default_deck["note_count"], 1);
+        assert_eq!(info["stats"]["total_notes"], 1);
+        assert_eq!(info["stats"]["decks_summary"]["Default"]["notes"], 1);
+
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
     }

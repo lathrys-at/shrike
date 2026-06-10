@@ -22,6 +22,11 @@ anki = { git = "https://github.com/ankitects/anki", tag = "25.09.4", package = "
 anki_proto = { git = "https://github.com/ankitects/anki", tag = "25.09.4", package = "anki_proto" }
 prost = "0.13"
 serde_json = "1"
+# embed_text (#278 step 2): regex for the simple patterns; fancy-regex for the
+# cloze pattern, which uses a lookahead the regex crate doesn't support — the
+# Python pattern is kept verbatim (byte-identity contract).
+regex = "1"
+fancy-regex = "0.16"
 # rslib relies on the anki workspace's feature unification: sibling crates
 # enable tokio's io-util/etc., which an external consumer must re-enable.
 tokio = { version = "1", features = ["full"] }

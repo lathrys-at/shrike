@@ -112,4 +112,87 @@ impl CollectionCore {
         py.detach(|| self.inner.delete_notes(&note_ids))
             .map_err(to_py_err)
     }
+
+    // ── read surface (#278 step 2) ───────────────────────────────────────────
+
+    /// Normalized embedding text per note id ("" for a missing id).
+    fn note_texts(&self, py: Python<'_>, note_ids: Vec<i64>) -> PyResult<Vec<String>> {
+        py.detach(|| self.inner.note_texts(&note_ids))
+            .map_err(to_py_err)
+    }
+
+    /// `(note_id, text, image_names)` per note id — the multimodal input.
+    fn note_embed_inputs(
+        &self,
+        py: Python<'_>,
+        note_ids: Vec<i64>,
+    ) -> PyResult<Vec<(i64, String, Vec<String>)>> {
+        py.detach(|| self.inner.note_embed_inputs(&note_ids))
+            .map_err(to_py_err)
+    }
+
+    /// `(note_id, source, field_name, raw_value)` rows for the derived store.
+    fn derived_field_rows(
+        &self,
+        py: Python<'_>,
+        note_ids: Vec<i64>,
+    ) -> PyResult<Vec<(i64, String, String, String)>> {
+        py.detach(|| self.inner.derived_field_rows(&note_ids))
+            .map_err(to_py_err)
+    }
+
+    /// One field value through the embedding normalization (the byte-identity
+    /// parity surface against `shrike.embed_text.normalize_for_embedding`).
+    fn normalize_text(&self, py: Python<'_>, value: String) -> PyResult<String> {
+        py.detach(|| self.inner.normalize_text(&value))
+            .map_err(to_py_err)
+    }
+
+    /// Structured filters → notes; returns the wrapper-shaped JSON
+    /// (`{"notes": [...], "total": N, "limit": L}`). `modified_since` is an
+    /// epoch-seconds cutoff (the host parses ISO timestamps).
+    #[pyo3(signature = (ids=None, deck=None, tags=None, note_type=None, modified_since=None, with_fields=true, limit=50))]
+    #[allow(clippy::too_many_arguments)]
+    fn list_notes(
+        &self,
+        py: Python<'_>,
+        ids: Option<Vec<i64>>,
+        deck: Option<String>,
+        tags: Option<Vec<String>>,
+        note_type: Option<String>,
+        modified_since: Option<i64>,
+        with_fields: bool,
+        limit: usize,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            self.inner.list_notes(
+                ids.as_deref(),
+                deck.as_deref(),
+                tags.as_deref(),
+                note_type.as_deref(),
+                modified_since,
+                with_fields,
+                limit,
+            )
+        })
+        .map_err(to_py_err)
+    }
+
+    /// The sectioned collection info dict as JSON (`sections` mirrors
+    /// `include`; `"all"` expands; empty = summary).
+    #[pyo3(signature = (sections=None, detail_names=None))]
+    fn collection_info(
+        &self,
+        py: Python<'_>,
+        sections: Option<Vec<String>>,
+        detail_names: Option<Vec<String>>,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            self.inner.collection_info(
+                sections.as_deref().unwrap_or(&[]),
+                detail_names.as_deref().unwrap_or(&[]),
+            )
+        })
+        .map_err(to_py_err)
+    }
 }
