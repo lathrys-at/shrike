@@ -1,0 +1,42 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@shrike_pip//:requirements.bzl", "requirement")
+load("//tools/bazel:defs.bzl", "pytest_test")
+
+package(default_testonly = True)
+
+# Integration conftest: spawns the server (//bin:server through runfiles —
+# _server_launch_cmd), the MCP/CLI clients, the shared-server + per-test reset
+# machinery. model_cache.py rides along (conftest imports it for the embedding
+# fixtures, exercised by the 2c embedding target). imports=["../.."] puts the repo
+# root on sys.path so `tests.integration.model_cache` resolves.
+py_library(
+    name = "conftest",
+    srcs = [
+        "conftest.py",
+        "model_cache.py",
+    ],
+    imports = ["../.."],
+    data = ["//bin:server"],
+    deps = [
+        "//src/shrike",
+        "@rules_python//python/runfiles",
+        requirement("httpx"),
+    ],
+)
+
+# One aggregate target: the non-embedding integration files run in a single action
+# with `-n auto` (xdist, the macro default), mirroring the pip
+# `pytest tests/integration -n auto` lane — the import + server-spawn cost is
+# amortized across the suite, not paid per file. The embedding-gated files
+# (llama-server/onnx/clip) are a separate `manual` target in 2c (#244).
+pytest_test(
+    name = "integration",
+    size = "large",
+    srcs = [
+        "test_cli.py",
+        "test_media.py",
+        "test_security.py",
+        "test_tools.py",
+    ],
+    deps = [":conftest"],
+)
