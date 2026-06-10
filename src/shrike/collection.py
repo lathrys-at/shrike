@@ -1935,6 +1935,32 @@ class CollectionWrapper:
         """
         return await self.run(lambda c: self._note_embed_inputs(c, note_ids))
 
+    async def note_field_map(self, note_ids: Sequence[int]) -> dict[int, dict[str, str]]:
+        """Per note: its **raw** field values as ``{field_name: value}`` (literal, unnormalized).
+
+        What the derived-text store (#98) ingests for substring/fuzzy search: substring matching is
+        over the *raw* field content (the same text ``substring_info`` uses — the ``flds`` column),
+        so the index must hold exactly that. Missing ids are simply absent from the map.
+        """
+        return await self.run(
+            lambda c: {
+                nid: dict(zip(names, values, strict=False))
+                for nid, names, values in self._note_field_rows(c, note_ids)
+            }
+        )
+
+    @staticmethod
+    def derived_field_rows(
+        col: Collection, note_ids: Sequence[int]
+    ) -> Iterator[tuple[int, str, str, str]]:
+        """Yield ``(note_id, "field", field_name, raw_value)`` for non-empty fields — the ``field``
+        source the derived-text store ingests (#98). Worker-thread only; via ``_note_field_rows``.
+        """
+        for nid, names, values in CollectionWrapper._note_field_rows(col, note_ids):
+            for name, value in zip(names, values, strict=False):
+                if (value or "").strip():
+                    yield nid, "field", name, value
+
     @staticmethod
     def _render_embed_text(names: Sequence[str], values: Sequence[str]) -> str:
         """Render a note's embedding text: each non-empty normalized field as ``Name: text``,
