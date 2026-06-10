@@ -616,8 +616,11 @@ def note_search(
             if brief:
                 tag = f"\\[{badges}] " if badges else ""
                 output.console.print(f"  {tag}[green]#{m.id}[/green] ([cyan]{m.deck}[/cyan])")
-                if m.substring is not None and m.substring.snippet:
-                    output.console.print(f"      [dim]{m.substring.snippet}[/dim]")
+                # The window a literal (substring) or near-miss (fuzzy) hit matched, so a
+                # text/audio card's match is legible at a glance.
+                snippet = (m.substring and m.substring.snippet) or (m.fuzzy and m.fuzzy.snippet)
+                if snippet:
+                    output.console.print(f"      [dim]{snippet}[/dim]")
             else:
                 output.note_detail(m, subtitle=f"[{badges}]" if badges else None)
 

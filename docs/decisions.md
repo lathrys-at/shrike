@@ -75,7 +75,7 @@ under one key and **can't be unmixed**, so an image-capable backend meeting a v1
 ### Search fuses signals by rank (RRF), not normalized score (#180)
 
 `search_notes` blends retrieval signals — semantic cosine (now per-modality `text`/`image`, #201a) +
-exact substring, soon n-gram fuzzy (#98) and tag-centroid (#179). They live on
+exact substring + trigram `fuzzy` (#98), soon tag-centroid (#179). They live on
 incommensurable scales: cosine clusters in a narrow ~0.3–0.7 band, exact match is near-binary, a
 cross-modal (text-query↔image-vector) cosine sits a roughly *constant offset* below within-modal.
 **Normalize-and-sum inherits every pathology** — min-max stretches cosine's narrow band so trivial
@@ -96,6 +96,39 @@ ranked ints out) and returns per-note which signals contributed at what rank —
 (#182) reads. This first slice ships the backbone over the two existing signals (near
 behaviour-equivalent today, since RRF over one semantic ranking == rank order); its worth is the
 extensible architecture every later signal plugs into by just producing a ranking.
+
+### Derived data lives in a sidecar `shrike.db`, not in `collection.anki2` (#98)
+
+Shrike is starting to **derive data locally from notes** — a trigram lexical index now (the `fuzzy`
+signal + the substring candidate source); OCR/ASR recognized text next (#199); VLM image-describe
+text later. That derived/computed data wants **one home, separate from Anki's synced collection**.
+The settled choice is a sidecar SQLite file (`shrike.db` in `cache_dir()`), **not** new tables in
+`collection.anki2`. Anki's sync, "Check Database", media check, and version-upgrade migrations all
+**own** that schema: a foreign table risks being dropped or erroring, and — worse — it would ship
+*rebuildable derived data over sync*, which is exactly what a derived cache must never do. We already
+time-share the collection lock with Anki desktop (#64), and the community norm is that add-ons keep
+their own files beside the collection. A sidecar in our cache dir is both safe and the correct home:
+rebuildable from the collection (the source of truth), so a corrupt/stale/missing sidecar is never a
+data-loss event. With the relay in view (offload heavy compute to a user's desktop instance and sync
+the *artifacts*, not recompute them everywhere), this is also the natural sync target — so the store
+is **source-seamed** (`(note_id, source, ref)` rows) from day one, even though `field` is its only
+source today.
+
+The store is the FTS5-trigram **`DerivedTextStore`** (`derived.py`). Two design choices worth pinning:
+**(1) it feeds two signals, not one.** A quoted-phrase trigram MATCH *is* a literal substring match,
+so the store supplies the `exact` signal's candidates (a fast pre-filter replacing the linear
+`find_notes` scan); a trigram-OR MATCH ranked by bm25 *is* fuzzy/typo matching, the new `fuzzy`
+signal. Both degrade to the old `find_notes` path when the runtime's SQLite lacks FTS5 (probed at
+construction) or the query is sub-trigram — `substring_info` stays the authority that confirms every
+exact candidate, so the swap is behaviour-preserving. **(2) provenance is source-aware** so the
+payoff #199 unlocks is designed in now: a lexical hit carries `source`/`ref`/`snippet`, so a result
+can report *which* derived text matched (a field today; "the OCR text of diagram.png" tomorrow) — the
+window an LLM/MCP client needs to understand an image/audio card it can't be shown. A VLM
+image-describe source, when it lands, goes to the embedding space **only**, never the trigram index:
+a literal-search hit on metadata the user never sees can't be cleanly explained, so it must not drive
+fast lexical search. Unlike the vector index the store has **no debounced saver** (SQLite writes are
+durable per-commit) and is **independent of the embedder** (it builds and ingests with embeddings
+off) — the one place the derived-cache pattern deliberately diverges from `VectorIndex`.
 
 ### USearch stays the index; revisit only on a measured, specific trigger
 

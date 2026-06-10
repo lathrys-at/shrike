@@ -171,9 +171,34 @@ class Note(BaseModel):
 
 
 class SubstringInfo(BaseModel):
-    """Evidence that the query text occurs literally in a note."""
+    """Evidence that the query text occurs literally in a note.
+
+    ``matched_fields``/``snippet`` are the field-text hit (the only case today). ``source`` names
+    which *derived* text the literal match was found in — ``field`` now; ``ocr``/``asr`` once #199
+    feeds those into the derived-text store (never VLM image-describe, which is embedding-only). For
+    a non-field source ``ref`` pins the single artifact that matched (a media filename); for the
+    ``field`` source it stays ``None`` and ``matched_fields`` enumerates the fields instead. The
+    ``source``/``ref`` seam lets a result say *where* an image/audio card's text matched.
+    """
 
     matched_fields: list[str] = []
+    snippet: str | None = None
+    source: str = "field"
+    ref: str | None = None
+
+
+class FuzzyMatch(BaseModel):
+    """Evidence that the query *approximately* matched a note's derived text (#98).
+
+    A trigram/typo-tolerant hit from the derived-text store (the ``fuzzy`` retrieval signal), for
+    near-misses an exact substring search would miss (``protien`` → ``protein``). ``source`` is
+    which derived text matched (``field`` today; ``ocr``/``asr`` when #199 lands), ``ref`` the field
+    name or media filename it hit, and ``snippet`` a window around the match — so an LLM/MCP client
+    can see what an image/audio card actually is from the text that matched it.
+    """
+
+    source: str
+    ref: str
     snippet: str | None = None
 
 
@@ -207,6 +232,10 @@ class SearchMatch(Note):
     score: float | None = None
     # Present when the query text occurs literally in the note.
     substring: SubstringInfo | None = None
+    # Present when the query trigram/typo-matched the note's derived text (the `fuzzy` signal, #98).
+    # Independent of `score`/`substring` — a hit can be any combination. Carries the source-aware
+    # window (where in which derived text it matched).
+    fuzzy: FuzzyMatch | None = None
     # Which signals surfaced this result, best (lowest) rank first (#182). Always non-empty for a
     # returned match (it came from a fused hit). The unified provenance view over the fused ranking;
     # `score`/`substring` above stay as the per-signal detail. `signal: "image"` is the
@@ -896,6 +925,24 @@ IndexStatus = Annotated[
 ]
 
 
+class DerivedStatus(BaseModel):
+    """The derived-text store's self-report (#98) — the FTS5 trigram sidecar.
+
+    Unlike the vector index this is a flat shape, not a discriminated union: the store has no
+    per-state-only fields (no build progress to report, no persisted error variant — a failed build
+    drops back to ``unavailable`` and lookups fall back), so a single model with a ``state`` tag is
+    honest. ``fts5`` is False when the runtime's SQLite lacks FTS5/trigram (the store is inert and
+    search falls back to the linear scan); ``available`` adds "a build has run" on top.
+    """
+
+    state: Literal["unavailable", "building", "ready", "error"] = "unavailable"
+    available: bool = False
+    fts5: bool = False
+    size: int = 0
+    path: str | None = None
+    col_mod: int | None = None
+
+
 class ServerStatus(BaseModel):
     """A responding server's self-report from ``GET /status``.
 
@@ -918,6 +965,9 @@ class ServerStatus(BaseModel):
     log: str | None = None
     embedding: EmbeddingStatus
     index: IndexStatus
+    # Derived-text store (#98): the FTS5 trigram sidecar backing substring/fuzzy lexical search.
+    # Defaulted so older payloads (and a build without FTS5 support) validate.
+    derived: DerivedStatus = DerivedStatus()
     # Collection-lock state (#64): the locking mode and whether the collection is
     # currently held open. In the default permanent-hold mode it's always held;
     # in cooperative mode it's released when idle. Defaulted so older payloads

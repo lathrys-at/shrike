@@ -184,7 +184,9 @@ Use it for conceptual queries keyword search can't handle ("cards about electron
 
 When the server runs a multimodal (CLIP) embedding backend, semantic matching also covers a note's **image content** — a text query like "diagram of the Krebs cycle" can surface a card whose meaning lives in its image, even if the text doesn't say so. The query is ranked against text and image separately and the rankings are fused, so an image match isn't drowned out by text matches. On a text-only backend this is simply inert (no image vectors), and the request shape is identical either way. Image matches carry their (lower) cross-modal `score`. An activation gate keeps the image modality from contributing when none of its matches are good enough for a given query, so an off-topic query won't pull in loosely-related image cards.
 
-Exact matches are returned even when the embedding index is unavailable — the response carries a `message` noting semantic ranking was skipped — and are **not** subject to `threshold` (a literal hit is always relevant). Within a group, literal hits are listed first, then by descending score.
+Each query is also matched **fuzzily** — a trigram/typo-tolerant lexical search over the same field text — so a misspelled or partial query (`protien`, `mitochndria`) still surfaces the intended card even with no semantic or exact hit. Fuzzy matches are weighted below the other signals (a near-miss is weaker evidence) and carry a `fuzzy` annotation (the source/field and a snippet window).
+
+Exact matches are returned even when the embedding index is unavailable — the response carries a `message` noting semantic ranking was skipped — and are **not** subject to `threshold` (a literal hit is always relevant). Within a group, literal hits are listed first, then by descending score. (Substring and fuzzy matching are backed by a local FTS5 trigram index; if the server's SQLite lacks FTS5 the substring path degrades to a linear scan and the fuzzy signal is simply absent — search still works.)
 
 ### Parameters
 
@@ -192,7 +194,7 @@ Exact matches are returned even when the embedding index is unavailable — the 
 |---|---|---|---|
 | `queries` | `string[]` | no | Search strings. Each is matched independently by semantic similarity **and** as an exact substring of note fields. Max 50 per call. |
 | `ids` | `integer[]` | no | Note IDs to use as semantic anchors, finding notes similar to these. Source notes are excluded from results. Max 50 per call. |
-| `top_k` | `integer` | no | Maximum results per mechanism per query/anchor. Default `10`, max `50`. |
+| `top_k` | `integer` | no | Maximum results per query/anchor (the fused result is capped to this). Default `10`, max `50`. |
 | `threshold` | `number` | no | Minimum cosine similarity (0–1) for a *semantic* match. Default `0.5`. Does not apply to exact substring matches. |
 | `deck` | `string` | no | Restrict to notes in this deck (includes child decks). Accepts a deck name, numeric ID, or `#id`. |
 | `tags` | `string[]` | no | Restrict to notes matching all of these tags. |
@@ -204,9 +206,11 @@ At least one of `queries` or `ids` must be provided.
 
 ### Response
 
-Each match is a note annotated with the evidence that produced it: `score` (semantic, `null`/omitted when only an exact hit), `substring` (`{matched_fields, snippet}`, absent when there was no literal hit), and `provenance` — the list of signals that surfaced this result, best-ranked signal first.
+Each match is a note annotated with the evidence that produced it: `score` (semantic, `null`/omitted when only a lexical hit), `substring` (`{matched_fields, snippet, source, ref}`, absent when there was no literal hit), `fuzzy` (`{source, ref, snippet}`, present only on a trigram/typo match), and `provenance` — the list of signals that surfaced this result, best-ranked signal first.
 
-Each `provenance` entry is `{signal, rank}`. `signal` names the retrieval signal: `text` and `image` are the per-modality semantic rankers (so the name doubles as the matched-modality facet — `image` means the query matched the note's *image* content, on a multimodal backend), and `exact` is a literal substring hit (`fuzzy` and `tag` signals will appear here as they land). `rank` is the note's 1-based position in that signal's own ranking. `provenance` is always present and non-empty for a returned match; `score`/`substring` remain the per-signal detail (the cosine magnitude, the matched fields/snippet) and stay consistent with it (`exact` in `provenance` ⟺ `substring` is set; a semantic signal present ⟺ `score` is non-null).
+Each `provenance` entry is `{signal, rank}`. `signal` names the retrieval signal: `text` and `image` are the per-modality semantic rankers (so the name doubles as the matched-modality facet — `image` means the query matched the note's *image* content, on a multimodal backend), `exact` is a literal substring hit, and `fuzzy` is a trigram/typo hit (`tag` and others will appear here as they land). `rank` is the note's 1-based position in that signal's own ranking. `provenance` is always present and non-empty for a returned match; `score`/`substring`/`fuzzy` remain the per-signal detail (the cosine magnitude, the matched fields/snippet, the fuzzy window) and stay consistent with it (`exact` in `provenance` ⟺ `substring` is set; `fuzzy` in `provenance` ⟺ `fuzzy` is set; a semantic signal present ⟺ `score` is non-null).
+
+On both `substring` and `fuzzy`, `source` reports *which* derived text matched — `field` for note field text (always, today) — and `ref` the field name (or, in future, a media filename for OCR/ASR-recognized text); `snippet` is a context window around the match. This is what lets a result explain how an image- or audio-based card matched a text query.
 
 ```jsonc
 {
@@ -221,11 +225,14 @@ Each `provenance` entry is `{signal, rank}`. `signal` names the retrieval signal
           "deck": "Biochemistry",
           "tags": ["metabolism", "chapter-18"],
           "content": { "Front": "…", "Back": "…" },
-          "score": 0.87,                 // semantic similarity; null/omitted if exact-only
+          "score": 0.87,                 // semantic similarity; null/omitted if lexical-only
           "substring": {                 // present only when the text matched literally
             "matched_fields": ["Front"],
-            "snippet": "…electron transport chain…"
+            "snippet": "…electron transport chain…",
+            "source": "field",           // which derived text matched ("field" today)
+            "ref": null                  // field name for a non-field source; null for fields
           },
+          "fuzzy": null,                 // present only on a trigram/typo hit: {source, ref, snippet}
           "provenance": [                // why it surfaced, best-ranked signal first
             { "signal": "exact", "rank": 1 },
             { "signal": "text",  "rank": 2 }

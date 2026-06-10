@@ -517,6 +517,123 @@ class TestProvenance:
         assert prov[a] == [("text", 1)]
 
 
+def _build_derived(wrapper, derived) -> None:
+    """Build the derived store from the collection's current notes (what the boot path does)."""
+    from shrike.collection import CollectionWrapper
+
+    rows, mod = wrapper.run_sync(
+        lambda c: (
+            list(CollectionWrapper.derived_field_rows(c, list(c.find_notes("deck:*")))),
+            c.mod,
+        )
+    )
+    derived.build(rows, mod)
+
+
+class TestDerivedSearch:
+    """search_notes wired to the derived store: substring-via-store + the fuzzy signal (#98)."""
+
+    @pytest.fixture()
+    def derived(self, tmp_path):
+        from shrike.derived import DerivedTextStore
+
+        s = DerivedTextStore(path=tmp_path / "shrike.db")
+        yield s
+        s.close()
+
+    @pytest.fixture()
+    def mcp_derived(self, wrapper, mock_index, derived):
+        mcp = FastMCP("test")
+        register_tools(mcp, wrapper, index=mock_index, derived=derived)
+        return mcp
+
+    def _seed_front(self, wrapper, front: str) -> int:
+        note = {"deck": "Test", "note_type": "Basic", "fields": {"Front": front, "Back": "x"}}
+        return _seed(wrapper, [note])[0]["id"]
+
+    def test_substring_via_store_matches_find_notes(
+        self, wrapper, mock_index, mcp_derived, derived
+    ):
+        # An exact substring hit comes through the store (candidate) + substring_info (authority),
+        # identical to the find_notes path: matched field + the `exact` provenance.
+        nid = self._seed_front(wrapper, "Electron transport chain")
+        _build_derived(wrapper, derived)
+        mock_index.search_by_modality.return_value = _text_hits([[]])  # no semantic hits
+        res = _call(mcp_derived, "search_notes", {"queries": ["transport"]})
+        m = res["results"][0]["matches"]
+        assert [x["id"] for x in m] == [nid]
+        assert m[0]["substring"]["matched_fields"] == ["Front"]
+        assert m[0]["substring"]["source"] == "field"
+        # A literal hit shares every trigram so it's *trivially* also a fuzzy match, but `fuzzy` is
+        # suppressed on exact hits (review F4) — `exact` is the distinguishing lexical signal.
+        assert [p["signal"] for p in m[0]["provenance"]] == ["exact"]
+        assert m[0].get("fuzzy") is None
+
+    def test_fuzzy_only_hit_surfaces_with_provenance(
+        self, wrapper, mock_index, mcp_derived, derived
+    ):
+        # A typo query the note doesn't literally contain surfaces via the `fuzzy` signal alone:
+        # no score, no substring, provenance == [fuzzy], carrying the source/ref/snippet window.
+        nid = self._seed_front(wrapper, "Mitochondria are the powerhouse")
+        _build_derived(wrapper, derived)
+        mock_index.search_by_modality.return_value = _text_hits([[]])
+        res = _call(mcp_derived, "search_notes", {"queries": ["mitochndria"]})
+        m = res["results"][0]["matches"]
+        assert [x["id"] for x in m] == [nid]
+        hit = m[0]
+        assert hit["score"] is None
+        assert hit["substring"] is None
+        assert [p["signal"] for p in hit["provenance"]] == ["fuzzy"]
+        assert hit["fuzzy"]["source"] == "field"
+        assert hit["fuzzy"]["ref"] == "Front"
+        assert "Mitochondria" in hit["fuzzy"]["snippet"]
+
+    def test_literal_tiers_above_fuzzy(self, wrapper, mock_index, mcp_derived, derived):
+        # The exact-match override still wins: a literal hit floats above a fuzzy-only near-miss.
+        literal = self._seed_front(wrapper, "Mitochondria diagram")
+        fuzzy_only = self._seed_front(wrapper, "mitochndrial membrane")  # typo → no literal hit
+        _build_derived(wrapper, derived)
+        mock_index.search_by_modality.return_value = _text_hits([[]])
+        m = _call(mcp_derived, "search_notes", {"queries": ["mitochondria"]})["results"][0][
+            "matches"
+        ]
+        assert [x["id"] for x in m][0] == literal  # literal floats to the top
+        prov = {x["id"]: [p["signal"] for p in x["provenance"]] for x in m}
+        assert "exact" in prov[literal]
+        assert prov[fuzzy_only] == ["fuzzy"]  # the near-miss is fuzzy-only
+
+    def test_no_fuzzy_signal_when_store_unavailable(self, wrapper, mock_index, mcp_app):
+        # Fallback safety: with no derived store (mcp_app), a typo query emits no fuzzy match —
+        # substring still works via find_notes, exactly as before #98.
+        self._seed_front(wrapper, "Mitochondria are the powerhouse")
+        mock_index.search_by_modality.return_value = _text_hits([[]])
+        m = _call(mcp_app, "search_notes", {"queries": ["mitochndria"]})["results"][0]["matches"]
+        assert m == []
+
+    def test_exact_hit_carries_no_fuzzy(self, wrapper, mock_index, mcp_derived, derived):
+        # Review F4: a clean exact (literal) match must not also be badged `fuzzy`, even though it
+        # shares every trigram — `fuzzy` is reserved for the distinguishing near-miss signal.
+        nid = self._seed_front(wrapper, "powerhouse of the cell")
+        _build_derived(wrapper, derived)
+        mock_index.search_by_modality.return_value = _text_hits([[]])
+        m = _call(mcp_derived, "search_notes", {"queries": ["powerhouse"]})["results"][0]["matches"]
+        hit = next(x for x in m if x["id"] == nid)
+        assert "fuzzy" not in [p["signal"] for p in hit["provenance"]]
+        assert hit.get("fuzzy") is None
+
+    def test_result_capped_at_top_k(self, wrapper, mock_index, mcp_derived, derived):
+        # Review F5: the fused union (text/image/exact/fuzzy, each up to top_k) is capped to top_k,
+        # so a broad fuzzy signal can't inflate a query's result count past the documented cap.
+        for i in range(8):
+            self._seed_front(wrapper, f"mitochondrion variant {i}")  # all fuzzy-match the typo
+        _build_derived(wrapper, derived)
+        mock_index.search_by_modality.return_value = _text_hits([[]])
+        m = _call(mcp_derived, "search_notes", {"queries": ["mitochndrion"], "top_k": 3})[
+            "results"
+        ][0]["matches"]
+        assert len(m) == 3
+
+
 class TestUpsertNeighbors:
     def test_neighbors_attached_on_create(self, wrapper, mock_index, mcp_app):
         existing = _seed(wrapper, [BASIC_NOTE])[0]["id"]

@@ -99,6 +99,22 @@ def _render_status(status: ServerStatus) -> None:
     if idx.path:
         output.kv("Path", f"[cyan]{idx.path}[/cyan]", indent=2)
 
+    # Derived-text store (#98): the FTS5 trigram sidecar behind substring/fuzzy lexical search.
+    der = status.derived
+    if not der.fts5:
+        output.kv("Derived text", "[dim]unavailable (no SQLite FTS5)[/dim]")
+    elif der.state == "ready":
+        output.kv("Derived text", "[green]ready[/green]")
+        output.kv("Rows", f"[green]{der.size}[/green]", indent=2)
+    elif der.state == "building":
+        output.kv("Derived text", "[yellow]building[/yellow]")
+    elif der.state == "error":
+        output.kv("Derived text", "[red]error[/red]")
+    else:
+        output.kv("Derived text", "[dim]unavailable[/dim]")
+    if der.fts5 and der.col_mod is not None:
+        output.kv("Collection mod", str(der.col_mod), indent=2)
+
 
 def _wait_for_server(
     url: str, timeout: float = 15.0, *, show_spinner: bool = True
