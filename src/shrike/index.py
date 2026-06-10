@@ -19,16 +19,34 @@ import json
 import logging
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from shrike.embedding_base import IMAGE, TEXT
+# NoteEmbedInput / ImageResolver / ImageExists moved to embedding_base (#266) — the
+# boundary types live with the protocol seam. Re-exported here so existing import
+# sites (tests included) keep working unchanged.
+from shrike.embedding_base import (
+    IMAGE,
+    TEXT,
+    ImageExists,
+    ImageResolver,
+    NoteEmbedInput,
+)
 
 if TYPE_CHECKING:
     from shrike.embedding_base import EmbedderBackend
+
+__all__ = [
+    "ImageExists",
+    "ImageResolver",
+    "IndexSaver",
+    "IndexState",
+    "NoteEmbedInput",
+    "VectorIndex",
+    "activation_floor",
+]
 
 logger = logging.getLogger("shrike.index")
 
@@ -74,26 +92,6 @@ def activation_floor(stats: dict[str, float] | None, margin: float) -> float | N
     if not stats:
         return None
     return stats["mean"] + margin * stats["std"]
-
-
-# An image resolver maps a media filename to its bytes (None = missing/unreadable → skipped).
-ImageResolver = Callable[[str], "bytes | None"]
-# A cheap presence check for a media filename (a stat, not a byte read) — folded into the hash.
-ImageExists = Callable[[str], bool]
-
-
-@dataclass(frozen=True)
-class NoteEmbedInput:
-    """One note's embedding inputs: its normalized text plus any image filenames.
-
-    Produced by ``CollectionWrapper.note_embed_inputs`` (a cheap DB + regex pass, no file reads);
-    the index turns it into a text vector and — for an image-capable backend — one vector per
-    resolvable image, all stored under the ``note_id`` key.
-    """
-
-    note_id: int
-    text: str
-    image_names: list[str] = field(default_factory=list)
 
 
 def _hash_text(text: str) -> str:

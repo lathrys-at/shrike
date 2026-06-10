@@ -24,7 +24,7 @@ from anki.errors import DBError, NotFoundError
 from anki.notes import NoteFieldsCheckResult
 
 from shrike.embed_text import extract_image_refs, field_is_blank, normalize_for_embedding
-from shrike.index import NoteEmbedInput
+from shrike.embedding_base import NoteEmbedInput
 from shrike.schemas import COLLECTION_BUSY_CODE
 
 
