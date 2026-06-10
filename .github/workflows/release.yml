@@ -4,8 +4,8 @@ name: Release
 # (they only run on `rc`-labelled PRs — see test.yml) run here unconditionally:
 # tagging a release is exactly the moment to pay for full coverage. On a `v*` tag
 # push we run the full integration suite on every platform, build the artifacts
-# (Python sdist + wheel, the anki-cards.skill bundle, and SHA256SUMS), and cut a
-# GitHub Release with them attached.
+# with Bazel (Python sdist + wheel, the anki-cards.skill bundle, and SHA256SUMS),
+# and cut a GitHub Release with them attached.
 #
 # Pre-release tags (`vX.Y.Z-rc.N`, `-alpha`, …) are marked as GitHub pre-releases.
 # PyPI publishing is intentionally out of scope (see #43) — decide separately
@@ -49,10 +49,11 @@ jobs:
           DYLD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
         run: pytest tests/integration -v -m integration
 
-  # Build the release artifacts from the tagged commit: the Python sdist + wheel
-  # (hatch-vcs derives the version from the tag, hence fetch-depth: 0) and the
-  # anki-cards skill bundle (a .skill zip — the format Claude Desktop / claude.ai
-  # accept). Both go into the `dist` artifact for the release job to attach.
+  # Build the release artifacts from the tagged commit, all via Bazel (#245): the
+  # Python wheel (//:wheel) + sdist (//:sdist) and the anki-cards.skill bundle
+  # (//skills:skill). Each is stamped from the tag (STABLE_VERSION via
+  # tools/workspace_status.sh, hence fetch-depth: 0). They go into the `dist`
+  # artifact for the release job to attach + checksum.
   build:
     name: Build sdist + wheel + skill
     needs: test
@@ -60,21 +61,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # hatch-vcs reads the tag via `git describe` at build time
+          fetch-depth: 0  # tags so the Bazel version stamp (git describe) resolves
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - name: Build
+          python-version: "3.12"  # for `twine check` only; Bazel uses its own toolchain
+      - name: Build the wheel and sdist with Bazel
+        # The committed ./bazel wrapper fetches the pinned Bazel; the wrappers stamp
+        # the tag-derived version in and rename to the real
+        # shrike_mcp-<version>.{whl,tar.gz} filenames under dist/.
         run: |
-          pip install build twine
-          python -m build
+          tools/build-wheel.sh
+          tools/build-sdist.sh
       - name: Validate metadata
-        run: twine check dist/*
+        run: |
+          pip install twine
+          twine check dist/*
       - name: Sanity-check built version matches the tag
-        # Defence-in-depth against a broken/shallow build producing a dev version
-        # (e.g. tag not fetched) — NOT the old __version__ drift, which hatch-vcs
-        # made impossible. Skipped for pre-releases: PEP 440 normalises the tag
-        # (v1.2.3-rc.1 -> 1.2.3rc1), so a literal tag↔filename match wouldn't hold.
+        # Defence-in-depth against a broken build producing a dev version (e.g. tags
+        # not fetched, so the Bazel version stamp falls back). Skipped for
+        # pre-releases: PEP 440 normalises the tag (v1.2.3-rc.1 -> 1.2.3rc1), so a
+        # literal tag↔filename match wouldn't hold.
         run: |
           version="${GITHUB_REF_NAME#v}"
           if [[ "$version" != *-* ]]; then
@@ -83,10 +89,11 @@ jobs:
               exit 1
             fi
           fi
-      # Run after `twine check` so it only ever saw the Python dists. The script
-      # validates SKILL.md frontmatter and writes dist/anki-cards.skill.
-      - name: Package the anki-cards skill bundle
-        run: python scripts/package-skill.py
+      # Built after `twine check` so the check only ever saw the Python dists.
+      - name: Package the anki-cards skill bundle with Bazel
+        run: |
+          ./bazel build //skills:skill --stamp
+          cp -f "$(./bazel cquery --output=files //skills:skill)" dist/anki-cards.skill
       - uses: actions/upload-artifact@v4
         with:
           name: dist
