@@ -13,15 +13,21 @@ in Anki's ``collection.anki2`` — derived/rebuildable data must not ride Anki's
 schema checks (see ``docs/decisions.md``). Persistence is inherent to the SQLite file, so there is
 no debounced saver (unlike the vector index): writes are transactional and durable.
 
-If the runtime's SQLite lacks FTS5 or the trigram tokenizer, the store reports ``unavailable`` and
-every lookup signals the caller to fall back to the linear ``find_notes`` scan — current behaviour,
-no feature regression.
+Engine split (#281, mirroring the index's #267/#273): the SQL layer lives behind a small engine —
+:class:`SqliteDerivedEngine` (stdlib ``sqlite3``) by default, or the native ``shrike-derived``
+crate (rusqlite with a *bundled* SQLite) when ``SHRIKE_NATIVE_DERIVED=1``. The facade keeps the
+state machine, drift policy, MATCH-expression building, and result filtering. With the native
+engine FTS5+trigram is deterministically available, so the availability probe below stops being
+load-bearing; with the stdlib engine it still governs: if the runtime's SQLite lacks FTS5 or the
+trigram tokenizer, the store reports ``unavailable`` and every lookup signals the caller to fall
+back to the linear ``find_notes`` scan — current behaviour, no feature regression.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import sqlite3
 import threading
 from collections.abc import Iterable, Mapping
@@ -38,6 +44,10 @@ MIN_TRIGRAM = 3  # FTS5's trigram tokenizer can't match a term shorter than 3 ch
 FUZZY_MIN_SHARED = 2  # a fuzzy candidate must share at least this many query trigrams (noise floor)
 SNIPPET_TOKENS = 12  # window size for FTS5 snippet()
 DEFAULT_FUZZY_TOP_K = 20
+
+# (note_id, source, ref, txt, snippet) — what an engine MATCH query returns. ``txt`` is only
+# filled when asked for (the fuzzy overlap filter needs it; substring doesn't).
+EngineRow = tuple[int, str, str, str | None, str | None]
 
 
 @dataclass(frozen=True)
@@ -64,17 +74,240 @@ def _fts_quote(term: str) -> str:
     return '"' + term.replace('"', '""') + '"'
 
 
+class SqliteDerivedEngine:
+    """The stdlib-``sqlite3`` engine: schema, writes, and MATCH queries (one lock inside).
+
+    Raises ``sqlite3.Error`` from the constructor on a bad file — the facade's
+    discard-and-retry recovery handles it. The native engine (#281) implements
+    this same surface over rusqlite; both read and write the same ``shrike.db``.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        with self._lock:
+            self._ensure_schema()
+
+    @staticmethod
+    def probe() -> bool:
+        """Whether this SQLite build has FTS5 with the trigram tokenizer (on a throwaway conn)."""
+        try:
+            probe = sqlite3.connect(":memory:")
+            try:
+                probe.execute("CREATE VIRTUAL TABLE t USING fts5(x, tokenize='trigram')")
+            finally:
+                probe.close()
+        except sqlite3.OperationalError:
+            return False
+        return True
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    def _ensure_schema(self) -> None:
+        c = self._conn
+        c.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value)")
+        version = self._get_meta_int("schema_version")
+        if version is not None and version != SCHEMA_VERSION:
+            # No migrations yet: a schema bump drops the derived data; the next drift rebuilds it.
+            logger.info("Derived store schema v%s != v%s; resetting", version, SCHEMA_VERSION)
+            c.execute("DROP TABLE IF EXISTS idx")
+            c.execute("DROP TABLE IF EXISTS rowmap")
+            c.execute("DELETE FROM meta WHERE key='col_mod'")
+        # idx holds only the searchable text (rowid auto). rowmap carries the (note_id, source, ref)
+        # provenance keyed by that rowid, indexed by note_id so incremental delete-by-note is cheap
+        # (FTS5 has no secondary indexes, and DELETE-by-column would scan the whole index).
+        c.execute("CREATE VIRTUAL TABLE IF NOT EXISTS idx USING fts5(txt, tokenize='trigram')")
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS rowmap("
+            "rowid INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, "
+            "source TEXT NOT NULL, ref TEXT NOT NULL)"
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS rowmap_note ON rowmap(note_id, source)")
+        self._set_meta("schema_version", SCHEMA_VERSION)
+        c.commit()
+
+    def _get_meta_int(self, key: str) -> int | None:
+        row = self._conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return int(row[0]) if row is not None and row[0] is not None else None
+
+    def _set_meta(self, key: str, value: Any) -> None:
+        self._conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", (key, value))
+
+    def get_col_mod(self) -> int | None:
+        with self._lock:
+            return self._get_meta_int("col_mod")
+
+    def set_col_mod(self, value: int) -> None:
+        with self._lock:
+            self._set_meta("col_mod", value)
+            self._conn.commit()
+
+    def count(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT count(*) FROM rowmap").fetchone()
+        return int(row[0]) if row else 0
+
+    def _delete_rows(self, note_ids: Iterable[int], source: str | None) -> None:
+        """Delete notes' rows (optionally one source) from idx + rowmap. Caller holds the lock."""
+        ids = list(note_ids)
+        if not ids:
+            return
+        marks = ",".join("?" * len(ids))
+        params: list[Any] = list(ids)
+        clause = f"note_id IN ({marks})"
+        if source is not None:
+            clause += " AND source=?"
+            params.append(source)
+        rows = self._conn.execute(f"SELECT rowid FROM rowmap WHERE {clause}", params).fetchall()
+        rowids = [r[0] for r in rows]
+        if not rowids:
+            return
+        rmarks = ",".join("?" * len(rowids))
+        self._conn.execute(f"DELETE FROM idx WHERE rowid IN ({rmarks})", rowids)
+        self._conn.execute(f"DELETE FROM rowmap WHERE rowid IN ({rmarks})", rowids)
+
+    def _insert_rows(self, note_id: int, source: str, refs_text: Mapping[str, str]) -> None:
+        """Insert one (note_id, source) note's {ref: text} rows. Caller holds the lock."""
+        for ref, text in refs_text.items():
+            if not (text or "").strip():
+                continue
+            cur = self._conn.execute("INSERT INTO idx(txt) VALUES(?)", (text,))
+            self._conn.execute(
+                "INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?,?,?,?)",
+                (cur.lastrowid, note_id, source, ref),
+            )
+
+    def ingest(self, note_id: int, source: str, refs_text: Mapping[str, str]) -> None:
+        with self._lock:
+            self._delete_rows([note_id], source)
+            self._insert_rows(note_id, source, refs_text)
+            self._conn.commit()
+
+    def remove(self, note_ids: list[int], source: str | None = None) -> None:
+        with self._lock:
+            self._delete_rows(note_ids, source)
+            self._conn.commit()
+
+    def build(self, rows: Iterable[tuple[int, str, str, str]], col_mod: int) -> None:
+        """Full (re)build in one transaction; stamps ``col_mod``. Rolls back on failure."""
+        try:
+            with self._lock:
+                self._conn.execute("DELETE FROM idx")
+                self._conn.execute("DELETE FROM rowmap")
+                for note_id, source, ref, text in rows:
+                    if not (text or "").strip():
+                        continue
+                    cur = self._conn.execute("INSERT INTO idx(txt) VALUES(?)", (text,))
+                    self._conn.execute(
+                        "INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?,?,?,?)",
+                        (cur.lastrowid, note_id, source, ref),
+                    )
+                self._set_meta("col_mod", col_mod)
+                self._conn.commit()
+        except Exception:
+            # Roll back the half-applied DELETE+INSERTs so a later count/SELECT (or the next
+            # build's DELETE) doesn't see a partially-cleared index on the shared connection.
+            with self._lock, contextlib.suppress(Exception):
+                self._conn.rollback()
+            raise
+
+    def match_rows(self, expr: str, limit: int, *, with_text: bool) -> list[EngineRow]:
+        """Execute one FTS5 MATCH (rank-ordered) returning provenance + snippet rows.
+
+        Raises ``sqlite3.OperationalError`` on a bad expression — the facade
+        decides the fallback.
+        """
+        txt_col = "idx.txt" if with_text else "NULL"
+        with self._lock:
+            cur = self._conn.execute(
+                f"SELECT m.note_id, m.source, m.ref, {txt_col}, "
+                "snippet(idx, 0, '', '', '…', ?) "
+                "FROM idx JOIN rowmap m ON m.rowid = idx.rowid "
+                "WHERE idx MATCH ? ORDER BY rank LIMIT ?",
+                (SNIPPET_TOKENS, expr, limit),
+            )
+            return [(int(r[0]), r[1], r[2], r[3], r[4]) for r in cur.fetchall()]
+
+
+class NativeDerivedEngine:
+    """The Rust engine (#281): the same surface over rusqlite's *bundled* SQLite.
+
+    A thin marshaling adapter over ``shrike_native.DerivedTextEngine``; FTS5 +
+    trigram are deterministically available (the bundled build always has them),
+    so the facade's probe isn't consulted on this path. Native errors are
+    translated to ``sqlite3.Error`` so the facade's recovery/fallback logic is
+    engine-agnostic.
+    """
+
+    def __init__(self, path: Path) -> None:
+        import shrike_native
+
+        self._native_errors = (
+            shrike_native.NativeInputError,
+            shrike_native.NativeUnavailableError,
+            shrike_native.NativeInternalError,
+        )
+        try:
+            self._rust = shrike_native.DerivedTextEngine(str(path), SCHEMA_VERSION)
+        except self._native_errors as e:
+            raise sqlite3.DatabaseError(str(e)) from e
+
+    @staticmethod
+    def probe() -> bool:
+        return True  # bundled SQLite: FTS5 + trigram always compiled in
+
+    def close(self) -> None:
+        self._rust.close()
+
+    def get_col_mod(self) -> int | None:
+        # Explicit conversion — see NativeIndexEngine.ndim (no-any-return on CI).
+        value = self._rust.get_col_mod()
+        return None if value is None else int(value)
+
+    def set_col_mod(self, value: int) -> None:
+        self._rust.set_col_mod(int(value))
+
+    def count(self) -> int:
+        return int(self._rust.count())
+
+    def ingest(self, note_id: int, source: str, refs_text: Mapping[str, str]) -> None:
+        self._rust.ingest(int(note_id), source, list(refs_text.items()))
+
+    def remove(self, note_ids: list[int], source: str | None = None) -> None:
+        self._rust.remove([int(n) for n in note_ids], source)
+
+    def build(self, rows: Iterable[tuple[int, str, str, str]], col_mod: int) -> None:
+        try:
+            self._rust.build(list(rows), int(col_mod))
+        except self._native_errors as e:
+            raise sqlite3.DatabaseError(str(e)) from e
+
+    def match_rows(self, expr: str, limit: int, *, with_text: bool) -> list[EngineRow]:
+        try:
+            rows = self._rust.match_rows(expr, int(limit), with_text)
+        except self._native_errors as e:
+            raise sqlite3.OperationalError(str(e)) from e
+        return [(int(n), s, r, t, sn) for n, s, r, t, sn in rows]
+
+
+def native_derived_requested() -> bool:
+    """Whether the operator opted into the native derived engine (#281 bake flag)."""
+    return os.environ.get("SHRIKE_NATIVE_DERIVED", "").lower() in ("1", "true", "yes")
+
+
 class DerivedTextStore:
     """FTS5-trigram lexical index over note text in a sidecar ``shrike.db`` (see module doc)."""
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
-        self._lock = threading.Lock()  # guards SQLite access (held across a build's transaction)
-        # A *separate*, short-lived lock for the BUILDING claim only — never held during SQLite I/O,
+        # A short-lived lock for the BUILDING claim only — never held during SQLite I/O,
         # so a /reload on the event loop can claim/skip a build without waiting on an in-flight
-        # build's data transaction (which `self._lock` would).
+        # build's data transaction (the engine's internal lock would).
         self._state_lock = threading.Lock()
-        self._conn: sqlite3.Connection | None = None
+        self._engine: SqliteDerivedEngine | NativeDerivedEngine | None = None
         self._available = False
         self._state = IndexState.UNAVAILABLE
         self._col_mod: int | None = None
@@ -82,6 +315,18 @@ class DerivedTextStore:
         self._open()
 
     # ── lifecycle ────────────────────────────────────────────────────────────────────────────────
+
+    def _make_engine(self) -> SqliteDerivedEngine | NativeDerivedEngine:
+        """Build the configured engine (native when requested and installed, else stdlib)."""
+        if native_derived_requested():
+            try:
+                return NativeDerivedEngine(self._path)
+            except ImportError:
+                logger.warning(
+                    "SHRIKE_NATIVE_DERIVED set but the shrike-native extension is not "
+                    "installed; using the stdlib sqlite3 engine."
+                )
+        return SqliteDerivedEngine(self._path)
 
     def _open(self) -> None:
         if not self._probe_fts5():
@@ -116,20 +361,17 @@ class DerivedTextStore:
         return IndexState.READY if self._col_mod is not None else IndexState.UNAVAILABLE
 
     def _connect_and_init(self) -> None:
-        """(Re)open the connection and ensure the schema. Raises ``sqlite3.Error`` on a bad file."""
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        with self._lock:
-            self._ensure_schema()
-            self._col_mod = self._get_meta_int("col_mod")
+        """(Re)open the engine and ensure the schema. Raises ``sqlite3.Error`` on a bad file."""
+        self._engine = self._make_engine()
+        self._col_mod = self._engine.get_col_mod()
         self._available = True
 
     def _discard_file(self) -> None:
-        """Close the connection and delete the sidecar (+ WAL/SHM) — recovery from corruption."""
-        if self._conn is not None:
+        """Close the engine and delete the sidecar (+ WAL/SHM) — recovery from corruption."""
+        if self._engine is not None:
             with contextlib.suppress(Exception):
-                self._conn.close()
-            self._conn = None
+                self._engine.close()
+            self._engine = None
         self._available = False
         for suffix in ("", "-wal", "-shm"):
             with contextlib.suppress(OSError):
@@ -137,57 +379,20 @@ class DerivedTextStore:
 
     @staticmethod
     def _probe_fts5() -> bool:
-        """Whether this SQLite build has FTS5 with the trigram tokenizer (on a throwaway conn)."""
-        try:
-            probe = sqlite3.connect(":memory:")
-            try:
-                probe.execute("CREATE VIRTUAL TABLE t USING fts5(x, tokenize='trigram')")
-            finally:
-                probe.close()
-        except sqlite3.OperationalError:
-            return False
-        return True
+        """Whether the selected engine's SQLite has FTS5 with the trigram tokenizer.
 
-    def _ensure_schema(self) -> None:
-        assert self._conn is not None
-        c = self._conn
-        c.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value)")
-        version = self._get_meta_int("schema_version")
-        if version is not None and version != SCHEMA_VERSION:
-            # No migrations yet: a schema bump drops the derived data; the next drift rebuilds it.
-            logger.info("Derived store schema v%s != v%s; resetting", version, SCHEMA_VERSION)
-            c.execute("DROP TABLE IF EXISTS idx")
-            c.execute("DROP TABLE IF EXISTS rowmap")
-            c.execute("DELETE FROM meta WHERE key='col_mod'")
-        # idx holds only the searchable text (rowid auto). rowmap carries the (note_id, source, ref)
-        # provenance keyed by that rowid, indexed by note_id so incremental delete-by-note is cheap
-        # (FTS5 has no secondary indexes, and DELETE-by-column would scan the whole index).
-        c.execute("CREATE VIRTUAL TABLE IF NOT EXISTS idx USING fts5(txt, tokenize='trigram')")
-        c.execute(
-            "CREATE TABLE IF NOT EXISTS rowmap("
-            "rowid INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, "
-            "source TEXT NOT NULL, ref TEXT NOT NULL)"
-        )
-        c.execute("CREATE INDEX IF NOT EXISTS rowmap_note ON rowmap(note_id, source)")
-        self._set_meta("schema_version", SCHEMA_VERSION)
-        c.commit()
+        Constant True on the native path — rusqlite's bundled SQLite always
+        compiles them in, which is the #281 win (the probe stops being
+        load-bearing there); the stdlib engine still genuinely probes.
+        """
+        if native_derived_requested():
+            return NativeDerivedEngine.probe()
+        return SqliteDerivedEngine.probe()
 
     def close(self) -> None:
-        if self._conn is not None:
-            with self._lock:
-                self._conn.close()
-                self._conn = None
-
-    # ── meta helpers ─────────────────────────────────────────────────────────────────────────────
-
-    def _get_meta_int(self, key: str) -> int | None:
-        assert self._conn is not None
-        row = self._conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
-        return int(row[0]) if row is not None and row[0] is not None else None
-
-    def _set_meta(self, key: str, value: Any) -> None:
-        assert self._conn is not None
-        self._conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", (key, value))
+        if self._engine is not None:
+            self._engine.close()
+            self._engine = None
 
     # ── properties ───────────────────────────────────────────────────────────────────────────────
 
@@ -213,57 +418,21 @@ class DerivedTextStore:
         the next boot's :meth:`check_drift` sees no drift and skips a needless full rebuild. A no-op
         unless FTS5 is present and the store is open (callers gate on :attr:`available`).
         """
-        if not self._available or self._conn is None:
+        if not self._available or self._engine is None:
             return
-        with self._lock:
-            self._set_meta("col_mod", value)
-            self._conn.commit()
-            self._col_mod = value
+        self._engine.set_col_mod(value)
+        self._col_mod = value
 
     @property
     def size(self) -> int:
-        # Skip the count (and the lock) while a build holds the lock for its whole transaction —
+        # Skip the count (and the engine lock) while a build holds it for its whole transaction —
         # `build()` keeps `_state == BUILDING` across its DELETE+N×INSERT+commit, so a concurrent
         # `status()`/`GET /status` must not block the event loop waiting on it.
-        if not self._available or self._conn is None or self._state == IndexState.BUILDING:
+        if not self._available or self._engine is None or self._state == IndexState.BUILDING:
             return 0
-        with self._lock:
-            row = self._conn.execute("SELECT count(*) FROM rowmap").fetchone()
-        return int(row[0]) if row else 0
+        return self._engine.count()
 
     # ── writes ───────────────────────────────────────────────────────────────────────────────────
-
-    def _delete_rows(self, note_ids: Iterable[int], source: str | None) -> None:
-        """Delete a note's rows (optionally one source) from idx + rowmap. Caller holds the lock."""
-        assert self._conn is not None
-        ids = list(note_ids)
-        if not ids:
-            return
-        marks = ",".join("?" * len(ids))
-        params: list[Any] = list(ids)
-        clause = f"note_id IN ({marks})"
-        if source is not None:
-            clause += " AND source=?"
-            params.append(source)
-        rows = self._conn.execute(f"SELECT rowid FROM rowmap WHERE {clause}", params).fetchall()
-        rowids = [r[0] for r in rows]
-        if not rowids:
-            return
-        rmarks = ",".join("?" * len(rowids))
-        self._conn.execute(f"DELETE FROM idx WHERE rowid IN ({rmarks})", rowids)
-        self._conn.execute(f"DELETE FROM rowmap WHERE rowid IN ({rmarks})", rowids)
-
-    def _insert_rows(self, note_id: int, source: str, refs_text: Mapping[str, str]) -> None:
-        """Insert one (note_id, source) note's {ref: text} rows. Caller holds the lock."""
-        assert self._conn is not None
-        for ref, text in refs_text.items():
-            if not (text or "").strip():
-                continue
-            cur = self._conn.execute("INSERT INTO idx(txt) VALUES(?)", (text,))
-            self._conn.execute(
-                "INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?,?,?,?)",
-                (cur.lastrowid, note_id, source, ref),
-            )
 
     def ingest(self, note_id: int, source: str, refs_text: Mapping[str, str]) -> None:
         """Replace a note's text rows for one ``source`` (incremental upsert).
@@ -271,50 +440,28 @@ class DerivedTextStore:
         ``refs_text`` maps a ``ref`` (field name, or a media filename for a derived source) to its
         text. #98 calls this with ``source="field"``; #199 will call it with ``"ocr"``/``"asr"``.
         """
-        if not self._available or self._conn is None:
+        if not self._available or self._engine is None:
             return
-        with self._lock:
-            self._delete_rows([note_id], source)
-            self._insert_rows(note_id, source, refs_text)
-            self._conn.commit()
+        self._engine.ingest(note_id, source, refs_text)
 
     def remove(self, note_ids: list[int], source: str | None = None) -> None:
         """Drop notes' rows (all sources, or just one)."""
-        if not self._available or self._conn is None or not note_ids:
+        if not self._available or self._engine is None or not note_ids:
             return
-        with self._lock:
-            self._delete_rows(note_ids, source)
-            self._conn.commit()
+        self._engine.remove(note_ids, source)
 
     def build(self, rows: Iterable[tuple[int, str, str, str]], col_mod: int) -> None:
         """Full (re)build from ``(note_id, source, ref, text)`` rows; stamps ``col_mod``."""
-        if not self._available or self._conn is None:
+        if not self._available or self._engine is None:
             return
         self._state = IndexState.BUILDING
         try:
-            with self._lock:
-                self._conn.execute("DELETE FROM idx")
-                self._conn.execute("DELETE FROM rowmap")
-                for note_id, source, ref, text in rows:
-                    if not (text or "").strip():
-                        continue
-                    cur = self._conn.execute("INSERT INTO idx(txt) VALUES(?)", (text,))
-                    self._conn.execute(
-                        "INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?,?,?,?)",
-                        (cur.lastrowid, note_id, source, ref),
-                    )
-                self._set_meta("col_mod", col_mod)
-                self._conn.commit()
-                self._col_mod = col_mod
+            self._engine.build(rows, col_mod)
+            self._col_mod = col_mod
             self._state = IndexState.READY
             logger.info("Derived-text store built: %d rows (col_mod=%d)", self.size, col_mod)
         except Exception:
             self._state = IndexState.ERROR
-            # Roll back the half-applied DELETE+INSERTs so a later status()/size SELECT (or the next
-            # build's DELETE) doesn't see a partially-cleared index on the shared connection.
-            with self._lock, contextlib.suppress(Exception):
-                if self._conn is not None:
-                    self._conn.rollback()
             logger.exception("Derived-text store build failed")
             raise
 
@@ -374,21 +521,15 @@ class DerivedTextStore:
         query is shorter than a trigram (FTS5 trigram can't match < 3 chars).
         """
         q = query.strip()
-        if not self.available or self._conn is None or len(q) < MIN_TRIGRAM:
+        if not self.available or self._engine is None or len(q) < MIN_TRIGRAM:
             return None
         expr = _fts_quote(q)  # a quoted phrase → contiguous (literal substring) match
-        with self._lock:
-            try:
-                cur = self._conn.execute(
-                    "SELECT m.note_id, m.source, m.ref, snippet(idx, 0, '', '', '…', ?) "
-                    "FROM idx JOIN rowmap m ON m.rowid = idx.rowid "
-                    "WHERE idx MATCH ? ORDER BY rank LIMIT ?",
-                    (SNIPPET_TOKENS, expr, limit),
-                )
-                return [LexicalMatch(int(r[0]), r[1], r[2], r[3]) for r in cur.fetchall()]
-            except sqlite3.OperationalError:
-                logger.debug("FTS5 substring query failed for %r; falling back", q, exc_info=True)
-                return None
+        try:
+            rows = self._engine.match_rows(expr, limit, with_text=False)
+        except sqlite3.OperationalError:
+            logger.debug("FTS5 substring query failed for %r; falling back", q, exc_info=True)
+            return None
+        return [LexicalMatch(nid, source, ref, snippet) for nid, source, ref, _, snippet in rows]
 
     def search_fuzzy(
         self, query: str, top_k: int = DEFAULT_FUZZY_TOP_K
@@ -400,29 +541,21 @@ class DerivedTextStore:
         when the store can't serve it (the fuzzy signal is simply absent — graceful).
         """
         grams = _trigrams(query.strip())
-        if not self.available or self._conn is None or len(grams) < FUZZY_MIN_SHARED:
+        if not self.available or self._engine is None or len(grams) < FUZZY_MIN_SHARED:
             return []
         gram_set = set(grams)
         expr = " OR ".join(_fts_quote(g) for g in gram_set)
+        try:
+            rows = self._engine.match_rows(expr, top_k * 4, with_text=True)
+        except sqlite3.OperationalError:
+            logger.debug("FTS5 fuzzy query failed for %r", query, exc_info=True)
+            return []
         seen: set[int] = set()
         out: list[tuple[int, LexicalMatch]] = []
-        with self._lock:
-            try:
-                cur = self._conn.execute(
-                    "SELECT m.note_id, m.source, m.ref, idx.txt, "
-                    "snippet(idx, 0, '', '', '…', ?) "
-                    "FROM idx JOIN rowmap m ON m.rowid = idx.rowid "
-                    "WHERE idx MATCH ? ORDER BY rank LIMIT ?",
-                    (SNIPPET_TOKENS, expr, top_k * 4),
-                )
-                rows = cur.fetchall()
-            except sqlite3.OperationalError:
-                logger.debug("FTS5 fuzzy query failed for %r", query, exc_info=True)
-                return []
         for note_id, source, ref, txt, snippet in rows:
             # Min-overlap floor: FTS5 OR matches ≥1 trigram; require a few shared so a single common
             # gram doesn't surface noise. (bm25 already down-ranks weak matches; this is hygiene.)
-            if len(gram_set & set(_trigrams(txt))) < FUZZY_MIN_SHARED:
+            if len(gram_set & set(_trigrams(txt or ""))) < FUZZY_MIN_SHARED:
                 continue
             nid = int(note_id)
             if nid in seen:  # dedup to one (best) row per note — rows arrive best-first

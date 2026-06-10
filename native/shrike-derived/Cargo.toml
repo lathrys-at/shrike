@@ -1,0 +1,17 @@
+[package]
+name = "shrike-derived"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Native derived-text engine: rusqlite (bundled SQLite) FTS5 trigram store (#281)."
+
+[lib]
+name = "shrike_derived"
+
+# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py.
+[dependencies]
+shrike-ffi = { workspace = true }
+# bundled: compiles its own SQLite with FTS5 on — the deterministic-availability
+# win this engine exists for (the stdlib-sqlite3 probe stops being load-bearing).
+rusqlite = { version = "0.37", features = ["bundled"] }
