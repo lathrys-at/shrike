@@ -1,4 +1,4 @@
-name: Warm Bazel cache
+name: Warm CI caches
 
 # Populates main's actions/cache scope with the Bazel build graph (#244/#262) so a
 # PR's first Bazel run restores it instead of building cold: the Rust toolchain +
@@ -10,16 +10,41 @@ name: Warm Bazel cache
 # (#93). Cutting over the test lanes to Bazel (#262) retired the old pip llama-server
 # + HuggingFace model warmer — those externals now ride the Bazel repository cache.
 #
+# Since #319 this also warms the LINT lane's Rust cache (the cargo/clippy
+# dependency build under Swatinem/rust-cache's `rust-lint` shared key) — the
+# lint lane compiles the native workspace with cargo, not Bazel, so it needs
+# its own warmed entry in main's scope.
+#
 # Runs on the default branch twice a week — comfortably under the 7-day cache
-# eviction window — and on demand via workflow_dispatch (use it to warm the cache
-# immediately, e.g. after bumping the pinned llama-server, a model, or a dependency).
+# eviction window — on demand via workflow_dispatch, AND on every merge to main
+# that touches the native tree or its pins (#319): a crate-pin bump otherwise
+# leaves every subsequent PR cold-compiling the same dependency delta until the
+# next scheduled warm. One incremental warm build on main (linux 1x, on top of
+# the restored caches) replaces N cold deltas on PRs — it saves minutes net.
 on:
   schedule:
     - cron: "17 4 * * 1,4" # Mon & Thu, 04:17 UTC
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "native/**"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - "requirements_lock.txt"
+      - ".bazelversion"
+      - "tools/bazel.lock"
+      - ".github/workflows/warm-cache.yml"
 
 permissions:
   contents: read
+
+# A merge burst (a PR stack landing) queues several warms; only the newest
+# matters — each warm is a superset built from the latest main. Cancel the
+# in-flight one rather than running the backlog serially.
+concurrency:
+  group: warm-cache-main
+  cancel-in-progress: true
 
 jobs:
   warm-bazel:
@@ -60,3 +85,24 @@ jobs:
             --disk_cache="$HOME/.cache/shrike/bazel-disk" \
             --repository_cache="$HOME/.cache/shrike/bazel-repo" \
             -- //... //tests/integration:embedding
+
+  # The lint lane's Rust cache (#319): the SAME rust-cache shared-key and the
+  # SAME clippy command as test.yml's lint job, run on main so the saved entry
+  # lands in the default branch's scope — the only scope every PR can restore
+  # from. rust-cache saves ~/.cargo (registry + git, i.e. the crate downloads)
+  # and a dependency-pruned native/target keyed on Cargo.lock + toolchain, so a
+  # PR's clippy step restores the compiled dependency cone and only builds the
+  # workspace crates themselves.
+  warm-rust-lint:
+    name: Warm Rust lint cache (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          shared-key: rust-lint
+          cache-on-failure: true
+      - name: Clippy (warms the dependency build)
+        run: cd native && cargo clippy --workspace --exclude shrike-collection --exclude shrike-kernel --all-targets -- -D warnings

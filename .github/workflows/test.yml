@@ -162,6 +162,21 @@ jobs:
       # pure-Python PR doesn't pay for a Rust toolchain or a clippy build;
       # rc-labelled PRs run it regardless (full-suite release posture). The
       # GitHub runner ships rustup; sync to the repo's pinned toolchain default.
+      #
+      # rust-cache (#319): caches ~/.cargo (registry + git checkouts — the
+      # crate downloads) and a dependency-pruned native/target, keyed on
+      # Cargo.lock + the toolchain, so clippy stops cold-compiling the whole
+      # dependency cone every run. `shared-key` makes the cache one logical
+      # entry shared with warm-cache.yml's warm-rust-lint job — a PR's cache
+      # save is invisible to sibling PRs (only main's scope is shared, the #93
+      # lesson), so the warmer seeds main and every PR restores from there.
+      - name: Cache Rust dependencies
+        if: needs.changes.outputs.native == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          shared-key: rust-lint
+          cache-on-failure: true
       - name: Rust format check
         if: needs.changes.outputs.native == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
         run: cd native && cargo fmt --check
