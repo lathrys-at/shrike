@@ -1,0 +1,27 @@
+[package]
+name = "shrike-collection"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Rust collection core over anki's protobuf service layer (#278, slice 1)."
+
+[lib]
+name = "shrike_collection"
+
+# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py
+# behind its (default-off) `anki-core` feature.
+#
+# Consumption rule (#277 verdict review, binding): anki is consumed ONLY through
+# its protobuf service layer — Backend::run_service_method + run_db_command_bytes,
+# the exact surface pylib's rsbridge binds — never the bare crate API. Pin policy:
+# tag == the pip wheel version, bumped together.
+[dependencies]
+shrike-ffi = { workspace = true }
+anki = { git = "https://github.com/ankitects/anki", tag = "25.09.4", package = "anki" }
+anki_proto = { git = "https://github.com/ankitects/anki", tag = "25.09.4", package = "anki_proto" }
+prost = "0.13"
+serde_json = "1"
+# rslib relies on the anki workspace's feature unification: sibling crates
+# enable tokio's io-util/etc., which an external consumer must re-enable.
+tokio = { version = "1", features = ["full"] }

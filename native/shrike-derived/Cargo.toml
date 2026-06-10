@@ -22,4 +22,6 @@ bundled = ["rusqlite/bundled"]
 # Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py.
 [dependencies]
 shrike-ffi = { workspace = true }
-rusqlite = { version = "0.37" }
+# 0.36 to match anki's pin: only one crate may link sqlite3 (the links attr),
+# and the anki workspace (shrike-collection, #278) brings rusqlite 0.36.
+rusqlite = { version = "0.36" }
