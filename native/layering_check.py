@@ -18,12 +18,32 @@ PYO3_ALLOWED = {"shrike-py", "shrike-native-demo"}
 
 
 def manifest_paths() -> list[Path]:
-    """Every crate manifest shipped as test data (runfiles cwd is the repo root)."""
-    root = Path("native")
-    found = sorted(root.glob("*/Cargo.toml"))
-    if not found:
-        raise SystemExit("layering_check found no crate manifests under native/")
-    return found
+    """Every workspace member's manifest, derived from the root Cargo.toml.
+
+    Driving the scan from the *members list* (not a directory glob) makes a
+    coverage gap loud: under Bazel only data-declared files exist in runfiles,
+    so a new crate whose manifest wasn't added to this test's `data` would
+    silently escape a glob — here it fails the run instead.
+    """
+    root = Path("native/Cargo.toml")
+    workspace = tomllib.loads(root.read_text())
+    members = workspace.get("workspace", {}).get("members", [])
+    if not members:
+        raise SystemExit("layering_check: no workspace members in native/Cargo.toml")
+    paths: list[Path] = []
+    missing: list[str] = []
+    for member in members:
+        manifest = Path("native") / member / "Cargo.toml"
+        if manifest.is_file():
+            paths.append(manifest)
+        else:
+            missing.append(str(manifest))
+    if missing:
+        raise SystemExit(
+            "layering_check: member manifest(s) not in runfiles — add them to the "
+            f"test's data in native/BUILD.bazel: {missing}"
+        )
+    return paths
 
 
 def main() -> int:
