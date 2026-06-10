@@ -22,6 +22,7 @@ from mcp.server.transport_security import (
 from shrike._mcp_perf import install_validator_cache
 from shrike.collection import DEFAULT_LOCK_HOLD, CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
+from shrike.derived import DerivedTextStore
 from shrike.embedding import DEFAULT_BACKEND, SUPPORTED_BACKENDS, EmbeddingRuntime
 from shrike.embedding_base import EmbedderBackend
 from shrike.index import (
@@ -45,6 +46,16 @@ def _collect_for_rebuild(c: Any) -> tuple[list[NoteEmbedInput], int]:
     """
     note_ids = list(c.find_notes("deck:*"))
     return CollectionWrapper._note_embed_inputs(c, note_ids), c.mod
+
+
+def _collect_derived_rows(c: Any) -> tuple[list[tuple[int, str, str, str]], int]:
+    """Gather every note's ``(note_id, "field", field_name, raw_value)`` rows + the mod stamp.
+
+    The full-build input for the derived-text store (#98). Runs on the collection worker thread.
+    Independent of the embedding index — the store builds whether or not a backend is configured.
+    """
+    note_ids = list(c.find_notes("deck:*"))
+    return list(CollectionWrapper.derived_field_rows(c, note_ids)), c.mod
 
 
 def _make_image_resolver(
@@ -275,6 +286,7 @@ def _register_custom_routes(
     runtime: EmbeddingRuntime,
     index: VectorIndex,
     saver: IndexSaver,
+    derived: DerivedTextStore,
     security: TransportSecuritySettings | None,
 ) -> None:
     """Register custom HTTP endpoints on the server.
@@ -338,6 +350,7 @@ def _register_custom_routes(
         # slow/hung embedding server can't stall request handling.
         status["embedding"] = await asyncio.to_thread(runtime.health)
         status["index"] = index.status()
+        status["derived"] = derived.status()
         status["locking"] = "cooperative" if wrapper.cooperative else "permanent"
         status["collection_held"] = wrapper.is_open
 
@@ -482,6 +495,12 @@ def _register_custom_routes(
         await wrapper.reopen()
         col_mod = await wrapper.run(lambda c: c.mod)
 
+        # The derived-text store is independent of the embedder — rebuild it on drift regardless
+        # (cheap text-only build).
+        if derived.check_drift(col_mod):
+            rows, dmod = await wrapper.run(_collect_derived_rows)
+            derived.build_in_background(rows, dmod)
+
         # Re-check index drift against the re-opened collection. Without a running
         # embedder we can't rebuild (the index stays unavailable); just report.
         rebuilding = False
@@ -501,6 +520,7 @@ def _register_custom_routes(
         logger.info("Shutdown requested via HTTP from %s", request.client)
         # aclose cancels the pending debounce timer and flushes if dirty.
         await saver.aclose()
+        derived.close()
         runtime.stop()
         wrapper.close()
         server_lock.release()
@@ -861,12 +881,31 @@ def main() -> None:
     elif args.no_embedding and args.embedding_model:
         logger.info("Embedding service disabled at boot (--no-embedding); model configured")
 
+    # The derived-text store (FTS5 trigram sidecar) is independent of the embedding index — it
+    # builds whether or not a backend is configured. Cheap col_mod probe first; only read all field
+    # text on real drift (first build, or an external edit), so a clean reload does no full read.
+    derived = DerivedTextStore(path=cache_base / "shrike.db")
+    logger.info("Derived-text store: %s", derived.status())
+    d_col_mod = wrapper.run_sync(lambda c: c.mod)
+    if derived.check_drift(d_col_mod):
+        rows, dmod = wrapper.run_sync(_collect_derived_rows)
+        derived.build_in_background(rows, dmod)
+        logger.info("Derived-text store drift; building in background (%d rows)", len(rows))
+
     if args.cooperative_lock:
         # On every re-acquire after an idle release, re-check index drift: if the
         # collection changed on disk while we were released (Anki, sync, import),
         # rebuild. Cheap col_mod-only check; texts are read under the lock and
         # embedded off-lock only on real drift. Runs on the worker thread.
         def _acquire_hook(col: Any) -> None:
+            # The derived-text store is independent of the embedder — rebuild it on drift even with
+            # no embedding service (it's a cheap text-only build).
+            if derived.check_drift(col.mod):
+                rows, dmod = _collect_derived_rows(col)
+                logger.info(
+                    "Collection changed while idle; rebuilding derived store (%d rows)", len(rows)
+                )
+                derived.build_in_background(rows, dmod)
             if not index.available or not index.check_drift(col.mod):
                 return
             svc_now = runtime.service
@@ -885,6 +924,7 @@ def main() -> None:
         sig_name = signal.Signals(signum).name
         logger.info("Received %s, shutting down", sig_name)
         index.save()
+        derived.close()
         runtime.stop()
         wrapper.close()
         server_lock.release()
@@ -981,6 +1021,7 @@ def main() -> None:
         wrapper,
         index=index,
         saver=saver,
+        derived=derived,
         allow_private_fetch=allow_private_media_fetch,
         server_path_roots=server_path_roots,
         media_base_url=media_base_url,
@@ -993,6 +1034,7 @@ def main() -> None:
         runtime=runtime,
         index=index,
         saver=saver,
+        derived=derived,
         security=transport_security,
     )
 

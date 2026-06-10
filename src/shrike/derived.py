@@ -164,6 +164,22 @@ class DerivedTextStore:
     def col_mod(self) -> int | None:
         return self._col_mod
 
+    @col_mod.setter
+    def col_mod(self, value: int) -> None:
+        """Advance the drift watermark in place, without a rebuild.
+
+        Called after an incremental ``ingest``/``remove`` keeps the store current, or after a
+        vectors-/text-unchanged metadata edit (tag/deck rename) that only bumped ``col.mod`` — so
+        the next boot's :meth:`check_drift` sees no drift and skips a needless full rebuild. A no-op
+        unless FTS5 is present and the store is open (callers gate on :attr:`available`).
+        """
+        if not self._available or self._conn is None:
+            return
+        with self._lock:
+            self._set_meta("col_mod", value)
+            self._conn.commit()
+            self._col_mod = value
+
     @property
     def size(self) -> int:
         if not self._available or self._conn is None:

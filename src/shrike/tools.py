@@ -15,6 +15,7 @@ from shrike.collection import (
     CollectionWrapper,
     substring_info,
 )
+from shrike.derived import DerivedTextStore, LexicalMatch
 from shrike.index import IndexSaver, IndexState, VectorIndex, activation_floor
 from shrike.schemas import (
     CollectionCheckResponse,
@@ -55,9 +56,11 @@ logger = logging.getLogger("shrike.tools")
 # Per-signal RRF weights for search_notes' fusion (#180/#201). The semantic retriever is now
 # per-modality — `text` and `image` are separate rank-based signals (search_by_modality), so the
 # CLIP modality gap (image cosines sit a constant offset below text ones) is invisible to the
-# fusion. Equal today; the tuning harness + further signals (n-gram #98, tag #179) will make these
+# fusion. The `fuzzy` signal (#98) is the derived-text store's trigram/typo ranking; it's weighted
+# below the rest because it's the noisiest (a near-miss is weaker evidence than a literal or
+# semantic hit). Equal-ish today; the tuning harness + further signals (tag #179) will make these
 # config/`--search-*` knobs. The exact-match override (priority tier) is orthogonal to the weight.
-SEARCH_WEIGHTS = {"text": 1.0, "image": 1.0, "exact": 1.0}
+SEARCH_WEIGHTS = {"text": 1.0, "image": 1.0, "exact": 1.0, "fuzzy": 0.5}
 
 # Intra-modal activation gate (#201b). A non-text modality's ranking is fed to the fusion only when
 # its best match for the query exceeds `mean + ACTIVATION_MARGIN·std` of that modality's calibrated
@@ -134,6 +137,7 @@ def register_tools(
     index: VectorIndex | None = None,
     saver: IndexSaver | None = None,
     *,
+    derived: DerivedTextStore | None = None,
     allow_private_fetch: bool = False,
     server_path_roots: list[str] | None = None,
     media_base_url: str | None = None,
@@ -567,6 +571,79 @@ def register_tools(
                     break
             return ranking
 
+        async def _collect_substring_candidates(
+            text: str, note_data: dict[int, dict[str, Any]]
+        ) -> None:
+            """Populate ``note_data`` with literal-substring candidates for ``text``.
+
+            Prefers the derived-text store's FTS5 trigram index (fast); falls back to the linear
+            ``find_notes`` scan when the store is unavailable/not-built or the query is sub-trigram
+            (``search_substring`` returns ``None``). Either way ``substring_info`` downstream is the
+            authority that confirms + annotates each candidate, so both paths agree on what counts
+            as a literal hit — and an index built before the store existed degrades cleanly.
+            """
+            lex = None
+            if derived is not None:
+                sub_limit = top_k * 10 if (deck or tags) else top_k + len(exclude_set)
+                lex = await asyncio.to_thread(derived.search_substring, text, sub_limit)
+            if lex is None:
+                # Fallback: the find_notes path already applies scope + the substring annotation.
+                for note in await wrapper.search_substring(
+                    text, deck=deck, tags=tags or None, exclude_ids=list(exclude_set), limit=top_k
+                ):
+                    note_data[note["id"]] = note
+                return
+            added = 0
+            for lm in lex:
+                nid = lm.note_id
+                if nid in exclude_set or nid in note_data:  # store may return a row per field
+                    continue
+                try:
+                    data = await wrapper.note_to_dict(nid, "full")
+                except Exception:
+                    logger.debug("search_notes: skipping unreadable note %s", nid, exc_info=True)
+                    continue
+                if not _in_scope(data):
+                    continue
+                note_data[nid] = data
+                added += 1
+                if added >= top_k:
+                    break
+
+        async def _collect_fuzzy(
+            text: str, note_data: dict[int, dict[str, Any]]
+        ) -> tuple[list[int], dict[int, LexicalMatch]]:
+            """Fuzzy (trigram/typo) ranking + per-note evidence from the derived-text store (#98).
+
+            Returns a scoped, deduped note ranking (best-first, capped at top_k) and a
+            ``{note_id: LexicalMatch}`` of the matched (source, ref, snippet). Empty when the store
+            can't serve it — the fuzzy signal simply doesn't join the fusion (graceful).
+            """
+            if derived is None or not derived.available:
+                return [], {}
+            hits = await asyncio.to_thread(derived.search_fuzzy, text, top_k)
+            ranking: list[int] = []
+            evidence: dict[int, LexicalMatch] = {}
+            for nid, lm in hits:
+                if nid in exclude_set or nid in evidence:
+                    continue
+                if nid not in note_data:
+                    try:
+                        data = await wrapper.note_to_dict(nid, "full")
+                    except Exception:
+                        logger.debug(
+                            "search_notes: skipping unreadable note %s", nid, exc_info=True
+                        )
+                        continue
+                    if not _in_scope(data):
+                        continue
+                    note_data[nid] = data
+                ranking.append(nid)
+                evidence[nid] = lm
+                if len(ranking) >= top_k:
+                    break
+            return ranking, evidence
+
         results: list[dict[str, Any]] = []
         for i, (kind, label, text) in enumerate(text_sources):
             # Each signal ranks its own candidates (best-first); rrf_fuse blends them by rank and
@@ -574,16 +651,14 @@ def register_tools(
             # magnitude-blindness is wrong). note_data caches every in-scope candidate's full dict.
             note_data: dict[int, dict[str, Any]] = {}
 
-            # Literal-substring candidates (query sources only). Anki's "*term*" search is a fast,
-            # scoped pre-filter; `substring_info` (recomputed below over every candidate) is the
-            # *authority* for what counts as a literal hit — so a literal match Anki's normalized
-            # search misses (text in markup/attributes) or that fell beyond its limit is still
-            # floated, keeping the annotation and the exact tier in lockstep.
+            # Literal-substring candidates (query sources only). The derived-text store's FTS5
+            # trigram index (or the find_notes fallback) is a fast, scoped pre-filter;
+            # `substring_info` (recomputed below over every candidate) is the *authority* for what
+            # counts as a literal hit — so a literal match the pre-filter's normalization misses
+            # (text in markup/attributes) or that fell beyond its limit is still floated, keeping
+            # the annotation and the exact tier in lockstep.
             if kind == "query":
-                for note in await wrapper.search_substring(
-                    text, deck=deck, tags=tags or None, exclude_ids=list(exclude_set), limit=top_k
-                ):
-                    note_data[note["id"]] = note
+                await _collect_substring_candidates(text, note_data)
 
             # Per-modality semantic rankings (scoped, excluded), distance-ascending. The text
             # ranking is thresholded as before; the image ranking is not (see _rank_modality). Each
@@ -613,6 +688,14 @@ def register_tools(
                 prev = sem_score.get(nid)
                 sem_score[nid] = isim if prev is None else max(prev, isim)
 
+            # Fuzzy (derived-text trigram/typo) ranking + evidence — query sources only. Run before
+            # the exact loop so a fuzzy candidate that *also* literally matches still joins the
+            # exact tier (it's now in note_data and gets a substring annotation below).
+            ranking_fuzzy: list[int] = []
+            fuzzy_evidence: dict[int, LexicalMatch] = {}
+            if kind == "query":
+                ranking_fuzzy, fuzzy_evidence = await _collect_fuzzy(text, note_data)
+
             # Exact ranking = every candidate whose content literally contains the query (the
             # `substring` annotation), so annotation ⟺ floated. Pre-filter hits already carry it.
             exact_ids: list[int] = []
@@ -624,7 +707,12 @@ def register_tools(
                         exact_ids.append(nid)
 
             fused = rrf_fuse(
-                {"text": ranking_text, "image": ranking_image, "exact": exact_ids},
+                {
+                    "text": ranking_text,
+                    "image": ranking_image,
+                    "exact": exact_ids,
+                    "fuzzy": ranking_fuzzy,
+                },
                 weights=SEARCH_WEIGHTS,
                 priority_signals=frozenset({"exact"}),
             )
@@ -633,8 +721,9 @@ def register_tools(
             # by signal name). hit.signals is already {signal_name: 1-based rank} from rrf_fuse —
             # just rename keys. (Best-rank, not "strongest contribution": those coincide only under
             # equal SEARCH_WEIGHTS; rank order is the weight-independent guarantee the sort makes.)
-            matches = [
-                {
+            matches: list[dict[str, Any]] = []
+            for hit in fused:
+                match = {
                     **note_data[hit.note_id],
                     "score": sem_score.get(hit.note_id),
                     "provenance": [
@@ -642,8 +731,10 @@ def register_tools(
                         for sig, rank in sorted(hit.signals.items(), key=lambda kv: (kv[1], kv[0]))
                     ],
                 }
-                for hit in fused
-            ]
+                lm = fuzzy_evidence.get(hit.note_id)
+                if lm is not None:  # the source-aware fuzzy window (#98)
+                    match["fuzzy"] = {"source": lm.source, "ref": lm.ref, "snippet": lm.snippet}
+                matches.append(match)
             results.append({"source": label, "matches": matches})
 
         logger.info(
@@ -771,72 +862,79 @@ def register_tools(
             counts.get("error", 0),
         )
 
-        # A dry run writes nothing, so there is no index maintenance or neighbor
+        # A dry run writes nothing, so there is no cache maintenance or neighbor
         # lookup to do — the results are pure validation outcomes.
-        if not dry_run and index and index.available:
-            changed_ids = [r["id"] for r in results if r.get("status") in ("created", "updated")]
-            if changed_ids:
-                # Index maintenance is best-effort: the notes are already
-                # committed to the collection, so a failure here must never
-                # turn a successful upsert into an error response. Keep the
-                # neighbor lookup inside this try for the same reason —
-                # otherwise an embedding failure leaves `texts` unbound.
-                neighbors_ok = False
-                try:
-                    inputs = await wrapper.note_embed_inputs(changed_ids)
-                    await asyncio.to_thread(index.add, inputs)
-                    index.col_mod = await wrapper.run(lambda c: c.mod)
-                    logger.debug("Index updated: %d notes added/replaced", len(changed_ids))
-                    neighbors_ok = await _attach_neighbors(
-                        results,
-                        changed_ids,
-                        [inp.text for inp in inputs],
-                        top_k_neighbors,
-                        neighbor_threshold,
-                    )
-                    # Schedule a debounced flush so a hard kill while idle
-                    # doesn't force a full re-embed. Non-blocking and last in
-                    # the try: it must not mask the neighbors attached above.
-                    if saver is not None:
-                        saver.request_save()
-                except Exception:
-                    logger.warning("Failed to update index after upsert", exc_info=True)
+        changed_ids = (
+            [r["id"] for r in results if r.get("status") in ("created", "updated")]
+            if not dry_run
+            else []
+        )
+        # The derived-text store is independent of the vector index — re-ingest the
+        # changed field text even when embeddings are off.
+        await _ingest_derived(changed_ids)
 
-                if not neighbors_ok:
-                    # Notes are saved, but neighbors could not be computed
-                    # (transient index/embedding hiccup). Flag each affected
-                    # result and point the caller at the recovery path: the
-                    # exact same neighbor data is reproducible via a similarity
-                    # search keyed on the note's own ID. We only reach here when
-                    # the index was available, so search_notes(ids=...) is a
-                    # viable retry.
-                    pending = [
-                        r["id"]
-                        for r in results
-                        if r.get("status") in ("created", "updated") and "neighbors" not in r
-                    ]
-                    for r in results:
-                        if r.get("id") in pending:
-                            r["neighbors_unavailable"] = True
-                    if pending:
-                        logger.info(
-                            "Neighbors unavailable for %d note(s); caller can retry via "
-                            "search_notes(ids=%s)",
-                            len(pending),
-                            pending,
-                        )
-                        return UpsertNotesResponse.model_validate(
-                            {
-                                "results": results,
-                                "dry_run": False,
-                                "message": (
-                                    "Notes were saved, but the vector index update failed, "
-                                    "so neighbors could not be computed. Retry with "
-                                    f"search_notes(ids={pending}) to fetch the same "
-                                    "neighbor data."
-                                ),
-                            }
-                        )
+        if changed_ids and index and index.available:
+            # Index maintenance is best-effort: the notes are already
+            # committed to the collection, so a failure here must never
+            # turn a successful upsert into an error response. Keep the
+            # neighbor lookup inside this try for the same reason —
+            # otherwise an embedding failure leaves `texts` unbound.
+            neighbors_ok = False
+            try:
+                inputs = await wrapper.note_embed_inputs(changed_ids)
+                await asyncio.to_thread(index.add, inputs)
+                index.col_mod = await wrapper.run(lambda c: c.mod)
+                logger.debug("Index updated: %d notes added/replaced", len(changed_ids))
+                neighbors_ok = await _attach_neighbors(
+                    results,
+                    changed_ids,
+                    [inp.text for inp in inputs],
+                    top_k_neighbors,
+                    neighbor_threshold,
+                )
+                # Schedule a debounced flush so a hard kill while idle
+                # doesn't force a full re-embed. Non-blocking and last in
+                # the try: it must not mask the neighbors attached above.
+                if saver is not None:
+                    saver.request_save()
+            except Exception:
+                logger.warning("Failed to update index after upsert", exc_info=True)
+
+            if not neighbors_ok:
+                # Notes are saved, but neighbors could not be computed
+                # (transient index/embedding hiccup). Flag each affected
+                # result and point the caller at the recovery path: the
+                # exact same neighbor data is reproducible via a similarity
+                # search keyed on the note's own ID. We only reach here when
+                # the index was available, so search_notes(ids=...) is a
+                # viable retry.
+                pending = [
+                    r["id"]
+                    for r in results
+                    if r.get("status") in ("created", "updated") and "neighbors" not in r
+                ]
+                for r in results:
+                    if r.get("id") in pending:
+                        r["neighbors_unavailable"] = True
+                if pending:
+                    logger.info(
+                        "Neighbors unavailable for %d note(s); caller can retry via "
+                        "search_notes(ids=%s)",
+                        len(pending),
+                        pending,
+                    )
+                    return UpsertNotesResponse.model_validate(
+                        {
+                            "results": results,
+                            "dry_run": False,
+                            "message": (
+                                "Notes were saved, but the vector index update failed, "
+                                "so neighbors could not be computed. Retry with "
+                                f"search_notes(ids={pending}) to fetch the same "
+                                "neighbor data."
+                            ),
+                        }
+                    )
 
         return UpsertNotesResponse.model_validate({"results": results, "dry_run": dry_run})
 
@@ -1200,6 +1298,9 @@ def register_tools(
             len(result["not_found"]),
         )
 
+        # Derived-text rows leave the store too (independent of the vector index).
+        await _remove_derived(result["deleted"])
+
         if index and index.available and result["deleted"]:
             try:
                 removed = index.remove(result["deleted"])
@@ -1299,6 +1400,11 @@ def register_tools(
             "would change" if dry_run else "changed",
             result["notes_changed"],
         )
+
+        if not dry_run and changed_ids:
+            # Field bodies are both embedding text and derived-text — re-ingest the
+            # changed notes into the store (independent of the vector index).
+            await _ingest_derived(changed_ids)
 
         if not dry_run and changed_ids and index and index.available:
             # Field bodies are embedding text, so re-embed the changed notes
@@ -1405,6 +1511,11 @@ def register_tools(
             result["dropped_fields"],
         )
 
+        if not dry_run and changed:
+            # Remapped fields are derived-text too — re-ingest the migrated notes
+            # (IDs unchanged) into the store, independent of the vector index.
+            await _ingest_derived(changed)
+
         if not dry_run and changed and index and index.available:
             # Remapped fields change the embedding text, so re-embed the migrated
             # notes (their IDs are unchanged) — best-effort, like find_replace_notes.
@@ -1446,22 +1557,61 @@ def register_tools(
         return DeleteNoteTypesResponse.model_validate(result)
 
     async def _bump_col_mod_after_metadata_change() -> None:
-        """Keep the index from needlessly rebuilding after a vectors-unchanged edit.
+        """Keep the index/derived store from needlessly rebuilding after a vectors-unchanged edit.
 
-        Tag and deck operations don't touch a note's embedding text, so every
-        vector stays valid — but they still bump ``col.mod``. Advance the stored
-        ``col_mod`` (and request a debounced save) so the next startup sees no
-        drift and skips a full re-embed. Best-effort: index bookkeeping must
-        never fail the operation, which is already committed to the collection.
+        Tag and deck operations don't touch a note's embedding text *or* its raw
+        field text, so every vector and every derived-text row stays valid — but
+        they still bump ``col.mod``. Advance the stored ``col_mod`` on both derived
+        caches (and request a debounced index save) so the next startup sees no
+        drift and skips a full re-embed / re-ingest. Best-effort: cache bookkeeping
+        must never fail the operation, which is already committed to the collection.
         """
-        if index is None or not index.available:
+        index_live = index is not None and index.available
+        derived_live = derived is not None and derived.available
+        if not index_live and not derived_live:
             return
         try:
-            index.col_mod = await wrapper.run(lambda c: c.mod)
-            if saver is not None:
-                saver.request_save()
+            mod = await wrapper.run(lambda c: c.mod)
+            if index is not None and index.available:
+                index.col_mod = mod
+                if saver is not None:
+                    saver.request_save()
+            if derived is not None and derived.available:
+                derived.col_mod = mod
         except Exception:
-            logger.warning("Failed to advance index col_mod after metadata change", exc_info=True)
+            logger.warning("Failed to advance col_mod after metadata change", exc_info=True)
+
+    async def _ingest_derived(note_ids: list[int]) -> None:
+        """Re-ingest the given notes' raw field text into the derived-text store (#98).
+
+        Called alongside the index update after upsert/find-replace/migrate — these edit field
+        bodies, which are derived-text. Independent of the vector index (the store works with
+        embeddings off), and best-effort: a failure never fails the already-committed write. Stamps
+        the store's ``col_mod`` so the next boot sees no drift.
+        """
+        if derived is None or not derived.available or not note_ids:
+            return
+        try:
+            field_map = await wrapper.note_field_map(note_ids)
+
+            def _run() -> None:
+                for nid in note_ids:
+                    derived.ingest(nid, "field", field_map.get(nid, {}))
+
+            await asyncio.to_thread(_run)
+            derived.col_mod = await wrapper.run(lambda c: c.mod)
+        except Exception:
+            logger.warning("Failed to update derived-text store after edit", exc_info=True)
+
+    async def _remove_derived(note_ids: list[int]) -> None:
+        """Drop the given (deleted/pruned) notes from the derived-text store (#98). Best-effort."""
+        if derived is None or not derived.available or not note_ids:
+            return
+        try:
+            await asyncio.to_thread(derived.remove, note_ids)
+            derived.col_mod = await wrapper.run(lambda c: c.mod)
+        except Exception:
+            logger.warning("Failed to update derived-text store after delete", exc_info=True)
 
     @mcp.tool()
     @_safe_tool
@@ -1653,6 +1803,11 @@ def register_tools(
             len(removed_note_ids),
             result.get("unused_tags", {}).get("removed", "-"),
         )
+
+        # Empty notes/cards delete notes — their rows must leave the derived store
+        # too (independent of the vector index).
+        if not dry_run and removed_note_ids:
+            await _remove_derived(removed_note_ids)
 
         # Empty notes/cards delete notes — their vectors must leave the index
         # (like delete_notes); clearing unused tags is a metadata-only change.

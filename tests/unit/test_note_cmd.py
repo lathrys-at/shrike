@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from shrike.cli.note_cmd import _search_match_badges
-from shrike.schemas import SearchMatch, SignalContribution, SubstringInfo
+from shrike.schemas import FuzzyMatch, SearchMatch, SignalContribution, SubstringInfo
 
 
 def _match(**kw: Any) -> SearchMatch:
@@ -58,3 +58,12 @@ class TestSearchMatchBadges:
             ],
         )
         assert _search_match_badges(m) == "image · 0.30 · match: Front"
+
+    def test_fuzzy_facet_renders(self):
+        # A fuzzy-only near-miss (#98) is otherwise invisible (no score, no `match:`), so the
+        # `fuzzy` facet surfaces on its own — like `image`, it's a non-{text,exact} signal.
+        m = _match(
+            fuzzy=FuzzyMatch(source="field", ref="Front", snippet="…protein…"),
+            provenance=[SignalContribution(signal="fuzzy", rank=1)],
+        )
+        assert _search_match_badges(m) == "fuzzy"
