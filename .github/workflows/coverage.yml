@@ -5,7 +5,7 @@ name: Coverage
 #
 #   - pull_request (rc-labelled only): a release candidate carries a fresh coverage
 #     report. The job is skipped on every non-rc PR, so this costs ~nothing there.
-#   - schedule (3x/week on main): an ongoing record as work lands between releases.
+#   - schedule (daily on main): an ongoing record as work lands between releases.
 #     These runs (and manual ones) ALSO publish the README badge to the `badges` branch.
 #   - workflow_dispatch: a one-off run whenever you want the current number / to (re)seed
 #     the badge.
@@ -18,8 +18,8 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, labeled]
   schedule:
-    # Mon / Wed / Fri 06:00 UTC — 3x/week between releases.
-    - cron: "0 6 * * 1,3,5"
+    # Mon / Wed / Fri 06:00 UTC — daily between releases.
+    - cron: "0 14 * * *" # daily, 14:00 UTC = 7am PDT (6am PST in winter)
   workflow_dispatch:
 
 # Cancel a PR's in-flight coverage run on a new push (same scoping as test.yml);

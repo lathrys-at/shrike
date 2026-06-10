@@ -15,8 +15,10 @@ name: Warm CI caches
 # lint lane compiles the native workspace with cargo, not Bazel, so it needs
 # its own warmed entry in main's scope.
 #
-# Runs on the default branch twice a week — comfortably under the 7-day cache
-# eviction window — on demand via workflow_dispatch, AND on a merge to main that
+# Runs on the default branch every morning (6am Pacific — twice-weekly let
+# entries go stale or get evicted between runs; a daily warm is one cheap
+# incremental linux build), on demand via workflow_dispatch, AND on a merge to
+# main that
 # changes the DEPENDENCY CONE (#319): the lock/pin files only, deliberately not
 # `native/**`. Every cache here is keyed on the locks, so a source-only merge
 # (the common single-commit PR) invalidates nothing — the next PR still restores
@@ -27,7 +29,7 @@ name: Warm CI caches
 # keys) is covered by the schedule.
 on:
   schedule:
-    - cron: "17 4 * * 1,4" # Mon & Thu, 04:17 UTC
+    - cron: "0 13 * * *" # daily, 13:00 UTC = 6am PDT (5am PST in winter)
   workflow_dispatch:
   push:
     branches: [main]
