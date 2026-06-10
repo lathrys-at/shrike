@@ -30,7 +30,11 @@ def _seed(wrapper, notes):
     create notes identical to seeded ones to exercise similarity lookup, which
     the default error-on-duplicate policy would otherwise reject.
     """
-    return wrapper.run_sync(lambda _c: wrapper._upsert_notes(notes, on_duplicate="allow"))
+    import json
+
+    return wrapper.run_sync(
+        lambda c: json.loads(c.upsert_notes(json.dumps(notes), "allow", False))
+    )
 
 
 def _call(mcp: FastMCP, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -523,8 +527,8 @@ def _build_derived(wrapper, derived) -> None:
 
     rows, mod = wrapper.run_sync(
         lambda c: (
-            list(CollectionWrapper.derived_field_rows(c, list(c.find_notes("deck:*")))),
-            c.mod,
+            c.derived_field_rows(c.find_notes("deck:*")),
+            c.col_mod(),
         )
     )
     derived.build(rows, mod)
@@ -755,7 +759,7 @@ class TestDeleteIndexUpdate:
     def test_updates_col_mod(self, wrapper, mock_index, mcp_app, basic_note):
         mock_index.remove.return_value = 1
         _call(mcp_app, "delete_notes", {"ids": [basic_note]})
-        assert mock_index.col_mod == wrapper.col.mod
+        assert mock_index.col_mod == wrapper.run_sync(lambda c: c.col_mod())
 
 
 class TestUpsertIndexUpdate:
@@ -770,7 +774,7 @@ class TestUpsertIndexUpdate:
     def test_updates_col_mod_after_upsert(self, wrapper, mock_index, mcp_app):
         mock_index.search.return_value = [[]]
         _upsert(mcp_app, [BASIC_NOTE])
-        assert mock_index.col_mod == wrapper.col.mod
+        assert mock_index.col_mod == wrapper.run_sync(lambda c: c.col_mod())
 
     def test_index_add_failure_doesnt_fail_upsert(self, wrapper, mock_index, mcp_app):
         mock_index.add.side_effect = RuntimeError("embed failed")

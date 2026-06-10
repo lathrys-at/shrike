@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import functools
 import ipaddress
+import json
 import logging
 import os
 import signal
@@ -701,9 +702,10 @@ def main() -> None:
         logger.info(
             "Cooperative locking on: releasing the collection after %.0fs idle", hold_seconds
         )
-    notes, decks, note_types = wrapper.run_sync(
-        lambda c: (c.note_count(), len(c.decks.all_names_and_ids()), len(c.models.all()))
+    summary = wrapper.run_sync(
+        lambda c: json.loads(c.collection_info(["summary"], []))["summary"]
     )
+    notes, decks, note_types = summary["notes"], summary["decks"], summary["note_types"]
     logger.info(
         "Collection ready: %d notes, %d decks, %d note types",
         notes,
@@ -778,7 +780,7 @@ def main() -> None:
     # text on real drift (first build, or an external edit), so a clean reload does no full read.
     derived = DerivedTextStore(path=cache_base / "shrike.db")
     logger.info("Derived-text store: %s", derived.status())
-    d_col_mod = wrapper.run_sync(lambda c: c.mod)
+    d_col_mod = wrapper.run_sync(lambda c: c.col_mod())
     if derived.check_drift(d_col_mod):
         rows, dmod = wrapper.run_sync(_collect_derived_rows)
         derived.build_in_background(rows, dmod)
@@ -789,21 +791,21 @@ def main() -> None:
         # collection changed on disk while we were released (Anki, sync, import),
         # rebuild. Cheap col_mod-only check; texts are read under the lock and
         # embedded off-lock only on real drift. Runs on the worker thread.
-        def _acquire_hook(col: Any) -> None:
+        def _acquire_hook(core: Any) -> None:
             # The derived-text store is independent of the embedder — rebuild it on drift even with
             # no embedding service (it's a cheap text-only build).
-            if derived.check_drift(col.mod):
-                rows, dmod = _collect_derived_rows(col)
+            if derived.check_drift(core.col_mod()):
+                rows, dmod = _collect_derived_rows(core)
                 logger.info(
                     "Collection changed while idle; rebuilding derived store (%d rows)", len(rows)
                 )
                 derived.build_in_background(rows, dmod)
-            if not index.available or not index.check_drift(col.mod):
+            if not index.available or not index.check_drift(core.col_mod()):
                 return
             svc_now = runtime.service
             if svc_now is None or not svc_now.running:
                 return
-            inputs, changed_mod = _collect_for_rebuild(col)
+            inputs, changed_mod = _collect_for_rebuild(core)
             logger.info("Collection changed while idle (col_mod=%d); rebuilding index", changed_mod)
             index.rebuild_in_background(inputs, changed_mod, model_id=svc_now.model_fingerprint())
 

@@ -51,7 +51,7 @@ class TestUpsertDecksBump:
         assert result["results"][0]["status"] == "created"
         mock_index.add.assert_not_called()
         mock_index.remove.assert_not_called()
-        assert mock_index.col_mod == wrapper.col.mod
+        assert mock_index.col_mod == wrapper.run_sync(lambda c: c.col_mod())
         mock_saver.request_save.assert_called_once()
 
     def test_all_error_does_not_bump(self, wrapper, mock_index, mock_saver, mcp_app):
@@ -74,7 +74,7 @@ class TestDeleteDecksTool:
         result = _call(mcp_app, "delete_decks", {"decks": ["Temp"]})
         assert result["deleted"] == ["Temp"]
         mock_index.remove.assert_not_called()
-        assert mock_index.col_mod == wrapper.col.mod
+        assert mock_index.col_mod == wrapper.run_sync(lambda c: c.col_mod())
         mock_saver.request_save.assert_called_once()
 
     def test_non_empty_reported_and_no_bump(self, wrapper, mock_index, mock_saver, mcp_app):

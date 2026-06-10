@@ -8,20 +8,19 @@ from __future__ import annotations
 
 import pytest
 
-from shrike.embed_text import field_is_blank
+import json
+
+from tests.oracles.embed_text_oracle import field_is_blank
+from tests.unit.conftest import make_notes
 
 
 def _add_note(wrapper, fields, *, tags=None, model="Basic", deck="D"):
-    def build(c):
-        note = c.new_note(c.models.by_name(model))
-        for k, v in fields.items():
-            note[k] = v
-        if tags:
-            note.tags = list(tags)
-        c.add_note(note, c.decks.id(deck))
-        return note.id
-
-    return wrapper.run_sync(build)
+    results = make_notes(
+        wrapper,
+        [{"note_type": model, "deck": deck, "fields": dict(fields), "tags": list(tags or [])}],
+    )
+    assert results[0]["status"] == "created", results[0]
+    return results[0]["id"]
 
 
 def _blank_note(wrapper, *, model="Basic"):
@@ -32,10 +31,8 @@ def _blank_note(wrapper, *, model="Basic"):
 
 
 def _clear(c, nid):
-    note = c.get_note(nid)
-    for f in list(note.keys()):
-        note[f] = ""
-    c.update_note(note)
+    _, _, fields, _ = c.get_note(nid)
+    c.update_note(nid, ["" for _ in fields])
 
 
 def _prune(wrapper, **kw):
@@ -44,8 +41,23 @@ def _prune(wrapper, **kw):
     kw.setdefault("empty_cards", False)
     kw.setdefault("unused_media", False)
     kw.setdefault("dry_run", True)
-    return wrapper.run_sync(lambda c: wrapper._prune(**kw))
+    def run(c):
+        result = json.loads(
+            c.prune(kw["unused_tags"], kw["empty_notes"], kw["empty_cards"],
+                    kw["unused_media"], kw["dry_run"])
+        )
+        removed = result.pop("removed_note_ids")
+        return result, removed
 
+    return wrapper.run_sync(run)
+
+
+
+
+def _find_empty(wrapper):
+    """Empty-note ids via a dry-run prune (the native core owns the scan)."""
+    result, _ = _prune(wrapper, empty_notes=True, dry_run=True)
+    return result["empty_notes"]["removed"]
 
 def _note_exists(wrapper, nid):
     return bool(wrapper.run_sync(lambda c: c.find_notes(f"nid:{nid}")))
@@ -67,7 +79,7 @@ class TestEmptyNotes:
     def test_finds_only_blank_notes(self, wrapper):
         blank = _blank_note(wrapper)
         full = _add_note(wrapper, {"Front": "Q", "Back": "A"})
-        found = wrapper.run_sync(lambda c: wrapper._find_empty_notes())
+        found = _find_empty(wrapper)
         assert blank in found
         assert full not in found
 
@@ -75,13 +87,13 @@ class TestEmptyNotes:
         # Front blank but Back has an image -> note has content, not empty.
         nid = _add_note(wrapper, {"Front": "x", "Back": "y"})
         wrapper.run_sync(lambda c: _set(c, nid, {"Front": "", "Back": "<img src='pic.png'>"}))
-        found = wrapper.run_sync(lambda c: wrapper._find_empty_notes())
+        found = _find_empty(wrapper)
         assert nid not in found
 
     def test_content_in_any_field_keeps_note(self, wrapper):
         nid = _add_note(wrapper, {"Front": "x", "Back": "y"})
         wrapper.run_sync(lambda c: _set(c, nid, {"Front": "", "Back": "still here"}))
-        assert wrapper.run_sync(lambda c: wrapper._find_empty_notes()) == []
+        assert _find_empty(wrapper) == []
 
     def test_dry_run_reports_but_keeps(self, wrapper):
         blank = _blank_note(wrapper)
@@ -102,16 +114,16 @@ class TestUnusedTags:
         _add_note(wrapper, {"Front": "Q", "Back": "A"}, tags=["used", "willremove"])
         # Orphan "willremove" in the registry by removing it from the note.
         nid = wrapper.run_sync(lambda c: c.find_notes("tag:willremove")[0])
-        wrapper.run_sync(lambda c: c.tags.bulk_remove([nid], "willremove"))
+        wrapper.run_sync(lambda c: c.update_note_tags([nid], remove=["willremove"]))
 
         preview, _ = _prune(wrapper, unused_tags=True, dry_run=True)
         assert preview["unused_tags"]["tags"] == ["willremove"]
-        assert "willremove" in wrapper.run_sync(lambda c: list(c.tags.all()))  # not cleared yet
+        assert "willremove" in wrapper.run_sync(lambda c: json.loads(c.collection_info(["tags"], []))["tags"])  # not cleared yet
 
         applied, _ = _prune(wrapper, unused_tags=True, dry_run=False)
         assert applied["unused_tags"]["removed"] == 1
-        assert "willremove" not in wrapper.run_sync(lambda c: list(c.tags.all()))
-        assert "used" in wrapper.run_sync(lambda c: list(c.tags.all()))
+        assert "willremove" not in wrapper.run_sync(lambda c: json.loads(c.collection_info(["tags"], []))["tags"])
+        assert "used" in wrapper.run_sync(lambda c: json.loads(c.collection_info(["tags"], []))["tags"])
 
     def test_parent_tag_with_child_notes_is_kept(self, wrapper):
         # A note tagged only "parent::child" keeps "parent" as in-use (hierarchy).
@@ -124,17 +136,17 @@ class TestUnusedTags:
 class TestEmptyCards:
     def test_finds_and_removes_empty_cloze_card(self, wrapper):
         nid = _add_note(wrapper, {"Text": "{{c1::A}} and {{c2::B}}"}, model="Cloze")
-        assert len(wrapper.run_sync(lambda c: c.card_ids_of_note(nid))) == 2
+        assert len(wrapper.run_sync(lambda c: c.cards_of_note(nid))) == 2
         # Drop c2 -> its card becomes empty.
         wrapper.run_sync(lambda c: _set(c, nid, {"Text": "{{c1::A}} only"}))
 
         preview, _ = _prune(wrapper, empty_cards=True, dry_run=True)
         assert preview["empty_cards"]["cards_removed"] == 1
-        assert len(wrapper.run_sync(lambda c: c.card_ids_of_note(nid))) == 2  # untouched
+        assert len(wrapper.run_sync(lambda c: c.cards_of_note(nid))) == 2  # untouched
 
         applied, _ = _prune(wrapper, empty_cards=True, dry_run=False)
         assert applied["empty_cards"]["cards_removed"] == 1
-        assert len(wrapper.run_sync(lambda c: c.card_ids_of_note(nid))) == 1
+        assert len(wrapper.run_sync(lambda c: c.cards_of_note(nid))) == 1
 
 
 class TestPruneOrdering:
@@ -142,15 +154,13 @@ class TestPruneOrdering:
         # A tag that lives only on an empty note: removing the note frees the tag,
         # and unused-tags (run last on apply) clears it in the same call.
         blank = _blank_note(wrapper)
-        wrapper.run_sync(lambda c: c.tags.bulk_add([blank], "lonely"))
+        wrapper.run_sync(lambda c: c.update_note_tags([blank], add=["lonely"]))
         result, removed = _prune(wrapper, empty_notes=True, unused_tags=True, dry_run=False)
         assert blank in removed
         assert not _note_exists(wrapper, blank)
-        assert "lonely" not in wrapper.run_sync(lambda c: list(c.tags.all()))
+        assert "lonely" not in wrapper.run_sync(lambda c: json.loads(c.collection_info(["tags"], []))["tags"])
 
 
 def _set(c, nid, fields):
-    note = c.get_note(nid)
-    for k, v in fields.items():
-        note[k] = v
-    c.update_note(note)
+    result = json.loads(c.upsert_notes(json.dumps([{"id": nid, "fields": fields}]), "allow", False))[0]
+    assert result["status"] == "updated", result

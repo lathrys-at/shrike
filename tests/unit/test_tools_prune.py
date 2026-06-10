@@ -95,7 +95,7 @@ class TestCollectionPruneTool:
         result = _call(mcp_app, "collection_prune", {"empty_notes": True, "dry_run": False})
         assert result["empty_notes"]["removed"] == [blank]
         mock_index.remove.assert_called_once_with([blank])
-        assert mock_index.col_mod == wrapper.col.mod
+        assert mock_index.col_mod == wrapper.run_sync(lambda c: c.col_mod())
         mock_saver.request_save.assert_called_once()
 
     def test_apply_unused_tags_bumps_without_index_remove(
@@ -105,7 +105,7 @@ class TestCollectionPruneTool:
         result = _call(mcp_app, "collection_prune", {"unused_tags": True, "dry_run": False})
         assert result["unused_tags"]["removed"] >= 1
         mock_index.remove.assert_not_called()  # no notes deleted
-        assert mock_index.col_mod == wrapper.col.mod  # but col_mod advanced
+        assert mock_index.col_mod == wrapper.run_sync(lambda c: c.col_mod())  # but col_mod advanced
         mock_saver.request_save.assert_called_once()
 
     def test_dry_run_default_does_not_mutate(self, wrapper, mock_index, mock_saver, mcp_app):

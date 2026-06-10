@@ -24,7 +24,7 @@ async def test_concurrent_async_upserts_all_apply(wrapper):
     ids = await asyncio.gather(*[add(i) for i in range(50)])
 
     assert len(set(ids)) == 50  # distinct ids, no clobbering
-    assert await wrapper.run(lambda c: c.note_count()) == 50
+    assert await wrapper.run(lambda c: len(c.find_notes("deck:*"))) == 50
 
 
 async def test_background_reader_races_async_writers(wrapper):
@@ -60,7 +60,7 @@ async def test_background_reader_races_async_writers(wrapper):
     assert not reader.is_alive()
     assert reader_errors == []
     assert len(set(ids)) == 40
-    assert await wrapper.run(lambda c: c.note_count()) == 40
+    assert await wrapper.run(lambda c: len(c.find_notes("deck:*"))) == 40
 
 
 async def test_interleaved_reads_and_writes_consistent(wrapper):
@@ -71,7 +71,7 @@ async def test_interleaved_reads_and_writes_consistent(wrapper):
         await wrapper.upsert_notes([{**BASIC, "fields": {"Front": f"W{i}", "Back": "A"}}])
 
     async def read() -> int:
-        return await wrapper.run(lambda c: c.note_count())
+        return await wrapper.run(lambda c: len(c.find_notes("deck:*")))
 
     tasks: list[asyncio.Future] = []
     for i in range(30):
@@ -82,4 +82,4 @@ async def test_interleaved_reads_and_writes_consistent(wrapper):
     counts = [r for r in results if isinstance(r, int)]
     # Each observed count is a valid intermediate state (0..30), never garbage.
     assert all(0 <= c <= 30 for c in counts)
-    assert await wrapper.run(lambda c: c.note_count()) == 30
+    assert await wrapper.run(lambda c: len(c.find_notes("deck:*"))) == 30

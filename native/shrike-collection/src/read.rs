@@ -158,6 +158,25 @@ impl CollectionCore {
         Ok(out)
     }
 
+    /// The raw Anki search escape hatch (`collection_query`): the full grammar
+    /// straight to search, `list_notes`-shaped JSON out (`total` = the full
+    /// match count before `limit`).
+    pub fn query(&self, search: &str, with_fields: bool, limit: usize) -> NativeResult<String> {
+        let note_ids = self.adapter.search_notes(search)?;
+        let total = note_ids.len();
+        let take: Vec<i64> = note_ids.into_iter().take(limit).collect();
+        let notes = self.notes_to_dicts(&take, with_fields)?;
+        Ok(json!({"notes": notes, "total": total, "limit": limit}).to_string())
+    }
+
+    /// Per note: the FULL raw field map `(note_id, [(name, value)...])` —
+    /// unlike `derived_field_rows`, empty fields are included (`note_field_map`
+    /// feeds substring_info + the find/replace preview, which want every
+    /// field). Missing ids are absent.
+    pub fn note_field_map(&self, note_ids: &[i64]) -> NativeResult<Vec<NoteFieldRow>> {
+        self.note_field_rows(note_ids)
+    }
+
     /// One field value through the embedding normalization — the parity-test
     /// surface for byte-identity against the Python normalizer.
     pub fn normalize_text(&self, value: &str) -> NativeResult<String> {
@@ -166,7 +185,7 @@ impl CollectionCore {
 
     /// Map a deck reference (name, numeric id, `#id`) to a deck name —
     /// `_resolve_deck_ref`. None = an explicit id matching no deck.
-    pub(crate) fn resolve_deck_ref(&self, reference: &str) -> NativeResult<Option<String>> {
+    pub fn resolve_deck_ref(&self, reference: &str) -> NativeResult<Option<String>> {
         let name_of = |id: i64| -> NativeResult<Option<String>> {
             Ok(self
                 .adapter

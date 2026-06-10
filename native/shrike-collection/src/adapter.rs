@@ -533,7 +533,10 @@ impl ServiceAdapter {
         let req = anki_proto::cards::RemoveCardsRequest {
             card_ids: card_ids.to_vec(),
         };
-        let _: anki_proto::collection::OpChanges =
+        // remove_cards returns OpChangesWithCount (service.rs) — decoding the
+        // wrong message here produced a wire-type error the ported pytest
+        // suite caught; the Rust round-trip lacked an empty-CARD case.
+        let _: anki_proto::collection::OpChangesWithCount =
             self.call(SVC_CARDS, CARDS_REMOVE_CARDS, &req)?;
         Ok(())
     }

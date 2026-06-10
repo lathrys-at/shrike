@@ -8,3 +8,5 @@ shrike_native._native.CollectionCore
 # match one static stub. Allowlisting only the __all__ comparison keeps every
 # per-symbol check live — a new Rust symbol missing from the stub still fails.
 shrike_native._native.__all__
+shrike_native._native.fetch_media_url
+shrike_native._native.decode_media_b64

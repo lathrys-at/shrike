@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from shrike.embed_text import EMBED_TEXT_VERSION, normalize_for_embedding
+from shrike.embed_text import EMBED_TEXT_VERSION
+from tests.oracles.embed_text_oracle import normalize_for_embedding
 
 
 class TestClozeFill:

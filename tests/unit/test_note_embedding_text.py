@@ -101,17 +101,17 @@ class TestExtractImageRefs:
     """embed_text.extract_image_refs — pull <img src> filenames for multimodal embedding (#162)."""
 
     def test_basic_quoted(self):
-        from shrike.embed_text import extract_image_refs
+        from tests.oracles.embed_text_oracle import extract_image_refs
 
         assert extract_image_refs('<img src="cat.png">') == ["cat.png"]
 
     def test_unquoted_and_single_quoted(self):
-        from shrike.embed_text import extract_image_refs
+        from tests.oracles.embed_text_oracle import extract_image_refs
 
         assert extract_image_refs("<img src=a.png> x <img src='b.gif'>") == ["a.png", "b.gif"]
 
     def test_dedup_in_order(self):
-        from shrike.embed_text import extract_image_refs
+        from tests.oracles.embed_text_oracle import extract_image_refs
 
         assert extract_image_refs('<img src="x.png"> <img src="y.png"> <img src="x.png">') == [
             "x.png",
@@ -119,38 +119,38 @@ class TestExtractImageRefs:
         ]
 
     def test_basename_only(self):
-        from shrike.embed_text import extract_image_refs
+        from tests.oracles.embed_text_oracle import extract_image_refs
 
         assert extract_image_refs('<img src="sub/dir/d.jpg">') == ["d.jpg"]
 
     def test_remote_url_skipped(self):
-        from shrike.embed_text import extract_image_refs
+        from tests.oracles.embed_text_oracle import extract_image_refs
 
         assert extract_image_refs('<img src="https://e.com/r.png">') == []
 
     def test_other_attributes(self):
-        from shrike.embed_text import extract_image_refs
+        from tests.oracles.embed_text_oracle import extract_image_refs
 
         assert extract_image_refs('<img alt="a cat" src="c.png" width="10">') == ["c.png"]
 
     def test_html_entity_in_name(self):
-        from shrike.embed_text import extract_image_refs
+        from tests.oracles.embed_text_oracle import extract_image_refs
 
         assert extract_image_refs('<img src="a&amp;b.png">') == ["a&b.png"]
 
     def test_no_image(self):
-        from shrike.embed_text import extract_image_refs
+        from tests.oracles.embed_text_oracle import extract_image_refs
 
         assert extract_image_refs("plain <b>text</b> [sound:x.mp3]") == []
 
     def test_data_src_decoy_ignored(self):
         # A real parser must not grab the earlier data-src= as the tag's src (regex did, #213).
-        from shrike.embed_text import extract_image_refs
+        from tests.oracles.embed_text_oracle import extract_image_refs
 
         assert extract_image_refs('<img data-src="decoy.png" src="real.png">') == ["real.png"]
 
     def test_src_inside_other_attribute_value_ignored(self):
-        from shrike.embed_text import extract_image_refs
+        from tests.oracles.embed_text_oracle import extract_image_refs
 
         assert extract_image_refs('<img alt="x src=y" src="real.png">') == ["real.png"]
 

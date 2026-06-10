@@ -106,6 +106,29 @@ fn init_logging() -> PyResult<()> {
     Ok(())
 }
 
+/// The SSRF-guarded media URL fetch (#278 step 5b) standalone: the facades'
+/// CONCURRENT prepare path downloads off the collection worker thread, then
+/// writes bytes through it — same architecture as the Python original.
+#[cfg(feature = "anki-core")]
+#[pyfunction]
+#[pyo3(signature = (url, allow_private=false))]
+fn fetch_media_url(
+    py: Python<'_>,
+    url: String,
+    allow_private: bool,
+) -> PyResult<(Vec<u8>, Option<String>)> {
+    py.detach(|| shrike_collection::media_fetch::fetch_media_url(&url, allow_private))
+        .map_err(to_py_err)
+}
+
+/// Base64 media decode with the size cap applied to the ENCODED length.
+#[cfg(feature = "anki-core")]
+#[pyfunction]
+fn decode_media_b64(py: Python<'_>, data: String) -> PyResult<Vec<u8>> {
+    py.detach(|| shrike_collection::media_fetch::decode_media_b64(&data))
+        .map_err(to_py_err)
+}
+
 /// One derived-store MATCH row: (note_id, source, ref, txt, snippet).
 type MatchRow = (i64, String, String, Option<String>, Option<String>);
 /// Per-query, per-modality parallel rankings: {modality: (note_ids, distances)}.
@@ -569,6 +592,11 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(checked_div, m)?)?;
     m.add_function(wrap_pyfunction!(init_onnx_runtime, m)?)?;
     m.add_function(wrap_pyfunction!(init_logging, m)?)?;
+    #[cfg(feature = "anki-core")]
+    {
+        m.add_function(wrap_pyfunction!(fetch_media_url, m)?)?;
+        m.add_function(wrap_pyfunction!(decode_media_b64, m)?)?;
+    }
     m.add_class::<OnnxTextEmbedder>()?;
     m.add_class::<ClipEmbedder>()?;
     m.add_class::<NativeIndexEngine>()?;

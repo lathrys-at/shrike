@@ -1,248 +1,45 @@
+"""CollectionWrapper — the async facade over the NATIVE collection core.
+
+Since the #278 cutover every collection operation runs in Rust
+(``shrike_native.CollectionCore``, anki consumed exclusively through its
+protobuf service layer). This module is the Python *harness half*: one
+dedicated worker thread serializing every access, asyncio ergonomics for the
+HTTP host, the cooperative idle-release lifecycle (#64), the busy surface
+(#65), and the response-shape glue the tool layer consumes. There is no
+``anki.Collection`` here — the pip ``anki`` package is a test-only oracle.
+
+Threading model (unchanged from the pre-cutover wrapper): the native core is
+internally synchronized (anki's Backend mutex), but Shrike still routes every
+op through a single worker thread so operations are *ordered*, the cooperative
+release/reopen lifecycle has one owner, and the event loop never blocks.
+``run``/``run_sync`` expose that thread; ``fn`` now receives the native
+``CollectionCore`` instead of an ``anki.Collection``.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import atexit
-import base64
 import contextlib
-import fnmatch
-import ipaddress
+import json
 import logging
 import mimetypes
 import os
 import re
-import socket
-from collections import defaultdict
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any, Literal, TypeVar
-from urllib.parse import urljoin, urlparse
 
-from anki.collection import Collection
-from anki.consts import MODEL_CLOZE
-from anki.errors import DBError, NotFoundError
-from anki.notes import NoteFieldsCheckResult
+import shrike_native
+from shrike_native import CollectionCore
 
-from shrike.embed_text import extract_image_refs, field_is_blank, normalize_for_embedding
 from shrike.embedding_base import NoteEmbedInput
 from shrike.schemas import COLLECTION_BUSY_CODE
-
-
-class CollectionBusyError(Exception):
-    """A cooperative-mode re-acquire failed: another process holds the collection.
-
-    Raised when re-opening the collection (after an idle release, #64) hits Anki's
-    ``DBError`` lock — typically because Anki desktop is open. Expected, not a bug;
-    the tool layer surfaces it over MCP with ``COLLECTION_BUSY_CODE`` and the
-    client maps it to its own ``CollectionBusyError``. The message is prefixed
-    with the code so the client can detect it without parsing prose.
-    """
-
-    def __init__(self, detail: str = "") -> None:
-        human = detail or (
-            "The collection is in use by another process (is Anki open?). Close it and try again."
-        )
-        super().__init__(f"{COLLECTION_BUSY_CODE}: {human}")
-
 
 logger = logging.getLogger("shrike.collection")
 
 OnDuplicate = Literal["error", "skip", "allow"]
-
-# -- media (#70) -------------------------------------------------------------
-# fetch_media never returns bytes — base64 in a tool response is useless to a
-# model and wrecks context; callers get a `url` (the server's GET /media/<name>)
-# or a `path` and fetch the bytes from there. MEDIA_MAX_BYTES is the hard ceiling
-# on a single stored / downloaded file; URL_FETCH_TIMEOUT bounds a server-side
-# URL store.
-MEDIA_MAX_BYTES = 64 * 1024 * 1024
-URL_FETCH_TIMEOUT = 30.0
-
-
-def _guess_mime(filename: str) -> str | None:
-    """Best-effort MIME from a filename's extension (None for unknown)."""
-    return mimetypes.guess_type(filename)[0]
-
-
-def _decode_media_b64(data: str) -> bytes:
-    """Decode base64 media bytes, capping on the *encoded* length first.
-
-    base64 is ~4/3 the size of its payload, so the encoded string length bounds
-    the decoded size — checking it up front avoids allocating an oversize payload
-    only to reject it post-decode. Runs in a worker thread (CPU-bound)."""
-    if len(data) > (MEDIA_MAX_BYTES // 3) * 4 + 4:
-        raise ValueError(f"data exceeds the {MEDIA_MAX_BYTES}-byte limit")
-    return base64.b64decode(data, validate=True)
-
-
-def _safe_media_name(name: str) -> str:
-    """Reduce a caller-supplied name to a bare basename inside the media dir.
-
-    Strips any directory components, so ``../../etc/passwd`` becomes ``passwd`` and
-    can only ever resolve inside ``col.media.dir()`` — the path-traversal guard for
-    fetch/delete. Returns "" for a name that is only separators/dots.
-    """
-    base = os.path.basename(name.replace("\\", "/").rstrip("/"))
-    return "" if base in ("", ".", "..") else base
-
-
-MAX_MEDIA_REDIRECTS = 5
-
-
-def _resolve_public_ip(host: str) -> str:
-    """Resolve ``host`` and return one vetted, globally-routable IP to connect to.
-
-    SSRF guard for server-side URL fetches. An **allowlist** (``is_global``) rather
-    than a hand-rolled denylist: it rejects loopback, RFC1918, link-local
-    (incl. the cloud-metadata IP), reserved, unspecified, **and** carrier-grade
-    NAT (100.64/10) / benchmarking / `192.0.0.0/24` ranges that a denylist misses
-    — while still permitting public hosts (8.8.8.8, 1.1.1.1, …). Multicast is
-    rejected explicitly because ``is_global`` is True for 224.0.0.0/4. Rejects if
-    *any* resolved address is disallowed, so a name can't smuggle an internal A
-    record alongside a public one.
-
-    Returns the first resolved address so the caller can **pin the connection to
-    the vetted IP** (rather than letting httpx re-resolve at connect time, which
-    would reopen a DNS-rebinding TOCTOU). Raises ValueError on an unresolvable or
-    disallowed host.
-    """
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror as e:
-        raise ValueError(f"could not resolve host '{host}': {e}") from e
-    vetted: str | None = None
-    for info in infos:
-        ip = str(info[4][0])  # sockaddr[0] is the address; str() narrows the stub's str|int
-        addr = ipaddress.ip_address(ip)
-        if not addr.is_global or addr.is_multicast:
-            raise ValueError(f"refusing to fetch from non-public address {addr} (host '{host}')")
-        if vetted is None:
-            vetted = ip
-    if vetted is None:
-        raise ValueError(f"could not resolve host '{host}'")
-    return vetted
-
-
-def _path_within_any_root(path: str, roots: list[str]) -> bool:
-    """Whether ``path`` is contained in **any** of ``roots`` — on resolved real paths.
-
-    Confines store_media's server-local ``path`` to the configured subtrees
-    (``--media-path-root``, repeatable, #164/#170): allowed iff the target is under
-    any one root (a disjunction — the reachable set is the union). ``realpath``
-    collapses ``..`` and resolves symlinks on both sides (``add_file`` follows
-    symlinks, so the *target's* real path is what matters), and ``commonpath``
-    avoids the ``/srv/media-evil`` vs ``/srv/media`` prefix bug a bare
-    ``startswith`` has. (A TOCTOU between this check and ``add_file`` — swapping a
-    symlink in the gap — is an accepted residual for this local-trust feature.)"""
-    target = os.path.realpath(path)
-    for root in roots:
-        root_real = os.path.realpath(root)
-        try:
-            if os.path.commonpath([root_real, target]) == root_real:
-                return True
-        except ValueError:  # different drives on Windows → not contained
-            continue
-    return False
-
-
-def _host_with_port(host: str, port: int | None) -> str:
-    """Format host[:port] for a Host header (bracketing an IPv6 literal)."""
-    bracketed = f"[{host}]" if ":" in host else host
-    return f"{bracketed}:{port}" if port else bracketed
-
-
-def _fetch_media_url(
-    url: str,
-    *,
-    allow_private: bool,
-    max_bytes: int = MEDIA_MAX_BYTES,
-    timeout: float = URL_FETCH_TIMEOUT,
-) -> tuple[bytes, str | None]:
-    """Download ``url`` into memory, returning (bytes, content_type).
-
-    Off the worker thread (network I/O): callers run it via ``asyncio.to_thread``
-    so a 30s fetch never blocks collection ops. Scheme is restricted to http/https,
-    the body is capped at ``max_bytes``, and httpx honors proxy env vars
-    (``trust_env``; SOCKS needs the optional ``httpx[socks]`` extra).
-
-    SSRF hardening (when ``allow_private`` is False): each hop's host is resolved
-    and vetted, then the connection is **pinned to the vetted IP** — the request
-    URL's host is the IP (so httpx connects there and does not re-resolve the name
-    at connect time, closing the DNS-rebinding TOCTOU), the ``Host`` header carries
-    the original name so the server routes correctly, and ``sni_hostname`` carries
-    it too so TLS SNI + certificate validation still verify against the hostname,
-    not the IP. Redirects are followed **manually**, re-vetting every hop (httpx's
-    ``follow_redirects`` would jump to an attacker-chosen address unchecked), capped
-    at ``MAX_MEDIA_REDIRECTS``. With ``allow_private`` the guard and pinning are off
-    (the operator opted into trusted internal hosts).
-    """
-    import httpx
-
-    logical = url  # hostname-based; redirects resolve against this, not the pinned URL
-    with httpx.Client(follow_redirects=False, timeout=timeout, trust_env=True) as client:
-        for _hop in range(MAX_MEDIA_REDIRECTS + 1):
-            parsed = urlparse(logical)
-            if parsed.scheme not in ("http", "https"):
-                raise ValueError(f"unsupported URL scheme: {parsed.scheme or '(none)'}")
-            host = parsed.hostname
-            if not host:
-                raise ValueError("URL has no host")
-
-            request_url = logical
-            headers: dict[str, str] | None = None
-            extensions: dict[str, Any] | None = None
-            if not allow_private:
-                ip = _resolve_public_ip(host)
-                netloc = _host_with_port(ip, parsed.port)
-                query = f"?{parsed.query}" if parsed.query else ""
-                request_url = f"{parsed.scheme}://{netloc}{parsed.path or '/'}{query}"
-                headers = {"Host": _host_with_port(host, parsed.port)}
-                if parsed.scheme == "https":
-                    extensions = {"sni_hostname": host}  # TLS verifies the name, not the IP
-
-            with client.stream("GET", request_url, headers=headers, extensions=extensions) as resp:
-                if resp.is_redirect:
-                    location = resp.headers.get("location")
-                    if not location:
-                        raise ValueError("redirect response without a Location header")
-                    logical = urljoin(logical, location)  # resolve relative, re-vet next loop
-                    continue
-                resp.raise_for_status()
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in resp.iter_bytes():
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise ValueError(f"download exceeds the {max_bytes}-byte limit")
-                    chunks.append(chunk)
-                content_type = (resp.headers.get("content-type") or "").split(";")[
-                    0
-                ].strip() or None
-                return b"".join(chunks), content_type
-    raise ValueError(f"too many redirects (>{MAX_MEDIA_REDIRECTS})")
-
-
-# Anki's note.fields_check() failures that are *not* duplicates — these are
-# structural problems with the note itself and are always rejected (no policy
-# knob), mapped to a machine reason + human message. DUPLICATE is handled
-# separately because it's the one fields_check result a caller may legitimately
-# want to allow.
-_STRUCTURAL_PROBLEMS: dict[NoteFieldsCheckResult.V, tuple[str, str]] = {
-    NoteFieldsCheckResult.EMPTY: ("empty", "The first field is empty."),
-    NoteFieldsCheckResult.MISSING_CLOZE: (
-        "missing_cloze",
-        "No cloze deletions ({{c1::...}}) were found in the cloze field.",
-    ),
-    NoteFieldsCheckResult.NOTETYPE_NOT_CLOZE: (
-        "notetype_not_cloze",
-        "Cloze syntax was used but the note type is not a cloze type.",
-    ),
-    NoteFieldsCheckResult.FIELD_NOT_CLOZE: (
-        "field_not_cloze",
-        "A cloze deletion is in a field that is not the cloze field.",
-    ),
-}
-_DUPLICATE_MESSAGE = "The first field duplicates an existing note of this type."
 
 T = TypeVar("T")
 
@@ -251,6 +48,37 @@ T = TypeVar("T")
 # ``busy_timeout``; short because holding blocks launching Anki and re-opening is
 # a cheap local SQLite open.
 DEFAULT_LOCK_HOLD = 5.0
+
+
+class CollectionBusyError(Exception):
+    """The collection is held by another process (lock contention).
+
+    Raised when a cooperative-mode re-acquire can't open the collection —
+    typically because Anki desktop is open. Expected, not a bug; the server
+    surfaces it over MCP with ``COLLECTION_BUSY_CODE`` and the client maps it
+    back to a typed error, so callers catch-and-retry instead of parsing text.
+    """
+
+    def __init__(self) -> None:
+        human = "the collection is in use by another process (is Anki open?); try again shortly"
+        super().__init__(f"{COLLECTION_BUSY_CODE}: {human}")
+
+
+def _safe_media_name(name: str) -> str:
+    """Reduce a caller-supplied name to a bare basename inside the media dir.
+
+    Strips any directory components, so ``../../etc/passwd`` becomes ``passwd`` and
+    can only ever resolve inside the media dir — the path-traversal guard for
+    fetch/delete. Returns "" for a name that is only separators/dots.
+    """
+    base = os.path.basename(name.replace("\\", "/").rstrip("/"))
+    return "" if base in ("", ".", "..") else base
+
+
+def _guess_mime(filename: str) -> str | None:
+    """Best-effort MIME from a filename's extension (None for unknown)."""
+    return mimetypes.guess_type(filename)[0]
+
 
 # Chars that are special inside an Anki search even within double quotes; escaped
 # so the term is matched literally (verified against anki 25.9.4: ':' must be
@@ -315,36 +143,35 @@ def substring_info(content: dict[str, str] | None, text: str) -> dict[str, Any] 
     return {"matched_fields": matched, "snippet": snippet}
 
 
+# ── collection-thread collectors (module-level: the kernel's Scheduler port
+# passes the native core straight through) ───────────────────────────────────
+
+
+def collect_embed_inputs(core: CollectionCore) -> tuple[list[NoteEmbedInput], int]:
+    """Every note's embedding input (text + image names) + the col_mod stamp."""
+    note_ids = core.find_notes("deck:*")
+    inputs = [
+        NoteEmbedInput(note_id=nid, text=text, image_names=images)
+        for nid, text, images in core.note_embed_inputs(note_ids)
+    ]
+    return inputs, core.col_mod()
+
+
+def collect_derived_rows(core: CollectionCore) -> tuple[list[tuple[int, str, str, str]], int]:
+    """Every note's ``(note_id, "field", field_name, raw_value)`` rows + the mod stamp."""
+    note_ids = core.find_notes("deck:*")
+    return core.derived_field_rows(note_ids), core.col_mod()
+
+
 class CollectionWrapper:
-    """Serializes every access to the underlying ``anki.Collection``.
+    """Serializes every access to the native collection core.
 
-    The Anki collection is not safe for concurrent use, and its SQLite-backed
-    state is happiest when touched from a single thread. This wrapper owns one
-    dedicated worker thread and funnels all collection operations through it,
-    so concurrent callers (event-loop tasks, custom HTTP routes, the startup
-    path) are serialized rather than racing.
-
-    Operations are exposed as ``async`` methods: awaiting one schedules the
-    work on the worker thread and yields control, keeping the event loop
-    responsive while the collection is busy. ``run_sync`` and ``close`` provide
-    synchronous entry points for the startup and shutdown paths where no event
-    loop is running.
-
-    **Cooperative locking (#64, opt-in).** By default the collection is opened
-    once and held for the daemon's lifetime (Anki's exclusive lock too). In
-    cooperative mode the collection is still opened at boot, but released after a
-    short idle window and re-opened on demand, so an *idle* daemon doesn't block
-    launching Anki. ``self._open`` tracks held-vs-released; every op routes
-    through ``_locked`` (re-open if released, run an acquire drift hook), and each
-    async op (re)arms an idle-release timer. In the default mode ``self._open`` is
-    always True and these paths are inert.
+    One dedicated worker thread funnels all collection operations, so
+    concurrent callers (event-loop tasks, custom HTTP routes, the startup
+    path) are *ordered* rather than racing, and the cooperative idle-release
+    lifecycle (#64) has a single owner. Operations are exposed as ``async``
+    methods; ``run_sync`` and ``close`` serve the startup/shutdown paths.
     """
-
-    # Assigned on the worker thread in ``_open``; declared here for the type
-    # checker. Never mutate or call methods on it outside the worker thread.
-    # In cooperative mode it may be a *closed* handle while released; ``_locked``
-    # re-opens before any access, so it is never dereferenced while closed.
-    col: Collection
 
     def __init__(
         self,
@@ -352,7 +179,7 @@ class CollectionWrapper:
         *,
         cooperative: bool = False,
         hold_seconds: float = DEFAULT_LOCK_HOLD,
-        on_acquire: Callable[[Collection], None] | None = None,
+        on_acquire: Callable[[CollectionCore], None] | None = None,
     ) -> None:
         # Absolutize once at construction (cwd is the daemon's startup dir): every
         # downstream use — opening the collection, the lock-free media_dir — is then
@@ -365,19 +192,19 @@ class CollectionWrapper:
         self._open_flag = False
         self._release_handle: asyncio.TimerHandle | None = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shrike-collection")
-        # Open on the worker thread so the backend is owned by the same thread
-        # that will service every subsequent operation. (Cooperative mode opens
-        # at boot too; the idle-release lifecycle takes over afterwards.)
+        # Open on the worker thread so the lifecycle is owned by the same thread
+        # that orders every subsequent operation. (Cooperative mode opens at
+        # boot too; the idle-release lifecycle takes over afterwards.)
         self._executor.submit(self._open).result()
         atexit.register(self.close)
 
     def _open(self) -> None:
         logger.debug("Opening collection at %s", self._path)
-        self.col = Collection(self._path)
+        self.core = CollectionCore(self._path)
         self._open_flag = True
         logger.debug("Collection opened successfully")
 
-    def set_acquire_hook(self, hook: Callable[[Collection], None] | None) -> None:
+    def set_acquire_hook(self, hook: Callable[[CollectionCore], None] | None) -> None:
         """Set the callback run (on the worker thread) after a fresh re-open.
 
         Set post-construction because the hook closes over the index/embedding
@@ -399,48 +226,45 @@ class CollectionWrapper:
     def media_dir(self) -> str:
         """The media folder path, derived from the collection path — **lock-free**.
 
-        Computed via Anki's ``media_paths_from_col_path`` (the dir is always
-        ``<stem>.media`` next to the collection), so the static media HTTP route
-        can resolve files without acquiring the collection (no CollectionBusyError
-        under cooperative locking). Absolute because ``self._path`` is absolutized
-        in ``__init__`` — matches ``col.media.dir()`` and is cwd-independent."""
-        from anki.media import media_paths_from_col_path
-
-        return media_paths_from_col_path(self._path)[0]
+        Always ``<stem>.media`` next to the collection (the same derivation the
+        native open uses), so the static media HTTP route can resolve files
+        without acquiring the collection (no CollectionBusyError under
+        cooperative locking). Absolute because ``self._path`` is absolutized in
+        ``__init__``."""
+        base = self._path[: -len(".anki2")] if self._path.endswith(".anki2") else self._path
+        return base + ".media"
 
     # -- execution primitives ------------------------------------------------
 
-    def _locked(self, fn: Callable[[Collection], T]) -> T:
-        """Run ``fn(col)`` on the worker thread, re-opening first if released.
+    def _locked(self, fn: Callable[[CollectionCore], T]) -> T:
+        """Run ``fn(core)`` on the worker thread, re-acquiring first if released.
 
-        The single place that touches ``self.col``: if cooperative mode released
-        the collection, re-open it and run the acquire hook (drift re-check)
-        before the op. In the default mode ``self._open_flag`` is always True, so
-        this is just ``fn(self.col)``.
+        If cooperative mode released the collection, re-open it and run the
+        acquire hook (drift re-check) before the op. In the default mode
+        ``self._open_flag`` is always True, so this is just ``fn(self.core)``.
+        A re-acquire that can't open (another process holds the file) surfaces
+        as :class:`CollectionBusyError` — typed, immediate, retryable.
         """
         if not self._open_flag:
             try:
-                self.col = Collection(self._path)
-            except DBError as e:
-                # The file opened fine at boot, so a DBError on re-acquire is
-                # overwhelmingly lock contention (another process — usually Anki
-                # desktop — holds it), not corruption. Surface it as busy.
+                self.core.reopen()
+            except shrike_native.NativeBusyError as e:
                 raise CollectionBusyError() from e
             self._open_flag = True
             logger.debug("Re-acquired collection at %s", self._path)
             if self._on_acquire is not None:
                 with contextlib.suppress(Exception):
-                    self._on_acquire(self.col)
-        return fn(self.col)
+                    self._on_acquire(self.core)
+        return fn(self.core)
 
-    async def run(self, fn: Callable[[Collection], T]) -> T:
-        """Run ``fn(col)`` on the worker thread and await the result.
+    async def run(self, fn: Callable[[CollectionCore], T]) -> T:
+        """Run ``fn(core)`` on the worker thread and await the result.
 
         The escape hatch for collection operations that don't have a dedicated
-        method here (e.g. note-type edits, reading ``col.mod``). All access is
-        serialized through the same single worker thread, which re-opens the
-        collection first if cooperative mode released it (``_locked``). In
-        cooperative mode the idle-release timer is (re)armed after the op.
+        method here. All access is serialized through the same single worker
+        thread, which re-acquires the collection first if cooperative mode
+        released it (``_locked``). In cooperative mode the idle-release timer
+        is (re)armed after the op.
         """
         loop = asyncio.get_running_loop()
         try:
@@ -449,14 +273,14 @@ class CollectionWrapper:
             if self._cooperative and not self._closed:
                 self._schedule_release(loop)
 
-    def run_sync(self, fn: Callable[[Collection], T]) -> T:
-        """Run ``fn(col)`` on the worker thread, blocking until it returns.
+    def run_sync(self, fn: Callable[[CollectionCore], T]) -> T:
+        """Run ``fn(core)`` on the worker thread, blocking until it returns.
 
         For the startup and shutdown paths, which run before/after the event
         loop and so cannot ``await``. Still routes through the worker thread
-        (re-opening first if released), preserving single-thread ownership. No
-        idle-release is armed here — there is no loop; the next async op or an
-        explicit ``release_now`` handles release.
+        (re-acquiring first if released), preserving the single-owner ordering.
+        No idle-release is armed here — there is no loop; the next async op or
+        an explicit ``release_now`` handles release.
         """
         return self._executor.submit(lambda: self._locked(fn)).result()
 
@@ -470,7 +294,7 @@ class CollectionWrapper:
 
     def _fire_release(self) -> None:
         self._release_handle = None
-        # Close on the worker thread; fire-and-forget so the loop never blocks.
+        # Release on the worker thread; fire-and-forget so the loop never blocks.
         # A re-acquire racing this is safe — _release no-ops if already re-opened
         # and _locked re-opens before any access.
         self._executor.submit(self._release)
@@ -479,7 +303,7 @@ class CollectionWrapper:
         if not self._open_flag or self._closed:
             return
         with contextlib.suppress(Exception):
-            self.col.close()
+            self.core.release()
         self._open_flag = False
         logger.debug("Released collection lock after idle")
 
@@ -496,17 +320,18 @@ class CollectionWrapper:
 
         Releases Anki's SQLite lock and re-opens the file, picking up changes made
         on disk underneath the daemon (a restored backup, a file-level sync/swap).
-        Runs on the single worker thread, so it's serialized against every other
-        operation — nothing sees a half-swapped handle. The index is not touched
-        here; the caller re-checks drift afterwards. This is the primitive
-        cooperative locking (#64) will reuse for its open-on-demand lifecycle.
+        Serialized against every other operation — nothing sees a half-swapped
+        handle. The index is not touched here; the caller re-checks drift after.
         """
         await self.run(self._do_reopen)
 
-    def _do_reopen(self, _c: Collection) -> None:
-        with contextlib.suppress(Exception):
-            self.col.close()
-        self.col = Collection(self._path)
+    def _do_reopen(self, core: CollectionCore) -> None:
+        # The native reopen maps contention to the busy tier; /reload on a
+        # collection another process holds should surface exactly that.
+        try:
+            core.reopen()
+        except shrike_native.NativeBusyError as e:
+            raise CollectionBusyError() from e
         self._open_flag = True
         logger.info("Reopened collection at %s", self._path)
 
@@ -519,225 +344,23 @@ class CollectionWrapper:
             self._release_handle = None
         logger.debug("Closing collection")
         with contextlib.suppress(Exception):
-            self._executor.submit(lambda _c: self.col.close(), None).result()
+            self._executor.submit(self.core.close).result()
         self._executor.shutdown(wait=True)
 
-    # -- collection info -----------------------------------------------------
+    # -- info / read -----------------------------------------------------------
+
+    async def col_mod(self) -> int:
+        """The collection-modified watermark (drift detection's anchor)."""
+        return await self.run(lambda c: c.col_mod())
 
     async def get_collection_info(
         self,
         include: list[str] | None = None,
         note_type_details: list[str] | None = None,
     ) -> dict[str, Any]:
-        return await self.run(lambda _c: self._get_collection_info(include, note_type_details))
-
-    def _get_collection_info(
-        self,
-        include: list[str] | None,
-        note_type_details: list[str] | None,
-    ) -> dict[str, Any]:
-        ALL_SECTIONS = ["summary", "note_types", "decks", "tags", "stats"]
-        sections = ALL_SECTIONS if include and "all" in include else (include or ["summary"])
-        detail_names = set(note_type_details or [])
-        result: dict[str, Any] = {}
-
-        # Compute the two expensive intermediates shared across sections at most
-        # once: the scheduler due tree (summary + stats) and the per-deck note
-        # counts (decks + stats — a full card-table scan). collection_info("all")
-        # would otherwise build each twice.
-        tree = self.col.sched.deck_due_tree() if {"summary", "stats"} & set(sections) else None
-        counts = self._note_counts_by_deck() if {"decks", "stats"} & set(sections) else None
-
-        if "summary" in sections:
-            assert tree is not None
-            result["summary"] = self._get_summary(tree)
-
-        if "note_types" in sections:
-            result["note_types"] = self._get_note_types(detail_names)
-
-        if "decks" in sections:
-            assert counts is not None
-            result["decks"] = self._get_decks(counts)
-
-        if "tags" in sections:
-            result["tags"] = self.col.tags.all()
-
-        if "stats" in sections:
-            assert tree is not None and counts is not None
-            result["stats"] = self._get_stats(tree, counts)
-
-        return result
-
-    def _get_summary(self, tree: Any) -> dict[str, Any]:
-        # Top-level node counts are already rolled up to include their
-        # subdecks, so the collection total is the sum over top-level decks
-        # only. Recursing into children would double-count nested decks.
-        total_due = sum(top.review_count + top.learn_count for top in tree.children)
-
-        created = datetime.fromtimestamp(self.col.crt, tz=UTC).strftime("%Y-%m-%d")
-        modified = datetime.fromtimestamp(self.col.mod / 1000, tz=UTC).isoformat(timespec="seconds")
-
-        return {
-            "path": self.col.path,
-            "created": created,
-            "modified": modified,
-            "notes": self.col.note_count(),
-            "cards": self.col.card_count(),
-            "decks": len(self.col.decks.all_names_and_ids()),
-            "note_types": len(self.col.models.all()),
-            "tags": len(self.col.tags.all()),
-            "due_today": total_due,
-        }
-
-    def _get_note_types(self, detail_names: set[str]) -> list[dict]:
-        note_types = []
-        for nt in self.col.models.all():
-            entry: dict[str, Any] = {
-                "name": nt["name"],
-                "id": nt["id"],
-                "fields": [f["name"] for f in nt["flds"]],
-                "type": "cloze" if nt.get("type") == MODEL_CLOZE else "standard",
-            }
-            if nt["name"] in detail_names:
-                entry["detail"] = {
-                    "templates": [
-                        {
-                            "name": t["name"],
-                            "front": t["qfmt"],
-                            "back": t["afmt"],
-                        }
-                        for t in nt["tmpls"]
-                    ],
-                    "css": nt.get("css", ""),
-                    "fields": [
-                        {
-                            "name": f["name"],
-                            "font": f.get("font", ""),
-                            "size": f.get("size", 0),
-                            "description": f.get("description", ""),
-                        }
-                        for f in nt["flds"]
-                    ],
-                }
-            note_types.append(entry)
-        return note_types
-
-    def _note_counts_by_deck(self) -> dict[str, int]:
-        """Note count per deck (including subdecks), in a single pass.
-
-        Mirrors ``find_notes("deck:NAME")`` without running a query per deck: a
-        note counts toward a deck when any of its cards sits in that deck or a
-        descendant. A card parked in a filtered deck counts toward *both* the
-        filtered deck (``did``) and its original deck (``odid``), matching
-        Anki's ``deck:`` search — verified against ``find_notes`` for nested,
-        multi-deck, and filtered cases.
-        """
-        id_to_name = {d.id: d.name for d in self.col.decks.all_names_and_ids()}
-
-        db = self.col.db
-        assert db is not None  # always present on an open collection
-        # Let SQLite produce the distinct (note, deck) pairs: a card in a filtered
-        # deck counts toward both its current deck (did) and original (odid), and
-        # UNION both dedups those and collapses a note's many cards in one deck to
-        # a single row — so Python walks distinct pairs, not every card.
-        nids_by_deck: dict[int, set[int]] = defaultdict(set)
-        for nid, did in db.all(
-            "select nid, did from cards union select nid, odid from cards where odid != 0"
-        ):
-            nids_by_deck[did].add(nid)
-
-        # Roll each deck's notes up into itself and every ancestor (by name
-        # prefix), so a parent's count includes all its subdecks' notes.
-        rolled: dict[str, set[int]] = defaultdict(set)
-        for did, nids in nids_by_deck.items():
-            name = id_to_name.get(did)
-            if name is None:
-                continue
-            parts = name.split("::")
-            for i in range(1, len(parts) + 1):
-                rolled["::".join(parts[:i])] |= nids
-
-        return {name: len(rolled.get(name, set())) for name in id_to_name.values()}
-
-    def _get_decks(self, counts: dict[str, int]) -> list[dict]:
-        return [
-            {
-                "name": name_id.name,
-                "id": name_id.id,
-                "note_count": counts.get(name_id.name, 0),
-            }
-            for name_id in self.col.decks.all_names_and_ids()
-        ]
-
-    def _get_stats(self, tree: Any, note_counts: dict[str, int]) -> dict[str, Any]:
-        # Top-level node counts already include their subdecks, so collection
-        # totals sum over top-level decks only. The per-deck summary below
-        # walks every node — each node's count is its own rolled-up total.
-        total_due = sum(top.review_count + top.learn_count for top in tree.children)
-        total_new = sum(top.new_count for top in tree.children)
-
-        decks_summary: dict[str, dict] = {}
-
-        def walk(node: Any, prefix: str = "") -> None:
-            name = node.name
-            if prefix:
-                name = f"{prefix}::{node.name}"
-            due = node.review_count + node.learn_count
-
-            decks_summary[name] = {
-                "notes": note_counts.get(name, 0),
-                "due": due,
-            }
-            for child in node.children:
-                walk(child, name)
-
-        for top in tree.children:
-            walk(top)
-
-        return {
-            "total_notes": self.col.note_count(),
-            "total_cards": self.col.card_count(),
-            "cards_due_today": total_due,
-            "new_cards": total_new,
-            "decks_summary": decks_summary,
-        }
-
-    # -- list / read ---------------------------------------------------------
-
-    def _build_scope_query(
-        self,
-        *,
-        ids: list[int] | None = None,
-        deck: str | None = None,
-        tags: list[str] | None = None,
-        note_type: str | None = None,
-    ) -> tuple[str | None, bool]:
-        """Build an Anki search from structured selectors.
-
-        Returns ``(query, no_match)``: ``query`` is ``None`` when no selector was
-        given; ``no_match`` is True when a deck reference resolved to no deck (so
-        the caller should treat the result as empty). Shared by list and
-        find-replace so their scoping is identical.
-        """
-        parts: list[str] = []
-        if deck is not None:
-            resolved = self._resolve_deck_ref(deck)
-            if resolved is None:
-                return None, True
-            parts.append(f'"deck:{resolved}"')
-        if tags is not None:
-            for tag in tags:
-                if tag.startswith("-"):
-                    parts.append(f"-tag:{tag[1:]}")
-                else:
-                    parts.append(f"tag:{tag}")
-        if note_type is not None:
-            parts.append(f'"note:{note_type}"')
-        combined = " ".join(parts) if parts else None
-        if ids is not None:
-            id_query = f"nid:{','.join(str(i) for i in ids)}"
-            combined = f"{id_query} {combined}" if combined else id_query
-        return combined, False
+        return await self.run(
+            lambda c: json.loads(c.collection_info(include or [], note_type_details or []))
+        )
 
     async def list_notes(
         self,
@@ -750,93 +373,57 @@ class CollectionWrapper:
         fields_mode: str = "full",
         limit: int = 50,
     ) -> dict[str, Any]:
-        return await self.run(
-            lambda _c: self._list_notes(
-                ids=ids,
-                deck=deck,
-                tags=tags,
-                note_type=note_type,
-                modified_since=modified_since,
-                fields_mode=fields_mode,
-                limit=limit,
-            )
-        )
-
-    def _list_notes(
-        self,
-        *,
-        ids: list[int] | None = None,
-        deck: str | None = None,
-        tags: list[str] | None = None,
-        note_type: str | None = None,
-        modified_since: str | None = None,
-        fields_mode: str = "full",
-        limit: int = 50,
-    ) -> dict[str, Any]:
-        if ids is not None and not any([deck, tags, note_type, modified_since]):
-            return self._get_notes_by_ids(ids, fields_mode, limit)
-
-        combined, no_match = self._build_scope_query(
-            ids=ids, deck=deck, tags=tags, note_type=note_type
-        )
-        if no_match:
-            # An explicit #id (or numeric id) that matches no deck → no hits.
-            return {"notes": [], "total": 0, "limit": limit}
-
-        if combined is None:
-            if modified_since is not None:
-                combined = "deck:*"
-            else:
-                return {"error": "At least one filter is required"}
-
-        note_ids = list(self.col.find_notes(combined))
-
-        mod_cutoff = None
+        cutoff: int | None = None
         if modified_since is not None:
             dt = datetime.fromisoformat(modified_since)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=UTC)
-            mod_cutoff = int(dt.timestamp())
+            cutoff = int(dt.timestamp())
 
-        if mod_cutoff is not None:
-            # Intersect with one indexed query against the notes table rather
-            # than loading every candidate note via get_note (an N+1 over the
-            # match set). ``notes.mod`` is the same value as ``Note.mod``.
-            db = self.col.db
-            assert db is not None  # always present on an open collection
-            recent = set(db.list("select id from notes where mod >= ?", mod_cutoff))
-            note_ids = [nid for nid in note_ids if nid in recent]
+        def _list(c: CollectionCore) -> dict[str, Any]:
+            try:
+                return json.loads(
+                    c.list_notes(
+                        ids=ids,
+                        deck=deck,
+                        tags=tags,
+                        note_type=note_type,
+                        modified_since=cutoff,
+                        with_fields=fields_mode == "full",
+                        limit=limit,
+                    )
+                )
+            except shrike_native.NativeInputError as e:
+                if "filter" in str(e):
+                    # The tool layer's contract for the no-filter case.
+                    return {"error": "At least one filter is required"}
+                raise
 
-        total = len(note_ids)
-        note_ids = note_ids[:limit]
-
-        notes = self._notes_to_dicts(note_ids, fields_mode)
-        return {"notes": notes, "total": total, "limit": limit}
-
-    def _get_notes_by_ids(self, ids: list[int], fields_mode: str, limit: int) -> dict[str, Any]:
-        # _notes_to_dicts skips ids absent from the collection, so a stale id is
-        # dropped just as the per-note get_note path did (via NotFoundError).
-        notes = self._notes_to_dicts(ids[:limit], fields_mode)
-        return {"notes": notes, "total": len(notes), "limit": limit}
+        return await self.run(_list)
 
     async def query(
         self, query: str, *, fields_mode: str = "full", limit: int = 50
     ) -> dict[str, Any]:
-        return await self.run(lambda _c: self._query(query, fields_mode=fields_mode, limit=limit))
-
-    def _query(self, query: str, *, fields_mode: str = "full", limit: int = 50) -> dict[str, Any]:
         """Run a raw Anki search expression and return matching notes.
 
-        The query string is passed straight to ``col.find_notes`` — the full
-        Anki search language, no structured filters. A malformed expression
-        raises ``anki.errors.SearchError``, which the tool layer turns into a
-        ``ToolInputError``. Returns the same shape as ``list_notes`` (``total``
-        is the full match count before ``limit``).
+        The full Anki search language, no structured filters. A malformed
+        expression raises the native input error (a ``ValueError``), which the
+        tool layer turns into a ``ToolInputError``. Same shape as ``list_notes``
+        (``total`` is the full match count before ``limit``).
         """
-        note_ids = list(self.col.find_notes(query))
-        total = len(note_ids)
-        notes = self._notes_to_dicts(note_ids[:limit], fields_mode)
-        return {"notes": notes, "total": total, "limit": limit}
+        return await self.run(
+            lambda c: json.loads(c.query(query, with_fields=fields_mode == "full", limit=limit))
+        )
+
+    async def note_to_dict(self, nid: int, fields_mode: str) -> dict[str, Any]:
+        def _one(c: CollectionCore) -> dict[str, Any]:
+            listed = json.loads(c.list_notes(ids=[nid], with_fields=fields_mode == "full"))
+            notes = listed["notes"]
+            if not notes:
+                raise ValueError(f"Note {nid} not found")
+            return notes[0]  # type: ignore[no-any-return]
+
+        return await self.run(_one)
 
     async def search_substring(
         self,
@@ -847,53 +434,95 @@ class CollectionWrapper:
         exclude_ids: list[int] | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        return await self.run(
-            lambda _c: self._search_substring(
-                text, deck=deck, tags=tags, exclude_ids=exclude_ids, limit=limit
-            )
-        )
-
-    def _search_substring(
-        self,
-        text: str,
-        *,
-        deck: str | None,
-        tags: list[str] | None,
-        exclude_ids: list[int] | None,
-        limit: int,
-    ) -> list[dict[str, Any]]:
         """Notes whose field text contains ``text`` literally (case-insensitive).
 
         Anki's ``"*term*"`` wildcard search is a fast pre-filter; each candidate
         is then confirmed (and annotated) by ``substring_info``, the authority.
-        Returns full note dicts each carrying a ``substring`` annotation; no
-        ``score`` (this is the non-semantic mechanism).
+        Returns full note dicts each carrying a ``substring`` annotation.
         """
-        if not text.strip():
-            return []
-        parts = [f'"*{_escape_anki_text(text)}*"']
-        if deck is not None:
-            resolved = self._resolve_deck_ref(deck)
-            if resolved is None:
-                return []
-            parts.append(f'"deck:{resolved}"')
-        for tag in tags or []:
-            parts.append(f'"tag:{tag}"')
 
-        exclude = set(exclude_ids or [])
-        results: list[dict[str, Any]] = []
-        for nid in self.col.find_notes(" ".join(parts)):
-            if nid in exclude:
-                continue
-            note = self._note_to_dict(nid, "full")
-            info = substring_info(note.get("content"), text)
-            if info is None:
-                continue  # Anki matched across markup/normalization; not a literal hit
-            note["substring"] = info
-            results.append(note)
-            if len(results) >= limit:
-                break
-        return results
+        def _search(c: CollectionCore) -> list[dict[str, Any]]:
+            if not text.strip():
+                return []
+            parts = [f'"*{_escape_anki_text(text)}*"']
+            if deck is not None:
+                resolved = c.resolve_deck_ref(deck)
+                if resolved is None:
+                    return []
+                parts.append(f'"deck:{resolved}"')
+            for tag in tags or []:
+                parts.append(f'"tag:{tag}"')
+
+            exclude = set(exclude_ids or [])
+            candidates = [nid for nid in c.find_notes(" ".join(parts)) if nid not in exclude]
+            results: list[dict[str, Any]] = []
+            for note in json.loads(c.list_notes(ids=candidates, limit=len(candidates) or 1))[
+                "notes"
+            ]:
+                info = substring_info(note.get("content"), text)
+                if info is None:
+                    continue  # Anki matched across markup/normalization; not a literal hit
+                note["substring"] = info
+                results.append(note)
+                if len(results) >= limit:
+                    break
+            return results
+
+        return await self.run(_search)
+
+    async def resolve_deck_ref(self, ref: str) -> str | None:
+        return await self.run(lambda c: c.resolve_deck_ref(ref))
+
+    # -- write ------------------------------------------------------------------
+
+    async def upsert_notes(
+        self,
+        notes: list[dict[str, Any]],
+        *,
+        on_duplicate: OnDuplicate = "error",
+        dry_run: bool = False,
+    ) -> list[dict[str, Any]]:
+        return await self.run(
+            lambda c: json.loads(c.upsert_notes(json.dumps(notes), on_duplicate, dry_run))
+        )
+
+    async def delete_notes(self, ids: list[int]) -> dict[str, Any]:
+        def _delete(c: CollectionCore) -> dict[str, Any]:
+            existing = set(c.find_notes(f"nid:{','.join(str(i) for i in ids)}")) if ids else set()
+            not_found = [i for i in ids if i not in existing]
+            deleted = [i for i in ids if i in existing]
+            if deleted:
+                c.delete_notes(deleted)
+            return {"deleted": deleted, "not_found": not_found}
+
+        return await self.run(_delete)
+
+    async def update_note_tags(
+        self,
+        note_ids: list[int],
+        *,
+        set_tags: list[str] | None,
+        add: list[str],
+        remove: list[str],
+    ) -> dict[str, Any]:
+        def _tags(c: CollectionCore) -> dict[str, Any]:
+            modified, not_found = c.update_note_tags(
+                note_ids, set_tags=set_tags, add=add, remove=remove
+            )
+            return {"notes_modified": modified, "not_found": not_found}
+
+        return await self.run(_tags)
+
+    async def rename_tag(self, old: str, new: str, note_ids: list[int]) -> dict[str, Any]:
+        return await self.run(
+            lambda c: {"notes_modified": c.rename_tag(old, new, note_ids)}
+        )
+
+    async def upsert_decks(self, decks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return await self.run(lambda c: json.loads(c.upsert_decks(json.dumps(decks))))
+
+    async def delete_decks(self, names: list[str]) -> dict[str, Any]:
+        return await self.run(lambda c: json.loads(c.delete_decks(names)))
 
     async def find_replace(
         self,
@@ -910,354 +539,71 @@ class CollectionWrapper:
         dry_run: bool = False,
         sample_limit: int = 20,
     ) -> dict[str, Any]:
-        return await self.run(
-            lambda _c: self._find_replace(
-                search,
-                replacement,
-                regex=regex,
-                match_case=match_case,
-                field=field,
-                deck=deck,
-                tags=tags,
-                note_type=note_type,
-                ids=ids,
-                dry_run=dry_run,
-                sample_limit=sample_limit,
-            )
-        )
-
-    def _find_replace(
-        self,
-        search: str,
-        replacement: str,
-        *,
-        regex: bool,
-        match_case: bool,
-        field: str | None,
-        deck: str | None,
-        tags: list[str] | None,
-        note_type: str | None,
-        ids: list[int] | None,
-        dry_run: bool,
-        sample_limit: int,
-    ) -> dict[str, Any]:
-        """Bulk find-and-replace over a scoped note set.
-
-        Preview (samples + predicted count) is computed in Python; the apply runs
-        Anki's ``find_and_replace`` (authoritative) and the changed set is the
-        notes whose ``mod`` advanced — re-embedded by the tool layer.
-        """
-        empty = {"notes_changed": 0, "dry_run": dry_run, "samples": [], "changed_ids": []}
-        combined, no_match = self._build_scope_query(
-            ids=ids, deck=deck, tags=tags, note_type=note_type
-        )
-        if no_match or combined is None:
-            return empty
-        candidates = list(self.col.find_notes(combined))
-        if not candidates:
-            return empty
-
-        # Predict changes in Python for the preview / dry-run count. Read fields
-        # in one query (shared with note_texts) rather than get_note per note.
-        samples: list[dict[str, Any]] = []
-        predicted: set[int] = set()
-        for nid, names, values in self._note_field_rows(self.col, candidates):
-            for fname, value in zip(names, values, strict=False):
-                if field is not None and fname != field:
-                    continue
-                new = apply_replacement(
-                    value, search, replacement, regex=regex, match_case=match_case
-                )
-                if new != value:
-                    predicted.add(nid)
-                    if len(samples) < sample_limit:
-                        samples.append({"id": nid, "field": fname, "before": value, "after": new})
-
-        if dry_run:
-            return {
-                "notes_changed": len(predicted),
-                "dry_run": True,
-                "samples": samples,
-                "changed_ids": [],
-            }
-
-        # Apply via Anki; detect the actually-changed notes by mod-bump diff.
-        # Detect the actually-changed notes by diffing field content before/after
-        # (note.mod is only second-resolution, so a fast edit wouldn't show a bump).
-        db = self.col.db
-        assert db is not None
-        id_list = ",".join(str(i) for i in candidates)
-        flds_sql = f"select id, flds from notes where id in ({id_list})"
-        before: dict[int, str] = {int(r[0]): r[1] for r in db.all(flds_sql)}
-        count = self.col.find_and_replace(
-            note_ids=candidates,  # type: ignore[arg-type]
-            search=search,
-            replacement=replacement,
-            regex=regex,
-            field_name=field,
-            match_case=match_case,
-        ).count
-        after: dict[int, str] = {int(r[0]): r[1] for r in db.all(flds_sql)}
-        changed_ids = [nid for nid in candidates if after.get(nid) != before.get(nid)]
-        return {
-            "notes_changed": count,
-            "dry_run": False,
-            "samples": samples,
-            "changed_ids": changed_ids,
-        }
-
-    async def note_to_dict(self, nid: int, fields_mode: str) -> dict[str, Any]:
-        return await self.run(lambda _c: self._note_to_dict(nid, fields_mode))
-
-    def _notes_to_dicts(self, nids: Sequence[int], fields_mode: str) -> list[dict[str, Any]]:
-        """Serialize many notes in a fixed number of queries (no per-note N+1).
-
-        Reads all note rows and their first-card decks in two indexed queries
-        instead of ``get_note`` + ``note.cards()`` + ``decks.get()`` *per note*.
-        Field values come from the raw ``flds`` column (Anki joins fields with
-        U+001F, as already relied on in ``_find_empty_notes``) and tags from the
-        space-delimited ``tags`` column — both verified equal to the Note API.
-        Results follow input order; ids missing from the collection are skipped
-        (matching ``get_note`` raising ``NotFoundError`` for the single-note path).
-        """
-        if not nids:
-            return []
-        db = self.col.db
-        assert db is not None  # always present on an open collection
-        id_list = ",".join(str(n) for n in nids)
-
-        note_rows = {
-            r[0]: r
-            for r in db.all(f"select id, mid, tags, flds, mod from notes where id in ({id_list})")
-        }
-        # First card's deck per note (lowest ord), matching note.cards()[0].did.
-        deck_by_nid: dict[int, int] = {}
-        for nid, did in db.all(f"select nid, did from cards where nid in ({id_list}) order by ord"):
-            deck_by_nid.setdefault(nid, did)
-        deck_names = {d.id: d.name for d in self.col.decks.all_names_and_ids()}
-
-        model_cache: dict[int, tuple[str, list[str]]] = {}
-
-        def _model(mid: int) -> tuple[str, list[str]]:
-            cached = model_cache.get(mid)
-            if cached is None:
-                nt = self.col.models.get(mid)  # type: ignore[arg-type]
-                cached = (nt["name"], [f["name"] for f in nt["flds"]]) if nt else ("Unknown", [])
-                model_cache[mid] = cached
-            return cached
-
-        out: list[dict[str, Any]] = []
-        for nid in nids:
-            row = note_rows.get(nid)
-            if row is None:
-                continue
-            _id, mid, tags, flds, mod = row
-            name, field_names = _model(mid)
-            did = deck_by_nid.get(nid)
-            result: dict[str, Any] = {
-                "id": _id,
-                "note_type": name,
-                "deck": deck_names.get(did, "Default") if did is not None else "Default",
-                "tags": tags.split(),
-                "modified": datetime.fromtimestamp(mod, tz=UTC).isoformat(),
-            }
-            if fields_mode == "full":
-                result["content"] = dict(zip(field_names, flds.split("\x1f"), strict=False))
-            out.append(result)
-        return out
-
-    def _note_to_dict(self, nid: int, fields_mode: str) -> dict[str, Any]:
-        dicts = self._notes_to_dicts([nid], fields_mode)
-        if not dicts:
-            # Missing note (rare — a stale id, e.g. an index neighbor pointing at
-            # a deleted note): defer to Anki to raise its NotFoundError as before.
-            self.col.get_note(nid)  # type: ignore[arg-type]
-        return dicts[0]
-
-    # -- upsert / delete -----------------------------------------------------
-
-    async def upsert_notes(
-        self,
-        notes: list[dict[str, Any]],
-        *,
-        on_duplicate: OnDuplicate = "error",
-        dry_run: bool = False,
-    ) -> list[dict[str, Any]]:
-        return await self.run(
-            lambda _c: self._upsert_notes(notes, on_duplicate=on_duplicate, dry_run=dry_run)
-        )
-
-    def _upsert_notes(
-        self,
-        notes: list[dict[str, Any]],
-        *,
-        on_duplicate: OnDuplicate = "error",
-        dry_run: bool = False,
-    ) -> list[dict[str, Any]]:
-        results = []
-        for i, note_input in enumerate(notes):
-            try:
-                if "id" in note_input and note_input["id"] is not None:
-                    results.append(self._update_note(note_input, index=i, dry_run=dry_run))
-                else:
-                    results.append(
-                        self._create_note(
-                            note_input, index=i, on_duplicate=on_duplicate, dry_run=dry_run
-                        )
-                    )
-            except Exception as e:
-                results.append(
-                    {
-                        "status": "error",
-                        "index": i,
-                        "error": str(e),
-                    }
-                )
-        return results
-
-    def _check_new_note(self, note: Any, on_duplicate: OnDuplicate) -> dict[str, Any] | None:
-        """Run Anki's add-note validation on a candidate note.
-
-        Returns ``None`` if the note is addable (including a duplicate when
-        ``on_duplicate="allow"``), or a partial result dict (``status`` +
-        ``reason`` [+ ``error``], no ``index``) describing why not.
-        """
-        state = note.fields_check()
-        if state == NoteFieldsCheckResult.NORMAL:
-            return None
-        if state == NoteFieldsCheckResult.DUPLICATE:
-            if on_duplicate == "allow":
-                return None
-            if on_duplicate == "skip":
-                return {"status": "skipped", "reason": "duplicate"}
-            return {"status": "error", "error": _DUPLICATE_MESSAGE, "reason": "duplicate"}
-        reason, message = _STRUCTURAL_PROBLEMS[state]
-        return {"status": "error", "error": message, "reason": reason}
-
-    def _create_note(
-        self, note_input: dict[str, Any], *, index: int, on_duplicate: OnDuplicate, dry_run: bool
-    ) -> dict[str, Any]:
-        note_type_name = note_input.get("note_type")
-        deck_name = note_input.get("deck")
-        fields = note_input.get("fields")
-
-        if not note_type_name:
-            raise ValueError("note_type is required for new notes")
-        if not deck_name:
-            raise ValueError("deck is required for new notes")
-        if not fields:
-            raise ValueError("fields is required for new notes")
-
-        notetype = self.col.models.by_name(note_type_name)
-        if notetype is None:
-            return {
-                "status": "error",
-                "index": index,
-                "error": f"Note type '{note_type_name}' not found",
-                "reason": "unknown_note_type",
-            }
-
-        # Resolve the deck reference (name / numeric id / #id) to a canonical
-        # name. This is read-only — a plain name for a not-yet-existing deck
-        # passes through unchanged and is auto-created on the write path below,
-        # so a dry run still creates nothing. Only an id/#id pointing at no deck
-        # is an error.
-        resolved_deck = self._resolve_deck_ref(deck_name)
-        if resolved_deck is None:
-            raise ValueError(f"Deck '{deck_name}' not found")
-        deck_name = resolved_deck
-
-        note = self.col.new_note(notetype)
-        for field_name, value in fields.items():
-            if field_name not in note:
-                return {
-                    "status": "error",
-                    "index": index,
-                    "error": (
-                        f"Field '{field_name}' not found in note type '{note_type_name}'. "
-                        f"Available fields: {list(note.keys())}"
-                    ),
-                    "reason": "unknown_field",
-                }
-            note[field_name] = value
-
-        if "tags" in note_input and note_input["tags"] is not None:
-            note.tags = note_input["tags"]
-
-        # Anki's own add-note validation (duplicate / empty / cloze structure),
-        # applied before any write so dry runs and real runs classify identically.
-        problem = self._check_new_note(note, on_duplicate)
-        if problem is not None:
-            return {"index": index, **problem}
-
-        if dry_run:
-            return {"status": "ok", "index": index, "action": "create"}
-
-        deck_id = self.col.decks.id_for_name(deck_name)
-        if deck_id is None:
-            deck_id = self.col.decks.id(deck_name)
-        if deck_id is None:
-            raise ValueError(f"Could not find or create deck '{deck_name}'")
-
-        self.col.add_note(note, deck_id)
-        logger.debug("Created note %d (type=%s, deck=%s)", note.id, note_type_name, deck_name)
-        return {"status": "created", "id": note.id}
-
-    def _update_note(
-        self, note_input: dict[str, Any], *, index: int, dry_run: bool
-    ) -> dict[str, Any]:
-        nid = note_input["id"]
-        try:
-            note = self.col.get_note(nid)  # type: ignore[arg-type]
-        except NotFoundError as err:
-            raise ValueError(f"Note {nid} not found") from err
-
-        if "note_type" in note_input and note_input["note_type"] is not None:
-            notetype = self.col.models.get(note.mid)
-            current_type = notetype["name"] if notetype else "Unknown"
-            if note_input["note_type"] != current_type:
-                raise ValueError(
-                    f"Cannot change note type (current: '{current_type}', "
-                    f"requested: '{note_input['note_type']}')"
-                )
-
-        if "fields" in note_input and note_input["fields"] is not None:
-            for field_name, value in note_input["fields"].items():
-                if field_name not in note:
-                    nt = self.col.models.get(note.mid)
-                    nt_name = nt["name"] if nt else "Unknown"
+        def _replace(c: CollectionCore) -> dict[str, Any]:
+            # Scope resolution mirrors list_notes' structured filters.
+            parts: list[str] = []
+            if deck is not None:
+                resolved = c.resolve_deck_ref(deck)
+                if resolved is None:
                     return {
-                        "status": "error",
-                        "index": index,
-                        "error": (
-                            f"Field '{field_name}' not found in note type "
-                            f"'{nt_name}'. Available fields: {list(note.keys())}"
-                        ),
-                        "reason": "unknown_field",
+                        "notes_changed": 0,
+                        "dry_run": dry_run,
+                        "samples": [],
+                        "changed_ids": [],
                     }
-                note[field_name] = value
+                parts.append(f'"deck:{resolved}"')
+            for tag in tags or []:
+                parts.append(f"-tag:{tag[1:]}" if tag.startswith("-") else f"tag:{tag}")
+            if note_type is not None:
+                parts.append(f'"note:{note_type}"')
+            combined = " ".join(parts) if parts else None
+            if ids is not None:
+                id_query = f"nid:{','.join(str(i) for i in ids)}"
+                combined = f"{id_query} {combined}" if combined else id_query
+            if combined is None:
+                raise ValueError(
+                    "A scope is required: provide deck, tags, note_type, or ids."
+                )
+            candidates = c.find_notes(combined)
+            if not candidates:
+                return {"notes_changed": 0, "dry_run": dry_run, "samples": [], "changed_ids": []}
 
-        if "tags" in note_input and note_input["tags"] is not None:
-            note.tags = note_input["tags"]
+            # Preview in Python (exact for literal, illustrative for regex).
+            samples: list[dict[str, Any]] = []
+            predicted: set[int] = set()
+            for nid, names, values in c.note_field_map(candidates):
+                for fname, value in zip(names, values, strict=False):
+                    if field is not None and fname != field:
+                        continue
+                    new = apply_replacement(
+                        value, search, replacement, regex=regex, match_case=match_case
+                    )
+                    if new != value:
+                        predicted.add(nid)
+                        if len(samples) < sample_limit:
+                            samples.append(
+                                {"id": nid, "field": fname, "before": value, "after": new}
+                            )
 
-        if dry_run:
-            return {"status": "ok", "index": index, "action": "update"}
+            if dry_run:
+                return {
+                    "notes_changed": len(predicted),
+                    "dry_run": True,
+                    "samples": samples,
+                    "changed_ids": [],
+                }
 
-        self.col.update_note(note)
+            applied = json.loads(
+                c.find_replace_notes(candidates, search, replacement, regex, match_case, field)
+            )
+            return {
+                "notes_changed": applied["notes_changed"],
+                "dry_run": False,
+                "samples": samples,
+                "changed_ids": applied["changed_ids"],
+            }
 
-        if "deck" in note_input and note_input["deck"] is not None:
-            resolved_deck = self._resolve_deck_ref(note_input["deck"])
-            if resolved_deck is None:
-                raise ValueError(f"Deck '{note_input['deck']}' not found")
-            target_deck_id = self.col.decks.id_for_name(resolved_deck)
-            if target_deck_id is None:
-                target_deck_id = self.col.decks.id(resolved_deck)
-            if target_deck_id is not None:
-                card_ids = note.card_ids()
-                self.col.set_deck(card_ids, int(target_deck_id))
-
-        logger.debug("Updated note %d", note.id)
-        return {"status": "updated", "id": note.id}
+        return await self.run(_replace)
 
     async def migrate_note_type(
         self,
@@ -1269,194 +615,71 @@ class CollectionWrapper:
         dry_run: bool = False,
     ) -> dict[str, Any]:
         return await self.run(
-            lambda _c: self._migrate_note_type(
-                note_ids, new_note_type, field_map, template_map=template_map, dry_run=dry_run
+            lambda c: json.loads(
+                c.migrate_note_type(
+                    note_ids,
+                    new_note_type,
+                    json.dumps(field_map),
+                    json.dumps(template_map) if template_map else "",
+                    dry_run,
+                )
             )
         )
 
-    def _migrate_note_type(
-        self,
-        note_ids: list[int],
-        new_note_type: str,
-        field_map: dict[str, str],
-        *,
-        template_map: dict[str, str] | None = None,
-        dry_run: bool = False,
-    ) -> dict[str, Any]:
-        """Change a set of notes from one note type to another (Anki's models.change).
+    # -- note types ---------------------------------------------------------------
 
-        All ``note_ids`` must currently share a single source note type — one
-        field/template map can't apply to mixed types. ``field_map`` maps source
-        field *names* to target field names; source fields absent from it are
-        dropped (reported in ``dropped_fields``), and target fields nothing maps
-        into are reported in ``new_empty_fields``. ``template_map`` is optional;
-        omitted, Anki maps templates by ordinal. Note IDs and (for mapped
-        templates) card scheduling are preserved. Raises ``ValueError`` for any
-        caller error — the tool layer turns it into a ``ToolInputError``.
-        """
-        try:
-            notes = [self.col.get_note(nid) for nid in note_ids]  # type: ignore[arg-type]
-        except NotFoundError as err:
-            raise ValueError(f"Note not found: {err}") from err
+    async def upsert_note_types(self, note_types: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return await self.run(lambda c: json.loads(c.upsert_note_types(json.dumps(note_types))))
 
-        source_mids = {n.mid for n in notes}
-        if len(source_mids) != 1:
-            raise ValueError("All notes must currently share one note type to migrate together.")
-        source = self.col.models.get(source_mids.pop())
-        assert source is not None
-
-        target = self.col.models.by_name(new_note_type)
-        if target is None:
-            raise ValueError(f"Note type '{new_note_type}' not found")
-        if target["id"] == source["id"]:
-            raise ValueError(f"Notes already use note type '{new_note_type}'.")
-
-        src_fields = {f["name"]: f["ord"] for f in source["flds"]}
-        tgt_fields = {f["name"]: f["ord"] for f in target["flds"]}
-        for old, new in field_map.items():
-            if old not in src_fields:
-                raise ValueError(f"Source field '{old}' not in note type '{source['name']}'")
-            if new not in tgt_fields:
-                raise ValueError(f"Target field '{new}' not in note type '{new_note_type}'")
-        targets = list(field_map.values())
-        ambiguous = sorted({t for t in targets if targets.count(t) > 1})
-        if ambiguous:
-            raise ValueError(f"Multiple source fields map to the same target field(s): {ambiguous}")
-
-        # fmap covers every source field ord: mapped -> target ord, else None (drop).
-        fmap: dict[int, int | None] = {
-            ord_: (tgt_fields[field_map[name]] if name in field_map else None)
-            for name, ord_ in src_fields.items()
-        }
-        dropped_fields = [name for name in src_fields if name not in field_map]
-        mapped_targets = set(field_map.values())
-        new_empty_fields = [name for name in tgt_fields if name not in mapped_targets]
-
-        cmap: dict[int, int | None] | None = None
-        if template_map:
-            src_tmpls = {t["name"]: t["ord"] for t in source["tmpls"]}
-            tgt_tmpls = {t["name"]: t["ord"] for t in target["tmpls"]}
-            for old, new in template_map.items():
-                if old not in src_tmpls:
-                    raise ValueError(f"Source template '{old}' not in note type '{source['name']}'")
-                if new not in tgt_tmpls:
-                    raise ValueError(f"Target template '{new}' not in note type '{new_note_type}'")
-            cmap = {
-                ord_: (tgt_tmpls[template_map[name]] if name in template_map else None)
-                for name, ord_ in src_tmpls.items()
-            }
-
-        result = {
-            "changed": [n.id for n in notes],
-            "from_note_type": source["name"],
-            "to_note_type": target["name"],
-            "dropped_fields": dropped_fields,
-            "new_empty_fields": new_empty_fields,
-            "dry_run": dry_run,
-        }
-        if dry_run:
-            return result
-
-        self.col.models.change(
-            source,
-            [n.id for n in notes],  # type: ignore[misc]
-            target,
-            fmap,
-            cmap,
-        )
-        logger.debug(
-            "Migrated %d note(s) %s -> %s (dropped=%s)",
-            len(notes),
-            source["name"],
-            target["name"],
-            dropped_fields,
-        )
-        return result
-
-    async def delete_notes(self, ids: list[int]) -> dict[str, Any]:
-        return await self.run(lambda _c: self._delete_notes(ids))
-
-    def _delete_notes(self, ids: list[int]) -> dict[str, Any]:
-        existing = set(self.col.find_notes(f"nid:{','.join(str(i) for i in ids)}"))
-        not_found = [i for i in ids if i not in existing]
-        deleted = list(existing)
-
-        if deleted:
-            self.col.remove_notes(deleted)
-
-        return {"deleted": deleted, "not_found": not_found}
-
-    # -- tags ----------------------------------------------------------------
-
-    async def update_note_tags(
-        self,
-        note_ids: list[int],
-        *,
-        set_tags: list[str] | None,
-        add: list[str],
-        remove: list[str],
+    async def update_note_type_fields(
+        self, note_type_name: str, operations: list[dict[str, Any]]
     ) -> dict[str, Any]:
         return await self.run(
-            lambda _c: self._update_note_tags(note_ids, set_tags=set_tags, add=add, remove=remove)
+            lambda c: json.loads(c.update_note_type_fields(note_type_name, json.dumps(operations)))
         )
 
-    def _update_note_tags(
-        self,
-        note_ids: list[int],
-        *,
-        set_tags: list[str] | None,
-        add: list[str],
-        remove: list[str],
+    async def update_note_type_templates(
+        self, note_type_name: str, operations: list[dict[str, Any]]
     ) -> dict[str, Any]:
-        """Edit tags on a set of notes.
+        return await self.run(
+            lambda c: json.loads(
+                c.update_note_type_templates(note_type_name, json.dumps(operations))
+            )
+        )
 
-        ``set_tags`` is a full replace (an empty list clears all tags); it is
-        mutually exclusive with ``add``/``remove``, which apply additively and
-        subtractively without disturbing other tags. Validation of that rule
-        lives in the tool layer — here ``set_tags is not None`` selects replace
-        mode. Returns the notes the operation applied to and any IDs not found.
-        """
-        existing = set(self.col.find_notes(f"nid:{','.join(str(i) for i in note_ids)}"))
-        not_found = [i for i in note_ids if i not in existing]
-        targets = [i for i in note_ids if i in existing]
+    async def find_replace_note_types(
+        self,
+        note_type_name: str,
+        *,
+        search: str,
+        replacement: str,
+        regex: bool = False,
+        match_case: bool = True,
+        front: bool = True,
+        back: bool = True,
+        css: bool = True,
+    ) -> dict[str, Any]:
+        return await self.run(
+            lambda c: json.loads(
+                c.find_replace_note_types(
+                    note_type_name, search, replacement, regex, match_case, front, back, css
+                )
+            )
+        )
 
-        if targets:
-            if set_tags is not None:
-                for nid in targets:
-                    note = self.col.get_note(nid)  # type: ignore[arg-type]
-                    note.tags = list(set_tags)
-                    self.col.update_note(note)
-            else:
-                # Remove before add so a tag named in both ends up present.
-                if remove:
-                    self.col.tags.bulk_remove(targets, " ".join(remove))  # type: ignore[arg-type]
-                if add:
-                    self.col.tags.bulk_add(targets, " ".join(add))  # type: ignore[arg-type]
+    async def update_note_type_field_metadata(
+        self, note_type_name: str, updates: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        return await self.run(
+            lambda c: json.loads(
+                c.update_note_type_field_metadata(note_type_name, json.dumps(updates))
+            )
+        )
 
-        return {"notes_modified": len(targets), "not_found": not_found}
+    async def delete_note_types(self, ids: list[int]) -> dict[str, Any]:
+        return await self.run(lambda c: json.loads(c.delete_note_types(ids)))
 
-    async def rename_tag(self, old: str, new: str, note_ids: list[int]) -> dict[str, Any]:
-        return await self.run(lambda _c: self._rename_tag(old, new, note_ids))
-
-    def _rename_tag(self, old: str, new: str, note_ids: list[int]) -> dict[str, Any]:
-        """Rename a tag collection-wide (empty ``note_ids``) or on a note set.
-
-        The note-scoped path renames the tag *exactly* (match notes carrying
-        ``old``, then swap it for ``new``) rather than a substring find/replace,
-        so renaming ``jp`` never touches ``jp-verbs``.
-        """
-        if not note_ids:
-            count = self.col.tags.rename(old, new).count
-            return {"notes_modified": count}
-
-        scope = ",".join(str(i) for i in note_ids)
-        matching = list(self.col.find_notes(f"(nid:{scope}) tag:{old}"))
-        if matching:
-            self.col.tags.bulk_remove(matching, old)
-            self.col.tags.bulk_add(matching, new)
-        return {"notes_modified": len(matching)}
-
-    # -- collection maintenance ----------------------------------------------
+    # -- maintenance ----------------------------------------------------------------
 
     async def prune(
         self,
@@ -1467,122 +690,14 @@ class CollectionWrapper:
         unused_media: bool,
         dry_run: bool,
     ) -> tuple[dict[str, Any], list[int]]:
-        return await self.run(
-            lambda _c: self._prune(
-                unused_tags=unused_tags,
-                empty_notes=empty_notes,
-                empty_cards=empty_cards,
-                unused_media=unused_media,
-                dry_run=dry_run,
-            )
-        )
+        def _prune(c: CollectionCore) -> tuple[dict[str, Any], list[int]]:
+            result = json.loads(c.prune(unused_tags, empty_notes, empty_cards, unused_media, dry_run))
+            removed: list[int] = result.pop("removed_note_ids")
+            return result, removed
 
-    def _find_unused_media(self) -> list[str]:
-        """Media files on disk that no note references (Anki's media check)."""
-        return list(self.col.media.check().unused)
+        return await self.run(_prune)
 
-    def _find_empty_notes(self) -> list[int]:
-        """Note ids whose every field is blank (no text and no media).
-
-        Uses ``embed_text.field_is_blank`` per field, so a note made only of an
-        image or ``[sound:…]`` is *not* empty. Scans the whole ``notes`` table —
-        prune is a maintenance op, so the full pass is acceptable.
-        """
-        db = self.col.db
-        assert db is not None  # always present on an open collection
-        empty: list[int] = []
-        for nid, flds in db.all("select id, flds from notes"):
-            if all(field_is_blank(f) for f in flds.split("\x1f")):
-                empty.append(int(nid))
-        return empty
-
-    def _prune(
-        self,
-        *,
-        unused_tags: bool,
-        empty_notes: bool,
-        empty_cards: bool,
-        unused_media: bool,
-        dry_run: bool,
-    ) -> tuple[dict[str, Any], list[int]]:
-        """Run the requested cleanups; return (result, note ids removed).
-
-        On apply the cleanups run in order — empty notes, then empty cards, then
-        unused tags, then unused media — so tag-registry names and media files
-        orphaned by the deletions get cleared in the same call. The returned
-        note-id list (empty notes + empty cards that lost their last card) is what
-        the tool layer removes from the index; trashing media touches no vectors.
-
-        Dry-run mutates nothing and computes each cleanup against the *current*
-        collection; the empty-cards preview subtracts the empty-note ids (those
-        notes go first on apply) so a note isn't listed under both. Because the
-        previews are independent, a real apply may clear a few more tags than the
-        dry-run reported (deletions free additional tags).
-        """
-        result: dict[str, Any] = {"dry_run": dry_run}
-        removed_note_ids: list[int] = []
-
-        empty_note_ids: list[int] = []
-        if empty_notes:
-            empty_note_ids = self._find_empty_notes()
-            if not dry_run and empty_note_ids:
-                self.col.remove_notes(empty_note_ids)  # type: ignore[arg-type]
-            result["empty_notes"] = {"removed": empty_note_ids}
-            removed_note_ids += empty_note_ids
-
-        if empty_cards:
-            report = self.col.get_empty_cards()
-            card_ids = [cid for n in report.notes for cid in n.card_ids]
-            notes_deleted = [n.note_id for n in report.notes if n.will_delete_note]
-            if dry_run:
-                # Empty notes go first on apply, so don't double-list them here.
-                already = set(empty_note_ids)
-                notes_deleted = [nid for nid in notes_deleted if nid not in already]
-            elif card_ids:
-                self.col.remove_cards_and_orphaned_notes(card_ids)  # type: ignore[arg-type]
-            result["empty_cards"] = {
-                "cards_removed": len(card_ids),
-                "notes_deleted": notes_deleted,
-            }
-            removed_note_ids += notes_deleted
-
-        if unused_tags:
-            names = self._unused_tag_names()
-            if not dry_run and names:
-                self.col.tags.clear_unused_tags()
-            result["unused_tags"] = {"removed": len(names), "tags": names}
-
-        if unused_media:
-            # Last, so on apply it catches media orphaned by the note/card deletions
-            # above (Anki's check re-reads the post-deletion reference set). Like
-            # unused_tags, the dry-run preview reflects the *current* references, so
-            # an apply may trash a few more than the preview showed. Trashing media
-            # changes no note text or note set, so the index is untouched.
-            media_files = self._find_unused_media()
-            if not dry_run and media_files:
-                self.col.media.trash_files(media_files)
-            result["unused_media"] = {"removed": len(media_files), "files": media_files}
-
-        return result, removed_note_ids
-
-    def _unused_tag_names(self) -> list[str]:
-        """Registered tags present on no note — in one scan, not a find_notes per
-        tag. A tag is *used* if a note carries it or any descendant (``a`` is used
-        when a note has ``a::b``), mirroring Anki's hierarchical, case-insensitive
-        ``tag:`` search: collect every note tag's ancestor chain, case-folded, and
-        flag the registered tags absent from it.
-        """
-        db = self.col.db
-        assert db is not None  # always present on an open collection
-        used: set[str] = set()
-        for (tagstr,) in db.all("select distinct tags from notes"):
-            for tag in tagstr.split():
-                parts = tag.lower().split("::")
-                for i in range(1, len(parts) + 1):
-                    used.add("::".join(parts[:i]))
-        return [t for t in self.col.tags.all() if t.lower() not in used]
-
-    # -- media (#70) ---------------------------------------------------------
+    # -- media (#70) ---------------------------------------------------------------
 
     async def store_media(
         self,
@@ -1594,20 +709,12 @@ class CollectionWrapper:
         """Store a batch of media files; one bad item never sinks the batch.
 
         Each item is prepared **off the worker thread** and **concurrently**
-        (``asyncio.gather`` over ``to_thread``): URL items download in parallel
-        (so a 10-URL batch isn't serialized at the per-fetch timeout) and base64
-        items decode off the event loop, with the size cap applied to the encoded
-        length *before* decoding (no allocating an oversize payload to then reject
-        it). The prepared bytes are written on the worker thread.
-
-        A server-local ``path`` item (#164/#170) is honored **only** when
-        ``server_path_roots`` is non-empty (the operator's opt-in, repeatable
-        ``--media-path-root`` on a purely-local daemon) **and** the path is
-        contained in one of those roots after ``..``/symlink resolution; otherwise
-        it's a per-item error. It's stored zero-copy via ``col.media.add_file`` on
-        the worker thread (no read into Python memory). Per-item failures (bad
-        base64, unfetchable/SSRF-blocked URL, disabled/out-of-root/missing path,
-        oversize) become error results.
+        (``asyncio.gather`` over ``to_thread`` of the NATIVE fetch/decode):
+        URL items download in parallel through the SSRF-guarded native fetch
+        and base64 items decode with the cap on the encoded length. The
+        prepared bytes are then written on the worker thread; server-local
+        ``path`` items go through the native store whole (its containment
+        gates are authoritative).
         """
         roots = server_path_roots or []
 
@@ -1615,469 +722,114 @@ class CollectionWrapper:
             name = item.get("filename")
             try:
                 if item.get("path") is not None:
-                    if not roots:
-                        raise ValueError(
-                            "server-local paths are not enabled (set --media-path-root on a "
-                            "purely-local daemon)"
-                        )
-                    # Resolve once; check containment and hand the *resolved* real
-                    # path to add_file so the final component isn't re-resolved
-                    # through a symlink swapped in after the check (shrinks the
-                    # accepted check→copy TOCTOU window — see _add_file_media).
-                    target = os.path.realpath(item["path"])
-                    if not _path_within_any_root(target, roots):
-                        raise ValueError("path is outside the configured media root(s)")
-                    if not os.path.isfile(target):
-                        raise ValueError(f"file not found: {item['path']}")
-                    return {"index": index, "src_path": target, "name": name}
+                    # Native handles the roots gate + containment + zero-copy.
+                    return {"index": index, "path_item": item, "name": name}
                 if item.get("data") is not None:
-                    raw = await asyncio.to_thread(_decode_media_b64, item["data"])
+                    raw = await asyncio.to_thread(shrike_native.decode_media_b64, item["data"])
                     return {"index": index, "raw": raw, "name": name, "content_type": None}
-                url = item["url"]
                 raw, content_type = await asyncio.to_thread(
-                    _fetch_media_url, url, allow_private=allow_private_fetch
+                    shrike_native.fetch_media_url, item["url"], allow_private_fetch
                 )
+                from urllib.parse import urlparse
+
                 return {
                     "index": index,
                     "raw": raw,
-                    "name": name or _safe_media_name(urlparse(url).path),
+                    "name": name or _safe_media_name(urlparse(item["url"]).path),
                     "content_type": content_type,
                 }
             except Exception as e:
                 return {"index": index, "error": str(e), "name": name}
 
         prepared = await asyncio.gather(*(_prepare(i, item) for i, item in enumerate(items)))
-        return await self.run(lambda _c: self._write_media_batch(list(prepared)))
 
-    def _write_media_batch(self, prepared: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-        for p in prepared:
-            if "error" in p:
-                results.append(
-                    {
-                        "status": "error",
-                        "index": p["index"],
-                        "filename": p["name"],
-                        "error": p["error"],
-                    }
-                )
-                continue
-            try:
-                results.append(self._write_one_media(p))
-            except Exception as e:
-                results.append(
-                    {
-                        "status": "error",
-                        "index": p["index"],
-                        "filename": p.get("name"),
-                        "error": str(e),
-                    }
-                )
-        return results
-
-    def _write_one_media(self, p: dict[str, Any]) -> dict[str, Any]:
-        if "src_path" in p:
-            return self._add_file_media(p)
-        raw: bytes = p["raw"]
-        name: str | None = p["name"]
-        content_type: str | None = p["content_type"]
-        if len(raw) > MEDIA_MAX_BYTES:
-            raise ValueError(f"file exceeds the {MEDIA_MAX_BYTES}-byte limit")
-        # Derive an extension from the HTTP type when the (URL-derived) name lacks
-        # one, so Anki's renderer knows what it is. A base64 item always has a
-        # filename with an extension (schema-enforced).
-        if (not name or "." not in os.path.basename(name)) and content_type:
-            name = self.col.media.add_extension_based_on_mime(name or "media", content_type)
-        safe = _safe_media_name(name or "")
-        if not safe:
-            raise ValueError("could not determine a filename")
-        existed = self.col.media.have(safe)
-        stored = self.col.media.write_data(safe, raw)
-        return {
-            "status": "stored",
-            "index": p["index"],
-            "filename": stored,
-            "mime": _guess_mime(stored),
-            "size_bytes": len(raw),
-            # Identical content already present → Anki kept the name, wrote nothing
-            # new. A different-content collision instead yields stored != safe.
-            "deduped": existed and stored == safe,
-        }
-
-    def _add_file_media(self, p: dict[str, Any]) -> dict[str, Any]:
-        """Store a server-local file zero-copy via Anki's add_file (#164/#170).
-
-        ``src_path`` is the **resolved real path** already vetted against the
-        configured roots (the caller realpath'd it before the containment check),
-        so add_file copies the exact vetted file rather than re-resolving the
-        original possibly-symlinked path — shrinking the check→copy TOCTOU window
-        (a remaining race on a path *component* is an accepted local-trust
-        residual). The stored name comes from that path's basename (a `filename`
-        override isn't honored for `path` — rewriting it would mean reading the
-        file, defeating the zero-copy intent). Anki resolves collisions/dedup as
-        write_data does. No size cap: a deliberate local-file copy, not a
-        memory-bound base64/URL payload."""
-        src: str = p["src_path"]
-        base = _safe_media_name(os.path.basename(src))
-        existed = bool(base) and self.col.media.have(base)
-        stored = self.col.media.add_file(src)
-        return {
-            "status": "stored",
-            "index": p["index"],
-            "filename": stored,
-            "mime": _guess_mime(stored),
-            "size_bytes": os.path.getsize(src),
-            "deduped": existed and stored == base,
-        }
-
-    async def fetch_media(self, filenames: list[str]) -> list[dict[str, Any]]:
-        return await self.run(lambda _c: self._fetch_media(filenames))
-
-    def _fetch_media(self, filenames: list[str]) -> list[dict[str, Any]]:
-        """Resolve each media filename to where its bytes live — never the bytes.
-
-        A `found` result carries `path` (read directly if co-located); the tool
-        layer adds the `url` (it knows the server's base URL). The bytes are
-        fetched from that url or path, never base64'd into the response."""
-        media_dir = self.col.media.dir()
-        results: list[dict[str, Any]] = []
-        for fn in filenames:
-            safe = _safe_media_name(fn)
-            path = os.path.join(media_dir, safe) if safe else ""
-            size: int | None = None
-            if safe and os.path.isfile(path):
-                with contextlib.suppress(OSError):
-                    size = os.path.getsize(path)  # may vanish in the gap (external delete)
-            if size is None:
-                results.append({"status": "missing", "filename": fn})
-                continue
-            results.append(
-                {
-                    "status": "found",
-                    "filename": safe,
-                    "path": path,
-                    "mime": _guess_mime(safe),
-                    "size_bytes": size,
-                }
-            )
-        return results
-
-    async def list_media(self, *, pattern: str | None, limit: int | None) -> dict[str, Any]:
-        return await self.run(lambda _c: self._list_media(pattern, limit))
-
-    def _list_media(self, pattern: str | None, limit: int | None) -> dict[str, Any]:
-        media_dir = self.col.media.dir()
-        # One scandir pass yields is_file() + stat().st_size without a second stat
-        # per file; an entry that vanishes mid-scan is skipped (treated as gone).
-        entries: list[tuple[str, int]] = []
-        # media dir absent → empty listing
-        with contextlib.suppress(OSError), os.scandir(media_dir) as it:
-            for entry in it:
-                if pattern and not fnmatch.fnmatch(entry.name, pattern):
+        def _write(c: CollectionCore) -> list[dict[str, Any]]:
+            results: list[dict[str, Any]] = []
+            for p in prepared:
+                if "error" in p:
+                    results.append(
+                        {
+                            "status": "error",
+                            "index": p["index"],
+                            "filename": p["name"],
+                            "error": p["error"],
+                        }
+                    )
                     continue
                 try:
-                    if entry.is_file():
-                        entries.append((entry.name, entry.stat().st_size))
-                except OSError:
-                    continue
-        entries.sort(key=lambda e: e[0])
-        count = len(entries)
-        if limit is not None:
-            entries = entries[:limit]
-        files = [
-            {"filename": name, "mime": _guess_mime(name), "size_bytes": size}
-            for name, size in entries
-        ]
-        return {"media_dir": media_dir, "count": count, "files": files}
+                    if "path_item" in p:
+                        out = json.loads(
+                            c.store_media_items(
+                                json.dumps([p["path_item"]]),
+                                allow_private_fetch,
+                                roots,
+                            )
+                        )[0]
+                    else:
+                        out = json.loads(
+                            c.store_media_bytes(
+                                bytes(p["raw"]),
+                                filename=p["name"] or None,
+                                content_type=p["content_type"],
+                            )
+                        )
+                    out["index"] = p["index"]
+                    results.append(out)
+                except Exception as e:
+                    results.append(
+                        {
+                            "status": "error",
+                            "index": p["index"],
+                            "filename": p.get("name"),
+                            "error": str(e),
+                        }
+                    )
+            return results
+
+        return await self.run(_write)
+
+    async def fetch_media(self, filenames: list[str]) -> list[dict[str, Any]]:
+        return await self.run(lambda c: json.loads(c.fetch_media(filenames)))
+
+    async def list_media(self, *, pattern: str | None, limit: int | None) -> dict[str, Any]:
+        return await self.run(lambda c: json.loads(c.list_media(pattern, limit)))
 
     async def delete_media(self, filenames: list[str]) -> dict[str, Any]:
-        return await self.run(lambda _c: self._delete_media(filenames))
-
-    def _delete_media(self, filenames: list[str]) -> dict[str, Any]:
-        """Move existing media files to Anki's trash (recoverable, sync-aware)."""
-        deleted: list[str] = []
-        not_found: list[str] = []
-        to_trash: list[str] = []
-        for fn in filenames:
-            safe = _safe_media_name(fn)
-            if safe and self.col.media.have(safe):
-                to_trash.append(safe)
-                deleted.append(fn)  # echo the caller's reference, like delete_decks
-            else:
-                not_found.append(fn)
-        if to_trash:
-            self.col.media.trash_files(to_trash)
-        return {"deleted": deleted, "not_found": not_found}
+        return await self.run(lambda c: json.loads(c.delete_media(filenames)))
 
     async def media_check(self) -> dict[str, Any]:
-        return await self.run(lambda _c: self._media_check())
+        return await self.run(lambda c: json.loads(c.media_check()))
 
-    def _media_check(self) -> dict[str, Any]:
-        media_dir = self.col.media.dir()
-        report = self.col.media.check()
-        return {
-            "media_dir": media_dir,
-            "unused": list(report.unused),
-            "missing": list(report.missing),
-            "missing_media_notes": [int(nid) for nid in report.missing_media_notes],
-            "have_trash": report.have_trash,
-        }
-
-    # -- decks ---------------------------------------------------------------
-
-    async def resolve_deck_ref(self, ref: str) -> str | None:
-        return await self.run(lambda _c: self._resolve_deck_ref(ref))
-
-    def _resolve_deck_ref(self, ref: str) -> str | None:
-        """Map a deck reference to a deck name.
-
-        Accepts a deck name, a numeric deck ID, or a ``#``-prefixed ID:
-        - ``#<id>`` is always an ID — returns the deck's name, or ``None`` if no
-          deck has that ID.
-        - a bare integer is tried as an ID first, falling back to a literal name
-          if no deck has that ID (a deck genuinely named "123" still resolves).
-        - anything else is a name, returned unchanged.
-        """
-        if ref.startswith("#") and ref[1:].isdigit():
-            return self.col.decks.name_if_exists(int(ref[1:]))  # type: ignore[arg-type]
-        if ref.isdigit():
-            name = self.col.decks.name_if_exists(int(ref))  # type: ignore[arg-type]
-            return name if name is not None else ref
-        return ref
-
-    async def upsert_decks(self, decks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return await self.run(lambda _c: self._upsert_decks(decks))
-
-    def _upsert_decks(self, decks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Create or rename decks in bulk (same shape as ``_upsert_notes``).
-
-        Each item carries the desired ``name``; an optional ``id`` selects an
-        existing deck to rename to that name. Renaming onto a name already used by
-        a *different* deck is rejected (Anki would silently disambiguate to
-        ``name+``); to consolidate, move the notes instead. Per-item try/except so
-        one bad item doesn't sink the batch.
-        """
-        results: list[dict[str, Any]] = []
-        for index, deck in enumerate(decks):
-            try:
-                results.append(self._upsert_one_deck(deck))
-            except Exception as e:
-                results.append({"status": "error", "index": index, "error": str(e)})
-        return results
-
-    def _upsert_one_deck(self, deck: dict[str, Any]) -> dict[str, Any]:
-        name = deck.get("name")
-        if not name:
-            raise ValueError("name is required")
-        deck_id = deck.get("id")
-        if deck_id is not None:
-            if self.col.decks.get(deck_id, default=False) is None:  # type: ignore[arg-type]
-                raise ValueError(f"Deck {deck_id} not found")
-            clash = self.col.decks.id_for_name(name)
-            if clash is not None and int(clash) != int(deck_id):
-                raise ValueError(f"A deck named '{name}' already exists")
-            self.col.decks.rename(deck_id, name)  # type: ignore[arg-type]
-            logger.debug("Renamed deck %d -> %s", deck_id, name)
-            return {"status": "updated", "id": int(deck_id), "name": name}
-        existing = self.col.decks.id_for_name(name)
-        if existing is not None:
-            return {"status": "updated", "id": int(existing), "name": name}
-        new_id = self.col.decks.add_normal_deck_with_name(name).id
-        logger.debug("Created deck %s (id=%d)", name, new_id)
-        return {"status": "created", "id": int(new_id), "name": name}
-
-    async def delete_decks(self, names: list[str]) -> dict[str, Any]:
-        return await self.run(lambda _c: self._delete_decks(names))
-
-    def _delete_decks(self, names: list[str]) -> dict[str, Any]:
-        """Delete decks by name — only if empty (no cards in the deck or subdecks).
-
-        Emptying a deck is composed separately (move/merge its notes out, then
-        delete), so this never deletes a card or note and never touches the index
-        beyond the caller's col_mod bump.
-        """
-        deleted: list[str] = []
-        not_found: list[str] = []
-        not_empty: list[str] = []
-        to_remove: list[int] = []
-        # Report back the reference the caller passed (name or #id), not the
-        # resolved name, so the result lists echo their input.
-        for ref in names:
-            resolved = self._resolve_deck_ref(ref)
-            deck_id = self.col.decks.id_for_name(resolved) if resolved is not None else None
-            if deck_id is None:
-                not_found.append(ref)
-            elif self.col.decks.card_count(deck_id, include_subdecks=True) > 0:
-                not_empty.append(ref)
-            else:
-                to_remove.append(deck_id)
-                deleted.append(ref)
-        if to_remove:
-            self.col.decks.remove(to_remove)  # type: ignore[arg-type]
-        return {"deleted": deleted, "not_found": not_found, "not_empty": not_empty}
-
-    # -- embedding text ------------------------------------------------------
+    # -- embedding text -------------------------------------------------------------
 
     async def note_texts_for_embedding(self, note_ids: Sequence[int]) -> list[str]:
-        """Return concatenated field text for each note, suitable for embedding.
-
-        Notes that don't exist are returned as empty strings (same index position).
-        """
-        return await self.run(lambda c: self.note_texts(c, note_ids))
+        """Normalized embedding text per note id ("" at missing positions)."""
+        ids = list(note_ids)
+        return await self.run(lambda c: c.note_texts(ids))
 
     async def note_embed_inputs(self, note_ids: Sequence[int]) -> list[NoteEmbedInput]:
-        """Return each note's embedding input — normalized text + image filenames (#162).
-
-        The multimodal counterpart of ``note_texts_for_embedding``: also collects the ``<img src>``
-        filenames a CLIP-style backend embeds. One DB pass on the worker thread; no media files are
-        read here (the index reads bytes lazily, only for notes it embeds). Missing ids yield an
-        empty input at the same position.
-        """
-        return await self.run(lambda c: self._note_embed_inputs(c, note_ids))
+        """Each note's embedding input — normalized text + image filenames (#162)."""
+        ids = list(note_ids)
+        return await self.run(
+            lambda c: [
+                NoteEmbedInput(note_id=nid, text=text, image_names=images)
+                for nid, text, images in c.note_embed_inputs(ids)
+            ]
+        )
 
     async def note_field_map(self, note_ids: Sequence[int]) -> dict[int, dict[str, str]]:
-        """Per note: its **raw** field values as ``{field_name: value}`` (literal, unnormalized).
-
-        What the derived-text store (#98) ingests for substring/fuzzy search: substring matching is
-        over the *raw* field content (the same text ``substring_info`` uses — the ``flds`` column),
-        so the index must hold exactly that. Missing ids are simply absent from the map.
-        """
+        """Per note: its **raw** field values as ``{field_name: value}``."""
+        ids = list(note_ids)
         return await self.run(
             lambda c: {
                 nid: dict(zip(names, values, strict=False))
-                for nid, names, values in self._note_field_rows(c, note_ids)
+                for nid, names, values in c.note_field_map(ids)
             }
         )
 
-    @staticmethod
-    def derived_field_rows(
-        col: Collection, note_ids: Sequence[int]
-    ) -> Iterator[tuple[int, str, str, str]]:
-        """Yield ``(note_id, "field", field_name, raw_value)`` for non-empty fields — the ``field``
-        source the derived-text store ingests (#98). Worker-thread only; via ``_note_field_rows``.
-        """
-        for nid, names, values in CollectionWrapper._note_field_rows(col, note_ids):
-            for name, value in zip(names, values, strict=False):
-                if (value or "").strip():
-                    yield nid, "field", name, value
-
-    @staticmethod
-    def _render_embed_text(names: Sequence[str], values: Sequence[str]) -> str:
-        """Render a note's embedding text: each non-empty normalized field as ``Name: text``,
-        newline-joined. The **single source of truth** for both ``note_texts`` (the search/query
-        path) and ``_note_embed_inputs`` (the index path) — they must render identically, or query
-        vectors silently diverge from the indexed vectors.
-        """
-        return "\n".join(
-            f"{k}: {cleaned}"
-            for k, v in zip(names, values, strict=False)
-            if (cleaned := normalize_for_embedding(v))
-        )
-
-    @staticmethod
-    def _note_embed_inputs(col: Collection, note_ids: Sequence[int]) -> list[NoteEmbedInput]:
-        """Build ``NoteEmbedInput``s (text + image names) per note id. Worker-thread only.
-
-        Reuses ``_note_field_rows`` (one query): the text is rendered by ``_render_embed_text``
-        (shared with ``note_texts``); image names come from the raw field values via
-        ``extract_image_refs`` (normalization strips ``<img>`` from the text, so the names must be
-        read from the unnormalized value), de-duplicated across fields in order.
-        """
-        by_id: dict[int, NoteEmbedInput] = {}
-        for nid, names, values in CollectionWrapper._note_field_rows(col, note_ids):
-            text = CollectionWrapper._render_embed_text(names, values)
-            images = list(dict.fromkeys(n for v in values for n in extract_image_refs(v)))
-            by_id[nid] = NoteEmbedInput(note_id=nid, text=text, image_names=images)
-        return [
-            by_id.get(nid, NoteEmbedInput(note_id=nid, text="", image_names=[])) for nid in note_ids
-        ]
-
-    @staticmethod
-    def note_texts(col: Collection, note_ids: Sequence[int]) -> list[str]:
-        """Normalized field text for each note id. Must run on the worker thread.
-
-        Each field value is run through ``normalize_for_embedding`` (cloze fill,
-        HTML/media stripping, entity/whitespace cleanup) so we embed the rendered
-        text — deterministically, the same regardless of when or how the note is
-        embedded. Fields that normalize to nothing (pure markup/media) are
-        dropped.
-
-        Built on ``_note_field_rows`` (one query, no per-note ``get_note``), which
-        runs once per note on every index rebuild. Missing ids yield "" at the
-        same position. The per-note render is shared with ``_note_embed_inputs``
-        via ``_render_embed_text``.
-        """
-        rendered = {
-            nid: CollectionWrapper._render_embed_text(names, values)
-            for nid, names, values in CollectionWrapper._note_field_rows(col, note_ids)
-        }
-        return [rendered.get(nid, "") for nid in note_ids]
-
-    @staticmethod
-    def _note_field_rows(
-        col: Collection, note_ids: Sequence[int]
-    ) -> Iterator[tuple[int, list[str], list[str]]]:
-        """Yield ``(note_id, field_names, field_values)`` per existing note, in
-        input order, from a single query over the raw notes table.
-
-        The shared low-level field reader behind ``note_texts`` and the
-        find-replace preview — both need a note's fields without a per-note
-        ``get_note`` round trip. Field names come from the note type (field order,
-        == ``Note.keys()``); values from the ``flds`` column split on U+001F
-        (== ``Note.values()``, as relied on in ``_find_empty_notes``). Ids absent
-        from the collection are skipped (so callers that need a fixed-length,
-        position-aligned result map by id rather than zipping).
-        """
+    async def derived_rows(
+        self, note_ids: Sequence[int]
+    ) -> list[tuple[int, str, str, str]]:
+        """``(note_id, "field", field_name, raw_value)`` rows for the derived store."""
         ids = list(note_ids)
-        if not ids:
-            return
-        db = col.db
-        assert db is not None  # always present on an open collection
-        id_list = ",".join(str(n) for n in ids)
-        rows = {
-            r[0]: (r[1], r[2])
-            for r in db.all(f"select id, mid, flds from notes where id in ({id_list})")
-        }
-        field_names: dict[int, list[str]] = {}
-        for nid in ids:
-            row = rows.get(nid)
-            if row is None:
-                continue
-            mid, flds = row
-            names = field_names.get(mid)
-            if names is None:
-                nt = col.models.get(mid)  # type: ignore[arg-type]
-                names = [f["name"] for f in nt["flds"]] if nt else []
-                field_names[mid] = names
-            yield nid, names, flds.split("\x1f")
-
-    # -- note types ----------------------------------------------------------
-
-    async def delete_note_types(self, ids: list[int]) -> dict[str, Any]:
-        return await self.run(lambda _c: self._delete_note_types(ids))
-
-    def _delete_note_types(self, ids: list[int]) -> dict[str, Any]:
-        results: list[dict[str, Any]] = []
-        for nt_id in ids:
-            nt = self.col.models.get(nt_id)  # type: ignore[arg-type]
-            if nt is None:
-                results.append({"id": nt_id, "status": "not_found"})
-                continue
-
-            use_count = self.col.models.use_count(nt)
-            if use_count > 0:
-                results.append(
-                    {
-                        "id": nt_id,
-                        "name": nt["name"],
-                        "status": "error",
-                        "error": f"Cannot delete: {use_count} note(s) use this type",
-                    }
-                )
-                continue
-
-            self.col.models.remove(nt_id)  # type: ignore[arg-type]
-            logger.debug("Deleted note type %s (%d)", nt["name"], nt_id)
-            results.append({"id": nt_id, "name": nt["name"], "status": "deleted"})
-
-        return {"results": results}
+        return await self.run(lambda c: c.derived_field_rows(ids))

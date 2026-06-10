@@ -62,7 +62,7 @@ NORMALIZE_CORPUS = [
 
 
 def test_normalize_byte_identity(native_core):
-    from shrike.embed_text import normalize_for_embedding
+    from tests.oracles.embed_text_oracle import normalize_for_embedding
 
     for value in NORMALIZE_CORPUS:
         assert native_core.normalize_text(value) == normalize_for_embedding(value), (
@@ -76,7 +76,7 @@ def test_extract_image_refs_parity(native_core):
     The native side has no direct binding; covered via note_embed_inputs below
     and the Rust unit tests; here we pin the Python reference on the same
     cases the Rust tests assert, so the two suites can't drift silently."""
-    from shrike.embed_text import extract_image_refs
+    from tests.oracles.embed_text_oracle import extract_image_refs
 
     assert extract_image_refs('<img data-src="lazy.png" src="real.png">') == ["real.png"]
     assert extract_image_refs("<img alt=\"src=fake.png\" src='dir/pic.jpg'>") == ["pic.jpg"]

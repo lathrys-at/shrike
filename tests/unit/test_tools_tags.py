@@ -67,13 +67,13 @@ class TestUpdateNoteTagsBump:
         # Vectors untouched; only col_mod advanced + save requested.
         mock_index.add.assert_not_called()
         mock_index.remove.assert_not_called()
-        assert mock_index.col_mod == wrapper.col.mod
+        assert mock_index.col_mod == wrapper.run_sync(lambda c: c.col_mod())
         mock_saver.request_save.assert_called_once()
 
     def test_add_remove_bumps_col_mod(self, wrapper, mock_index, mock_saver, mcp_app, basic_note):
         _call(mcp_app, "update_note_tags", {"note_ids": [basic_note], "add": ["new"]})
         mock_index.add.assert_not_called()
-        assert mock_index.col_mod == wrapper.col.mod
+        assert mock_index.col_mod == wrapper.run_sync(lambda c: c.col_mod())
         mock_saver.request_save.assert_called_once()
 
     def test_no_match_does_not_bump(self, wrapper, mock_index, mock_saver, mcp_app):
@@ -92,5 +92,5 @@ class TestRenameTagTool:
         # basic_note has tag "math"; collection-wide rename.
         result = _call(mcp_app, "rename_tag", {"old": "math", "new": "arithmetic"})
         assert result["notes_modified"] == 1
-        assert mock_index.col_mod == wrapper.col.mod
+        assert mock_index.col_mod == wrapper.run_sync(lambda c: c.col_mod())
         mock_saver.request_save.assert_called_once()

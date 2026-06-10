@@ -6,24 +6,29 @@ straight to col.find_notes, so this also pins the error type for malformed input
 
 from __future__ import annotations
 
+import json
+
 import pytest
-from anki.errors import SearchError
+import shrike_native
+
+from tests.unit.conftest import make_notes
 
 
 def _add(wrapper, front, back="x", *, tags=None, deck="D"):
-    def build(c):
-        n = c.new_note(c.models.by_name("Basic"))
-        n["Front"], n["Back"] = front, back
-        if tags:
-            n.tags = list(tags)
-        c.add_note(n, c.decks.id(deck))
-        return n.id
-
-    return wrapper.run_sync(build)
+    results = make_notes(
+        wrapper,
+        [{"note_type": "Basic", "deck": deck, "fields": {"Front": front, "Back": back},
+          "tags": list(tags or [])}],
+    )
+    return results[0]["id"]
 
 
 def _query(wrapper, q, **kw):
-    return wrapper.run_sync(lambda c: wrapper._query(q, **kw))
+    fields_mode = kw.pop("fields_mode", "full")
+    limit = kw.pop("limit", 50)
+    return wrapper.run_sync(
+        lambda c: json.loads(c.query(q, with_fields=fields_mode == "full", limit=limit))
+    )
 
 
 class TestCollectionQuery:
@@ -80,5 +85,5 @@ class TestCollectionQuery:
         assert _query(wrapper, "is:due")["total"] == 0  # nothing due yet
 
     def test_malformed_query_raises_search_error(self, wrapper):
-        with pytest.raises(SearchError):
+        with pytest.raises(shrike_native.NativeInputError):
             _query(wrapper, "(unbalanced")

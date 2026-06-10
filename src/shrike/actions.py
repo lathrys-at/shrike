@@ -152,12 +152,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
     # per registry build, closed over by search_notes.
     pipeline = make_search_pipeline()
 
-    from shrike.note_types import NoteTypeOpError
-    from shrike.note_types import find_and_replace_note_types as _find_and_replace_note_types
-    from shrike.note_types import update_note_type_field_metadata as _update_field_metadata
-    from shrike.note_types import update_note_type_fields as _update_note_type_fields
-    from shrike.note_types import update_note_type_templates as _update_note_type_templates
-    from shrike.note_types import upsert_note_types as _upsert_note_types
+    # Since the cutover the note-type ops run in the native core; its input
+    # error is a ValueError and plays the old NoteTypeOpError's role verbatim.
+    from shrike_native import NativeInputError as NoteTypeOpError
 
     def _media_url(filename: str) -> str | None:
         """The GET /media/<name> URL for a media file, or None if the server
@@ -906,7 +903,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             try:
                 inputs = await wrapper.note_embed_inputs(changed_ids)
                 await asyncio.to_thread(index.add, inputs)
-                index.col_mod = await wrapper.run(lambda c: c.mod)
+                index.col_mod = await wrapper.col_mod()
                 logger.debug("Index updated: %d notes added/replaced", len(changed_ids))
                 neighbors_ok = await _attach_neighbors(
                     results,
@@ -1058,7 +1055,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         logger.info("upsert_note_types count=%d names=%s", len(note_types), ", ".join(names))
 
         nt_dicts = [nt.model_dump(exclude_none=True) for nt in note_types]
-        results = await wrapper.run(lambda c: _upsert_note_types(c, nt_dicts))
+        results = await wrapper.upsert_note_types(nt_dicts)
 
         for r in results:
             status = r.get("status", "unknown")
@@ -1107,7 +1104,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         logger.info("update_note_type_fields %r ops=%d", note_type, len(operations))
         op_dicts = [op.model_dump(exclude_none=True) for op in operations]
         try:
-            result = await wrapper.run(lambda c: _update_note_type_fields(c, note_type, op_dicts))
+            result = await wrapper.update_note_type_fields(note_type, op_dicts)
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
         logger.info("update_note_type_fields %r -> %s", note_type, result["fields"])
@@ -1152,9 +1149,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         logger.info("update_note_type_templates %r ops=%d", note_type, len(operations))
         op_dicts = [op.model_dump(exclude_none=True) for op in operations]
         try:
-            result = await wrapper.run(
-                lambda c: _update_note_type_templates(c, note_type, op_dicts)
-            )
+            result = await wrapper.update_note_type_templates(note_type, op_dicts)
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
         logger.info("update_note_type_templates %r -> %s", note_type, result["templates"])
@@ -1225,18 +1220,15 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             regex,
         )
         try:
-            result = await wrapper.run(
-                lambda c: _find_and_replace_note_types(
-                    c,
-                    note_type,
-                    search=search,
-                    replacement=replace,
-                    regex=regex,
-                    match_case=match_case,
-                    front=front,
-                    back=back,
-                    css=css,
-                )
+            result = await wrapper.find_replace_note_types(
+                note_type,
+                search=search,
+                replacement=replace,
+                regex=regex,
+                match_case=match_case,
+                front=front,
+                back=back,
+                css=css,
             )
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
@@ -1283,7 +1275,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         logger.info("update_note_type_field_metadata %r fields=%d", note_type, len(fields))
         updates = [f.model_dump(exclude_none=True) for f in fields]
         try:
-            result = await wrapper.run(lambda c: _update_field_metadata(c, note_type, updates))
+            result = await wrapper.update_note_type_field_metadata(note_type, updates)
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
         logger.info("update_note_type_field_metadata %r -> %s", note_type, result["fields_updated"])
@@ -1321,7 +1313,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         if index and index.available and result["deleted"]:
             try:
                 removed = index.remove(result["deleted"])
-                index.col_mod = await wrapper.run(lambda c: c.mod)
+                index.col_mod = await wrapper.col_mod()
                 if saver is not None:
                     saver.request_save()
                 logger.debug("Index updated: %d vectors removed", removed)
@@ -1428,7 +1420,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             try:
                 inputs = await wrapper.note_embed_inputs(changed_ids)
                 await asyncio.to_thread(index.add, inputs)
-                index.col_mod = await wrapper.run(lambda c: c.mod)
+                index.col_mod = await wrapper.col_mod()
                 if saver is not None:
                     saver.request_save()
                 logger.debug("Index updated after find_replace: %d notes", len(changed_ids))
@@ -1537,7 +1529,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             try:
                 inputs = await wrapper.note_embed_inputs(changed)
                 await asyncio.to_thread(index.add, inputs)
-                index.col_mod = await wrapper.run(lambda c: c.mod)
+                index.col_mod = await wrapper.col_mod()
                 if saver is not None:
                     saver.request_save()
                 logger.debug("Index updated after migrate: %d vectors", len(changed))
@@ -1585,7 +1577,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         if not index_live and not derived_live:
             return
         try:
-            mod = await wrapper.run(lambda c: c.mod)
+            mod = await wrapper.col_mod()
             if index is not None and index.available:
                 index.col_mod = mod
                 if saver is not None:
@@ -1613,7 +1605,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                     derived.ingest(nid, "field", field_map.get(nid, {}))
 
             await asyncio.to_thread(_run)
-            derived.col_mod = await wrapper.run(lambda c: c.mod)
+            derived.col_mod = await wrapper.col_mod()
         except Exception:
             logger.warning("Failed to update derived-text store after edit", exc_info=True)
 
@@ -1623,7 +1615,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             return
         try:
             await asyncio.to_thread(derived.remove, note_ids)
-            derived.col_mod = await wrapper.run(lambda c: c.mod)
+            derived.col_mod = await wrapper.col_mod()
         except Exception:
             logger.warning("Failed to update derived-text store after delete", exc_info=True)
 
@@ -1824,7 +1816,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 await _remove_derived(removed_note_ids)  # removes rows + stamps col_mod
             elif result.get("unused_tags", {}).get("removed"):
                 try:
-                    derived.col_mod = await wrapper.run(lambda c: c.mod)
+                    derived.col_mod = await wrapper.col_mod()
                 except Exception:
                     logger.warning("Failed to advance derived col_mod after prune", exc_info=True)
 
@@ -1836,7 +1828,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 if removed_note_ids:
                     index.remove(removed_note_ids)
                 if removed_note_ids or result.get("unused_tags", {}).get("removed"):
-                    index.col_mod = await wrapper.run(lambda c: c.mod)
+                    index.col_mod = await wrapper.col_mod()
                     if saver is not None:
                         saver.request_save()
             except Exception:

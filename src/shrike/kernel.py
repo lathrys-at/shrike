@@ -38,13 +38,13 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
-from shrike.collection import CollectionWrapper
+from shrike_native import CollectionCore
+
+from shrike.collection import CollectionWrapper, collect_derived_rows, collect_embed_inputs
 from shrike.embedding_base import EmbedderBackend, NoteEmbedInput
 from shrike.index import IndexSaver, IndexState, VectorIndex
 
 if TYPE_CHECKING:
-    from anki.collection import Collection
-
     from shrike.derived import DerivedTextStore
     from shrike.embedding import EmbeddingRuntime
 
@@ -65,8 +65,8 @@ class Scheduler(Protocol):
     (behaviour unchanged); an embedded host implements it over its own threads.
     """
 
-    def run_on_collection(self, fn: Callable[[Collection], T]) -> T:
-        """Run ``fn(col)`` on the collection-owning thread, blocking for the result."""
+    def run_on_collection(self, fn: Callable[[CollectionCore], T]) -> T:
+        """Run ``fn(core)`` on the collection-owning thread, blocking for the result."""
         ...
 
     def spawn_compute(self, name: str, fn: Callable[[], None]) -> None:
@@ -103,7 +103,7 @@ class WorkerScheduler:
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
 
-    def run_on_collection(self, fn: Callable[[Collection], T]) -> T:
+    def run_on_collection(self, fn: Callable[[CollectionCore], T]) -> T:
         try:
             return self._wrapper.run_sync(fn)
         finally:
@@ -127,26 +127,11 @@ class KernelConfigError(Exception):
     """A caller-actionable configuration error (the HTTP host maps it to a 400)."""
 
 
-# ── collection-thread collectors ─────────────────────────────────────────────
-
-
-def _collect_for_rebuild(c: Any) -> tuple[list[NoteEmbedInput], int]:
-    """Gather every note's embedding input (text + image names) and the collection mod stamp.
-
-    Runs on the collection worker thread (receives the live ``Collection``).
-    """
-    note_ids = list(c.find_notes("deck:*"))
-    return CollectionWrapper._note_embed_inputs(c, note_ids), c.mod
-
-
-def _collect_derived_rows(c: Any) -> tuple[list[tuple[int, str, str, str]], int]:
-    """Gather every note's ``(note_id, "field", field_name, raw_value)`` rows + the mod stamp.
-
-    The full-build input for the derived-text store (#98). Runs on the collection worker thread.
-    Independent of the embedding index — the store builds whether or not a backend is configured.
-    """
-    note_ids = list(c.find_notes("deck:*"))
-    return list(CollectionWrapper.derived_field_rows(c, note_ids)), c.mod
+# The collection-thread collectors live in shrike.collection
+# (collect_embed_inputs / collect_derived_rows) — they read through the native
+# core and are shared with the boot path.
+_collect_for_rebuild = collect_embed_inputs
+_collect_derived_rows = collect_derived_rows
 
 
 def _maybe_rebuild(
@@ -306,7 +291,7 @@ class ShrikeKernel:
     def reload(self) -> dict[str, Any]:
         """Close and re-open the collection; re-check drift (the ``POST /reload`` semantics)."""
         self.scheduler.run_on_collection(self.wrapper._do_reopen)
-        col_mod = self.scheduler.run_on_collection(lambda c: c.mod)
+        col_mod = self.scheduler.run_on_collection(lambda c: c.col_mod())
 
         # The derived-text store is independent of the embedder — rebuild it on drift regardless
         # (cheap text-only build).

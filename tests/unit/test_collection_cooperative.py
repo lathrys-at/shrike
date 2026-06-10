@@ -36,18 +36,18 @@ async def _wait_released(w, timeout=1.0):
 
 class TestCooperativeLifecycle:
     async def test_releases_after_idle(self, coop):
-        await coop.run(lambda c: c.note_count())
+        await coop.run(lambda c: len(c.find_notes("deck:*")))
         assert coop.is_open  # held right after an op
         await _wait_released(coop)
         assert not coop.is_open  # released after the idle window
 
     async def test_reacquires_and_runs_hook(self, coop):
-        await coop.run(lambda c: c.note_count())
+        await coop.run(lambda c: len(c.find_notes("deck:*")))
         await _wait_released(coop)
         coop.acquire_calls.clear()
 
         # Next op re-opens and runs the acquire hook exactly once.
-        result = await coop.run(lambda c: c.note_count())
+        result = await coop.run(lambda c: len(c.find_notes("deck:*")))
         assert result == 0
         assert coop.is_open
         assert len(coop.acquire_calls) == 1
@@ -69,7 +69,7 @@ class TestCooperativeLifecycle:
         coop.release_now()
         assert not coop.is_open
         # An op immediately after an explicit release re-acquires cleanly.
-        assert await coop.run(lambda c: c.note_count()) == 0
+        assert await coop.run(lambda c: len(c.find_notes("deck:*"))) == 0
         assert coop.is_open
 
     def test_release_now_is_idempotent(self, coop):
@@ -85,7 +85,7 @@ class TestPermanentModeUnaffected:
         try:
             assert w.is_open
             assert not w.cooperative
-            await w.run(lambda c: c.note_count())
+            await w.run(lambda c: len(c.find_notes("deck:*")))
             await asyncio.sleep(0.1)
             assert w.is_open  # permanent mode holds the lock
             assert calls == []  # hook never fires (no re-acquire)

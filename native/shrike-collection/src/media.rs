@@ -76,17 +76,48 @@ fn mime_extension(content_type: &str) -> Option<&'static str> {
 }
 
 impl CollectionCore {
-    /// Store one media item from bytes (the `data` source of `store_media`);
-    /// Anki resolves collisions, so the caller must use the RETURNED name.
-    /// `deduped` = identical content already existed under that name.
-    pub fn store_media_bytes(&self, filename: &str, data: &[u8]) -> NativeResult<String> {
-        let actual = self.adapter.add_media_file(filename, data)?;
-        let deduped = actual != filename;
+    /// Store one media item from prepared bytes — the full `_write_one_media`
+    /// semantics: extension derived from `content_type` when the name lacks
+    /// one, basename-sanitized, Anki collision handling, `deduped` = identical
+    /// content already existed (the caller must use the RETURNED filename).
+    pub fn store_media_bytes(
+        &self,
+        filename: Option<&str>,
+        data: &[u8],
+        content_type: Option<&str>,
+    ) -> NativeResult<String> {
+        if data.len() > crate::media_fetch::MEDIA_MAX_BYTES {
+            return Err(shrike_ffi::NativeError::invalid_input(format!(
+                "file exceeds the {}-byte limit",
+                crate::media_fetch::MEDIA_MAX_BYTES
+            )));
+        }
+        let mut name = filename.unwrap_or_default().to_string();
+        let basename_has_ext = name.rsplit('/').next().unwrap_or(&name).contains('.');
+        if name.is_empty() || !basename_has_ext {
+            if let Some(ct) = content_type {
+                if let Some(ext) = mime_extension(ct) {
+                    if name.is_empty() {
+                        name = "media".to_string();
+                    }
+                    name.push_str(ext);
+                }
+            }
+        }
+        let safe = safe_media_name(&name);
+        if safe.is_empty() {
+            return Err(shrike_ffi::NativeError::invalid_input(
+                "could not determine a filename",
+            ));
+        }
+        let existed = std::path::Path::new(&self.media_dir).join(&safe).is_file();
+        let stored = self.adapter.add_media_file(&safe, data)?;
         Ok(json!({
             "status": "stored",
-            "filename": actual,
+            "filename": stored,
+            "mime": guess_mime(&stored),
             "size_bytes": data.len(),
-            "renamed": deduped,
+            "deduped": existed && stored == safe,
         })
         .to_string())
     }

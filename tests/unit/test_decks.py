@@ -4,7 +4,12 @@ from __future__ import annotations
 
 
 async def _deck_names(wrapper) -> set[str]:
-    return set(wrapper.run_sync(lambda c: [d.name for d in c.decks.all_names_and_ids()]))
+    import json
+
+    return {
+        d["name"]
+        for d in wrapper.run_sync(lambda c: json.loads(c.collection_info(["decks"], []))["decks"])
+    }
 
 
 async def _make_note(wrapper, deck: str) -> int:
