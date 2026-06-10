@@ -18,7 +18,7 @@ import hashlib
 import json
 import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, MutableMapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -43,6 +43,7 @@ from shrike.embedding_base import (
 from shrike.index_engine import (
     SEARCH_OVERFETCH,
     UsearchIndexEngine,
+    make_index_engine,
     modality_file_paths,
 )
 
@@ -152,7 +153,8 @@ class VectorIndex:
         self._image_exists_fn: ImageExists | None = None
         # The storage engine (#267): per-modality USearch sub-indexes, dedup, file persistence,
         # calibration. The orchestrator (this class) holds policy and delegates storage to it.
-        self._engine = UsearchIndexEngine()
+        # Python by default; the native engine (#273) when SHRIKE_NATIVE_INDEX is set.
+        self._engine = make_index_engine()
         self._col_mod: int | None = None
         self._model_id: str | None = None
         # On-disk schema of the loaded index (INDEX_SCHEMA_VERSION for a freshly-built one). A v1
@@ -196,8 +198,8 @@ class VectorIndex:
         return self._engine.size
 
     @property
-    def _indexes(self) -> dict[str, Any]:
-        """The engine's live per-modality sub-index map.
+    def _indexes(self) -> MutableMapping[str, Any]:
+        """The engine's live per-modality sub-index map (a view, for the native engine).
 
         Deliberately exposed (and assignable) as the pre-split attribute: a handful of unit
         tests simulate on-disk layouts by poking it directly, and that surface is part of the
@@ -322,10 +324,25 @@ class VectorIndex:
             logger.warning("Corrupt index metadata at %s: %s", self._meta_path, e)
             return
 
+        # Per-note hashes are an optional sidecar: a missing or corrupt file (or
+        # an index built before this existed) leaves _note_hashes None, so the
+        # next reconcile safely falls back to a full rebuild. Loaded before the
+        # engine restore because the native engine reconstructs its per-key map
+        # from these ids (candidate_keys below).
+        if self._hashes_path.exists():
+            try:
+                self._note_hashes = {
+                    int(k): v for k, v in json.loads(self._hashes_path.read_text()).items()
+                }
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning("Corrupt index hashes at %s: %s", self._hashes_path, e)
+
         # The engine restores whatever modality files are present (a corrupt present file clears
         # everything, so the next check_drift forces a full rebuild rather than silently serving
         # from a half-loaded index) and re-derives ndim from the loaded text index.
-        if not self._engine.restore(str(self._dir)):
+        candidates = list(self._note_hashes) if self._note_hashes is not None else None
+        if not self._engine.restore(str(self._dir), candidates):
+            self._note_hashes = None  # the rebuild repopulates both together
             return
 
         logger.info(
@@ -334,17 +351,6 @@ class VectorIndex:
             self.ndim,
             self._schema,
         )
-
-        # Per-note hashes are an optional sidecar: a missing or corrupt file (or
-        # an index built before this existed) leaves _note_hashes None, so the
-        # next reconcile safely falls back to a full rebuild.
-        if self._hashes_path.exists():
-            try:
-                self._note_hashes = {
-                    int(k): v for k, v in json.loads(self._hashes_path.read_text()).items()
-                }
-            except (json.JSONDecodeError, ValueError) as e:
-                logger.warning("Corrupt index hashes at %s: %s", self._hashes_path, e)
 
     def materialize_empty(self, ndim: int, col_mod: int, model_id: str | None) -> None:
         """Create an empty, ready index for an empty collection.

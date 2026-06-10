@@ -226,6 +226,125 @@ impl ClipEmbedder {
     }
 }
 
+// ── Index engine (#273) ─────────────────────────────────────────────────────
+
+/// The native per-modality vector index engine under the `VectorIndex`
+/// orchestrator (the frozen #267 `IndexEngine` surface). Coarse, batched calls
+/// trafficking in i64 key arrays and f32 vector batches, all GIL-released.
+#[pyclass(frozen)]
+struct NativeIndexEngine {
+    inner: shrike_index::MultiModalIndex,
+}
+
+#[pymethods]
+impl NativeIndexEngine {
+    #[new]
+    fn new(modalities: Vec<String>) -> PyResult<Self> {
+        let inner = shrike_index::MultiModalIndex::new(modalities).map_err(to_py_err)?;
+        Ok(Self { inner })
+    }
+
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    fn ndim(&self) -> Option<usize> {
+        self.inner.ndim()
+    }
+
+    fn modality_sizes(&self) -> Vec<(String, usize)> {
+        self.inner.modality_sizes()
+    }
+
+    fn modality_names(&self) -> Vec<String> {
+        self.inner.modality_names()
+    }
+
+    fn ensure(&self, modality: &str, ndim: usize) -> PyResult<()> {
+        self.inner.ensure(modality, ndim).map_err(to_py_err)
+    }
+
+    fn clear(&self) {
+        self.inner.clear()
+    }
+
+    fn drop_modality(&self, modality: &str) {
+        self.inner.drop_modality(modality)
+    }
+
+    #[pyo3(signature = (path, candidate_keys=None))]
+    fn restore(&self, py: Python<'_>, path: String, candidate_keys: Option<Vec<i64>>) -> bool {
+        py.detach(move || self.inner.restore(&path, candidate_keys.as_deref()))
+    }
+
+    fn save(&self, py: Python<'_>, path: String) -> PyResult<()> {
+        py.detach(move || self.inner.save(&path)).map_err(to_py_err)
+    }
+
+    fn add(
+        &self,
+        py: Python<'_>,
+        modality: &str,
+        keys: Vec<i64>,
+        vectors: Vec<Vec<f32>>,
+    ) -> PyResult<()> {
+        py.detach(|| self.inner.add(modality, &keys, &vectors)).map_err(to_py_err)
+    }
+
+    fn remove(&self, py: Python<'_>, keys: Vec<i64>) -> PyResult<usize> {
+        py.detach(|| self.inner.remove(&keys)).map_err(to_py_err)
+    }
+
+    /// Per-query `{modality: (note_ids, distances)}` rankings (parallel arrays;
+    /// the Python adapter zips them into the protocol's dict shape).
+    #[pyo3(signature = (queries, k, modalities=None))]
+    fn search_by_modality(
+        &self,
+        py: Python<'_>,
+        queries: Vec<Vec<f32>>,
+        k: usize,
+        modalities: Option<Vec<String>>,
+    ) -> PyResult<Vec<std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>>> {
+        py.detach(|| self.inner.search_by_modality(&queries, k, modalities.as_deref()))
+            .map_err(to_py_err)
+    }
+
+    fn contains(&self, key: i64) -> bool {
+        self.inner.contains(key)
+    }
+
+    fn keys(&self) -> Vec<i64> {
+        self.inner.keys()
+    }
+
+    fn get(&self, key: i64) -> Option<Vec<Vec<f32>>> {
+        self.inner.get(key)
+    }
+
+    fn modality_contains(&self, modality: &str, key: i64) -> bool {
+        self.inner.modality_contains(modality, key)
+    }
+
+    fn modality_keys(&self, modality: &str) -> Vec<i64> {
+        self.inner.modality_keys(modality)
+    }
+
+    fn modality_get(&self, modality: &str, key: i64) -> Option<Vec<Vec<f32>>> {
+        self.inner.modality_get(modality, key)
+    }
+
+    fn calibrate_activation(
+        &self,
+        py: Python<'_>,
+        sample_size: usize,
+        k: usize,
+        min_count: usize,
+    ) -> PyResult<Vec<(String, f64, f64, f64)>> {
+        py.detach(|| self.inner.calibrate_activation(sample_size, k, min_count))
+            .map_err(to_py_err)
+    }
+}
+
 /// The module init. Its name MUST match the imported module / the `.so`
 /// filename (`_native`), since PyO3 exports `PyInit__native` from it.
 #[pymodule]
@@ -237,6 +356,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init_onnx_runtime, m)?)?;
     m.add_class::<OnnxTextEmbedder>()?;
     m.add_class::<ClipEmbedder>()?;
+    m.add_class::<NativeIndexEngine>()?;
     // The native image-prep pipeline version — folded into the clip-rs
     // fingerprint by the facade (a pixel-math change must invalidate vectors).
     m.add("IMAGE_PREP_VERSION_RS", shrike_embed::IMAGE_PREP_VERSION_RS)?;

@@ -1033,6 +1033,7 @@ dependencies = [
  "pyo3",
  "shrike-embed",
  "shrike-ffi",
+ "shrike-index",
 ]
 
 [[package]]

@@ -17,8 +17,9 @@ instance-per-space with no global state — a multi-space manager (#232) is just
 from __future__ import annotations
 
 import logging
+import os
 import threading
-from collections.abc import Sequence
+from collections.abc import MutableMapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -123,13 +124,15 @@ class UsearchIndexEngine:
             self._indexes = {}
             self._ndim = None
 
-    def restore(self, path: str) -> bool:
+    def restore(self, path: str, candidate_keys: Sequence[int] | None = None) -> bool:
         """Load the per-modality sub-index files under ``path``.
 
         The TEXT sub-index (index.usearch) restores a pre-#201a file directly; every other
         modality's file is optional (a text-only collection simply has none). A corrupt *present*
         file clears everything and returns False — so the caller forces a full rebuild — rather
-        than silently serving from a half-loaded index.
+        than silently serving from a half-loaded index. ``candidate_keys`` (the orchestrator's
+        hashes-sidecar note ids) is unused here — the Python binding enumerates keys natively —
+        but is part of the engine surface because the Rust binding can't (#273).
         """
         from usearch.index import Index
 
@@ -352,3 +355,207 @@ class UsearchIndexEngine:
                         "std": float(arr.std()),
                     }
             return stats
+
+
+# ── Native engine (#273) ─────────────────────────────────────────────────────
+
+
+class _NativeSubIndex:
+    """A read-mostly view of one modality's sub-index inside the native engine.
+
+    Emulates the slice of the usearch-python ``Index`` surface the orchestrator's
+    frozen ``_indexes`` contract exposes (len / ``in`` / ``.keys`` / ``.get``), so
+    the tests that poke ``VectorIndex._indexes`` directly behave identically
+    against the native engine.
+    """
+
+    def __init__(self, rust: Any, modality: str) -> None:
+        self._rust = rust
+        self._modality = modality
+
+    def __len__(self) -> int:
+        return int(dict(self._rust.modality_sizes()).get(self._modality, 0))
+
+    def __contains__(self, key: int) -> bool:
+        return bool(self._rust.modality_contains(self._modality, int(key)))
+
+    @property
+    def keys(self) -> list[int]:
+        """All keys, one per vector (multi keys repeat) — usearch's ``.keys`` view."""
+        return list(self._rust.modality_keys(self._modality))
+
+    def get(self, key: int) -> list[list[float]] | None:
+        vectors: list[list[float]] | None = self._rust.modality_get(self._modality, int(key))
+        return vectors
+
+
+class _NativeIndexesView(MutableMapping[str, Any]):
+    """The native engine's ``_indexes`` map emulation (modality → sub-index view).
+
+    Assignment (``idx._indexes = {TEXT: Index(...)}``) copies the given
+    usearch-python indexes' vectors into the native engine — the handful of
+    tests that simulate layouts this way keep working unchanged.
+    """
+
+    def __init__(self, rust: Any) -> None:
+        self._rust = rust
+
+    def __getitem__(self, modality: str) -> _NativeSubIndex:
+        if modality not in self._rust.modality_names():
+            raise KeyError(modality)
+        return _NativeSubIndex(self._rust, modality)
+
+    def __setitem__(self, modality: str, py_index: Any) -> None:
+        self._rust.drop_modality(modality)
+        ndim = int(py_index.ndim)
+        self._rust.ensure(modality, ndim)
+        distinct = sorted({int(k) for k in py_index.keys})
+        for key in distinct:
+            import numpy as _np
+
+            vecs = _np.atleast_2d(_np.asarray(py_index.get(key), dtype=_np.float32))
+            self._rust.add(modality, [key] * vecs.shape[0], vecs.tolist())
+
+    def __delitem__(self, modality: str) -> None:
+        if modality not in self._rust.modality_names():
+            raise KeyError(modality)
+        self._rust.drop_modality(modality)
+
+    def __iter__(self) -> Any:
+        return iter(self._rust.modality_names())
+
+    def __len__(self) -> int:
+        return len(self._rust.modality_names())
+
+
+class NativeIndexEngine:
+    """The Rust :class:`~shrike.embedding_base.IndexEngine` (#273), adapted.
+
+    A thin marshaling adapter over ``shrike_native.NativeIndexEngine`` (the
+    `shrike-index` crate): numpy arrays in, the protocol's dict shapes out. All
+    storage, dedup, persistence, and calibration run crate-side with the GIL
+    released; this class is ordinary patchable Python, per the facade rule.
+    """
+
+    def __init__(self) -> None:
+        import shrike_native
+
+        self._rust = shrike_native.NativeIndexEngine(list(_INDEX_MODALITIES))
+
+    # The orchestrator's frozen `_indexes` contract, emulated (see the views).
+    @property
+    def _indexes(self) -> _NativeIndexesView:
+        return _NativeIndexesView(self._rust)
+
+    @_indexes.setter
+    def _indexes(self, value: dict[str, Any]) -> None:
+        self._rust.clear()
+        view = _NativeIndexesView(self._rust)
+        for modality, py_index in value.items():
+            view[modality] = py_index
+
+    @property
+    def size(self) -> int:
+        return int(self._rust.size())
+
+    @property
+    def ndim(self) -> int | None:
+        return self._rust.ndim()
+
+    def modality_sizes(self) -> dict[str, int]:
+        return dict(self._rust.modality_sizes())
+
+    def ensure(self, modality: str, ndim: int) -> None:
+        self._rust.ensure(modality, int(ndim))
+
+    def clear(self) -> None:
+        self._rust.clear()
+
+    def restore(self, path: str, candidate_keys: Sequence[int] | None = None) -> bool:
+        """Load sub-index files; ``candidate_keys`` (the hashes-sidecar note ids)
+        reconstruct the per-key map the Rust binding can't enumerate. A
+        multimodal index restored without (complete) candidates returns False —
+        the standard one-time drift rebuild, never a silently wrong key map."""
+        keys = [int(k) for k in candidate_keys] if candidate_keys is not None else None
+        return bool(self._rust.restore(str(path), keys))
+
+    def save(self, path: str) -> None:
+        self._rust.save(str(path))
+
+    def add(self, modality: str, keys: Any, vectors: Any) -> None:
+        keys_list = [int(k) for k in np.asarray(keys, dtype=np.int64).tolist()]
+        if not keys_list:
+            return
+        vecs = np.asarray(vectors, dtype=np.float32)
+        self._rust.add(modality, keys_list, vecs.tolist())
+
+    def remove(self, keys: Any) -> int:
+        keys_list = [int(k) for k in np.asarray(keys, dtype=np.int64).tolist()]
+        if not keys_list:
+            return 0
+        return int(self._rust.remove(keys_list))
+
+    def search_by_modality(
+        self,
+        query_vectors: Any,
+        k: int,
+        *,
+        modalities: Sequence[str] | None = None,
+    ) -> list[dict[str, list[dict[str, Any]]]]:
+        q = np.atleast_2d(np.asarray(query_vectors, dtype=np.float32))
+        raw = self._rust.search_by_modality(
+            q.tolist(), int(k), list(modalities) if modalities is not None else None
+        )
+        out: list[dict[str, list[dict[str, Any]]]] = []
+        for per_query in raw:
+            ranking: dict[str, list[dict[str, Any]]] = {}
+            for modality, (ids, distances) in per_query.items():
+                ranking[modality] = [
+                    {"note_id": int(nid), "distance": float(dist)}
+                    for nid, dist in zip(ids, distances, strict=True)
+                ]
+            out.append(ranking)
+        return out
+
+    def contains(self, key: int) -> bool:
+        return bool(self._rust.contains(int(key)))
+
+    def keys(self) -> list[int]:
+        return list(self._rust.keys())
+
+    def get(self, key: int) -> Any:
+        vecs = self._rust.get(int(key))
+        return None if vecs is None else np.asarray(vecs, dtype=np.float32)
+
+    def calibrate_activation(
+        self, sample_size: int, k: int, min_count: int
+    ) -> dict[str, dict[str, float]]:
+        stats = self._rust.calibrate_activation(int(sample_size), int(k), int(min_count))
+        return {m: {"n": n, "mean": mean, "std": std} for m, n, mean, std in stats}
+
+
+def native_index_requested() -> bool:
+    """Whether the operator opted into the native index engine (#273 bake flag).
+
+    Selection is environment-driven for the bake (``SHRIKE_NATIVE_INDEX=1``);
+    full config/CLI plumbing arrives with the default flip.
+    """
+    return os.environ.get("SHRIKE_NATIVE_INDEX", "").lower() in ("1", "true", "yes")
+
+
+def make_index_engine() -> UsearchIndexEngine | NativeIndexEngine:
+    """Build the configured engine: native when requested and installed, else Python.
+
+    A requested-but-missing native extension degrades to the Python engine with
+    a warning (never a boot failure) — the index is a derived cache; degrading
+    is always safe.
+    """
+    if native_index_requested():
+        try:
+            return NativeIndexEngine()
+        except ImportError:
+            logger.warning(
+                "SHRIKE_NATIVE_INDEX set but the shrike-native extension is not "
+                "installed; using the Python index engine."
+            )
+    return UsearchIndexEngine()

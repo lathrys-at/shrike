@@ -155,8 +155,15 @@ class IndexEngine(Protocol):
         """Drop every in-memory sub-index (file deletion is the orchestrator's)."""
         ...
 
-    def restore(self, path: str) -> bool:
-        """Load sub-index files under ``path``; False (and empty) on a corrupt present file."""
+    def restore(self, path: str, candidate_keys: Sequence[int] | None = None) -> bool:
+        """Load sub-index files under ``path``; False (and empty) on a corrupt present file.
+
+        ``candidate_keys`` are the note ids that may be indexed (the
+        orchestrator's hashes sidecar). The Python engine ignores them (its
+        binding enumerates keys natively); the Rust engine reconstructs its
+        per-key map from them, returning False — the standard drift rebuild —
+        when they can't account for every stored vector (#273).
+        """
         ...
 
     def save(self, path: str) -> None:
