@@ -9,4 +9,9 @@
 # Readable, non-truncated test failures.
 test --test_output=errors
 
+# Stamp the build with the tag-derived version (STABLE_VERSION) so py_wheel (#245)
+# can embed it. Cheap (a `git describe`); only stamped outputs (the wheel) rebuild
+# on a version change, since it lands in stable-status.txt.
+build --workspace_status_command=tools/workspace_status.sh
+
 try-import %workspace%/.bazelrc.user
