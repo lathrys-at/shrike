@@ -33,6 +33,11 @@ alias(
         ":_linux_amd64": "@llama_server_linux_amd64//:files",
         ":_linux_arm64": "@llama_server_linux_arm64//:files",
     }),
+    # `manual` so `bazel test //...` (which builds non-test targets too —
+    # --build_tests_only=false) doesn't build this and force-fetch the llama-server
+    # http_archive onto the per-PR hot path. The embedding target's explicit
+    # `data = [":llama_server"]` still pulls it in the dedicated embedding lane.
+    tags = ["manual"],
 )
 
 # Integration conftest: spawns the server (//bin:server / //bin:server_embedding

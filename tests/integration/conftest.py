@@ -32,8 +32,12 @@ from click.testing import CliRunner
 from shrike.cli import cli
 from shrike.client import ShrikeClient
 from tests.integration.model_cache import (
+    CLIP_MODEL_DIR_NAME,
+    DISTILROBERTA_MODEL_DIR_NAME,
     EMBEDDING_MODEL_NAME,
     EMBEDDING_MODEL_URL,
+    ONNX_FP32_MODEL_DIR_NAME,
+    ONNX_MODEL_DIR_NAME,
     cached_clip_model_dir,
     cached_distilroberta_model_dir,
     cached_model_path,
@@ -60,28 +64,33 @@ def pytest_configure(config: pytest.Config) -> None:
 # downloads. No-op off Bazel, when SHRIKE_TEST_MODEL_DIR is already set (the pip
 # lane / CI), or for a target with no model externals (the non-embedding suite),
 # so the pip path is untouched.
+# Dest dir-names come from model_cache's *_DIR_NAME constants (not re-spelled here),
+# so a model rename there can't silently drift this map into the wrong layout — which
+# would make model_cache miss the assembled file and fall back to a HuggingFace
+# download at test time (the #83/#93 flake). Key = the http_file external's runfiles
+# path (MODULE.bazel); value = the model_cache <dir>/<file> layout it assembles into.
 _BAZEL_MODELS: dict[str, list[str]] = {
-    "model_minilm_int8_onnx/file/model.onnx": ["all-MiniLM-L6-v2-onnx-int8/model.onnx"],
+    "model_minilm_int8_onnx/file/model.onnx": [f"{ONNX_MODEL_DIR_NAME}/model.onnx"],
     "model_minilm_tokenizer/file/tokenizer.json": [
-        "all-MiniLM-L6-v2-onnx-int8/tokenizer.json",
-        "all-MiniLM-L6-v2-onnx-fp32/tokenizer.json",
+        f"{ONNX_MODEL_DIR_NAME}/tokenizer.json",
+        f"{ONNX_FP32_MODEL_DIR_NAME}/tokenizer.json",
     ],
-    "model_minilm_fp32_onnx/file/model.onnx": ["all-MiniLM-L6-v2-onnx-fp32/model.onnx"],
-    "model_roberta_int8_onnx/file/model.onnx": ["all-distilroberta-v1-onnx-int8/model.onnx"],
+    "model_minilm_fp32_onnx/file/model.onnx": [f"{ONNX_FP32_MODEL_DIR_NAME}/model.onnx"],
+    "model_roberta_int8_onnx/file/model.onnx": [f"{DISTILROBERTA_MODEL_DIR_NAME}/model.onnx"],
     "model_roberta_tokenizer/file/tokenizer.json": [
-        "all-distilroberta-v1-onnx-int8/tokenizer.json",
+        f"{DISTILROBERTA_MODEL_DIR_NAME}/tokenizer.json"
     ],
     "model_clip_text_onnx/file/text_model_quantized.onnx": [
-        "clip-vit-base-patch32-onnx/text_model_quantized.onnx",
+        f"{CLIP_MODEL_DIR_NAME}/text_model_quantized.onnx",
     ],
     "model_clip_vision_onnx/file/vision_model_quantized.onnx": [
-        "clip-vit-base-patch32-onnx/vision_model_quantized.onnx",
+        f"{CLIP_MODEL_DIR_NAME}/vision_model_quantized.onnx",
     ],
-    "model_clip_tokenizer/file/tokenizer.json": ["clip-vit-base-patch32-onnx/tokenizer.json"],
+    "model_clip_tokenizer/file/tokenizer.json": [f"{CLIP_MODEL_DIR_NAME}/tokenizer.json"],
     "model_clip_preprocessor/file/preprocessor_config.json": [
-        "clip-vit-base-patch32-onnx/preprocessor_config.json",
+        f"{CLIP_MODEL_DIR_NAME}/preprocessor_config.json",
     ],
-    "model_gguf_minilm/file/all-MiniLM-L6-v2-Q4_K_M.gguf": ["all-MiniLM-L6-v2-Q4_K_M.gguf"],
+    f"model_gguf_minilm/file/{EMBEDDING_MODEL_NAME}": [EMBEDDING_MODEL_NAME],
 }
 
 # llama-server binary externals (per-platform; only the host's is in a given test's
@@ -139,7 +148,12 @@ def _populate_bazel_model_dir() -> None:
     r = runfiles.Create()
     if r is None:
         return
-    model_root = Path(os.environ["TEST_TMPDIR"]) / "shrike-models"
+    # RUNFILES_* are set under `bazel run` too, where TEST_TMPDIR is absent — guard
+    # it like everything else in this function rather than KeyError.
+    test_tmp = os.environ.get("TEST_TMPDIR")
+    if not test_tmp:
+        return
+    model_root = Path(test_tmp) / "shrike-models"
     found = False
     for src, dests in _BAZEL_MODELS.items():
         loc = r.Rlocation(src)
