@@ -1,0 +1,21 @@
+[package]
+name = "shrike-kernel"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The pure-Rust kernel: collection + index + derived store + fusion, no CPython (#279, slice 2)."
+
+[lib]
+name = "shrike_kernel"
+
+# Pure Rust — NO pyo3 anywhere in this dep tree (epic #265 convention 5; the
+# layering check + the no-CPython smoke test below are the proof). This crate
+# IS the embedded host #224 specs: it owns its own threading.
+[dependencies]
+shrike-collection = { path = "../shrike-collection" }
+shrike-compute = { path = "../shrike-compute" }
+shrike-derived = { path = "../shrike-derived" }
+shrike-embed = { path = "../shrike-embed" }
+shrike-ffi = { workspace = true }
+shrike-index = { path = "../shrike-index" }

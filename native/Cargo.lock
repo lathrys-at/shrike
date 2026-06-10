@@ -4909,6 +4909,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "shrike-kernel"
+version = "0.0.0"
+dependencies = [
+ "shrike-collection",
+ "shrike-compute",
+ "shrike-derived",
+ "shrike-embed",
+ "shrike-ffi",
+ "shrike-index",
+]
+
+[[package]]
 name = "shrike-native-demo"
 version = "0.0.0"
 dependencies = [
