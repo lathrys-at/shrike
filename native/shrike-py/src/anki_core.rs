@@ -270,6 +270,38 @@ impl CollectionCore {
         .map_err(to_py_err)
     }
 
+    // ── media URL/path sources (#278 step 5b — security-review gated) ────────
+
+    /// The full store_media batch: items of `data` (base64) / `url`
+    /// (SSRF-guarded download with IP pinning) / server-local `path` (honored
+    /// only inside `path_roots`). Per-item results JSON.
+    #[pyo3(signature = (items_json, allow_private_fetch=false, path_roots=None))]
+    fn store_media_items(
+        &self,
+        py: Python<'_>,
+        items_json: String,
+        allow_private_fetch: bool,
+        path_roots: Option<Vec<String>>,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            self.inner.store_media_items(
+                &items_json,
+                allow_private_fetch,
+                path_roots.as_deref().unwrap_or(&[]),
+            )
+        })
+        .map_err(to_py_err)
+    }
+
+    /// The SSRF allowlist classifier (one IP literal) — the parity surface
+    /// the harness compares against Python's `ipaddress.is_global` corpus.
+    fn media_ip_allowed(&self, ip: &str) -> PyResult<bool> {
+        let addr: std::net::IpAddr = ip
+            .parse()
+            .map_err(|e| crate::NativeInputError::new_err(format!("bad ip: {e}")))?;
+        Ok(shrike_collection::media_fetch::ip_is_allowed(addr))
+    }
+
     // ── note types (#278 step 4) ─────────────────────────────────────────────
 
     /// Create/update note-type definitions in bulk (JSON in/out; the

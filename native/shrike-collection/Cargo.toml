@@ -27,6 +27,13 @@ serde_json = "1"
 # Python pattern is kept verbatim (byte-identity contract).
 regex = "1"
 fancy-regex = "0.16"
+# media URL fetch (#278 step 5b): ureq is a SYNCHRONOUS client — no tokio, no
+# owned threads/runtime in the native tree (the #308 constraint); rustls TLS.
+# The custom-resolver hook is what pins each hop's connection to the vetted IP
+# while SNI/cert validation still run against the hostname.
+ureq = "2"
+base64 = "0.22"
+url = "2"
 # rslib relies on the anki workspace's feature unification: sibling crates
 # enable tokio's io-util/etc., which an external consumer must re-enable.
 tokio = { version = "1", features = ["full"] }

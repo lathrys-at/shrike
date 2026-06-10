@@ -20,6 +20,7 @@
 mod adapter;
 pub mod embed_text;
 mod media;
+pub mod media_fetch;
 mod note_types;
 mod read;
 mod write;
