@@ -35,6 +35,15 @@ pip.parse(
 )
 use_repo(pip, "shrike_pip")
 
+# Build-time tools for //:sdist (build / hatchling / hatch-vcs), in their own hub +
+# lock so they never enter the runtime dependency set (requirements_lock.txt).
+pip.parse(
+    hub_name = "shrike_sdist_pip",
+    python_version = "3.12",
+    requirements_lock = "//:requirements_sdist_lock.txt",
+)
+use_repo(pip, "shrike_sdist_pip")
+
 # ── Rust toolchain + crates: the polyglot proof (#247) ──────────────────────
 # Proves the cross-language seam — rules_rust builds a PyO3 extension linked
 # against the hermetic CPython, importable from a py_test (//native/_demo). The

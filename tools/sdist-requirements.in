@@ -1,0 +1,6 @@
+# Build-time tools for the Bazel sdist (//:sdist) — kept out of the runtime lock
+# (requirements_lock.txt) since they aren't package dependencies. Compiled to
+# requirements_sdist_lock.txt by tools/update-requirements.sh.
+build
+hatchling
+hatch-vcs

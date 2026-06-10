@@ -8,6 +8,13 @@ packages = ["src/shrike"]
 # globs them; this keeps the hatchling wheel matching — see tools/check-wheel-parity.sh).
 exclude = ["**/BUILD.bazel"]
 
+# NB: the sdist file selection is intentionally *not* configured here. hatchling
+# derives it from git, which can't run in Bazel's hermetic sandbox; rather than make
+# the repo's `python -m build` sdist git-independent (which changes its contents), the
+# Bazel sdist (//:sdist) injects an explicit include into its own staged pyproject —
+# see tools/bazel/sdist_builder.py. So `python -m build` is unchanged, and //:sdist
+# ships the lean staged tree.
+
 # Version is derived from the git tag (hatch-vcs / setuptools-scm), never a
 # hand-edited constant — so it can't drift from the release tag. The build hook
 # writes the computed value to src/shrike/_version.py (gitignored), which

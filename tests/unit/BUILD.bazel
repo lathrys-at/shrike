@@ -37,3 +37,15 @@ pytest_test(
     deps = [":conftest"],
     size = "medium",
 )
+
+# Source files for the //:sdist source distribution (#245). testonly=False (overriding
+# the package default) so the non-testonly //:sdist can stage them.
+filegroup(
+    name = "dist_files",
+    testonly = False,
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel", "**/__pycache__/**", "**/*.pyc", "**/*.pyo"],
+    ),
+    visibility = ["//visibility:public"],
+)

@@ -1,6 +1,7 @@
 load("@rules_python//python:defs.bzl", "py_test")
 load("@rules_python//python:packaging.bzl", "py_wheel")
 load("@shrike_pip//:requirements.bzl", "requirement")
+load("//tools/bazel:sdist.bzl", "py_sdist")
 
 # Phase 0 make-or-break spike (#242): the native-dependency wheels must import and
 # run on Bazel's hermetic CPython toolchain, on every target platform. If this
@@ -109,4 +110,25 @@ py_wheel(
         "//src/shrike:shrike",
         "//src/shrike:py_typed",
     ],
+)
+
+# The release sdist (#245). hatchling builds it via the `build` API from the staged
+# source tree (the dist_files filegroups + the root-package files), git-independent
+# thanks to the explicit [tool.hatch.build.targets.sdist] include, with the version
+# stamped from the git tag. `manual` (like //:wheel) keeps it off the per-PR //...
+# lane; tools/build-sdist.sh + release.yml name //:sdist explicitly.
+py_sdist(
+    name = "sdist",
+    srcs = [
+        "//src/shrike:dist_files",
+        "//tests/unit:dist_files",
+        "//tests/integration:dist_files",
+        "tests/__init__.py",
+        "tests/conftest.py",
+        "pyproject.toml",
+        "README.md",
+        "LICENSE",
+        "CHANGELOG.md",
+    ],
+    tags = ["manual"],
 )

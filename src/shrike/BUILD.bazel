@@ -34,3 +34,14 @@ filegroup(
     name = "py_typed",
     srcs = ["py.typed"],
 )
+
+# Source files for the //:sdist source distribution (#245) — the package tree minus
+# the BUILD file, generated _version.py, and bytecode.
+filegroup(
+    name = "dist_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel", "_version.py", "**/__pycache__/**", "**/*.pyc", "**/*.pyo"],
+    ),
+    visibility = ["//visibility:public"],
+)

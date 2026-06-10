@@ -17,7 +17,7 @@ UV_VERSION=0.11.19
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-exec uvx "uv@${UV_VERSION}" pip compile pyproject.toml \
+uvx "uv@${UV_VERSION}" pip compile pyproject.toml \
   --python-version 3.12 \
   --universal \
   --generate-hashes \
@@ -26,3 +26,11 @@ exec uvx "uv@${UV_VERSION}" pip compile pyproject.toml \
   --extra clip \
   --extra socks \
   -o requirements_lock.txt
+
+# Build-time tools for //:sdist, in their own lock so they stay out of the runtime
+# dependency set (consumed by the @shrike_sdist_pip hub in MODULE.bazel).
+exec uvx "uv@${UV_VERSION}" pip compile tools/sdist-requirements.in \
+  --python-version 3.12 \
+  --universal \
+  --generate-hashes \
+  -o requirements_sdist_lock.txt
