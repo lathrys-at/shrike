@@ -26,3 +26,11 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# PEP 561 marker. A py_library's `data` isn't pulled into a py_wheel, but a filegroup
+# named in the wheel's `deps` is — so the wheel ships shrike/py.typed (matching the
+# hatchling wheel; see tools/check-wheel-parity.sh).
+filegroup(
+    name = "py_typed",
+    srcs = ["py.typed"],
+)

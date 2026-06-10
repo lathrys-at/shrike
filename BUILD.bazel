@@ -46,7 +46,12 @@ py_wheel(
     summary = "MCP server for Anki collection management",
     description_file = "README.md",
     description_content_type = "text/markdown",
-    homepage = "https://github.com/lathrys-at/shrike",
+    # Mirror pyproject's [project.urls] (Project-URL, like hatchling) rather than the
+    # deprecated Home-page field.
+    project_urls = {
+        "Homepage": "https://github.com/lathrys-at/shrike",
+        "Issues": "https://github.com/lathrys-at/shrike/issues",
+    },
     license = "AGPL-3.0-or-later",
     python_requires = ">=3.12",
     requires = [
@@ -88,7 +93,7 @@ py_wheel(
             "pytest-testmon>=2.1",
             "mypy>=1.10",
             "ruff>=0.8",
-            "types-PyYAML",
+            "types-pyyaml",
             "trustme>=1.1",
         ],
     },
@@ -100,5 +105,8 @@ py_wheel(
     # release.yml and tools/build-wheel.sh name //:wheel explicitly.
     tags = ["manual"],
     strip_path_prefixes = ["src"],
-    deps = ["//src/shrike:shrike"],
+    deps = [
+        "//src/shrike:shrike",
+        "//src/shrike:py_typed",
+    ],
 )

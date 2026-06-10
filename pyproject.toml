@@ -4,6 +4,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/shrike"]
+# Don't ship the Bazel BUILD files in the published wheel (the Bazel wheel never
+# globs them; this keeps the hatchling wheel matching — see tools/check-wheel-parity.sh).
+exclude = ["**/BUILD.bazel"]
 
 # Version is derived from the git tag (hatch-vcs / setuptools-scm), never a
 # hand-edited constant — so it can't drift from the release tag. The build hook
