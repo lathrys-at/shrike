@@ -1,0 +1,2 @@
+# Crate patches consumed by MODULE.bazel's crate.annotation entries.
+exports_files(glob(["*.patch"]))

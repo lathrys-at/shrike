@@ -1,0 +1,54 @@
+Bazel output-tree validation rejects dangling symlinks. cxx_build leaves
+OUT_DIR/cxxbridge symlinks (crate/usearch -> the build-sandbox manifest dir,
+and per-header links under include/) that dangle once the sandbox is gone.
+Nothing downstream of this crate's own build consumes them — the bridge
+sources are compiled inside the build script — so materialize-or-drop them:
+copy a symlink's target while it still exists, else remove the link.
+
+--- a/build.rs
++++ b/build.rs
+@@ -84,5 +84,44 @@
+     println!("cargo:rerun-if-changed=include/usearch/index.hpp");
+     println!("cargo:rerun-if-changed=include/usearch/index_plugins.hpp");
+     println!("cargo:rerun-if-changed=include/usearch/index_dense.hpp");
++    sanitize_out_dir_symlinks();
+     Ok(())
+ }
++
++// Replace every symlink under OUT_DIR with a real copy of its target (the
++// target still exists while the build script runs), or remove it if the
++// target is already gone. Keeps Bazel's output-tree validation happy; a
++// plain cargo build is unaffected (copies behave like the links did).
++fn sanitize_out_dir_symlinks() {
++    let Ok(out_dir) = std::env::var("OUT_DIR") else { return };
++    fn walk(dir: &std::path::Path) {
++        let Ok(entries) = std::fs::read_dir(dir) else { return };
++        for entry in entries.flatten() {
++            let path = entry.path();
++            let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
++            if meta.file_type().is_symlink() {
++                let target = std::fs::canonicalize(&path).ok();
++                let _ = std::fs::remove_file(&path);
++                if let Some(target) = target {
++                    if target.is_dir() {
++                        copy_tree(&target, &path);
++                    } else {
++                        let _ = std::fs::copy(&target, &path);
++                    }
++                }
++            } else if meta.is_dir() {
++                walk(&path);
++            }
++        }
++    }
++    fn copy_tree(src: &std::path::Path, dst: &std::path::Path) {
++        let _ = std::fs::create_dir_all(dst);
++        let Ok(entries) = std::fs::read_dir(src) else { return };
++        for entry in entries.flatten() {
++            let from = entry.path();
++            let to = dst.join(entry.file_name());
++            if from.is_dir() { copy_tree(&from, &to); } else { let _ = std::fs::copy(&from, &to); }
++        }
++    }
++    walk(std::path::Path::new(&out_dir));
++}

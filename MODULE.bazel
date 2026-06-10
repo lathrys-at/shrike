@@ -74,8 +74,17 @@ crate.from_cargo(
         "//native/_demo:Cargo.toml",
         "//native/shrike-embed:Cargo.toml",
         "//native/shrike-ffi:Cargo.toml",
+        "//native/shrike-index:Cargo.toml",
         "//native/shrike-py:Cargo.toml",
     ],
+)
+# usearch's cxx_build leaves OUT_DIR symlinks into the ephemeral build sandbox,
+# which Bazel's output-tree validation rejects as dangling; the patch
+# materializes/drops them (no behaviour change under plain cargo).
+crate.annotation(
+    crate = "usearch",
+    patch_args = ["-p1"],
+    patches = ["//native/patches:usearch-bazel-cxxbridge-symlink.patch"],
 )
 use_repo(crate, "crates")
 
