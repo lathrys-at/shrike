@@ -8,6 +8,10 @@ name: Warm CI cache
 # the current branch or the default branch; the test workflow runs on PRs only,
 # so without this nothing ever seeds main's scope and every PR misses (#93).
 #
+# The same scope rule applies to the Bazel build cache (#244): the `warm-bazel`
+# job below builds //... on main so a PR's first Bazel run restores the Rust
+# toolchain + compiled crates + Python action results instead of building cold.
+#
 # Runs on the default branch twice a week — comfortably under the 7-day cache
 # eviction window — and on demand via workflow_dispatch (use it to warm the cache
 # immediately, e.g. after bumping the pinned llama-server or model).
@@ -77,3 +81,40 @@ jobs:
           print(f"ONNX MiniLM fp32 dir ready: {cached_onnx_fp32_model_dir(fallback)}")
           print(f"CLIP dir ready: {cached_clip_model_dir(fallback)}")
           PY
+
+  warm-bazel:
+    name: Warm Bazel cache (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Same paths/keys as the bazel job in test.yml, so PRs restore exactly what
+      # this saves. The disk cache is content-addressed, so crates compiled here
+      # are cache hits for any PR with the same Cargo.lock + toolchain — the
+      # cross-PR win a per-branch cache can't give (every PR can read the default
+      # branch's scope, but not a sibling PR's). Linux x64 only: it mirrors the
+      # per-PR bazel lane; the rc cross-platform lane (arm64/macOS) is rare and
+      # warms on its own.
+      - name: Cache Bazel toolchains + repo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/shrike/bazelisk
+            ~/.cache/shrike/bazelisk-home
+            ~/.cache/shrike/bazel-repo
+          key: bazel-repo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
+          restore-keys: bazel-repo-${{ runner.os }}-${{ runner.arch }}-
+      - name: Cache Bazel action results
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shrike/bazel-disk
+          key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: bazel-disk-${{ runner.os }}-${{ runner.arch }}-
+      # `build`, not `test`: the expensive cold cost is compiling the Rust crates
+      # for the PyO3 seam, a build action cached in the disk cache. No test run —
+      # execution is cheap and (pre-#259) the coarse //src/shrike dep invalidates
+      # the unit result on any source edit, so warming test results buys little.
+      - name: Warm the Bazel graph (build //..., incl. the Rust/PyO3 seam)
+        run: |
+          ./bazel build //... \
+            --disk_cache="$HOME/.cache/shrike/bazel-disk" \
+            --repository_cache="$HOME/.cache/shrike/bazel-repo"
