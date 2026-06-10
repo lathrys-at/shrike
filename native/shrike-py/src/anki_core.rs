@@ -39,6 +39,17 @@ impl CollectionCore {
         py.detach(|| self.inner.close()).map_err(to_py_err)
     }
 
+    /// Cooperative idle-release (#64): close, keeping the instance reusable.
+    fn release(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.inner.release()).map_err(to_py_err)
+    }
+
+    /// Re-acquire after a release; lock contention surfaces as
+    /// NativeBusyError (retryable), mirroring the Python wrapper.
+    fn reopen(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.inner.reopen()).map_err(to_py_err)
+    }
+
     /// The collection-modified watermark (drift detection's anchor).
     fn col_mod(&self, py: Python<'_>) -> PyResult<i64> {
         py.detach(|| self.inner.col_mod()).map_err(to_py_err)

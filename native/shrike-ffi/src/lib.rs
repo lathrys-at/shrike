@@ -49,6 +49,11 @@ pub enum ErrorKind {
     /// A runtime dependency isn't available (model not loaded, backend stopped,
     /// file missing). Python side: a runtime-error exception.
     Unavailable,
+    /// The collection is held by another process (lock contention — usually
+    /// Anki desktop). Expected and retryable, never a bug: the caller decides
+    /// whether to wait. Python side: the busy exception the facades map onto
+    /// the existing CollectionBusyError surface.
+    Busy,
     /// A bug — anything that "can't happen". Python side: a runtime-error
     /// exception, logged with a traceback.
     Internal,
@@ -59,6 +64,7 @@ impl ErrorKind {
         match self {
             ErrorKind::InvalidInput => "invalid_input",
             ErrorKind::Unavailable => "unavailable",
+            ErrorKind::Busy => "busy",
             ErrorKind::Internal => "internal",
         }
     }
@@ -108,6 +114,10 @@ impl NativeError {
         Self::new(ErrorKind::Internal, message.into())
     }
 
+    pub fn busy(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Busy, message.into())
+    }
+
     /// The rendered span trace, or None when no spans were active (no
     /// subscriber installed, or the error arose outside any span).
     pub fn trace(&self) -> Option<String> {
@@ -140,6 +150,7 @@ mod tests {
         assert_eq!(ErrorKind::InvalidInput.as_str(), "invalid_input");
         assert_eq!(ErrorKind::Unavailable.as_str(), "unavailable");
         assert_eq!(ErrorKind::Internal.as_str(), "internal");
+        assert_eq!(ErrorKind::Busy.as_str(), "busy");
     }
 
     #[test]

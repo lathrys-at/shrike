@@ -47,6 +47,14 @@ pyo3::create_exception!(
     PyRuntimeError,
     "A native-side bug (ErrorKind::Internal). Logged with a traceback."
 );
+pyo3::create_exception!(
+    _native,
+    NativeBusyError,
+    PyRuntimeError,
+    "The collection is held by another process (ErrorKind::Busy — lock \
+     contention, usually Anki desktop). Expected and retryable; the facades \
+     map it onto the existing CollectionBusyError surface."
+);
 
 /// Map the shared native error taxonomy onto the module's exception classes.
 /// The captured Rust span trace rides along as a PEP 678 note (#308), so the
@@ -56,6 +64,7 @@ pub(crate) fn to_py_err(e: NativeError) -> PyErr {
     let err = match e.kind {
         ErrorKind::InvalidInput => NativeInputError::new_err(e.message),
         ErrorKind::Unavailable => NativeUnavailableError::new_err(e.message),
+        ErrorKind::Busy => NativeBusyError::new_err(e.message),
         ErrorKind::Internal => NativeInternalError::new_err(e.message),
     };
     if let Some(trace) = trace {
@@ -582,5 +591,6 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py.get_type::<NativeUnavailableError>(),
     )?;
     m.add("NativeInternalError", py.get_type::<NativeInternalError>())?;
+    m.add("NativeBusyError", py.get_type::<NativeBusyError>())?;
     Ok(())
 }

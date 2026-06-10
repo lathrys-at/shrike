@@ -88,6 +88,38 @@ impl CollectionCore {
         self.adapter.close_collection()
     }
 
+    /// Release the collection (cooperative idle-release, #64): close, keeping
+    /// the instance reusable via [`reopen`]. Already-closed is a no-op.
+    pub fn release(&self) -> NativeResult<()> {
+        let _ = self.adapter.close_collection();
+        Ok(())
+    }
+
+    /// Re-acquire after a release (#64/#79). The file opened fine at boot, so
+    /// a failure here is overwhelmingly lock contention (another process —
+    /// usually Anki desktop — holds it), not corruption: it surfaces as the
+    /// BUSY tier, mirroring the Python wrapper's contextual classification.
+    /// The caller decides whether to retry; nothing here waits.
+    pub fn reopen(&self) -> NativeResult<()> {
+        let _ = self.adapter.close_collection(); // a half-open handle is fine to close
+        let base = self
+            .collection_path
+            .strip_suffix(".anki2")
+            .unwrap_or(&self.collection_path);
+        self.adapter
+            .open_collection(
+                &self.collection_path,
+                &format!("{base}.media"),
+                &format!("{base}.media.db2"),
+            )
+            .map_err(|e| {
+                NativeError::busy(format!(
+                    "the collection is in use by another process: {}",
+                    e.message
+                ))
+            })
+    }
+
     /// The collection-modified watermark Shrike's drift detection leans on.
     pub fn col_mod(&self) -> NativeResult<i64> {
         self.adapter.col_mod()
@@ -760,6 +792,48 @@ mod tests {
         .unwrap();
         assert_eq!(deleted["deleted"][0], "pic.png");
         assert_eq!(deleted["not_found"][0], "nope.png");
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn busy_surface_release_reopen() {
+        // The #64/#65 contention story: a second holder makes reopen BUSY;
+        // releasing hands the lock over; reopening after the holder leaves
+        // succeeds. (The second core never successfully co-manages the
+        // collection — it exists to HOLD the lock, which is the scenario the
+        // busy tier is for.)
+        let (core, dir) = temp_core();
+        let path = core.collection_path.clone();
+        let basic = core.notetype_id("Basic").unwrap();
+
+        // release → another core can open (cooperative time-slicing).
+        core.release().unwrap();
+        let holder = CollectionCore::open(&path).unwrap();
+
+        // reopen while held → the BUSY tier, message intact.
+        let err = core.reopen().unwrap_err();
+        assert_eq!(err.kind, shrike_ffi::ErrorKind::Busy);
+        assert!(err.message.contains("in use by another process"));
+
+        // holder leaves → reopen succeeds and ops work again.
+        holder.close().unwrap();
+        core.reopen().unwrap();
+        core.create_note(
+            basic,
+            DEFAULT_DECK,
+            &["after reopen".into(), "b".into()],
+            &[],
+            DuplicatePolicy::Error,
+        )
+        .unwrap();
+        assert_eq!(core.find_notes("deck:*").unwrap().len(), 1);
+
+        // release is idempotent; double reopen is fine.
+        core.release().unwrap();
+        core.release().unwrap();
+        core.reopen().unwrap();
 
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();

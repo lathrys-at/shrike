@@ -348,6 +348,19 @@ impl<E: Embedder> Kernel<E> {
         .await
     }
 
+    /// Cooperative idle-release (#64): close the collection, keeping the
+    /// kernel reusable via [`reopen`]. WHEN to release is harness policy (an
+    /// idle timer on its runtime); the kernel only provides the ops.
+    pub async fn release(&self) -> NativeResult<()> {
+        self.collection.run(|core| core.release()).await?
+    }
+
+    /// Re-acquire after a release; contention surfaces as the BUSY error
+    /// tier (retryable — the caller decides, nothing waits).
+    pub async fn reopen(&self) -> NativeResult<()> {
+        self.collection.run(|core| core.reopen()).await?
+    }
+
     pub async fn close(self) -> NativeResult<()> {
         self.collection.close().await
     }
