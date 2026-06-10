@@ -8,10 +8,11 @@ exports_files(["Cargo.toml"])
 # Pure Rust — NO pyo3 (enforced by //native:layering_check).
 rust_library(
     name = "shrike_embed",
-    srcs = ["src/lib.rs"],
+    srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     deps = [
         "//native/shrike-ffi:shrike_ffi",
+        "@crates//:image",
         "@crates//:ndarray",
         "@crates//:ort",
         "@crates//:tokenizers",

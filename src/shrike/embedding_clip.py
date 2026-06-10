@@ -81,12 +81,16 @@ class ClipBackend:
         providers: list[str] | None = None,
         batch_size: int | None = None,
         log_dir: str | Path | None = None,  # accepted for runtime parity; unused
+        native: bool = False,
     ) -> None:
         self._model = model
         self._providers = list(providers) if providers else list(DEFAULT_PROVIDERS)
         self._active_providers: list[str] = []
         self._batch_cap = batch_size
         self._safe_batch = 1
+        # Engine selection (#271): False = onnxruntime-python + PIL, True = shrike_native.
+        self._native = native
+        self._native_engine: Any = None
         self._text_sess: Any = None
         self._vis_sess: Any = None
         self._tokenizer: Any = None
@@ -101,6 +105,8 @@ class ClipBackend:
 
     @property
     def running(self) -> bool:
+        if self._native:
+            return self._native_engine is not None
         return self._text_sess is not None and self._vis_sess is not None
 
     def _resolve_files(self) -> tuple[Path, Path, Path, Path]:
@@ -147,15 +153,12 @@ class ClipBackend:
             import json
 
             import onnxruntime as ort
-            from PIL import Image
-            from tokenizers import Tokenizer
         except ImportError as e:
             raise ImportError(
                 "The CLIP embedding backend needs the 'clip' optional dependency. "
                 "Install it with: pip install 'shrike[clip]'"
             ) from e
 
-        self._Image = Image  # captured so _preprocess doesn't re-import per image
         self._text_path, self._vis_path, tok_path, pp_path = self._resolve_files()
 
         available = list(ort.get_available_providers())
@@ -167,6 +170,32 @@ class ClipBackend:
                 available,
                 resolved,
             )
+
+        # The preprocessor config is parsed here for both engines: only scalars
+        # cross the FFI into the native engine.
+        pp = json.loads(pp_path.read_text())
+        self._mean = np.array(pp["image_mean"], dtype=np.float32)
+        self._std = np.array(pp["image_std"], dtype=np.float32)
+        # CLIP preprocessing has two independent knobs: resize the shortest edge to `size`, then
+        # center-crop to `crop_size`. Each may be a dict or a bare scalar across exports.
+        self._resize = _read_edge(pp.get("size"), ("shortest_edge", "height", "width"), 224)
+        self._crop = _read_edge(pp.get("crop_size"), ("height", "width"), self._resize)
+
+        if self._native:
+            self._start_native(tok_path, resolved)
+            self._finish_start()
+            return
+
+        try:
+            from PIL import Image
+            from tokenizers import Tokenizer
+        except ImportError as e:
+            raise ImportError(
+                "The CLIP embedding backend needs the 'clip' optional dependency. "
+                "Install it with: pip install 'shrike[clip]'"
+            ) from e
+
+        self._Image = Image  # captured so _preprocess doesn't re-import per image
         self._text_sess = ort.InferenceSession(str(self._text_path), providers=resolved)
         self._vis_sess = ort.InferenceSession(str(self._vis_path), providers=resolved)
         self._active_providers = list(self._text_sess.get_providers())
@@ -184,15 +213,40 @@ class ClipBackend:
         tokenizer.enable_truncation(max_length=CLIP_CONTEXT)
         tokenizer.enable_padding(length=CLIP_CONTEXT)
         self._tokenizer = tokenizer
+        self._finish_start()
 
-        pp = json.loads(pp_path.read_text())
-        self._mean = np.array(pp["image_mean"], dtype=np.float32)
-        self._std = np.array(pp["image_std"], dtype=np.float32)
-        # CLIP preprocessing has two independent knobs: resize the shortest edge to `size`, then
-        # center-crop to `crop_size`. Each may be a dict or a bare scalar across exports.
-        self._resize = _read_edge(pp.get("size"), ("shortest_edge", "height", "width"), 224)
-        self._crop = _read_edge(pp.get("crop_size"), ("height", "width"), self._resize)
+    def _start_native(self, tok_path: Path, resolved: list[str]) -> None:
+        """Bring up the Rust CLIP engine (#271): both graphs + in-crate tokenization
+        and image preprocessing, dlopening the same onnxruntime shared library."""
+        try:
+            import shrike_native
+        except ImportError as e:
+            raise ImportError(
+                "The clip-rs embedding backend needs the shrike-native extension. "
+                "Install the shrike-native wheel, or build it from a checkout with "
+                "scripts/build-native.sh."
+            ) from e
 
+        from shrike.embedding_onnx import locate_ort_dylib
+
+        assert self._text_path is not None and self._vis_path is not None
+        assert self._mean is not None and self._std is not None
+        shrike_native.init_onnx_runtime(str(locate_ort_dylib()))
+        self._native_engine = shrike_native.ClipEmbedder(
+            str(self._text_path),
+            str(self._vis_path),
+            str(tok_path),
+            providers=resolved,
+            image_mean=[float(v) for v in self._mean],
+            image_std=[float(v) for v in self._std],
+            resize=self._resize,
+            crop=self._crop,
+            context=CLIP_CONTEXT,
+        )
+        self._active_providers = list(self._native_engine.active_providers())
+
+    def _finish_start(self) -> None:
+        """The engine-agnostic tail of start(): the batch-safety probe + logging."""
         # Both graphs are auto-discovered at the *same* precision (_resolve_files), so one probe on
         # the text path governs the vision path too. (A hand-assembled mixed-precision pair — fp
         # text + int8 vision — would batch the vision graph non-deterministically; that's
@@ -209,6 +263,7 @@ class ClipBackend:
             logger.warning("Batch-safety probe failed (%s); embedding serially.", e)
             self._safe_batch = 1
 
+        assert self._text_path is not None and self._vis_path is not None
         logger.info(
             "CLIP model ready (%s + %s, %s)",
             self._text_path.name,
@@ -220,6 +275,7 @@ class ClipBackend:
         self._text_sess = None
         self._vis_sess = None
         self._tokenizer = None
+        self._native_engine = None
 
     def _effective_batch(self, n: int) -> int:
         if self._safe_batch <= 1:
@@ -242,6 +298,11 @@ class ClipBackend:
         return out
 
     def _embed_text_chunk(self, texts: list[str]) -> list[list[float]]:
+        if self._native:
+            vectors_native: list[list[float]] = self._native_engine.embed_text_chunk(texts)
+            if vectors_native:
+                self._dim = len(vectors_native[0])
+            return vectors_native
         encodings = self._tokenizer.encode_batch(texts)
         # Feed whichever of input_ids/attention_mask the graph declares, each cast to its declared
         # integer dtype (onnxruntime won't auto-cast). CLIP text usually declares only input_ids,
@@ -273,10 +334,29 @@ class ClipBackend:
         return out
 
     def _embed_image_chunk(self, images: list[ImageInput]) -> list[list[float]]:
+        if self._native:
+            # Marshaling rule: only bytes cross the FFI. Paths are read here; a
+            # PIL image (test convenience) is round-tripped through lossless PNG.
+            vectors_native: list[list[float]] = self._native_engine.embed_image_chunk(
+                [self._image_bytes(im) for im in images]
+            )
+            if vectors_native:
+                self._dim = len(vectors_native[0])
+            return vectors_native
         pixels = np.stack([self._preprocess(im) for im in images]).astype(np.float32)
         feed = {self._vis_sess.get_inputs()[0].name: pixels}
         out = np.asarray(self._vis_sess.run(None, feed)[0], dtype=np.float32)
         return self._normalize(out)
+
+    def _image_bytes(self, image: ImageInput) -> bytes:
+        """Encoded bytes for the native engine (which decodes crate-side)."""
+        if isinstance(image, bytes):
+            return image
+        if isinstance(image, (str, Path)):
+            return Path(image).read_bytes()
+        buf = io.BytesIO()
+        image.convert("RGB").save(buf, format="PNG")  # lossless — pixels unchanged
+        return buf.getvalue()
 
     def _preprocess(self, image: ImageInput) -> np.ndarray:
         """CLIP preprocessing → CHW float32 (resize shortest-edge, center-crop, rescale, normalize)."""  # noqa: E501
@@ -316,6 +396,12 @@ class ClipBackend:
             return self._dim
         if not self.running:
             return None
+        if self._native:
+            dim = self._native_engine.dim()
+            if dim is not None:
+                self._dim = int(dim)
+                return self._dim
+            return len(self.embed_texts([" "])[0])
         # Prefer the graph's static output dim (text_embeds is [batch, dim]); embed only if dynamic.
         shape = self._text_sess.get_outputs()[0].shape
         if shape and isinstance(shape[-1], int):
@@ -339,13 +425,22 @@ class ClipBackend:
         t, v = self._text_path, self._vis_path
         tn = t.name if t else "text_model"
         vn = v.name if v else "vision_model"
+        # The native engine's image preprocessing (the image crate's Catmull-Rom
+        # bicubic) is pixel-different from PIL's bicubic, so its vectors live in
+        # a (slightly) different space — namespaced accordingly (epic #265
+        # convention 7), with its own image-prep version counter.
+        if self._native:
+            import shrike_native
+
+            prep = f"imgprep=rs{shrike_native.IMAGE_PREP_VERSION_RS}:textprep={EMBED_TEXT_VERSION}"
+            return f"clip-rs:{tn}:{_sz(t)}:{vn}:{_sz(v)}:{prep}"
         prep = f"imgprep={IMAGE_PREP_VERSION}:textprep={EMBED_TEXT_VERSION}"
         return f"clip:{tn}:{_sz(t)}:{vn}:{_sz(v)}:{prep}"
 
     def health(self) -> dict[str, Any]:
         return {
             "available": self.running,
-            "backend": "clip",
+            "backend": "clip-rs" if self._native else "clip",
             "model": self._model,
             "modalities": sorted(self.modalities),
             "requested_providers": self._providers,

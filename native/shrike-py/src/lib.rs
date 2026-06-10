@@ -160,6 +160,72 @@ impl OnnxTextEmbedder {
     }
 }
 
+/// The native CLIP dual-encoder engine under the `ClipBackend` facade (#271).
+///
+/// Image bytes (PNG/JPEG/...) in, vectors out — preprocessing (decode, resize,
+/// center-crop, normalize) runs crate-side via the `image` crate, with the
+/// whole pipeline GIL-released.
+#[pyclass(frozen)]
+struct ClipEmbedder {
+    inner: shrike_embed::ClipEmbedder,
+}
+
+#[pymethods]
+impl ClipEmbedder {
+    #[new]
+    #[pyo3(signature = (text_model_path, vision_model_path, tokenizer_path, *, providers, image_mean, image_std, resize, crop, context))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        text_model_path: String,
+        vision_model_path: String,
+        tokenizer_path: String,
+        providers: Vec<String>,
+        image_mean: Vec<f32>,
+        image_std: Vec<f32>,
+        resize: u32,
+        crop: u32,
+        context: usize,
+    ) -> PyResult<Self> {
+        let cfg = shrike_embed::ClipEmbedderConfig {
+            text_model_path,
+            vision_model_path,
+            tokenizer_path,
+            providers,
+            image_mean,
+            image_std,
+            resize,
+            crop,
+            context,
+        };
+        let inner = py
+            .detach(move || shrike_embed::ClipEmbedder::load(cfg))
+            .map_err(to_py_err)?;
+        Ok(Self { inner })
+    }
+
+    fn embed_text_chunk(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<Vec<f32>>> {
+        py.detach(|| self.inner.embed_text_chunk(&texts)).map_err(to_py_err)
+    }
+
+    /// Embed one chunk of images, each given as encoded bytes.
+    fn embed_image_chunk(
+        &self,
+        py: Python<'_>,
+        images: Vec<Vec<u8>>,
+    ) -> PyResult<Vec<Vec<f32>>> {
+        py.detach(|| self.inner.embed_image_chunk(&images)).map_err(to_py_err)
+    }
+
+    fn dim(&self) -> Option<usize> {
+        self.inner.dim()
+    }
+
+    fn active_providers(&self) -> Vec<String> {
+        self.inner.active_providers().to_vec()
+    }
+}
+
 /// The module init. Its name MUST match the imported module / the `.so`
 /// filename (`_native`), since PyO3 exports `PyInit__native` from it.
 #[pymodule]
@@ -170,6 +236,10 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(checked_div, m)?)?;
     m.add_function(wrap_pyfunction!(init_onnx_runtime, m)?)?;
     m.add_class::<OnnxTextEmbedder>()?;
+    m.add_class::<ClipEmbedder>()?;
+    // The native image-prep pipeline version — folded into the clip-rs
+    // fingerprint by the facade (a pixel-math change must invalidate vectors).
+    m.add("IMAGE_PREP_VERSION_RS", shrike_embed::IMAGE_PREP_VERSION_RS)?;
     m.add("NativeInputError", py.get_type::<NativeInputError>())?;
     m.add("NativeUnavailableError", py.get_type::<NativeUnavailableError>())?;
     m.add("NativeInternalError", py.get_type::<NativeInternalError>())?;

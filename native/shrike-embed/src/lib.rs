@@ -10,8 +10,12 @@
 //!
 //! Pure Rust: no pyo3 (epic #265 convention 5) — bound to Python in `shrike-py`.
 
+mod clip;
+
 use std::path::Path;
 use std::sync::Mutex;
+
+pub use clip::{ClipEmbedder, ClipEmbedderConfig, IMAGE_PREP_VERSION_RS};
 
 use ndarray::{Array1, Array2, ArrayD, Axis, Ix3, s};
 use shrike_ffi::{NativeError, NativeResult};
@@ -105,32 +109,100 @@ fn map_provider(name: &str) -> Option<ort::ep::ExecutionProviderDispatch> {
     }
 }
 
+/// A graph input this engine supplies, at its declared integer width
+/// (some quantized exports declare int32 ids).
+pub(crate) struct GraphInput {
+    pub(crate) name: String,
+    pub(crate) int32: bool,
+}
+
+/// Build an ort session for a model with the (already Python-resolved)
+/// execution providers registered. Returns the session and the providers
+/// actually registered, in order.
+pub(crate) fn build_session(
+    model_path: &str,
+    providers: &[String],
+) -> NativeResult<(ort::session::Session, Vec<String>)> {
+    if !Path::new(model_path).is_file() {
+        return Err(NativeError::unavailable(format!("ONNX model not found: {model_path}")));
+    }
+    let mut builder = ort::session::Session::builder()
+        .map_err(|e| NativeError::internal(format!("session builder: {e}")))?;
+    let mut active: Vec<String> = Vec::new();
+    for name in providers {
+        // The list is already resolved Python-side; mapping is defence in
+        // depth (an unmappable name degrades to CPU, which is always last).
+        if let Some(ep) = map_provider(name) {
+            builder = builder
+                .with_execution_providers([ep])
+                .map_err(|e| NativeError::unavailable(format!("provider {name}: {e}")))?;
+            active.push(name.clone());
+        }
+    }
+    let session = builder
+        .commit_from_file(model_path)
+        .map_err(|e| NativeError::unavailable(format!("loading {model_path}: {e}")))?;
+    Ok((session, active))
+}
+
+/// The graph's declared inputs among `supplied`, at their declared int widths.
+pub(crate) fn graph_inputs(
+    session: &ort::session::Session,
+    supplied: &[&str],
+) -> Vec<GraphInput> {
+    use ort::value::{TensorElementType, ValueType};
+
+    session
+        .inputs()
+        .iter()
+        .filter(|i| supplied.contains(&i.name()))
+        .map(|i| GraphInput {
+            name: i.name().to_string(),
+            int32: matches!(
+                i.dtype(),
+                ValueType::Tensor { ty: TensorElementType::Int32, .. }
+            ),
+        })
+        .collect()
+}
+
+/// An integer [batch, seq] tensor at the input's declared width.
+pub(crate) fn int_tensor(
+    batch: usize,
+    seq: usize,
+    data: &[i64],
+    int32: bool,
+) -> NativeResult<ort::value::DynValue> {
+    let value = if int32 {
+        let v32: Vec<i32> = data.iter().map(|&v| v as i32).collect();
+        ort::value::Tensor::from_array(([batch, seq], v32))
+            .map_err(|e| NativeError::internal(format!("int tensor: {e}")))?
+            .into_dyn()
+    } else {
+        ort::value::Tensor::from_array(([batch, seq], data.to_vec()))
+            .map_err(|e| NativeError::internal(format!("int tensor: {e}")))?
+            .into_dyn()
+    };
+    Ok(value)
+}
+
+/// The first output as a [batch, dim] f32 matrix (already-pooled exports).
+pub(crate) fn extract_2d(outputs: &ort::session::SessionOutputs<'_>) -> NativeResult<Array2<f32>> {
+    let array: ArrayD<f32> = outputs[0]
+        .try_extract_array::<f32>()
+        .map_err(|e| NativeError::internal(format!("output extract: {e}")))?
+        .to_owned();
+    array
+        .into_dimensionality::<ndarray::Ix2>()
+        .map_err(|e| NativeError::invalid_input(format!("expected a rank-2 output: {e}")))
+}
+
+/// Backwards-compat alias used by both engines.
+pub(crate) use l2_normalize as l2_normalize_rows;
+
 impl TextEmbedder {
     pub fn load(cfg: TextEmbedderConfig) -> NativeResult<Self> {
-        if !Path::new(&cfg.model_path).is_file() {
-            return Err(NativeError::unavailable(format!(
-                "ONNX model not found: {}",
-                cfg.model_path
-            )));
-        }
-
-        let mut builder = ort::session::Session::builder()
-            .map_err(|e| NativeError::internal(format!("session builder: {e}")))?;
-        let mut active: Vec<String> = Vec::new();
-        for name in &cfg.providers {
-            // The list is already resolved Python-side; mapping is defence in
-            // depth (an unmappable name degrades to CPU, which is always last).
-            if let Some(ep) = map_provider(name) {
-                builder = builder
-                    .with_execution_providers([ep])
-                    .map_err(|e| NativeError::unavailable(format!("provider {name}: {e}")))?;
-                active.push(name.clone());
-            }
-        }
-        let mut builder = builder;
-        let session = builder
-            .commit_from_file(&cfg.model_path)
-            .map_err(|e| NativeError::unavailable(format!("loading {}: {e}", cfg.model_path)))?;
+        let (session, active) = build_session(&cfg.model_path, &cfg.providers)?;
 
         let inputs = Self::inspect_inputs(&session);
 

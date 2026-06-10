@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 # models, same provider resolution, in-crate tokenization/pooling — it coexists
 # with "onnx" through the parity bake (vectors are float-noise-different, so the
 # kinds keep distinct fingerprint namespaces and never mix index spaces).
-SUPPORTED_BACKENDS = ("llama", "onnx", "onnx-rs", "clip")
+SUPPORTED_BACKENDS = ("llama", "onnx", "onnx-rs", "clip", "clip-rs")
 DEFAULT_BACKEND = "llama"
 
 logger = logging.getLogger("shrike.embedding")
@@ -786,7 +786,7 @@ class EmbeddingRuntime:
                 log_dir=self._log_dir,
                 native=self._backend_kind == "onnx-rs",
             )
-        if self._backend_kind == "clip":
+        if self._backend_kind in ("clip", "clip-rs"):
             from shrike.embedding_clip import ClipBackend
 
             return ClipBackend(
@@ -794,6 +794,7 @@ class EmbeddingRuntime:
                 providers=self._onnx_providers,
                 batch_size=self._batch_size,
                 log_dir=self._log_dir,
+                native=self._backend_kind == "clip-rs",
             )
         if self._backend_kind == "llama":
             return LlamaServerBackend(

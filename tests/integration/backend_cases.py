@@ -81,11 +81,15 @@ def _make_onnx(
     return make
 
 
-def _make_clip(request: pytest.FixtureRequest) -> EmbedderBackend:
+def _make_clip(request: pytest.FixtureRequest, *, native: bool = False) -> EmbedderBackend:
     from shrike.embedding_clip import ClipBackend
 
     model: Path = request.getfixturevalue("clip_model")
-    return ClipBackend(model=str(model))
+    return ClipBackend(model=str(model), native=native)
+
+
+def _make_clip_native(request: pytest.FixtureRequest) -> EmbedderBackend:
+    return _make_clip(request, native=True)
 
 
 def _make_llama(request: pytest.FixtureRequest) -> EmbedderBackend:
@@ -186,6 +190,22 @@ def cases() -> list[BackendCase]:
             restart_exact=True,
             batch_exact=True,
             marks=(requires_clip,),
+        ),
+        # The Rust CLIP engine (#271). Text-path vectors agree with the Python
+        # engine at tolerance tier; the IMAGE path is pixel-different (image
+        # crate Catmull-Rom vs PIL bicubic), so the kind namespaces clip-rs: and
+        # image parity is asserted as retrieval equivalence in
+        # test_clip_native.py, not vector equality.
+        BackendCase(
+            id="clip-rs-vit-b32",
+            ndim=512,
+            fingerprint_prefixes=("clip-rs:",),
+            make=_make_clip_native,
+            restart_exact=True,
+            batch_exact=True,
+            parity_ref=_make_clip,
+            claims_reference_namespace=False,
+            marks=(requires_clip, requires_shrike_native),
         ),
         BackendCase(
             id="llama-minilm-gguf",
