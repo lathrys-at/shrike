@@ -41,9 +41,14 @@ const DECKS_GET_DECK_NAMES: u32 = 13;
 const DECKS_REMOVE_DECKS: u32 = 16;
 const DECKS_RENAME_DECK: u32 = 18;
 
+const NOTETYPES_ADD_NOTETYPE_LEGACY: u32 = 2;
+const NOTETYPES_UPDATE_NOTETYPE_LEGACY: u32 = 3;
+const NOTETYPES_GET_STOCK_NOTETYPE_LEGACY: u32 = 5;
 const NOTETYPES_GET_NOTETYPE: u32 = 6;
+const NOTETYPES_GET_NOTETYPE_LEGACY: u32 = 7;
 const NOTETYPES_GET_NOTETYPE_NAMES: u32 = 8;
 const NOTETYPES_REMOVE_NOTETYPE: u32 = 11;
+const NOTETYPES_CHANGE_NOTETYPE: u32 = 15;
 
 const NOTES_NEW_NOTE: u32 = 0;
 const NOTES_ADD_NOTE: u32 = 1;
@@ -391,6 +396,87 @@ impl ServiceAdapter {
         let req = anki_proto::notetypes::NotetypeId { ntid: notetype_id };
         let _: anki_proto::collection::OpChanges =
             self.call(SVC_NOTETYPES, NOTETYPES_REMOVE_NOTETYPE, &req)?;
+        Ok(())
+    }
+
+    // ── notetype JSON (schema11) RPCs — pylib's update_dict/new_field path ───
+    //
+    // The note-type structural ops (#76) port operates on the schema11 JSON
+    // dicts through the SAME legacy RPCs pylib's ModelManager uses
+    // (update_dict → update_notetype_legacy, new_field → a stock-Basic clone),
+    // so the ord-based data/card migration semantics are identical by
+    // construction — not re-derived against the proto representation.
+
+    fn json_call<Req: Message>(
+        &self,
+        method: u32,
+        request: &Req,
+    ) -> NativeResult<serde_json::Value> {
+        let resp: anki_proto::generic::Json = self.call(SVC_NOTETYPES, method, request)?;
+        serde_json::from_slice(&resp.json)
+            .map_err(|e| NativeError::internal(format!("notetype json: {e}")))
+    }
+
+    /// The stock Basic notetype as a schema11 dict (the donor pylib's
+    /// `models.new` / `new_field` / `new_template` clone from).
+    pub fn stock_notetype_legacy(&self) -> NativeResult<serde_json::Value> {
+        let req = anki_proto::notetypes::StockNotetype::default(); // kind 0 = Basic
+        self.json_call(NOTETYPES_GET_STOCK_NOTETYPE_LEGACY, &req)
+    }
+
+    pub fn notetype_legacy(&self, notetype_id: i64) -> NativeResult<serde_json::Value> {
+        let req = anki_proto::notetypes::NotetypeId { ntid: notetype_id };
+        self.json_call(NOTETYPES_GET_NOTETYPE_LEGACY, &req)
+    }
+
+    /// Add a schema11 notetype dict; returns the new id (pylib's `models.add`).
+    pub fn add_notetype_legacy(&self, notetype: &serde_json::Value) -> NativeResult<i64> {
+        let req = anki_proto::generic::Json {
+            json: notetype.to_string().into_bytes(),
+        };
+        let resp: anki_proto::collection::OpChangesWithId =
+            self.call(SVC_NOTETYPES, NOTETYPES_ADD_NOTETYPE_LEGACY, &req)?;
+        Ok(resp.id)
+    }
+
+    /// Persist a mutated schema11 notetype dict (pylib's `update_dict` — the
+    /// single write behind every structural op; Anki migrates note data/cards
+    /// from the `ord` markers).
+    pub fn update_notetype_legacy(&self, notetype: &serde_json::Value) -> NativeResult<()> {
+        let req = anki_proto::generic::Json {
+            json: notetype.to_string().into_bytes(),
+        };
+        let _: anki_proto::collection::OpChanges =
+            self.call(SVC_NOTETYPES, NOTETYPES_UPDATE_NOTETYPE_LEGACY, &req)?;
+        Ok(())
+    }
+
+    /// Anki's history-safe note-type migration (pylib's `models.change`).
+    pub fn change_notetype(
+        &self,
+        req: &anki_proto::notetypes::ChangeNotetypeRequest,
+    ) -> NativeResult<()> {
+        let _: anki_proto::collection::OpChanges =
+            self.call(SVC_NOTETYPES, NOTETYPES_CHANGE_NOTETYPE, req)?;
+        Ok(())
+    }
+
+    /// One write through the DB proxy. Exists ONLY for the pylib-mirroring
+    /// `set_schema_modified` bump before `change_notetype` (pylib itself does
+    /// `update col set scm=?` via this proxy — its `execute` is literally an
+    /// alias of the query path, so this is the same `kind: "query"` call);
+    /// every other write goes through a service RPC and reads stay on
+    /// `db_rows`.
+    pub fn db_execute(&self, sql: &str, args: &[serde_json::Value]) -> NativeResult<()> {
+        let req = serde_json::json!({
+            "kind": "query",
+            "sql": sql,
+            "args": args,
+            "first_row_only": false,
+        });
+        self.backend
+            .run_db_command_bytes(req.to_string().as_bytes())
+            .map_err(|err_bytes| decode_backend_error(&err_bytes))?;
         Ok(())
     }
 

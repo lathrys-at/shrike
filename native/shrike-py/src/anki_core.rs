@@ -208,6 +208,111 @@ impl CollectionCore {
             .map_err(to_py_err)
     }
 
+    // ── note types (#278 step 4) ─────────────────────────────────────────────
+
+    /// Create/update note-type definitions in bulk (JSON in/out; the
+    /// position-keyed replace with the #76 unsound-move rejection).
+    fn upsert_note_types(&self, py: Python<'_>, note_types_json: String) -> PyResult<String> {
+        py.detach(|| self.inner.upsert_note_types(&note_types_json))
+            .map_err(to_py_err)
+    }
+
+    /// Identity-based field ops (add/remove/rename/reposition), atomic.
+    fn update_note_type_fields(
+        &self,
+        py: Python<'_>,
+        note_type_name: String,
+        operations_json: String,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            self.inner
+                .update_note_type_fields(&note_type_name, &operations_json)
+        })
+        .map_err(to_py_err)
+    }
+
+    /// Identity-based template ops, atomic.
+    fn update_note_type_templates(
+        &self,
+        py: Python<'_>,
+        note_type_name: String,
+        operations_json: String,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            self.inner
+                .update_note_type_templates(&note_type_name, &operations_json)
+        })
+        .map_err(to_py_err)
+    }
+
+    /// Literal-or-regex rewrite over one model's template HTML + CSS.
+    #[pyo3(signature = (note_type_name, search, replacement, regex=false, match_case=true, front=true, back=true, css=true))]
+    #[allow(clippy::too_many_arguments)]
+    fn find_replace_note_types(
+        &self,
+        py: Python<'_>,
+        note_type_name: String,
+        search: String,
+        replacement: String,
+        regex: bool,
+        match_case: bool,
+        front: bool,
+        back: bool,
+        css: bool,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            self.inner.find_and_replace_note_types(
+                &note_type_name,
+                &search,
+                &replacement,
+                regex,
+                match_case,
+                front,
+                back,
+                css,
+            )
+        })
+        .map_err(to_py_err)
+    }
+
+    /// Per-field editor metadata (font/size/description), atomic.
+    fn update_note_type_field_metadata(
+        &self,
+        py: Python<'_>,
+        note_type_name: String,
+        updates_json: String,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            self.inner
+                .update_note_type_field_metadata(&note_type_name, &updates_json)
+        })
+        .map_err(to_py_err)
+    }
+
+    /// Change notes' note type via name maps (Anki's history-safe migration);
+    /// `template_map_json` may be empty (= map templates by ordinal).
+    #[pyo3(signature = (note_ids, new_note_type, field_map_json, template_map_json="", dry_run=false))]
+    fn migrate_note_type(
+        &self,
+        py: Python<'_>,
+        note_ids: Vec<i64>,
+        new_note_type: String,
+        field_map_json: String,
+        template_map_json: &str,
+        dry_run: bool,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            self.inner.migrate_note_type(
+                &note_ids,
+                &new_note_type,
+                &field_map_json,
+                template_map_json,
+                dry_run,
+            )
+        })
+        .map_err(to_py_err)
+    }
+
     // ── read surface (#278 step 2) ───────────────────────────────────────────
 
     /// Normalized embedding text per note id ("" for a missing id).

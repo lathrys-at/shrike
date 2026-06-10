@@ -19,6 +19,7 @@
 
 mod adapter;
 pub mod embed_text;
+mod note_types;
 mod read;
 mod write;
 
@@ -453,6 +454,193 @@ mod tests {
         assert_eq!(default_deck["note_count"], 1);
         assert_eq!(info["stats"]["total_notes"], 1);
         assert_eq!(info["stats"]["decks_summary"]["Default"]["notes"], 1);
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn note_types_round_trip() {
+        // Step-4 tripwires (the legacy schema11 RPCs) + the ported note-type
+        // ops, against a real temp collection — including the data-safety
+        // property the #76/#99 history demands: note data survives renames
+        // and identity-based moves.
+        let (core, dir) = temp_core();
+
+        // Create a custom type (cloze flag off), then a note carrying data.
+        let create = serde_json::json!([{
+            "name": "Custom",
+            "fields": ["A", "B", "C"],
+            "templates": [{"name": "Card 1", "front": "{{A}}", "back": "{{B}}"}],
+            "css": ".card { color: red; }",
+        }]);
+        let created: serde_json::Value =
+            serde_json::from_str(&core.upsert_note_types(&create.to_string()).unwrap()).unwrap();
+        assert_eq!(created[0]["status"], "created");
+        let custom_id = created[0]["id"].as_i64().unwrap();
+        let CreateOutcome::Created(nid) = core
+            .create_note(
+                custom_id,
+                DEFAULT_DECK,
+                &["a-data".into(), "b-data".into(), "c-data".into()],
+                &[],
+                DuplicatePolicy::Error,
+            )
+            .unwrap()
+        else {
+            panic!("create failed")
+        };
+
+        // Positional replace: rename-in-place + append is sound and data-safe.
+        let update = serde_json::json!([{
+            "id": custom_id,
+            "fields": ["A2", "B", "C", "D"],
+        }]);
+        let updated: serde_json::Value =
+            serde_json::from_str(&core.upsert_note_types(&update.to_string()).unwrap()).unwrap();
+        assert_eq!(updated[0]["status"], "updated");
+        assert_eq!(
+            core.get_note(nid).unwrap().fields,
+            vec!["a-data", "b-data", "c-data", ""]
+        );
+        // A move is refused with the pointer to the identity tool.
+        let bad = serde_json::json!([{"id": custom_id, "fields": ["B", "A2", "C", "D"]}]);
+        let rejected: serde_json::Value =
+            serde_json::from_str(&core.upsert_note_types(&bad.to_string()).unwrap()).unwrap();
+        assert_eq!(rejected[0]["status"], "error");
+        assert!(rejected[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("update_note_type_fields"));
+
+        // Identity ops: a true move + a non-trailing remove migrate data by
+        // identity (a-data follows A2; b-data is dropped with B).
+        let ops = serde_json::json!([
+            {"op": "reposition", "name": "A2", "position": 2},
+            {"op": "remove", "name": "B"},
+        ]);
+        let result: serde_json::Value = serde_json::from_str(
+            &core
+                .update_note_type_fields("Custom", &ops.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["fields"], serde_json::json!(["C", "A2", "D"]));
+        assert_eq!(
+            core.get_note(nid).unwrap().fields,
+            vec!["c-data", "a-data", ""]
+        );
+        // Invalid op sequence changes nothing (atomic).
+        let bad_ops = serde_json::json!([
+            {"op": "rename", "name": "C", "new_name": "C2"},
+            {"op": "remove", "name": "Ghost"},
+        ]);
+        let err = core
+            .update_note_type_fields("Custom", &bad_ops.to_string())
+            .unwrap_err();
+        assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
+        assert_eq!(
+            core.notetype_field_names(custom_id).unwrap(),
+            vec!["C", "A2", "D"]
+        );
+
+        // Template identity ops: add + rename (pure label change).
+        let tops = serde_json::json!([
+            {"op": "add", "name": "Card 2", "front": "{{C}}", "back": "{{A2}}"},
+            {"op": "rename", "name": "Card 1", "new_name": "Primary"},
+        ]);
+        let tresult: serde_json::Value = serde_json::from_str(
+            &core
+                .update_note_type_templates("Custom", &tops.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            tresult["templates"],
+            serde_json::json!(["Primary", "Card 2"])
+        );
+
+        // find_and_replace_note_types: literal + regex with a Python group ref.
+        let fr: serde_json::Value = serde_json::from_str(
+            &core
+                .find_and_replace_note_types(
+                    "Custom",
+                    "color: red",
+                    "color: blue",
+                    false,
+                    true,
+                    true,
+                    true,
+                    true,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fr["replacements"], 1);
+        assert_eq!(fr["css_changed"], true);
+        let fr2: serde_json::Value = serde_json::from_str(
+            &core
+                .find_and_replace_note_types(
+                    "Custom",
+                    r"\{\{(A2)\}\}",
+                    r"<b>{{\1}}</b>",
+                    true,
+                    true,
+                    true,
+                    false,
+                    false,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fr2["replacements"], 1);
+        let info: serde_json::Value = serde_json::from_str(
+            &core
+                .collection_info(&["note_types".to_string()], &["Custom".to_string()])
+                .unwrap(),
+        )
+        .unwrap();
+        let custom = info["note_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|nt| nt["name"] == "Custom")
+            .unwrap();
+        assert!(custom["detail"]["css"].as_str().unwrap().contains("blue"));
+
+        // Field metadata: set + atomic validation.
+        let meta = serde_json::json!([{"name": "A2", "font": "Courier", "size": 14}]);
+        let mresult: serde_json::Value = serde_json::from_str(
+            &core
+                .update_note_type_field_metadata("Custom", &meta.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mresult["fields_updated"], serde_json::json!(["A2"]));
+
+        // migrate_note_type: Custom -> Basic, dropping a field; dry_run first.
+        let fmap = serde_json::json!({"A2": "Front", "C": "Back"}).to_string();
+        let dry: serde_json::Value = serde_json::from_str(
+            &core
+                .migrate_note_type(&[nid], "Basic", &fmap, "", true)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(dry["dropped_fields"], serde_json::json!(["D"]));
+        assert_eq!(dry["dry_run"], true);
+        // dry run changed nothing
+        assert_eq!(core.get_note(nid).unwrap().notetype_id, custom_id);
+        let applied: serde_json::Value = serde_json::from_str(
+            &core
+                .migrate_note_type(&[nid], "Basic", &fmap, "", false)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(applied["to_note_type"], "Basic");
+        let migrated = core.get_note(nid).unwrap();
+        let basic = core.notetype_id("Basic").unwrap();
+        assert_eq!(migrated.notetype_id, basic);
+        assert_eq!(migrated.fields, vec!["a-data", "c-data"]);
 
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
