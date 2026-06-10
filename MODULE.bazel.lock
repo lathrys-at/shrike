@@ -262,13 +262,13 @@
         "bzlTransitiveDigest": "3zR074JXZAQCr86uFPI/uSBgUKFt1M655ovK7uYxxNs=",
         "usagesDigest": "lwqfB/SFDn7A4bpoDYjzUo5GtUP0pCqmSHyN+g78Fdo=",
         "recordedFileInputs": {
-          "@@//native/Cargo.lock": "b622a9979ece461aa668d81d49a63aae5010d210b7519b2be7ac4378b7c81ee1",
+          "@@//native/Cargo.lock": "31be3c4e71b808802a6a52b809e1217db55347b37b943950d3b24341baf1c6db",
           "@@//native/Cargo.toml": "21566a66181fce230598570367a741655c49403656dfc15d6cb3952d9e0705ef",
           "@@//native/_demo/Cargo.toml": "833ef01900b52b84364fe729393a63aa0b2c92cb3e017f3f39ca1ea8d60531b5",
           "@@//native/shrike-embed/Cargo.toml": "a2666368f78f931f1c62d35c980d352639b289515662a896bf9928e07d755053",
           "@@//native/shrike-ffi/Cargo.toml": "dc17c2f604b3780dbca9aa41011351ad078ac90abb4ca46884bc277c3083502e",
           "@@//native/shrike-index/Cargo.toml": "11e1945651b21fc0ad15c17e5890db9f5787db3612b2e205c1c4860e84be410c",
-          "@@//native/shrike-py/Cargo.toml": "e4ce35eb19b5d9240f4c8d3353f33d0415a871a848d51e05bb64ed40536bb792"
+          "@@//native/shrike-py/Cargo.toml": "1fc9093161ea51f8cf75e12d5fa8566466d245e71cdd08c9369f08a6c627e390"
         },
         "recordedDirentsInputs": {},
         "envVariables": {

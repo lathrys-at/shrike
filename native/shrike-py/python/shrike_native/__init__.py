@@ -10,6 +10,7 @@ in the native CI lane keeps them honest.
 from shrike_native._native import (
     IMAGE_PREP_VERSION_RS,
     ClipEmbedder,
+    NativeIndexEngine,
     NativeInputError,
     NativeInternalError,
     NativeUnavailableError,
@@ -24,6 +25,7 @@ from shrike_native._native import (
 __all__ = [
     "ClipEmbedder",
     "IMAGE_PREP_VERSION_RS",
+    "NativeIndexEngine",
     "NativeInputError",
     "NativeInternalError",
     "NativeUnavailableError",

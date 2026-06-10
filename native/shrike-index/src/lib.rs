@@ -6,8 +6,12 @@
 //! index contract, including on-disk compatibility with files written by the
 //! Python binding. The Phase-2b engine is built on the verdict.
 
+mod engine;
+
 use shrike_ffi::{NativeError, NativeResult};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
+
+pub use engine::{ActivationStats, ModalityRanking, MultiModalIndex};
 
 /// Build a usearch index matching `UsearchIndexEngine._ensure`'s configuration:
 /// cosine metric, f32 scalars, multi=true (several vectors per note_id key).
