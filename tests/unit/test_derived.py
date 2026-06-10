@@ -187,6 +187,34 @@ class TestPersistence:
         s2.close()
 
 
+class TestCorruptRecovery:
+    """A corrupt/unreadable sidecar is never fatal (review F1) — it's recreated, not crashed on."""
+
+    def test_garbage_file_is_recreated(self, tmp_path):
+        path = tmp_path / "shrike.db"
+        path.write_bytes(b"this is not a sqlite database at all, just junk bytes" * 50)
+        s = DerivedTextStore(path=path)  # must not raise out of __init__
+        # Recovered to a clean, usable store (the corrupt file was dropped + recreated).
+        assert s.available is False  # fresh: no build has run yet
+        s.build(ROWS, col_mod=1)
+        assert s.available is True
+        assert [m.note_id for m in s.search_substring("powerhouse")] == [1]
+        s.close()
+
+
+class TestBuildFailure:
+    def test_failed_build_rolls_back(self, store):
+        # Review F8: a build that raises mid-transaction rolls back, so a later size() SELECT on the
+        # shared connection sees the intact pre-build data, not a half-cleared index. A non-iterable
+        # `rows` raises inside the locked transaction, *after* the two DELETEs.
+        with pytest.raises(TypeError):
+            store.build(42, col_mod=200)  # type: ignore[arg-type]
+        assert store.state == IndexState.ERROR
+        # size() reads on the same connection: without the rollback it would see the DELETEd 0 rows;
+        # with it, the original 4 are intact.
+        assert store.size == 4
+
+
 class TestFts5Unavailable:
     def test_degrades_when_probe_fails(self, tmp_path, monkeypatch):
         # Simulate a SQLite build without FTS5/trigram: the store is inert and every lookup signals

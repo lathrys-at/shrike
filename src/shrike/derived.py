@@ -84,16 +84,48 @@ class DerivedTextStore:
             logger.warning("SQLite FTS5/trigram unavailable; lexical search disabled (find_notes)")
             return
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # The sidecar is a throwaway derived cache, so a corrupt/unreadable file must never be fatal
+        # (a hard kill mid-checkpoint, disk-full, or a non-DB file at the path). On any open/schema
+        # error: drop the file (+ its WAL sidecars) and try once more from scratch; if that still
+        # fails, degrade to unavailable so lookups fall back to find_notes rather than aborting the
+        # daemon. (This is the corruption case the FTS5-missing branch above doesn't cover.)
+        try:
+            self._connect_and_init()
+        except sqlite3.Error:
+            logger.warning("Derived store at %s unreadable; recreating", self._path, exc_info=True)
+            self._discard_file()
+            try:
+                self._connect_and_init()
+            except sqlite3.Error:
+                logger.warning(
+                    "Derived store could not be initialized; lexical search disabled",
+                    exc_info=True,
+                )
+                self._discard_file()
+                return
+        # Ready only once a build has stamped col_mod; until then callers fall back.
+        self._state = IndexState.READY if self._col_mod is not None else IndexState.UNAVAILABLE
+        logger.info("Derived-text store ready at %s (col_mod=%s)", self._path, self._col_mod)
+
+    def _connect_and_init(self) -> None:
+        """(Re)open the connection and ensure the schema. Raises ``sqlite3.Error`` on a bad file."""
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._available = True
         with self._lock:
             self._ensure_schema()
             self._col_mod = self._get_meta_int("col_mod")
-        # Ready only once a build has stamped col_mod; until then callers fall back.
-        self._state = IndexState.READY if self._col_mod is not None else IndexState.UNAVAILABLE
-        if self._available:
-            logger.info("Derived-text store ready at %s (col_mod=%s)", self._path, self._col_mod)
+        self._available = True
+
+    def _discard_file(self) -> None:
+        """Close the connection and delete the sidecar (+ WAL/SHM) — recovery from corruption."""
+        if self._conn is not None:
+            with contextlib.suppress(Exception):
+                self._conn.close()
+            self._conn = None
+        self._available = False
+        for suffix in ("", "-wal", "-shm"):
+            with contextlib.suppress(OSError):
+                Path(str(self._path) + suffix).unlink()
 
     @staticmethod
     def _probe_fts5() -> bool:
@@ -182,7 +214,10 @@ class DerivedTextStore:
 
     @property
     def size(self) -> int:
-        if not self._available or self._conn is None:
+        # Skip the count (and the lock) while a build holds the lock for its whole transaction —
+        # `build()` keeps `_state == BUILDING` across its DELETE+N×INSERT+commit, so a concurrent
+        # `status()`/`GET /status` must not block the event loop waiting on it.
+        if not self._available or self._conn is None or self._state == IndexState.BUILDING:
             return 0
         with self._lock:
             row = self._conn.execute("SELECT count(*) FROM rowmap").fetchone()
@@ -267,13 +302,25 @@ class DerivedTextStore:
             logger.info("Derived-text store built: %d rows (col_mod=%d)", self.size, col_mod)
         except Exception:
             self._state = IndexState.ERROR
+            # Roll back the half-applied DELETE+INSERTs so a later status()/size SELECT (or the next
+            # build's DELETE) doesn't see a partially-cleared index on the shared connection.
+            with self._lock, contextlib.suppress(Exception):
+                if self._conn is not None:
+                    self._conn.rollback()
             logger.exception("Derived-text store build failed")
             raise
 
     def build_in_background(self, rows: Iterable[tuple[int, str, str, str]], col_mod: int) -> None:
         """Run :meth:`build` on a daemon thread (``rows`` are materialized first — they cross)."""
-        if not self._available or self._state == IndexState.BUILDING:
+        if not self._available:
             return
+        # Claim BUILDING under the lock *before* spawning, so two drift triggers firing close
+        # together (boot racing a /reload, a cooperative re-acquire) don't both pass the guard and
+        # run a full rebuild each. build() flips BUILDING only once its worker runs — too late.
+        with self._lock:
+            if self._state == IndexState.BUILDING:
+                return
+            self._state = IndexState.BUILDING
         materialized = list(rows)
 
         def _run() -> None:

@@ -563,10 +563,11 @@ class TestDerivedSearch:
         m = res["results"][0]["matches"]
         assert [x["id"] for x in m] == [nid]
         assert m[0]["substring"]["matched_fields"] == ["Front"]
-        # A literal hit shares every trigram, so it also registers as fuzzy — but `exact` leads
-        # (the priority tier), and the substring annotation is what marks it a literal match.
-        prov = {p["signal"]: p["rank"] for p in m[0]["provenance"]}
-        assert prov["exact"] == 1
+        assert m[0]["substring"]["source"] == "field"
+        # A literal hit shares every trigram so it's *trivially* also a fuzzy match, but `fuzzy` is
+        # suppressed on exact hits (review F4) — `exact` is the distinguishing lexical signal.
+        assert [p["signal"] for p in m[0]["provenance"]] == ["exact"]
+        assert m[0].get("fuzzy") is None
 
     def test_fuzzy_only_hit_surfaces_with_provenance(
         self, wrapper, mock_index, mcp_derived, derived
@@ -608,6 +609,29 @@ class TestDerivedSearch:
         mock_index.search_by_modality.return_value = _text_hits([[]])
         m = _call(mcp_app, "search_notes", {"queries": ["mitochndria"]})["results"][0]["matches"]
         assert m == []
+
+    def test_exact_hit_carries_no_fuzzy(self, wrapper, mock_index, mcp_derived, derived):
+        # Review F4: a clean exact (literal) match must not also be badged `fuzzy`, even though it
+        # shares every trigram — `fuzzy` is reserved for the distinguishing near-miss signal.
+        nid = self._seed_front(wrapper, "powerhouse of the cell")
+        _build_derived(wrapper, derived)
+        mock_index.search_by_modality.return_value = _text_hits([[]])
+        m = _call(mcp_derived, "search_notes", {"queries": ["powerhouse"]})["results"][0]["matches"]
+        hit = next(x for x in m if x["id"] == nid)
+        assert "fuzzy" not in [p["signal"] for p in hit["provenance"]]
+        assert hit.get("fuzzy") is None
+
+    def test_result_capped_at_top_k(self, wrapper, mock_index, mcp_derived, derived):
+        # Review F5: the fused union (text/image/exact/fuzzy, each up to top_k) is capped to top_k,
+        # so a broad fuzzy signal can't inflate a query's result count past the documented cap.
+        for i in range(8):
+            self._seed_front(wrapper, f"mitochondrion variant {i}")  # all fuzzy-match the typo
+        _build_derived(wrapper, derived)
+        mock_index.search_by_modality.return_value = _text_hits([[]])
+        m = _call(mcp_derived, "search_notes", {"queries": ["mitochndrion"], "top_k": 3})[
+            "results"
+        ][0]["matches"]
+        assert len(m) == 3
 
 
 class TestUpsertNeighbors:

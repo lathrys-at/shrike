@@ -194,7 +194,7 @@ Exact matches are returned even when the embedding index is unavailable — the 
 |---|---|---|---|
 | `queries` | `string[]` | no | Search strings. Each is matched independently by semantic similarity **and** as an exact substring of note fields. Max 50 per call. |
 | `ids` | `integer[]` | no | Note IDs to use as semantic anchors, finding notes similar to these. Source notes are excluded from results. Max 50 per call. |
-| `top_k` | `integer` | no | Maximum results per mechanism per query/anchor. Default `10`, max `50`. |
+| `top_k` | `integer` | no | Maximum results per query/anchor (the fused result is capped to this). Default `10`, max `50`. |
 | `threshold` | `number` | no | Minimum cosine similarity (0–1) for a *semantic* match. Default `0.5`. Does not apply to exact substring matches. |
 | `deck` | `string` | no | Restrict to notes in this deck (includes child decks). Accepts a deck name, numeric ID, or `#id`. |
 | `tags` | `string[]` | no | Restrict to notes matching all of these tags. |

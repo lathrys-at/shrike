@@ -576,16 +576,20 @@ def register_tools(
         ) -> None:
             """Populate ``note_data`` with literal-substring candidates for ``text``.
 
-            Prefers the derived-text store's FTS5 trigram index (fast); falls back to the linear
-            ``find_notes`` scan when the store is unavailable/not-built or the query is sub-trigram
-            (``search_substring`` returns ``None``). Either way ``substring_info`` downstream is the
-            authority that confirms + annotates each candidate, so both paths agree on what counts
-            as a literal hit — and an index built before the store existed degrades cleanly.
+            Prefers the derived-text store's FTS5 trigram index (fast), but **only when unscoped**:
+            the store ranks collection-wide and scope is applied afterward, so for a
+            ``deck``/``tags`` query whose term is common collection-wide but rare in-scope, in-scope
+            hits can sit beyond the bm25 window and be dropped — a recall regression the scope-aware
+            ``find_notes`` path (which puts ``deck:``/``tag:`` in the query) doesn't have. So scoped
+            queries use the fallback; the store handles the common unscoped case. Either way
+            ``substring_info`` downstream is the authority that confirms + annotates each candidate,
+            so both paths agree on what counts as a literal hit.
             """
             lex = None
-            if derived is not None:
-                sub_limit = top_k * 10 if (deck or tags) else top_k + len(exclude_set)
-                lex = await asyncio.to_thread(derived.search_substring, text, sub_limit)
+            if derived is not None and not (deck or tags):
+                lex = await asyncio.to_thread(
+                    derived.search_substring, text, top_k + len(exclude_set)
+                )
             if lex is None:
                 # Fallback: the find_notes path already applies scope + the substring annotation.
                 for note in await wrapper.search_substring(
@@ -706,6 +710,17 @@ def register_tools(
                     if data.get("substring") is not None:
                         exact_ids.append(nid)
 
+            # A literal hit shares every trigram, so an exact note is *trivially* also a fuzzy
+            # match — redundant noise that would set a `fuzzy` annotation + a spurious
+            # `fuzzy · match:Front` badge on a clean exact hit. Drop exact notes from the fuzzy
+            # signal so `fuzzy` means the *distinguishing* lexical signal (a near-miss).
+            if exact_ids and ranking_fuzzy:
+                exact_set = set(exact_ids)
+                ranking_fuzzy = [nid for nid in ranking_fuzzy if nid not in exact_set]
+                fuzzy_evidence = {
+                    nid: lm for nid, lm in fuzzy_evidence.items() if nid not in exact_set
+                }
+
             fused = rrf_fuse(
                 {
                     "text": ranking_text,
@@ -735,7 +750,12 @@ def register_tools(
                 if lm is not None:  # the source-aware fuzzy window (#98)
                     match["fuzzy"] = {"source": lm.source, "ref": lm.ref, "snippet": lm.snippet}
                 matches.append(match)
-            results.append({"source": label, "matches": matches})
+            # Cap to top_k (fused is best-first). With four signals (text/image/exact/fuzzy) each
+            # contributing up to top_k, the union would run ~4×top_k and tack low-relevance fuzzy
+            # near-misses onto already-successful queries; top_k is the documented per-query result
+            # cap. The exact-first tier keeps literal hits; a typo/sparse query's fuzzy hits *are*
+            # the top, so they survive the cap.
+            results.append({"source": label, "matches": matches[:top_k]})
 
         logger.info(
             "search_notes returned %d groups, %d total matches",
@@ -1804,10 +1824,18 @@ def register_tools(
             result.get("unused_tags", {}).get("removed", "-"),
         )
 
-        # Empty notes/cards delete notes — their rows must leave the derived store
-        # too (independent of the vector index).
-        if not dry_run and removed_note_ids:
-            await _remove_derived(removed_note_ids)
+        # Empty notes/cards delete notes — their rows must leave the derived store too (independent
+        # of the vector index). A tags-only prune removes no notes but still bumps col.mod, so
+        # advance the store's watermark anyway (mirrors the index path below) — otherwise the next
+        # boot/reload sees drift and re-ingests *all* field text for nothing.
+        if not dry_run and derived is not None and derived.available:
+            if removed_note_ids:
+                await _remove_derived(removed_note_ids)  # removes rows + stamps col_mod
+            elif result.get("unused_tags", {}).get("removed"):
+                try:
+                    derived.col_mod = await wrapper.run(lambda c: c.mod)
+                except Exception:
+                    logger.warning("Failed to advance derived col_mod after prune", exc_info=True)
 
         # Empty notes/cards delete notes — their vectors must leave the index
         # (like delete_notes); clearing unused tags is a metadata-only change.
