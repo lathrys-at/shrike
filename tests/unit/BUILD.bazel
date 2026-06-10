@@ -3,7 +3,7 @@ load("//tools/bazel:defs.bzl", "pytest_test")
 
 package(default_testonly = True)
 
-# conftest.py (the wrapper/basic_note fixtures) goes in every test's runfiles so
+# conftest.py (the wrapper/basic_note fixtures) rides in the test's runfiles so
 # pytest's per-directory conftest discovery finds it.
 py_library(
     name = "conftest",
@@ -22,12 +22,18 @@ _PIP_ONLY = [
     "test_version.py",
 ]
 
-# One py_test per file: parallel execution, granular caching, clear attribution.
-[
-    pytest_test(
-        name = f[:-len(".py")],
-        src = f,
-        deps = [":conftest"],
-    )
-    for f in glob(["test_*.py"], exclude = _PIP_ONLY)
-]
+# One aggregate target: every unit file runs in a single test action with
+# `-n auto` (xdist, the macro default), so the heavy anki/usearch/pydantic import
+# is paid once per worker and the suite parallelizes across cores — the same model
+# as the pip `pytest -n auto` lane, not ~60 cold one-file processes. pytest still
+# reports per-test pass/fail, and `bazel test //tests/unit:unit --test_filter=EXPR`
+# (-> pytest -k) runs a subset.
+# TODO(#259): once src/shrike is split into sub-libraries, split this into one
+# target per library so a lib change re-runs only its dependent tests — the grain
+# at which Bazel caching pays off (per-file finer than that buys nothing).
+pytest_test(
+    name = "unit",
+    srcs = glob(["test_*.py"], exclude = _PIP_ONLY),
+    deps = [":conftest"],
+    size = "medium",
+)
