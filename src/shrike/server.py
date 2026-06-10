@@ -24,38 +24,29 @@ from shrike.collection import DEFAULT_LOCK_HOLD, CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
 from shrike.derived import DerivedTextStore
 from shrike.embedding import DEFAULT_BACKEND, SUPPORTED_BACKENDS, EmbeddingRuntime
-from shrike.embedding_base import EmbedderBackend
 from shrike.index import (
     DEFAULT_SAVE_DELAY,
     DEFAULT_SAVE_THRESHOLD,
     IndexSaver,
-    NoteEmbedInput,
     VectorIndex,
+)
+
+# The transport-free core (#275). The collectors and _maybe_rebuild moved there
+# with it; re-exported here so existing import sites (tests included) are
+# unchanged.
+from shrike.kernel import (
+    KernelConfigError,
+    ShrikeKernel,
+    WorkerScheduler,
+    _collect_derived_rows,
+    _collect_for_rebuild,
+    _maybe_rebuild,
 )
 from shrike.log import configure_logging
 from shrike.paths import cache_dir, state_dir
 from shrike.tools import register_tools
 
 logger = logging.getLogger("shrike.server")
-
-
-def _collect_for_rebuild(c: Any) -> tuple[list[NoteEmbedInput], int]:
-    """Gather every note's embedding input (text + image names) and the collection mod stamp.
-
-    Runs on the collection worker thread (receives the live ``Collection``).
-    """
-    note_ids = list(c.find_notes("deck:*"))
-    return CollectionWrapper._note_embed_inputs(c, note_ids), c.mod
-
-
-def _collect_derived_rows(c: Any) -> tuple[list[tuple[int, str, str, str]], int]:
-    """Gather every note's ``(note_id, "field", field_name, raw_value)`` rows + the mod stamp.
-
-    The full-build input for the derived-text store (#98). Runs on the collection worker thread.
-    Independent of the embedding index — the store builds whether or not a backend is configured.
-    """
-    note_ids = list(c.find_notes("deck:*"))
-    return list(CollectionWrapper.derived_field_rows(c, note_ids)), c.mod
 
 
 def _make_image_resolver(
@@ -90,43 +81,6 @@ def _make_image_resolver(
         return path is not None and os.path.isfile(path)
 
     return _read, _exists
-
-
-def _maybe_rebuild(
-    index: VectorIndex,
-    model_id: str,
-    col_mod: int,
-    inputs: list[NoteEmbedInput],
-    embedding: EmbedderBackend,
-) -> bool:
-    """Reconcile the index in the background if it drifted or the model changed.
-
-    Drift (an external ``col.mod`` bump) reconciles incrementally — re-embedding
-    only the notes whose text changed — rather than re-embedding the whole
-    collection; ``reconcile`` itself falls back to a full rebuild when the model
-    changed or there's no prior per-note state. Returns True if work was started
-    (drift detected and the collection is non-empty), False otherwise.
-
-    When the collection is *empty* there is nothing to embed, but we still
-    materialize an empty, ready index at the model's dimension so notes added
-    later in the session are indexed incrementally instead of being skipped until
-    a restart (#148).
-    """
-    if index.check_drift(col_mod, model_id):
-        if inputs:
-            index.reconcile_in_background(inputs, col_mod, model_id=model_id)
-            return True  # the background reconcile recalibrates the activation gate at its tail
-        ndim = embedding.embedding_dim()
-        if ndim is not None:
-            index.materialize_empty(ndim, col_mod, model_id)
-        else:
-            logger.info("Collection is empty and embedding dim unknown, skipping index rebuild")
-    # No background rebuild was started (the index loaded clean, or the collection is empty). Make
-    # sure a clean index that predates the activation gate (#201b) gets calibrated now rather than
-    # waiting for the next drift; a no-op when it's already calibrated or has no non-text modality.
-    # We're already off the event loop here (callers run _maybe_rebuild via asyncio.to_thread).
-    index.ensure_calibrated()
-    return False
 
 
 # Host/Origin values accepted when the server is bound to a loopback address.
@@ -279,14 +233,10 @@ def create_mcp(
 
 def _register_custom_routes(
     app: FastMCP,
-    wrapper: CollectionWrapper,
+    kernel: ShrikeKernel,
     server_lock: ServerLock,
     *,
     meta: dict[str, Any],
-    runtime: EmbeddingRuntime,
-    index: VectorIndex,
-    saver: IndexSaver,
-    derived: DerivedTextStore,
     security: TransportSecuritySettings | None,
 ) -> None:
     """Register custom HTTP endpoints on the server.
@@ -294,7 +244,14 @@ def _register_custom_routes(
     The custom routes bypass the MCP transport middleware, so they get the same
     Host/Origin validation applied here via ``_guard`` — otherwise a browser page
     could drive ``/shutdown`` etc. through a no-preflight POST.
+
+    Each handler is parse → kernel call → JSONResponse (#275): the kernel methods
+    are blocking, so they run via ``asyncio.to_thread``; only what is genuinely
+    host-specific stays here (the guard, uptime/pid/url assembly, the media
+    FileResponse, the loop-bound saver flush, process exit).
     """
+    wrapper = kernel.wrapper
+    saver = kernel.saver
     from starlette.requests import Request
     from starlette.responses import FileResponse, JSONResponse, Response
 
@@ -317,6 +274,14 @@ def _register_custom_routes(
             return await handler(request)
 
         return wrapped
+
+    async def _kernel(fn: Callable[..., Any], *args: Any) -> Any:
+        """Run a blocking kernel method off the event loop, with the host loop
+        bound on the scheduler (for the cooperative idle-release re-arm)."""
+        scheduler = kernel.scheduler
+        if isinstance(scheduler, WorkerScheduler):
+            scheduler.bind_loop(asyncio.get_running_loop())
+        return await asyncio.to_thread(fn, *args)
 
     @app.custom_route("/status", methods=["GET"])
     @_guard
@@ -346,13 +311,9 @@ def _register_custom_routes(
                 else:
                     status["uptime"] = f"{seconds}s"
 
-        # health() probes llama-server over HTTP; run it off the event loop so a
-        # slow/hung embedding server can't stall request handling.
-        status["embedding"] = await asyncio.to_thread(runtime.health)
-        status["index"] = index.status()
-        status["derived"] = derived.status()
-        status["locking"] = "cooperative" if wrapper.cooperative else "permanent"
-        status["collection_held"] = wrapper.is_open
+        # The kernel's status block (embedding/index/derived/locking). health()
+        # probes llama-server over HTTP, so the whole call runs off the loop.
+        status.update(await _kernel(kernel.status))
 
         return JSONResponse(status)
 
@@ -374,60 +335,19 @@ def _register_custom_routes(
     @app.custom_route("/index/rebuild", methods=["POST"])
     @_guard
     async def handle_index_rebuild(request: Request) -> JSONResponse:
-        from shrike.index import IndexState
-
-        svc = runtime.service
-        if svc is None or not svc.running:
-            return JSONResponse({"error": "Embedding service is not running"}, status_code=400)
-
-        if index.state == IndexState.BUILDING:
-            indexed, total = index.build_progress
-            return JSONResponse(
-                {
-                    "status": "already_building",
-                    "progress": {"indexed": indexed, "total": total},
-                }
-            )
-
-        model_id = await asyncio.to_thread(svc.model_fingerprint)
-        inputs, col_mod = await wrapper.run(_collect_for_rebuild)
-        if not inputs:
-            index.rebuild([], col_mod, model_id=model_id)
-            return JSONResponse({"status": "complete", "size": 0})
-
-        index.rebuild_in_background(inputs, col_mod, model_id=model_id)
-        return JSONResponse(
-            {
-                "status": "started",
-                "total": len(inputs),
-            }
-        )
+        try:
+            return JSONResponse(await _kernel(kernel.rebuild_index))
+        except KernelConfigError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
 
     @app.custom_route("/index/save", methods=["POST"])
     @_guard
     async def handle_index_save(request: Request) -> JSONResponse:
-        from shrike.index import IndexState
-
-        # Refuse mid-rebuild: a save here would persist a partial index with a
-        # stale col_mod, and rebuild() saves at its own end anyway.
-        if index.state == IndexState.BUILDING:
-            indexed, total = index.build_progress
-            return JSONResponse(
-                {"status": "building", "progress": {"indexed": indexed, "total": total}}
-            )
-        if index.ndim is None:
-            return JSONResponse({"status": "empty"})
-
-        pending = index.pending_changes
-        await asyncio.to_thread(index.save)
-        return JSONResponse({"status": "saved", "size": index.size, "pending": pending})
+        return JSONResponse(await _kernel(kernel.save_index))
 
     @app.custom_route("/embedding/start", methods=["POST"])
     @_guard
     async def handle_embedding_start(request: Request) -> JSONResponse:
-        if runtime.running:
-            return JSONResponse({"status": "already_running", "embedding": runtime.health()})
-
         import contextlib
 
         overrides: dict[str, Any] = {}
@@ -452,77 +372,37 @@ def _register_custom_routes(
 
         logger.info("Embedding start requested via HTTP from %s", request.client)
         try:
-            # Starting a backend blocks (model load + health wait); run it off the
-            # event loop so other requests keep flowing.
-            svc = await asyncio.to_thread(lambda: runtime.start(**overrides))
-        except (ValueError, ImportError) as e:
-            # Unknown backend / no model (ValueError) or a missing ONNX optional
-            # dependency (ImportError) are caller-actionable config errors → 400.
+            # Starting a backend blocks (model load + health wait); the kernel
+            # call runs off the event loop so other requests keep flowing.
+            return JSONResponse(await _kernel(kernel.start_embedding, overrides))
+        except KernelConfigError as e:
+            # Unknown backend / no model / a missing ONNX optional dependency
+            # are caller-actionable config errors → 400.
             return JSONResponse({"error": str(e)}, status_code=400)
         except (FileNotFoundError, RuntimeError) as e:
             logger.error("Failed to start embedding service: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
-        model_id = await asyncio.to_thread(svc.model_fingerprint)
-        inputs, col_mod = await wrapper.run(_collect_for_rebuild)
-        await asyncio.to_thread(_maybe_rebuild, index, model_id, col_mod, inputs, svc)
-
-        return JSONResponse(
-            {
-                "status": "started",
-                "embedding": runtime.health(),
-                "index": index.status(),
-            }
-        )
-
     @app.custom_route("/embedding/stop", methods=["POST"])
     @_guard
     async def handle_embedding_stop(request: Request) -> JSONResponse:
-        if not runtime.running:
-            return JSONResponse({"status": "not_running"})
-
         logger.info("Embedding stop requested via HTTP from %s", request.client)
-        # Persist current vectors before tearing down the embedder.
-        index.save()
-        await asyncio.to_thread(runtime.stop)
-        return JSONResponse({"status": "stopped", "index": index.status()})
+        return JSONResponse(await _kernel(kernel.stop_embedding))
 
     @app.custom_route("/reload", methods=["POST"])
     @_guard
     async def handle_reload(request: Request) -> JSONResponse:
         logger.info("Reload requested via HTTP from %s", request.client)
-        # Close and re-open the collection, picking up on-disk changes.
-        await wrapper.reopen()
-        col_mod = await wrapper.run(lambda c: c.mod)
-
-        # The derived-text store is independent of the embedder — rebuild it on drift regardless
-        # (cheap text-only build).
-        if derived.check_drift(col_mod):
-            rows, dmod = await wrapper.run(_collect_derived_rows)
-            derived.build_in_background(rows, dmod)
-
-        # Re-check index drift against the re-opened collection. Without a running
-        # embedder we can't rebuild (the index stays unavailable); just report.
-        rebuilding = False
-        svc = runtime.service
-        if svc is not None and svc.running:
-            model_id = await asyncio.to_thread(svc.model_fingerprint)
-            inputs, new_col_mod = await wrapper.run(_collect_for_rebuild)
-            rebuilding = await asyncio.to_thread(
-                _maybe_rebuild, index, model_id, new_col_mod, inputs, svc
-            )
-
-        return JSONResponse({"status": "reloaded", "col_mod": col_mod, "rebuilding": rebuilding})
+        return JSONResponse(await _kernel(kernel.reload))
 
     @app.custom_route("/shutdown", methods=["POST"])
     @_guard
     async def handle_shutdown(request: Request) -> JSONResponse:
         logger.info("Shutdown requested via HTTP from %s", request.client)
-        # aclose cancels the pending debounce timer and flushes if dirty.
+        # aclose cancels the pending debounce timer and flushes if dirty (it is
+        # loop-bound, so it stays host-side); the kernel tears down the core.
         await saver.aclose()
-        derived.close()
-        runtime.stop()
-        wrapper.close()
+        await _kernel(kernel.close)
         server_lock.release()
         logger.info("Shutdown complete")
 
@@ -920,13 +800,23 @@ def main() -> None:
         # the lock; the first request re-acquires on demand.
         wrapper.release_now()
 
+    # The transport-free core (#275): everything below the route layer. The
+    # scheduler is the HTTP host's implementation of the kernel's concurrency
+    # port (the wrapper's worker thread + the host loop, bound per request).
+    kernel = ShrikeKernel(
+        wrapper=wrapper,
+        index=index,
+        saver=saver,
+        derived=derived,
+        runtime=runtime,
+        scheduler=WorkerScheduler(wrapper),
+    )
+
     def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
         sig_name = signal.Signals(signum).name
         logger.info("Received %s, shutting down", sig_name)
         index.save()
-        derived.close()
-        runtime.stop()
-        wrapper.close()
+        kernel.close()
         server_lock.release()
         logger.info("Shutdown complete")
         sys.exit(0)
@@ -1028,13 +918,9 @@ def main() -> None:
     )
     _register_custom_routes(
         mcp,
-        wrapper,
+        kernel,
         server_lock,
         meta=server_meta,
-        runtime=runtime,
-        index=index,
-        saver=saver,
-        derived=derived,
         security=transport_security,
     )
 
