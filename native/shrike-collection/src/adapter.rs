@@ -646,6 +646,14 @@ fn decode_backend_error(bytes: &[u8]) -> NativeError {
         Ok(err) => {
             use anki_proto::backend::backend_error::Kind;
             let kind = Kind::try_from(err.kind).unwrap_or(Kind::UndoEmpty);
+            // Anki wraps interpolated values in Unicode isolation marks
+            // (U+2068/U+2069) for bidi safety in its own UI; in an API error
+            // they're invisible garbage — strip at the source so every
+            // surface (tool errors, logs, exceptions) is clean.
+            let err = anki_proto::backend::BackendError {
+                message: err.message.replace(['\u{2068}', '\u{2069}'], ""),
+                ..err
+            };
             match kind {
                 Kind::InvalidInput | Kind::NotFoundError | Kind::Exists | Kind::SearchError => {
                     NativeError::invalid_input(err.message)

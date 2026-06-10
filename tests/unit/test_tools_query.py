@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
 from shrike.tools import register_tools
+from tests.unit.conftest import make_notes
 
 
 def _call(mcp: FastMCP, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -25,15 +26,12 @@ def mcp_app(wrapper):
 
 
 def _add(wrapper, front, *, tags=None):
-    def build(c):
-        n = c.new_note(c.models.by_name("Basic"))
-        n["Front"], n["Back"] = front, "x"
-        if tags:
-            n.tags = list(tags)
-        c.add_note(n, c.decks.id("D"))
-        return n.id
-
-    return wrapper.run_sync(build)
+    results = make_notes(
+        wrapper,
+        [{"note_type": "Basic", "deck": "D", "fields": {"Front": front, "Back": "x"},
+          "tags": list(tags or [])}],
+    )
+    return results[0]["id"]
 
 
 class TestCollectionQueryTool:
