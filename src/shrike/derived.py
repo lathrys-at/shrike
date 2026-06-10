@@ -69,7 +69,11 @@ class DerivedTextStore:
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # guards SQLite access (held across a build's transaction)
+        # A *separate*, short-lived lock for the BUILDING claim only — never held during SQLite I/O,
+        # so a /reload on the event loop can claim/skip a build without waiting on an in-flight
+        # build's data transaction (which `self._lock` would).
+        self._state_lock = threading.Lock()
         self._conn: sqlite3.Connection | None = None
         self._available = False
         self._state = IndexState.UNAVAILABLE
@@ -104,8 +108,12 @@ class DerivedTextStore:
                 self._discard_file()
                 return
         # Ready only once a build has stamped col_mod; until then callers fall back.
-        self._state = IndexState.READY if self._col_mod is not None else IndexState.UNAVAILABLE
+        self._state = self._idle_state()
         logger.info("Derived-text store ready at %s (col_mod=%s)", self._path, self._col_mod)
+
+    def _idle_state(self) -> IndexState:
+        """The non-building resting state: READY once a build stamped col_mod, else UNAVAILABLE."""
+        return IndexState.READY if self._col_mod is not None else IndexState.UNAVAILABLE
 
     def _connect_and_init(self) -> None:
         """(Re)open the connection and ensure the schema. Raises ``sqlite3.Error`` on a bad file."""
@@ -314,21 +322,40 @@ class DerivedTextStore:
         """Run :meth:`build` on a daemon thread (``rows`` are materialized first — they cross)."""
         if not self._available:
             return
-        # Claim BUILDING under the lock *before* spawning, so two drift triggers firing close
-        # together (boot racing a /reload, a cooperative re-acquire) don't both pass the guard and
-        # run a full rebuild each. build() flips BUILDING only once its worker runs — too late.
-        with self._lock:
+        # Claim BUILDING *before* spawning, so two drift triggers firing close together (boot vs an
+        # immediate /reload, a cooperative re-acquire) don't both run a full rebuild — build() flips
+        # BUILDING only once its worker runs, too late. The claim uses the short-lived _state_lock
+        # (NOT the SQLite-access lock), so a /reload on the event loop never waits here on an
+        # in-flight build's transaction.
+        with self._state_lock:
             if self._state == IndexState.BUILDING:
                 return
             self._state = IndexState.BUILDING
         materialized = list(rows)
 
-        def _run() -> None:
-            with contextlib.suppress(Exception):  # build() already logs + records ERROR
-                self.build(materialized, col_mod)
+        def _release_stuck_claim() -> None:
+            # If the claim never reached a terminal state (build() early-returned on a closed store,
+            # or the thread never started), don't strand the store in BUILDING — that would refuse
+            # every future build and read.
+            with self._state_lock:
+                if self._state == IndexState.BUILDING:
+                    self._state = self._idle_state()
 
-        self._build_thread = threading.Thread(target=_run, name="derived-build", daemon=True)
-        self._build_thread.start()
+        def _run() -> None:
+            try:
+                self.build(materialized, col_mod)  # records its own terminal READY/ERROR state
+            except Exception:
+                logger.debug("background derived build failed", exc_info=True)
+            finally:
+                _release_stuck_claim()
+
+        try:
+            self._build_thread = threading.Thread(target=_run, name="derived-build", daemon=True)
+            self._build_thread.start()
+        except Exception:
+            _release_stuck_claim()  # thread couldn't start — release so a later trigger can retry
+            logger.warning("Could not start background derived build", exc_info=True)
+            return
         logger.info("Background derived-text build started (%d rows)", len(materialized))
 
     def check_drift(self, current_col_mod: int) -> bool:

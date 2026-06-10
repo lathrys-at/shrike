@@ -215,6 +215,31 @@ class TestBuildFailure:
         assert store.size == 4
 
 
+class TestConcurrentBuildGuard:
+    """The BUILDING claim is honest (review F7) and never strands the store."""
+
+    def test_second_trigger_while_building_is_a_noop(self, store):
+        # Simulate a build already in flight: a second build_in_background must not spawn another
+        # (the claim guard fires) and must not touch the store.
+        store._state = IndexState.BUILDING
+        store.build_in_background([(99, "field", "F", "should not be ingested")], col_mod=999)
+        assert store._build_thread is None  # nothing spawned
+        assert store.col_mod == 100  # unchanged
+
+    def test_claim_released_if_thread_cannot_start(self, store, monkeypatch):
+        # If Thread.start() blows up, the claim is released (back to the idle state), not wedged in
+        # BUILDING forever — a later drift trigger can retry.
+        def boom(*a, **k):
+            raise RuntimeError("can't spawn")
+
+        monkeypatch.setattr("shrike.derived.threading.Thread", boom)
+        store.build_in_background(ROWS, col_mod=200)
+        assert store.state == IndexState.READY  # col_mod is set, so idle == READY
+        # The guard no longer refuses a retry.
+        store.build(ROWS, col_mod=200)
+        assert store.state == IndexState.READY
+
+
 class TestFts5Unavailable:
     def test_degrades_when_probe_fails(self, tmp_path, monkeypatch):
         # Simulate a SQLite build without FTS5/trigram: the store is inert and every lookup signals
