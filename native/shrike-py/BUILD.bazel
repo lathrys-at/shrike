@@ -24,6 +24,7 @@ rust_shared_library(
         "//conditions:default": [],
     }),
     deps = [
+        "//native/shrike-derived:shrike_derived",
         "//native/shrike-embed:shrike_embed",
         "//native/shrike-ffi:shrike_ffi",
         "//native/shrike-index:shrike_index",

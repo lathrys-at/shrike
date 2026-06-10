@@ -1,0 +1,23 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//native:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# Native derived-text engine (#281): rusqlite + bundled SQLite (FTS5 + trigram
+# always compiled in). Pure Rust — NO pyo3 (enforced by //native:layering_check).
+rust_library(
+    name = "shrike_derived",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        "//native/shrike-ffi:shrike_ffi",
+        "@crates//:rusqlite",
+    ],
+)
+
+rust_test(
+    name = "shrike_derived_test",
+    size = "small",
+    crate = ":shrike_derived",
+)

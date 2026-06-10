@@ -226,6 +226,83 @@ impl ClipEmbedder {
     }
 }
 
+// ── Derived-text engine (#281) ──────────────────────────────────────────────
+
+/// The native FTS5-trigram derived-text engine under the `DerivedTextStore`
+/// facade — rusqlite with a bundled SQLite, so FTS5 + trigram are always
+/// available. Storage + MATCH queries only; expression building, filtering,
+/// and the state machine stay in the facade.
+#[pyclass(frozen)]
+struct DerivedTextEngine {
+    inner: shrike_derived::DerivedEngine,
+}
+
+#[pymethods]
+impl DerivedTextEngine {
+    #[new]
+    fn new(py: Python<'_>, path: String, schema_version: i64) -> PyResult<Self> {
+        let inner = py
+            .detach(move || shrike_derived::DerivedEngine::open(&path, schema_version))
+            .map_err(to_py_err)?;
+        Ok(Self { inner })
+    }
+
+    fn close(&self) {
+        // Dropping happens when the Python object is collected; the facade's
+        // close() just stops using it. Nothing to do eagerly — rusqlite closes
+        // on drop — but the method keeps the engine surfaces aligned.
+    }
+
+    fn get_col_mod(&self) -> Option<i64> {
+        self.inner.get_col_mod()
+    }
+
+    fn set_col_mod(&self, value: i64) -> PyResult<()> {
+        self.inner.set_col_mod(value).map_err(to_py_err)
+    }
+
+    fn count(&self) -> i64 {
+        self.inner.count()
+    }
+
+    fn ingest(
+        &self,
+        py: Python<'_>,
+        note_id: i64,
+        source: &str,
+        refs_text: Vec<(String, String)>,
+    ) -> PyResult<()> {
+        py.detach(|| self.inner.ingest(note_id, source, &refs_text))
+            .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (note_ids, source=None))]
+    fn remove(&self, py: Python<'_>, note_ids: Vec<i64>, source: Option<String>) -> PyResult<()> {
+        py.detach(|| self.inner.remove(&note_ids, source.as_deref()))
+            .map_err(to_py_err)
+    }
+
+    fn build(
+        &self,
+        py: Python<'_>,
+        rows: Vec<(i64, String, String, String)>,
+        col_mod: i64,
+    ) -> PyResult<()> {
+        py.detach(|| self.inner.build(&rows, col_mod)).map_err(to_py_err)
+    }
+
+    fn match_rows(
+        &self,
+        py: Python<'_>,
+        expr: String,
+        limit: i64,
+        with_text: bool,
+    ) -> PyResult<Vec<(i64, String, String, Option<String>, Option<String>)>> {
+        py.detach(|| self.inner.match_rows(&expr, limit, with_text))
+            .map_err(to_py_err)
+    }
+}
+
 // ── Index engine (#273) ─────────────────────────────────────────────────────
 
 /// The native per-modality vector index engine under the `VectorIndex`
@@ -357,6 +434,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OnnxTextEmbedder>()?;
     m.add_class::<ClipEmbedder>()?;
     m.add_class::<NativeIndexEngine>()?;
+    m.add_class::<DerivedTextEngine>()?;
     // The native image-prep pipeline version — folded into the clip-rs
     // fingerprint by the facade (a pixel-math change must invalidate vectors).
     m.add("IMAGE_PREP_VERSION_RS", shrike_embed::IMAGE_PREP_VERSION_RS)?;
