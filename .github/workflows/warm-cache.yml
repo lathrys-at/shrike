@@ -1,20 +1,18 @@
-name: Warm CI cache
+name: Warm Bazel cache
 
-# Populates main's actions/cache scope with the pinned llama-server, the GGUF
-# embedding model, the three ONNX text models — MiniLM int8, DistilRoBERTa
-# int8, MiniLM fp32 (#172, #174) — and the small CLIP (#162) — so PR embedding
-# runs restore them instead of cold-downloading from HuggingFace (which
-# intermittently 429s). A cache is only restorable from
-# the current branch or the default branch; the test workflow runs on PRs only,
-# so without this nothing ever seeds main's scope and every PR misses (#93).
-#
-# The same scope rule applies to the Bazel build cache (#244): the `warm-bazel`
-# job below builds //... on main so a PR's first Bazel run restores the Rust
-# toolchain + compiled crates + Python action results instead of building cold.
+# Populates main's actions/cache scope with the Bazel build graph (#244/#262) so a
+# PR's first Bazel run restores it instead of building cold: the Rust toolchain +
+# compiled crates + Python action results, AND the embedding externals (the pinned
+# llama-server + the GGUF/ONNX/CLIP models, fetched + checksum-verified into the
+# repository cache by building //tests/integration:embedding). A cache is only
+# restorable from the current branch or the default branch; the test workflow runs
+# on PRs only, so without this nothing ever seeds main's scope and every PR misses
+# (#93). Cutting over the test lanes to Bazel (#262) retired the old pip llama-server
+# + HuggingFace model warmer — those externals now ride the Bazel repository cache.
 #
 # Runs on the default branch twice a week — comfortably under the 7-day cache
 # eviction window — and on demand via workflow_dispatch (use it to warm the cache
-# immediately, e.g. after bumping the pinned llama-server or model).
+# immediately, e.g. after bumping the pinned llama-server, a model, or a dependency).
 on:
   schedule:
     - cron: "17 4 * * 1,4" # Mon & Thu, 04:17 UTC
@@ -24,75 +22,17 @@ permissions:
   contents: read
 
 jobs:
-  warm:
-    name: Warm embedding caches
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      # Same path/key as the embedding job in test.yml, so PRs restore exactly
-      # what this saves. llama-server is pinned via scripts/llama-server.lock.
-      - name: Cache llama-server
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/llama-server
-          key: llama-server-${{ runner.os }}-${{ hashFiles('scripts/llama-server.lock') }}
-      - name: Warm llama-server
-        run: bash .github/scripts/install-llama-server.sh
-      - name: Cache embedding models
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/shrike-test-models
-          key: embedding-model-all-MiniLM-L6-v2-Q4_K_M-onnx-int8-roberta-fp32-clip
-      - name: Warm embedding models
-        env:
-          SHRIKE_TEST_MODEL_DIR: ${{ runner.temp }}/shrike-test-models
-        run: |
-          pip install httpx
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          from tests.integration.model_cache import (
-              EMBEDDING_MODEL_NAME,
-              EMBEDDING_MODEL_URL,
-              cached_clip_model_dir,
-              cached_distilroberta_model_dir,
-              cached_model_path,
-              cached_onnx_fp32_model_dir,
-              cached_onnx_model_dir,
-              download_with_retry,
-          )
-
-          fallback = Path(os.environ["RUNNER_TEMP"]) / "models"
-          dest = cached_model_path(EMBEDDING_MODEL_NAME, fallback)
-          if dest.exists() and dest.stat().st_size > 0:
-              print(f"GGUF model already present: {dest}")
-          else:
-              download_with_retry(EMBEDDING_MODEL_URL, dest)
-              print(f"downloaded GGUF model: {dest}")
-
-          # ONNX backend models (model.onnx + tokenizer.json each); download only the
-          # files that are missing, into the same cached dir.
-          print(f"ONNX MiniLM int8 dir ready: {cached_onnx_model_dir(fallback)}")
-          print(f"ONNX DistilRoBERTa dir ready: {cached_distilroberta_model_dir(fallback)}")
-          print(f"ONNX MiniLM fp32 dir ready: {cached_onnx_fp32_model_dir(fallback)}")
-          print(f"CLIP dir ready: {cached_clip_model_dir(fallback)}")
-          PY
-
   warm-bazel:
     name: Warm Bazel cache (linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Same paths/keys as the bazel job in test.yml, so PRs restore exactly what
-      # this saves. The disk cache is content-addressed, so crates compiled here
-      # are cache hits for any PR with the same Cargo.lock + toolchain — the
-      # cross-PR win a per-branch cache can't give (every PR can read the default
-      # branch's scope, but not a sibling PR's). Linux x64 only: it mirrors the
-      # per-PR bazel lane; the rc cross-platform lane (arm64/macOS) is rare and
+      # Same paths/keys as the bazel + embedding jobs in test.yml, so PRs restore
+      # exactly what this saves. The disk cache is content-addressed, so crates
+      # compiled here are cache hits for any PR with the same Cargo.lock + toolchain
+      # — the cross-PR win a per-branch cache can't give (every PR can read the
+      # default branch's scope, but not a sibling PR's). Linux x64 only: it mirrors
+      # the per-PR bazel lane; the rc cross-platform lane (arm64/macOS) is rare and
       # warms on its own.
       - name: Cache Bazel toolchains + repo
         uses: actions/cache@v4
@@ -110,11 +50,13 @@ jobs:
           key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: bazel-disk-${{ runner.os }}-${{ runner.arch }}-
       # `build`, not `test`: the expensive cold cost is compiling the Rust crates
-      # for the PyO3 seam, a build action cached in the disk cache. No test run —
-      # execution is cheap and (pre-#259) the coarse //src/shrike dep invalidates
-      # the unit result on any source edit, so warming test results buys little.
-      - name: Warm the Bazel graph (build //..., incl. the Rust/PyO3 seam)
+      # for the PyO3 seam (a build action cached in the disk cache) and fetching the
+      # embedding externals (cached in the repo cache). Building //... covers the
+      # Python + Rust graph; //tests/integration:embedding is `manual` (excluded from
+      # //...), so name it explicitly to pull its model + llama-server externals.
+      - name: Warm the Bazel graph (//... + the embedding externals)
         run: |
-          ./bazel build //... \
+          ./bazel build \
             --disk_cache="$HOME/.cache/shrike/bazel-disk" \
-            --repository_cache="$HOME/.cache/shrike/bazel-repo"
+            --repository_cache="$HOME/.cache/shrike/bazel-repo" \
+            -- //... //tests/integration:embedding
