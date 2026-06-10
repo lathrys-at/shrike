@@ -107,6 +107,29 @@ pub fn render_embed_text(
     Ok(parts.join("\n"))
 }
 
+// Media references that make a field non-empty even with no text (the #89
+// empty-note rule) — mirrors Python's _MEDIA_RE.
+static MEDIA_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)<\s*(?:img|audio|video|object|embed|source)\b|\[sound:").unwrap()
+});
+
+/// True if a field value carries no content — no text and no media. Mirrors
+/// `shrike.embed_text.field_is_blank` (stricter than the embedding
+/// normalization: media makes a field non-blank).
+pub fn field_is_blank(
+    value: &str,
+    strip_html: &dyn Fn(&str) -> NativeResult<String>,
+) -> NativeResult<bool> {
+    if value.is_empty() {
+        return Ok(true);
+    }
+    if MEDIA_RE.is_match(value) {
+        return Ok(false);
+    }
+    let stripped = strip_html(value)?;
+    Ok(stripped.replace('\u{a0}', " ").trim().is_empty())
+}
+
 /// Image filenames referenced by a field's `<img src>` attributes — in order,
 /// de-duplicated; basenames only; remote (`scheme://`) srcs skipped. Mirrors
 /// `shrike.embed_text.extract_image_refs`, including its parser-not-regex

@@ -25,12 +25,14 @@ const SVC_NOTETYPES: u32 = 23;
 const SVC_NOTES: u32 = 25;
 const SVC_CARD_RENDERING: u32 = 27;
 const SVC_SEARCH: u32 = 29;
+const SVC_MEDIA: u32 = 39;
 const SVC_TAGS: u32 = 43;
 
 // ── method indices ───────────────────────────────────────────────────────────
 const COLLECTION_OPEN: u32 = 0;
 const COLLECTION_CLOSE: u32 = 1;
 
+const CARDS_REMOVE_CARDS: u32 = 2;
 const CARDS_SET_DECK: u32 = 3;
 
 const DECKS_NEW_DECK: u32 = 0;
@@ -64,10 +66,16 @@ const NOTES_CARDS_OF_NOTE: u32 = 12;
 // the collection-level 10 (which lands on render_markdown). The tripwire test
 // pins this: a wrong index here dispatches to a different VALID method.
 const CARD_RENDERING_STRIP_HTML: u32 = 0;
+const CARD_RENDERING_GET_EMPTY_CARDS: u32 = 5;
 
 const SEARCH_SEARCH_NOTES: u32 = 2;
 const SEARCH_FIND_AND_REPLACE: u32 = 5;
 
+const MEDIA_CHECK_MEDIA: u32 = 0;
+const MEDIA_ADD_MEDIA_FILE: u32 = 1;
+const MEDIA_TRASH_MEDIA_FILES: u32 = 2;
+
+const TAGS_CLEAR_UNUSED_TAGS: u32 = 0;
 const TAGS_ALL_TAGS: u32 = 1;
 const TAGS_RENAME_TAGS: u32 = 6;
 const TAGS_ADD_NOTE_TAGS: u32 = 7;
@@ -478,6 +486,65 @@ impl ServiceAdapter {
             .run_db_command_bytes(req.to_string().as_bytes())
             .map_err(|err_bytes| decode_backend_error(&err_bytes))?;
         Ok(())
+    }
+
+    // ── media (#70 port) ─────────────────────────────────────────────────────
+
+    /// Store bytes under (a collision-resolved variant of) `desired_name`;
+    /// returns the ACTUAL name Anki chose (pylib's `media.write_data`).
+    pub fn add_media_file(&self, desired_name: &str, data: &[u8]) -> NativeResult<String> {
+        let req = anki_proto::media::AddMediaFileRequest {
+            desired_name: desired_name.to_string(),
+            data: data.to_vec(),
+        };
+        let resp: anki_proto::generic::String = self.call(SVC_MEDIA, MEDIA_ADD_MEDIA_FILE, &req)?;
+        Ok(resp.val)
+    }
+
+    /// Move media files to Anki's recoverable trash.
+    pub fn trash_media_files(&self, fnames: &[String]) -> NativeResult<()> {
+        let req = anki_proto::media::TrashMediaFilesRequest {
+            fnames: fnames.to_vec(),
+        };
+        let _: anki_proto::generic::Empty = self.call(SVC_MEDIA, MEDIA_TRASH_MEDIA_FILES, &req)?;
+        Ok(())
+    }
+
+    /// Anki's media check (unused/missing/missing-notes/trash state).
+    pub fn check_media(&self) -> NativeResult<anki_proto::media::CheckMediaResponse> {
+        self.call(
+            SVC_MEDIA,
+            MEDIA_CHECK_MEDIA,
+            &anki_proto::generic::Empty::default(),
+        )
+    }
+
+    // ── maintenance ──────────────────────────────────────────────────────────
+
+    pub fn get_empty_cards(&self) -> NativeResult<anki_proto::card_rendering::EmptyCardsReport> {
+        self.call(
+            SVC_CARD_RENDERING,
+            CARD_RENDERING_GET_EMPTY_CARDS,
+            &anki_proto::generic::Empty::default(),
+        )
+    }
+
+    pub fn remove_cards(&self, card_ids: &[i64]) -> NativeResult<()> {
+        let req = anki_proto::cards::RemoveCardsRequest {
+            card_ids: card_ids.to_vec(),
+        };
+        let _: anki_proto::collection::OpChanges =
+            self.call(SVC_CARDS, CARDS_REMOVE_CARDS, &req)?;
+        Ok(())
+    }
+
+    pub fn clear_unused_tags(&self) -> NativeResult<usize> {
+        let resp: anki_proto::collection::OpChangesWithCount = self.call(
+            SVC_TAGS,
+            TAGS_CLEAR_UNUSED_TAGS,
+            &anki_proto::generic::Empty::default(),
+        )?;
+        Ok(resp.count as usize)
     }
 
     // ── card rendering ───────────────────────────────────────────────────────

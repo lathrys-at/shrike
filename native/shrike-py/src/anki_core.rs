@@ -208,6 +208,68 @@ impl CollectionCore {
             .map_err(to_py_err)
     }
 
+    // ── media + maintenance (#278 step 5a) ───────────────────────────────────
+
+    /// Store one media item from bytes; Anki resolves collisions — use the
+    /// RETURNED filename (JSON result).
+    fn store_media_bytes(
+        &self,
+        py: Python<'_>,
+        filename: String,
+        data: Vec<u8>,
+    ) -> PyResult<String> {
+        py.detach(|| self.inner.store_media_bytes(&filename, &data))
+            .map_err(to_py_err)
+    }
+
+    /// Locate media files (never bytes): per-item found/missing JSON.
+    fn fetch_media(&self, py: Python<'_>, filenames: Vec<String>) -> PyResult<String> {
+        py.detach(|| self.inner.fetch_media(&filenames))
+            .map_err(to_py_err)
+    }
+
+    /// List media filenames (sorted; optional glob pattern + limit), JSON.
+    #[pyo3(signature = (pattern=None, limit=None))]
+    fn list_media(
+        &self,
+        py: Python<'_>,
+        pattern: Option<String>,
+        limit: Option<usize>,
+    ) -> PyResult<String> {
+        py.detach(|| self.inner.list_media(pattern.as_deref(), limit))
+            .map_err(to_py_err)
+    }
+
+    /// Move media files to Anki's recoverable trash (JSON result echoes refs).
+    fn delete_media(&self, py: Python<'_>, filenames: Vec<String>) -> PyResult<String> {
+        py.detach(|| self.inner.delete_media(&filenames))
+            .map_err(to_py_err)
+    }
+
+    /// Read-only media diagnostics (unused/missing/missing-notes/trash), JSON.
+    fn media_check(&self, py: Python<'_>) -> PyResult<String> {
+        py.detach(|| self.inner.media_check()).map_err(to_py_err)
+    }
+
+    /// The #89 prune: four cleanups, dry-run previews; `removed_note_ids`
+    /// rides in the JSON for the host's index maintenance.
+    #[pyo3(signature = (unused_tags=true, empty_notes=true, empty_cards=true, unused_media=true, dry_run=true))]
+    fn prune(
+        &self,
+        py: Python<'_>,
+        unused_tags: bool,
+        empty_notes: bool,
+        empty_cards: bool,
+        unused_media: bool,
+        dry_run: bool,
+    ) -> PyResult<String> {
+        py.detach(|| {
+            self.inner
+                .prune(unused_tags, empty_notes, empty_cards, unused_media, dry_run)
+        })
+        .map_err(to_py_err)
+    }
+
     // ── note types (#278 step 4) ─────────────────────────────────────────────
 
     /// Create/update note-type definitions in bulk (JSON in/out; the

@@ -19,6 +19,7 @@
 
 mod adapter;
 pub mod embed_text;
+mod media;
 mod note_types;
 mod read;
 mod write;
@@ -62,6 +63,7 @@ pub enum CreateOutcome {
 pub struct CollectionCore {
     adapter: ServiceAdapter,
     collection_path: String,
+    media_dir: String,
 }
 
 impl CollectionCore {
@@ -72,14 +74,12 @@ impl CollectionCore {
         let base = collection_path
             .strip_suffix(".anki2")
             .unwrap_or(collection_path);
-        adapter.open_collection(
-            collection_path,
-            &format!("{base}.media"),
-            &format!("{base}.media.db2"),
-        )?;
+        let media_dir = format!("{base}.media");
+        adapter.open_collection(collection_path, &media_dir, &format!("{base}.media.db2"))?;
         Ok(Self {
             adapter,
             collection_path: collection_path.to_string(),
+            media_dir,
         })
     }
 
@@ -641,6 +641,124 @@ mod tests {
         let basic = core.notetype_id("Basic").unwrap();
         assert_eq!(migrated.notetype_id, basic);
         assert_eq!(migrated.fields, vec!["a-data", "c-data"]);
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn media_and_prune_round_trip() {
+        // Step-5a tripwires (media + maintenance RPCs) + the ported ops.
+        let (core, dir) = temp_core();
+        let basic = core.notetype_id("Basic").unwrap();
+
+        // Store: bytes in, Anki-resolved name out; collision dedups/renames.
+        let stored: serde_json::Value =
+            serde_json::from_str(&core.store_media_bytes("pic.png", b"PNGDATA").unwrap()).unwrap();
+        assert_eq!(stored["filename"], "pic.png");
+        assert_eq!(stored["renamed"], false);
+        let same: serde_json::Value =
+            serde_json::from_str(&core.store_media_bytes("pic.png", b"PNGDATA").unwrap()).unwrap();
+        assert_eq!(same["filename"], "pic.png"); // identical content → same name
+        let diff: serde_json::Value =
+            serde_json::from_str(&core.store_media_bytes("pic.png", b"OTHERDATA").unwrap())
+                .unwrap();
+        assert_ne!(diff["filename"], "pic.png"); // different content → suffixed
+        assert_eq!(diff["renamed"], true);
+
+        // fetch/list with the traversal guard + glob.
+        let fetched: serde_json::Value = serde_json::from_str(
+            &core
+                .fetch_media(&["pic.png".into(), "../pic.png".into(), "ghost.png".into()])
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fetched[0]["status"], "found");
+        assert_eq!(fetched[0]["mime"], "image/png");
+        assert_eq!(fetched[1]["status"], "found"); // basename guard resolves it
+        assert_eq!(fetched[2]["status"], "missing");
+        let listing: serde_json::Value =
+            serde_json::from_str(&core.list_media(Some("pic*"), None).unwrap()).unwrap();
+        assert_eq!(listing["count"], 2);
+
+        // A note referencing pic.png; the other file is unused.
+        core.create_note(
+            basic,
+            DEFAULT_DECK,
+            &["<img src=\"pic.png\">".into(), "kept".into()],
+            &["usedtag".into()],
+            DuplicatePolicy::Error,
+        )
+        .unwrap();
+        // An empty note (no text, no media) for the prune.
+        let empty_batch = serde_json::json!([
+            {"note_type": "Basic", "deck": "Default",
+             "fields": {"Front": "<b> </b>&nbsp;", "Back": ""}}
+        ]);
+        // fields_check calls this EMPTY, so create it via allow + raw create.
+        let raw = core
+            .upsert_notes(&empty_batch.to_string(), "allow", false)
+            .unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(raw[0]["status"], "error"); // structurally empty is never written
+                                               // Insert a genuinely empty-able note: text now, blanked by update.
+        let CreateOutcome::Created(empty_nid) = core
+            .create_note(
+                basic,
+                DEFAULT_DECK,
+                &["temp".into(), "".into()],
+                &["onlytag".into()],
+                DuplicatePolicy::Error,
+            )
+            .unwrap()
+        else {
+            panic!("create failed")
+        };
+        core.update_note(empty_nid, &["<b> </b>&nbsp;".into(), "".into()], None)
+            .unwrap();
+
+        // media check sees the unused file.
+        let check: serde_json::Value = serde_json::from_str(&core.media_check().unwrap()).unwrap();
+        let unused: Vec<&str> = check["unused"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(unused.len(), 1);
+        assert_ne!(unused[0], "pic.png");
+
+        // Dry-run prune: previews everything, mutates nothing.
+        let preview: serde_json::Value =
+            serde_json::from_str(&core.prune(true, true, true, true, true).unwrap()).unwrap();
+        assert_eq!(preview["dry_run"], true);
+        assert_eq!(preview["empty_notes"]["removed"][0], empty_nid);
+        assert_eq!(preview["unused_media"]["removed"], 1);
+        assert_eq!(core.find_notes("deck:*").unwrap().len(), 2);
+
+        // Apply: empty note gone (its tag freed and cleared), media trashed.
+        let applied: serde_json::Value =
+            serde_json::from_str(&core.prune(true, true, true, true, false).unwrap()).unwrap();
+        assert_eq!(applied["removed_note_ids"][0], empty_nid);
+        assert!(applied["unused_tags"]["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t == "onlytag"));
+        assert_eq!(core.find_notes("deck:*").unwrap().len(), 1);
+        let listing_after: serde_json::Value =
+            serde_json::from_str(&core.list_media(None, None).unwrap()).unwrap();
+        assert_eq!(listing_after["count"], 1);
+
+        // delete_media: trash + echo, not_found for ghosts.
+        let deleted: serde_json::Value = serde_json::from_str(
+            &core
+                .delete_media(&["pic.png".into(), "nope.png".into()])
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(deleted["deleted"][0], "pic.png");
+        assert_eq!(deleted["not_found"][0], "nope.png");
 
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
