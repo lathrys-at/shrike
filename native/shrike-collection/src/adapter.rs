@@ -19,6 +19,7 @@ use shrike_ffi::{NativeError, NativeResult};
 
 // ── service indices (Backend dispatcher, tag 25.09.4) ───────────────────────
 const SVC_COLLECTION: u32 = 3;
+const SVC_CARDS: u32 = 5;
 const SVC_DECKS: u32 = 7;
 const SVC_NOTETYPES: u32 = 23;
 const SVC_NOTES: u32 = 25;
@@ -30,11 +31,19 @@ const SVC_TAGS: u32 = 43;
 const COLLECTION_OPEN: u32 = 0;
 const COLLECTION_CLOSE: u32 = 1;
 
+const CARDS_SET_DECK: u32 = 3;
+
+const DECKS_NEW_DECK: u32 = 0;
+const DECKS_ADD_DECK: u32 = 1;
 const DECKS_DECK_TREE: u32 = 4;
+const DECKS_GET_DECK_ID_BY_NAME: u32 = 7;
 const DECKS_GET_DECK_NAMES: u32 = 13;
+const DECKS_REMOVE_DECKS: u32 = 16;
+const DECKS_RENAME_DECK: u32 = 18;
 
 const NOTETYPES_GET_NOTETYPE: u32 = 6;
 const NOTETYPES_GET_NOTETYPE_NAMES: u32 = 8;
+const NOTETYPES_REMOVE_NOTETYPE: u32 = 11;
 
 const NOTES_NEW_NOTE: u32 = 0;
 const NOTES_ADD_NOTE: u32 = 1;
@@ -42,6 +51,7 @@ const NOTES_UPDATE_NOTES: u32 = 5;
 const NOTES_GET_NOTE: u32 = 6;
 const NOTES_REMOVE_NOTES: u32 = 7;
 const NOTES_FIELDS_CHECK: u32 = 11;
+const NOTES_CARDS_OF_NOTE: u32 = 12;
 
 // NB: card_rendering is the one service whose BACKEND-level dispatcher is a
 // merged table (its backend-specific methods come first, the collection-level
@@ -51,8 +61,12 @@ const NOTES_FIELDS_CHECK: u32 = 11;
 const CARD_RENDERING_STRIP_HTML: u32 = 0;
 
 const SEARCH_SEARCH_NOTES: u32 = 2;
+const SEARCH_FIND_AND_REPLACE: u32 = 5;
 
 const TAGS_ALL_TAGS: u32 = 1;
+const TAGS_RENAME_TAGS: u32 = 6;
+const TAGS_ADD_NOTE_TAGS: u32 = 7;
+const TAGS_REMOVE_NOTE_TAGS: u32 = 8;
 
 /// The duplicate-check states `note_fields_check` reports (mirrors
 /// `anki_proto::notes::note_fields_check_response::State`).
@@ -221,6 +235,52 @@ impl ServiceAdapter {
 
     // ── decks ────────────────────────────────────────────────────────────────
 
+    /// Deck id for an exact full name, or None (pylib's `id_for_name`; the
+    /// service maps a missing name to NotFound, folded to None here).
+    pub fn deck_id_by_name(&self, name: &str) -> NativeResult<Option<i64>> {
+        let req = anki_proto::generic::String {
+            val: name.to_string(),
+        };
+        match self.call::<_, anki_proto::decks::DeckId>(SVC_DECKS, DECKS_GET_DECK_ID_BY_NAME, &req)
+        {
+            Ok(resp) => Ok(Some(resp.did)),
+            Err(e) if e.kind == shrike_ffi::ErrorKind::InvalidInput => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Create a normal deck with `name` (pylib's `add_normal_deck_with_name`:
+    /// a fresh default deck proto, renamed, added). Returns the new id.
+    pub fn add_deck(&self, name: &str) -> NativeResult<i64> {
+        let mut deck: anki_proto::decks::Deck = self.call(
+            SVC_DECKS,
+            DECKS_NEW_DECK,
+            &anki_proto::generic::Empty::default(),
+        )?;
+        deck.name = name.to_string();
+        let resp: anki_proto::collection::OpChangesWithId =
+            self.call(SVC_DECKS, DECKS_ADD_DECK, &deck)?;
+        Ok(resp.id)
+    }
+
+    pub fn rename_deck(&self, deck_id: i64, new_name: &str) -> NativeResult<()> {
+        let req = anki_proto::decks::RenameDeckRequest {
+            deck_id,
+            new_name: new_name.to_string(),
+        };
+        let _: anki_proto::collection::OpChanges = self.call(SVC_DECKS, DECKS_RENAME_DECK, &req)?;
+        Ok(())
+    }
+
+    pub fn remove_decks(&self, deck_ids: &[i64]) -> NativeResult<()> {
+        let req = anki_proto::decks::DeckIds {
+            dids: deck_ids.to_vec(),
+        };
+        let _: anki_proto::collection::OpChangesWithCount =
+            self.call(SVC_DECKS, DECKS_REMOVE_DECKS, &req)?;
+        Ok(())
+    }
+
     /// Every deck's (id, full name) — pylib's `all_names_and_ids()` call shape
     /// (keep the empty default deck, include filtered decks).
     pub fn deck_names(&self) -> NativeResult<Vec<(i64, String)>> {
@@ -246,6 +306,92 @@ impl ServiceAdapter {
         let req = anki_proto::generic::Empty::default();
         let resp: anki_proto::generic::StringList = self.call(SVC_TAGS, TAGS_ALL_TAGS, &req)?;
         Ok(resp.vals)
+    }
+
+    /// Collection-wide tag rename (prefix semantics: renames children like
+    /// `old::sub`, never the substring `old-ish`) — pylib's `tags.rename`.
+    pub fn rename_tags(&self, old: &str, new: &str) -> NativeResult<usize> {
+        let req = anki_proto::tags::RenameTagsRequest {
+            current_prefix: old.to_string(),
+            new_prefix: new.to_string(),
+        };
+        let resp: anki_proto::collection::OpChangesWithCount =
+            self.call(SVC_TAGS, TAGS_RENAME_TAGS, &req)?;
+        Ok(resp.count as usize)
+    }
+
+    /// Add space-separated `tags` to every note in `note_ids` (bulk_add).
+    pub fn add_note_tags(&self, note_ids: &[i64], tags: &str) -> NativeResult<usize> {
+        let req = anki_proto::tags::NoteIdsAndTagsRequest {
+            note_ids: note_ids.to_vec(),
+            tags: tags.to_string(),
+        };
+        let resp: anki_proto::collection::OpChangesWithCount =
+            self.call(SVC_TAGS, TAGS_ADD_NOTE_TAGS, &req)?;
+        Ok(resp.count as usize)
+    }
+
+    /// Remove space-separated `tags` from every note in `note_ids` (bulk_remove).
+    pub fn remove_note_tags(&self, note_ids: &[i64], tags: &str) -> NativeResult<usize> {
+        let req = anki_proto::tags::NoteIdsAndTagsRequest {
+            note_ids: note_ids.to_vec(),
+            tags: tags.to_string(),
+        };
+        let resp: anki_proto::collection::OpChangesWithCount =
+            self.call(SVC_TAGS, TAGS_REMOVE_NOTE_TAGS, &req)?;
+        Ok(resp.count as usize)
+    }
+
+    // ── cards ────────────────────────────────────────────────────────────────
+
+    pub fn cards_of_note(&self, note_id: i64) -> NativeResult<Vec<i64>> {
+        let req = anki_proto::notes::NoteId { nid: note_id };
+        let resp: anki_proto::cards::CardIds = self.call(SVC_NOTES, NOTES_CARDS_OF_NOTE, &req)?;
+        Ok(resp.cids)
+    }
+
+    pub fn set_card_deck(&self, card_ids: &[i64], deck_id: i64) -> NativeResult<()> {
+        let req = anki_proto::cards::SetDeckRequest {
+            card_ids: card_ids.to_vec(),
+            deck_id,
+        };
+        let _: anki_proto::collection::OpChangesWithCount =
+            self.call(SVC_CARDS, CARDS_SET_DECK, &req)?;
+        Ok(())
+    }
+
+    // ── find & replace / notetype removal ────────────────────────────────────
+
+    /// Anki's own find_and_replace over note fields (Rust regex, undo-able).
+    /// Empty `field_name` means all fields. Returns the changed-note count.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_and_replace(
+        &self,
+        note_ids: &[i64],
+        search: &str,
+        replacement: &str,
+        regex: bool,
+        match_case: bool,
+        field_name: Option<&str>,
+    ) -> NativeResult<usize> {
+        let req = anki_proto::search::FindAndReplaceRequest {
+            nids: note_ids.to_vec(),
+            search: search.to_string(),
+            replacement: replacement.to_string(),
+            regex,
+            match_case,
+            field_name: field_name.unwrap_or("").to_string(),
+        };
+        let resp: anki_proto::collection::OpChangesWithCount =
+            self.call(SVC_SEARCH, SEARCH_FIND_AND_REPLACE, &req)?;
+        Ok(resp.count as usize)
+    }
+
+    pub fn remove_notetype(&self, notetype_id: i64) -> NativeResult<()> {
+        let req = anki_proto::notetypes::NotetypeId { ntid: notetype_id };
+        let _: anki_proto::collection::OpChanges =
+            self.call(SVC_NOTETYPES, NOTETYPES_REMOVE_NOTETYPE, &req)?;
+        Ok(())
     }
 
     // ── card rendering ───────────────────────────────────────────────────────

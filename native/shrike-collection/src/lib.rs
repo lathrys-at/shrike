@@ -20,6 +20,7 @@
 mod adapter;
 pub mod embed_text;
 mod read;
+mod write;
 
 pub use adapter::{FieldsState, ServiceAdapter, ServiceNote};
 pub use embed_text::{extract_image_refs, EMBED_TEXT_VERSION};
@@ -97,12 +98,37 @@ impl CollectionCore {
 
     /// Resolve a notetype by name (case-sensitive, like the Python wrapper).
     pub fn notetype_id(&self, name: &str) -> NativeResult<i64> {
-        self.adapter
+        self.notetype_id_opt(name)?
+            .ok_or_else(|| NativeError::invalid_input(format!("unknown note type: {name}")))
+    }
+
+    pub(crate) fn notetype_id_opt(&self, name: &str) -> NativeResult<Option<i64>> {
+        Ok(self
+            .adapter
             .notetype_names()?
             .into_iter()
             .find(|(_, n)| n == name)
-            .map(|(id, _)| id)
-            .ok_or_else(|| NativeError::invalid_input(format!("unknown note type: {name}")))
+            .map(|(id, _)| id))
+    }
+
+    pub(crate) fn notetype_name(&self, notetype_id: i64) -> NativeResult<String> {
+        Ok(self
+            .adapter
+            .notetype_names()?
+            .into_iter()
+            .find(|(id, _)| *id == notetype_id)
+            .map(|(_, n)| n)
+            .unwrap_or_else(|| "Unknown".to_string()))
+    }
+
+    pub(crate) fn notetype_field_names(&self, notetype_id: i64) -> NativeResult<Vec<String>> {
+        Ok(self
+            .adapter
+            .notetype(notetype_id)?
+            .fields
+            .into_iter()
+            .map(|f| f.name)
+            .collect())
     }
 
     pub fn get_note(&self, note_id: i64) -> NativeResult<ServiceNote> {
@@ -427,6 +453,148 @@ mod tests {
         assert_eq!(default_deck["note_count"], 1);
         assert_eq!(info["stats"]["total_notes"], 1);
         assert_eq!(info["stats"]["decks_summary"]["Default"]["notes"], 1);
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn write_surface_round_trip() {
+        // Tripwires for the step-3 (service, method) indices and the ported
+        // write ops, against a real temp collection.
+        let (core, dir) = temp_core();
+
+        // Named-fields upsert: create (auto-creating a nested deck), with
+        // the #77 policy + reason vocabulary.
+        let batch = serde_json::json!([
+            {"note_type": "Basic", "deck": "Science::Physics",
+             "fields": {"Front": "alpha", "Back": "beta"}, "tags": ["t1"]},
+            {"note_type": "Basic", "deck": "Science::Physics",
+             "fields": {"Front": "alpha", "Back": "dup"}},
+            {"note_type": "Nope", "deck": "D", "fields": {"Front": "x"}},
+            {"note_type": "Basic", "deck": "D", "fields": {"Bogus": "x"}},
+        ]);
+        let results: serde_json::Value = serde_json::from_str(
+            &core
+                .upsert_notes(&batch.to_string(), "skip", false)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(results[0]["status"], "created");
+        let nid = results[0]["id"].as_i64().unwrap();
+        assert_eq!(results[1]["status"], "skipped");
+        assert_eq!(results[1]["reason"], "duplicate");
+        assert_eq!(results[2]["reason"], "unknown_note_type");
+        assert_eq!(results[3]["reason"], "unknown_field");
+        // The nested deck was auto-created; the bogus items created nothing.
+        assert!(core
+            .adapter
+            .deck_id_by_name("Science::Physics")
+            .unwrap()
+            .is_some());
+        assert_eq!(core.find_notes("deck:*").unwrap().len(), 1);
+
+        // dry_run validates but writes nothing.
+        let dry = serde_json::json!([
+            {"note_type": "Basic", "deck": "DryDeck", "fields": {"Front": "new", "Back": "b"}}
+        ]);
+        let dry_results: serde_json::Value =
+            serde_json::from_str(&core.upsert_notes(&dry.to_string(), "error", true).unwrap())
+                .unwrap();
+        assert_eq!(dry_results[0]["status"], "ok");
+        assert_eq!(dry_results[0]["action"], "create");
+        assert!(core.adapter.deck_id_by_name("DryDeck").unwrap().is_none());
+        assert_eq!(core.find_notes("deck:*").unwrap().len(), 1);
+
+        // Update: partial fields, tags, deck move; type change refused.
+        let update = serde_json::json!([
+            {"id": nid, "fields": {"Back": "new back"}, "tags": ["t2"], "deck": "Default"}
+        ]);
+        let up_results: serde_json::Value = serde_json::from_str(
+            &core
+                .upsert_notes(&update.to_string(), "error", false)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(up_results[0]["status"], "updated");
+        let note = core.get_note(nid).unwrap();
+        assert_eq!(
+            note.fields,
+            vec!["alpha".to_string(), "new back".to_string()]
+        );
+        assert_eq!(note.tags, vec!["t2".to_string()]);
+        assert_eq!(core.find_notes("\"deck:Default\"").unwrap(), vec![nid]);
+
+        // Tags: add/remove (remove-before-add), set replace, not_found.
+        let (modified, not_found) = core
+            .update_note_tags(&[nid, 999], None, &["x1".into()], &["t2".into()])
+            .unwrap();
+        assert_eq!((modified, not_found), (1, vec![999]));
+        assert_eq!(core.get_note(nid).unwrap().tags, vec!["x1".to_string()]);
+        core.update_note_tags(&[nid], Some(&["fresh".into()]), &[], &[])
+            .unwrap();
+        assert_eq!(core.get_note(nid).unwrap().tags, vec!["fresh".to_string()]);
+
+        // rename_tag: exact on a note set, then collection-wide.
+        assert_eq!(core.rename_tag("fresh", "renamed", &[nid]).unwrap(), 1);
+        assert_eq!(
+            core.get_note(nid).unwrap().tags,
+            vec!["renamed".to_string()]
+        );
+        assert_eq!(core.rename_tag("renamed", "global", &[]).unwrap(), 1);
+
+        // Decks: upsert rename + clash, delete empty-only.
+        let physics = core
+            .adapter
+            .deck_id_by_name("Science::Physics")
+            .unwrap()
+            .unwrap();
+        let deck_batch = serde_json::json!([
+            {"id": physics, "name": "Science::Mechanics"},
+            {"name": "Empty::Leaf"},
+        ]);
+        let deck_results: serde_json::Value =
+            serde_json::from_str(&core.upsert_decks(&deck_batch.to_string()).unwrap()).unwrap();
+        assert_eq!(deck_results[0]["status"], "updated");
+        assert_eq!(deck_results[1]["status"], "created");
+        let clash = serde_json::json!([{"id": physics, "name": "Default"}]);
+        let clash_results: serde_json::Value =
+            serde_json::from_str(&core.upsert_decks(&clash.to_string()).unwrap()).unwrap();
+        assert_eq!(clash_results[0]["status"], "error");
+
+        let del: serde_json::Value = serde_json::from_str(
+            &core
+                .delete_decks(&["Empty::Leaf".into(), "Default".into(), "Ghost".into()])
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(del["deleted"][0], "Empty::Leaf");
+        assert_eq!(del["not_empty"][0], "Default"); // holds the note's card
+        assert_eq!(del["not_found"][0], "Ghost");
+
+        // find_replace_notes: literal apply + changed-id diff.
+        let fr: serde_json::Value = serde_json::from_str(
+            &core
+                .find_replace_notes(&[nid], "alpha", "omega", false, true, None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fr["notes_changed"], 1);
+        assert_eq!(fr["changed_ids"][0], nid);
+        assert_eq!(core.get_note(nid).unwrap().fields[0], "omega");
+
+        // delete_note_types: in-use error / not_found; (no unused stock type
+        // is guaranteed, so the deleted path is covered by the binding tests).
+        let basic = core.notetype_id("Basic").unwrap();
+        let dnt: serde_json::Value =
+            serde_json::from_str(&core.delete_note_types(&[basic, 12345]).unwrap()).unwrap();
+        assert_eq!(dnt["results"][0]["status"], "error");
+        assert_eq!(dnt["results"][1]["status"], "not_found");
+        // An unused stock type deletes cleanly.
+        let cloze = core.notetype_id("Cloze").unwrap();
+        let dnt2: serde_json::Value =
+            serde_json::from_str(&core.delete_note_types(&[cloze]).unwrap()).unwrap();
+        assert_eq!(dnt2["results"][0]["status"], "deleted");
 
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();

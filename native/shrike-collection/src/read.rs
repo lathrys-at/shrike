@@ -166,7 +166,7 @@ impl CollectionCore {
 
     /// Map a deck reference (name, numeric id, `#id`) to a deck name —
     /// `_resolve_deck_ref`. None = an explicit id matching no deck.
-    fn resolve_deck_ref(&self, reference: &str) -> NativeResult<Option<String>> {
+    pub(crate) fn resolve_deck_ref(&self, reference: &str) -> NativeResult<Option<String>> {
         let name_of = |id: i64| -> NativeResult<Option<String>> {
             Ok(self
                 .adapter
