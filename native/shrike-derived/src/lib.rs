@@ -24,6 +24,26 @@ const SNIPPET_TOKENS: i64 = 12;
 /// (note_id, source, ref, txt, snippet) — one MATCH result row.
 pub type MatchRow = (i64, String, String, Option<String>, Option<String>);
 
+/// Whether this build statically links rusqlite's bundled SQLite (#300).
+/// Bundled guarantees FTS5 + trigram; a platform-linked build must rely on
+/// [`fts5_trigram_available`] instead.
+pub const fn sqlite_bundled() -> bool {
+    cfg!(feature = "bundled")
+}
+
+/// Whether the linked SQLite has FTS5 with the trigram tokenizer (#300).
+///
+/// Probed on a throwaway in-memory connection — the same check the stdlib
+/// engine's probe performs. Trivially true under the bundled default; genuinely
+/// load-bearing when linked against a platform SQLite.
+pub fn fts5_trigram_available() -> bool {
+    let Ok(conn) = Connection::open_in_memory() else {
+        return false;
+    };
+    conn.execute_batch("CREATE VIRTUAL TABLE t USING fts5(x, tokenize='trigram')")
+        .is_ok()
+}
+
 pub struct DerivedEngine {
     conn: Mutex<Connection>,
 }
@@ -270,6 +290,18 @@ mod tests {
         // The bundled-SQLite win: creating the trigram FTS5 table just works.
         let (_e, dir) = store();
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn probe_reports_linkage_capability() {
+        // Under the bundled default the probe MUST pass (the #281 guarantee);
+        // under platform linkage it reports whatever the host library has —
+        // on this dev host the test only runs if the store above worked, so
+        // the probe must agree.
+        assert!(fts5_trigram_available());
+        if sqlite_bundled() {
+            assert!(fts5_trigram_available());
+        }
     }
 
     #[test]

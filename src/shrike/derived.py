@@ -235,11 +235,13 @@ class SqliteDerivedEngine:
 class NativeDerivedEngine:
     """The Rust engine (#281): the same surface over rusqlite's *bundled* SQLite.
 
-    A thin marshaling adapter over ``shrike_native.DerivedTextEngine``; FTS5 +
-    trigram are deterministically available (the bundled build always has them),
-    so the facade's probe isn't consulted on this path. Native errors are
-    translated to ``sqlite3.Error`` so the facade's recovery/fallback logic is
-    engine-agnostic.
+    A thin marshaling adapter over ``shrike_native.DerivedTextEngine``. Under
+    the default build the extension bundles its own SQLite, so FTS5 + trigram
+    are deterministically available; a platform-linked build (#300,
+    ``--no-default-features``) relies on the host library, so :meth:`probe`
+    genuinely probes either way (trivially true when bundled). Native errors
+    are translated to ``sqlite3.Error`` so the facade's recovery/fallback logic
+    is engine-agnostic.
     """
 
     def __init__(self, path: Path) -> None:
@@ -257,7 +259,14 @@ class NativeDerivedEngine:
 
     @staticmethod
     def probe() -> bool:
-        return True  # bundled SQLite: FTS5 + trigram always compiled in
+        """FTS5+trigram availability in the *extension's* SQLite (#300).
+
+        Trivially true under the bundled default; load-bearing when the
+        extension was built against a platform SQLite.
+        """
+        import shrike_native
+
+        return bool(shrike_native.derived_fts5_probe())
 
     def close(self) -> None:
         self._rust.close()
@@ -379,12 +388,18 @@ class DerivedTextStore:
     def _probe_fts5() -> bool:
         """Whether the selected engine's SQLite has FTS5 with the trigram tokenizer.
 
-        Constant True on the native path — rusqlite's bundled SQLite always
-        compiles them in, which is the #281 win (the probe stops being
-        load-bearing there); the stdlib engine still genuinely probes.
+        On the native path the probe asks the extension's linked SQLite: under
+        the bundled default that's constant True — the #281 win (the probe
+        stops being load-bearing there) — while a platform-linked build (#300)
+        genuinely probes the host library. The stdlib engine always probes. A
+        missing extension falls through to the stdlib probe, mirroring
+        ``_make_engine``'s degradation.
         """
         if native_derived_requested():
-            return NativeDerivedEngine.probe()
+            try:
+                return NativeDerivedEngine.probe()
+            except ImportError:
+                pass  # _make_engine degrades to the stdlib engine too
         return SqliteDerivedEngine.probe()
 
     def close(self) -> None:

@@ -6,16 +6,22 @@
 #   source .venv/bin/activate && scripts/build-native.sh
 #   pytest tests/unit -q          # facades now see the real extension
 #
-# Pass --release for an optimized build (default: debug, fastest compile).
+# Flags:
+#   --release         optimized build (default: debug, fastest compile)
+#   --system-sqlite   link the platform SQLite instead of bundling (#300);
+#                     FTS5/trigram availability is then probed at runtime
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PROFILE="debug"
 CARGO_FLAGS=()
-if [[ "${1:-}" == "--release" ]]; then
-  PROFILE="release"
-  CARGO_FLAGS+=(--release)
-fi
+for arg in "$@"; do
+  case "$arg" in
+    --release) PROFILE="release"; CARGO_FLAGS+=(--release) ;;
+    --system-sqlite) CARGO_FLAGS+=(--no-default-features) ;;
+    *) echo "unknown arg: $arg" >&2; exit 1 ;;
+  esac
+done
 
 (cd native && cargo build -p shrike-py ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"})
 

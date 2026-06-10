@@ -83,9 +83,23 @@ class TestNativeDerivedEngine:
         _assert_store_serves(reopened)
         reopened.close()
 
-    def test_probe_is_constant_true_on_native_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_probe_passes_on_native_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Under the default (bundled-SQLite) build the native probe must pass —
+        # the #281 guarantee. A platform-linked build (#300) probes the host
+        # library instead; this dev/CI build is the bundled one.
+        import shrike_native
+
         monkeypatch.setenv("SHRIKE_NATIVE_DERIVED", "1")
         assert DerivedTextStore._probe_fts5() is True
+        assert shrike_native.derived_fts5_probe() is True
+
+    def test_bundled_flag_matches_probe_guarantee(self) -> None:
+        # Diagnostics surface (#300): when the build claims bundled SQLite, the
+        # probe may never fail; otherwise it merely reports the host library.
+        import shrike_native
+
+        if shrike_native.derived_sqlite_bundled():
+            assert shrike_native.derived_fts5_probe() is True
 
     def test_missing_extension_degrades_to_stdlib_engine(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

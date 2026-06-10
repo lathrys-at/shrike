@@ -13,10 +13,16 @@ description = "The Shrike PyO3 binding crate — the ONLY crate that sees pyo3 (
 name = "shrike_py"
 crate-type = ["cdylib"]
 
+[features]
+# Forwarded to shrike-derived (#300): default = bundled SQLite (FTS5 + trigram
+# guaranteed). Build with --no-default-features to link the platform SQLite.
+default = ["bundled-sqlite"]
+bundled-sqlite = ["shrike-derived/bundled"]
+
 [dependencies]
 pyo3 = { workspace = true }
 shrike-compute = { path = "../shrike-compute" }
-shrike-derived = { path = "../shrike-derived" }
+shrike-derived = { path = "../shrike-derived", default-features = false }
 shrike-embed = { path = "../shrike-embed" }
 shrike-ffi = { workspace = true }
 shrike-index = { path = "../shrike-index" }

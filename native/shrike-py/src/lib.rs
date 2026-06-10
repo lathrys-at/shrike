@@ -228,6 +228,21 @@ impl ClipEmbedder {
 
 // ── Derived-text engine (#281) ──────────────────────────────────────────────
 
+/// Whether the linked SQLite has FTS5 with the trigram tokenizer (#300).
+/// Constant-true under the bundled default; genuinely probed under platform
+/// linkage (a build without the bundled-sqlite feature).
+#[pyfunction]
+fn derived_fts5_probe() -> bool {
+    shrike_derived::fts5_trigram_available()
+}
+
+/// Whether this build statically links the bundled SQLite (#300) — for
+/// status/diagnostics.
+#[pyfunction]
+fn derived_sqlite_bundled() -> bool {
+    shrike_derived::sqlite_bundled()
+}
+
 /// The native FTS5-trigram derived-text engine under the `DerivedTextStore`
 /// facade — rusqlite with a bundled SQLite, so FTS5 + trigram are always
 /// available. Storage + MATCH queries only; expression building, filtering,
@@ -494,6 +509,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ClipEmbedder>()?;
     m.add_class::<NativeIndexEngine>()?;
     m.add_class::<DerivedTextEngine>()?;
+    m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
+    m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;
     m.add_function(wrap_pyfunction!(rrf_fuse, m)?)?;
     m.add_function(wrap_pyfunction!(fused_search_text, m)?)?;
     m.add_function(wrap_pyfunction!(fused_add_text, m)?)?;
