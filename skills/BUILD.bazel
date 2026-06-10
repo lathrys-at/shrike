@@ -1,0 +1,30 @@
+load("@rules_pkg//pkg:mappings.bzl", "pkg_files", "strip_prefix")
+load("@rules_pkg//pkg:zip.bzl", "pkg_zip")
+
+# The anki-cards skill bundle (#245): a `.skill` zip whose root holds the skill
+# folder (anki-cards/SKILL.md, anki-cards/references/…) — the layout Claude Desktop /
+# claude.ai expect on upload. The Bazel equivalent of scripts/package-skill.py
+# (which stays for ad-hoc/local packaging); both ship the same tree. strip_prefix
+# .from_pkg() keeps the package-relative path (anki-cards/…) as the zip root, and the
+# excludes drop the root-level evals/ test scaffolding + build cruft.
+pkg_files(
+    name = "skill_files",
+    srcs = glob(
+        ["anki-cards/**"],
+        exclude = [
+            "anki-cards/evals/**",
+            "**/__pycache__/**",
+            "**/*.pyc",
+            "**/*.pyo",
+            "**/.DS_Store",
+        ],
+    ),
+    strip_prefix = strip_prefix.from_pkg(),
+)
+
+pkg_zip(
+    name = "skill",
+    srcs = [":skill_files"],
+    package_file_name = "anki-cards.skill",
+    visibility = ["//visibility:public"],
+)
