@@ -539,8 +539,12 @@ class VectorIndex:
 
         fused = self._fused_text_handles()
         if fused is not None:
-            with self._lock:
-                rankings = self._fused_search(fused, texts, top_k, modalities=(TEXT,))
+            # No orchestrator lock here: the fused call embeds inside it, and
+            # holding the lock across an embed would serialize searches against
+            # adds for the embed's whole duration (the non-fused path embeds
+            # outside the lock for the same reason). The engine's internal lock
+            # keeps the index read consistent.
+            rankings = self._fused_search(fused, texts, top_k, modalities=(TEXT,))
             return [r.get(TEXT, []) for r in rankings]
 
         vectors = self._embedding.embed_texts(texts)  # type: ignore[union-attr]
@@ -561,7 +565,7 @@ class VectorIndex:
         *,
         modalities: tuple[str, ...] | None = None,
     ) -> list[dict[str, list[dict[str, Any]]]]:
-        """Embed + rank in one GIL-released native call (#274); caller holds the lock."""
+        """Embed + rank in one GIL-released native call (#274); engine-locked internally."""
         import shrike_native
 
         native_embedder, native_engine = handles
@@ -603,8 +607,8 @@ class VectorIndex:
 
         fused = self._fused_text_handles()
         if fused is not None:
-            with self._lock:
-                return self._fused_search(fused, texts, top_k)
+            # Lock-free like search() above — see the comment there.
+            return self._fused_search(fused, texts, top_k)
 
         vectors = self._embedding.embed_texts(texts)  # type: ignore[union-attr]
         query_array = np.array(vectors, dtype=np.float32)

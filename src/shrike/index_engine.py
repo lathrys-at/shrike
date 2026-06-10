@@ -460,7 +460,10 @@ class NativeIndexEngine:
 
     @property
     def ndim(self) -> int | None:
-        return self._rust.ndim()
+        # Explicit conversion: in an env without the extension (CI's lint job),
+        # shrike_native resolves to Any and a bare return trips no-any-return.
+        value = self._rust.ndim()
+        return None if value is None else int(value)
 
     def modality_sizes(self) -> dict[str, int]:
         return dict(self._rust.modality_sizes())
