@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -40,6 +41,15 @@ from tests.integration.model_cache import (
     cached_onnx_model_dir,
     download_with_retry,
 )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the markers pyproject declares, so they're known under Bazel too —
+    pyproject's [tool.pytest.ini_options] isn't read when the rootdir is the
+    runfiles tree. A harmless duplicate registration on the pip path."""
+    config.addinivalue_line("markers", "integration: spawns a server over HTTP")
+    config.addinivalue_line("markers", "embedding: requires llama-server and a model")
+
 
 # -- Per-test mutation tracking (drives the cheap collection reset) -----------
 #
@@ -233,6 +243,27 @@ class CLIRunner:
         return data
 
 
+def _server_launch_cmd() -> list[str]:
+    """Base argv to launch a Shrike server, abstracted over the runtime.
+
+    Under Bazel, `-m shrike.server` against the sandbox's import layout isn't
+    reliable, so resolve the //bin:server py_binary through runfiles and run it
+    directly (it's a data dep of this conftest's target). Under plain pytest, use
+    the current interpreter's `-m shrike.server` — unchanged behaviour, so the
+    pip path is untouched (coexistence).
+    """
+    if os.environ.get("RUNFILES_DIR") or os.environ.get("RUNFILES_MANIFEST_FILE"):
+        try:
+            from python.runfiles import runfiles
+        except ImportError:
+            pass
+        else:
+            server = runfiles.Create().Rlocation("_main/bin/server")
+            if server and os.path.exists(server):
+                return [server]
+    return [sys.executable, "-m", "shrike.server"]
+
+
 @pytest.fixture(scope="session")
 def server_factory(tmp_path_factory: pytest.TempPathFactory):
     """Factory that creates isolated server instances.
@@ -263,9 +294,7 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         url = f"http://127.0.0.1:{port}/mcp"
 
         cmd = [
-            sys.executable,
-            "-m",
-            "shrike.server",
+            *_server_launch_cmd(),
             "--collection",
             collection_path,
             "--port",
