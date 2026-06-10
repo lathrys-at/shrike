@@ -14,7 +14,7 @@ are all backend-agnostic — they only ever call ``embed_texts`` and read
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -110,4 +110,91 @@ class EmbedderBackend(Protocol):
 
     def health(self) -> dict[str, Any]:
         """Status dict for the ``/status`` endpoint (carries at least ``available``)."""
+        ...
+
+
+@runtime_checkable
+class IndexEngine(Protocol):
+    """The storage engine under the ``VectorIndex`` orchestrator (#267).
+
+    **Frozen as the future FFI surface** (#273): the native ``shrike-index``
+    crate implements this verbatim, so the calls are coarse and batched,
+    trafficking only in i64 key arrays, f32 vector arrays (numpy or nested
+    sequences), and small JSON-able dicts — never live Python objects. The
+    orchestrator keeps everything that is *policy*: the state machine, drift
+    detection, the reconcile hash-diff and its fallback ladder, background
+    threads, and metadata persistence. Implementations are instance-per-space
+    with no global state (#232's multi-space manager is "make N engines").
+
+    Engine quirks are part of the contract (pinned by the unit suite): the
+    phantom ``(0, 0)`` hit on an empty index is filtered inside
+    ``search_by_modality``; multi-key dedup is min-distance-per-note (== max-sim
+    over a note's vectors); ``remove`` returns the count removed from the *text*
+    sub-index.
+    """
+
+    @property
+    def size(self) -> int:
+        """Total vectors across every modality sub-index."""
+        ...
+
+    @property
+    def ndim(self) -> int | None:
+        """The shared vector dimension, or None before the first add/restore."""
+        ...
+
+    def modality_sizes(self) -> dict[str, int]:
+        """Vector count per loaded modality (a created-but-empty sub-index counts, at 0)."""
+        ...
+
+    def ensure(self, modality: str, ndim: int) -> None:
+        """Create the (empty) sub-index for a modality if it doesn't exist yet."""
+        ...
+
+    def clear(self) -> None:
+        """Drop every in-memory sub-index (file deletion is the orchestrator's)."""
+        ...
+
+    def restore(self, path: str) -> bool:
+        """Load sub-index files under ``path``; False (and empty) on a corrupt present file."""
+        ...
+
+    def save(self, path: str) -> None:
+        """Persist every loaded sub-index under ``path``; delete stale modality files."""
+        ...
+
+    def add(self, modality: str, keys: Any, vectors: Any) -> None:
+        """Add f32 vectors under i64 keys to one modality (pure add — no replace)."""
+        ...
+
+    def remove(self, keys: Any) -> int:
+        """Remove the keys' vectors from every sub-index; returns the text-index count."""
+        ...
+
+    def search_by_modality(
+        self,
+        query_vectors: Any,
+        k: int,
+        *,
+        modalities: Sequence[str] | None = None,
+    ) -> list[dict[str, list[dict[str, Any]]]]:
+        """Per-query ``{modality: [{note_id, distance}, ...]}`` rankings (max-sim per note)."""
+        ...
+
+    def contains(self, key: int) -> bool:
+        """Whether a note is indexed (every indexed note has a text vector)."""
+        ...
+
+    def keys(self) -> list[int]:
+        """The distinct note ids in the text sub-index."""
+        ...
+
+    def get(self, key: int) -> Any:
+        """A note's stored text vector(s), or None if absent."""
+        ...
+
+    def calibrate_activation(
+        self, sample_size: int, k: int, min_count: int
+    ) -> dict[str, dict[str, float]]:
+        """Per-(non-text-)modality best-match ``{n, mean, std}`` stats (#201b), ``{}`` if N/A."""
         ...

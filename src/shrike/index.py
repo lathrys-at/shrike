@@ -32,18 +32,32 @@ from shrike.embedding_base import (
     TEXT,
     ImageExists,
     ImageResolver,
+    IndexEngine,
     NoteEmbedInput,
+)
+
+# The engine/orchestrator split (#267): the storage layer (USearch sub-indexes, dedup,
+# persistence, calibration) lives in index_engine; this module keeps the orchestration
+# (state machine, drift/reconcile policy, note hashing, background threads, IndexSaver).
+# SEARCH_OVERFETCH is re-exported for compatibility.
+from shrike.index_engine import (
+    SEARCH_OVERFETCH,
+    UsearchIndexEngine,
+    modality_file_paths,
 )
 
 if TYPE_CHECKING:
     from shrike.embedding_base import EmbedderBackend
 
 __all__ = [
+    "SEARCH_OVERFETCH",
     "ImageExists",
     "ImageResolver",
+    "IndexEngine",
     "IndexSaver",
     "IndexState",
     "NoteEmbedInput",
+    "UsearchIndexEngine",
     "VectorIndex",
     "activation_floor",
 ]
@@ -51,13 +65,6 @@ __all__ = [
 logger = logging.getLogger("shrike.index")
 
 BATCH_SIZE = 64
-# Search over-fetches this multiple of top_k raw vectors before deduping to distinct notes — a
-# note can contribute several vectors (text + images) under one key, so the raw top-k can dedup
-# to fewer notes. A small factor covers the common few-images-per-note case; a note with more
-# images than this could in principle still under-fill (a real but minor recall reduction vs a
-# single-vector index for image-heavy notes) — a smarter fetch bound is a rank-fusion concern,
-# #180.
-SEARCH_OVERFETCH = 4
 
 # On-disk index schema version, stamped into index.meta.json as "schema". v1 (implicit — the marker
 # absent) is the pre-#201a single-index layout: a 3c index stored a note's text + image vectors
@@ -68,9 +75,9 @@ SEARCH_OVERFETCH = 4
 # a v1 index can't unmix it, so it rebuilds once (see check_drift / reconcile).
 INDEX_SCHEMA_VERSION = 2
 
-# Modalities that get their own on-disk sub-index, in load order (TEXT first — it's mandatory and
-# keeps the original index.usearch filename). Extend this tuple when a new media modality lands.
-_INDEX_MODALITIES = (TEXT, IMAGE)
+# Calibration searches fetch this many neighbours per pseudo-query — k>1 so a pseudo-query whose
+# own image is the nearest hit still has a non-self hit to record.
+_CALIB_K = 5
 
 # Activation-gate calibration (#201b): a non-text modality's ranking only contributes to search
 # fusion when its best match for a query meaningfully beats that modality's *typical* best match,
@@ -143,12 +150,9 @@ class VectorIndex:
         self._embedding = backend
         self._read_image: ImageResolver | None = None
         self._image_exists_fn: ImageExists | None = None
-        # One USearch sub-index per modality (TEXT, IMAGE), each keyed by note_id. Split because a
-        # USearch hit reveals only the note_id, not which vector matched — separate indexes are the
-        # only way to rank a query per modality (see search_by_modality). The TEXT index persists as
-        # index.usearch (back-compat with the pre-#201a single index); IMAGE as index.image.usearch.
-        self._indexes: dict[str, Any] = {}
-        self._ndim: int | None = None
+        # The storage engine (#267): per-modality USearch sub-indexes, dedup, file persistence,
+        # calibration. The orchestrator (this class) holds policy and delegates storage to it.
+        self._engine = UsearchIndexEngine()
         self._col_mod: int | None = None
         self._model_id: str | None = None
         # On-disk schema of the loaded index (INDEX_SCHEMA_VERSION for a freshly-built one). A v1
@@ -189,19 +193,25 @@ class VectorIndex:
     @property
     def size(self) -> int:
         """Total vectors across every modality sub-index (text + images)."""
-        return sum(len(idx) for idx in self._indexes.values())
+        return self._engine.size
 
-    def _modality_path(self, modality: str) -> Path:
-        """On-disk file for a modality's sub-index.
+    @property
+    def _indexes(self) -> dict[str, Any]:
+        """The engine's live per-modality sub-index map.
 
-        TEXT keeps the original ``index.usearch`` name so a pre-#201a index loads unchanged as the
-        text sub-index; other modalities get ``index.<modality>.usearch`` (``index.image.usearch``).
+        Deliberately exposed (and assignable) as the pre-split attribute: a handful of unit
+        tests simulate on-disk layouts by poking it directly, and that surface is part of the
+        frozen ``VectorIndex`` contract. Production code goes through the engine API.
         """
-        return self._index_path if modality == TEXT else self._dir / f"index.{modality}.usearch"
+        return self._engine._indexes
+
+    @_indexes.setter
+    def _indexes(self, value: dict[str, Any]) -> None:
+        self._engine._indexes = value
 
     @property
     def ndim(self) -> int | None:
-        return self._ndim
+        return self._engine.ndim
 
     @property
     def pending_changes(self) -> int:
@@ -299,7 +309,7 @@ class VectorIndex:
 
         try:
             meta = json.loads(self._meta_path.read_text())
-            self._ndim = meta["ndim"]
+            _ = meta["ndim"]  # ndim is mandatory — a meta without it is corrupt
             self._col_mod = meta.get("col_mod")
             self._model_id = meta.get("model_id")
             # marker absent → pre-#201a (v1) single-index layout
@@ -312,28 +322,16 @@ class VectorIndex:
             logger.warning("Corrupt index metadata at %s: %s", self._meta_path, e)
             return
 
-        from usearch.index import Index
-
-        # The TEXT sub-index (index.usearch) is mandatory — a pre-#201a file restores here directly.
-        # Every other modality's file is optional: a text-only collection simply has none. A corrupt
-        # *present* file clears everything (so the next check_drift forces a full rebuild) rather
-        # than silently serving from a half-loaded index.
-        for modality in _INDEX_MODALITIES:
-            path = self._modality_path(modality)
-            if not path.exists():
-                continue
-            try:
-                self._indexes[modality] = Index.restore(str(path))
-            except Exception as e:
-                logger.warning("Failed to load %s index from %s: %s", modality, path, e)
-                self._indexes = {}
-                self._ndim = None
-                return
+        # The engine restores whatever modality files are present (a corrupt present file clears
+        # everything, so the next check_drift forces a full rebuild rather than silently serving
+        # from a half-loaded index) and re-derives ndim from the loaded text index.
+        if not self._engine.restore(str(self._dir)):
+            return
 
         logger.info(
             "Loaded vector index: %d vectors, %d dims (schema v%d)",
             self.size,
-            self._ndim,
+            self.ndim,
             self._schema,
         )
 
@@ -347,32 +345,6 @@ class VectorIndex:
                 }
             except (json.JSONDecodeError, ValueError) as e:
                 logger.warning("Corrupt index hashes at %s: %s", self._hashes_path, e)
-
-    def _ensure_index(self, ndim: int, modality: str) -> Any:
-        """Create the USearch sub-index for a modality if it doesn't exist yet."""
-        existing = self._indexes.get(modality)
-        if existing is not None:
-            return existing
-
-        from usearch.index import Index
-
-        self._ndim = ndim
-        # "cos" is scale-invariant — it divides by vector norms per distance
-        # computation, so unnormalized embeddings rank and score identically to
-        # normalized ones (verified on usearch 2.25.3). That makes llama-server's
-        # --embd-normalize moot here; normalization is deliberately *not* a typed
-        # setting. If the metric ever changes to one that isn't scale-invariant
-        # (l2sq, ip), normalization becomes vector-affecting and must be typed +
-        # folded into model_id like pooling. All modality sub-indexes share one
-        # ndim — text and image vectors live in the same CLIP space.
-        # multi=True: a note maps to several vectors under one note_id key — its single text vector
-        # in the text index, one vector per image in the image index — so remove(note_id) drops them
-        # all and search dedups multi-hits back to one result per note.
-        idx = Index(ndim=ndim, metric="cos", dtype="f32", multi=True)
-        self._indexes[modality] = idx
-        self._dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Created new %s sub-index: %d dims", modality, ndim)
-        return idx
 
     def materialize_empty(self, ndim: int, col_mod: int, model_id: str | None) -> None:
         """Create an empty, ready index for an empty collection.
@@ -390,7 +362,8 @@ class VectorIndex:
         if self._indexes:
             return
         with self._lock:
-            self._ensure_index(ndim, TEXT)
+            self._engine.ensure(TEXT, ndim)
+            self._dir.mkdir(parents=True, exist_ok=True)
             if self._note_hashes is None:
                 self._note_hashes = {}
             self._col_mod = col_mod
@@ -445,22 +418,19 @@ class VectorIndex:
                         )
 
             with self._lock:
-                ndim = text_array.shape[1]
-                tidx = self._ensure_index(ndim, TEXT)
-                tidx.remove(note_ids_arr)
-                tidx.add(note_ids_arr, text_array)
-                # Drop any stale image vectors for these notes first — a re-add may have changed or
-                # dropped a note's images — then add the fresh set. The remove is unconditional so a
-                # note that lost all its images doesn't keep orphaned image vectors.
-                existing_img = self._indexes.get(IMAGE)
-                if existing_img is not None:
-                    existing_img.remove(note_ids_arr)
+                # Replace semantics: drop every existing vector for these notes first (text and
+                # any stale image vectors — a re-add may have changed or dropped a note's images,
+                # and the remove is unconditional so a note that lost all its images doesn't keep
+                # orphaned ones), then add the fresh set.
+                self._engine.remove(note_ids_arr)
+                self._engine.add(TEXT, note_ids_arr, text_array)
                 if img_vecs:
-                    iidx = self._ensure_index(ndim, IMAGE)
-                    iidx.add(
+                    self._engine.add(
+                        IMAGE,
                         np.array(img_keys, dtype=np.int64),
                         np.array(img_vecs, dtype=np.float32),
                     )
+                self._dir.mkdir(parents=True, exist_ok=True)
                 if self._note_hashes is not None:
                     for inp in batch:
                         self._note_hashes[int(inp.note_id)] = self._note_hash(
@@ -484,13 +454,9 @@ class VectorIndex:
         ids_arr = np.array(note_ids, dtype=np.int64)
         with self._lock:
             # Batch remove returns the count actually removed and ignores ids not in the index —
-            # no per-id membership check needed. Remove from every modality so a note's images go
-            # with its text.
-            removed = 0
-            for modality, idx in self._indexes.items():
-                count = int(idx.remove(ids_arr))
-                if modality == TEXT:
-                    removed = count
+            # no per-id membership check needed. The engine removes from every modality so a
+            # note's images go with its text.
+            removed = self._engine.remove(ids_arr)
             if self._note_hashes is not None:
                 for nid in note_ids:
                     self._note_hashes.pop(int(nid), None)
@@ -498,36 +464,6 @@ class VectorIndex:
         self._dirty += removed
         logger.debug("Removed %d notes from index (total vectors: %d)", removed, self.size)
         return removed
-
-    def _dedup_per_note(
-        self, raw: Any, n_queries: int, top_k: int, index_size: int
-    ) -> list[list[dict[str, Any]]]:
-        """Reduce one sub-index's batched matches to top_k distinct notes per query (max-sim).
-
-        ``raw`` is what ``Index.search`` returns — ``Matches`` for one query, ``BatchMatches``
-        (indexable per query) for several. Matches come back nearest-first, so the first time a
-        note_id appears is its best (smallest) distance — its other vectors under that key (a note's
-        several images) are dropped. That min-distance-per-note *is* the max-sim-over-items
-        aggregation. Truncate to top_k distinct notes.
-        """
-        per_query = [raw] if n_queries == 1 else [raw[i] for i in range(n_queries)]
-        out: list[list[dict[str, Any]]] = []
-        for matches in per_query:
-            result_list: list[dict[str, Any]] = []
-            seen: set[int] = set()
-            for key, dist in zip(matches.keys, matches.distances, strict=True):
-                nid = int(key)
-                if nid in seen:
-                    continue
-                # An empty USearch index can return a phantom (key 0, distance 0) match — drop it.
-                if nid == 0 and float(dist) == 0.0 and index_size == 0:
-                    continue
-                seen.add(nid)
-                result_list.append({"note_id": nid, "distance": float(dist)})
-                if len(result_list) >= top_k:
-                    break
-            out.append(result_list)
-        return out
 
     def search(
         self,
@@ -546,22 +482,12 @@ class VectorIndex:
         vectors = self._embedding.embed_texts(texts)  # type: ignore[union-attr]
         query_array = np.array(vectors, dtype=np.float32)
 
-        # Over-fetch so the dedup-to-distinct-notes (a note can match via several of its vectors)
-        # still yields up to top_k notes; usearch caps k at the index size internally.
-        fetch = max(top_k * SEARCH_OVERFETCH, top_k)
-
         with self._lock:
-            # Look up the text index *inside* the lock: a background rebuild can clear self._indexes
-            # between the lock-free `available` check / embed_texts round-trip above and here, so a
-            # bare subscript would KeyError. Guarding with .get mirrors search_by_modality (which
-            # also reads _indexes under the lock) and contains() — mid-rebuild degrades to empty.
-            text_idx = self._indexes.get(TEXT)
-            if text_idx is None:
-                return [[] for _ in texts]
-            # One batched search over all queries — usearch parallelises across them internally,
-            # versus a Python loop of single-query searches.
-            raw = text_idx.search(query_array, fetch)
-            return self._dedup_per_note(raw, len(texts), top_k, len(text_idx))
+            # The engine reads its sub-index map under its own lock, so a background rebuild
+            # clearing the engine between the lock-free `available` check / embed_texts
+            # round-trip above and here degrades to empty results, never a KeyError.
+            rankings = self._engine.search_by_modality(query_array, top_k, modalities=(TEXT,))
+        return [r.get(TEXT, []) for r in rankings]
 
     def search_by_modality(
         self,
@@ -583,19 +509,9 @@ class VectorIndex:
 
         vectors = self._embedding.embed_texts(texts)  # type: ignore[union-attr]
         query_array = np.array(vectors, dtype=np.float32)
-        fetch = max(top_k * SEARCH_OVERFETCH, top_k)
 
-        rankings: list[dict[str, list[dict[str, Any]]]] = [{} for _ in texts]
         with self._lock:
-            for modality, idx in self._indexes.items():
-                if len(idx) == 0:
-                    continue
-                raw = idx.search(query_array, fetch)
-                per_query = self._dedup_per_note(raw, len(texts), top_k, len(idx))
-                for i, ranking in enumerate(per_query):
-                    if ranking:
-                        rankings[i][modality] = ranking
-        return rankings
+            return self._engine.search_by_modality(query_array, top_k)
 
     def _calibrate_activation(self) -> None:
         """Recompute per-(non-text-)modality best-match statistics for the activation gate (#201b).
@@ -609,61 +525,18 @@ class VectorIndex:
         ``CALIB_MIN`` non-self best-matches (or an empty sub-index) gets no stats → gate disabled.
         """
         with self._lock:
-            text_idx = self._indexes.get(TEXT)
-            non_text = {m: idx for m, idx in self._indexes.items() if m != TEXT and len(idx) > 0}
-            if text_idx is None or len(text_idx) == 0 or not non_text:
+            sizes = self._engine.modality_sizes()
+            has_text = sizes.get(TEXT, 0) > 0
+            has_non_text = any(m != TEXT and n > 0 for m, n in sizes.items())
+            if not has_text or not has_non_text:
                 self._activation_stats = {}
                 return  # text-only / empty → nothing to calibrate; don't mark attempted
             # A genuine multimodal calibration ran (even if it ends up below CALIB_MIN): record it
             # so ensure_calibrated treats this as one-shot rather than re-sampling every boot.
             self._calibration_attempted = True
-
-            all_keys = np.array([int(k) for k in text_idx.keys], dtype=np.int64)
-            rng = np.random.default_rng(0)  # deterministic → calibration is stable across runs
-            sample = (
-                rng.choice(all_keys, size=CALIB_SAMPLE, replace=False)
-                if len(all_keys) > CALIB_SAMPLE
-                else all_keys
+            self._activation_stats = self._engine.calibrate_activation(
+                CALIB_SAMPLE, _CALIB_K, CALIB_MIN
             )
-
-            # Pull the sampled text vectors straight from the index (one per note in the text idx).
-            query_rows: list[np.ndarray] = []
-            query_ids: list[int] = []
-            for k in sample:
-                kid = int(k)
-                vec = text_idx.get(kid)
-                if vec is None:
-                    continue
-                query_rows.append(np.atleast_2d(np.asarray(vec, dtype=np.float32))[0])
-                query_ids.append(kid)
-            if not query_rows:
-                self._activation_stats = {}
-                return
-            query_array = np.array(query_rows, dtype=np.float32)
-
-            stats: dict[str, dict[str, float]] = {}
-            for modality, idx in non_text.items():
-                # k>1 so a pseudo-query whose own image is the nearest hit still has a non-self hit.
-                raw = idx.search(query_array, min(5, len(idx)))
-                per_query = (
-                    [raw] if len(query_ids) == 1 else [raw[i] for i in range(len(query_ids))]
-                )
-                best_sims: list[float] = []
-                for qi, matches in enumerate(per_query):
-                    self_id = query_ids[qi]
-                    for key, dist in zip(matches.keys, matches.distances, strict=True):
-                        if int(key) == self_id:
-                            continue  # exclude the pseudo-query's own note (self-match)
-                        best_sims.append(1.0 - float(dist))
-                        break  # nearest non-self hit = this pseudo-query's best match
-                if len(best_sims) >= CALIB_MIN:
-                    arr = np.array(best_sims, dtype=np.float64)
-                    stats[modality] = {
-                        "n": float(len(best_sims)),
-                        "mean": float(arr.mean()),
-                        "std": float(arr.std()),
-                    }
-            self._activation_stats = stats
         logger.info("Calibrated activation stats: %s", self._activation_stats or "none")
 
     def ensure_calibrated(self) -> None:
@@ -673,7 +546,8 @@ class VectorIndex:
         pre-#201b index — loaded without ``activation`` in its meta — turn the gate on without
         waiting for the next drift rebuild. Cheap (a sample of HNSW searches); safe to call at boot.
         """
-        has_non_text = any(m != TEXT and len(idx) > 0 for m, idx in self._indexes.items())
+        sizes = self._engine.modality_sizes()
+        has_non_text = any(m != TEXT and n > 0 for m, n in sizes.items())
         if not has_non_text or self._calibration_attempted:
             return
         self._calibrate_activation()
@@ -682,18 +556,15 @@ class VectorIndex:
 
     def contains(self, note_id: int) -> bool:
         """Check if a note ID is in the index (every indexed note has a text vector)."""
-        text_idx = self._indexes.get(TEXT)
-        if text_idx is None:
-            return False
-        return note_id in text_idx
+        return self._engine.contains(note_id)
 
     def save(self) -> None:
         """Persist every modality sub-index and the shared metadata to disk."""
-        if not self._indexes or self._ndim is None:
+        if not self._indexes or self.ndim is None:
             return
 
         self._dir.mkdir(parents=True, exist_ok=True)
-        meta: dict[str, Any] = {"ndim": self._ndim, "schema": INDEX_SCHEMA_VERSION}
+        meta: dict[str, Any] = {"ndim": self.ndim, "schema": INDEX_SCHEMA_VERSION}
         if self._col_mod is not None:
             meta["col_mod"] = self._col_mod
         if self._model_id is not None:
@@ -705,15 +576,10 @@ class VectorIndex:
         # /index/save) can't interleave a sub-index write with the metadata write
         # and leave a torn meta.json. The files are small; the lock is brief.
         with self._lock:
-            for modality, idx in self._indexes.items():
-                idx.save(str(self._modality_path(modality)))
-            # Delete a sub-index file for a modality no longer present (e.g. a CLIP→text-only
-            # backend switch rebuilt without images) so it isn't reloaded as a phantom on restart.
-            for modality in _INDEX_MODALITIES:
-                if modality not in self._indexes:
-                    stale = self._modality_path(modality)
-                    if stale.exists():
-                        stale.unlink()
+            # The engine writes the sub-index files (and deletes a stale one for a modality no
+            # longer present — e.g. a CLIP→text-only backend switch rebuilt without images — so
+            # it isn't reloaded as a phantom on restart).
+            self._engine.save(str(self._dir))
             self._meta_path.write_text(json.dumps(meta))
             if self._note_hashes is not None:
                 self._hashes_path.write_text(json.dumps(self._note_hashes))
@@ -724,16 +590,14 @@ class VectorIndex:
     def clear(self) -> None:
         """Remove all vectors and delete the index files."""
         with self._lock:
-            self._indexes = {}
-            self._ndim = None
+            self._engine.clear()
             self._model_id = None
             self._note_hashes = None
-        # Unlink every *known* modality's file (like save()), not just the ones currently loaded —
-        # a present-but-unloaded sub-index file (e.g. a corrupt-restore early-return in _load left
-        # _indexes empty) would otherwise survive and reload as a phantom on the next startup.
-        # _modality_path(TEXT) is index.usearch, so the text file is covered.
-        paths = [self._modality_path(m) for m in _INDEX_MODALITIES]
-        paths += [self._meta_path, self._hashes_path]
+        # Unlink every *known* modality's file (like the engine's save()), not just the ones
+        # currently loaded — a present-but-unloaded sub-index file (e.g. a corrupt-restore
+        # early-return in _load left the engine empty) would otherwise survive and reload as a
+        # phantom on the next startup. modality_file_paths covers index.usearch (TEXT) too.
+        paths = modality_file_paths(self._dir) + [self._meta_path, self._hashes_path]
         for path in paths:
             if path.exists():
                 path.unlink()
@@ -801,8 +665,7 @@ class VectorIndex:
 
         try:
             with self._lock:
-                self._indexes = {}
-                self._ndim = None
+                self._engine.clear()
                 self._schema = INDEX_SCHEMA_VERSION  # rebuilds always land on the current layout
                 # Start fresh — add() repopulates per-note hashes as it embeds.
                 self._note_hashes = {}
@@ -822,7 +685,7 @@ class VectorIndex:
             self._calibrate_activation()  # stats land in the same meta write as the vectors
             self.save()
             self._state = IndexState.READY
-            logger.info("Index rebuild complete: %d vectors, %d dims", self.size, self._ndim or 0)
+            logger.info("Index rebuild complete: %d vectors, %d dims", self.size, self.ndim or 0)
         except Exception as e:
             self._state = IndexState.ERROR
             self._build_error = str(e)
@@ -956,7 +819,7 @@ class VectorIndex:
             "state": self._state.value,
             "available": self.available,
             "size": self.size,
-            "ndim": self._ndim,
+            "ndim": self.ndim,
             "path": str(self._dir),
         }
         if self._col_mod is not None:
