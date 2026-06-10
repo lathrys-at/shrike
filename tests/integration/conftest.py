@@ -51,6 +51,112 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "embedding: requires llama-server and a model")
 
 
+# -- Bazel: assemble the pinned model externals into a SHRIKE_TEST_MODEL_DIR tree -
+#
+# Under `bazel test`, the embedding models are pinned http_file externals (see
+# MODULE.bazel) rather than HuggingFace downloads. This copies whichever are in
+# the test's runfiles into the <dir_name>/<file> layout model_cache expects and
+# points SHRIKE_TEST_MODEL_DIR at it — so model_cache finds them present and never
+# downloads. No-op off Bazel, when SHRIKE_TEST_MODEL_DIR is already set (the pip
+# lane / CI), or for a target with no model externals (the non-embedding suite),
+# so the pip path is untouched.
+_BAZEL_MODELS: dict[str, list[str]] = {
+    "model_minilm_int8_onnx/file/model.onnx": ["all-MiniLM-L6-v2-onnx-int8/model.onnx"],
+    "model_minilm_tokenizer/file/tokenizer.json": [
+        "all-MiniLM-L6-v2-onnx-int8/tokenizer.json",
+        "all-MiniLM-L6-v2-onnx-fp32/tokenizer.json",
+    ],
+    "model_minilm_fp32_onnx/file/model.onnx": ["all-MiniLM-L6-v2-onnx-fp32/model.onnx"],
+    "model_roberta_int8_onnx/file/model.onnx": ["all-distilroberta-v1-onnx-int8/model.onnx"],
+    "model_roberta_tokenizer/file/tokenizer.json": [
+        "all-distilroberta-v1-onnx-int8/tokenizer.json",
+    ],
+    "model_clip_text_onnx/file/text_model_quantized.onnx": [
+        "clip-vit-base-patch32-onnx/text_model_quantized.onnx",
+    ],
+    "model_clip_vision_onnx/file/vision_model_quantized.onnx": [
+        "clip-vit-base-patch32-onnx/vision_model_quantized.onnx",
+    ],
+    "model_clip_tokenizer/file/tokenizer.json": ["clip-vit-base-patch32-onnx/tokenizer.json"],
+    "model_clip_preprocessor/file/preprocessor_config.json": [
+        "clip-vit-base-patch32-onnx/preprocessor_config.json",
+    ],
+    "model_gguf_minilm/file/all-MiniLM-L6-v2-Q4_K_M.gguf": ["all-MiniLM-L6-v2-Q4_K_M.gguf"],
+}
+
+# llama-server binary externals (per-platform; only the host's is in a given test's
+# runfiles). The conftest puts it on PATH (so the requires_llama_server gate and the
+# server's _find_llama_server both see it) + the lib path (the .dylib/.so sit beside
+# the binary). No-op off Bazel / when llama-server is already available (pip lane).
+_BAZEL_LLAMA_REPOS = (
+    "llama_server_macos_arm64",
+    "llama_server_macos_amd64",
+    "llama_server_linux_amd64",
+    "llama_server_linux_arm64",
+)
+
+
+def _setup_bazel_llama_server() -> None:
+    if os.environ.get("LLAMA_SERVER_PATH") or shutil.which("llama-server"):
+        return
+    if not (os.environ.get("RUNFILES_DIR") or os.environ.get("RUNFILES_MANIFEST_FILE")):
+        return
+    try:
+        from python.runfiles import runfiles
+    except ImportError:
+        return
+    r = runfiles.Create()
+    if r is None:
+        return
+    for repo in _BAZEL_LLAMA_REPOS:
+        try:
+            loc = r.Rlocation(f"{repo}/llama-server")
+        except Exception:  # noqa: BLE001 - repo not in this target's mapping
+            continue
+        if not loc or not os.path.exists(loc):
+            continue
+        bindir = os.path.dirname(loc)
+        os.environ["LLAMA_SERVER_PATH"] = loc
+        os.environ["PATH"] = bindir + os.pathsep + os.environ.get("PATH", "")
+        # The shared libs are flat beside the binary.
+        for var in ("DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+            os.environ[var] = bindir + os.pathsep + os.environ.get(var, "")
+        return
+
+
+_setup_bazel_llama_server()
+
+
+def _populate_bazel_model_dir() -> None:
+    if os.environ.get("SHRIKE_TEST_MODEL_DIR"):
+        return  # already provided (pip lane / CI) — respect it
+    if not (os.environ.get("RUNFILES_DIR") or os.environ.get("RUNFILES_MANIFEST_FILE")):
+        return  # not under Bazel
+    try:
+        from python.runfiles import runfiles
+    except ImportError:
+        return
+    r = runfiles.Create()
+    if r is None:
+        return
+    model_root = Path(os.environ["TEST_TMPDIR"]) / "shrike-models"
+    found = False
+    for src, dests in _BAZEL_MODELS.items():
+        loc = r.Rlocation(src)
+        if not loc or not os.path.exists(loc):
+            continue
+        for dest in dests:
+            target = model_root / dest
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                shutil.copy(loc, target)
+        found = True
+    if found:
+        os.environ["SHRIKE_TEST_MODEL_DIR"] = str(model_root)
+
+
+_populate_bazel_model_dir()
+
 # -- Per-test mutation tracking (drives the cheap collection reset) -----------
 #
 # The shared-collection reset runs after every test. Enumerating the collection
@@ -258,9 +364,15 @@ def _server_launch_cmd() -> list[str]:
         except ImportError:
             pass
         else:
-            server = runfiles.Create().Rlocation("_main/bin/server")
-            if server and os.path.exists(server):
-                return [server]
+            r = runfiles.Create()
+            if r is not None:
+                # Prefer the backend-equipped server (onnx/clip in-process) when a
+                # test data-deps it; else the lean default (handles llama, which is
+                # a subprocess).
+                for name in ("_main/bin/server_embedding", "_main/bin/server"):
+                    server = r.Rlocation(name)
+                    if server and os.path.exists(server):
+                        return [server]
     return [sys.executable, "-m", "shrike.server"]
 
 

@@ -58,3 +58,121 @@ crate.from_cargo(
     manifests = ["//native/_demo:Cargo.toml"],
 )
 use_repo(crate, "crates")
+
+# ── Embedding-test model fixtures as pinned externals (#244 Phase 2c) ────────
+# The embedding tests' models, fetched once + checksum-verified instead of
+# downloaded from HuggingFace at test time (removing the #83/#93 flake). Lazily
+# fetched — only an embedding test that data-deps one pulls it. The sha256s are
+# the HuggingFace LFS oids. The integration conftest assembles these into a
+# SHRIKE_TEST_MODEL_DIR tree under Bazel; model_cache then finds them present.
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "model_minilm_int8_onnx",
+    downloaded_file_path = "model.onnx",
+    sha256 = "afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1",
+    urls = ["https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx"],
+)
+
+http_file(
+    name = "model_minilm_tokenizer",
+    downloaded_file_path = "tokenizer.json",
+    sha256 = "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0",
+    urls = ["https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json"],
+)
+
+http_file(
+    name = "model_minilm_fp32_onnx",
+    downloaded_file_path = "model.onnx",
+    sha256 = "759c3cd2b7fe7e93933ad23c4c9181b7396442a2ed746ec7c1d46192c469c46e",
+    urls = ["https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx"],
+)
+
+http_file(
+    name = "model_roberta_int8_onnx",
+    downloaded_file_path = "model.onnx",
+    sha256 = "0d293f3930cd803878f1d3aaebdd52817e5e2f76377d706e2a5543ee4561c57a",
+    urls = ["https://huggingface.co/Xenova/all-distilroberta-v1/resolve/main/onnx/model_quantized.onnx"],
+)
+
+http_file(
+    name = "model_roberta_tokenizer",
+    downloaded_file_path = "tokenizer.json",
+    sha256 = "63735ef382776e869c0ee50f8e999ab19111bb794f8a451559e611077dfe7f25",
+    urls = ["https://huggingface.co/Xenova/all-distilroberta-v1/resolve/main/tokenizer.json"],
+)
+
+http_file(
+    name = "model_clip_text_onnx",
+    downloaded_file_path = "text_model_quantized.onnx",
+    sha256 = "73baab855d406190da9faa498cfedf65f15cf309f4cc7385b7b032e6d08e5c3a",
+    urls = ["https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model_quantized.onnx"],
+)
+
+http_file(
+    name = "model_clip_vision_onnx",
+    downloaded_file_path = "vision_model_quantized.onnx",
+    sha256 = "583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299",
+    urls = ["https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx"],
+)
+
+http_file(
+    name = "model_clip_tokenizer",
+    downloaded_file_path = "tokenizer.json",
+    sha256 = "f7f3b7af117d467b58374797691a6438d3e6b9e9cef800dfd5dced7f697a90cd",
+    urls = ["https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/tokenizer.json"],
+)
+
+http_file(
+    name = "model_clip_preprocessor",
+    downloaded_file_path = "preprocessor_config.json",
+    sha256 = "6f638fb9401a6d6296feff533ee7efe657b787c49f954f82f5906b36ef2a1b1f",
+    urls = ["https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/preprocessor_config.json"],
+)
+
+# The GGUF for the llama-server backend (test_embedding/test_semantic/test_backends).
+http_file(
+    name = "model_gguf_minilm",
+    downloaded_file_path = "all-MiniLM-L6-v2-Q4_K_M.gguf",
+    sha256 = "2ec4cee28a27a9c973d5f5230930d6ef6e52694bd2bc71be26a9bef5b1d755e6",
+    urls = ["https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-Q4_K_M.gguf"],
+)
+
+# The pinned llama-server binary (+ its shared libs, flat beside it) as a per-platform
+# http_archive — tag + shas from scripts/llama-server.lock. The conftest puts the
+# host one on PATH + the lib path for the embedding_server fixture. Lazily fetched.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+_LLAMA_FILES = 'filegroup(name = "files", srcs = glob(["**"]), visibility = ["//visibility:public"])'
+
+http_archive(
+    name = "llama_server_macos_arm64",
+    build_file_content = _LLAMA_FILES,
+    sha256 = "edf417cd8dd148fd423ea758953caa43376df98d8f027b7748ea0399a9a8023f",
+    strip_prefix = "llama-b9415",
+    urls = ["https://github.com/ggml-org/llama.cpp/releases/download/b9415/llama-b9415-bin-macos-arm64.tar.gz"],
+)
+
+http_archive(
+    name = "llama_server_macos_amd64",
+    build_file_content = _LLAMA_FILES,
+    sha256 = "7c07ab8bb59e249340ed15afe03d5f164521242942a406661d6c499efc186a84",
+    strip_prefix = "llama-b9415",
+    urls = ["https://github.com/ggml-org/llama.cpp/releases/download/b9415/llama-b9415-bin-macos-x64.tar.gz"],
+)
+
+http_archive(
+    name = "llama_server_linux_amd64",
+    build_file_content = _LLAMA_FILES,
+    sha256 = "df22e2447cd16dc2ae039d6dccd3b734efac109e315fa61ec8e1d5000bcbee00",
+    strip_prefix = "llama-b9415",
+    urls = ["https://github.com/ggml-org/llama.cpp/releases/download/b9415/llama-b9415-bin-ubuntu-x64.tar.gz"],
+)
+
+http_archive(
+    name = "llama_server_linux_arm64",
+    build_file_content = _LLAMA_FILES,
+    sha256 = "bf01d2ce3ea74402c757fa992388ef10987a6cdc0231b0c43353c1e5722ae22c",
+    strip_prefix = "llama-b9415",
+    urls = ["https://github.com/ggml-org/llama.cpp/releases/download/b9415/llama-b9415-bin-ubuntu-arm64.tar.gz"],
+)

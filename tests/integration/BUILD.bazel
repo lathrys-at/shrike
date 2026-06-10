@@ -4,11 +4,43 @@ load("//tools/bazel:defs.bzl", "pytest_test")
 
 package(default_testonly = True)
 
-# Integration conftest: spawns the server (//bin:server through runfiles —
-# _server_launch_cmd), the MCP/CLI clients, the shared-server + per-test reset
-# machinery. model_cache.py rides along (conftest imports it for the embedding
-# fixtures, exercised by the 2c embedding target). imports=["../.."] puts the repo
-# root on sys.path so `tests.integration.model_cache` resolves.
+# Pick the host's llama-server binary external (only it gets fetched).
+config_setting(
+    name = "_macos_arm64",
+    constraint_values = ["@platforms//os:macos", "@platforms//cpu:arm64"],
+)
+
+config_setting(
+    name = "_macos_amd64",
+    constraint_values = ["@platforms//os:macos", "@platforms//cpu:x86_64"],
+)
+
+config_setting(
+    name = "_linux_amd64",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+config_setting(
+    name = "_linux_arm64",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:arm64"],
+)
+
+alias(
+    name = "llama_server",
+    actual = select({
+        ":_macos_arm64": "@llama_server_macos_arm64//:files",
+        ":_macos_amd64": "@llama_server_macos_amd64//:files",
+        ":_linux_amd64": "@llama_server_linux_amd64//:files",
+        ":_linux_arm64": "@llama_server_linux_arm64//:files",
+    }),
+)
+
+# Integration conftest: spawns the server (//bin:server / //bin:server_embedding
+# through runfiles — _server_launch_cmd), the MCP/CLI clients, the shared-server +
+# per-test reset machinery, and (under Bazel) assembles the model externals into
+# SHRIKE_TEST_MODEL_DIR + puts llama-server on PATH. model_cache.py rides along.
+# imports=["../.."] puts the repo root on sys.path so tests.integration.model_cache
+# resolves.
 py_library(
     name = "conftest",
     srcs = [
@@ -24,11 +56,8 @@ py_library(
     ],
 )
 
-# One aggregate target: the non-embedding integration files run in a single action
-# with `-n auto` (xdist, the macro default), mirroring the pip
-# `pytest tests/integration -n auto` lane — the import + server-spawn cost is
-# amortized across the suite, not paid per file. The embedding-gated files
-# (llama-server/onnx/clip) are a separate `manual` target in 2c (#244).
+# Non-embedding integration: one aggregate target, `-n auto` (xdist), mirroring the
+# pip `pytest tests/integration -n auto` lane — import + server-spawn cost amortized.
 pytest_test(
     name = "integration",
     size = "large",
@@ -39,4 +68,45 @@ pytest_test(
         "test_tools.py",
     ],
     deps = [":conftest"],
+)
+
+# Embedding integration: one `manual` aggregate (so the per-PR //... lane never
+# fetches the hundreds of MB of model + llama-server externals; it runs in a
+# dedicated embedding lane, #262). Pulls every model as a pinned http_file and the
+# host llama-server as an http_archive; the conftest assembles them. Runs SERIALLY
+# (xdist=None): it's model-load-bound with session-scoped servers, so one process =
+# one llama boot + one load of each model, not N. //bin:server_embedding carries the
+# onnx/clip extras for the tests whose server loads a backend (test_backends).
+pytest_test(
+    name = "embedding",
+    size = "large",
+    srcs = [
+        "test_backends.py",
+        "test_clip_model.py",
+        "test_embedding.py",
+        "test_onnx_models.py",
+        "test_semantic.py",
+    ],
+    tags = ["manual"],
+    xdist = None,
+    deps = [
+        ":conftest",
+        requirement("onnxruntime"),
+        requirement("pillow"),
+        requirement("tokenizers"),
+    ],
+    data = [
+        ":llama_server",
+        "//bin:server_embedding",
+        "@model_clip_preprocessor//file",
+        "@model_clip_text_onnx//file",
+        "@model_clip_tokenizer//file",
+        "@model_clip_vision_onnx//file",
+        "@model_gguf_minilm//file",
+        "@model_minilm_fp32_onnx//file",
+        "@model_minilm_int8_onnx//file",
+        "@model_minilm_tokenizer//file",
+        "@model_roberta_int8_onnx//file",
+        "@model_roberta_tokenizer//file",
+    ],
 )

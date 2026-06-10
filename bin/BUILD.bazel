@@ -1,4 +1,5 @@
 load("@rules_python//python:defs.bzl", "py_binary")
+load("@shrike_pip//:requirements.bzl", "requirement")
 
 # Runnable entry points (thin launchers over //src/shrike:shrike). Kept in their
 # own package so a binary's output path never collides with a package subdir.
@@ -11,6 +12,25 @@ py_binary(
     main = "server.py",
     visibility = ["//visibility:public"],
     deps = ["//src/shrike:shrike"],
+)
+
+# The same server with the in-process embedding backends (onnx/clip) bundled, for
+# the embedding tests whose server loads one (`--embedding-backend onnx`). The
+# default //bin:server keeps these lazy/optional; this test-only variant makes
+# them importable in the spawned server. The integration conftest prefers it when
+# a test data-deps it (see _server_launch_cmd).
+py_binary(
+    name = "server_embedding",
+    srcs = ["server.py"],
+    main = "server.py",
+    testonly = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/shrike:shrike",
+        requirement("onnxruntime"),
+        requirement("pillow"),
+        requirement("tokenizers"),
+    ],
 )
 
 py_binary(
