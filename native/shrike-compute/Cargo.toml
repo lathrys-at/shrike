@@ -1,0 +1,16 @@
+[package]
+name = "shrike-compute"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Fused search/upsert composition: RRF + embed→index paths (#274)."
+
+[lib]
+name = "shrike_compute"
+
+# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py.
+[dependencies]
+shrike-ffi = { workspace = true }
+shrike-embed = { path = "../shrike-embed" }
+shrike-index = { path = "../shrike-index" }

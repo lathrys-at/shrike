@@ -13,6 +13,9 @@ __all__ = [
     "parallel_sum",
     "checked_div",
     "init_onnx_runtime",
+    "rrf_fuse",
+    "fused_search_text",
+    "fused_add_text",
     "OnnxTextEmbedder",
     "ClipEmbedder",
     "NativeIndexEngine",
@@ -34,6 +37,27 @@ def build_info() -> str: ...
 def parallel_sum(values: list[float]) -> float: ...
 def checked_div(a: float, b: float) -> float: ...
 def init_onnx_runtime(dylib_path: str) -> None: ...
+def rrf_fuse(
+    rankings: list[tuple[str, list[int]]],
+    weights: dict[str, float],
+    k: int = 60,
+    priority_signals: list[str] = ...,
+) -> list[tuple[int, float, list[tuple[str, int]]]]: ...
+def fused_search_text(
+    embedder: OnnxTextEmbedder,
+    engine: NativeIndexEngine,
+    texts: list[str],
+    k: int,
+    modalities: list[str] | None = None,
+) -> list[dict[str, tuple[list[int], list[float]]]]: ...
+def fused_add_text(
+    embedder: OnnxTextEmbedder,
+    engine: NativeIndexEngine,
+    modality: str,
+    keys: list[int],
+    texts: list[str],
+    chunk: int,
+) -> int: ...
 
 @final
 class OnnxTextEmbedder:

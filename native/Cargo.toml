@@ -11,6 +11,7 @@
 resolver = "2"
 members = [
     "_demo",
+    "shrike-compute",
     "shrike-derived",
     "shrike-embed",
     "shrike-ffi",

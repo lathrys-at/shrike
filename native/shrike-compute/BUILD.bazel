@@ -1,0 +1,24 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//native:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# Fused search/upsert composition (#274): the native rrf_fuse (parity-pinned
+# against search_fusion.py) + the embed→index fused paths. Pure Rust — NO pyo3.
+rust_library(
+    name = "shrike_compute",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        "//native/shrike-embed:shrike_embed",
+        "//native/shrike-ffi:shrike_ffi",
+        "//native/shrike-index:shrike_index",
+    ],
+)
+
+rust_test(
+    name = "shrike_compute_test",
+    size = "small",
+    crate = ":shrike_compute",
+)

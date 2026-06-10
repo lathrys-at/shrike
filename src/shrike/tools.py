@@ -49,7 +49,7 @@ from shrike.schemas import (
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
 )
-from shrike.search_fusion import rrf_fuse
+from shrike.search_fusion import make_search_pipeline
 
 logger = logging.getLogger("shrike.tools")
 
@@ -143,6 +143,11 @@ def register_tools(
     media_base_url: str | None = None,
 ) -> None:
     from urllib.parse import quote
+
+    # The fusion seam (#274): the reference (pure-Python rrf_fuse) pipeline by
+    # default; the native one when SHRIKE_NATIVE_COMPUTE is set. One instance
+    # per registration, closed over by search_notes.
+    pipeline = make_search_pipeline()
 
     from shrike.note_types import NoteTypeOpError
     from shrike.note_types import find_and_replace_note_types as _find_and_replace_note_types
@@ -721,7 +726,7 @@ def register_tools(
                     nid: lm for nid, lm in fuzzy_evidence.items() if nid not in exact_set
                 }
 
-            fused = rrf_fuse(
+            fused = pipeline.fuse(
                 {
                     "text": ranking_text,
                     "image": ranking_image,

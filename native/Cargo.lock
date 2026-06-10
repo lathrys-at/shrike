@@ -1058,6 +1058,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "shrike-compute"
+version = "0.0.0"
+dependencies = [
+ "shrike-embed",
+ "shrike-ffi",
+ "shrike-index",
+]
+
+[[package]]
 name = "shrike-derived"
 version = "0.0.0"
 dependencies = [
@@ -1100,6 +1109,7 @@ name = "shrike-py"
 version = "0.0.0"
 dependencies = [
  "pyo3",
+ "shrike-compute",
  "shrike-derived",
  "shrike-embed",
  "shrike-ffi",

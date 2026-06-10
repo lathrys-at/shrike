@@ -23,9 +23,11 @@ This module is pure: rankings of ints in, fused order out. No embedding / index 
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
 # RRF dampening constant. ~60 is the standard from Cormack et al. — large enough that the gap
 # between rank 1 and 2 isn't dramatic (a single signal can't unilaterally dominate the fusion),
@@ -87,3 +89,92 @@ def rrf_fuse(
     hits = [FusedHit(nid, scores[nid], contributions[nid]) for nid in scores]
     hits.sort(key=lambda h: (0 if priority_signals & h.signals.keys() else 1, -h.score, h.note_id))
     return hits
+
+
+# ── The SearchPipeline seam (#274) ───────────────────────────────────────────
+
+
+@runtime_checkable
+class SearchPipeline(Protocol):
+    """The fusion seam `search_notes` composes against (#274).
+
+    Today's Python composition (`rrf_fuse` above) is the **reference
+    implementation** — the readable spec, what test doubles fake, and what the
+    parity property suite compares the native implementation against. The
+    native pipeline (`shrike-compute`) is a second implementation of the same
+    contract, selected when the native extension is in play.
+    """
+
+    def fuse(
+        self,
+        rankings: Mapping[str, Sequence[int]],
+        *,
+        weights: Mapping[str, float] | None = None,
+        k: int = RRF_K,
+        priority_signals: frozenset[str] = frozenset(),
+    ) -> list[FusedHit]:
+        """Fuse per-signal best-first rankings into one ordered list (see rrf_fuse)."""
+        ...
+
+
+class ReferenceSearchPipeline:
+    """The frozen Python reference — delegates to :func:`rrf_fuse` verbatim."""
+
+    def fuse(
+        self,
+        rankings: Mapping[str, Sequence[int]],
+        *,
+        weights: Mapping[str, float] | None = None,
+        k: int = RRF_K,
+        priority_signals: frozenset[str] = frozenset(),
+    ) -> list[FusedHit]:
+        return rrf_fuse(rankings, weights=weights, k=k, priority_signals=priority_signals)
+
+
+class NativeSearchPipeline:
+    """The native fusion (#274): `shrike_compute::rrf_fuse` via shrike_native.
+
+    Same semantics by construction (the parity property suite is the drift
+    alarm); GIL released for the fusion itself. Ordinary patchable Python.
+    """
+
+    def __init__(self) -> None:
+        import shrike_native
+
+        self._rrf = shrike_native.rrf_fuse
+
+    def fuse(
+        self,
+        rankings: Mapping[str, Sequence[int]],
+        *,
+        weights: Mapping[str, float] | None = None,
+        k: int = RRF_K,
+        priority_signals: frozenset[str] = frozenset(),
+    ) -> list[FusedHit]:
+        raw = self._rrf(
+            [(signal, [int(i) for i in ids]) for signal, ids in rankings.items()],
+            dict(weights or {}),
+            k,
+            sorted(priority_signals),
+        )
+        return [FusedHit(nid, score, dict(signals)) for nid, score, signals in raw]
+
+
+def native_compute_requested() -> bool:
+    """Whether the operator opted into the native fused pipeline (#274 bake flag)."""
+    return os.environ.get("SHRIKE_NATIVE_COMPUTE", "").lower() in ("1", "true", "yes")
+
+
+def make_search_pipeline() -> SearchPipeline:
+    """Build the configured pipeline: native when requested and installed, else reference."""
+    if native_compute_requested():
+        try:
+            return NativeSearchPipeline()
+        except ImportError:
+            import logging
+
+            logging.getLogger("shrike.tools").warning(
+                "SHRIKE_NATIVE_COMPUTE set but the shrike-native extension is not "
+                "installed; using the reference search pipeline."
+            )
+    return ReferenceSearchPipeline()

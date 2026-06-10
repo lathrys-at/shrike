@@ -272,6 +272,31 @@ class VectorIndex:
         self._read_image = resolver
         self._image_exists_fn = exists
 
+    def _fused_text_handles(self) -> tuple[Any, Any] | None:
+        """The (native embedder, native engine) pair for the fused FFI paths (#274).
+
+        Non-None only when *both* sides are native — the engine is the Rust
+        NativeIndexEngine and the attached backend is the onnx-rs OnnxBackend —
+        and the backend is text-only. Then embed→add and embed→search compose
+        inside one GIL-released native call and the vectors never cross the FFI.
+        Any other combination uses the regular per-side paths unchanged.
+        """
+        from shrike.index_engine import NativeIndexEngine
+
+        if not isinstance(self._engine, NativeIndexEngine):
+            return None
+        backend = self._embedding
+        native = getattr(backend, "_native_engine", None)
+        if native is None or self._embeds_images():
+            return None
+        try:
+            import shrike_native
+        except ImportError:
+            return None
+        if not isinstance(native, shrike_native.OnnxTextEmbedder):
+            return None
+        return native, self._engine._rust
+
     def _embeds_images(self) -> bool:
         """True when the attached backend embeds images (so the index must be multi-vector)."""
         return self._embedding is not None and IMAGE in self._embedding.modalities
@@ -393,9 +418,36 @@ class VectorIndex:
 
         # Local (narrowed) resolver: non-None only when the backend embeds images and one is set.
         read_image = self._read_image if self._embeds_images() else None
+        fused = self._fused_text_handles()
         added = 0
         for i in range(0, len(inputs), BATCH_SIZE):
             batch = inputs[i : i + BATCH_SIZE]
+
+            if fused is not None:
+                # Fused native path (#274): embed→remove→add composes inside one
+                # GIL-released call; the vectors never cross the FFI. The embed
+                # chunk honours the backend's probed batch-safety ceiling.
+                import shrike_native
+
+                native_embedder, native_engine = fused
+                chunk = getattr(self._embedding, "_effective_batch", lambda n: 1)(len(batch))
+                with self._lock:
+                    shrike_native.fused_add_text(
+                        native_embedder,
+                        native_engine,
+                        TEXT,
+                        [int(inp.note_id) for inp in batch],
+                        [inp.text for inp in batch],
+                        chunk,
+                    )
+                    self._dir.mkdir(parents=True, exist_ok=True)
+                    if self._note_hashes is not None:
+                        for inp in batch:
+                            self._note_hashes[int(inp.note_id)] = self._note_hash(
+                                inp.text, inp.image_names
+                            )
+                added += len(batch)
+                continue
 
             note_ids = [inp.note_id for inp in batch]
             note_ids_arr = np.array(note_ids, dtype=np.int64)
@@ -485,6 +537,12 @@ class VectorIndex:
         if not self.available or not texts:
             return [[] for _ in texts]
 
+        fused = self._fused_text_handles()
+        if fused is not None:
+            with self._lock:
+                rankings = self._fused_search(fused, texts, top_k, modalities=(TEXT,))
+            return [r.get(TEXT, []) for r in rankings]
+
         vectors = self._embedding.embed_texts(texts)  # type: ignore[union-attr]
         query_array = np.array(vectors, dtype=np.float32)
 
@@ -494,6 +552,36 @@ class VectorIndex:
             # round-trip above and here degrades to empty results, never a KeyError.
             rankings = self._engine.search_by_modality(query_array, top_k, modalities=(TEXT,))
         return [r.get(TEXT, []) for r in rankings]
+
+    def _fused_search(
+        self,
+        handles: tuple[Any, Any],
+        texts: list[str],
+        top_k: int,
+        *,
+        modalities: tuple[str, ...] | None = None,
+    ) -> list[dict[str, list[dict[str, Any]]]]:
+        """Embed + rank in one GIL-released native call (#274); caller holds the lock."""
+        import shrike_native
+
+        native_embedder, native_engine = handles
+        raw = shrike_native.fused_search_text(
+            native_embedder,
+            native_engine,
+            texts,
+            top_k,
+            list(modalities) if modalities is not None else None,
+        )
+        out: list[dict[str, list[dict[str, Any]]]] = []
+        for per_query in raw:
+            ranking: dict[str, list[dict[str, Any]]] = {}
+            for modality, (ids, distances) in per_query.items():
+                ranking[modality] = [
+                    {"note_id": int(nid), "distance": float(dist)}
+                    for nid, dist in zip(ids, distances, strict=True)
+                ]
+            out.append(ranking)
+        return out
 
     def search_by_modality(
         self,
@@ -512,6 +600,11 @@ class VectorIndex:
         """
         if not self.available or not texts:
             return [{} for _ in texts]
+
+        fused = self._fused_text_handles()
+        if fused is not None:
+            with self._lock:
+                return self._fused_search(fused, texts, top_k)
 
         vectors = self._embedding.embed_texts(texts)  # type: ignore[union-attr]
         query_array = np.array(vectors, dtype=np.float32)

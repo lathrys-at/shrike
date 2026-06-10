@@ -19,6 +19,7 @@ py_test(
     data = [
         "Cargo.toml",
         "//native/_demo:Cargo.toml",
+        "//native/shrike-compute:Cargo.toml",
         "//native/shrike-derived:Cargo.toml",
         "//native/shrike-embed:Cargo.toml",
         "//native/shrike-ffi:Cargo.toml",

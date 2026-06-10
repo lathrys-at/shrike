@@ -18,7 +18,10 @@ from shrike_native._native import (
     OnnxTextEmbedder,
     build_info,
     checked_div,
+    fused_add_text,
+    fused_search_text,
     init_onnx_runtime,
+    rrf_fuse,
     parallel_sum,
     version,
 )
@@ -34,7 +37,10 @@ __all__ = [
     "OnnxTextEmbedder",
     "build_info",
     "checked_div",
+    "fused_add_text",
+    "fused_search_text",
     "init_onnx_runtime",
+    "rrf_fuse",
     "parallel_sum",
     "version",
 ]

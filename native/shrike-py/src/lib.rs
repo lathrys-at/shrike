@@ -422,6 +422,65 @@ impl NativeIndexEngine {
     }
 }
 
+// ── Fused compute (#274) ────────────────────────────────────────────────────
+
+/// Reciprocal Rank Fusion — the native implementation of the frozen
+/// `search_fusion.py` spec. Same canonical accumulation order, same dedup, same
+/// `(tier, -score, note_id)` ordering; the Python parity property suite pins
+/// the two byte-for-byte.
+#[pyfunction]
+#[pyo3(signature = (rankings, weights, k=60, priority_signals=vec![]))]
+fn rrf_fuse(
+    py: Python<'_>,
+    rankings: Vec<(String, Vec<i64>)>,
+    weights: std::collections::BTreeMap<String, f64>,
+    k: i64,
+    priority_signals: Vec<String>,
+) -> Vec<(i64, f64, Vec<(String, i64)>)> {
+    py.detach(move || {
+        let priority: std::collections::HashSet<String> = priority_signals.into_iter().collect();
+        shrike_compute::rrf_fuse(&rankings, &weights, k, &priority)
+    })
+}
+
+/// Embed query texts and rank per modality — one GIL-released composition over
+/// the native text embedder + index engine; the vectors never cross the FFI.
+#[pyfunction]
+#[pyo3(signature = (embedder, engine, texts, k, modalities=None))]
+fn fused_search_text(
+    py: Python<'_>,
+    embedder: Py<OnnxTextEmbedder>,
+    engine: Py<NativeIndexEngine>,
+    texts: Vec<String>,
+    k: usize,
+    modalities: Option<Vec<String>>,
+) -> PyResult<Vec<std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>>> {
+    let e = embedder.get();
+    let ix = engine.get();
+    py.detach(|| {
+        shrike_compute::fused_search(&e.inner, &ix.inner, &texts, k, modalities.as_deref())
+    })
+    .map_err(to_py_err)
+}
+
+/// Embed note texts and replace-add them under their ids — one GIL-released
+/// composition; the vectors never cross the FFI. Returns the count added.
+#[pyfunction]
+fn fused_add_text(
+    py: Python<'_>,
+    embedder: Py<OnnxTextEmbedder>,
+    engine: Py<NativeIndexEngine>,
+    modality: String,
+    keys: Vec<i64>,
+    texts: Vec<String>,
+    chunk: usize,
+) -> PyResult<usize> {
+    let e = embedder.get();
+    let ix = engine.get();
+    py.detach(|| shrike_compute::fused_add(&e.inner, &ix.inner, &modality, &keys, &texts, chunk))
+        .map_err(to_py_err)
+}
+
 /// The module init. Its name MUST match the imported module / the `.so`
 /// filename (`_native`), since PyO3 exports `PyInit__native` from it.
 #[pymodule]
@@ -435,6 +494,9 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ClipEmbedder>()?;
     m.add_class::<NativeIndexEngine>()?;
     m.add_class::<DerivedTextEngine>()?;
+    m.add_function(wrap_pyfunction!(rrf_fuse, m)?)?;
+    m.add_function(wrap_pyfunction!(fused_search_text, m)?)?;
+    m.add_function(wrap_pyfunction!(fused_add_text, m)?)?;
     // The native image-prep pipeline version — folded into the clip-rs
     // fingerprint by the facade (a pixel-math change must invalidate vectors).
     m.add("IMAGE_PREP_VERSION_RS", shrike_embed::IMAGE_PREP_VERSION_RS)?;
