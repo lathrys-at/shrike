@@ -14,6 +14,8 @@ are all backend-agnostic — they only ever call ``embed_texts`` and read
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 # Modality identifiers a backend may advertise in ``modalities``. Phase 1 backends
@@ -24,6 +26,29 @@ IMAGE = "image"
 AUDIO = "audio"
 VIDEO = "video"
 PDF = "pdf"
+
+# An image resolver maps a media filename to its bytes (None = missing/unreadable → skipped).
+ImageResolver = Callable[[str], "bytes | None"]
+# A cheap presence check for a media filename (a stat, not a byte read) — folded into the hash.
+ImageExists = Callable[[str], bool]
+
+
+@dataclass(frozen=True)
+class NoteEmbedInput:
+    """One note's embedding inputs: its normalized text plus any image filenames.
+
+    Produced by ``CollectionWrapper.note_embed_inputs`` (a cheap DB + regex pass, no file reads);
+    the index turns it into a text vector and — for an image-capable backend — one vector per
+    resolvable image, all stored under the ``note_id`` key.
+
+    This boundary *type* lives here with the protocol seam (not in ``index.py``):
+    it's what the collection produces and any index/embedder consumes, so homing it
+    on the leaf protocol module keeps the module graph acyclic (#266).
+    """
+
+    note_id: int
+    text: str
+    image_names: list[str] = field(default_factory=list)
 
 
 @runtime_checkable
