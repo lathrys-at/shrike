@@ -21,8 +21,8 @@ from shrike_native._native import (
     fused_add_text,
     fused_search_text,
     init_onnx_runtime,
-    rrf_fuse,
     parallel_sum,
+    rrf_fuse,
     version,
 )
 
