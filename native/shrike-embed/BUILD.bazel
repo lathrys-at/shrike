@@ -16,6 +16,7 @@ rust_library(
         "@crates//:ndarray",
         "@crates//:ort",
         "@crates//:tokenizers",
+        "@crates//:tracing",
     ],
 )
 
