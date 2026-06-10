@@ -10,7 +10,16 @@ the shrike library; a target needing more (a genuine third-party wheel) adds it
 via `deps`, and the package's conftest goes in `deps` too (so pytest finds it in
 runfiles).
 
-`xdist` is the `-n` value (default "auto"); pass `xdist = None` to run serial.
+`xdist` sets pytest's `-n` worker count (default "auto", matching the pip
+`pytest -n auto` lane). Override per-target with a specific count (`xdist = "4"`
+or `xdist = 4`), or run serially with `xdist = None` (also `0` / `False`) — e.g.
+for an order-dependent target or one you want to step through under a debugger.
+
+Every other default is overridable per-target the same way: `size` (default
+"small"), `deps` / `data` / `args`, and any other `py_test` attribute
+(`tags`, `timeout`, `flaky`, `env`, …) passed through via `**kwargs`. The only
+non-negotiable deps are the launcher + pytest/pytest-asyncio/pytest-xdist + the
+shrike library, which every pytest target needs; callers add to them via `deps`.
 """
 
 load("@rules_python//python:defs.bzl", "py_test")
@@ -19,7 +28,9 @@ load("@shrike_pip//:requirements.bzl", "requirement")
 _RUNNER = "//tools/bazel:pytest_runner.py"
 
 def pytest_test(name, srcs, deps = [], data = [], args = [], size = "small", xdist = "auto", **kwargs):
-    xdist_args = ["-n", xdist] if xdist else []
+    # `-n <xdist>` (xdist worker count) unless a caller disables it with a falsy
+    # value (None / 0 / False) for a serial run. str() so an int count works too.
+    xdist_args = ["-n", str(xdist)] if xdist else []
     py_test(
         name = name,
         size = size,
