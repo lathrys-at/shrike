@@ -42,6 +42,15 @@ from tests.integration.model_cache import (
     download_with_retry,
 )
 
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the markers pyproject declares, so they're known under Bazel too —
+    pyproject's [tool.pytest.ini_options] isn't read when the rootdir is the
+    runfiles tree. A harmless duplicate registration on the pip path."""
+    config.addinivalue_line("markers", "integration: spawns a server over HTTP")
+    config.addinivalue_line("markers", "embedding: requires llama-server and a model")
+
+
 # -- Per-test mutation tracking (drives the cheap collection reset) -----------
 #
 # The shared-collection reset runs after every test. Enumerating the collection
@@ -51,14 +60,6 @@ from tests.integration.model_cache import (
 # The reset still does one `collection_info` to catch auto-created decks and any
 # untracked note (e.g. a pretty-mode CLI create whose id we can't parse) — so a
 # tracking gap can never leak state, only cost an extra enumeration.
-
-def pytest_configure(config: pytest.Config) -> None:
-    """Register the markers pyproject declares, so they're known under Bazel too —
-    pyproject's [tool.pytest.ini_options] isn't read when the rootdir is the
-    runfiles tree. A harmless duplicate registration on the pip path."""
-    config.addinivalue_line("markers", "integration: spawns a server over HTTP")
-    config.addinivalue_line("markers", "embedding: requires llama-server and a model")
-
 
 _MCP_READ_TOOLS = frozenset(
     {
