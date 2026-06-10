@@ -263,7 +263,9 @@ class NativeDerivedEngine:
         self._rust.close()
 
     def get_col_mod(self) -> int | None:
-        return self._rust.get_col_mod()
+        # Explicit conversion — see NativeIndexEngine.ndim (no-any-return on CI).
+        value = self._rust.get_col_mod()
+        return None if value is None else int(value)
 
     def set_col_mod(self, value: int) -> None:
         self._rust.set_col_mod(int(value))
