@@ -51,7 +51,7 @@ class BackendCase:
 
     id: str
     ndim: int
-    # Acceptable model_fingerprint prefixes (a namespace, e.g. ("onnx:",)).
+    # Acceptable model_fingerprint prefixes (a namespace, e.g. ("onnx-rs:",)).
     fingerprint_prefixes: tuple[str, ...]
     # Build a *fresh, unstarted* backend. Takes the pytest request so it can pull
     # the CI-cached model fixtures (session-scoped) lazily.
