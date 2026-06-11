@@ -199,6 +199,21 @@ impl IndexOrchestrator {
         Arc::clone(&self.engine)
     }
 
+    /// Embedder detached: searchable vectors remain on disk/memory but the
+    /// semantic surface is down (mirrors the Python `set_backend(None)`).
+    pub fn mark_unavailable(&self) {
+        self.shared.lock().expect("orchestrator poisoned").state = OrchestratorState::Unavailable;
+    }
+
+    /// Embedder (re)attached: flip back to ready ONLY from unavailable — a
+    /// building or errored state is the (re)build path's to resolve.
+    pub fn mark_ready_if_loaded(&self) {
+        let mut shared = self.shared.lock().expect("orchestrator poisoned");
+        if shared.state == OrchestratorState::Unavailable {
+            shared.state = OrchestratorState::Ready;
+        }
+    }
+
     /// The drift policy (mirrors `VectorIndex.check_drift`): nothing loaded /
     /// no stamp / model change / a v1 layout under an image-capable backend →
     /// rebuild; a bare `col_mod` move → reconcile; otherwise current.
