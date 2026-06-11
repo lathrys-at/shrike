@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from shrike.derived import DerivedTextStore
     from shrike.embedding import EmbeddingRuntime
 
-logger = logging.getLogger("shrike.server")
+logger = logging.getLogger("shrike.kernel")
 
 T = TypeVar("T")
 
@@ -235,8 +235,8 @@ class ShrikeKernel:
         # The derived-text store (FTS5 trigram sidecar) is independent of the
         # embedding index — it builds whether or not a backend is configured.
         # Cheap col_mod probe first; only read all field text on real drift
-        # (first build, or an external edit), so a clean reload does no full read.
-        logger.info("Derived-text store: %s", self.derived.status())
+        # (first build, or an external edit), so a clean reload does no full
+        # read. (The store already logged its own ready/unavailable line.)
         d_col_mod = self.scheduler.run_on_collection(lambda c: c.col_mod())
         if self.derived.check_drift(d_col_mod):
             rows, dmod = self.scheduler.run_on_collection(_collect_derived_rows)

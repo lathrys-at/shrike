@@ -9,6 +9,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -273,10 +274,32 @@ def _register_custom_routes(
             # enforced here because several endpoints are intentionally bodyless
             # POSTs (/shutdown, /index/rebuild, /embedding/stop). A no-op when
             # security is None (non-loopback bind).
+            started = time.perf_counter()
+            path = request.url.path
             rejection = await security_mw.validate_request(request, is_post=False)
             if rejection is not None:
+                logger.warning(
+                    "%s %s rejected by Host/Origin guard (%d) from %s",
+                    request.method,
+                    path,
+                    rejection.status_code,
+                    request.client,
+                )
                 return rejection
-            return await handler(request)
+            response = await handler(request)
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            # /status is polled by `shrike server status` and health checks —
+            # per-request lines would drown the log, so it logs at DEBUG.
+            level = logging.DEBUG if path == "/status" else logging.INFO
+            logger.log(
+                level,
+                "%s %s -> %d (%.0fms)",
+                request.method,
+                path,
+                response.status_code,
+                elapsed_ms,
+            )
+            return response
 
         return wrapped
 

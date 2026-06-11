@@ -23,6 +23,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -135,6 +136,7 @@ class ClipBackend:
         """Load the native engine: both graphs, tokenizer, and image preprocessing."""
         if self.running:
             return
+        started = time.perf_counter()
         try:
             import onnxruntime as ort
         except ImportError as e:
@@ -192,9 +194,9 @@ class ClipBackend:
                 unloaded,
                 self._active_providers,
             )
-        self._finish_start()
+        self._finish_start(started)
 
-    def _finish_start(self) -> None:
+    def _finish_start(self, started: float) -> None:
         """The tail of start(): the batch-safety probe + logging."""
         # Both graphs are auto-discovered at the *same* precision (_resolve_files), so one probe on
         # the text path governs the vision path too. (A hand-assembled mixed-precision pair — fp
@@ -214,10 +216,11 @@ class ClipBackend:
 
         assert self._text_path is not None and self._vis_path is not None
         logger.info(
-            "CLIP model ready (%s + %s, %s)",
+            "CLIP model ready (%s + %s, %s, %.1fs)",
             self._text_path.name,
             self._vis_path.name,
             "serial" if self._safe_batch == 1 else "batched",
+            time.perf_counter() - started,
         )
 
     def stop(self) -> None:

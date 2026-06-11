@@ -302,6 +302,7 @@ class LlamaServerBackend:
             logger.warning("Embedding service already running (PID %s)", self._process.pid)  # type: ignore[union-attr]
             return
 
+        started = time.perf_counter()
         binary = self._find_llama_server()
         cmd = self._build_command(binary)
 
@@ -372,9 +373,10 @@ class LlamaServerBackend:
             self._safe_batch = 1
 
         logger.info(
-            "Embedding service ready (PID %s, %s)",
+            "Embedding service ready (PID %s, %s, %.1fs)",
             self._process.pid,
             "serial" if self._safe_batch == 1 else "batched",
+            time.perf_counter() - started,
         )
 
     def _wait_healthy(self) -> bool:

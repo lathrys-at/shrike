@@ -414,7 +414,7 @@ The vector index is a **derived cache**, not a co-equal store. The Anki collecti
 
 Logging is configured in `shrike/log.py`. Log format, parsing, and styling all live in that module — formatting knowledge should not be spread across CLI commands.
 
-**Logger names** — Use per-module loggers: `shrike.server`, `shrike.tools`, `shrike.collection`, `shrike.note_types`. This makes the config's per-logger level overrides (`logging.levels.shrike.collection: debug`) actually work. Never log everything under a bare `shrike` logger.
+**Logger names** — Use per-module loggers: `shrike.server`, `shrike.kernel`, `shrike.tools`, `shrike.collection`, `shrike.embedding`, `shrike.index`, `shrike.derived`, `shrike.daemon`. This makes the config's per-logger level overrides (`logging.levels.shrike.collection: debug`) actually work. Never log everything under a bare `shrike` logger. Native (Rust) tracing forwards through pyo3-log under the crate's module path (e.g. `shrike_collection.media_fetch`), so the same per-logger overrides govern it.
 
 **Principles for log messages:**
 

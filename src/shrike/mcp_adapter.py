@@ -17,6 +17,7 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
+import time
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -26,6 +27,18 @@ from shrike.collection import CollectionBusyError
 
 logger = logging.getLogger("shrike.tools")
 
+# A tool call slower than this logs its duration at INFO instead of DEBUG, so
+# slowness is visible in a default-level log without per-call noise.
+SLOW_TOOL_SECONDS = 1.0
+
+
+def _log_duration(name: str, started: float) -> None:
+    elapsed = time.perf_counter() - started
+    if elapsed >= SLOW_TOOL_SECONDS:
+        logger.info("%s completed (%.1fs)", name, elapsed)
+    else:
+        logger.debug("%s completed (%.0fms)", name, elapsed * 1000)
+
 
 def _safe_tool(fn: Any) -> Any:
     """Wrap a tool to log unhandled exceptions, then re-raise.
@@ -34,7 +47,10 @@ def _safe_tool(fn: Any) -> Any:
     it), which the client surfaces as a ``ServerError``. Tools therefore never
     embed an ``error`` field in a success payload — protocol errors live in the
     protocol, and response models stay clean. ``ToolInputError`` (expected bad
-    input) re-raises quietly; anything else logs with a traceback.
+    input) logs the rejection without a traceback; anything else logs with one.
+
+    Every call is timed: completion duration logs at DEBUG, escalating to INFO
+    for a slow call (>= 1s) so slowness surfaces without per-call log noise.
 
     The wrapped function's docstring is dedented with ``inspect.cleandoc`` so the
     tool description FastMCP advertises to clients has no source indentation.
@@ -45,9 +61,12 @@ def _safe_tool(fn: Any) -> Any:
 
         @functools.wraps(fn)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            started = time.perf_counter()
             try:
-                return await fn(*args, **kwargs)
-            except ToolInputError:
+                result = await fn(*args, **kwargs)
+            except ToolInputError as e:
+                # Expected bad input — the caller's mistake, surfaced without a trace.
+                logger.warning("%s rejected: %s", fn.__name__, e)
                 raise
             except CollectionBusyError as e:
                 # Expected under cooperative locking — another process holds the
@@ -57,15 +76,19 @@ def _safe_tool(fn: Any) -> Any:
             except Exception:
                 logger.exception("Unhandled error in %s", fn.__name__)
                 raise
+            _log_duration(fn.__name__, started)
+            return result
 
         async_wrapper.__doc__ = cleaned_doc
         return async_wrapper
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        started = time.perf_counter()
         try:
-            return fn(*args, **kwargs)
-        except ToolInputError:
+            result = fn(*args, **kwargs)
+        except ToolInputError as e:
+            logger.warning("%s rejected: %s", fn.__name__, e)
             raise
         except CollectionBusyError as e:
             logger.warning("%s in %s", e, fn.__name__)
@@ -73,6 +96,8 @@ def _safe_tool(fn: Any) -> Any:
         except Exception:
             logger.exception("Unhandled error in %s", fn.__name__)
             raise
+        _log_duration(fn.__name__, started)
+        return result
 
     wrapper.__doc__ = cleaned_doc
     return wrapper

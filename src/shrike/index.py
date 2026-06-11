@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import threading
+import time
 from collections.abc import Callable, MutableMapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -767,6 +768,7 @@ class VectorIndex:
         self._build_error = None
 
         logger.info("Starting full index rebuild: %d notes", total)
+        started = time.perf_counter()
 
         try:
             with self._lock:
@@ -790,7 +792,12 @@ class VectorIndex:
             self._calibrate_activation()  # stats land in the same meta write as the vectors
             self.save()
             self._state = IndexState.READY
-            logger.info("Index rebuild complete: %d vectors, %d dims", self.size, self.ndim or 0)
+            logger.info(
+                "Index rebuild complete: %d vectors, %d dims (%.1fs)",
+                self.size,
+                self.ndim or 0,
+                time.perf_counter() - started,
+            )
         except Exception as e:
             self._state = IndexState.ERROR
             self._build_error = str(e)
@@ -851,6 +858,7 @@ class VectorIndex:
             len(new_hashes),
             len(new_hashes),
         )
+        started = time.perf_counter()
         self._state = IndexState.BUILDING
         self._build_progress = (0, len(to_embed))
         self._build_error = None
@@ -868,7 +876,11 @@ class VectorIndex:
             self._calibrate_activation()  # the changed set may have shifted a modality distribution
             self.save()
             self._state = IndexState.READY
-            logger.info("Index reconcile complete: %d vectors", self.size)
+            logger.info(
+                "Index reconcile complete: %d vectors (%.1fs)",
+                self.size,
+                time.perf_counter() - started,
+            )
         except Exception as e:
             self._state = IndexState.ERROR
             self._build_error = str(e)

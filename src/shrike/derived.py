@@ -28,6 +28,7 @@ import contextlib
 import logging
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -300,11 +301,17 @@ class DerivedTextStore:
         if not self._available or self._engine is None:
             return
         self._state = IndexState.BUILDING
+        started = time.perf_counter()
         try:
             self._engine.build(rows, col_mod)
             self._col_mod = col_mod
             self._state = IndexState.READY
-            logger.info("Derived-text store built: %d rows (col_mod=%d)", self.size, col_mod)
+            logger.info(
+                "Derived-text store built: %d rows (col_mod=%d, %.1fs)",
+                self.size,
+                col_mod,
+                time.perf_counter() - started,
+            )
         except Exception:
             self._state = IndexState.ERROR
             logger.exception("Derived-text store build failed")

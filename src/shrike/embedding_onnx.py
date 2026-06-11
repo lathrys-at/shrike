@@ -29,6 +29,7 @@ Model layout: ``model`` points either at a directory holding ``model.onnx`` (or
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -152,6 +153,7 @@ class OnnxBackend:
         """Load the native inference engine (in-process)."""
         if self.running:
             return
+        started = time.perf_counter()
         try:
             import onnxruntime as ort
         except ImportError as e:
@@ -204,7 +206,7 @@ class OnnxBackend:
                 unloaded,
                 self._active_providers,
             )
-        self._finish_start(onnx_path)
+        self._finish_start(onnx_path, started)
 
     def _unsupported_inputs(self) -> list[str]:
         """Graph inputs outside the supplied sentence-transformers set (diagnostics)."""
@@ -212,7 +214,7 @@ class OnnxBackend:
             return []
         return sorted(self._native_engine.unsupported_inputs())
 
-    def _finish_start(self, onnx_path: Path) -> None:
+    def _finish_start(self, onnx_path: Path, started: float) -> None:
         """The tail of start(): the batch-safety probe + logging.
 
         Probe batch-safety once: int8 dynamic-quant exports are batch-variant (a
@@ -245,9 +247,10 @@ class OnnxBackend:
                 self._safe_batch,
             )
         logger.info(
-            "ONNX embedding model ready (%s, %s)",
+            "ONNX embedding model ready (%s, %s, %.1fs)",
             onnx_path.name,
             "serial" if self._safe_batch == 1 else "batched",
+            time.perf_counter() - started,
         )
 
     def stop(self) -> None:
