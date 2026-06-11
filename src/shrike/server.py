@@ -31,7 +31,7 @@ from shrike.embedding import (
     SUPPORTED_BACKENDS,
     EmbeddingRuntime,
 )
-from shrike.harness import Harness
+from shrike.harness import Harness, KernelConfigError
 from shrike.index import (
     DEFAULT_SAVE_DELAY,
     DEFAULT_SAVE_THRESHOLD,
@@ -40,7 +40,6 @@ from shrike.index import (
 # The transport-free core (#275). The collectors and _maybe_rebuild moved there
 # with it; re-exported here so existing import sites (tests included) are
 # unchanged.
-from shrike.kernel import KernelConfigError
 from shrike.log import configure_logging
 from shrike.paths import cache_dir, state_dir
 from shrike.tools import register_tools

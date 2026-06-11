@@ -24,9 +24,12 @@ from shrike.collection import CollectionWrapper, collect_derived_rows
 from shrike.derived import DerivedTextStore
 from shrike.embedding import EmbeddingRuntime
 from shrike.embedding_base import EmbedderBackend
-from shrike.kernel import KernelConfigError
 
 logger = logging.getLogger("shrike.kernel")
+
+
+class KernelConfigError(Exception):
+    """A caller-actionable configuration error (the HTTP host maps it to a 400)."""
 
 
 class KernelIndexView:

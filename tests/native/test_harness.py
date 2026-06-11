@@ -16,8 +16,7 @@ shrike_native = pytest.importorskip("shrike_native")
 
 from shrike.derived import DerivedTextStore, NativeDerivedEngine  # noqa: E402
 from shrike.embedding import EmbeddingRuntime  # noqa: E402
-from shrike.harness import Harness  # noqa: E402
-from shrike.kernel import KernelConfigError  # noqa: E402
+from shrike.harness import Harness, KernelConfigError  # noqa: E402
 
 
 async def _assemble(tmp_path, *, cooperative: bool = False) -> Harness:
