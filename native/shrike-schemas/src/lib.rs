@@ -516,12 +516,41 @@ pub struct SearchResultGroup {
     pub matches: Vec<SearchMatch>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct SearchResponse {
     #[serde(default)]
     pub results: Vec<SearchResultGroup>,
     #[serde(default)]
     pub message: Option<String>,
+    /// The two-tier live-search contract (#181): "partial" = the
+    /// embedding-bearing signals were skipped at the caller's request
+    /// (tier="live"); "full" = the final answer for this query/server state.
+    #[serde(default)]
+    pub completeness: Completeness,
+    /// Echo of the request's `version` (client-side stale-response dropping).
+    #[serde(default)]
+    pub version: Option<i64>,
+}
+
+/// `SearchResponse.completeness` (#181) — mirrors the Pydantic
+/// `Literal["partial", "full"]`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Completeness {
+    Partial,
+    #[default]
+    Full,
+}
+
+impl Default for SearchResponse {
+    fn default() -> Self {
+        Self {
+            results: Vec::new(),
+            message: None,
+            completeness: Completeness::Full,
+            version: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]

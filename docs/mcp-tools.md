@@ -199,8 +199,12 @@ Exact matches are returned even when the embedding index is unavailable — the 
 | `deck` | `string` | no | Restrict to notes in this deck (includes child decks). Accepts a deck name, numeric ID, or `#id`. |
 | `tags` | `string[]` | no | Restrict to notes matching all of these tags. |
 | `exclude_ids` | `integer[]` | no | Additional note IDs to exclude from results. |
+| `tier` | `"full"` \| `"live"` | no | The two-tier live-search contract: `live` runs only the no-embedding signals (exact substring + fuzzy) for per-keystroke latency and the response reports `completeness: "partial"`; `full` (default) adds the semantic + tag signals. Same fused result shape either way. |
+| `version` | `integer` | no | Opaque client sequence number, echoed back verbatim in the response — drop any response whose echo doesn't match your latest request (the stale-live-search guard; the server is stateless per request, so the client owns cancellation). |
 
 At least one of `queries` or `ids` must be provided.
+
+The response carries `completeness`: `"partial"` means the embedding-bearing signals were skipped because the caller asked for the live tier — re-request with `tier: "full"` to upgrade; `"full"` is the final answer for that query and server state. Query strings shorter than 3 characters skip semantic ranking even on the full tier (typing fragments never burn an embedding call; the response stays `"full"` with an advisory `message` — id anchors are never gated). Query embeddings are cached server-side (LRU, keyed per backend), so an Enter-after-pause re-request of the same string is free.
 
 `deck`/`tags` are applied after the vector search over a widened candidate window; if in-scope notes rank very deep a filtered semantic search may still return fewer than `top_k` (exact matches are filtered precisely). 
 

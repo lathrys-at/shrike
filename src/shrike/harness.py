@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import threading
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,6 +27,11 @@ from shrike.embedding import EmbeddingRuntime
 from shrike.embedding_base import EmbedderBackend
 
 logger = logging.getLogger("shrike.kernel")
+
+# Query-embedding LRU size (#181): repeated/backspace-retyped queries (and the
+# Enter-after-pause commit) reuse the vector instead of re-embedding. Keyed by
+# backend identity, so a model swap never serves a stale-space vector.
+EMBED_CACHE_SIZE = 128
 
 
 class KernelConfigError(Exception):
@@ -48,6 +54,7 @@ class KernelIndexView:
         # Facade-shaped engine access: the search action extracts the native
         # handle as `index._engine._rust`, so mirror that exact attribute.
         self._engine = SimpleNamespace(_rust=self._engine_handle)
+        self._embed_cache: OrderedDict[tuple[int, str], list[float]] = OrderedDict()
 
     def _status(self) -> dict[str, Any]:
         return json.loads(self._kernel.index_status_json())  # type: ignore[no-any-return]
@@ -92,7 +99,27 @@ class KernelIndexView:
         backend = self._runtime.backend
         if backend is None or not texts:
             return None
-        return backend.embed_texts(texts)
+        # LRU per (backend identity, query) — loop-confined, no lock needed.
+        base = id(backend)
+        out: list[list[float] | None] = [None] * len(texts)
+        missing: list[str] = []
+        missing_at: list[int] = []
+        for i, text in enumerate(texts):
+            cached = self._embed_cache.get((base, text))
+            if cached is not None:
+                self._embed_cache.move_to_end((base, text))
+                out[i] = cached
+            else:
+                missing.append(text)
+                missing_at.append(i)
+        if missing:
+            fresh = backend.embed_texts(missing)
+            for i, text, vector in zip(missing_at, missing, fresh, strict=True):
+                out[i] = vector
+                self._embed_cache[(base, text)] = vector
+            while len(self._embed_cache) > EMBED_CACHE_SIZE:
+                self._embed_cache.popitem(last=False)
+        return [v for v in out if v is not None]
 
     def search(self, texts: list[str], top_k: int = 10) -> list[list[dict[str, Any]]]:
         """Nearest **text** neighbors per query (the upsert-neighbors path):

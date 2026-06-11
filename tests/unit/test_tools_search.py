@@ -317,7 +317,7 @@ class TestUnifiedSearch:
             [{"deck": "Other", "note_type": "Basic", "fields": {"Front": "O", "Back": "A"}}],
         )[0]["id"]
         _plant(sem_index, [(other, 0.05), (basic_note, 0.20)])
-        result = _call(mcp_sem, "search_notes", {"queries": ["q"], "deck": "Test"})
+        result = _call(mcp_sem, "search_notes", {"queries": ["qry"], "deck": "Test"})
         matches = result["results"][0]["matches"]
         assert [m["id"] for m in matches] == [basic_note]
 
@@ -395,9 +395,9 @@ class TestUnifiedSearch:
         weak = self._seed_front(wrapper, "weakly related card")
         sem_index._activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
         _plant(sem_index, [(anchor, 0.65), (weak, 0.80)], modality="image")
-        m = _call(mcp_sem, "search_notes", {"queries": ["q"], "exclude_ids": [anchor]})["results"][
-            0
-        ]["matches"]
+        m = _call(mcp_sem, "search_notes", {"queries": ["qry"], "exclude_ids": [anchor]})[
+            "results"
+        ][0]["matches"]
         assert m == []  # gated on the surviving (weak) hit, so nothing surfaces
 
     def test_image_gate_passes_strong_surviving_hit(self, wrapper, sem_index, mcp_sem):
@@ -407,9 +407,9 @@ class TestUnifiedSearch:
         strong = self._seed_front(wrapper, "strongly matching card")
         sem_index._activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
         _plant(sem_index, [(anchor, 0.55), (strong, 0.66)], modality="image")
-        m = _call(mcp_sem, "search_notes", {"queries": ["q"], "exclude_ids": [anchor]})["results"][
-            0
-        ]["matches"]
+        m = _call(mcp_sem, "search_notes", {"queries": ["qry"], "exclude_ids": [anchor]})[
+            "results"
+        ][0]["matches"]
         assert [x["id"] for x in m] == [strong]
 
 
@@ -462,7 +462,7 @@ class TestProvenance:
         # nid trails a, b in text (rank 3) but leads the image ranking (rank 1).
         _plant(sem_index, [(a, 0.10), (b, 0.15), (nid, 0.20)])
         _plant(sem_index, [(nid, 0.65)], modality="image")
-        matches = self._matches(mcp_sem, "q")
+        matches = self._matches(mcp_sem, "qry")
         assert all(m["provenance"] for m in matches)  # every returned match carries provenance
         prov = {m["id"]: [(p["signal"], p["rank"]) for p in m["provenance"]] for m in matches}
         assert prov[nid] == [("image", 1), ("text", 3)]  # strongest (lowest-rank) signal first
@@ -775,3 +775,70 @@ class TestUpsertPolicyTool:
         assert result["results"][0] == {"status": "ok", "index": 0, "action": "create"}
         # No write, so the index is never touched on a dry run.
         mock_index.add.assert_not_called()
+
+
+class TestTwoTierSearch:
+    """The live-search tier contract (#181): tier='live' runs only the
+    no-embedding signals and reports partial; the min-query gate keeps typing
+    fragments from burning embedding calls; `version` echoes verbatim."""
+
+    def test_live_tier_skips_semantic_and_reports_partial(self, wrapper, sem_index, mcp_sem):
+        planted = _seed(
+            wrapper,
+            [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "sem only", "Back": "A"}}],
+        )[0]["id"]
+        _plant(sem_index, [(planted, 0.05)])
+        result = _call(mcp_sem, "search_notes", {"queries": ["qry"], "tier": "live", "version": 7})
+        assert result["completeness"] == "partial"
+        assert result["version"] == 7
+        # The semantically-planted note does not surface on the live tier.
+        ids = [m["id"] for m in result["results"][0]["matches"]]
+        assert planted not in ids
+
+    def test_full_tier_reports_full_and_finds_semantic(self, wrapper, sem_index, mcp_sem):
+        planted = _seed(
+            wrapper,
+            [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "sem hit", "Back": "A"}}],
+        )[0]["id"]
+        _plant(sem_index, [(planted, 0.05)])
+        result = _call(mcp_sem, "search_notes", {"queries": ["qry"]})
+        assert result["completeness"] == "full"
+        assert result["version"] is None
+        assert planted in [m["id"] for m in result["results"][0]["matches"]]
+
+    def test_min_query_gate_skips_semantic_but_is_final(self, wrapper, sem_index, mcp_sem):
+        planted = _seed(
+            wrapper,
+            [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "ab gate", "Back": "A"}}],
+        )[0]["id"]
+        _plant(sem_index, [(planted, 0.05)])
+        result = _call(mcp_sem, "search_notes", {"queries": ["ab"]})
+        # Final for this query (a client must not poll for more) + advisory.
+        assert result["completeness"] == "full"
+        assert "skipped" in result["message"]
+        # The literal substring still matches (the cheap signals ran).
+        assert planted in [m["id"] for m in result["results"][0]["matches"]]
+
+    def test_id_anchors_are_never_gated(self, wrapper, sem_index, mcp_sem):
+        a, b = (
+            r["id"]
+            for r in _seed(
+                wrapper,
+                [
+                    {
+                        "deck": "Test",
+                        "note_type": "Basic",
+                        "fields": {"Front": "anchor", "Back": "A"},
+                    },
+                    {
+                        "deck": "Test",
+                        "note_type": "Basic",
+                        "fields": {"Front": "neighbor", "Back": "A"},
+                    },
+                ],
+            )
+        )
+        _plant(sem_index, [(a, 0.30), (b, 0.10)])
+        result = _call(mcp_sem, "search_notes", {"ids": [a]})
+        assert result["completeness"] == "full"
+        assert b in [m["id"] for m in result["results"][0]["matches"]]

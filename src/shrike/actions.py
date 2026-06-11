@@ -95,6 +95,12 @@ def note_outcome(message: str) -> None:
 # signals (precision justifies parity; RRF's rank decay bounds flooding).
 SEARCH_WEIGHTS = {"text": 1.0, "image": 1.0, "tag": 1.0, "exact": 1.0, "fuzzy": 0.5}
 
+# The live-search min-query gate (#181): query strings shorter than this skip
+# the embedding-bearing tier even on tier="full" — single letters and typing
+# fragments must not burn an embedding call. Ids-anchored searches are never
+# gated (no typing-fragment problem).
+MIN_SEMANTIC_QUERY_CHARS = 3
+
 # Intra-modal activation gate (#201b). A non-text modality's ranking is fed to the fusion only when
 # its best match for the query exceeds `mean + ACTIVATION_MARGIN·std` of that modality's calibrated
 # typical best match (index.activation_stats) — otherwise the modality "had no good match" and its
@@ -456,6 +462,27 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 description="Additional note IDs to exclude from results.",
             ),
         ],
+        tier: Annotated[
+            Literal["full", "live"],
+            Field(
+                description=(
+                    "The live-search tier contract (#181): 'live' runs only the "
+                    "no-embedding signals (exact substring + fuzzy) for per-keystroke "
+                    "latency and returns completeness='partial'; 'full' (default) adds "
+                    "the semantic + tag signals. Same fused result shape either way."
+                ),
+            ),
+        ] = "full",
+        version: Annotated[
+            int | None,
+            Field(
+                description=(
+                    "Opaque client sequence number, echoed back verbatim — drop any "
+                    "response whose echo doesn't match your latest request (the "
+                    "stale-live-search guard; the server is stateless per request)."
+                ),
+            ),
+        ] = None,
     ) -> SearchResponse:
         """Search the collection by meaning and by exact text in one call.
 
@@ -493,7 +520,27 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         # Substring matching needs no embeddings; semantic ranking does.
         semantic_ok = index is not None and index.available and index.state == IndexState.READY
         message: str | None = None
-        if not semantic_ok:
+        # The live tier (#181): the caller wants the cheap signals only —
+        # "partial" promises a fuller answer on a tier="full" re-request.
+        completeness: Literal["partial", "full"] = (
+            "partial" if (tier == "live" and semantic_ok) else "full"
+        )
+        if tier == "live":
+            semantic_ok = False
+        elif (
+            semantic_ok
+            and queries
+            and not ids
+            and all(len(q.strip()) < MIN_SEMANTIC_QUERY_CHARS for q in queries)
+        ):
+            # The min-query gate: typing fragments never burn an embedding
+            # call. This IS the final answer for this query → stays "full".
+            semantic_ok = False
+            message = (
+                f"Semantic ranking skipped (queries shorter than "
+                f"{MIN_SEMANTIC_QUERY_CHARS} characters); exact text matches only."
+            )
+        if tier != "live" and not semantic_ok and message is None:
             if index is not None and index.state == IndexState.BUILDING:
                 indexed, total = index.build_progress
                 message = (
@@ -512,14 +559,23 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 )
             # Pure semantic request with nothing to substring-match → nothing to do.
             if not queries:
-                return SearchResponse(message=message)
+                return SearchResponse(message=message, completeness=completeness, version=version)
+        elif not semantic_ok and not queries:
+            # The live tier with id anchors only: anchors are semantic-only,
+            # so there is nothing the cheap signals can do.
+            return SearchResponse(message=message, completeness=completeness, version=version)
 
         if deck:
             # Accept a deck name, #id, or numeric id; an explicit id that matches
             # nothing yields no results.
             deck = await wrapper.resolve_deck_ref(deck)
             if deck is None:
-                return SearchResponse(results=[], message="No deck matches that reference.")
+                return SearchResponse(
+                    results=[],
+                    message="No deck matches that reference.",
+                    completeness=completeness,
+                    version=version,
+                )
 
         exclude_set = set(exclude_ids or [])
 
@@ -536,7 +592,11 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                     exclude_set.add(nid)
 
         if not sources:
-            return SearchResponse(message="No valid queries or note IDs to search.")
+            return SearchResponse(
+                message="No valid queries or note IDs to search.",
+                completeness=completeness,
+                version=version,
+            )
 
         # Query vectors (host-side embedding — the recorded #331 design point);
         # the assembly itself is re-homed in shrike_kernel::actions.
@@ -587,7 +647,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         )
         groups = TypeAdapter(list[SearchResultGroup]).validate_json(raw)
         note_outcome(f"{len(groups)} groups, {sum(len(g.matches) for g in groups)} matches")
-        return SearchResponse(results=groups, message=message)
+        return SearchResponse(
+            results=groups, message=message, completeness=completeness, version=version
+        )
 
     @_action
     async def upsert_notes(
