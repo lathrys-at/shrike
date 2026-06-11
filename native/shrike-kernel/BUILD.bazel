@@ -20,6 +20,7 @@ rust_library(
         "//native/shrike-ffi:shrike_ffi",
         "//native/shrike-index:shrike_index",
         "//native/shrike-schemas:shrike_schemas",
+        "@crates//:blake2",
         "@crates//:futures",
         "@crates//:serde",
         "@crates//:serde_json",

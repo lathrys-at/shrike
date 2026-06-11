@@ -30,6 +30,7 @@
 //! transitional Python schedulers from #275.
 
 pub mod actions;
+pub mod index_orchestrator;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
