@@ -14,6 +14,7 @@ resolver = "2"
 exclude = ["spikes/*"]
 members = [
     "_demo",
+    "shrike-cabi",
     "shrike-collection",
     "shrike-compute",
     "shrike-derived",

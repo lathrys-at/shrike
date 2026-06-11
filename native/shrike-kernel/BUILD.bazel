@@ -36,3 +36,26 @@ rust_test(
     size = "medium",
     crate = ":shrike_kernel",
 )
+
+# The minimal core profile (#338): no onnx-embed → no ort in the link. The
+# C-ABI surface (//native/shrike-cabi) builds against THIS target; the
+# minimal-profile clippy lane covers the cargo side of the same profile.
+rust_library(
+    name = "shrike_kernel_minimal",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "shrike_kernel",
+    edition = "2021",
+    deps = [
+        "//native/shrike-collection:shrike_collection",
+        "//native/shrike-compute:shrike_compute_minimal",
+        "//native/shrike-derived:shrike_derived",
+        "//native/shrike-ffi:shrike_ffi",
+        "//native/shrike-index:shrike_index",
+        "//native/shrike-schemas:shrike_schemas",
+        "@crates//:blake2",
+        "@crates//:futures",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:tracing",
+    ],
+)

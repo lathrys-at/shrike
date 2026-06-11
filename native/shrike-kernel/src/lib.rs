@@ -322,6 +322,7 @@ impl Kernel {
         });
         let derived =
             DerivedEngine::open(&format!("{}/shrike.db", cache_dir.trim_end_matches('/')), 1)?;
+        tracing::debug!(collection = collection_path, "kernel opened");
         Ok(Self {
             collection,
             orchestrator,

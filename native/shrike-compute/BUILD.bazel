@@ -23,3 +23,14 @@ rust_test(
     size = "small",
     crate = ":shrike_compute",
 )
+
+# The minimal core profile (#338): no fused feature → no shrike-embed/ort.
+rust_library(
+    name = "shrike_compute_minimal",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "shrike_compute",
+    edition = "2021",
+    deps = [
+        "//native/shrike-ffi:shrike_ffi",
+    ],
+)

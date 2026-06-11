@@ -1,0 +1,73 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_static_library", "rust_test")
+
+package(default_visibility = ["//native:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# The C-ABI binding surface (#333): a thin manual extern "C" + JSON layer over
+# the MINIMAL kernel profile (#338 — no ort linked). Verdict + handoff shapes
+# recorded on the issue; the module docs carry the contract.
+rust_library(
+    name = "shrike_cabi",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        "//native/shrike-ffi:shrike_ffi",
+        "//native/shrike-kernel:shrike_kernel_minimal",
+        "@crates//:futures",
+        "@crates//:serde_json",
+        "@crates//:tracing",
+    ],
+)
+
+# The Rust-side ABI smoke (per-PR lane): drives the surface exactly as a C
+# host would (opaque handle, C strings, last-error, free).
+rust_test(
+    name = "shrike_cabi_smoke",
+    size = "medium",
+    srcs = ["tests/smoke.rs"],
+    edition = "2021",
+    deps = [
+        ":shrike_cabi",
+        "@crates//:serde_json",
+    ],
+)
+
+# The cc-linkable archive for embedded hosts (and the future XCFramework).
+rust_static_library(
+    name = "shrike_cabi_static",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    tags = ["manual"],
+    deps = [
+        "//native/shrike-ffi:shrike_ffi",
+        "//native/shrike-kernel:shrike_kernel_minimal",
+        "@crates//:futures",
+        "@crates//:serde_json",
+        "@crates//:tracing",
+    ],
+)
+
+# The #333 acceptance: a plain C program embeds the kernel (zero CPython) and
+# runs open → upsert → search → close. MANUAL — run explicitly:
+#   ./bazel test //native/shrike-cabi:smoke_host
+cc_test(
+    name = "smoke_host",
+    size = "medium",
+    srcs = ["smoke/main.c"],
+    linkopts = select({
+        # The static kernel pulls anki's tree: system frameworks + the C++
+        # runtime must come from the final link (a dylib would resolve them
+        # lazily; a static C host links them explicitly).
+        "@platforms//os:macos": [
+            "-framework IOKit",
+            "-framework CoreFoundation",
+            "-framework Security",
+            "-framework SystemConfiguration",
+            "-lc++",
+        ],
+        "//conditions:default": ["-lstdc++"],
+    }),
+    tags = ["manual"],
+    deps = [":shrike_cabi_static"],
+)
