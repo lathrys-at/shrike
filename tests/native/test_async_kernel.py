@@ -277,3 +277,36 @@ class TestEmbedderSlot:
             await kernel.close()
 
         asyncio.run(flow())
+
+
+class TestRebuildIndex:
+    def test_explicit_rebuild_is_full(self, tmp_path) -> None:
+        async def flow():
+            backend = _Backend()
+            kernel = await _open(tmp_path, backend)
+            await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            await kernel.upsert_notes(
+                [(basic, 1, [f"note {i}", "b"], []) for i in range(3)], "error"
+            )
+            backend.calls.clear()
+            total = await kernel.rebuild_index()
+            assert total == 3
+            # FULL: every note re-embedded even though nothing drifted.
+            assert sum(len(c) for c in backend.calls) == 3
+            assert json.loads(kernel.index_status_json())["state"] == "ready"
+            await kernel.close()
+
+        asyncio.run(flow())
+
+    def test_rebuild_without_embedder_is_unavailable(self, tmp_path) -> None:
+        async def flow():
+            kernel = await shrike_native.async_kernel_open(
+                str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
+            )
+            with pytest.raises(shrike_native.NativeUnavailableError):
+                await kernel.rebuild_index()
+            await kernel.close()
+
+        asyncio.run(flow())

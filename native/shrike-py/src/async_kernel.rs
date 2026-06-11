@@ -220,6 +220,13 @@ impl AsyncKernel {
         })
     }
 
+    /// Explicit FULL rebuild (the `/index/rebuild` semantics) — awaitable;
+    /// resolves to the note count. Progress reads via `index_status_json`.
+    fn rebuild_index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        future_into_py(py, async move { kernel.rebuild_index().await })
+    }
+
     /// The boot/reload drift path (awaitable; drive as a background task).
     fn reindex_if_needed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
