@@ -606,12 +606,18 @@ impl IndexOrchestrator {
                 self.engine.add("image", &image_keys, &image_vectors)?;
             }
 
+            // Hash OUTSIDE the lock: the resolver's `exists` may be a harness
+            // call (a stat, or Python via the injected resolver) — never run
+            // foreign code under the orchestrator mutex.
+            let new_hashes: Vec<(i64, String)> = batch
+                .iter()
+                .map(|input| (input.note_id, self.hash_for(input, images)))
+                .collect();
             let mut shared = self.shared.lock().expect("orchestrator poisoned");
             if let Some(hashes) = shared.note_hashes.as_mut() {
-                for input in batch {
-                    hashes.insert(input.note_id, self.hash_for(input, images));
-                }
+                hashes.extend(new_hashes);
             }
+            drop(shared);
             added += batch.len();
         }
         Ok(added)
