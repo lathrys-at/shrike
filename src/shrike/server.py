@@ -5,7 +5,6 @@ import asyncio
 import contextlib
 import functools
 import ipaddress
-import json
 import logging
 import os
 import signal
@@ -24,7 +23,7 @@ from mcp.server.transport_security import (
 from shrike._mcp_perf import install_validator_cache
 from shrike.collection import DEFAULT_LOCK_HOLD, CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
-from shrike.derived import DerivedTextStore
+from shrike.derived import DerivedTextStore, NativeDerivedEngine
 from shrike.embedding import (
     BACKEND_ALIASES,
     DEFAULT_BACKEND,
@@ -37,6 +36,7 @@ from shrike.index import (
     IndexSaver,
     VectorIndex,
 )
+from shrike.index_engine import make_index_engine
 
 # The transport-free core (#275). The collectors and _maybe_rebuild moved there
 # with it; re-exported here so existing import sites (tests included) are
@@ -45,12 +45,10 @@ from shrike.kernel import (
     KernelConfigError,
     ShrikeKernel,
     WorkerScheduler,
-    _collect_derived_rows,
-    _collect_for_rebuild,
-    _maybe_rebuild,
 )
 from shrike.log import configure_logging
 from shrike.paths import cache_dir, state_dir
+from shrike.search_fusion import make_search_pipeline
 from shrike.tools import register_tools
 
 logger = logging.getLogger("shrike.server")
@@ -707,20 +705,13 @@ def main() -> None:
         logger.info(
             "Cooperative locking on: releasing the collection after %.0fs idle", hold_seconds
         )
-    summary = wrapper.run_sync(lambda c: json.loads(c.collection_info(["summary"], []))["summary"])
-    notes, decks, note_types = summary["notes"], summary["decks"], summary["note_types"]
-    logger.info(
-        "Collection ready: %d notes, %d decks, %d note types",
-        notes,
-        decks,
-        note_types,
-    )
 
     # The index is always created — it can hold on-disk vectors and report
     # status even with no embedder. It reports UNAVAILABLE until a service is
-    # attached, so the embedding lifecycle can be cycled at runtime.
+    # attached, so the embedding lifecycle can be cycled at runtime. The engine
+    # is injected here (the harness owns assembly, #278 C5).
     cache_base = Path(args.cache_dir) if args.cache_dir else cache_dir()
-    index = VectorIndex(path=cache_base / "index")
+    index = VectorIndex(path=cache_base / "index", engine=make_index_engine())
     # Let the index read image bytes + cheaply check presence (lock-free, off the worker thread)
     # for a CLIP-style backend; inert for a text-only backend. media_dir is path-derived → safe
     # before open.
@@ -762,64 +753,16 @@ def main() -> None:
         batch_size=args.embedding_batch_size,
     )
 
-    if args.embedding_model and not args.no_embedding:
-        try:
-            svc = runtime.start()
-        except (FileNotFoundError, RuntimeError, ValueError, ImportError) as e:
-            # ImportError: the onnx backend was selected without the optional
-            # 'onnx' extra installed. Like a missing model file, degrade — boot
-            # without embedding rather than killing the server (the /embedding/start
-            # handler returns 400 for the same case).
-            logger.error("Failed to start embedding service: %s", e)
-        else:
-            model_id = svc.model_fingerprint()
-            inputs, col_mod = wrapper.run_sync(_collect_for_rebuild)
-            _maybe_rebuild(index, model_id, col_mod, inputs, svc)
-    elif args.no_embedding and args.embedding_model:
-        logger.info("Embedding service disabled at boot (--no-embedding); model configured")
-
-    # The derived-text store (FTS5 trigram sidecar) is independent of the embedding index — it
-    # builds whether or not a backend is configured. Cheap col_mod probe first; only read all field
-    # text on real drift (first build, or an external edit), so a clean reload does no full read.
-    derived = DerivedTextStore(path=cache_base / "shrike.db")
-    logger.info("Derived-text store: %s", derived.status())
-    d_col_mod = wrapper.run_sync(lambda c: c.col_mod())
-    if derived.check_drift(d_col_mod):
-        rows, dmod = wrapper.run_sync(_collect_derived_rows)
-        derived.build_in_background(rows, dmod)
-        logger.info("Derived-text store drift; building in background (%d rows)", len(rows))
-
-    if args.cooperative_lock:
-        # On every re-acquire after an idle release, re-check index drift: if the
-        # collection changed on disk while we were released (Anki, sync, import),
-        # rebuild. Cheap col_mod-only check; texts are read under the lock and
-        # embedded off-lock only on real drift. Runs on the worker thread.
-        def _acquire_hook(core: Any) -> None:
-            # The derived-text store is independent of the embedder — rebuild it on drift even with
-            # no embedding service (it's a cheap text-only build).
-            if derived.check_drift(core.col_mod()):
-                rows, dmod = _collect_derived_rows(core)
-                logger.info(
-                    "Collection changed while idle; rebuilding derived store (%d rows)", len(rows)
-                )
-                derived.build_in_background(rows, dmod)
-            if not index.available or not index.check_drift(core.col_mod()):
-                return
-            svc_now = runtime.service
-            if svc_now is None or not svc_now.running:
-                return
-            inputs, changed_mod = _collect_for_rebuild(core)
-            logger.info("Collection changed while idle (col_mod=%d); rebuilding index", changed_mod)
-            index.rebuild_in_background(inputs, changed_mod, model_id=svc_now.model_fingerprint())
-
-        wrapper.set_acquire_hook(_acquire_hook)
-        # Release now so a freshly-booted, never-touched idle daemon doesn't hold
-        # the lock; the first request re-acquires on demand.
-        wrapper.release_now()
+    # The derived-text store (FTS5 trigram sidecar) — engine factory injected
+    # here, like the index engine (the harness owns assembly, #278 C5).
+    derived = DerivedTextStore(path=cache_base / "shrike.db", engine_factory=NativeDerivedEngine)
 
     # The transport-free core (#275): everything below the route layer. The
     # scheduler is the HTTP host's implementation of the kernel's concurrency
     # port (the wrapper's worker thread + the host loop, bound per request).
+    # boot() runs the one-shot orchestration: embedding start (degrading on
+    # failure), index drift reconcile, derived-store drift build, and the
+    # cooperative re-acquire hook.
     kernel = ShrikeKernel(
         wrapper=wrapper,
         index=index,
@@ -828,6 +771,7 @@ def main() -> None:
         runtime=runtime,
         scheduler=WorkerScheduler(wrapper),
     )
+    kernel.boot(start_embedding=bool(args.embedding_model) and not args.no_embedding)
 
     def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
         sig_name = signal.Signals(signum).name
@@ -929,6 +873,7 @@ def main() -> None:
         index=index,
         saver=saver,
         derived=derived,
+        pipeline=make_search_pipeline(),
         allow_private_fetch=allow_private_media_fetch,
         server_path_roots=server_path_roots,
         media_base_url=media_base_url,

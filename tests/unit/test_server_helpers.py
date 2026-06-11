@@ -1,4 +1,4 @@
-"""Unit tests for server.py helpers (#79): _maybe_rebuild's rebuild signal."""
+"""Unit tests for the kernel's _maybe_rebuild (#79): the rebuild signal."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 from shrike.embedding import EmbeddingService
 from shrike.index import NoteEmbedInput, VectorIndex
-from shrike.server import _maybe_rebuild
+from shrike.kernel import _maybe_rebuild
 
 
 def _index(*, drift: bool) -> MagicMock:

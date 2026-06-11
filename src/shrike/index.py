@@ -20,7 +20,7 @@ import logging
 import threading
 from collections.abc import Callable, MutableMapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -141,6 +141,8 @@ class VectorIndex:
         self,
         path: str | Path,
         backend: EmbedderBackend | None = None,
+        *,
+        engine: IndexEngine | None = None,
     ) -> None:
         self._dir = Path(path)
         self._index_path = self._dir / "index.usearch"
@@ -151,8 +153,9 @@ class VectorIndex:
         self._image_exists_fn: ImageExists | None = None
         # The storage engine (#267): per-modality USearch sub-indexes, dedup, file persistence,
         # calibration. The orchestrator (this class) holds policy and delegates storage to it.
-        # Native (shrike-index, #273) — unconditional since the #278 cutover.
-        self._engine = make_index_engine()
+        # Injectable (the server harness passes it, #278 C5); defaults to the
+        # native engine (shrike-index, #273 — unconditional since the cutover).
+        self._engine = engine if engine is not None else make_index_engine()
         self._col_mod: int | None = None
         self._model_id: str | None = None
         # On-disk schema of the loaded index (INDEX_SCHEMA_VERSION for a freshly-built one). A v1
@@ -203,11 +206,12 @@ class VectorIndex:
         tests simulate on-disk layouts by poking it directly, and that surface is part of the
         frozen ``VectorIndex`` contract. Production code goes through the engine API.
         """
-        return self._engine._indexes
+        indexes: MutableMapping[str, Any] = cast(Any, self._engine)._indexes
+        return indexes
 
     @_indexes.setter
     def _indexes(self, value: dict[str, Any]) -> None:
-        self._engine._indexes = value
+        cast(Any, self._engine)._indexes = value
 
     @property
     def ndim(self) -> int | None:

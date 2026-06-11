@@ -9,7 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from shrike.index import NoteEmbedInput
-from shrike.server import _collect_for_rebuild, _maybe_rebuild, main
+from shrike.kernel import _collect_for_rebuild, _maybe_rebuild
+from shrike.server import main
 
 
 class TestCollectForRebuild:
