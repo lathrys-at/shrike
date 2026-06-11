@@ -20,9 +20,26 @@ use futures::future::BoxFuture;
 use pyo3::prelude::*;
 
 use shrike_ffi::{NativeError, NativeResult};
+use shrike_kernel::index_orchestrator::{ImageEmbedder, ImageResolver};
 use shrike_kernel::Embedder;
 
 type VecResult = NativeResult<Vec<Vec<f32>>>;
+
+/// What one dispatch embeds: a text batch (`embed_texts`) or an image-bytes
+/// batch (`embed_images`) — same loop → pool → oneshot shape either way.
+enum EmbedPayload {
+    Texts(Vec<String>),
+    Images(Vec<Vec<u8>>),
+}
+
+impl EmbedPayload {
+    fn method(&self) -> &'static str {
+        match self {
+            Self::Texts(_) => "embed_texts",
+            Self::Images(_) => "embed_images",
+        }
+    }
+}
 
 /// Loop callback: dispatch the blocking embed to the pool and chain the
 /// done-callback. (Runs on the loop thread, GIL held.)
@@ -30,18 +47,25 @@ type VecResult = NativeResult<Vec<Vec<f32>>>;
 struct EmbedDispatch {
     backend: Py<PyAny>,
     event_loop: Py<PyAny>,
-    texts: Vec<String>,
+    payload: Mutex<Option<EmbedPayload>>,
     tx: Arc<Mutex<Option<oneshot::Sender<VecResult>>>>,
 }
 
 #[pymethods]
 impl EmbedDispatch {
     fn __call__(&self, py: Python<'_>) -> PyResult<()> {
-        let embed = self.backend.bind(py).getattr("embed_texts")?;
+        let Some(payload) = self.payload.lock().expect("dispatch poisoned").take() else {
+            return Ok(()); // double-fired callback: nothing left to send
+        };
+        let embed = self.backend.bind(py).getattr(payload.method())?;
+        let arg: Py<PyAny> = match payload {
+            EmbedPayload::Texts(texts) => texts.into_pyobject(py)?.into_any().unbind(),
+            EmbedPayload::Images(images) => images.into_pyobject(py)?.into_any().unbind(),
+        };
         let pool_future = self
             .event_loop
             .bind(py)
-            .call_method1("run_in_executor", (py.None(), embed, self.texts.clone()))?;
+            .call_method1("run_in_executor", (py.None(), embed, arg))?;
         let done = EmbedDone {
             tx: Arc::clone(&self.tx),
         };
@@ -84,25 +108,25 @@ pub(crate) struct PyEmbedderHandle {
     event_loop: Py<PyAny>,
     fingerprint: Option<String>,
     dim: Option<usize>,
+    embeds_images: bool,
 }
 
-impl Embedder for PyEmbedderHandle {
-    fn fingerprint(&self) -> Option<String> {
-        self.fingerprint.clone()
+impl PyEmbedderHandle {
+    /// Whether the wrapped backend advertises the image modality.
+    pub(crate) fn embeds_images(&self) -> bool {
+        self.embeds_images
     }
 
-    fn dim(&self) -> Option<usize> {
-        self.dim
-    }
-
-    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, VecResult> {
+    /// Schedule one embed dispatch onto the loop and await its oneshot — the
+    /// shared spine of the text and image halves.
+    fn dispatch(&self, payload: EmbedPayload) -> BoxFuture<'_, VecResult> {
         let (tx, rx) = oneshot::channel::<VecResult>();
         let tx = Arc::new(Mutex::new(Some(tx)));
         let scheduled = Python::attach(|py| -> PyResult<()> {
             let dispatch = EmbedDispatch {
                 backend: self.backend.clone_ref(py),
                 event_loop: self.event_loop.clone_ref(py),
-                texts,
+                payload: Mutex::new(Some(payload)),
                 tx,
             };
             self.event_loop
@@ -119,6 +143,64 @@ impl Embedder for PyEmbedderHandle {
             rx.await.map_err(|_| {
                 NativeError::unavailable("the embed dispatch was dropped (loop gone?)")
             })?
+        })
+    }
+}
+
+impl Embedder for PyEmbedderHandle {
+    fn fingerprint(&self) -> Option<String> {
+        self.fingerprint.clone()
+    }
+
+    fn dim(&self) -> Option<usize> {
+        self.dim
+    }
+
+    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, VecResult> {
+        self.dispatch(EmbedPayload::Texts(texts))
+    }
+}
+
+impl ImageEmbedder for PyEmbedderHandle {
+    fn embed_images(&self, images: Vec<Vec<u8>>) -> BoxFuture<'_, VecResult> {
+        self.dispatch(EmbedPayload::Images(images))
+    }
+}
+
+/// The media resolver over harness callables: `read(name) -> bytes | None`
+/// and `exists(name) -> bool` (the server closes both over the collection's
+/// media dir, exactly like the Python facade's resolver pair). Called
+/// synchronously inside orchestrator ops — the reads are local files; the
+/// loop briefly hosts them during a poll.
+pub(crate) struct PyMediaResolver {
+    read: Py<PyAny>,
+    exists: Py<PyAny>,
+}
+
+impl PyMediaResolver {
+    pub(crate) fn new(read: Py<PyAny>, exists: Py<PyAny>) -> Self {
+        Self { read, exists }
+    }
+}
+
+impl ImageResolver for PyMediaResolver {
+    fn read(&self, name: &str) -> Option<Vec<u8>> {
+        Python::attach(|py| {
+            self.read
+                .call1(py, (name,))
+                .ok()
+                .and_then(|v| v.extract::<Option<Vec<u8>>>(py).ok())
+                .flatten()
+        })
+    }
+
+    fn exists(&self, name: &str) -> bool {
+        Python::attach(|py| {
+            self.exists
+                .call1(py, (name,))
+                .ok()
+                .and_then(|v| v.extract::<bool>(py).ok())
+                .unwrap_or(false)
         })
     }
 }
@@ -149,12 +231,17 @@ impl PyEmbedder {
             .call_method0("embedding_dim")
             .ok()
             .and_then(|v| v.extract::<usize>().ok());
+        let embeds_images = bound
+            .getattr("modalities")
+            .and_then(|m| m.contains("image"))
+            .unwrap_or(false);
         Ok(Self {
             handle: Arc::new(PyEmbedderHandle {
                 backend,
                 event_loop: event_loop.unbind(),
                 fingerprint,
                 dim,
+                embeds_images,
             }),
         })
     }

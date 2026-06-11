@@ -157,3 +157,73 @@ class TestAsyncKernel:
             await kernel.close()
 
         asyncio.run(flow())
+
+
+class _ImageBackend(_Backend):
+    """A dual-encoder stand-in: advertises the image modality and embeds
+    image bytes into the same 4-dim space."""
+
+    modalities = frozenset({"text", "image"})
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.image_calls: list[int] = []
+
+    def embed_images(self, images: list[bytes]) -> list[list[float]]:
+        self.image_calls.append(len(images))
+        out = []
+        for data in images:
+            b = hashlib.blake2b(data, digest_size=1).digest()[0] / 255.0
+            n = (b * b + 1.0) ** 0.5
+            out.append([1.0 / n, b / n, 0.0, 0.0])
+        return out
+
+
+class TestAsyncKernelImages:
+    def test_image_seam_embeds_resolvable_images(self, tmp_path) -> None:
+        media = tmp_path / "media"
+        media.mkdir()
+        (media / "diagram.png").write_bytes(b"png-bytes-here")
+
+        def read(name: str) -> bytes | None:
+            p = media / name
+            return p.read_bytes() if p.exists() else None
+
+        def exists(name: str) -> bool:
+            return (media / name).exists()
+
+        async def flow():
+            backend = _ImageBackend()
+            embedder = shrike_native.PyEmbedder.capture(backend)
+            kernel = await shrike_native.async_kernel_open(
+                str(tmp_path / "collection.anki2"),
+                str(tmp_path / "cache"),
+                embedder,
+                None,
+                read,
+                exists,
+            )
+            await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            results = await kernel.upsert_notes(
+                [
+                    (basic, 1, ['has a picture <img src="diagram.png">', "back"], []),
+                    (basic, 1, ['missing <img src="nope.png">', "back"], []),
+                ],
+                "error",
+            )
+            assert all(r[0] == "created" for r in results)
+            engine = kernel.engine_handle()
+            pictured, plain = results[0][1], results[1][1]
+            # The resolvable image embedded under the note's key; the missing
+            # one quietly contributed nothing (graceful degradation).
+            assert engine.modality_keys("image") == [pictured]
+            assert engine.modality_contains("text", plain)
+            # No drift after the kernel's own multimodal writes.
+            assert not await kernel.reindex_if_needed()
+            await kernel.close()
+            return backend
+
+        backend = asyncio.run(flow())
+        assert backend.image_calls == [1], "one image embed for the one resolvable file"

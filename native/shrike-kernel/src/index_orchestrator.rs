@@ -574,6 +574,17 @@ pub trait ImageEmbedder: Send + Sync {
     ) -> futures::future::BoxFuture<'_, NativeResult<Vec<Vec<f32>>>>;
 }
 
+/// An `Arc`'d image embedder is an image embedder (assembly hands the same
+/// handle to both halves of the seam).
+impl<T: ImageEmbedder> ImageEmbedder for Arc<T> {
+    fn embed_images(
+        &self,
+        images: Vec<Vec<u8>>,
+    ) -> futures::future::BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+        (**self).embed_images(images)
+    }
+}
+
 impl IndexOrchestrator {
     fn hash_for(
         &self,

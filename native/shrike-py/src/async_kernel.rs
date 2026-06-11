@@ -16,7 +16,7 @@ use shrike_collection::{CreateOutcome, DuplicatePolicy};
 use shrike_kernel::{Kernel, MutexExecutor, NoteSpec, SerialExecutor, SerializedCollection};
 
 use crate::asyncio_bridge::future_into_py;
-use crate::py_embedder::{PyEmbedder, PyEmbedderHandle};
+use crate::py_embedder::{PyEmbedder, PyEmbedderHandle, PyMediaResolver};
 use crate::timer_host::LoopTimerHost;
 use crate::worker_executor::WorkerExecutor;
 
@@ -103,13 +103,15 @@ pub(crate) struct AsyncKernel {
 /// Open a kernel asynchronously; resolves to an [`AsyncKernel`]. Call from a
 /// coroutine context (the loop hosts the timers and the embed dispatches).
 #[pyfunction]
-#[pyo3(signature = (collection_path, cache_dir, embedder, executor=None))]
+#[pyo3(signature = (collection_path, cache_dir, embedder, executor=None, media_read=None, media_exists=None))]
 pub(crate) fn async_kernel_open<'py>(
     py: Python<'py>,
     collection_path: String,
     cache_dir: String,
     embedder: PyRef<'py, PyEmbedder>,
     executor: Option<PyRef<'py, WorkerExecutor>>,
+    media_read: Option<Py<PyAny>>,
+    media_exists: Option<Py<PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let executor: Arc<dyn SerialExecutor> = match executor {
         Some(ex) => Arc::new(ex.handle()),
@@ -117,9 +119,26 @@ pub(crate) fn async_kernel_open<'py>(
     };
     let timers: Arc<dyn shrike_kernel::TimerHost> = Arc::new(LoopTimerHost::capture_host(py)?);
     let handle = Arc::clone(&embedder.handle);
+    // The image pair exists only when the backend embeds images AND the
+    // harness supplied BOTH resolver callables (read + the cheap stat).
+    let images: Option<shrike_kernel::KernelImages> =
+        match (handle.embeds_images(), media_read, media_exists) {
+            (true, Some(read), Some(exists)) => Some((
+                Box::new(Arc::clone(&handle)),
+                Box::new(PyMediaResolver::new(read, exists)),
+            )),
+            _ => None,
+        };
     future_into_py(py, async move {
-        let kernel =
-            Kernel::open(&collection_path, &cache_dir, handle, executor, Some(timers)).await?;
+        let kernel = Kernel::open(
+            &collection_path,
+            &cache_dir,
+            handle,
+            executor,
+            Some(timers),
+            images,
+        )
+        .await?;
         Ok(AsyncKernel {
             inner: Arc::new(kernel),
         })

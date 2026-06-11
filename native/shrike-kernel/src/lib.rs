@@ -252,7 +252,17 @@ pub struct Kernel<E: Embedder> {
     saver: Option<Arc<index_orchestrator::DebouncedSaver>>,
     derived: DerivedEngine,
     embedder: E,
+    /// The image half of the embedding seam, injected at assembly when the
+    /// backend embeds images AND the harness supplies a media resolver.
+    images: Option<KernelImages>,
 }
+
+/// The injected image pair: who embeds image bytes + who resolves filenames
+/// to bytes (lazily, at embed time).
+pub type KernelImages = (
+    Box<dyn index_orchestrator::ImageEmbedder>,
+    Box<dyn index_orchestrator::ImageResolver>,
+);
 
 const TEXT: &str = "text";
 const FIELD_SOURCE: &str = "field";
@@ -270,6 +280,7 @@ impl<E: Embedder> Kernel<E> {
         embedder: E,
         executor: Arc<dyn SerialExecutor>,
         timers: Option<Arc<dyn TimerHost>>,
+        images: Option<KernelImages>,
     ) -> NativeResult<Self> {
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
@@ -297,7 +308,18 @@ impl<E: Embedder> Kernel<E> {
             saver,
             derived,
             embedder,
+            images,
         })
+    }
+
+    /// The image pair as the borrow shape the orchestrator ops take.
+    fn images_pair(
+        &self,
+    ) -> Option<(
+        &dyn index_orchestrator::ImageEmbedder,
+        &dyn index_orchestrator::ImageResolver,
+    )> {
+        self.images.as_ref().map(|(e, r)| (&**e, &**r))
     }
 
     /// The orchestrator (state, status, drift) — the harness's status surface.
@@ -322,7 +344,7 @@ impl<E: Embedder> Kernel<E> {
         let model_id = self.embedder.fingerprint();
         if !self
             .orchestrator
-            .check_drift(col_mod, model_id.as_deref(), false)
+            .check_drift(col_mod, model_id.as_deref(), self.images.is_some())
         {
             return Ok(false);
         }
@@ -351,7 +373,13 @@ impl<E: Embedder> Kernel<E> {
             )
             .collect();
         self.orchestrator
-            .reconcile(inputs, col_mod, model_id, &self.embedder, None)
+            .reconcile(
+                inputs,
+                col_mod,
+                model_id,
+                &self.embedder,
+                self.images_pair(),
+            )
             .await?;
         Ok(true)
     }
@@ -462,7 +490,9 @@ impl<E: Embedder> Kernel<E> {
                         },
                     )
                     .collect();
-                self.orchestrator.add(&inputs, &self.embedder, None).await?;
+                self.orchestrator
+                    .add(&inputs, &self.embedder, self.images_pair())
+                    .await?;
                 // Group the derived rows per note (rows come back grouped by
                 // note already; ingest replaces per (note, source)).
                 let mut refs: BTreeMap<i64, Vec<(String, String)>> = BTreeMap::new();
@@ -676,6 +706,7 @@ mod no_cpython_smoke {
             HashEmbedder,
             Arc::new(MutexExecutor::default()),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -778,6 +809,7 @@ mod no_cpython_smoke {
             cache.to_str().unwrap(),
             HashEmbedder,
             Arc::new(MutexExecutor::default()),
+            None,
             None,
         )
         .await

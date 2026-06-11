@@ -6,6 +6,7 @@ CI lane fails if a Rust signature drifts from these.
 
 from asyncio import Future
 
+from collections.abc import Callable
 from typing import final
 
 # pyo3's #[pymodule] auto-generates __all__ from the registered names.
@@ -284,6 +285,8 @@ def async_kernel_open(
     cache_dir: str,
     embedder: PyEmbedder,
     executor: WorkerExecutor | None = None,
+    media_read: Callable[[str], bytes | None] | None = None,
+    media_exists: Callable[[str], bool] | None = None,
 ) -> Future[AsyncKernel]: ...
 
 class CollectionCore:
