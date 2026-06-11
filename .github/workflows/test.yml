@@ -189,6 +189,14 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - name: Rust clippy
         if: needs.changes.outputs.native == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
+        # DESCRIPTORS_BIN: both anki build scripts honor it; without it they
+        # hand the descriptor set over via cargo's shared target dir, which
+        # rust-cache prunes between runs (the file isn't a crate artifact).
+        # The checked-in pin keeps the build hermetic under a restored cache;
+        # anki_proto's write_file_if_changed re-verifies it (a content drift
+        # would show as a dirty file — a tag-bump tripwire, not a hazard).
+        env:
+          DESCRIPTORS_BIN: ${{ github.workspace }}/native/third_party/anki/anki_descriptors.bin
         run: cd native && cargo clippy --workspace --all-targets -- -D warnings
 
   # The authoritative test lane: the unit + non-embedding integration suites run

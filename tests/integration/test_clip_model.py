@@ -33,6 +33,12 @@ _UNRELATED = ["a photograph of a cat", "a circuit diagram schematic", "a page of
 
 
 @requires_clip
+def _make(w, notes):
+    import json
+
+    return w.run_sync(lambda c: json.loads(c.upsert_notes(json.dumps(notes), "allow", False)))
+
+
 class TestClipModel:
     # One started backend for the whole class: every test here exercises the *same*
     # default quantized graphs read-only (embed/health/_safe_batch), so a per-test
@@ -106,27 +112,25 @@ class TestClipImageIndex:
         os.makedirs(w.media_dir, exist_ok=True)
         Image.new("RGB", (128, 128), (220, 30, 30)).save(os.path.join(w.media_dir, "red.png"))
         # The note's TEXT never names a colour; its meaning lives in the image.
-        red = w.run_sync(
-            lambda _c: w._upsert_notes(
-                [
-                    {
-                        "deck": "Test",
-                        "note_type": "Basic",
-                        "fields": {"Front": 'study card <img src="red.png">', "Back": "."},
-                    }
-                ]
-            )
+        red = _make(
+            w,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": 'study card <img src="red.png">', "Back": "."},
+                }
+            ],
         )[0]["id"]
-        other = w.run_sync(
-            lambda _c: w._upsert_notes(
-                [
-                    {
-                        "deck": "Test",
-                        "note_type": "Basic",
-                        "fields": {"Front": "ancient rome", "Back": "."},
-                    }
-                ]
-            )
+        other = _make(
+            w,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": "ancient rome", "Back": "."},
+                }
+            ],
         )[0]["id"]
         return w, red, other
 
@@ -139,12 +143,18 @@ class TestClipImageIndex:
         return idx
 
     def test_image_note_rank_one_via_image_ranker(self, be: ClipBackend, tmp_path: Path) -> None:
-        from shrike.collection import CollectionWrapper
 
         w, red, other = self._collection(tmp_path)
         try:
             idx = self._index(be, tmp_path, w)
-            inputs = w.run_sync(lambda c: CollectionWrapper._note_embed_inputs(c, [red, other]))
+            from shrike.embedding_base import NoteEmbedInput
+
+            inputs = w.run_sync(
+                lambda c: [
+                    NoteEmbedInput(note_id=n, text=t, image_names=imgs)
+                    for n, t, imgs in c.note_embed_inputs([red, other])
+                ]
+            )
             idx.rebuild(inputs, col_mod=1, model_id=be.model_fingerprint())
             # red: text + image = 2 vectors (image in its own sub-index); other: text = 1.
             assert idx.size == 3
@@ -166,14 +176,20 @@ class TestClipImageIndex:
             w.close()
 
     def test_reconcile_reembeds_when_image_removed(self, be: ClipBackend, tmp_path: Path) -> None:
-        from shrike.collection import CollectionWrapper
         from shrike.index import NoteEmbedInput
 
         w, red, other = self._collection(tmp_path)
         try:
             idx = self._index(be, tmp_path, w)
             mid = be.model_fingerprint()
-            inputs = w.run_sync(lambda c: CollectionWrapper._note_embed_inputs(c, [red, other]))
+            from shrike.embedding_base import NoteEmbedInput
+
+            inputs = w.run_sync(
+                lambda c: [
+                    NoteEmbedInput(note_id=n, text=t, image_names=imgs)
+                    for n, t, imgs in c.note_embed_inputs([red, other])
+                ]
+            )
             idx.rebuild(inputs, col_mod=1, model_id=mid)
             assert idx.size == 3
             # The red note loses its image (its embedding fingerprint changes) → reconcile drops
@@ -210,20 +226,26 @@ class TestClipImageIndex:
                 "note_type": "Basic",
                 "fields": {"Front": f'study card number {i} <img src="{fn}">', "Back": "."},
             }
-            nid = w.run_sync(lambda _c, note=note: w._upsert_notes([note]))[0]["id"]
+            nid = _make(w, [note])[0]["id"]
             ids.append(nid)
         return w, ids
 
     def test_activation_gate_calibrates_and_passes_genuine_match(
         self, be: ClipBackend, tmp_path: Path
     ) -> None:
-        from shrike.collection import CollectionWrapper
 
         # A ≥CALIB_MIN colour collection so calibration produces image stats on the real CLIP model.
         w, ids = self._colour_collection(tmp_path, CALIB_MIN + 2)
         try:
             idx = self._index(be, tmp_path, w)
-            inputs = w.run_sync(lambda c: CollectionWrapper._note_embed_inputs(c, ids))
+            from shrike.embedding_base import NoteEmbedInput
+
+            inputs = w.run_sync(
+                lambda c: [
+                    NoteEmbedInput(note_id=n, text=t, image_names=imgs)
+                    for n, t, imgs in c.note_embed_inputs(ids)
+                ]
+            )
             idx.rebuild(inputs, col_mod=1, model_id=be.model_fingerprint())
 
             # Offline calibration (#201b) ran on the real model and produced image-modality stats.
