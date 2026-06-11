@@ -38,7 +38,8 @@ from shrike.index import IndexState
 
 logger = logging.getLogger("shrike.derived")
 
-SCHEMA_VERSION = 1
+# v2 (#228): segments table + recognition meta. Must match DerivedEngine::SCHEMA_VERSION.
+SCHEMA_VERSION = 2
 MIN_TRIGRAM = 3  # FTS5's trigram tokenizer can't match a term shorter than 3 chars
 FUZZY_MIN_SHARED = 2  # a fuzzy candidate must share at least this many query trigrams (noise floor)
 SNIPPET_TOKENS = 12  # window size for FTS5 snippet()

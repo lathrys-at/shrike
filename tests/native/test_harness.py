@@ -132,3 +132,69 @@ class TestEmbedQueryCache:
             await kernel.close()
 
         asyncio.run(flow())
+
+
+class _StubOcr:
+    """RecognizerBackend wire contract over a canned mapping."""
+
+    def recognize(self, items: list[bytes]) -> list[tuple[str, float, str]]:
+        return [(data.decode(), 0.9, "") for data in items]
+
+    def model_fingerprint(self) -> str:
+        return "stub-ocr:v1"
+
+
+class TestRecognition:
+    def test_sweep_without_embedding_feeds_lexical_search(self, tmp_path) -> None:
+        # Recognition is independent of the embed slot: with embedding off,
+        # the sweep still lands OCR rows in the derived store (vectors mint
+        # later, when an embedder attaches and reindexes).
+        async def flow():
+            media = {"krebs.png": b"oxaloacetate condenses with acetyl coa"}
+            runtime = EmbeddingRuntime(model=None)
+            derived = DerivedTextStore(
+                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
+            )
+            harness = await Harness.assemble(
+                collection_path=str(tmp_path / "collection.anki2"),
+                cache_dir=str(tmp_path / "cache"),
+                runtime=runtime,
+                derived=derived,
+                cooperative=False,
+                hold_seconds=5.0,
+                media_read=media.get,
+                media_exists=lambda name: name in media,
+            )
+            await harness.boot(start_embedding=False)
+            await harness.wrapper.upsert_notes(
+                [
+                    {
+                        "note_type": "Basic",
+                        "deck": "Default",
+                        "fields": {"Front": 'See <img src="krebs.png">', "Back": "b"},
+                    }
+                ]
+            )
+
+            harness.attach_recognizer(_StubOcr())
+            report = await harness.recognition_sweep(batch_size=4)
+            assert report["total_stored"] == 1
+
+            # The lexical consumer sees it through the SAME store file.
+            rows = harness.derived.search_substring("oxaloacetate", limit=5)
+            assert rows, "OCR text reached the lexical store"
+
+            harness.detach_recognizer()
+            await harness.close()
+
+        asyncio.run(flow())
+
+    def test_attach_without_media_access_is_a_config_error(self, tmp_path) -> None:
+        async def flow():
+            harness = await _assemble(tmp_path)
+            await harness.boot(start_embedding=False)
+            with pytest.raises(KernelConfigError):
+                harness.attach_recognizer(_StubOcr())
+            await harness.close()
+
+        asyncio.run(flow())

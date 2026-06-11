@@ -201,6 +201,11 @@ class PyEmbedder:
     @staticmethod
     def capture(backend: object) -> PyEmbedder: ...
 
+@final
+class Recognizer:
+    @staticmethod
+    def capture(backend: object) -> Recognizer: ...
+
 def embedder_probe(embedder: PyEmbedder, texts: list[str]) -> Future[list[list[float]]]: ...
 @final
 class KernelIndex:
@@ -269,6 +274,14 @@ class AsyncKernel:
         media_exists: Callable[[str], bool] | None = None,
     ) -> None: ...
     def detach_embedder(self) -> None: ...
+    def attach_recognizer(
+        self,
+        recognizer: Recognizer,
+        media_read: Callable[[str], bytes | None],
+        media_exists: Callable[[str], bool],
+    ) -> None: ...
+    def detach_recognizer(self) -> None: ...
+    def recognize_pending(self, max_items: int) -> Future[str]: ...
     def upsert_notes(
         self,
         notes: list[tuple[int, int, list[str], list[str]]],

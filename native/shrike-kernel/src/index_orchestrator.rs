@@ -53,7 +53,18 @@ pub fn note_hash(
     image_names: &[String],
     embeds_images: bool,
     image_exists: &dyn Fn(&str) -> bool,
+    ocr_texts: &[String],
 ) -> String {
+    // Recognized texts fold in behind a distinct separator (#228), so an
+    // OCR change re-embeds exactly that note; with none, every branch below
+    // is byte-identical to the pre-OCR scheme (no upgrade rebuild).
+    let text_part: std::borrow::Cow<'_, str> = if ocr_texts.is_empty() {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        let mut sorted: Vec<&str> = ocr_texts.iter().map(String::as_str).collect();
+        sorted.sort_unstable();
+        std::borrow::Cow::Owned(format!("{text}\u{1e}{}", sorted.join("\u{1e}")))
+    };
     if embeds_images {
         let mut present: Vec<&str> = image_names
             .iter()
@@ -62,11 +73,11 @@ pub fn note_hash(
             .collect();
         if !present.is_empty() {
             present.sort_unstable();
-            let joined = format!("{text}\u{1f}{}", present.join("\u{1f}"));
+            let joined = format!("{text_part}\u{1f}{}", present.join("\u{1f}"));
             return hash_text(&joined);
         }
     }
-    hash_text(text)
+    hash_text(&text_part)
 }
 
 /// `index.meta.json` — the exact shape the Python orchestrator wrote.
@@ -429,13 +440,30 @@ mod tests {
         let never = |_: &str| false;
         let names = vec!["b.png".to_owned(), "a.png".to_owned()];
         // Text-only backend → byte-identical to the bare text hash.
-        assert_eq!(note_hash("t", &names, false, &always), hash_text("t"));
+        assert_eq!(note_hash("t", &names, false, &always, &[]), hash_text("t"));
         // Image backend + nothing resolves → still the bare text hash.
-        assert_eq!(note_hash("t", &names, true, &never), hash_text("t"));
+        assert_eq!(note_hash("t", &names, true, &never, &[]), hash_text("t"));
         // Resolvable images fold in, sorted (matches the Python scheme).
-        let folded = note_hash("t", &names, true, &always);
+        let folded = note_hash("t", &names, true, &always, &[]);
         assert_eq!(folded, hash_text("t\u{1f}a.png\u{1f}b.png"));
         assert_ne!(folded, hash_text("t"));
+    }
+
+    #[test]
+    fn note_hash_folds_recognized_texts() {
+        // No OCR → byte-identical to the pre-#228 scheme (no upgrade rebuild).
+        let never = |_: &str| false;
+        assert_eq!(note_hash("t", &[], false, &never, &[]), hash_text("t"));
+        // OCR texts fold in sorted behind the record separator, so an OCR
+        // change re-embeds exactly this note...
+        let ocr = vec!["zeta".to_owned(), "alpha".to_owned()];
+        let folded = note_hash("t", &[], false, &never, &ocr);
+        assert_eq!(folded, hash_text("t\u{1e}alpha\u{1e}zeta"));
+        // ...and composes with the image fold.
+        let names = vec!["a.png".to_owned()];
+        let always = |_: &str| true;
+        let both = note_hash("t", &names, true, &always, &ocr);
+        assert_eq!(both, hash_text("t\u{1e}alpha\u{1e}zeta\u{1f}a.png"));
     }
 
     #[test]
@@ -569,6 +597,12 @@ pub struct EmbedInput {
     pub note_id: i64,
     pub text: String,
     pub image_names: Vec<String>,
+    /// Recognized, vector-worthy texts for this note (#199/#228): each mints
+    /// its own TEXT-space vector under the note key (no modality gap — the
+    /// text encoder reads them like any text), so a note ranks by
+    /// max-over-items. Empty for notes without recognition — the hash stays
+    /// byte-identical to the pre-OCR scheme, so upgrades never rebuild.
+    pub ocr_texts: Vec<String>,
 }
 
 /// The media resolver the harness injects for image-capable backends: read
@@ -608,7 +642,13 @@ impl IndexOrchestrator {
     ) -> String {
         let embeds_images = images.is_some();
         let exists = |name: &str| images.map(|(_, r)| r.exists(name)).unwrap_or(false);
-        note_hash(&input.text, &input.image_names, embeds_images, &exists)
+        note_hash(
+            &input.text,
+            &input.image_names,
+            embeds_images,
+            &exists,
+            &input.ocr_texts,
+        )
     }
 
     /// Embed and (replace-)add notes — text vectors always; one vector per
@@ -652,10 +692,31 @@ impl IndexOrchestrator {
                 }
             }
 
+            // Recognized-text vectors (#199/#228): each vector-worthy OCR/ASR
+            // text embeds via the SAME text encoder, landing in the text
+            // region with no modality gap, keyed by its note — so the
+            // per-modality ranking is max-over-items for free.
+            let mut ocr_keys: Vec<i64> = Vec::new();
+            let mut ocr_texts: Vec<String> = Vec::new();
+            for input in batch {
+                for t in &input.ocr_texts {
+                    ocr_keys.push(input.note_id);
+                    ocr_texts.push(t.clone());
+                }
+            }
+            let ocr_vectors: Vec<Vec<f32>> = if ocr_texts.is_empty() {
+                Vec::new()
+            } else {
+                embedder.embed(ocr_texts).await?
+            };
+
             self.engine.ensure(TEXT, ndim)?;
             // Replace semantics: drop a re-added note's existing vectors first.
             let _ = self.engine.remove(&keys)?;
             self.engine.add(TEXT, &keys, &vectors)?;
+            if !ocr_keys.is_empty() {
+                self.engine.add(TEXT, &ocr_keys, &ocr_vectors)?;
+            }
             if !image_keys.is_empty() {
                 let image_ndim = image_vectors.first().map(Vec::len).unwrap_or(0);
                 self.engine.ensure("image", image_ndim)?;
@@ -921,6 +982,7 @@ mod op_tests {
             note_id: nid,
             text: text.to_owned(),
             image_names: vec![],
+            ocr_texts: vec![],
         }
     }
 

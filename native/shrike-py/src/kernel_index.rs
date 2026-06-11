@@ -42,6 +42,9 @@ fn to_embed_inputs(inputs: Vec<EmbedInputTuple>) -> Vec<EmbedInput> {
             note_id,
             text,
             image_names,
+            // The standalone orchestrator binding has no derived store to
+            // compose from; OCR vectors mint only through the kernel paths.
+            ocr_texts: vec![],
         })
         .collect()
 }

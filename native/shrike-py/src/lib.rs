@@ -32,6 +32,7 @@ mod asyncio_bridge;
 mod kernel_actions;
 mod kernel_index;
 mod py_embedder;
+mod py_recognizer;
 mod timer_host;
 mod worker_executor;
 
@@ -659,6 +660,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ClipEmbedder>()?;
     m.add_class::<NativeIndexEngine>()?;
     m.add_class::<DerivedTextEngine>()?;
+    m.add_class::<py_recognizer::PyRecognizer>()?;
     // Feature-gated (#278): present only in `anki-core` builds; the stubtest
     // allowlist covers its absence from default builds.
     #[cfg(feature = "anki-core")]

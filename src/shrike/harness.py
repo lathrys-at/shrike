@@ -398,6 +398,49 @@ class Harness:
         embedder = shrike_native.PyEmbedder.capture(backend)
         self.kernel.attach_embedder(embedder, self._media_read, self._media_exists)
 
+    def attach_recognizer(self, backend: Any) -> None:
+        """Attach an OCR/ASR backend (#228) — the second #342 slot. The
+        backend satisfies the RecognizerBackend contract: a blocking
+        ``recognize(items: list[bytes]) -> list[tuple[str, float, str]]``
+        (text, confidence, segments-JSON) plus an optional
+        ``model_fingerprint()``. Must run on the event loop (capture grabs
+        the running loop, like PyEmbedder)."""
+        if self._media_read is None or self._media_exists is None:
+            raise KernelConfigError("recognition needs media access (media_read/media_exists)")
+        recognizer = shrike_native.Recognizer.capture(backend)
+        self.kernel.attach_recognizer(recognizer, self._media_read, self._media_exists)
+
+    def detach_recognizer(self) -> None:
+        self.kernel.detach_recognizer()
+
+    async def recognition_sweep(
+        self, batch_size: int = 8, max_batches: int | None = None
+    ) -> dict[str, Any]:
+        """Drive bounded recognition sweeps until nothing is pending (#228).
+
+        Each kernel call recognizes at most ``batch_size`` images then yields
+        the executor, so collection ops interleave; the harness runs this as
+        a background task (the reindex discipline). Returns the final report
+        plus the total stored across the run."""
+        total_stored = 0
+        batches = 0
+        while True:
+            report: dict[str, Any] = json.loads(await self.kernel.recognize_pending(batch_size))
+            total_stored += int(report.get("stored", 0))
+            batches += 1
+            if report.get("status") != "ran" or int(report.get("remaining", 0)) == 0:
+                report["total_stored"] = total_stored
+                if total_stored:
+                    logger.info(
+                        "Recognition sweep stored %d item(s) over %d batch(es)",
+                        total_stored,
+                        batches,
+                    )
+                return report
+            if max_batches is not None and batches >= max_batches:
+                report["total_stored"] = total_stored
+                return report
+
     async def _drive_boot_reindex(self) -> None:
         if await self.kernel.reindex_if_needed():
             logger.info("Index reconciled after embedding start")
