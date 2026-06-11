@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -67,6 +68,18 @@ from shrike.schemas import (
 from shrike.search_fusion import SearchPipeline, make_search_pipeline
 
 logger = logging.getLogger("shrike.tools")
+
+# The per-call outcome fragment for the single completion log line (#328): an
+# action records what happened ("3/3 notes", "2 created, 1 error"); the adapter
+# folds it — with the call's params and duration — into the ONE INFO line each
+# served call emits. Adapter-agnostic (a contextvar, not an MCP coupling).
+_call_outcome: ContextVar[str | None] = ContextVar("shrike_call_outcome", default=None)
+
+
+def note_outcome(message: str) -> None:
+    """Record the action's result fragment for the single completion log line."""
+    _call_outcome.set(message)
+
 
 # Per-signal RRF weights for search_notes' fusion (#180/#201). The semantic retriever is now
 # per-modality — `text` and `image` are separate rank-based signals (search_by_modality), so the
@@ -206,7 +219,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         `note_type_details` to request full definitions for specific note
         types when you need to inspect or author templates."""
         include_list: list[str] | None = [str(s) for s in include] if include else None
-        logger.info("collection_info sections=%s", ",".join(include_list or ["summary"]))
+        logger.debug("collection_info sections=%s", ",".join(include_list or ["summary"]))
         result = await wrapper.get_collection_info(include_list, note_type_details)
         return CollectionInfo.model_validate(result)
 
@@ -294,7 +307,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             ]
             if f
         ]
-        logger.info("list_notes %s limit=%d", " ".join(filters), limit)
+        logger.debug("list_notes %s limit=%d", " ".join(filters), limit)
 
         result = await wrapper.list_notes(
             ids=ids or None,
@@ -305,11 +318,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             fields_mode=fields or "full",
             limit=limit,
         )
-        logger.info(
-            "list_notes returned %d/%d notes",
-            len(result.get("notes", [])),
-            result.get("total", 0),
-        )
+        note_outcome(f"{len(result.get('notes', []))}/{result.get('total', 0)} notes")
         return ListNotesResponse.model_validate(result)
 
     @_action
@@ -350,14 +359,14 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         filters use list_notes. Returns the same note shape as list_notes, with
         `total` the full match count before `limit`. An invalid expression is
         reported as an input error."""
-        logger.info("collection_query %r fields=%s limit=%d", query, fields, limit)
+        logger.debug("collection_query %r fields=%s limit=%d", query, fields, limit)
         try:
             result = await wrapper.query(query, fields_mode=fields, limit=limit)
         except NoteTypeOpError as e:
             # The native input error (a malformed search expression); the
             # decoder already strips Anki's U+2068/U+2069 isolation marks.
             raise ToolInputError(str(e)) from e
-        logger.info("collection_query returned %d/%d notes", len(result["notes"]), result["total"])
+        note_outcome(f"{len(result['notes'])}/{result['total']} notes")
         return ListNotesResponse.model_validate(result)
 
     @_action
@@ -440,7 +449,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         if not queries and not ids:
             raise ToolInputError("At least one of queries or ids must be provided.")
 
-        logger.info(
+        logger.debug(
             "search_notes queries=%d ids=%d top_k=%d threshold=%.2f",
             len(queries or []),
             len(ids or []),
@@ -759,11 +768,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             # the top, so they survive the cap.
             results.append({"source": label, "matches": matches[:top_k]})
 
-        logger.info(
-            "search_notes returned %d groups, %d total matches",
-            len(results),
-            sum(len(r["matches"]) for r in results),
-        )
+        note_outcome(f"{len(results)} groups, {sum(len(r['matches']) for r in results)} matches")
         return SearchResponse.model_validate({"results": results, "message": message})
 
     @_action
@@ -859,7 +864,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         to what would have been attached here."""
         creates = sum(1 for n in notes if n.id is None)
         updates = len(notes) - creates
-        logger.info(
+        logger.debug(
             "upsert_notes count=%d (creates=%d, updates=%d) on_duplicate=%s dry_run=%s",
             len(notes),
             creates,
@@ -874,13 +879,10 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         counts: dict[str, int] = {}
         for r in results:
             counts[r["status"]] = counts.get(r["status"], 0) + 1
-        logger.info(
-            "upsert_notes completed: %d created, %d updated, %d ok, %d skipped, %d errors",
-            counts.get("created", 0),
-            counts.get("updated", 0),
-            counts.get("ok", 0),
-            counts.get("skipped", 0),
-            counts.get("error", 0),
+        note_outcome(
+            f"{counts.get('created', 0)} created, {counts.get('updated', 0)} updated, "
+            f"{counts.get('ok', 0)} ok, {counts.get('skipped', 0)} skipped, "
+            f"{counts.get('error', 0)} errors"
         )
 
         # A dry run writes nothing, so there is no cache maintenance or neighbor
@@ -938,7 +940,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                     if r.get("id") in pending:
                         r["neighbors_unavailable"] = True
                 if pending:
-                    logger.info(
+                    logger.debug(
                         "Neighbors unavailable for %d note(s); caller can retry via "
                         "search_notes(ids=%s)",
                         len(pending),
@@ -1053,7 +1055,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         data); use update_note_type_fields (reposition / add / remove / rename)
         for those."""
         names = [nt.name or f"id={nt.id}" for nt in note_types]
-        logger.info("upsert_note_types count=%d names=%s", len(note_types), ", ".join(names))
+        logger.debug("upsert_note_types count=%d names=%s", len(note_types), ", ".join(names))
 
         nt_dicts = [nt.model_dump(exclude_none=True) for nt in note_types]
         results = await wrapper.upsert_note_types(nt_dicts)
@@ -1102,13 +1104,13 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         these operations are addressed by field name and can truly move, insert,
         or remove a non-trailing field. Returns the resulting ordered field
         names."""
-        logger.info("update_note_type_fields %r ops=%d", note_type, len(operations))
+        logger.debug("update_note_type_fields %r ops=%d", note_type, len(operations))
         op_dicts = [op.model_dump(exclude_none=True) for op in operations]
         try:
             result = await wrapper.update_note_type_fields(note_type, op_dicts)
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
-        logger.info("update_note_type_fields %r -> %s", note_type, result["fields"])
+        note_outcome(f"fields -> {result['fields']}")
         return UpdateNoteTypeFieldsResponse.model_validate(result)
 
     @_action
@@ -1147,13 +1149,13 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         insert, or remove a non-trailing template. To change a template's
         front/back HTML in place, use upsert_note_types. Returns the resulting
         ordered template names."""
-        logger.info("update_note_type_templates %r ops=%d", note_type, len(operations))
+        logger.debug("update_note_type_templates %r ops=%d", note_type, len(operations))
         op_dicts = [op.model_dump(exclude_none=True) for op in operations]
         try:
             result = await wrapper.update_note_type_templates(note_type, op_dicts)
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
-        logger.info("update_note_type_templates %r -> %s", note_type, result["templates"])
+        note_outcome(f"templates -> {result['templates']}")
         return UpdateNoteTypeTemplatesResponse.model_validate(result)
 
     @_action
@@ -1211,7 +1213,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         references fields."""
         if not (front or back or css):
             raise ToolInputError("Enable at least one of `front`, `back`, or `css`.")
-        logger.info(
+        logger.debug(
             "find_replace_note_types %r search=%r front=%s back=%s css=%s regex=%s",
             note_type,
             search,
@@ -1233,12 +1235,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             )
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
-        logger.info(
-            "find_replace_note_types %r -> %d replacement(s) in %d template(s), css=%s",
-            note_type,
-            result["replacements"],
-            len(result["templates_changed"]),
-            result["css_changed"],
+        note_outcome(
+            f"{result['replacements']} replacement(s) in "
+            f"{len(result['templates_changed'])} template(s), css={result['css_changed']}"
         )
         # Templates/CSS aren't note embedding text, so vectors stay valid — but
         # update_dict bumped col.mod. Advance the stored col_mod without
@@ -1273,13 +1272,13 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         Read the current values from collection_info's note type details
         (`note_type_details`), which include each field's font/size/description.
         To change which fields exist or their order, use update_note_type_fields."""
-        logger.info("update_note_type_field_metadata %r fields=%d", note_type, len(fields))
+        logger.debug("update_note_type_field_metadata %r fields=%d", note_type, len(fields))
         updates = [f.model_dump(exclude_none=True) for f in fields]
         try:
             result = await wrapper.update_note_type_field_metadata(note_type, updates)
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
-        logger.info("update_note_type_field_metadata %r -> %s", note_type, result["fields_updated"])
+        note_outcome(f"updated {result['fields_updated']}")
         # Editor metadata isn't note embedding text, so vectors stay valid; advance
         # col_mod without re-embedding (like the tag/deck/find_replace_note_types ops).
         await _bump_col_mod_after_metadata_change()
@@ -1300,13 +1299,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
 
         This cannot be undone. Use list_notes or search_notes first to
         verify which notes will be deleted."""
-        logger.info("delete_notes requested=%d", len(ids))
+        logger.debug("delete_notes requested=%d", len(ids))
         result = await wrapper.delete_notes(ids)
-        logger.info(
-            "delete_notes completed: %d deleted, %d not found",
-            len(result["deleted"]),
-            len(result["not_found"]),
-        )
+        note_outcome(f"{len(result['deleted'])} deleted, {len(result['not_found'])} not found")
 
         # Derived-text rows leave the store too (independent of the vector index).
         await _remove_derived(result["deleted"])
@@ -1384,7 +1379,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         if not any([deck, tags, note_type, ids]):
             raise ToolInputError("A scope is required: deck, tags, note_type, or ids.")
 
-        logger.info(
+        logger.debug(
             "find_replace_notes search=%r regex=%s field=%s dry_run=%s",
             search,
             regex,
@@ -1404,10 +1399,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             dry_run=dry_run,
         )
         changed_ids = result.pop("changed_ids", [])
-        logger.info(
-            "find_replace_notes %s %d note(s)",
-            "would change" if dry_run else "changed",
-            result["notes_changed"],
+        note_outcome(
+            f"{'would change' if dry_run else 'changed'} {result['notes_changed']} note(s)"
         )
 
         if not dry_run and changed_ids:
@@ -1492,7 +1485,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         explicit — unknown field names, or two source fields mapping to one
         target, are errors rather than guesses. Use `dry_run` to preview the drops
         first. To create or edit notes without changing type, use upsert_notes."""
-        logger.info(
+        logger.debug(
             "migrate_note_type notes=%d -> %s dry_run=%s",
             len(note_ids),
             new_note_type,
@@ -1510,13 +1503,10 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             raise ToolInputError(str(e)) from e
 
         changed = result["changed"]
-        logger.info(
-            "migrate_note_type %s %d note(s) %s -> %s, dropped=%s",
-            "would migrate" if dry_run else "migrated",
-            len(changed),
-            result["from_note_type"],
-            result["to_note_type"],
-            result["dropped_fields"],
+        note_outcome(
+            f"{'would migrate' if dry_run else 'migrated'} {len(changed)} note(s) "
+            f"{result['from_note_type']} -> {result['to_note_type']}, "
+            f"dropped={result['dropped_fields']}"
         )
 
         if not dry_run and changed:
@@ -1554,13 +1544,13 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
 
         A note type can only be deleted if no notes currently use it.
         Check use counts via collection_info first."""
-        logger.info("delete_note_types requested=%d", len(ids))
+        logger.debug("delete_note_types requested=%d", len(ids))
         result = await wrapper.delete_note_types(ids)
         statuses: dict[str, int] = {}
         for r in result["results"]:
             s = r["status"]
             statuses[s] = statuses.get(s, 0) + 1
-        logger.info("delete_note_types completed: %s", statuses)
+        note_outcome(str(statuses))
         return DeleteNoteTypesResponse.model_validate(result)
 
     async def _bump_col_mod_after_metadata_change() -> None:
@@ -1671,15 +1661,13 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             raise ToolInputError("Specify `set`, or `add` and/or `remove`.")
 
         if set_mode:
-            logger.info("update_note_tags notes=%d set=%s", len(note_ids), set)
+            logger.debug("update_note_tags notes=%d set=%s", len(note_ids), set)
         else:
-            logger.info("update_note_tags notes=%d add=%s remove=%s", len(note_ids), add, remove)
+            logger.debug("update_note_tags notes=%d add=%s remove=%s", len(note_ids), add, remove)
 
         result = await wrapper.update_note_tags(note_ids, set_tags=set, add=add, remove=remove)
-        logger.info(
-            "update_note_tags modified %d note(s), %d not found",
-            result["notes_modified"],
-            len(result["not_found"]),
+        note_outcome(
+            f"modified {result['notes_modified']} note(s), {len(result['not_found'])} not found"
         )
 
         if result["notes_modified"]:
@@ -1712,9 +1700,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         Returns the number of notes whose tags changed."""
         if old == new:
             raise ToolInputError("`old` and `new` tags are identical — nothing to rename.")
-        logger.info("rename_tag %r -> %r (scope=%d notes)", old, new, len(note_ids))
+        logger.debug("rename_tag %r -> %r (scope=%d notes)", old, new, len(note_ids))
         result = await wrapper.rename_tag(old, new, note_ids)
-        logger.info("rename_tag modified %d note(s)", result["notes_modified"])
+        note_outcome(f"modified {result['notes_modified']} note(s)")
         if result["notes_modified"]:
             await _bump_col_mod_after_metadata_change()
         return RenameTagResponse.model_validate(result)
@@ -1785,7 +1773,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         # No selection means "prune everything".
         if not (unused_tags or empty_notes or empty_cards or unused_media):
             unused_tags = empty_notes = empty_cards = unused_media = True
-        logger.info(
+        logger.debug(
             "collection_prune unused_tags=%s empty_notes=%s empty_cards=%s "
             "unused_media=%s dry_run=%s",
             unused_tags,
@@ -1801,11 +1789,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             unused_media=unused_media,
             dry_run=dry_run,
         )
-        logger.info(
-            "collection_prune %s: %d note(s) removed, tags=%s",
-            "previewed" if dry_run else "applied",
-            len(removed_note_ids),
-            result.get("unused_tags", {}).get("removed", "-"),
+        note_outcome(
+            f"{'previewed' if dry_run else 'applied'}: {len(removed_note_ids)} note(s) removed, "
+            f"tags={result.get('unused_tags', {}).get('removed', '-')}"
         )
 
         # Empty notes/cards delete notes — their rows must leave the derived store too (independent
@@ -1872,7 +1858,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         the stored `filename` may differ from what you asked for — always reference
         the returned name. Per-item errors (bad base64, unfetchable URL, disabled
         or out-of-root path, oversize) are reported per item and don't sink the batch."""
-        logger.info("store_media count=%d", len(items))
+        logger.debug("store_media count=%d", len(items))
         item_dicts = [i.model_dump(exclude_none=True) for i in items]
         results = await wrapper.store_media(
             item_dicts,
@@ -1881,7 +1867,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         )
         stored = sum(1 for r in results if r.get("status") == "stored")
         errors = len(results) - stored
-        logger.info("store_media completed: %d stored, %d errors", stored, errors)
+        note_outcome(f"{stored} stored, {errors} errors")
         for r in results:
             if r.get("status") == "error":
                 logger.warning("store_media item %d failed: %s", r.get("index"), r["error"])
@@ -1903,15 +1889,14 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         bytes, GET the `url`** with your download/fetch tool, or read `path` if you
         share the server's disk. Every `found` file reports `url`, `path`, `mime`,
         and `size_bytes`."""
-        logger.info("fetch_media count=%d", len(filenames))
+        logger.debug("fetch_media count=%d", len(filenames))
         results = await wrapper.fetch_media(filenames)
         for r in results:
             if r["status"] == "found":
                 r["url"] = _media_url(r["filename"])
-        logger.info(
-            "fetch_media returned: %d found, %d missing",
-            sum(1 for r in results if r["status"] == "found"),
-            sum(1 for r in results if r["status"] == "missing"),
+        note_outcome(
+            f"{sum(1 for r in results if r['status'] == 'found')} found, "
+            f"{sum(1 for r in results if r['status'] == 'missing')} missing"
         )
         return FetchMediaResponse.model_validate({"results": results})
 
@@ -1934,11 +1919,11 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         matching files; `files` is capped at `limit` (each with its `url`, `mime`,
         and `size_bytes`). `media_dir` is the absolute media-folder path; fetch any
         file's bytes by GETting its `url` (the server's `GET /media/<name>`)."""
-        logger.info("list_media pattern=%s limit=%d", pattern, limit)
+        logger.debug("list_media pattern=%s limit=%d", pattern, limit)
         result = await wrapper.list_media(pattern=pattern, limit=limit)
         for f in result["files"]:
             f["url"] = _media_url(f["filename"])
-        logger.info("list_media returned %d/%d file(s)", len(result["files"]), result["count"])
+        note_outcome(f"{len(result['files'])}/{result['count']} file(s)")
         return ListMediaResponse.model_validate(result)
 
     @_action
@@ -1955,13 +1940,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         will leave a broken `<img>`/`[sound:]` — use collection_check to find
         unreferenced ('unused') media first. Returns `deleted` and `not_found`
         name lists; a missing file is skipped, not an error."""
-        logger.info("delete_media requested=%d", len(filenames))
+        logger.debug("delete_media requested=%d", len(filenames))
         result = await wrapper.delete_media(filenames)
-        logger.info(
-            "delete_media completed: %d deleted, %d not found",
-            len(result["deleted"]),
-            len(result["not_found"]),
-        )
+        note_outcome(f"{len(result['deleted'])} deleted, {len(result['not_found'])} not found")
         return DeleteMediaResponse.model_validate(result)
 
     @_action
@@ -1973,13 +1954,11 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         (filenames referenced by notes but absent from the media folder),
         `missing_media_notes` (the note IDs with such references), and `have_trash`
         (whether Anki's media trash holds anything). Nothing is modified."""
-        logger.info("collection_check")
+        logger.debug("collection_check")
         result = await wrapper.media_check()
-        logger.info(
-            "collection_check: %d unused, %d missing, trash=%s",
-            len(result["unused"]),
-            len(result["missing"]),
-            result["have_trash"],
+        note_outcome(
+            f"{len(result['unused'])} unused, {len(result['missing'])} missing, "
+            f"trash={result['have_trash']}"
         )
         return CollectionCheckResponse.model_validate(result)
 
@@ -2009,7 +1988,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         notes, or to reorganize the hierarchy. To delete a deck, empty it first
         (move its notes elsewhere) then call delete_decks."""
         creates = sum(1 for d in decks if d.id is None)
-        logger.info("upsert_decks count=%d (renames=%d)", len(decks), len(decks) - creates)
+        logger.debug("upsert_decks count=%d (renames=%d)", len(decks), len(decks) - creates)
 
         deck_dicts = [d.model_dump(exclude_none=True) for d in decks]
         results = await wrapper.upsert_decks(deck_dicts)
@@ -2017,9 +1996,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         created = sum(1 for r in results if r.get("status") == "created")
         updated = sum(1 for r in results if r.get("status") == "updated")
         errors = sum(1 for r in results if r.get("status") == "error")
-        logger.info(
-            "upsert_decks completed: %d created, %d updated, %d errors", created, updated, errors
-        )
+        note_outcome(f"{created} created, {updated} updated, {errors} errors")
         for r in results:
             if r.get("status") == "error":
                 logger.warning("upsert_decks item %d failed: %s", r.get("index"), r["error"])
@@ -2050,13 +2027,11 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
 
         Returns `deleted`, `not_found`, and `not_empty` name lists; a non-empty
         or missing deck is skipped, not an error."""
-        logger.info("delete_decks requested=%d", len(decks))
+        logger.debug("delete_decks requested=%d", len(decks))
         result = await wrapper.delete_decks(decks)
-        logger.info(
-            "delete_decks completed: %d deleted, %d not found, %d not empty",
-            len(result["deleted"]),
-            len(result["not_found"]),
-            len(result["not_empty"]),
+        note_outcome(
+            f"{len(result['deleted'])} deleted, {len(result['not_found'])} not found, "
+            f"{len(result['not_empty'])} not empty"
         )
         if result["deleted"]:
             await _bump_col_mod_after_metadata_change()

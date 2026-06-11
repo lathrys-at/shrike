@@ -396,7 +396,6 @@ def _register_custom_routes(
                     if body.get(key) is not None:
                         overrides[key] = body[key]
 
-        logger.info("Embedding start requested via HTTP from %s", request.client)
         try:
             # Starting a backend blocks (model load + health wait); the kernel
             # call runs off the event loop so other requests keep flowing.
@@ -412,19 +411,16 @@ def _register_custom_routes(
     @app.custom_route("/embedding/stop", methods=["POST"])
     @_guard
     async def handle_embedding_stop(request: Request) -> JSONResponse:
-        logger.info("Embedding stop requested via HTTP from %s", request.client)
         return JSONResponse(await _kernel(kernel.stop_embedding))
 
     @app.custom_route("/reload", methods=["POST"])
     @_guard
     async def handle_reload(request: Request) -> JSONResponse:
-        logger.info("Reload requested via HTTP from %s", request.client)
         return JSONResponse(await _kernel(kernel.reload))
 
     @app.custom_route("/shutdown", methods=["POST"])
     @_guard
     async def handle_shutdown(request: Request) -> JSONResponse:
-        logger.info("Shutdown requested via HTTP from %s", request.client)
         # aclose cancels the pending debounce timer and flushes if dirty (it is
         # loop-bound, so it stays host-side); the kernel tears down the core.
         await saver.aclose()

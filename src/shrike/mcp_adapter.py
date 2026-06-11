@@ -22,16 +22,40 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from shrike.actions import ActionDef, ToolInputError
+from shrike.actions import ActionDef, ToolInputError, _call_outcome
 from shrike.collection import CollectionBusyError
 
 logger = logging.getLogger("shrike.tools")
 
+# Cap on a single rendered param value in the completion line (long field
+# bodies and queries get elided, never dropped).
+_PARAM_VALUE_MAX = 60
 
-def _log_duration(name: str, started: float) -> None:
-    # Every completed call logs its duration at INFO — like the route access
-    # lines, what the server did and how long it took is never noise.
-    logger.info("%s completed (%.0fms)", name, (time.perf_counter() - started) * 1000)
+
+def _compact_value(value: Any) -> str:
+    """A short rendering of one call param for the completion log line."""
+    if isinstance(value, list):
+        return f"[{len(value)} item(s)]" if len(value) > 3 else repr(value)[:_PARAM_VALUE_MAX]
+    if isinstance(value, dict):
+        return f"{{{len(value)} key(s)}}"
+    rendered = repr(value)
+    return rendered if len(rendered) <= _PARAM_VALUE_MAX else rendered[: _PARAM_VALUE_MAX - 1] + "…"
+
+
+def _format_params(kwargs: dict[str, Any]) -> str:
+    """``k=v`` fragments for the params that were actually given (None = omitted)."""
+    return " ".join(f"{k}={_compact_value(v)}" for k, v in kwargs.items() if v is not None)
+
+
+def _log_completed(name: str, kwargs: dict[str, Any], started: float) -> None:
+    # THE log line for a served call (#328): one INFO line carrying the tool
+    # name, its params, the action-recorded outcome, and the duration. Actions
+    # contribute the outcome via note_outcome(); anything else they log during
+    # the call is a warning/error (exceptional) or DEBUG (internals).
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    outcome = _call_outcome.get() or "ok"
+    params = _format_params(kwargs)
+    logger.info("%s%s%s -> %s (%.0fms)", name, " " if params else "", params, outcome, elapsed_ms)
 
 
 def _safe_tool(fn: Any) -> Any:
@@ -43,7 +67,9 @@ def _safe_tool(fn: Any) -> Any:
     protocol, and response models stay clean. ``ToolInputError`` (expected bad
     input) logs the rejection without a traceback; anything else logs with one.
 
-    Every call is timed: the completion duration logs at INFO.
+    Every served call emits exactly ONE INFO line, here: tool name + given
+    params + the action's recorded outcome (``note_outcome``) + duration.
+    Failures log their warning/error instead (never both).
 
     The wrapped function's docstring is dedented with ``inspect.cleandoc`` so the
     tool description FastMCP advertises to clients has no source indentation.
@@ -55,6 +81,7 @@ def _safe_tool(fn: Any) -> Any:
         @functools.wraps(fn)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             started = time.perf_counter()
+            _call_outcome.set(None)  # never inherit a previous call's outcome
             try:
                 result = await fn(*args, **kwargs)
             except ToolInputError as e:
@@ -69,7 +96,7 @@ def _safe_tool(fn: Any) -> Any:
             except Exception:
                 logger.exception("Unhandled error in %s", fn.__name__)
                 raise
-            _log_duration(fn.__name__, started)
+            _log_completed(fn.__name__, kwargs, started)
             return result
 
         async_wrapper.__doc__ = cleaned_doc
@@ -78,6 +105,7 @@ def _safe_tool(fn: Any) -> Any:
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         started = time.perf_counter()
+        _call_outcome.set(None)  # never inherit a previous call's outcome
         try:
             result = fn(*args, **kwargs)
         except ToolInputError as e:
@@ -89,7 +117,7 @@ def _safe_tool(fn: Any) -> Any:
         except Exception:
             logger.exception("Unhandled error in %s", fn.__name__)
             raise
-        _log_duration(fn.__name__, started)
+        _log_completed(fn.__name__, kwargs, started)
         return result
 
     wrapper.__doc__ = cleaned_doc
