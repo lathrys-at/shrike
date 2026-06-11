@@ -64,7 +64,7 @@ from shrike.schemas import (
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
 )
-from shrike.search_fusion import make_search_pipeline
+from shrike.search_fusion import SearchPipeline, make_search_pipeline
 
 logger = logging.getLogger("shrike.tools")
 
@@ -107,6 +107,7 @@ class ActionContext:
     index: VectorIndex | None = None
     saver: IndexSaver | None = None
     derived: DerivedTextStore | None = None
+    pipeline: SearchPipeline | None = None
     allow_private_fetch: bool = False
     server_path_roots: list[str] | None = None
     media_base_url: str | None = None
@@ -146,10 +147,10 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         actions.append(ActionDef(name=fn.__name__, impl=fn, doc=fn.__doc__))
         return fn
 
-    # The fusion seam (#274): the native pipeline, unconditional since the
-    # #278 cutover. One instance per registry build, closed over by
-    # search_notes.
-    pipeline = make_search_pipeline()
+    # The fusion seam (#274): injected by the harness (#278 C5), defaulting to
+    # the native pipeline — unconditional since the cutover. One instance per
+    # registry build, closed over by search_notes.
+    pipeline = ctx.pipeline if ctx.pipeline is not None else make_search_pipeline()
 
     # Since the cutover the note-type ops run in the native core; its input
     # error is a ValueError and plays the old NoteTypeOpError's role verbatim.

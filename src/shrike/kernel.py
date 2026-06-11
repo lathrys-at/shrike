@@ -33,6 +33,7 @@ back through the queue.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from collections.abc import Callable
@@ -195,6 +196,82 @@ class ShrikeKernel:
         self.derived = derived
         self.runtime = runtime
         self.scheduler = scheduler
+
+    # -- boot ----------------------------------------------------------------
+
+    def boot(self, *, start_embedding: bool) -> None:
+        """One-shot boot orchestration, called by the host once the components
+        are assembled and before it starts serving: log the collection shape,
+        start the embedding service (degrading to no-embedding on failure),
+        reconcile index drift, build the derived store on drift, and install
+        the cooperative re-acquire hook.
+        """
+        summary = self.scheduler.run_on_collection(
+            lambda c: json.loads(c.collection_info(["summary"], []))["summary"]
+        )
+        logger.info(
+            "Collection ready: %d notes, %d decks, %d note types",
+            summary["notes"],
+            summary["decks"],
+            summary["note_types"],
+        )
+
+        if start_embedding:
+            try:
+                svc = self.runtime.start()
+            except (FileNotFoundError, RuntimeError, ValueError, ImportError) as e:
+                # ImportError: the onnx backend was selected without the optional
+                # 'onnx' extra installed. Like a missing model file, degrade — boot
+                # without embedding rather than killing the server (the
+                # /embedding/start handler returns 400 for the same case).
+                logger.error("Failed to start embedding service: %s", e)
+            else:
+                model_id = svc.model_fingerprint()
+                inputs, col_mod = self.scheduler.run_on_collection(_collect_for_rebuild)
+                _maybe_rebuild(self.index, model_id, col_mod, inputs, svc)
+        elif self.runtime.model:
+            logger.info("Embedding service disabled at boot (--no-embedding); model configured")
+
+        # The derived-text store (FTS5 trigram sidecar) is independent of the
+        # embedding index — it builds whether or not a backend is configured.
+        # Cheap col_mod probe first; only read all field text on real drift
+        # (first build, or an external edit), so a clean reload does no full read.
+        logger.info("Derived-text store: %s", self.derived.status())
+        d_col_mod = self.scheduler.run_on_collection(lambda c: c.col_mod())
+        if self.derived.check_drift(d_col_mod):
+            rows, dmod = self.scheduler.run_on_collection(_collect_derived_rows)
+            self.derived.build_in_background(rows, dmod)
+            logger.info("Derived-text store drift; building in background (%d rows)", len(rows))
+
+        if self.wrapper.cooperative:
+            # On every re-acquire after an idle release, re-check drift (below).
+            self.wrapper.set_acquire_hook(self._on_reacquire)
+            # Release now so a freshly-booted, never-touched idle daemon doesn't
+            # hold the lock; the first request re-acquires on demand.
+            self.wrapper.release_now()
+
+    def _on_reacquire(self, core: CollectionCore) -> None:
+        """Cooperative-lock re-acquire hook: if the collection changed on disk
+        while the lock was released (Anki, sync, import), rebuild the derived
+        store and reconcile the index. Cheap col_mod-only checks; texts are read
+        under the lock and embedded off-lock only on real drift. Runs on the
+        worker thread."""
+        # The derived store is independent of the embedder — rebuild it on
+        # drift even with no embedding service (a cheap text-only build).
+        if self.derived.check_drift(core.col_mod()):
+            rows, dmod = _collect_derived_rows(core)
+            logger.info(
+                "Collection changed while idle; rebuilding derived store (%d rows)", len(rows)
+            )
+            self.derived.build_in_background(rows, dmod)
+        if not self.index.available or not self.index.check_drift(core.col_mod()):
+            return
+        svc = self.runtime.service
+        if svc is None or not svc.running:
+            return
+        inputs, changed_mod = _collect_for_rebuild(core)
+        logger.info("Collection changed while idle (col_mod=%d); rebuilding index", changed_mod)
+        self.index.rebuild_in_background(inputs, changed_mod, model_id=svc.model_fingerprint())
 
     # -- status ----------------------------------------------------------------
 

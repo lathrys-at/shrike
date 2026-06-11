@@ -28,7 +28,7 @@ import contextlib
 import logging
 import sqlite3
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -145,8 +145,17 @@ class NativeDerivedEngine:
 class DerivedTextStore:
     """FTS5-trigram lexical index over note text in a sidecar ``shrike.db`` (see module doc)."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        engine_factory: Callable[[Path], NativeDerivedEngine] | None = None,
+    ) -> None:
         self._path = Path(path)
+        # Injectable (the server harness passes it, #278 C5); defaults to the
+        # native engine. A *factory*, not an instance: corrupt-file recovery
+        # recreates the engine after discarding the file.
+        self._engine_factory = engine_factory if engine_factory is not None else NativeDerivedEngine
         # A short-lived lock for the BUILDING claim only — never held during SQLite I/O,
         # so a /reload on the event loop can claim/skip a build without waiting on an in-flight
         # build's data transaction (the engine's internal lock would).
@@ -161,10 +170,9 @@ class DerivedTextStore:
     # ── lifecycle ────────────────────────────────────────────────────────────────────────────────
 
     def _make_engine(self) -> NativeDerivedEngine:
-        """The native FTS5 engine — unconditional since the #278 cutover (the
-        SHRIKE_NATIVE_DERIVED bake flag and the stdlib sqlite3 engine retired
-        with it)."""
-        return NativeDerivedEngine(self._path)
+        """The FTS5 engine, from the injected factory (native by default —
+        unconditional since the #278 cutover)."""
+        return self._engine_factory(self._path)
 
     def _open(self) -> None:
         if not self._probe_fts5():
