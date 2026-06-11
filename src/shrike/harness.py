@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import threading
+from types import SimpleNamespace
 from typing import Any
 
 import shrike_native
@@ -41,6 +42,9 @@ class KernelIndexView:
         self._kernel = kernel
         self._runtime = runtime
         self._engine_handle = kernel.engine_handle()
+        # Facade-shaped engine access: the search action extracts the native
+        # handle as `index._engine._rust`, so mirror that exact attribute.
+        self._engine = SimpleNamespace(_rust=self._engine_handle)
 
     def _status(self) -> dict[str, Any]:
         return json.loads(self._kernel.index_status_json())  # type: ignore[no-any-return]
@@ -48,6 +52,16 @@ class KernelIndexView:
     @property
     def state_name(self) -> str:
         return str(self._status()["state"])
+
+    @property
+    def state(self) -> Any:
+        """The facade's ``IndexState`` enum, for the search action's gating."""
+        from shrike.index import IndexState
+
+        name = self.state_name
+        if self._runtime.backend is None and name == "ready":
+            return IndexState.UNAVAILABLE
+        return IndexState(name)
 
     @property
     def available(self) -> bool:
@@ -76,6 +90,25 @@ class KernelIndexView:
         if backend is None or not texts:
             return None
         return backend.embed_texts(texts)
+
+    def search(self, texts: list[str], top_k: int = 10) -> list[list[dict[str, Any]]]:
+        """Nearest **text** neighbors per query (the upsert-neighbors path):
+        one list per text of ``{note_id, distance}`` dicts — the old facade's
+        ``search`` shape, over the kernel's engine."""
+        vectors = self.embed_queries(texts)
+        if vectors is None:
+            return [[] for _ in texts]
+        rankings = self._engine_handle.search_by_modality(vectors, top_k, ["text"])
+        out: list[list[dict[str, Any]]] = []
+        for per_query in rankings:
+            ids, distances = per_query.get("text", ([], []))
+            out.append(
+                [
+                    {"note_id": int(nid), "distance": float(dist)}
+                    for nid, dist in zip(ids, distances, strict=True)
+                ]
+            )
+        return out
 
 
 class Harness:
@@ -118,9 +151,7 @@ class Harness:
         """Open the kernel on the running loop with a dedicated harness thread
         driving its executor (the one serialization domain for everything)."""
         executor = shrike_native.WorkerExecutor()
-        threading.Thread(
-            target=executor.worker_loop, name="shrike-collection", daemon=True
-        ).start()
+        threading.Thread(target=executor.worker_loop, name="shrike-collection", daemon=True).start()
         kernel = await shrike_native.async_kernel_open(collection_path, cache_dir, executor)
         wrapper = CollectionWrapper.over_kernel(
             kernel, collection_path, cooperative=cooperative, hold_seconds=hold_seconds

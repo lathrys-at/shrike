@@ -20,6 +20,7 @@ re-homes in Rust.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ from shrike.collection import (
     CollectionWrapper,
 )
 from shrike.derived import DerivedTextStore
-from shrike.index import IndexSaver, IndexState, VectorIndex, activation_floor
+from shrike.index import IndexSaver, IndexState, activation_floor
 from shrike.schemas import (
     CollectionCheckResponse,
     CollectionInfo,
@@ -118,9 +119,17 @@ class ActionContext:
     """
 
     wrapper: CollectionWrapper
-    index: VectorIndex | None = None
+    # The VectorIndex facade — or, in kernel mode, the KernelIndexView
+    # (duck-typed search-facing surface). Annotated Any for that duality.
+    index: Any | None = None
     saver: IndexSaver | None = None
     derived: DerivedTextStore | None = None
+    # Kernel mode (#332 S3d-2): the AsyncKernel — write actions route through
+    # its maintained ops (upsert_notes_json/delete_notes/reindex_notes/
+    # forget_notes/metadata_changed) and the index/saver/derived hooks above
+    # go unused. `index` then carries the KernelIndexView (duck-typed: the
+    # search-facing surface only).
+    kernel: Any | None = None
     allow_private_fetch: bool = False
     server_path_roots: list[str] | None = None
     media_base_url: str | None = None
@@ -150,6 +159,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
     index = ctx.index
     saver = ctx.saver
     derived = ctx.derived
+    kernel = ctx.kernel
     allow_private_fetch = ctx.allow_private_fetch
     server_path_roots = ctx.server_path_roots
     media_base_url = ctx.media_base_url
@@ -678,7 +688,16 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         )
 
         note_dicts = [n.model_dump(exclude_none=True) for n in notes]
-        results = await wrapper.upsert_notes(note_dicts, on_duplicate=on_duplicate, dry_run=dry_run)
+        if kernel is not None:
+            # Kernel mode: ONE maintained op — write + index + derived +
+            # watermarks happen kernel-side; only neighbors remain below.
+            results = json.loads(
+                await kernel.upsert_notes_json(json.dumps(note_dicts), on_duplicate, dry_run)
+            )
+        else:
+            results = await wrapper.upsert_notes(
+                note_dicts, on_duplicate=on_duplicate, dry_run=dry_run
+            )
 
         counts: dict[str, int] = {}
         for r in results:
@@ -697,8 +716,10 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             else []
         )
         # The derived-text store is independent of the vector index — re-ingest the
-        # changed field text even when embeddings are off.
-        await _ingest_derived(changed_ids)
+        # changed field text even when embeddings are off. (Kernel mode: the
+        # kernel op already ingested.)
+        if kernel is None:
+            await _ingest_derived(changed_ids)
 
         if changed_ids and index and index.available:
             # Index maintenance is best-effort: the notes are already
@@ -709,9 +730,10 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             neighbors_ok = False
             try:
                 inputs = await wrapper.note_embed_inputs(changed_ids)
-                await asyncio.to_thread(index.add, inputs)
-                index.col_mod = await wrapper.col_mod()
-                logger.debug("Index updated: %d notes added/replaced", len(changed_ids))
+                if kernel is None:
+                    await asyncio.to_thread(index.add, inputs)
+                    index.col_mod = await wrapper.col_mod()
+                    logger.debug("Index updated: %d notes added/replaced", len(changed_ids))
                 neighbors_ok = await _attach_neighbors(
                     results,
                     changed_ids,
@@ -722,7 +744,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 # Schedule a debounced flush so a hard kill while idle
                 # doesn't force a full re-embed. Non-blocking and last in
                 # the try: it must not mask the neighbors attached above.
-                if saver is not None:
+                # (Kernel mode: the kernel's own saver debounces.)
+                if kernel is None and saver is not None:
                     saver.request_save()
             except Exception:
                 logger.warning("Failed to update index after upsert", exc_info=True)
@@ -1107,6 +1130,16 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         result = await wrapper.delete_notes(ids)
         note_outcome(f"{len(result['deleted'])} deleted, {len(result['not_found'])} not found")
 
+        if kernel is not None:
+            # Kernel mode: one maintained op drops vectors + fingerprints +
+            # derived rows and advances the watermarks.
+            if result["deleted"]:
+                try:
+                    await kernel.forget_notes(result["deleted"])
+                except Exception:
+                    logger.warning("Failed to update index after delete", exc_info=True)
+            return DeleteNotesResponse.model_validate(result)
+
         # Derived-text rows leave the store too (independent of the vector index).
         await _remove_derived(result["deleted"])
 
@@ -1207,23 +1240,28 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             f"{'would change' if dry_run else 'changed'} {result['notes_changed']} note(s)"
         )
 
-        if not dry_run and changed_ids:
+        if not dry_run and changed_ids and kernel is not None:
+            # Kernel mode: one maintained op re-embeds + re-ingests the set.
+            try:
+                await kernel.reindex_notes(changed_ids)
+            except Exception:
+                logger.warning("Failed to update index after find_replace", exc_info=True)
+        elif not dry_run and changed_ids:
             # Field bodies are both embedding text and derived-text — re-ingest the
             # changed notes into the store (independent of the vector index).
             await _ingest_derived(changed_ids)
-
-        if not dry_run and changed_ids and index and index.available:
-            # Field bodies are embedding text, so re-embed the changed notes
-            # (best-effort, like upsert_notes).
-            try:
-                inputs = await wrapper.note_embed_inputs(changed_ids)
-                await asyncio.to_thread(index.add, inputs)
-                index.col_mod = await wrapper.col_mod()
-                if saver is not None:
-                    saver.request_save()
-                logger.debug("Index updated after find_replace: %d notes", len(changed_ids))
-            except Exception:
-                logger.warning("Failed to update index after find_replace", exc_info=True)
+            if index and index.available:
+                # Field bodies are embedding text, so re-embed the changed notes
+                # (best-effort, like upsert_notes).
+                try:
+                    inputs = await wrapper.note_embed_inputs(changed_ids)
+                    await asyncio.to_thread(index.add, inputs)
+                    index.col_mod = await wrapper.col_mod()
+                    if saver is not None:
+                        saver.request_save()
+                    logger.debug("Index updated after find_replace: %d notes", len(changed_ids))
+                except Exception:
+                    logger.warning("Failed to update index after find_replace", exc_info=True)
 
         return FindReplaceResponse.model_validate(result)
 
@@ -1313,23 +1351,30 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             f"dropped={result['dropped_fields']}"
         )
 
-        if not dry_run and changed:
+        if not dry_run and changed and kernel is not None:
+            # Kernel mode: one maintained op re-embeds + re-ingests the set.
+            try:
+                await kernel.reindex_notes(changed)
+            except Exception:
+                logger.warning("Failed to update index after migrate_note_type", exc_info=True)
+        elif not dry_run and changed:
             # Remapped fields are derived-text too — re-ingest the migrated notes
             # (IDs unchanged) into the store, independent of the vector index.
             await _ingest_derived(changed)
-
-        if not dry_run and changed and index and index.available:
-            # Remapped fields change the embedding text, so re-embed the migrated
-            # notes (their IDs are unchanged) — best-effort, like find_replace_notes.
-            try:
-                inputs = await wrapper.note_embed_inputs(changed)
-                await asyncio.to_thread(index.add, inputs)
-                index.col_mod = await wrapper.col_mod()
-                if saver is not None:
-                    saver.request_save()
-                logger.debug("Index updated after migrate: %d vectors", len(changed))
-            except Exception:
-                logger.warning("Failed to update index after migrate_note_type", exc_info=True)
+            if index and index.available:
+                # Remapped fields change the embedding text, so re-embed the
+                # migrated notes (IDs unchanged) — best-effort.
+                try:
+                    inputs = await wrapper.note_embed_inputs(changed)
+                    await asyncio.to_thread(index.add, inputs)
+                    index.col_mod = await wrapper.col_mod()
+                    if saver is not None:
+                        saver.request_save()
+                    logger.debug("Index updated after migrate: %d vectors", len(changed))
+                except Exception:
+                    logger.warning(
+                        "Failed to update index after migrate_note_type", exc_info=True
+                    )
 
         return MigrateNoteTypeResponse.model_validate(result)
 
@@ -1367,6 +1412,12 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         drift and skips a full re-embed / re-ingest. Best-effort: cache bookkeeping
         must never fail the operation, which is already committed to the collection.
         """
+        if kernel is not None:
+            try:
+                await kernel.metadata_changed()
+            except Exception:
+                logger.warning("cache col_mod bump failed after metadata change", exc_info=True)
+            return
         index_live = index is not None and index.available
         derived_live = derived is not None and derived.available
         if not index_live and not derived_live:
@@ -1597,6 +1648,19 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             f"{'previewed' if dry_run else 'applied'}: {len(removed_note_ids)} note(s) removed, "
             f"tags={result.get('unused_tags', {}).get('removed', '-')}"
         )
+
+        if not dry_run and kernel is not None:
+            # Kernel mode: forget_notes drops vectors + fingerprints + derived
+            # rows and advances both watermarks; a tags-only prune is a
+            # metadata-only change. Best-effort either way.
+            try:
+                if removed_note_ids:
+                    await kernel.forget_notes(removed_note_ids)
+                elif result.get("unused_tags", {}).get("removed"):
+                    await kernel.metadata_changed()
+            except Exception:
+                logger.warning("Failed to update index after prune", exc_info=True)
+            return CollectionPruneResponse.model_validate(result)
 
         # Empty notes/cards delete notes — their rows must leave the derived store too (independent
         # of the vector index). A tags-only prune removes no notes but still bumps col.mod, so
