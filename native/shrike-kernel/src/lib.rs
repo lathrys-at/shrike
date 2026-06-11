@@ -783,7 +783,7 @@ impl Kernel {
             let quoted = format!("\"{}\"", query.replace('"', "\"\""));
             let exact: Vec<i64> = self
                 .derived
-                .match_rows(&quoted, top_k as i64, false)?
+                .match_rows(&quoted, top_k as i64, false, None)?
                 .into_iter()
                 .map(|(nid, ..)| nid)
                 .collect();
@@ -804,7 +804,7 @@ impl Kernel {
                     .join(" OR ");
                 let fuzzy: Vec<i64> = self
                     .derived
-                    .match_rows(&expr, (top_k * 4) as i64, false)?
+                    .match_rows(&expr, (top_k * 4) as i64, false, None)?
                     .into_iter()
                     .map(|(nid, ..)| nid)
                     .collect();

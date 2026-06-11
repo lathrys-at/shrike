@@ -257,22 +257,40 @@ impl DerivedEngine {
 
     /// One FTS5 MATCH (rank-ordered), returning provenance + snippet rows.
     /// A bad expression is `invalid_input` — the facade maps it to its
-    /// OperationalError fallback path.
+    /// OperationalError fallback path. `scope`, when given, restricts the
+    /// match to those note ids INSIDE the query (the #177 scoped-search path:
+    /// the id set comes from anki's indexed deck:/tag: search, so scoped
+    /// literal search needs no over-fetch and no post-hoc recall gamble).
     pub fn match_rows(
         &self,
         expr: &str,
         limit: i64,
         with_text: bool,
+        scope: Option<&[i64]>,
     ) -> NativeResult<Vec<MatchRow>> {
         let span = tracing::debug_span!("derived.match", limit, with_text);
         let _enter = span.enter();
         let conn = self.lock();
         let txt_col = if with_text { "idx.txt" } else { "NULL" };
+        // Inline the id set as literals (i64s — no injection surface); SQLite's
+        // default SQL-length cap comfortably holds even very large decks.
+        let scope_clause = match scope {
+            Some(ids) if !ids.is_empty() => {
+                let csv = ids
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("AND m.note_id IN ({csv}) ")
+            }
+            Some(_) => "AND 0 ".to_string(), // an empty scope matches nothing
+            None => String::new(),
+        };
         let sql = format!(
             "SELECT m.note_id, m.source, m.ref, {txt_col}, \
              snippet(idx, 0, '', '', '…', ?1) \
              FROM idx JOIN rowmap m ON m.rowid = idx.rowid \
-             WHERE idx MATCH ?2 ORDER BY rank LIMIT ?3"
+             WHERE idx MATCH ?2 {scope_clause}ORDER BY rank LIMIT ?3"
         );
         let mut stmt = conn.prepare(&sql).map_err(db_err)?;
         let rows = stmt
@@ -316,6 +334,48 @@ mod tests {
     }
 
     #[test]
+    fn scoped_match_restricts_to_the_id_set() {
+        // The #177 scoped-search path: the id set rides INSIDE the FTS5
+        // query, so a scoped literal/fuzzy search has exact recall within
+        // scope and zero hits outside it.
+        let (e, _dir) = store();
+        e.build(
+            &[
+                (1, "field".into(), "Front".into(), "the krebs cycle".into()),
+                (
+                    2,
+                    "field".into(),
+                    "Front".into(),
+                    "the krebs cycle too".into(),
+                ),
+                (3, "field".into(), "Front".into(), "unrelated text".into()),
+            ],
+            100,
+        )
+        .unwrap();
+
+        // Unscoped: both literal hits.
+        let all = e.search_substring("krebs", 10, None).unwrap().unwrap();
+        let ids: Vec<i64> = all.iter().map(|r| r.0).collect();
+        assert!(ids.contains(&1) && ids.contains(&2));
+
+        // Scoped to note 2 only.
+        let scoped = e
+            .search_substring("krebs", 10, Some(&[2]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(scoped.iter().map(|r| r.0).collect::<Vec<_>>(), vec![2]);
+
+        // An empty scope matches nothing (never falls open).
+        let none = e.search_substring("krebs", 10, Some(&[])).unwrap().unwrap();
+        assert!(none.is_empty());
+
+        // Fuzzy honors the same scope.
+        let fz = e.search_fuzzy("kreps cycle", 10, Some(&[1])).unwrap();
+        assert_eq!(fz.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
     fn probe_reports_linkage_capability() {
         // Under the bundled default the probe MUST pass (the #281 guarantee);
         // under platform linkage it reports whatever the host library has —
@@ -350,7 +410,7 @@ mod tests {
         e.ingest(1, "field", &[("Front".into(), "the chloroplast".into())])
             .unwrap();
         assert_eq!(e.count(), 2);
-        let hits = e.match_rows("\"chloroplast\"", 10, false).unwrap();
+        let hits = e.match_rows("\"chloroplast\"", 10, false, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, 1);
         assert_eq!(hits[0].1, "field");
@@ -369,7 +429,7 @@ mod tests {
             1,
         )
         .unwrap();
-        let rows = e.match_rows("\"beta\"", 10, true).unwrap();
+        let rows = e.match_rows("\"beta\"", 10, true, None).unwrap();
         assert_eq!(rows[0].3.as_deref(), Some("alpha beta gamma"));
         assert!(rows[0].4.as_deref().unwrap().contains("beta"));
         std::fs::remove_dir_all(dir).ok();
@@ -380,7 +440,7 @@ mod tests {
         let (e, dir) = store();
         e.build(&[(1, "field".into(), "F".into(), "abc".into())], 1)
             .unwrap();
-        let err = e.match_rows("AND AND (", 10, false).unwrap_err();
+        let err = e.match_rows("AND AND (", 10, false, None).unwrap_err();
         assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
         std::fs::remove_dir_all(dir).ok();
     }
@@ -439,13 +499,14 @@ impl DerivedEngine {
         &self,
         query: &str,
         limit: i64,
+        scope: Option<&[i64]>,
     ) -> NativeResult<Option<Vec<LexicalRow>>> {
         let q = query.trim();
         if q.chars().count() < MIN_TRIGRAM {
             return Ok(None);
         }
         // A quoted phrase → contiguous (literal substring) match.
-        let rows = self.match_rows(&fts_quote(q), limit, false)?;
+        let rows = self.match_rows(&fts_quote(q), limit, false, scope)?;
         Ok(Some(
             rows.into_iter()
                 .map(|(nid, source, r, _txt, snippet)| (nid, source, r, snippet))
@@ -457,14 +518,19 @@ impl DerivedEngine {
     /// by FTS5 bm25, deduped to one (best) row per note, requiring at least
     /// [`FUZZY_MIN_SHARED`] shared trigrams (drops one-trigram noise). Empty
     /// when the query is too short to rank.
-    pub fn search_fuzzy(&self, query: &str, top_k: i64) -> NativeResult<Vec<LexicalRow>> {
+    pub fn search_fuzzy(
+        &self,
+        query: &str,
+        top_k: i64,
+        scope: Option<&[i64]>,
+    ) -> NativeResult<Vec<LexicalRow>> {
         let grams = trigrams(query.trim());
         if grams.len() < FUZZY_MIN_SHARED {
             return Ok(Vec::new());
         }
         let gram_set: std::collections::BTreeSet<String> = grams.into_iter().collect();
         let expr: Vec<String> = gram_set.iter().map(|g| fts_quote(g)).collect();
-        let rows = self.match_rows(&expr.join(" OR "), top_k * 4, true)?;
+        let rows = self.match_rows(&expr.join(" OR "), top_k * 4, true, scope)?;
         let mut seen = std::collections::HashSet::new();
         let mut out: Vec<LexicalRow> = Vec::new();
         for (note_id, source, r, txt, snippet) in rows {
@@ -526,17 +592,24 @@ mod lexical_tests {
     #[test]
     fn substring_finds_literal_hits_and_signals_fallback() {
         let e = store();
-        let hits = e.search_substring("mitochondria", 10).unwrap().unwrap();
+        let hits = e
+            .search_substring("mitochondria", 10, None)
+            .unwrap()
+            .unwrap();
         assert_eq!(hits[0].0, 1);
-        assert!(e.search_substring("mi", 10).unwrap().is_none()); // sub-trigram → fallback
-        assert!(e.search_substring("q\"uo", 10).unwrap().unwrap().is_empty()); // quotes safe
+        assert!(e.search_substring("mi", 10, None).unwrap().is_none()); // sub-trigram → fallback
+        assert!(e
+            .search_substring("q\"uo", 10, None)
+            .unwrap()
+            .unwrap()
+            .is_empty()); // quotes safe
     }
 
     #[test]
     fn fuzzy_ranks_typos_and_floors_noise() {
         let e = store();
-        let hits = e.search_fuzzy("mitochondira", 10).unwrap(); // transposition
+        let hits = e.search_fuzzy("mitochondira", 10, None).unwrap(); // transposition
         assert!(hits.iter().any(|(nid, ..)| *nid == 1));
-        assert!(e.search_fuzzy("xy", 10).unwrap().is_empty()); // too short to rank
+        assert!(e.search_fuzzy("xy", 10, None).unwrap().is_empty()); // too short to rank
     }
 }

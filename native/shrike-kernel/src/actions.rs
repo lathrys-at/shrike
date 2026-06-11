@@ -435,13 +435,16 @@ fn collect_substring_candidates(
     note_data: &mut NoteData,
     exclude: &HashSet<i64>,
     args: &SearchArgs,
+    scope: Option<&[i64]>,
 ) -> NativeResult<()> {
-    // The store ranks collection-wide; scope applies afterward — so scoped
-    // queries use the scope-aware find_notes fallback (the recall note on the
-    // Python original).
-    let unscoped = args.deck.is_none() && args.tags.is_empty();
-    let lex = if let (Some(d), true) = (derived, unscoped) {
-        match d.search_substring(text, (args.top_k + exclude.len()) as i64) {
+    // The store serves scoped queries too (#177 retirement of the wildcard
+    // scan): the scope id set — from anki's INDEXED deck:/tag: search — is
+    // pushed into the FTS5 query, so a scoped literal search reads no note
+    // text outside the store. The wildcard `*text*` fallback (a full field
+    // scan) survives only for the cases FTS5 can't serve: a sub-trigram
+    // query (<3 chars) or a missing/unbuilt store.
+    let lex = if let Some(d) = derived {
+        match d.search_substring(text, (args.top_k + exclude.len()) as i64, scope) {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::debug!(error = ?e, "FTS5 substring query failed; falling back");
@@ -523,11 +526,12 @@ fn collect_fuzzy(
     note_data: &mut NoteData,
     exclude: &HashSet<i64>,
     args: &SearchArgs,
+    scope: Option<&[i64]>,
 ) -> (Vec<i64>, FuzzyEvidence) {
     let Some(d) = derived else {
         return (Vec::new(), HashMap::new());
     };
-    let hits = match d.search_fuzzy(text, args.top_k as i64) {
+    let hits = match d.search_fuzzy(text, args.top_k as i64, scope) {
         Ok(h) => h,
         Err(e) => {
             tracing::debug!(error = ?e, "FTS5 fuzzy query failed");
@@ -595,6 +599,23 @@ pub fn search_notes(
         sem_by_source = index.search_by_modality(vectors, fetch_k, Some(&note_spaces))?;
     }
 
+    // The lexical scope set (#177): one INDEXED anki query (deck:/tag: —
+    // never a field-text scan) shared by both lexical collectors, pushed
+    // into the FTS5 queries so scoped literal/fuzzy search keeps exact
+    // recall without over-fetch. None = unscoped.
+    let lex_scope: Option<Vec<i64>> = if args.deck.is_some() || !args.tags.is_empty() {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(d) = &args.deck {
+            parts.push(format!("\"deck:{d}\""));
+        }
+        for tag in &args.tags {
+            parts.push(format!("\"tag:{tag}\""));
+        }
+        Some(core.find_notes(&parts.join(" "))?)
+    } else {
+        None
+    };
+
     let mut results: Vec<Value> = Vec::new();
     for (i, source) in sources.iter().enumerate() {
         let mut note_data = NoteData::new();
@@ -609,6 +630,7 @@ pub fn search_notes(
                 &mut note_data,
                 &exclude,
                 args,
+                lex_scope.as_deref(),
             )?;
         }
 
@@ -695,7 +717,15 @@ pub fn search_notes(
         // Fuzzy ranking + evidence (query sources only), before the exact loop
         // so a fuzzy candidate that also literally matches joins the exact tier.
         let (mut ranking_fuzzy, mut fuzzy_evidence) = if source.is_query {
-            collect_fuzzy(core, derived, &source.text, &mut note_data, &exclude, args)
+            collect_fuzzy(
+                core,
+                derived,
+                &source.text,
+                &mut note_data,
+                &exclude,
+                args,
+                lex_scope.as_deref(),
+            )
         } else {
             (Vec::new(), HashMap::new())
         };
@@ -807,6 +837,54 @@ mod search_tests {
             text: text.to_owned(),
             is_query: true,
         }
+    }
+
+    #[test]
+    fn scoped_lexical_search_serves_from_the_store() {
+        // #177 (scan retirement): a deck-scoped literal/fuzzy search rides
+        // the FTS5 store with the scope id set pushed into the query — exact
+        // recall inside the scope, zero leakage outside it, and the wildcard
+        // `*text*` field scan is never consulted (the store served Some).
+        let (dir, core) = temp_collection();
+        let results: Vec<Value> = serde_json::from_str(
+            &core
+                .upsert_notes(
+                    r#"[
+                      {"note_type": "Basic", "deck": "Scoped",
+                       "fields": {"Front": "the krebs cycle in scope", "Back": "b"}},
+                      {"note_type": "Basic", "deck": "Other",
+                       "fields": {"Front": "the krebs cycle out of scope", "Back": "b"}}
+                    ]"#,
+                    "error",
+                    false,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let inside = results[0]["id"].as_i64().unwrap();
+        let derived = derived_for(&core, &dir);
+
+        let mut scoped_args = args(10);
+        scoped_args.deck = Some("Scoped".to_owned());
+        let groups = search_notes(
+            &core,
+            None,
+            Some(&derived),
+            None,
+            &[query("krebs"), query("kreps cycle")], // literal + typo
+            &[],
+            &scoped_args,
+        )
+        .unwrap();
+
+        let exact_ids: Vec<i64> = groups[0].matches.iter().map(|m| m.note.id).collect();
+        assert_eq!(exact_ids, vec![inside], "literal: in-scope only");
+        assert!(groups[0].matches[0].substring.is_some());
+
+        let fuzzy_ids: Vec<i64> = groups[1].matches.iter().map(|m| m.note.id).collect();
+        assert_eq!(fuzzy_ids, vec![inside], "fuzzy: in-scope only");
+
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

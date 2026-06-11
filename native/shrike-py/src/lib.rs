@@ -412,36 +412,45 @@ impl DerivedTextEngine {
             .map_err(to_py_err)
     }
 
+    #[pyo3(signature = (expr, limit, with_text, scope=None))]
     fn match_rows(
         &self,
         py: Python<'_>,
         expr: String,
         limit: i64,
         with_text: bool,
+        scope: Option<Vec<i64>>,
     ) -> PyResult<Vec<MatchRow>> {
-        py.detach(|| self.inner.match_rows(&expr, limit, with_text))
-            .map_err(to_py_err)
+        py.detach(|| {
+            self.inner
+                .match_rows(&expr, limit, with_text, scope.as_deref())
+        })
+        .map_err(to_py_err)
     }
 
     /// Literal-substring rows (#331) — `None` = use the find_notes fallback.
+    #[pyo3(signature = (query, limit, scope=None))]
     fn search_substring(
         &self,
         py: Python<'_>,
         query: String,
         limit: i64,
+        scope: Option<Vec<i64>>,
     ) -> PyResult<Option<Vec<shrike_derived::LexicalRow>>> {
-        py.detach(|| self.inner.search_substring(&query, limit))
+        py.detach(|| self.inner.search_substring(&query, limit, scope.as_deref()))
             .map_err(to_py_err)
     }
 
     /// Fuzzy (trigram/typo) rows, best-first, deduped per note (#331).
+    #[pyo3(signature = (query, top_k, scope=None))]
     fn search_fuzzy(
         &self,
         py: Python<'_>,
         query: String,
         top_k: i64,
+        scope: Option<Vec<i64>>,
     ) -> PyResult<Vec<shrike_derived::LexicalRow>> {
-        py.detach(|| self.inner.search_fuzzy(&query, top_k))
+        py.detach(|| self.inner.search_fuzzy(&query, top_k, scope.as_deref()))
             .map_err(to_py_err)
     }
 }
