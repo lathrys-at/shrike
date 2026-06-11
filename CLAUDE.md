@@ -139,6 +139,24 @@ pytest tests/unit -v                           # Unit tests (fast, no server)
 pytest tests/integration -v -m integration     # Integration tests (starts a server)
 ```
 
+#### Native (Rust) workspace
+
+The Rust workspace lives in `native/` (run `cargo` from there); the Python
+extension is rebuilt into the venv with `scripts/build-native.sh` (the fast
+pip-lane inner loop — run it after any Rust change before pytest, which
+otherwise tests the stale extension). **Bazel is NOT on PATH** — use the
+committed `./bazel` launcher at the repo root (it bootstraps bazelisk + the
+pinned Bazel from `.bazelversion`; same entry point CI uses). The full local
+gate for a native change:
+
+```bash
+(cd native && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings)
+(cd native && cargo clippy -p shrike-compute --no-default-features --all-targets -- -D warnings)
+(cd native && cargo test --workspace)
+scripts/build-native.sh && pytest tests/unit tests/native -q
+./bazel test //...      # the authoritative CI lane: all crate tests + layering check + py suites
+```
+
 #### Coverage
 
 Coverage lives in its own workflow (`.github/workflows/coverage.yml`), **off the
