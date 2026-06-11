@@ -27,17 +27,11 @@ from shrike.collection import CollectionBusyError
 
 logger = logging.getLogger("shrike.tools")
 
-# A tool call slower than this logs its duration at INFO instead of DEBUG, so
-# slowness is visible in a default-level log without per-call noise.
-SLOW_TOOL_SECONDS = 1.0
-
 
 def _log_duration(name: str, started: float) -> None:
-    elapsed = time.perf_counter() - started
-    if elapsed >= SLOW_TOOL_SECONDS:
-        logger.info("%s completed (%.1fs)", name, elapsed)
-    else:
-        logger.debug("%s completed (%.0fms)", name, elapsed * 1000)
+    # Every completed call logs its duration at INFO — like the route access
+    # lines, what the server did and how long it took is never noise.
+    logger.info("%s completed (%.0fms)", name, (time.perf_counter() - started) * 1000)
 
 
 def _safe_tool(fn: Any) -> Any:
@@ -49,8 +43,7 @@ def _safe_tool(fn: Any) -> Any:
     protocol, and response models stay clean. ``ToolInputError`` (expected bad
     input) logs the rejection without a traceback; anything else logs with one.
 
-    Every call is timed: completion duration logs at DEBUG, escalating to INFO
-    for a slow call (>= 1s) so slowness surfaces without per-call log noise.
+    Every call is timed: the completion duration logs at INFO.
 
     The wrapped function's docstring is dedented with ``inspect.cleandoc`` so the
     tool description FastMCP advertises to clients has no source indentation.

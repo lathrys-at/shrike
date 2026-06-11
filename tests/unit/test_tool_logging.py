@@ -1,5 +1,5 @@
-"""The _safe_tool logging policy (#328): durations, slow-call escalation, and
-the rejected-input/busy lines — pinned with caplog against sync and async tools."""
+"""The _safe_tool logging policy (#328): completion durations at INFO and the
+rejected-input/busy lines — pinned with caplog against sync and async tools."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import logging
 
 import pytest
 
-import shrike.mcp_adapter as mcp_adapter
 from shrike.actions import ToolInputError
 from shrike.collection import CollectionBusyError
 from shrike.mcp_adapter import _safe_tool
@@ -39,13 +38,15 @@ def _broken_tool() -> None:
 
 
 class TestDurations:
-    def test_success_logs_duration_at_debug(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_success_logs_duration_at_info(self, caplog: pytest.LogCaptureFixture) -> None:
+        # Every completed call carries its duration at INFO — like the route
+        # access lines, durations are operator information, never noise.
         wrapped = _safe_tool(_ok_tool)
         with caplog.at_level(logging.DEBUG, logger="shrike.tools"):
             assert wrapped(1) == 2
         records = [r for r in caplog.records if "completed" in r.message]
         assert len(records) == 1
-        assert records[0].levelno == logging.DEBUG
+        assert records[0].levelno == logging.INFO
         assert "_ok_tool" in records[0].message
         assert "ms)" in records[0].message
 
@@ -53,21 +54,7 @@ class TestDurations:
         wrapped = _safe_tool(_ok_tool_async)
         with caplog.at_level(logging.DEBUG, logger="shrike.tools"):
             assert await wrapped(1) == 2
-        assert any("completed" in r.message and r.levelno == logging.DEBUG for r in caplog.records)
-
-    def test_slow_call_escalates_to_info(
-        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Everything counts as slow with a zero threshold — the escalation
-        # branch fires without an actual sleep.
-        monkeypatch.setattr(mcp_adapter, "SLOW_TOOL_SECONDS", 0.0)
-        wrapped = _safe_tool(_ok_tool)
-        with caplog.at_level(logging.DEBUG, logger="shrike.tools"):
-            wrapped(1)
-        records = [r for r in caplog.records if "completed" in r.message]
-        assert len(records) == 1
-        assert records[0].levelno == logging.INFO
-        assert "s)" in records[0].message
+        assert any("completed" in r.message and r.levelno == logging.INFO for r in caplog.records)
 
 
 class TestFailures:
