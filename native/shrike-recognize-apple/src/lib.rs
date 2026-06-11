@@ -98,7 +98,10 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn stub_constructor_is_unavailable() {
-        let err = super::AppleVisionRecognizer::new().unwrap_err();
+        // .err(), not .unwrap_err(): the Ok type carries no Debug impl.
+        let err = super::AppleVisionRecognizer::new()
+            .err()
+            .expect("the stub constructor must fail off macOS");
         assert!(err.to_string().contains("only available on macOS"));
     }
 

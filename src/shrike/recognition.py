@@ -41,7 +41,10 @@ def make_recognizer(kind: str) -> RecognizerBackend:
         import shrike_native
 
         try:
-            return shrike_native.AppleVisionRecognizer()
+            # Typed through the protocol: the lint lane runs without the
+            # native package installed, where the constructor types as Any.
+            backend: RecognizerBackend = shrike_native.AppleVisionRecognizer()
         except shrike_native.NativeUnavailableError as e:
             raise ImportError(str(e)) from e
+        return backend
     raise ValueError(f"unknown OCR backend {kind!r} (choices: {', '.join(OCR_BACKENDS)})")
