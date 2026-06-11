@@ -24,6 +24,7 @@ rust_shared_library(
         "src/kernel_actions.rs",
         "src/kernel_index.rs",
         "src/lib.rs",
+        "src/native_embedder.rs",
         "src/py_embedder.rs",
         "src/py_recognizer.rs",
         "src/timer_host.rs",
