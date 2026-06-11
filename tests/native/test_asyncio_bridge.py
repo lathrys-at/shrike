@@ -78,7 +78,9 @@ class TestAsyncioBridge:
         core = shrike_native.CollectionCore(path)
         out = json.loads(
             core.upsert_notes(
-                json.dumps([{"note_type": "Basic", "deck": "D", "fields": {"Front": "Q", "Back": "A"}}]),
+                json.dumps(
+                    [{"note_type": "Basic", "deck": "D", "fields": {"Front": "Q", "Back": "A"}}]
+                ),
                 "allow",
                 False,
             )
@@ -93,3 +95,32 @@ class TestAsyncioBridge:
             return ids
 
         assert len(_run(flow())) == 1
+
+
+class TestWorkerExecutor:
+    """S3b: the harness-OWNED worker thread drives collection jobs off the loop."""
+
+    def test_jobs_run_on_the_harness_thread(self, tmp_path) -> None:
+        import threading
+
+        ex = shrike_native.WorkerExecutor()
+        worker = threading.Thread(target=ex.worker_loop, daemon=True)
+        worker.start()
+
+        async def flow() -> list[list[int]]:
+            col = await shrike_native.async_collection_open(str(tmp_path / "c.anki2"), executor=ex)
+            results = await asyncio.gather(*(col.find_notes("deck:*") for _ in range(4)))
+            await col.close()
+            return results
+
+        assert _run(flow()) == [[] for _ in range(4)]
+        ex.shutdown()
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+
+    def test_worker_loop_is_single_claim(self) -> None:
+        ex = shrike_native.WorkerExecutor()
+        ex.shutdown()  # close the queue so the claimed loop returns immediately
+        ex.worker_loop()
+        with pytest.raises(shrike_native.NativeInternalError):
+            ex.worker_loop()  # the receiver is already claimed

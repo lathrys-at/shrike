@@ -23,6 +23,7 @@ rust_shared_library(
         "src/asyncio_bridge.rs",
         "src/kernel_actions.rs",
         "src/lib.rs",
+        "src/worker_executor.rs",
     ],
     edition = "2021",
     rustc_flags = select({
@@ -42,6 +43,7 @@ rust_shared_library(
         "//native/shrike-index:shrike_index",
         "//native/shrike-kernel:shrike_kernel",
         "//native/shrike-schemas:shrike_schemas",
+        "@crates//:futures",
         "@crates//:pyo3",
         "@crates//:serde_json",
         "@crates//:pyo3-log",

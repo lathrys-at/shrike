@@ -12,9 +12,10 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 
-use shrike_kernel::{MutexExecutor, SerializedCollection};
+use shrike_kernel::{MutexExecutor, SerialExecutor, SerializedCollection};
 
 use crate::asyncio_bridge::future_into_py;
+use crate::worker_executor::WorkerExecutor;
 
 /// An open collection whose every op is an awaitable serialized through the
 /// kernel's injected executor.
@@ -25,17 +26,24 @@ pub(crate) struct AsyncCollection {
 
 /// Open a collection asynchronously; resolves to an [`AsyncCollection`].
 ///
-/// S3a uses the kernel's `MutexExecutor` (inline, conforming): collection
-/// jobs run inside the poll callback on the loop thread. The harness-injected
-/// worker executor (jobs off the loop) is the next S3 slice.
+/// `executor` is the harness-injected scheduler (#332 S3b): pass a
+/// [`WorkerExecutor`] whose `worker_loop` runs on a harness-owned thread and
+/// collection jobs leave the asyncio loop entirely. Without one, the kernel's
+/// inline `MutexExecutor` runs jobs inside the poll callback (conforming —
+/// fine for tests and tiny embedded uses).
 #[pyfunction]
+#[pyo3(signature = (collection_path, executor=None))]
 pub(crate) fn async_collection_open<'py>(
     py: Python<'py>,
     collection_path: String,
+    executor: Option<PyRef<'py, WorkerExecutor>>,
 ) -> PyResult<Bound<'py, PyAny>> {
+    let executor: Arc<dyn SerialExecutor> = match executor {
+        Some(ex) => Arc::new(ex.handle()),
+        None => Arc::new(MutexExecutor::default()),
+    };
     future_into_py(py, async move {
-        let collection =
-            SerializedCollection::open(collection_path, Arc::new(MutexExecutor::default())).await?;
+        let collection = SerializedCollection::open(collection_path, executor).await?;
         Ok(AsyncCollection {
             inner: Arc::new(collection),
         })

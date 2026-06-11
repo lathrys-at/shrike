@@ -5081,6 +5081,7 @@ dependencies = [
 name = "shrike-py"
 version = "0.0.0"
 dependencies = [
+ "futures",
  "pyo3",
  "pyo3-log",
  "serde_json",
