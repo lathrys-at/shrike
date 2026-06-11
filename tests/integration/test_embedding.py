@@ -103,7 +103,7 @@ class TestEmbeddingServiceViaShrike:
         svc._base_url = embedding_server.embedding_url
         svc._model = "test"
         svc._model_name = None
-        svc._process = type("FakeProc", (), {"poll": lambda self: None})()
+        svc._manager = type("FakeMgr", (), {"running": lambda self: True, "pid": lambda self: 1})()
         svc._safe_batch = 16  # bypassing start()/__init__, simulate a batch-safe probe
         svc._batch_cap = None
         # The native client pair __init__/start() would have built (#342 P4):
@@ -123,7 +123,7 @@ class TestEmbeddingServiceViaShrike:
         svc._base_url = embedding_server.embedding_url
         svc._model = "test"
         svc._model_name = None
-        svc._process = type("FakeProc", (), {"poll": lambda self: None})()
+        svc._manager = type("FakeMgr", (), {"running": lambda self: True, "pid": lambda self: 1})()
         svc._safe_batch = 16  # bypassing start()/__init__, simulate a batch-safe probe
         svc._batch_cap = None
         # The native client pair __init__/start() would have built (#342 P4):
@@ -142,8 +142,14 @@ class TestOrphanReaping:
 
     def test_start_reaps_orphaned_llama_server(self, embedding_model, tmp_path):
         import socket
+        import time
 
-        from shrike.embedding import EmbeddingService, _pid_alive, _port_in_use
+        from shrike.embedding import EmbeddingService
+
+        def port_in_use(port: int) -> bool:
+            with socket.socket() as probe:
+                probe.settimeout(0.5)
+                return probe.connect_ex(("127.0.0.1", port)) == 0
 
         # Pick a free port for both services to contend over.
         with socket.socket() as s:
@@ -158,10 +164,10 @@ class TestOrphanReaping:
             model=str(embedding_model), port=port, log_dir=tmp_path / "a", pid_file=pid_file
         )
         a.start()
-        orphan = a._process
-        assert _pid_alive(orphan.pid)
-        assert _port_in_use("127.0.0.1", port)
-        assert pid_file.read_text() == str(orphan.pid)
+        orphan_pid = a._manager.pid()
+        assert orphan_pid is not None
+        assert port_in_use(port)
+        assert pid_file.read_text() == str(orphan_pid)
 
         # B: a fresh server on the SAME port + pid_file. It must reap A's orphan
         # and come up healthy — a port collision would otherwise fail the start.
@@ -172,13 +178,15 @@ class TestOrphanReaping:
             b.start()
             assert b.running
             assert b.health()["available"] is True
-            assert b._process.pid != orphan.pid
-            assert pid_file.read_text() == str(b._process.pid)
+            assert b._manager.pid() != orphan_pid
+            assert pid_file.read_text() == str(b._manager.pid())
 
-            # The reap terminated A's process. Check via A's own Popen handle —
-            # .wait() also reaps the zombie (here the orphan's parent is pytest,
-            # not init, so os.kill(pid, 0) would otherwise still see a zombie).
-            assert orphan.wait(timeout=5) is not None
+            # The reap terminated A's child. A's manager poll (try_wait)
+            # reaps the zombie, flipping running to False.
+            deadline = time.monotonic() + 5
+            while a.running and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert not a.running
         finally:
             b.stop()
             if a.running:

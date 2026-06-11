@@ -81,6 +81,7 @@ crate.from_cargo(
         "//native/shrike-ffi:Cargo.toml",
         "//native/shrike-index:Cargo.toml",
         "//native/shrike-kernel:Cargo.toml",
+        "//native/shrike-llama-server:Cargo.toml",
         "//native/shrike-py:Cargo.toml",
         "//native/shrike-recognize-apple:Cargo.toml",
         "//native/shrike-schemas:Cargo.toml",

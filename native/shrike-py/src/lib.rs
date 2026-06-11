@@ -408,6 +408,79 @@ impl RemoteEmbedder {
     }
 }
 
+/// The llama-server lifecycle manager (#342 P4b) under the llama facade:
+/// spawn + health-wait + orphan reaping + escalating stop, all native. NOT
+/// an embedder — the facade composes manager → endpoint → RemoteEmbedder.
+#[pyclass]
+pub(crate) struct LlamaServerManager {
+    inner: std::sync::Mutex<shrike_llama_server::LlamaServerManager>,
+}
+
+#[pymethods]
+impl LlamaServerManager {
+    #[new]
+    #[pyo3(signature = (model, *, host, port, binary=None, log_dir=None, context_size=None, threads=None, gpu_layers=None, pooling=None, extra_args=vec![], pid_file=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        model: String,
+        host: String,
+        port: u16,
+        binary: Option<String>,
+        log_dir: Option<String>,
+        context_size: Option<u32>,
+        threads: Option<u32>,
+        gpu_layers: Option<i32>,
+        pooling: Option<String>,
+        extra_args: Vec<String>,
+        pid_file: Option<String>,
+    ) -> Self {
+        let cfg = shrike_llama_server::LlamaServerConfig {
+            binary,
+            model,
+            host,
+            port,
+            log_dir: log_dir.map(std::path::PathBuf::from),
+            context_size,
+            threads,
+            gpu_layers,
+            pooling,
+            extra_args,
+            pid_file: pid_file.map(std::path::PathBuf::from),
+        };
+        Self {
+            inner: std::sync::Mutex::new(shrike_llama_server::LlamaServerManager::new(cfg)),
+        }
+    }
+
+    /// Spawn + health-wait (blocking — the facade runs it off the loop).
+    fn start(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.inner.lock().expect("manager poisoned").start())
+            .map_err(to_py_err)
+    }
+
+    /// SIGTERM → SIGKILL stop (blocking, up to the shutdown tiers).
+    fn stop(&self, py: Python<'_>) {
+        py.detach(|| self.inner.lock().expect("manager poisoned").stop())
+    }
+
+    fn running(&self) -> bool {
+        self.inner.lock().expect("manager poisoned").running()
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.inner.lock().expect("manager poisoned").pid()
+    }
+
+    /// The effective passthrough (reserved flags stripped, silent) — the
+    /// facade folds this into the fingerprint's `args=` suffix.
+    fn passthrough_tokens(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("manager poisoned")
+            .passthrough_tokens(false)
+    }
+}
+
 // ── Derived-text engine (#281) ──────────────────────────────────────────────
 
 /// Whether the linked SQLite has FTS5 with the trigram tokenizer (#300).
@@ -735,6 +808,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OnnxTextEmbedder>()?;
     m.add_class::<ClipEmbedder>()?;
     m.add_class::<RemoteEmbedder>()?;
+    m.add_class::<LlamaServerManager>()?;
     m.add_class::<NativeIndexEngine>()?;
     m.add_class::<DerivedTextEngine>()?;
     m.add_class::<py_recognizer::PyRecognizer>()?;

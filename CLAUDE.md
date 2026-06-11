@@ -571,7 +571,12 @@ pipelined rather than serial:
 - **Then label, auto-merge, move on.** Apply `ci` once review findings are
   addressed, and immediately set the PR to merge when green
   (`gh pr merge --auto --squash`) — don't poll for green; while CI runs,
-  proactively move on to the next step.
+  proactively move on to the next step. Label as a **separate step after the
+  push settles**: pushing and labeling in one breath races the `synchronize`
+  run (whose payload lacks the label) against the `labeled` run; the
+  concurrency group can cancel the labeled one and the survivor fails
+  `ci-ok` fail-closed (every job "skipping"). If that shape appears, toggle
+  the label off and on to re-trigger.
 - **Subagents assist with research, orientation, and review — never
   authorship.** All code and tests are developed by the agent itself; use
   subagents wherever they speed up or improve the work (codebase orientation,

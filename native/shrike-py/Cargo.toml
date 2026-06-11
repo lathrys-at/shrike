@@ -35,6 +35,7 @@ shrike-compute = { path = "../shrike-compute" }
 shrike-derived = { path = "../shrike-derived", default-features = false }
 shrike-embed = { path = "../shrike-embed" }
 shrike-embed-remote = { path = "../shrike-embed-remote" }
+shrike-llama-server = { path = "../shrike-llama-server" }
 # The engine contract (#342): the binding composes engines (WithPolicy +
 # OnExecutor over the asyncio lane) into the kernel's Arc<dyn Embedder> slot.
 shrike-engine-api = { path = "../shrike-engine-api" }

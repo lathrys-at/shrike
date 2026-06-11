@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import signal
-import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -25,12 +22,40 @@ def svc(tmp_path: Path) -> EmbeddingService:
     )
 
 
+class _StubManager:
+    """The native LlamaServerManager seam (#342 P4b): lifecycle logic
+    (find-binary precedence, command construction, reserved-flag stripping,
+    orphan reaping, stop escalation) is pinned in the Rust crate; these stubs
+    pin the FACADE's delegation policy."""
+
+    def __init__(self, *, running: bool = False, pid: int | None = None) -> None:
+        self._running = running
+        self._pid = pid
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    def start(self) -> None:
+        self.start_calls += 1
+        self._running = True
+        self._pid = self._pid or 123
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        self._running = False
+
+    def running(self) -> bool:
+        return self._running
+
+    def pid(self) -> int | None:
+        return self._pid if self._running else None
+
+    def passthrough_tokens(self) -> list[str]:
+        return []
+
+
 def _set_running(svc: EmbeddingService, pid: int = 123) -> None:
     """Make a service look like it has a live, batch-safe llama-server subprocess."""
-    proc = MagicMock()
-    proc.poll.return_value = None
-    proc.pid = pid
-    svc._process = proc
+    svc._manager = _StubManager(running=True, pid=pid)
     svc._safe_batch = 16  # as the startup probe would set for fp llama-server
 
 
@@ -82,268 +107,45 @@ class TestInit:
         assert svc.running is False
 
 
-class TestFindLlamaServer:
-    def test_env_var_valid(self, svc: EmbeddingService, tmp_path: Path) -> None:
-        binary = tmp_path / "llama-server"
-        binary.write_text("#!/bin/sh\n")
-        binary.chmod(0o755)
-        with patch.dict(os.environ, {"LLAMA_SERVER_PATH": str(binary)}):
-            assert svc._find_llama_server() == str(binary)
-
-    def test_env_var_invalid(self, svc: EmbeddingService) -> None:
-        with (
-            patch.dict(os.environ, {"LLAMA_SERVER_PATH": "/nonexistent/binary"}),
-            pytest.raises(FileNotFoundError, match="does not point to an executable"),
-        ):
-            svc._find_llama_server()
-
-    def test_path_lookup(self, svc: EmbeddingService) -> None:
-        with (
-            patch.dict(os.environ, {}, clear=False),
-            patch("shutil.which", return_value="/usr/bin/llama-server"),
-        ):
-            os.environ.pop("LLAMA_SERVER_PATH", None)
-            assert svc._find_llama_server() == "/usr/bin/llama-server"
-
-    def test_not_found(self, svc: EmbeddingService) -> None:
-        with (
-            patch.dict(os.environ, {}, clear=False),
-            patch("shutil.which", return_value=None),
-        ):
-            os.environ.pop("LLAMA_SERVER_PATH", None)
-            with pytest.raises(FileNotFoundError, match="llama-server not found"):
-                svc._find_llama_server()
-
-
-class TestBuildCommand:
-    def test_minimal(self) -> None:
-        svc = EmbeddingService(model="/m.gguf", port=9000)
-        cmd = svc._build_command("/bin/llama-server")
-        assert cmd == [
-            "/bin/llama-server",
-            "--model",
-            "/m.gguf",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "9000",
-            "--embeddings",
-        ]
-
-    def test_all_options(self, tmp_path: Path) -> None:
-        svc = EmbeddingService(
-            model="/m.gguf",
-            host="0.0.0.0",
-            port=9001,
-            log_dir=tmp_path,
-            context_size=2048,
-            threads=4,
-            gpu_layers=33,
-        )
-        cmd = svc._build_command("/bin/ls")
-        assert "--ctx-size" in cmd
-        assert "2048" in cmd
-        assert "--threads" in cmd
-        assert "4" in cmd
-        assert "--gpu-layers" in cmd
-        assert "33" in cmd
-        assert "--log-file" in cmd
-        assert str(tmp_path / "llama-server.log") in cmd
-
-    def test_no_log_dir_omits_log_file(self) -> None:
-        svc = EmbeddingService(model="/m.gguf")
-        cmd = svc._build_command("/bin/ls")
-        assert "--log-file" not in cmd
-
-    def test_pooling_flag(self) -> None:
-        svc = EmbeddingService(model="/m.gguf", pooling="last")
-        cmd = svc._build_command("/bin/ls")
-        assert "--pooling" in cmd
-        assert cmd[cmd.index("--pooling") + 1] == "last"
-
-    def test_no_pooling_omits_flag(self) -> None:
-        svc = EmbeddingService(model="/m.gguf")
-        assert "--pooling" not in svc._build_command("/bin/ls")
-
-    def test_extra_args_appended_and_split(self) -> None:
-        # Raw entries are shlex-split and appended verbatim, in order, last.
-        svc = EmbeddingService(model="/m.gguf", extra_args=["--flash-attn", "--ubatch-size 256"])
-        cmd = svc._build_command("/bin/ls")
-        assert cmd[-3:] == ["--flash-attn", "--ubatch-size", "256"]
-
-    def test_extra_args_reject_reserved_flags(self) -> None:
-        # Shrike-owned flags are stripped (with their value), the rest survive.
-        svc = EmbeddingService(
-            model="/m.gguf",
-            extra_args=["--host 0.0.0.0", "--port 1", "--model /evil", "--embeddings", "--keep"],
-        )
-        cmd = svc._build_command("/bin/ls")
-        # --host's contract value is still loopback; the override didn't leak in.
-        assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
-        assert "0.0.0.0" not in cmd
-        assert "/evil" not in cmd
-        assert cmd.count("--embeddings") == 1  # only Shrike's own
-        assert cmd[-1] == "--keep"  # the one non-reserved passthrough token
-
-    def test_extra_args_reject_equals_form(self) -> None:
-        svc = EmbeddingService(model="/m.gguf", extra_args=["--host=0.0.0.0", "--ok"])
-        cmd = svc._build_command("/bin/ls")
-        assert "--host=0.0.0.0" not in cmd
-        assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
-        assert cmd[-1] == "--ok"
-
-    def test_no_extra_args_appends_nothing(self) -> None:
-        svc = EmbeddingService(model="/m.gguf", port=9000)
-        # Identical to the minimal command — passthrough is empty.
-        assert svc._build_command("/bin/llama-server")[-1] == "--embeddings"
-
-
 class TestStart:
-    def test_start_spawns_and_waits(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        mock_proc.pid = 12345
+    """The facade's start() = manager.start() + identity + pinned client +
+    probe (the spawn/health/reap mechanics are Rust-pinned)."""
 
+    def test_start_composes_manager_identity_and_probe(self, svc: EmbeddingService) -> None:
+        manager = _StubManager()
+        svc._manager = manager
         with (
-            patch.object(svc, "_find_llama_server", return_value="/bin/llama-server"),
-            patch("shrike.embedding.subprocess.Popen", return_value=mock_proc),
-            patch.object(svc, "_wait_healthy", return_value=True),
+            patch.object(svc, "model_info", return_value={"id": "m.gguf", "meta": {}}),
+            patch("shrike.embedding.probe_max_safe_batch", return_value=16),
         ):
             svc.start()
+        assert manager.start_calls == 1
+        assert svc._model_name == "m.gguf"
+        assert svc._remote is not None  # the model-pinned client was built
+        assert svc._safe_batch == 16
 
-        assert svc._process is mock_proc
+    def test_start_noop_when_already_running(self, svc: EmbeddingService) -> None:
+        manager = _StubManager(running=True, pid=7)
+        svc._manager = manager
+        svc.start()
+        assert manager.start_calls == 0
 
-    def test_start_creates_log_dir(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        mock_proc.pid = 12345
-
+    def test_probe_failure_degrades_to_serial_not_boot_failure(self, svc: EmbeddingService) -> None:
+        svc._manager = _StubManager()
         with (
-            patch.object(svc, "_find_llama_server", return_value="/bin/llama-server"),
-            patch("shrike.embedding.subprocess.Popen", return_value=mock_proc),
-            patch.object(svc, "_wait_healthy", return_value=True),
+            patch.object(svc, "model_info", return_value={}),
+            patch("shrike.embedding.probe_max_safe_batch", side_effect=RuntimeError("hiccup")),
         ):
             svc.start()
+        assert svc._safe_batch == 1
 
-        assert svc._log_dir is not None
-        assert svc._log_dir.exists()
-
-    def test_start_raises_on_health_timeout(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = 1
-        mock_proc.pid = 12345
-        mock_proc.wait.return_value = 1
-
-        with (
-            patch.object(svc, "_find_llama_server", return_value="/bin/llama-server"),
-            patch("shrike.embedding.subprocess.Popen", return_value=mock_proc),
-            patch.object(svc, "_wait_healthy", return_value=False),
-            pytest.raises(RuntimeError, match="failed to become healthy"),
-        ):
-            svc.start()
-
-        assert svc._process is None
-
-    def test_start_raises_on_missing_binary(self, svc: EmbeddingService) -> None:
-        with (
-            patch.dict(os.environ, {}, clear=False),
-            patch("shutil.which", return_value=None),
-        ):
-            os.environ.pop("LLAMA_SERVER_PATH", None)
-            with pytest.raises(FileNotFoundError):
-                svc.start()
-
-    def test_start_noop_if_already_running(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        mock_proc.pid = 999
-        svc._process = mock_proc
-
-        with patch.object(svc, "_find_llama_server") as find:
-            svc.start()
-            find.assert_not_called()
-
-
-class TestWaitHealthy:
-    def test_returns_true_on_healthy(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        svc._process = mock_proc
-        svc._client = _StubClient(healthy=True)
-
-        assert svc._wait_healthy() is True
-
-    def test_returns_false_on_process_exit(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = 1
-        svc._process = mock_proc
-
-        with patch("shrike.embedding.HEALTH_TIMEOUT", 0.1):
-            assert svc._wait_healthy() is False
-
-    def test_retries_until_healthy(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        svc._process = mock_proc
-
-        class _SlowStart(_StubClient):
-            def health_ok(self) -> bool:
-                self.health_calls += 1
-                return self.health_calls >= 3  # refused twice, then up
-
-        stub = _SlowStart()
-        svc._client = stub
-        with patch("shrike.embedding.HEALTH_POLL_INTERVAL", 0.01):
-            assert svc._wait_healthy() is True
-        assert stub.health_calls == 3
-
-
-class TestStop:
-    def test_stop_noop_if_not_started(self, svc: EmbeddingService) -> None:
+    def test_stop_delegates_and_clears_the_pinned_client(self, svc: EmbeddingService) -> None:
+        manager = _StubManager(running=True)
+        svc._manager = manager
+        svc._remote = object()
         svc.stop()
-        assert svc._process is None
-
-    def test_stop_already_exited(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = 0
-        mock_proc.returncode = 0
-        mock_proc.pid = 123
-        svc._process = mock_proc
-
-        svc.stop()
-        assert svc._process is None
-
-    def test_stop_sends_sigterm(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.side_effect = [None, None]
-        mock_proc.pid = 123
-        mock_proc.wait.return_value = 0
-        svc._process = mock_proc
-
-        with patch("os.kill") as mock_kill:
-            svc.stop()
-            mock_kill.assert_called_once_with(123, signal.SIGTERM)
-
-        assert svc._process is None
-
-    def test_stop_escalates_to_sigkill(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.side_effect = [None, None]
-        mock_proc.pid = 123
-        mock_proc.wait.side_effect = [subprocess.TimeoutExpired("cmd", 5), 0]
-        svc._process = mock_proc
-
-        kills: list[int] = []
-
-        def track_kill(pid: int, sig: int) -> None:
-            kills.append(sig)
-
-        with patch("os.kill", side_effect=track_kill):
-            svc.stop()
-
-        assert signal.SIGTERM in kills
-        assert signal.SIGKILL in kills
-        assert svc._process is None
+        assert manager.stop_calls == 1
+        assert svc._remote is None
 
 
 class TestHealth:
@@ -352,11 +154,7 @@ class TestHealth:
         assert result == {"available": False}
 
     def test_running_and_healthy(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        mock_proc.pid = 456
-        svc._process = mock_proc
-
+        _set_running(svc, pid=456)
         svc._client = _StubClient(healthy=True)
         result = svc.health()
 
@@ -365,11 +163,7 @@ class TestHealth:
         assert result["model"] == "/fake/model.gguf"
 
     def test_running_but_unhealthy(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        mock_proc.pid = 456
-        svc._process = mock_proc
-
+        _set_running(svc, pid=456)
         svc._client = _StubClient(healthy=False)
         result = svc.health()
 
@@ -547,13 +341,8 @@ class TestEmbedModelPinning:
                 captured["base_url"] = base_url
                 captured.update(kwargs)
 
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        mock_proc.pid = 99
+        svc._manager = _StubManager()
         with (
-            patch.object(svc, "_find_llama_server", return_value="/bin/llama-server"),
-            patch("shrike.embedding.subprocess.Popen", return_value=mock_proc),
-            patch.object(svc, "_wait_healthy", return_value=True),
             patch.object(svc, "model_info", return_value={"id": "m.gguf", "meta": {}}),
             patch("shrike.embedding.probe_max_safe_batch", return_value=16),
             patch("shrike.embedding.shrike_native.RemoteEmbedder", _CapturingCtor),
@@ -653,205 +442,3 @@ class TestEmbeddingRuntime:
         with pytest.raises(ValueError, match="Unknown embedding backend"):
             runtime.start()
         assert runtime.state == "failed"
-
-
-class TestProcessHelpers:
-    """Low-level helpers behind orphan reaping."""
-
-    def test_pid_alive_for_current_process(self) -> None:
-        from shrike.embedding import _pid_alive
-
-        assert _pid_alive(os.getpid()) is True
-
-    def test_pid_alive_false_for_nonexistent(self) -> None:
-        from shrike.embedding import _pid_alive
-
-        # An implausibly high PID that won't exist.
-        assert _pid_alive(2_147_483_646) is False
-
-    def test_pid_alive_false_for_nonpositive(self) -> None:
-        from shrike.embedding import _pid_alive
-
-        assert _pid_alive(0) is False
-        assert _pid_alive(-1) is False
-
-    def test_port_in_use_detects_listener(self) -> None:
-        import socket
-
-        from shrike.embedding import _port_in_use
-
-        sock = socket.socket()
-        sock.bind(("127.0.0.1", 0))
-        sock.listen()
-        port = sock.getsockname()[1]
-        try:
-            assert _port_in_use("127.0.0.1", port) is True
-        finally:
-            sock.close()
-        assert _port_in_use("127.0.0.1", port) is False
-
-
-class TestPidFileLifecycle:
-    def test_pid_file_written_on_start(self, tmp_path: Path) -> None:
-        pid_file = tmp_path / "embedding.pid"
-        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        mock_proc.pid = 54321
-
-        with (
-            patch.object(svc, "_find_llama_server", return_value="/bin/llama-server"),
-            patch("shrike.embedding.subprocess.Popen", return_value=mock_proc),
-            patch.object(svc, "_wait_healthy", return_value=True),
-            patch.object(svc, "_reap_orphan"),
-        ):
-            svc.start()
-
-        assert pid_file.read_text() == "54321"
-
-    def test_pid_file_removed_on_stop(self, tmp_path: Path) -> None:
-        pid_file = tmp_path / "embedding.pid"
-        pid_file.write_text("54321")
-        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
-        proc = MagicMock()
-        proc.poll.return_value = None
-        proc.pid = 54321
-        svc._process = proc
-
-        with patch("shrike.embedding.os.kill"):
-            svc.stop()
-
-        assert not pid_file.exists()
-
-    def test_pid_file_removed_when_already_exited(self, tmp_path: Path) -> None:
-        pid_file = tmp_path / "embedding.pid"
-        pid_file.write_text("54321")
-        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
-        proc = MagicMock()
-        proc.poll.return_value = 0
-        proc.returncode = 0
-        proc.pid = 54321
-        svc._process = proc
-
-        svc.stop()
-        assert not pid_file.exists()
-
-    def test_no_pid_file_is_noop(self, tmp_path: Path) -> None:
-        # A service without a pid_file must never write/read/raise.
-        svc = EmbeddingService(model="/m.gguf", port=19998)
-        svc._reap_orphan()
-        svc._write_pid_file()
-        svc._clear_pid_file()
-
-    def test_start_reaps_before_spawning(self, tmp_path: Path) -> None:
-        pid_file = tmp_path / "embedding.pid"
-        pid_file.write_text("99999")
-        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        mock_proc.pid = 111
-
-        with (
-            patch.object(svc, "_find_llama_server", return_value="/bin/llama-server"),
-            patch("shrike.embedding.subprocess.Popen", return_value=mock_proc),
-            patch.object(svc, "_wait_healthy", return_value=True),
-            patch.object(svc, "_reap_orphan") as reap,
-        ):
-            svc.start()
-
-        reap.assert_called_once()
-        assert pid_file.read_text() == "111"
-
-
-class TestReapOrphan:
-    def test_reaps_when_alive_and_port_held(self, tmp_path: Path) -> None:
-        pid_file = tmp_path / "embedding.pid"
-        pid_file.write_text("99999")
-        svc = EmbeddingService(model="/m.gguf", host="127.0.0.1", port=19998, pid_file=pid_file)
-
-        killed: list[tuple[int, int]] = []
-        # Port held during the reap check, then free after the kill.
-        port_states = iter([True, False])
-
-        def record_kill(pid: int, sig: int) -> None:
-            killed.append((pid, sig))
-
-        with (
-            patch("shrike.embedding._pid_alive", return_value=True),
-            patch("shrike.embedding._port_in_use", side_effect=lambda h, p: next(port_states)),
-            patch("shrike.embedding.os.kill", side_effect=record_kill),
-        ):
-            svc._reap_orphan()
-
-        assert (99999, signal.SIGTERM) in killed
-        assert not pid_file.exists()
-
-    def test_escalates_to_sigkill_if_port_stays_held(self, tmp_path: Path) -> None:
-        pid_file = tmp_path / "embedding.pid"
-        pid_file.write_text("99999")
-        svc = EmbeddingService(model="/m.gguf", host="127.0.0.1", port=19998, pid_file=pid_file)
-
-        killed: list[int] = []
-
-        with (
-            patch("shrike.embedding._pid_alive", return_value=True),
-            patch("shrike.embedding._port_in_use", return_value=True),  # never frees
-            # Zero both port-free deadlines: with time.sleep a no-op, any positive
-            # timeout busy-spins on time.monotonic() for that wall-clock duration.
-            patch("shrike.embedding.SHUTDOWN_TIMEOUT", 0.0),
-            patch("shrike.embedding.SIGKILL_PORT_TIMEOUT", 0.0),
-            patch("shrike.embedding.time.sleep", lambda *_: None),
-            patch("shrike.embedding.os.kill", side_effect=lambda pid, sig: killed.append(sig)),
-        ):
-            svc._reap_orphan()
-
-        assert signal.SIGTERM in killed
-        assert signal.SIGKILL in killed
-
-    def test_no_reap_when_port_free(self, tmp_path: Path) -> None:
-        pid_file = tmp_path / "embedding.pid"
-        pid_file.write_text("99999")
-        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
-
-        with (
-            patch("shrike.embedding._pid_alive", return_value=True),
-            patch("shrike.embedding._port_in_use", return_value=False),
-            patch("shrike.embedding.os.kill") as kill,
-        ):
-            svc._reap_orphan()
-
-        kill.assert_not_called()
-        # A stale file is still cleaned even when there's nothing to reap.
-        assert not pid_file.exists()
-
-    def test_no_reap_when_pid_dead(self, tmp_path: Path) -> None:
-        pid_file = tmp_path / "embedding.pid"
-        pid_file.write_text("99999")
-        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
-
-        with (
-            patch("shrike.embedding._pid_alive", return_value=False),
-            patch("shrike.embedding._port_in_use", return_value=True),
-            patch("shrike.embedding.os.kill") as kill,
-        ):
-            svc._reap_orphan()
-
-        kill.assert_not_called()
-        assert not pid_file.exists()
-
-    def test_garbage_pid_file_is_cleaned(self, tmp_path: Path) -> None:
-        pid_file = tmp_path / "embedding.pid"
-        pid_file.write_text("not-a-pid")
-        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=pid_file)
-
-        with patch("shrike.embedding.os.kill") as kill:
-            svc._reap_orphan()  # must not raise
-
-        kill.assert_not_called()
-        assert not pid_file.exists()
-
-    def test_missing_pid_file_is_noop(self, tmp_path: Path) -> None:
-        svc = EmbeddingService(model="/m.gguf", port=19998, pid_file=tmp_path / "absent.pid")
-        with patch("shrike.embedding.os.kill") as kill:
-            svc._reap_orphan()
-        kill.assert_not_called()

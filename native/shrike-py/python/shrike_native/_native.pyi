@@ -204,6 +204,29 @@ class PyEmbedder:
     def capture(backend: object) -> PyEmbedder: ...
 
 @final
+class LlamaServerManager:
+    def __new__(
+        cls,
+        model: str,
+        *,
+        host: str,
+        port: int,
+        binary: str | None = None,
+        log_dir: str | None = None,
+        context_size: int | None = None,
+        threads: int | None = None,
+        gpu_layers: int | None = None,
+        pooling: str | None = None,
+        extra_args: list[str] = ...,
+        pid_file: str | None = None,
+    ) -> LlamaServerManager: ...
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def running(self) -> bool: ...
+    def pid(self) -> int | None: ...
+    def passthrough_tokens(self) -> list[str]: ...
+
+@final
 class RemoteEmbedder:
     def __new__(
         cls,

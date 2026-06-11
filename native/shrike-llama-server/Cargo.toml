@@ -1,0 +1,22 @@
+# The llama-server lifecycle manager (#342 P4b): spawn, health-wait, orphan
+# reaping, escalating stop. NOT an Embedder — its product is a healthy
+# loopback *endpoint*; the host composes manager → endpoint →
+# shrike-embed-remote engine. A `manage`-class capability (#338): a mobile
+# build never includes it; a tailnet/cloud deployment composes the remote
+# engine with no manager at all. Deliberately NO dep on shrike-embed-remote —
+# the two concerns stay separable (the health-wait is one tiny GET).
+[package]
+name = "shrike-llama-server"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+shrike-ffi = { workspace = true }
+shlex = "1"
+tracing = "0.1"
+# SYNCHRONOUS — no runtime; the host runs lifecycle off its loop.
+ureq = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

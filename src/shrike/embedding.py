@@ -1,10 +1,13 @@
 """llama-server embedding backend + the runtime that owns its lifecycle.
 
-``LlamaServerBackend`` manages a llama-server subprocess for local text
-embeddings — one implementation of the :class:`~shrike.embedding_base.EmbedderBackend`
-protocol (``OnnxBackend`` is the other, in ``embedding_onnx.py``). The Shrike
-server owns the llama-server process as a direct child; the child inherits the
-parent's process group and is terminated on shutdown.
+``LlamaServerBackend`` is a thin facade (#342 P4) composing the two native
+pieces: ``shrike_native.LlamaServerManager`` (subprocess lifecycle — spawn,
+health-wait, orphan reaping, escalating stop) and
+``shrike_native.RemoteEmbedder`` (the generic OpenAI-compatible embeddings
+client). One implementation of the
+:class:`~shrike.embedding_base.EmbedderBackend` protocol (``OnnxBackend`` /
+``ClipBackend`` are the others). The Shrike server owns the llama-server
+process as a direct child; the child is terminated on shutdown.
 
 The backend exposes a simple sync interface:
     be = LlamaServerBackend(model="/path/to/model.gguf", log_dir="/path/to/logs")
@@ -19,15 +22,8 @@ The backend exposes a simple sync interface:
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
-import os
-import shlex
-import signal
-import socket
-import subprocess
-import sys
 import threading
 import time
 from collections.abc import Sequence
@@ -56,42 +52,7 @@ logger = logging.getLogger("shrike.embedding")
 
 DEFAULT_PORT = 8373
 DEFAULT_HOST = "127.0.0.1"
-HEALTH_TIMEOUT = 30.0
-HEALTH_POLL_INTERVAL = 0.25
-SHUTDOWN_TIMEOUT = 5.0
-# How long to wait for the port to free after a SIGKILL escalation. Shorter than
-# SHUTDOWN_TIMEOUT — a SIGKILL'd process can't linger like one ignoring SIGTERM.
-SIGKILL_PORT_TIMEOUT = 2.0
-
-# llama-server flags Shrike owns; a generic passthrough (``--embedding-arg``)
-# must not override them. ``--host`` is a security boundary — the embedding
-# backend is deliberately pinned to loopback (audit §1.1) — so a passthrough
-# can't be allowed to re-bind it. ``--embedding`` is llama.cpp's alias for
-# ``--embeddings``.
-_RESERVED_FLAGS = frozenset({"--model", "-m", "--host", "--port", "--embeddings", "--embedding"})
-# Of the reserved flags, those that consume a following value token (so a
-# rejected ``--host 0.0.0.0`` drops the value too, not just the flag).
-_RESERVED_VALUE_FLAGS = frozenset({"--model", "-m", "--host", "--port"})
-
-
-def _pid_alive(pid: int) -> bool:
-    """True if a process with this PID currently exists."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OSError):
-        return True  # exists (e.g. owned by another user)
-    return True
-
-
-def _port_in_use(host: str, port: int) -> bool:
-    """True if something is accepting connections on host:port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.5)
-        return sock.connect_ex((host, port)) == 0
+HEALTH_TIMEOUT = 30.0  # mirrored by the native manager; kept for messages/tests
 
 
 class LlamaServerBackend:
@@ -123,232 +84,50 @@ class LlamaServerBackend:
         self._model = model
         self._host = host
         self._port = port
-        self._log_dir = Path(log_dir) if log_dir else None
-        self._context_size = context_size
-        self._threads = threads
-        self._gpu_layers = gpu_layers
-        self._pooling = pooling
-        # Raw passthrough token strings (each shlex-split at command-build time).
-        self._extra_args = list(extra_args) if extra_args else []
-        self._llama_server_override = llama_server
         # Optional cap on the per-request batch (None = whole input); _safe_batch is
         # set by the startup batch-safety probe (1 == serial). llama is normally safe.
         self._batch_cap = batch_size
         self._safe_batch = 1
-        # PID file: records the llama-server PID so a later start can reap an
-        # orphan left by an unclean Shrike shutdown (it survives a parent SIGKILL).
-        self._pid_file = Path(pid_file) if pid_file else None
-        self._process: subprocess.Popen[bytes] | None = None
         self._base_url = f"http://{host}:{port}"
         self._model_name: str | None = None
-        # The native HTTP client (#342 P4): one unpinned client for health and
+        # The native lifecycle manager (#342 P4b): spawn + health-wait +
+        # PID-file orphan reaping + SIGTERM→SIGKILL stop, all crate-side
+        # (including the reserved-flag guard on the extra_args passthrough).
+        self._manager = shrike_native.LlamaServerManager(
+            model,
+            host=host,
+            port=port,
+            binary=llama_server,
+            log_dir=str(log_dir) if log_dir else None,
+            context_size=context_size,
+            threads=threads,
+            gpu_layers=gpu_layers,
+            pooling=pooling,
+            extra_args=list(extra_args) if extra_args else [],
+            pid_file=str(pid_file) if pid_file else None,
+        )
+        self._pooling = pooling
+        # The native HTTP client (#342 P4a): one unpinned client for health and
         # model metadata; a model-pinned twin is built once the name is known.
         self._client = shrike_native.RemoteEmbedder(self._base_url)
         self._remote: Any = None
 
     @property
     def running(self) -> bool:
-        return self._process is not None and self._process.poll() is None
+        return bool(self._manager.running())
 
     @property
     def url(self) -> str:
         return self._base_url
 
-    def _find_llama_server(self) -> str:
-        """Locate the llama-server binary.
-
-        Priority: explicit override (--llama-server) > LLAMA_SERVER_PATH env > PATH.
-        """
-        env_path = self._llama_server_override or os.environ.get("LLAMA_SERVER_PATH")
-        if env_path:
-            p = Path(env_path)
-            if p.is_file() and os.access(p, os.X_OK):
-                return str(p)
-            raise FileNotFoundError(f"LLAMA_SERVER_PATH={env_path} does not point to an executable")
-
-        import shutil
-
-        found = shutil.which("llama-server")
-        if found:
-            return found
-
-        raise FileNotFoundError(
-            "llama-server not found. Install llama.cpp or set LLAMA_SERVER_PATH."
-        )
-
-    def _passthrough_tokens(self, *, warn: bool = False) -> list[str]:
-        """Resolve ``extra_args`` to llama-server tokens, dropping reserved flags.
-
-        Each raw entry is shlex-split (so ``"--ubatch-size 256"`` becomes two
-        tokens), then any attempt to set a Shrike-owned flag (see
-        ``_RESERVED_FLAGS``) is stripped — including a separate value token for
-        value-taking flags. ``warn`` logs each rejection (set only on the
-        command-build path, so the fingerprint can reuse this silently).
-        """
-        raw: list[str] = []
-        for entry in self._extra_args:
-            raw.extend(shlex.split(entry))
-
-        result: list[str] = []
-        i = 0
-        while i < len(raw):
-            tok = raw[i]
-            flag = tok.split("=", 1)[0]
-            if flag in _RESERVED_FLAGS:
-                if warn:
-                    logger.warning(
-                        "Ignoring reserved llama-server flag %r passed via --embedding-arg; "
-                        "Shrike controls it (use a typed setting for vector-affecting flags).",
-                        flag,
-                    )
-                # Drop a separate value token for `--host 0.0.0.0`, but not the
-                # self-contained `--host=0.0.0.0` form.
-                if flag in _RESERVED_VALUE_FLAGS and "=" not in tok and i + 1 < len(raw):
-                    i += 2
-                else:
-                    i += 1
-                continue
-            result.append(tok)
-            i += 1
-        return result
-
-    def _build_command(self, binary: str) -> list[str]:
-        cmd = [
-            binary,
-            "--model",
-            self._model,
-            "--host",
-            self._host,
-            "--port",
-            str(self._port),
-            "--embeddings",
-        ]
-        if self._context_size is not None:
-            cmd.extend(["--ctx-size", str(self._context_size)])
-        if self._threads is not None:
-            cmd.extend(["--threads", str(self._threads)])
-        if self._gpu_layers is not None:
-            cmd.extend(["--gpu-layers", str(self._gpu_layers)])
-        if self._pooling is not None:
-            # Override the GGUF's stored pooling type. Required for last-token
-            # models (Jina v5, Qwen3-Embedding) whose metadata omits it —
-            # without this, llama-server defaults to mean and produces wrong
-            # embeddings.
-            cmd.extend(["--pooling", self._pooling])
-        if self._log_dir:
-            cmd.extend(["--log-file", str(self._log_dir / "llama-server.log")])
-        # Generic passthrough last, so a user can't shadow Shrike's own args by
-        # ordering (and reserved flags are stripped regardless).
-        cmd.extend(self._passthrough_tokens(warn=True))
-        return cmd
-
-    def _write_pid_file(self) -> None:
-        """Record the running llama-server PID for orphan reaping."""
-        if self._pid_file is None or self._process is None:
-            return
-        with contextlib.suppress(OSError):
-            self._pid_file.parent.mkdir(parents=True, exist_ok=True)
-            self._pid_file.write_text(str(self._process.pid))
-
-    def _clear_pid_file(self) -> None:
-        if self._pid_file is None:
-            return
-        with contextlib.suppress(OSError):
-            self._pid_file.unlink()
-
-    def _reap_orphan(self) -> None:
-        """Kill a llama-server left over from a prior unclean shutdown.
-
-        ``stop()`` removes the PID file, so a recorded PID that is still alive
-        *and* holding our port is an orphan — e.g. the Shrike server was
-        SIGKILLed (including by its own force-kill path) before it could stop the
-        child, which then reparents to init and keeps the port. We require both
-        signals (alive and on our port) so a recycled PID can't make us kill an
-        unrelated process.
-        """
-        if self._pid_file is None or not self._pid_file.exists():
-            return
-        try:
-            pid = int(self._pid_file.read_text().strip())
-        except (ValueError, OSError):
-            self._clear_pid_file()
-            return
-        if _pid_alive(pid) and _port_in_use(self._host, self._port):
-            logger.warning(
-                "Reaping orphaned llama-server (PID %s) holding port %s", pid, self._port
-            )
-            self._terminate_pid(pid)
-        self._clear_pid_file()
-
-    def _terminate_pid(self, pid: int) -> None:
-        """SIGTERM, then SIGKILL, a stale PID — waiting for the port to free."""
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.kill(pid, signal.SIGTERM)
-        if self._wait_port_free(SHUTDOWN_TIMEOUT):
-            return
-        logger.warning("Orphan llama-server (PID %s) ignored SIGTERM, sending SIGKILL", pid)
-        sig = signal.SIGTERM if sys.platform == "win32" else signal.SIGKILL
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.kill(pid, sig)
-        self._wait_port_free(SIGKILL_PORT_TIMEOUT)
-
-    def _wait_port_free(self, timeout: float) -> bool:
-        """Block until our port is free, or *timeout* elapses. Returns freeness."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not _port_in_use(self._host, self._port):
-                return True
-            time.sleep(0.1)
-        return not _port_in_use(self._host, self._port)
-
     def start(self) -> None:
-        """Spawn llama-server and wait for it to become healthy."""
+        """Start llama-server (native manager: reap → spawn → health-wait)."""
         if self.running:
-            logger.warning("Embedding service already running (PID %s)", self._process.pid)  # type: ignore[union-attr]
+            logger.warning("Embedding service already running (PID %s)", self._manager.pid())
             return
 
         started = time.perf_counter()
-        binary = self._find_llama_server()
-        cmd = self._build_command(binary)
-
-        if self._log_dir:
-            self._log_dir.mkdir(parents=True, exist_ok=True)
-
-        # Clear out any orphan from a prior unclean shutdown before we try to
-        # bind the same port.
-        self._reap_orphan()
-
-        logger.info(
-            "Starting llama-server: model=%s, host=%s, port=%s",
-            self._model,
-            self._host,
-            self._port,
-        )
-
-        stderr_file = (
-            open(self._log_dir / "llama-server-stderr.log", "a")  # noqa: SIM115
-            if self._log_dir
-            else None
-        )
-
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=stderr_file or subprocess.DEVNULL,
-        )
-        # The child dup'd the stderr fd at spawn and writes to it for its whole
-        # life; the parent never does, so close our copy rather than leak it for
-        # the server's lifetime.
-        if stderr_file is not None:
-            stderr_file.close()
-        self._write_pid_file()
-
-        if not self._wait_healthy():
-            rc = self._process.poll()
-            self.stop()
-            raise RuntimeError(
-                f"llama-server failed to become healthy within {HEALTH_TIMEOUT}s (exit code: {rc})"
-            )
+        self._manager.start()
 
         # Cache the model's reported name/alias and build the model-pinned
         # embed client (a multi-model endpoint resolves the right one; a
@@ -382,62 +161,15 @@ class LlamaServerBackend:
 
         logger.info(
             "Embedding service ready (PID %s, %s, %.1fs)",
-            self._process.pid,
+            self._manager.pid(),
             "serial" if self._safe_batch == 1 else "batched",
             time.perf_counter() - started,
         )
 
-    def _wait_healthy(self) -> bool:
-        """Poll GET /health (via the native client) until 200 or timeout."""
-        deadline = time.monotonic() + HEALTH_TIMEOUT
-        while time.monotonic() < deadline:
-            if self._process and self._process.poll() is not None:
-                return False
-            if self._client.health_ok():
-                return True
-            time.sleep(HEALTH_POLL_INTERVAL)
-        return False
-
     def stop(self) -> None:
-        """Stop the llama-server subprocess."""
-        if self._process is None:
-            return
-
-        pid = self._process.pid
-
-        if self._process.poll() is not None:
-            logger.info(
-                "Embedding service already exited (PID %s, code %s)",
-                pid,
-                self._process.returncode,
-            )
-            self._process = None
-            self._clear_pid_file()
-            return
-
-        logger.info("Stopping embedding service (PID %s)", pid)
-
-        if sys.platform == "win32":
-            self._process.terminate()
-        else:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGTERM)
-
-        try:
-            self._process.wait(timeout=SHUTDOWN_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            logger.warning("llama-server did not exit after SIGTERM, sending SIGKILL")
-            with contextlib.suppress(ProcessLookupError):
-                if sys.platform == "win32":
-                    self._process.terminate()
-                else:
-                    os.kill(pid, signal.SIGKILL)
-            self._process.wait(timeout=2.0)
-
-        logger.info("Embedding service stopped (PID %s)", pid)
-        self._process = None
+        """Stop the llama-server subprocess (SIGTERM → SIGKILL, native)."""
+        self._manager.stop()
         self._remote = None
-        self._clear_pid_file()
 
     def health(self) -> dict[str, Any]:
         """Return health status suitable for inclusion in /status responses."""
@@ -446,7 +178,7 @@ class LlamaServerBackend:
 
         return {
             "available": self._client.health_ok(),
-            "pid": self._process.pid if self._process else None,
+            "pid": self._manager.pid(),
             "url": self._base_url,
             "model": self._model,
             # batch_safe is the model's probed capability; batch is the *effective*
@@ -535,7 +267,7 @@ class LlamaServerBackend:
 
         if self._pooling:
             base = f"{base}:pool={self._pooling}"
-        passthrough = self._passthrough_tokens()
+        passthrough = list(self._manager.passthrough_tokens())
         if passthrough:
             base = f"{base}:args={' '.join(passthrough)}"
         return f"{base}:textprep={EMBED_TEXT_VERSION}"

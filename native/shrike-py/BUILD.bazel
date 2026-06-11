@@ -49,6 +49,7 @@ rust_shared_library(
         "//native/shrike-ffi:shrike_ffi",
         "//native/shrike-index:shrike_index",
         "//native/shrike-kernel:shrike_kernel",
+        "//native/shrike-llama-server:shrike_llama_server",
         "//native/shrike-recognize-apple:shrike_recognize_apple",
         "//native/shrike-schemas:shrike_schemas",
         "@crates//:futures",
