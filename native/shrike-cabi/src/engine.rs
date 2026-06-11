@@ -22,8 +22,11 @@ use crate::{arg_str, clear_last_error, set_last_error, ShrikeKernel};
 /// the index then skips the model-change rule). The loaded model is probed
 /// for batch safety before attach (serial when batch-variant).
 ///
-/// Returns 0 on success, -1 on failure (see [`crate::shrike_last_error`]).
-/// Follow up by driving a reindex (the attach is the #342 slot swap).
+/// **This call blocks the calling thread** for the model load plus the
+/// probe's 64 serial + 1 batched embeds — the same boot cost every host
+/// pays, on this surface's calling-thread model. Returns 0 on success, -1
+/// on failure (see [`crate::shrike_last_error`]). Follow up by driving a
+/// reindex (the attach is the #342 slot swap).
 ///
 /// # Safety
 /// `handle` must come from [`crate::shrike_kernel_open`]; strings
