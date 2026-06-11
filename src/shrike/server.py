@@ -288,11 +288,9 @@ def _register_custom_routes(
                 return rejection
             response = await handler(request)
             elapsed_ms = (time.perf_counter() - started) * 1000
-            # /status is polled by `shrike server status` and health checks —
-            # per-request lines would drown the log, so it logs at DEBUG.
-            level = logging.DEBUG if path == "/status" else logging.INFO
-            logger.log(
-                level,
+            # Every served route logs at INFO — including /status polls: knowing
+            # what the server did (and how long it took) is the point.
+            logger.info(
                 "%s %s -> %d (%.0fms)",
                 request.method,
                 path,

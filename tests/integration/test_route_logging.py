@@ -1,5 +1,5 @@
-"""Custom-route access logging (#328): every guarded route logs method, path,
-status, and duration; /status stays at DEBUG so polling doesn't drown the log."""
+"""Custom-route access logging (#328): every guarded route — /status polls
+included — logs method, path, status, and duration at INFO."""
 
 from __future__ import annotations
 
@@ -52,11 +52,10 @@ class TestRouteAccessLog:
         text = _wait_for(server, lambda t: "/media/never-there.png -> 404" in t)
         assert "GET /media/never-there.png -> 404" in text
 
-    def test_status_poll_not_logged_at_info(self, server) -> None:
-        # The default log level is INFO; /status access lines are DEBUG, so a
-        # poll must leave no trace at the default level (the CLI polls it).
+    def test_status_poll_logged_at_info(self, server) -> None:
+        # Every served route logs at INFO — /status polls included (the
+        # operator wants to see what the server did, not a filtered view).
         base = server.url.rsplit("/", 1)[0]
         assert httpx.get(f"{base}/status", timeout=10.0).status_code == 200
-        # Give an (incorrect) line a moment to be flushed if it were emitted.
-        time.sleep(0.3)
-        assert "GET /status -> 200" not in _log_text(server)
+        text = _wait_for(server, lambda t: "GET /status -> 200" in t)
+        assert "GET /status -> 200" in text
