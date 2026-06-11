@@ -630,6 +630,24 @@ impl Kernel {
         .await
     }
 
+    /// Drop already-deleted notes from the index + derived store (the prune
+    /// path: the collection op removed them internally; this is the sidecar
+    /// half of `delete_notes`).
+    pub async fn forget_notes(&self, note_ids: Vec<i64>) -> NativeResult<()> {
+        self.orchestrator.remove(&note_ids)?;
+        self.derived.remove(&note_ids, None)?;
+        self.advance_watermarks(self.embed_service().is_some())
+            .await
+    }
+
+    /// A metadata-only collection change (tags/decks/templates/field metadata
+    /// — nothing that feeds embedding text or derived rows): advance the
+    /// watermarks so the col_mod bump doesn't read as drift on next boot.
+    pub async fn metadata_changed(&self) -> NativeResult<()> {
+        self.advance_watermarks(self.embed_service().is_some())
+            .await
+    }
+
     pub async fn delete_notes(&self, note_ids: Vec<i64>) -> NativeResult<usize> {
         let ids = note_ids.clone();
         let removed = self

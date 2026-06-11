@@ -212,6 +212,24 @@ impl AsyncKernel {
         })
     }
 
+    /// Drop already-deleted notes from the index + derived store (the prune
+    /// path) — awaitable.
+    fn forget_notes<'py>(
+        &self,
+        py: Python<'py>,
+        note_ids: Vec<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        future_into_py(py, async move { kernel.forget_notes(note_ids).await })
+    }
+
+    /// Advance the watermarks after a metadata-only change (tags/decks/
+    /// templates) — no re-embed, no drift on next boot. Awaitable.
+    fn metadata_changed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        future_into_py(py, async move { kernel.metadata_changed().await })
+    }
+
     /// Delete notes; vectors, fingerprints, and derived rows go with them.
     fn delete_notes<'py>(
         &self,
