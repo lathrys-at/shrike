@@ -4,6 +4,8 @@ Hand-written against native/shrike-py/src/lib.rs; mypy.stubtest in the native
 CI lane fails if a Rust signature drifts from these.
 """
 
+from asyncio import Future
+
 from typing import final
 
 # pyo3's #[pymodule] auto-generates __all__ from the registered names.
@@ -178,6 +180,13 @@ class NativeIndexEngine:
 # tolerates the stub-only name (and --ignore-unused-allowlist tolerates the
 # entry on a feature build). Kept OUT of __all__ (the default-build surface).
 @final
+class AsyncCollection:
+    def col_mod(self) -> Future[int]: ...
+    def find_notes(self, query: str) -> Future[list[int]]: ...
+    def close(self) -> Future[None]: ...
+
+def async_collection_open(collection_path: str) -> Future[AsyncCollection]: ...
+
 class CollectionCore:
     def __new__(cls, collection_path: str) -> CollectionCore: ...
     def close(self) -> None: ...

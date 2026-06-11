@@ -26,6 +26,9 @@ use shrike_ffi::{ErrorKind, NativeError};
 #[cfg(feature = "anki-core")]
 mod anki_core;
 #[cfg(feature = "anki-core")]
+mod async_kernel;
+mod asyncio_bridge;
+#[cfg(feature = "anki-core")]
 mod kernel_actions;
 
 pyo3::create_exception!(
@@ -654,6 +657,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
             m
         )?)?;
         m.add_function(wrap_pyfunction!(kernel_actions::action_search_notes, m)?)?;
+        m.add_class::<async_kernel::AsyncCollection>()?;
+        m.add_function(wrap_pyfunction!(async_kernel::async_collection_open, m)?)?;
     }
     m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;

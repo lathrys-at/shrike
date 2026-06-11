@@ -107,13 +107,17 @@ impl SerialExecutor for MutexExecutor {
 /// The collection behind the injected executor: every access is one submitted
 /// job; the core never escapes. (CollectionCore is Send: anki's Backend is
 /// internally synchronized, which is what makes thread migration safe.)
-struct SerializedCollection {
+///
+/// Public since #332 (S3): this is the embedded-host surface the asyncio
+/// bridge binds — open/run/close as runtime-agnostic futures over whatever
+/// executor the harness injected.
+pub struct SerializedCollection {
     core: Arc<CollectionCore>,
     executor: Arc<dyn SerialExecutor>,
 }
 
 impl SerializedCollection {
-    async fn open(
+    pub async fn open(
         collection_path: String,
         executor: Arc<dyn SerialExecutor>,
     ) -> NativeResult<Self> {
@@ -135,7 +139,7 @@ impl SerializedCollection {
 
     /// Run a job against the collection, serialized; the await IS the
     /// transition point ops chain continuations onto.
-    async fn run<T: Send + 'static>(
+    pub async fn run<T: Send + 'static>(
         &self,
         job: impl FnOnce(&CollectionCore) -> T + Send + 'static,
     ) -> NativeResult<T> {
@@ -150,7 +154,7 @@ impl SerializedCollection {
             .map_err(|_| NativeError::internal("executor dropped a collection job"))
     }
 
-    async fn close(&self) -> NativeResult<()> {
+    pub async fn close(&self) -> NativeResult<()> {
         self.run(|core| core.close()).await?
     }
 }
