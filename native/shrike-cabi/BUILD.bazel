@@ -5,8 +5,10 @@ package(default_visibility = ["//native:__subpackages__"])
 exports_files(["Cargo.toml"])
 
 # The C-ABI binding surface (#333): a thin manual extern "C" + JSON layer over
-# the MINIMAL kernel profile (#338 — no ort linked). Verdict + handoff shapes
-# recorded on the issue; the module docs carry the contract.
+# the kernel. Since #342 no kernel build links an engine (no ort anywhere);
+# `shrike_kernel_minimal` differs only in linking the minimal compute instance
+# (#338). Verdict + handoff shapes recorded on the issue; the module docs
+# carry the contract.
 rust_library(
     name = "shrike_cabi",
     srcs = glob(["src/**/*.rs"]),

@@ -320,11 +320,13 @@ impl ComputeExecutor for InlineComputeExecutor {
 /// Route-1 adapter: ready futures, compute on whatever thread polls.
 pub struct Inline<E>(pub E);
 
-/// Route-1 adapter: each chunk submits to the injected [`ComputeExecutor`]
-/// lane. The adapter owns the batch loop (splitting kernel batches by the
-/// engine's `safe_batch`) and submits chunks sequentially within one call —
-/// chunk-to-chunk order is a correctness requirement (output order mirrors
-/// input order); *cross-call* concurrency is the lane's business.
+/// Route-1 adapter: each call submits ONE job to the injected
+/// [`ComputeExecutor`] lane; the adapter-owned batch loop (splitting the
+/// kernel's batch by the engine's `safe_batch`) runs inside that job, so
+/// chunk-to-chunk order is trivially preserved (output order mirrors input
+/// order) and the lane sees one submission per kernel call. *Cross-call*
+/// concurrency is the lane's business (the [`ComputeExecutor`] contract
+/// requires concurrent in-flight submissions).
 pub struct OnExecutor<E> {
     engine: Arc<E>,
     lane: Arc<dyn ComputeExecutor>,

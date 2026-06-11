@@ -1,7 +1,7 @@
 //! The C-ABI smoke, Rust-side (#333): drive the surface exactly as a C host
 //! would — opaque handle, C strings, JSON in/out, last-error, free — running
 //! open → upsert → search → close against a temp collection with zero Python
-//! and zero embedder (lexical-only, the minimal #338 profile).
+//! and zero embedder (lexical-only — no engine attached, no ort linked).
 
 use std::ffi::{CStr, CString};
 

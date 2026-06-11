@@ -556,6 +556,30 @@ Reviews/audits are launched by the user (the `ultra`/cloud passes are billed and
 user-triggered — the agent can't start them); the agent's job is to surface that
 a change crosses one of these thresholds and to act on the findings.
 
+### The agent's PR loop — delegated, self-driving
+
+For work the user has delegated, the agent owns the whole PR cycle and keeps it
+pipelined rather than serial:
+
+- **PR at each natural checkpoint.** Don't contort in-progress work to make it
+  mergeable when going a bit further lands a larger, coherent section — but
+  don't hoard mergeable work either.
+- **Self-review before the `ci` label, not after.** Run a self-check code
+  review against the requirements on the ready PR — via a **subagent
+  (prefer the latest Opus model)** — *before* labeling, so review findings
+  never burn a CI re-run. Keep working while the review is in flight.
+- **Then label, then merge.** Apply `ci` once review findings are addressed;
+  while CI runs, proactively move on to the next step; merge on green.
+- **Subagents assist with research, orientation, and review — never
+  authorship.** All code and tests are developed by the agent itself; use
+  subagents wherever they speed up or improve the work (codebase orientation,
+  API research, parallel fact-finding, the self-check review above).
+
+This composes with the gates above: the user-triggered billed passes
+(`ultra`/cloud review, security/perf audits) stay user-triggered; the agent's
+self-review is the floor, not a replacement, for anything crossing those
+thresholds.
+
 ### Defect workflow — follow this when you find a defect or limitation
 
 When you hit a bug, a limitation, or a missing API surface that is **out of scope
