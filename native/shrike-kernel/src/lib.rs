@@ -52,12 +52,29 @@ pub trait Embedder: Send + Sync + 'static {
     /// embedder (a remote service, a platform ML API); CPU-bound embedders
     /// return a ready future.
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>>;
+
+    /// The model fingerprint for index drift detection (`model_id` in the
+    /// sidecar) — `None` means "unknown" and skips the model-change rule.
+    fn fingerprint(&self) -> Option<String> {
+        None
+    }
+
+    /// The embedding dimension, when known up front (lets an empty collection
+    /// materialize a ready index without a probe embed).
+    fn dim(&self) -> Option<usize> {
+        None
+    }
 }
 
 #[cfg(feature = "onnx-embed")]
 impl Embedder for shrike_embed::TextEmbedder {
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
         Box::pin(async move { self.embed_chunk(&texts) })
+    }
+
+    fn dim(&self) -> Option<usize> {
+        // The inherent method (explicit path: this trait method shadows it).
+        shrike_embed::TextEmbedder::dim(self)
     }
 }
 
@@ -200,12 +217,17 @@ pub struct NoteSpec {
     pub tags: Vec<String>,
 }
 
-/// The kernel: one open collection + the derived/vector stores + fusion,
-/// every op an async fn over the injected executor. No threads owned, no
-/// runtime assumed, no transport, no Python.
+/// The kernel: one open collection + the index orchestrator (which owns and
+/// maintains the engine) + the derived store + fusion, every op an async fn
+/// over the injected executor. No threads owned, no runtime assumed, no
+/// transport, no Python. Index maintenance is **kernel-internal** (#332 S3d):
+/// upserts/deletes keep the orchestrator's vectors, fingerprints, and
+/// watermarks current, and the debounced saver (over the injected
+/// [`TimerHost`]) bounds what a crash can discard.
 pub struct Kernel<E: Embedder> {
     collection: SerializedCollection,
-    index: MultiModalIndex,
+    orchestrator: Arc<index_orchestrator::IndexOrchestrator>,
+    saver: Option<Arc<index_orchestrator::DebouncedSaver>>,
     derived: DerivedEngine,
     embedder: E,
 }
@@ -215,26 +237,107 @@ const FIELD_SOURCE: &str = "field";
 
 impl<E: Embedder> Kernel<E> {
     /// Open a collection and its sidecar stores (cache_dir holds the derived
-    /// store, like the Python host's cache layout). `executor` is the
-    /// harness-injected scheduling (see [`SerialExecutor`]).
+    /// store and the index files, like the Python host's cache layout).
+    /// `executor` is the harness-injected scheduling (see [`SerialExecutor`]);
+    /// `timers`, when given, arms the debounced index flush (without it, the
+    /// index persists only on explicit `save`/rebuild — fine for tests and
+    /// one-shot hosts).
     pub async fn open(
         collection_path: &str,
         cache_dir: &str,
         embedder: E,
         executor: Arc<dyn SerialExecutor>,
+        timers: Option<Arc<dyn TimerHost>>,
     ) -> NativeResult<Self> {
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
         let collection = SerializedCollection::open(collection_path.to_string(), executor).await?;
-        let index = MultiModalIndex::new(vec![TEXT.to_string(), "image".to_string()])?;
+        let engine = Arc::new(MultiModalIndex::new(vec![
+            TEXT.to_string(),
+            "image".to_string(),
+        ])?);
+        let orchestrator = Arc::new(index_orchestrator::IndexOrchestrator::open(
+            cache_dir, engine,
+        ));
+        let saver = timers.map(|t| {
+            index_orchestrator::DebouncedSaver::new(
+                Arc::clone(&orchestrator),
+                t,
+                index_orchestrator::DEFAULT_SAVE_DELAY,
+                index_orchestrator::DEFAULT_SAVE_THRESHOLD,
+            )
+        });
         let derived =
             DerivedEngine::open(&format!("{}/shrike.db", cache_dir.trim_end_matches('/')), 1)?;
         Ok(Self {
             collection,
-            index,
+            orchestrator,
+            saver,
             derived,
             embedder,
         })
+    }
+
+    /// The orchestrator (state, status, drift) — the harness's status surface.
+    pub fn index(&self) -> &index_orchestrator::IndexOrchestrator {
+        &self.orchestrator
+    }
+
+    /// Bring the index in line with the collection if anything drifted while
+    /// the kernel was down (the boot/reload path): reconcile incrementally
+    /// when per-note fingerprints exist, rebuild otherwise; an empty
+    /// collection materializes an empty-but-ready index. Returns whether any
+    /// reindexing ran. The harness drives this as a background task — the
+    /// kernel serves while it runs.
+    pub async fn reindex_if_needed(&self) -> NativeResult<bool> {
+        let col_mod = self.col_mod().await?;
+        let model_id = self.embedder.fingerprint();
+        if !self
+            .orchestrator
+            .check_drift(col_mod, model_id.as_deref(), false)
+        {
+            return Ok(false);
+        }
+        let raw = self
+            .collection
+            .run(|core| -> NativeResult<_> {
+                let ids = core.find_notes("")?;
+                core.note_embed_inputs(&ids)
+            })
+            .await??;
+        if raw.is_empty() {
+            if let Some(dim) = self.embedder.dim() {
+                self.orchestrator
+                    .materialize_empty(dim, col_mod, model_id.as_deref());
+            }
+            return Ok(true);
+        }
+        let inputs: Vec<index_orchestrator::EmbedInput> = raw
+            .into_iter()
+            .map(
+                |(note_id, text, image_names)| index_orchestrator::EmbedInput {
+                    note_id,
+                    text,
+                    image_names,
+                },
+            )
+            .collect();
+        self.orchestrator
+            .reconcile(inputs, col_mod, model_id, &self.embedder, None)
+            .await?;
+        Ok(true)
+    }
+
+    /// Advance both derived-store and index watermarks to the collection's
+    /// current `col.mod` and request a debounced index flush.
+    async fn advance_watermarks(&self) -> NativeResult<()> {
+        let col_mod = self.collection.run(|core| core.col_mod()).await??;
+        self.derived.set_col_mod(col_mod)?;
+        self.orchestrator.set_col_mod(col_mod);
+        if let Some(saver) = &self.saver {
+            saver.request_save();
+        }
+        Ok(())
     }
 
     pub async fn col_mod(&self) -> NativeResult<i64> {
@@ -311,19 +414,27 @@ impl<E: Embedder> Kernel<E> {
                 // from the read surface, not an ad-hoc join. One job for the
                 // whole created set.
                 let ids = created.clone();
-                let (texts, rows) = self
+                let (raw_inputs, rows) = self
                     .collection
                     .run(move |core| -> NativeResult<_> {
-                        let texts = core.note_texts(&ids)?;
+                        let inputs = core.note_embed_inputs(&ids)?;
                         let rows = core.derived_field_rows(&ids)?;
-                        Ok((texts, rows))
+                        Ok((inputs, rows))
                     })
                     .await??;
-                // One embed call for the whole batch — the backend batches
-                // internally up to its proven-safe size.
-                let vectors = self.embedder.embed(texts).await?;
-                self.index.remove(&created)?;
-                self.index.add(TEXT, &created, &vectors)?;
+                // One orchestrator add for the whole batch (it chunks the
+                // embeds internally and maintains the per-note fingerprints).
+                let inputs: Vec<index_orchestrator::EmbedInput> = raw_inputs
+                    .into_iter()
+                    .map(
+                        |(note_id, text, image_names)| index_orchestrator::EmbedInput {
+                            note_id,
+                            text,
+                            image_names,
+                        },
+                    )
+                    .collect();
+                self.orchestrator.add(&inputs, &self.embedder, None).await?;
                 // Group the derived rows per note (rows come back grouped by
                 // note already; ingest replaces per (note, source)).
                 let mut refs: BTreeMap<i64, Vec<(String, String)>> = BTreeMap::new();
@@ -334,8 +445,7 @@ impl<E: Embedder> Kernel<E> {
                     let note_refs = refs.remove(note_id).unwrap_or_default();
                     self.derived.ingest(*note_id, FIELD_SOURCE, &note_refs)?;
                 }
-                let col_mod = self.collection.run(|core| core.col_mod()).await??;
-                self.derived.set_col_mod(col_mod)?;
+                self.advance_watermarks().await?;
             }
             Ok(outcomes)
         }
@@ -349,8 +459,9 @@ impl<E: Embedder> Kernel<E> {
             .collection
             .run(move |core| core.delete_notes(&ids))
             .await??;
-        self.index.remove(&note_ids)?;
+        self.orchestrator.remove(&note_ids)?;
         self.derived.remove(&note_ids, None)?;
+        self.advance_watermarks().await?;
         Ok(removed)
     }
 
@@ -364,7 +475,10 @@ impl<E: Embedder> Kernel<E> {
             // Semantic signal — the embed is the await; the engine/derived reads
             // are fast in-memory/SQLite calls chained after it.
             let qvec = self.embedder.embed(vec![query.to_string()]).await?;
-            let semantic = self.index.search_by_modality(&qvec, top_k, None)?;
+            let semantic = self
+                .orchestrator
+                .engine()
+                .search_by_modality(&qvec, top_k, None)?;
             let mut rankings: Vec<(String, Vec<i64>)> = Vec::new();
             if let Some(per_query) = semantic.first() {
                 for (modality, (ids, _dists)) in per_query {
@@ -485,6 +599,14 @@ mod no_cpython_smoke {
         fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
             Box::pin(async move { Ok(Self::embed_sync(&texts)) })
         }
+
+        fn fingerprint(&self) -> Option<String> {
+            Some("hash-embedder:v1".to_string())
+        }
+
+        fn dim(&self) -> Option<usize> {
+            Some(64)
+        }
     }
 
     fn temp_dir() -> std::path::PathBuf {
@@ -525,9 +647,15 @@ mod no_cpython_smoke {
             cache.to_str().unwrap(),
             HashEmbedder,
             Arc::new(MutexExecutor::default()),
+            None,
         )
         .await
         .unwrap();
+
+        // Boot path: a fresh empty collection materializes a ready index, so
+        // the upserts below maintain per-note fingerprints incrementally.
+        assert!(kernel.reindex_if_needed().await.unwrap());
+        assert!(!kernel.reindex_if_needed().await.unwrap()); // now current
 
         let basic = kernel.notetype_id("Basic").await.unwrap();
         let spec = |front: &str, back: &str| NoteSpec {
@@ -612,7 +740,25 @@ mod no_cpython_smoke {
         let after = kernel.search("mitochondria powerhouse", 5).await.unwrap();
         assert!(after.iter().all(|h| h.note_id != mito));
 
+        // Restart WITHOUT a flush: the on-disk sidecars still hold the
+        // boot-time materialized-empty state, so the fresh kernel detects
+        // drift and reconciles — re-embedding every live note via the
+        // collection read surface (find_notes + note_embed_inputs).
         kernel.close().await.unwrap();
+        let kernel2 = Kernel::open(
+            col.to_str().unwrap(),
+            cache.to_str().unwrap(),
+            HashEmbedder,
+            Arc::new(MutexExecutor::default()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(kernel2.reindex_if_needed().await.unwrap()); // drift → reconcile
+        assert!(!kernel2.reindex_if_needed().await.unwrap()); // now current
+        let hits = kernel2.search("newton laws of motion", 5).await.unwrap();
+        assert!(!hits.is_empty());
+        kernel2.close().await.unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
 }
