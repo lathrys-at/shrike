@@ -119,6 +119,13 @@ DEDUP_NEIGHBOR_THRESHOLD = 0.6
 # near-verbatim detection, bounded for the high-volume dedup path.
 DEDUP_LEXICAL_QUERY_CHARS = 200
 
+# The lexical signal is propose-verify: the trigram index PROPOSES candidates
+# (recall — any shared trigrams), then a cheap whole-text similarity check
+# VERIFIES near-verbatim before a candidate becomes a neighbor (precision —
+# a shared question stem like "What is the capital of…" is real trigram
+# overlap but not a near-duplicate, and dedup is a precision answer).
+DEDUP_LEXICAL_MIN_RATIO = 0.6
+
 # Intra-modal activation gate (#201b). A non-text modality's ranking is fed to the fusion only when
 # its best match for the query exceeds `mean + ACTIVATION_MARGIN·std` of that modality's calibrated
 # typical best match (index.activation_stats) — otherwise the modality "had no good match" and its
@@ -877,6 +884,25 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
 
         return UpsertNotesResponse.model_validate({"results": results, "dry_run": dry_run})
 
+    async def _near_verbatim(neighbor_id: int, draft_text: str) -> bool:
+        """The lexical verifier (#206): whole-text similarity over the
+        candidate's embedding text vs the draft — cheap (runs on at most the
+        few proposed candidates) and exactly the near-verbatim question."""
+        import difflib
+
+        try:
+            texts = await wrapper.run(lambda c: c.note_texts([neighbor_id]))
+        except Exception:
+            return False
+        candidate = (texts[0] if texts else "").strip().lower()
+        if not candidate:
+            return False
+        draft = draft_text.strip().lower()
+        ratio = difflib.SequenceMatcher(
+            None, draft[:DEDUP_LEXICAL_QUERY_CHARS], candidate[:DEDUP_LEXICAL_QUERY_CHARS]
+        ).ratio()
+        return ratio >= DEDUP_LEXICAL_MIN_RATIO
+
     async def _attach_neighbors(
         results: list[dict[str, Any]],
         changed_ids: list[int],
@@ -921,7 +947,10 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                         break
 
                 # Lexical overlap (#206): near-verbatim dupes the cosine gate
-                # missed. No cosine to report → score stays None.
+                # missed. Propose-verify: the trigram index proposes, then a
+                # whole-text similarity check confirms near-verbatim (a shared
+                # question stem is overlap, not a dupe). No cosine to report →
+                # score stays None.
                 if derived is not None and derived.available and text.strip():
                     fuzzy_rank = 0
                     try:
@@ -934,6 +963,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                     for fid, _match in fuzzy_rows:
                         if fid in exclude_set:
                             continue
+                        if fid not in candidates and not await _near_verbatim(fid, text):
+                            continue  # proposed but not verified — overlap, not a dupe
                         fuzzy_rank += 1
                         entry = candidates.get(fid)
                         if entry is None:
