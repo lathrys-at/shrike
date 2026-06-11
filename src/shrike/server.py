@@ -22,7 +22,7 @@ from mcp.server.transport_security import (
 )
 
 from shrike._mcp_perf import install_validator_cache
-from shrike.collection import DEFAULT_LOCK_HOLD, CollectionWrapper
+from shrike.collection import DEFAULT_LOCK_HOLD
 from shrike.daemon import AlreadyRunningError, ServerLock
 from shrike.derived import DerivedTextStore, NativeDerivedEngine
 from shrike.embedding import (
@@ -31,22 +31,16 @@ from shrike.embedding import (
     SUPPORTED_BACKENDS,
     EmbeddingRuntime,
 )
+from shrike.harness import Harness
 from shrike.index import (
     DEFAULT_SAVE_DELAY,
     DEFAULT_SAVE_THRESHOLD,
-    IndexSaver,
-    VectorIndex,
 )
-from shrike.index_engine import make_index_engine
 
 # The transport-free core (#275). The collectors and _maybe_rebuild moved there
 # with it; re-exported here so existing import sites (tests included) are
 # unchanged.
-from shrike.kernel import (
-    KernelConfigError,
-    ShrikeKernel,
-    WorkerScheduler,
-)
+from shrike.kernel import KernelConfigError
 from shrike.log import configure_logging
 from shrike.paths import cache_dir, state_dir
 from shrike.tools import register_tools
@@ -238,7 +232,7 @@ def create_mcp(
 
 def _register_custom_routes(
     app: FastMCP,
-    kernel: ShrikeKernel,
+    harness: Harness,
     server_lock: ServerLock,
     *,
     meta: dict[str, Any],
@@ -250,13 +244,12 @@ def _register_custom_routes(
     Host/Origin validation applied here via ``_guard`` — otherwise a browser page
     could drive ``/shutdown`` etc. through a no-preflight POST.
 
-    Each handler is parse → kernel call → JSONResponse (#275): the kernel methods
-    are blocking, so they run via ``asyncio.to_thread``; only what is genuinely
-    host-specific stays here (the guard, uptime/pid/url assembly, the media
-    FileResponse, the loop-bound saver flush, process exit).
+    Each handler is parse → harness coroutine → JSONResponse (#332 S3d-2): the
+    operational verbs live on the kernel-mode Harness and await natively; only
+    what is genuinely host-specific stays here (the guard, uptime/pid/url
+    assembly, the media FileResponse, process exit).
     """
-    wrapper = kernel.wrapper
-    saver = kernel.saver
+    wrapper = harness.wrapper
     from starlette.background import BackgroundTask
     from starlette.requests import Request
     from starlette.responses import FileResponse, JSONResponse, Response
@@ -301,14 +294,6 @@ def _register_custom_routes(
 
         return wrapped
 
-    async def _kernel(fn: Callable[..., Any], *args: Any) -> Any:
-        """Run a blocking kernel method off the event loop, with the host loop
-        bound on the scheduler (for the cooperative idle-release re-arm)."""
-        scheduler = kernel.scheduler
-        if isinstance(scheduler, WorkerScheduler):
-            scheduler.bind_loop(asyncio.get_running_loop())
-        return await asyncio.to_thread(fn, *args)
-
     @app.custom_route("/status", methods=["GET"])
     @_guard
     async def handle_status(request: Request) -> JSONResponse:
@@ -337,9 +322,9 @@ def _register_custom_routes(
                 else:
                     status["uptime"] = f"{seconds}s"
 
-        # The kernel's status block (embedding/index/derived/locking). health()
-        # probes llama-server over HTTP, so the whole call runs off the loop.
-        status.update(await _kernel(kernel.status))
+        # The core status block (embedding/index/derived/locking); health()
+        # probes llama-server over HTTP off the loop inside.
+        status.update(await harness.status())
 
         return JSONResponse(status)
 
@@ -362,14 +347,14 @@ def _register_custom_routes(
     @_guard
     async def handle_index_rebuild(request: Request) -> JSONResponse:
         try:
-            return JSONResponse(await _kernel(kernel.rebuild_index))
+            return JSONResponse(await harness.rebuild_index())
         except KernelConfigError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 
     @app.custom_route("/index/save", methods=["POST"])
     @_guard
     async def handle_index_save(request: Request) -> JSONResponse:
-        return JSONResponse(await _kernel(kernel.save_index))
+        return JSONResponse(await harness.save_index())
 
     @app.custom_route("/embedding/start", methods=["POST"])
     @_guard
@@ -399,7 +384,7 @@ def _register_custom_routes(
         try:
             # Starting a backend blocks (model load + health wait); the kernel
             # call runs off the event loop so other requests keep flowing.
-            return JSONResponse(await _kernel(kernel.start_embedding, overrides))
+            return JSONResponse(await harness.start_embedding(overrides))
         except KernelConfigError as e:
             # Unknown backend / no model / a missing ONNX optional dependency
             # are caller-actionable config errors → 400.
@@ -411,20 +396,19 @@ def _register_custom_routes(
     @app.custom_route("/embedding/stop", methods=["POST"])
     @_guard
     async def handle_embedding_stop(request: Request) -> JSONResponse:
-        return JSONResponse(await _kernel(kernel.stop_embedding))
+        return JSONResponse(await harness.stop_embedding())
 
     @app.custom_route("/reload", methods=["POST"])
     @_guard
     async def handle_reload(request: Request) -> JSONResponse:
-        return JSONResponse(await _kernel(kernel.reload))
+        return JSONResponse(await harness.reload())
 
     @app.custom_route("/shutdown", methods=["POST"])
     @_guard
     async def handle_shutdown(request: Request) -> JSONResponse:
-        # aclose cancels the pending debounce timer and flushes if dirty (it is
-        # loop-bound, so it stays host-side); the kernel tears down the core.
-        await saver.aclose()
-        await _kernel(kernel.close)
+        # The harness teardown flushes the index (kernel close) and stops
+        # derived/embedding before the core closes.
+        await harness.close()
         server_lock.release()
         logger.info("Shutdown complete")
 
@@ -715,51 +699,29 @@ def main() -> None:
         logger.error("Cannot start: %s", e)
         sys.exit(1)
 
-    logger.info("Opening collection at %s", args.collection)
     hold_seconds = (
         args.lock_hold_seconds if args.lock_hold_seconds is not None else DEFAULT_LOCK_HOLD
-    )
-    wrapper = CollectionWrapper(
-        args.collection,
-        cooperative=args.cooperative_lock,
-        hold_seconds=hold_seconds,
     )
     if args.cooperative_lock:
         logger.info(
             "Cooperative locking on: releasing the collection after %.0fs idle", hold_seconds
         )
 
-    # The index is always created — it can hold on-disk vectors and report
-    # status even with no embedder. It reports UNAVAILABLE until a service is
-    # attached, so the embedding lifecycle can be cycled at runtime. The engine
-    # is injected here (the harness owns assembly, #278 C5).
+    # Kernel mode (#332 S3d-2): the kernel owns the collection, the vector
+    # index, and the derived ingest; the index files live in the cache dir as
+    # before. The media resolver pair is path-derived (lock-free) and feeds
+    # the kernel's image seam for a CLIP-style backend.
     cache_base = Path(args.cache_dir) if args.cache_dir else cache_dir()
-    index = VectorIndex(path=cache_base / "index", engine=make_index_engine())
-    # Let the index read image bytes + cheaply check presence (lock-free, off the worker thread)
-    # for a CLIP-style backend; inert for a text-only backend. media_dir is path-derived → safe
-    # before open.
-    _read_img, _img_exists = _make_image_resolver(wrapper.media_dir)
-    index.set_image_resolver(_read_img, _img_exists)
-    logger.info("Vector index: %d vectors, %d dims", index.size, index.ndim or 0)
-
-    # Debounced persistence: incremental edits flush after a quiet period (or a
-    # burst cap), so an idle server that's hard-killed reloads without a full
-    # re-embed. The save itself runs off the event loop.
-    saver = IndexSaver(
-        index,
-        delay=(args.index_save_delay if args.index_save_delay is not None else DEFAULT_SAVE_DELAY),
-        threshold=(
-            args.index_save_threshold
-            if args.index_save_threshold is not None
-            else DEFAULT_SAVE_THRESHOLD
-        ),
+    collection_abs = os.path.abspath(args.collection)
+    media_base = (
+        collection_abs[: -len(".anki2")] if collection_abs.endswith(".anki2") else collection_abs
     )
+    _read_img, _img_exists = _make_image_resolver(media_base + ".media")
 
     # llama-server stays on loopback regardless of the MCP bind host — there is
     # never a reason to expose the embedding backend to the network.
     resolved_state_dir = state_dir_override or state_dir()
     runtime = EmbeddingRuntime(
-        index=index,
         backend=args.embedding_backend or DEFAULT_BACKEND,
         model=args.embedding_model,
         host="127.0.0.1",
@@ -779,34 +741,6 @@ def main() -> None:
     # The derived-text store (FTS5 trigram sidecar) — engine factory injected
     # here, like the index engine (the harness owns assembly, #278 C5).
     derived = DerivedTextStore(path=cache_base / "shrike.db", engine_factory=NativeDerivedEngine)
-
-    # The transport-free core (#275): everything below the route layer. The
-    # scheduler is the HTTP host's implementation of the kernel's concurrency
-    # port (the wrapper's worker thread + the host loop, bound per request).
-    # boot() runs the one-shot orchestration: embedding start (degrading on
-    # failure), index drift reconcile, derived-store drift build, and the
-    # cooperative re-acquire hook.
-    kernel = ShrikeKernel(
-        wrapper=wrapper,
-        index=index,
-        saver=saver,
-        derived=derived,
-        runtime=runtime,
-        scheduler=WorkerScheduler(wrapper),
-    )
-    kernel.boot(start_embedding=bool(args.embedding_model) and not args.no_embedding)
-
-    def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
-        sig_name = signal.Signals(signum).name
-        logger.info("Received %s, shutting down", sig_name)
-        index.save()
-        kernel.close()
-        server_lock.release()
-        logger.info("Shutdown complete")
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, _signal_shutdown)
-    signal.signal(signal.SIGINT, _signal_shutdown)
 
     transport_security = _build_transport_security(
         args.host,
@@ -890,32 +824,79 @@ def main() -> None:
                 "--media-path-root is set but the server is not purely-local "
                 "(remote/proxied exposure); store_media server-local paths stay disabled"
             )
-    register_tools(
-        mcp,
-        wrapper,
-        index=index,
-        saver=saver,
-        derived=derived,
-        allow_private_fetch=allow_private_media_fetch,
-        server_path_roots=server_path_roots,
-        media_base_url=media_base_url,
-    )
-    _register_custom_routes(
-        mcp,
-        kernel,
-        server_lock,
-        meta=server_meta,
-        security=transport_security,
-    )
 
-    logger.info(
-        "Listening on %s:%s (log_dir=%s, log_level=%s)",
-        args.host,
-        args.port,
-        log_dir,
-        args.log_level or "info",
-    )
-    mcp.run(transport="streamable-http")
+    async def _serve() -> None:
+        # Assembly runs ON the loop (#332 S3d-2): the kernel opens with a
+        # dedicated harness thread driving its executor; the wrapper rides the
+        # shared core; tools/routes register before the socket binds (no
+        # request is accepted until serve()).
+        logger.info("Opening collection at %s", args.collection)
+        harness = await Harness.assemble(
+            collection_path=args.collection,
+            cache_dir=str(cache_base),
+            runtime=runtime,
+            derived=derived,
+            cooperative=args.cooperative_lock,
+            hold_seconds=hold_seconds,
+            media_read=_read_img,
+            media_exists=_img_exists,
+        )
+        await harness.boot(start_embedding=bool(args.embedding_model) and not args.no_embedding)
+
+        def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
+            sig_name = signal.Signals(signum).name
+            logger.info("Received %s, shutting down", sig_name)
+            # Sync-safe teardown: flush the index + close the sidecars; the
+            # collection is crash-safe (WAL) and the process exits now.
+            with contextlib.suppress(Exception):
+                harness.kernel.save_index()
+            with contextlib.suppress(Exception):
+                harness.derived.close()
+            with contextlib.suppress(Exception):
+                harness.runtime.stop()
+            server_lock.release()
+            logger.info("Shutdown complete")
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _signal_shutdown)
+        signal.signal(signal.SIGINT, _signal_shutdown)
+
+        register_tools(
+            mcp,
+            harness.wrapper,
+            index=harness.index_view,
+            derived=derived,
+            kernel=harness.kernel,
+            allow_private_fetch=allow_private_media_fetch,
+            server_path_roots=server_path_roots,
+            media_base_url=media_base_url,
+        )
+        _register_custom_routes(
+            mcp,
+            harness,
+            server_lock,
+            meta=server_meta,
+            security=transport_security,
+        )
+
+        logger.info(
+            "Listening on %s:%s (log_dir=%s, log_level=%s)",
+            args.host,
+            args.port,
+            log_dir,
+            args.log_level or "info",
+        )
+        import uvicorn
+
+        config = uvicorn.Config(
+            mcp.streamable_http_app(),
+            host=args.host,
+            port=args.port,
+            log_config=None,
+        )
+        await uvicorn.Server(config).serve()
+
+    asyncio.run(_serve())
 
 
 if __name__ == "__main__":

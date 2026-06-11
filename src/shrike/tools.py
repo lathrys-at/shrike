@@ -10,6 +10,8 @@ schemas, behaviour) is byte-identical.
 
 from __future__ import annotations
 
+from typing import Any
+
 from mcp.server.fastmcp import FastMCP
 
 # Re-exports: these lived here pre-split and are part of the module's surface
@@ -24,7 +26,7 @@ from shrike.actions import (
 )
 from shrike.collection import CollectionWrapper
 from shrike.derived import DerivedTextStore
-from shrike.index import IndexSaver, VectorIndex
+from shrike.index import IndexSaver
 from shrike.mcp_adapter import _safe_tool, register_actions
 
 __all__ = [
@@ -39,20 +41,27 @@ __all__ = [
 def register_tools(
     mcp: FastMCP,
     wrapper: CollectionWrapper,
-    index: VectorIndex | None = None,
+    index: Any | None = None,
     saver: IndexSaver | None = None,
     *,
     derived: DerivedTextStore | None = None,
+    kernel: Any | None = None,
     allow_private_fetch: bool = False,
     server_path_roots: list[str] | None = None,
     media_base_url: str | None = None,
 ) -> None:
-    """Build the action registry against this server's context and bind it to MCP."""
+    """Build the action registry against this server's context and bind it to MCP.
+
+    ``kernel`` (the AsyncKernel) puts the actions in kernel mode (#332 S3d-2):
+    write paths route through the maintained kernel ops, and ``index`` then
+    carries the search-facing ``KernelIndexView`` instead of the facade.
+    """
     context = ActionContext(
         wrapper=wrapper,
         index=index,
         saver=saver,
         derived=derived,
+        kernel=kernel,
         allow_private_fetch=allow_private_fetch,
         server_path_roots=server_path_roots,
         media_base_url=media_base_url,

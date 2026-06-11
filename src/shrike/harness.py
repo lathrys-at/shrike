@@ -248,23 +248,32 @@ class Harness:
         }
 
     def _index_status(self) -> dict[str, Any]:
-        """The kernel's index status reshaped to the wire's IndexStatus union."""
+        """The kernel's index status in the facade's diagnostic shape (state,
+        available, size/ndim/path, stamps, activation; progress only while
+        building, error only on failure — the wire's IndexStatus contract)."""
         raw = json.loads(self.kernel.index_status_json())
         state = raw["state"]
         if self.runtime.backend is None and state == "ready":
             state = "unavailable"
-        status: dict[str, Any] = {"state": state}
+        status: dict[str, Any] = {
+            "state": state,
+            "available": state == "ready" and self.runtime.backend is not None,
+            "size": int(raw.get("size", 0)),
+            "ndim": raw.get("ndim"),
+        }
+        if raw.get("col_mod") is not None:
+            status["col_mod"] = raw["col_mod"]
+        if raw.get("model_id") is not None:
+            status["model_id"] = raw["model_id"]
+        if raw.get("activation"):
+            status["activation"] = raw["activation"]
         if state == "building":
             progress = raw.get("progress") or {}
             status["progress"] = {
                 "indexed": int(progress.get("indexed", 0)),
                 "total": int(progress.get("total", 0)),
             }
-        elif state == "ready":
-            status["size"] = int(raw.get("size", 0))
-            if raw.get("ndim") is not None:
-                status["ndim"] = int(raw["ndim"])
-        elif state == "error" and raw.get("error"):
+        if state == "error" and raw.get("error"):
             status["error"] = str(raw["error"])
         return status
 
