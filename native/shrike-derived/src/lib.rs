@@ -398,3 +398,145 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 }
+
+// ── lexical search policy (#331: re-homed from the Python facade) ────────────
+// The MATCH-expression building + result filtering that used to live in
+// `shrike/derived.py`. One implementation: the Python facade delegates here
+// through the binding, and the kernel's search assembly calls it directly.
+
+/// FTS5's trigram tokenizer can't match a term shorter than 3 chars.
+pub const MIN_TRIGRAM: usize = 3;
+/// A fuzzy candidate must share at least this many query trigrams (noise floor).
+pub const FUZZY_MIN_SHARED: usize = 2;
+
+/// One lexical hit with its provenance: `(note_id, source, ref, snippet)`.
+pub type LexicalRow = (i64, String, String, Option<String>);
+
+/// Lowercased char-level trigrams (mirrors the Python `_trigrams`: code-point
+/// windows over `text.lower()`).
+pub fn trigrams(text: &str) -> Vec<String> {
+    let lowered: Vec<char> = text.to_lowercase().chars().collect();
+    if lowered.len() < MIN_TRIGRAM {
+        return Vec::new();
+    }
+    (0..=lowered.len() - MIN_TRIGRAM)
+        .map(|i| lowered[i..i + MIN_TRIGRAM].iter().collect())
+        .collect()
+}
+
+/// Quote a term as an FTS5 string literal (wrap in double quotes, double
+/// internal ones) — the only safe way to feed arbitrary user text into MATCH.
+pub fn fts_quote(term: &str) -> String {
+    format!("\"{}\"", term.replace('"', "\"\""))
+}
+
+impl DerivedEngine {
+    /// Notes whose derived text literally contains `query` (case-insensitive),
+    /// with `(source, ref, snippet)` provenance. `None` tells the caller to use
+    /// the `find_notes` fallback (query shorter than a trigram); a MATCH error
+    /// is a real error (the caller decides whether to degrade).
+    pub fn search_substring(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> NativeResult<Option<Vec<LexicalRow>>> {
+        let q = query.trim();
+        if q.chars().count() < MIN_TRIGRAM {
+            return Ok(None);
+        }
+        // A quoted phrase → contiguous (literal substring) match.
+        let rows = self.match_rows(&fts_quote(q), limit, false)?;
+        Ok(Some(
+            rows.into_iter()
+                .map(|(nid, source, r, _txt, snippet)| (nid, source, r, snippet))
+                .collect(),
+        ))
+    }
+
+    /// Notes sharing trigrams with `query` (typo/partial tolerant), best-first
+    /// by FTS5 bm25, deduped to one (best) row per note, requiring at least
+    /// [`FUZZY_MIN_SHARED`] shared trigrams (drops one-trigram noise). Empty
+    /// when the query is too short to rank.
+    pub fn search_fuzzy(&self, query: &str, top_k: i64) -> NativeResult<Vec<LexicalRow>> {
+        let grams = trigrams(query.trim());
+        if grams.len() < FUZZY_MIN_SHARED {
+            return Ok(Vec::new());
+        }
+        let gram_set: std::collections::BTreeSet<String> = grams.into_iter().collect();
+        let expr: Vec<String> = gram_set.iter().map(|g| fts_quote(g)).collect();
+        let rows = self.match_rows(&expr.join(" OR "), top_k * 4, true)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut out: Vec<LexicalRow> = Vec::new();
+        for (note_id, source, r, txt, snippet) in rows {
+            // Min-overlap floor: FTS5 OR matches >= 1 trigram; require a few
+            // shared so a single common gram doesn't surface noise.
+            let txt_grams: std::collections::BTreeSet<String> =
+                trigrams(txt.as_deref().unwrap_or("")).into_iter().collect();
+            if gram_set.intersection(&txt_grams).count() < FUZZY_MIN_SHARED {
+                continue;
+            }
+            if !seen.insert(note_id) {
+                continue; // dedup to one (best) row per note — rows arrive best-first
+            }
+            out.push((note_id, source, r, snippet));
+            if out.len() as i64 >= top_k {
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod lexical_tests {
+    use super::*;
+
+    fn store() -> DerivedEngine {
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-lex-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+        e.build(
+            &[
+                (
+                    1,
+                    "field".into(),
+                    "Front".into(),
+                    "the mitochondria is the powerhouse".into(),
+                ),
+                (
+                    2,
+                    "field".into(),
+                    "Front".into(),
+                    "momentum is mass times velocity".into(),
+                ),
+            ],
+            1,
+        )
+        .unwrap();
+        e
+    }
+
+    #[test]
+    fn substring_finds_literal_hits_and_signals_fallback() {
+        let e = store();
+        let hits = e.search_substring("mitochondria", 10).unwrap().unwrap();
+        assert_eq!(hits[0].0, 1);
+        assert!(e.search_substring("mi", 10).unwrap().is_none()); // sub-trigram → fallback
+        assert!(e.search_substring("q\"uo", 10).unwrap().unwrap().is_empty()); // quotes safe
+    }
+
+    #[test]
+    fn fuzzy_ranks_typos_and_floors_noise() {
+        let e = store();
+        let hits = e.search_fuzzy("mitochondira", 10).unwrap(); // transposition
+        assert!(hits.iter().any(|(nid, ..)| *nid == 1));
+        assert!(e.search_fuzzy("xy", 10).unwrap().is_empty()); // too short to rank
+    }
+}

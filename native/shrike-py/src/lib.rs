@@ -347,7 +347,7 @@ fn derived_sqlite_bundled() -> bool {
 /// and the state machine stay in the facade.
 #[pyclass(frozen)]
 struct DerivedTextEngine {
-    inner: shrike_derived::DerivedEngine,
+    pub(crate) inner: shrike_derived::DerivedEngine,
 }
 
 #[pymethods]
@@ -415,6 +415,28 @@ impl DerivedTextEngine {
         py.detach(|| self.inner.match_rows(&expr, limit, with_text))
             .map_err(to_py_err)
     }
+
+    /// Literal-substring rows (#331) — `None` = use the find_notes fallback.
+    fn search_substring(
+        &self,
+        py: Python<'_>,
+        query: String,
+        limit: i64,
+    ) -> PyResult<Option<Vec<shrike_derived::LexicalRow>>> {
+        py.detach(|| self.inner.search_substring(&query, limit))
+            .map_err(to_py_err)
+    }
+
+    /// Fuzzy (trigram/typo) rows, best-first, deduped per note (#331).
+    fn search_fuzzy(
+        &self,
+        py: Python<'_>,
+        query: String,
+        top_k: i64,
+    ) -> PyResult<Vec<shrike_derived::LexicalRow>> {
+        py.detach(|| self.inner.search_fuzzy(&query, top_k))
+            .map_err(to_py_err)
+    }
 }
 
 // ── Index engine (#273) ─────────────────────────────────────────────────────
@@ -424,7 +446,7 @@ impl DerivedTextEngine {
 /// trafficking in i64 key arrays and f32 vector batches, all GIL-released.
 #[pyclass(frozen)]
 struct NativeIndexEngine {
-    inner: shrike_index::MultiModalIndex,
+    pub(crate) inner: shrike_index::MultiModalIndex,
 }
 
 #[pymethods]
@@ -631,6 +653,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
             kernel_actions::action_collection_query,
             m
         )?)?;
+        m.add_function(wrap_pyfunction!(kernel_actions::action_search_notes, m)?)?;
     }
     m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;

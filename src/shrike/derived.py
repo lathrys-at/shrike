@@ -142,6 +142,22 @@ class NativeDerivedEngine:
             raise sqlite3.OperationalError(str(e)) from e
         return [(int(n), s, r, t, sn) for n, s, r, t, sn in rows]
 
+    def search_substring(
+        self, query: str, limit: int
+    ) -> list[tuple[int, str, str, str | None]] | None:
+        try:
+            rows = self._rust.search_substring(query, int(limit))
+        except self._native_errors as e:
+            raise sqlite3.OperationalError(str(e)) from e
+        return None if rows is None else [(int(n), s, r, sn) for n, s, r, sn in rows]
+
+    def search_fuzzy(self, query: str, top_k: int) -> list[tuple[int, str, str, str | None]]:
+        try:
+            rows = self._rust.search_fuzzy(query, int(top_k))
+        except self._native_errors as e:
+            raise sqlite3.OperationalError(str(e)) from e
+        return [(int(n), s, r, sn) for n, s, r, sn in rows]
+
 
 class DerivedTextStore:
     """FTS5-trigram lexical index over note text in a sidecar ``shrike.db`` (see module doc)."""
@@ -372,16 +388,18 @@ class DerivedTextStore:
         caller to use the ``find_notes`` fallback — when the store is unavailable/not-ready or the
         query is shorter than a trigram (FTS5 trigram can't match < 3 chars).
         """
-        q = query.strip()
-        if not self.available or self._engine is None or len(q) < MIN_TRIGRAM:
+        if not self.available or self._engine is None:
             return None
-        expr = _fts_quote(q)  # a quoted phrase → contiguous (literal substring) match
         try:
-            rows = self._engine.match_rows(expr, limit, with_text=False)
-        except sqlite3.OperationalError:
-            logger.debug("FTS5 substring query failed for %r; falling back", q, exc_info=True)
+            # The MATCH policy is the Rust engine's (single implementation,
+            # #331); None = sub-trigram query → find_notes fallback.
+            rows = self._engine.search_substring(query, limit)
+        except sqlite3.Error:
+            logger.debug("FTS5 substring query failed for %r; falling back", query, exc_info=True)
             return None
-        return [LexicalMatch(nid, source, ref, snippet) for nid, source, ref, _, snippet in rows]
+        if rows is None:
+            return None
+        return [LexicalMatch(nid, source, ref, snippet) for nid, source, ref, snippet in rows]
 
     def search_fuzzy(
         self, query: str, top_k: int = DEFAULT_FUZZY_TOP_K
@@ -392,31 +410,19 @@ class DerivedTextStore:
         candidate must share at least ``FUZZY_MIN_SHARED`` of them (drops one-trigram noise). Empty
         when the store can't serve it (the fuzzy signal is simply absent — graceful).
         """
-        grams = _trigrams(query.strip())
-        if not self.available or self._engine is None or len(grams) < FUZZY_MIN_SHARED:
+        if not self.available or self._engine is None:
             return []
-        gram_set = set(grams)
-        expr = " OR ".join(_fts_quote(g) for g in gram_set)
         try:
-            rows = self._engine.match_rows(expr, top_k * 4, with_text=True)
-        except sqlite3.OperationalError:
+            # The trigram/overlap policy is the Rust engine's (single
+            # implementation, #331), already deduped + floored.
+            rows = self._engine.search_fuzzy(query, top_k)
+        except sqlite3.Error:
             logger.debug("FTS5 fuzzy query failed for %r", query, exc_info=True)
             return []
-        seen: set[int] = set()
-        out: list[tuple[int, LexicalMatch]] = []
-        for note_id, source, ref, txt, snippet in rows:
-            # Min-overlap floor: FTS5 OR matches ≥1 trigram; require a few shared so a single common
-            # gram doesn't surface noise. (bm25 already down-ranks weak matches; this is hygiene.)
-            if len(gram_set & set(_trigrams(txt or ""))) < FUZZY_MIN_SHARED:
-                continue
-            nid = int(note_id)
-            if nid in seen:  # dedup to one (best) row per note — rows arrive best-first
-                continue
-            seen.add(nid)
-            out.append((nid, LexicalMatch(nid, source, ref, snippet)))
-            if len(out) >= top_k:
-                break
-        return out
+        return [
+            (int(nid), LexicalMatch(int(nid), source, ref, snippet))
+            for nid, source, ref, snippet in rows
+        ]
 
     def status(self) -> dict[str, Any]:
         info: dict[str, Any] = {

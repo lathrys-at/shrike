@@ -63,6 +63,22 @@ def action_list_notes(
 def action_collection_query(
     core: CollectionCore, query: str, with_fields: bool = True, limit: int = 50
 ) -> str: ...
+def action_search_notes(
+    core: CollectionCore,
+    index_engine: NativeIndexEngine | None,
+    derived_engine: DerivedTextEngine | None,
+    sources: list[tuple[str, str, bool]],
+    vectors: list[list[float]],
+    top_k: int,
+    threshold: float,
+    deck: str | None = None,
+    tags: list[str] | None = None,
+    exclude: list[int] | None = None,
+    image_floor: float | None = None,
+    weights: dict[str, float] | None = None,
+    semantic: bool = False,
+    index_size: int = 0,
+) -> str: ...
 def init_onnx_runtime(dylib_path: str) -> None: ...
 def derived_fts5_probe() -> bool: ...
 def derived_sqlite_bundled() -> bool: ...
@@ -289,3 +305,7 @@ class DerivedTextEngine:
     def match_rows(
         self, expr: str, limit: int, with_text: bool
     ) -> list[tuple[int, str, str, str | None, str | None]]: ...
+    def search_substring(
+        self, query: str, limit: int
+    ) -> list[tuple[int, str, str, str | None]] | None: ...
+    def search_fuzzy(self, query: str, top_k: int) -> list[tuple[int, str, str, str | None]]: ...

@@ -43,6 +43,7 @@ with contextlib.suppress(ImportError):
     from shrike_native._native import action_collection_info  # noqa: F401
     from shrike_native._native import action_collection_query  # noqa: F401
     from shrike_native._native import action_list_notes  # noqa: F401
+    from shrike_native._native import action_search_notes  # noqa: F401
     from shrike_native._native import decode_media_b64  # noqa: F401
     from shrike_native._native import fetch_media_url  # noqa: F401
     from shrike_native._native import rehomed_actions  # noqa: F401

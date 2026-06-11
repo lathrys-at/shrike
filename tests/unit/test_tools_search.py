@@ -78,6 +78,52 @@ def mcp_app(wrapper, mock_index):
     return mcp
 
 
+def _unit_vec(sim: float) -> list[float]:
+    """A 2-dim unit vector at cosine ``sim`` against the [1, 0] query."""
+    import math
+
+    s = max(min(sim, 1.0), -1.0)
+    return [s, math.sqrt(max(0.0, 1.0 - s * s))]
+
+
+def _plant(index: VectorIndex, items: list[tuple[int, float]], modality: str = "text") -> None:
+    """Plant vectors so the REAL engine ranks ``items`` at exactly those distances.
+
+    The fake backend embeds every query as [1, 0]; a note planted at cosine
+    ``1 - distance`` therefore comes back from the native engine at
+    ``distance`` — the search clusters keep their scripted numbers while the
+    re-homed (#331) Rust assembly runs against the real index.
+    """
+    import numpy as np
+
+    keys = [nid for nid, _ in items]
+    vecs = np.asarray([_unit_vec(1.0 - d) for _, d in items], dtype=np.float32)
+    index._engine.add(modality, np.asarray(keys, dtype=np.int64), vecs)
+
+
+@pytest.fixture()
+def sem_index(tmp_path):
+    """A REAL VectorIndex (native engine) with a fake [1,0]-embedding backend.
+
+    The acknowledged #279/#331 churn: the search assembly runs in Rust, so the
+    old scripted ``search_by_modality`` mocks can't inject — these tests plant
+    vectors instead and exercise the genuine path end to end.
+    """
+    backend = MagicMock()
+    backend.embed_texts.side_effect = lambda texts: [[1.0, 0.0] for _ in texts]
+    backend.modalities = frozenset({"text"})
+    idx = VectorIndex(tmp_path / "sem-index", backend=backend)
+    idx.materialize_empty(2, col_mod=1, model_id="m")
+    return idx
+
+
+@pytest.fixture()
+def mcp_sem(wrapper, sem_index):
+    mcp = FastMCP("test")
+    register_tools(mcp, wrapper, index=sem_index)
+    return mcp
+
+
 @pytest.fixture()
 def mcp_no_index(wrapper):
     mcp = FastMCP("test")
@@ -127,11 +173,9 @@ class TestSearchNotesStates:
 
 
 class TestSearchNotesResults:
-    def test_text_query(self, wrapper, mock_index, mcp_app, basic_note):
-        mock_index.search_by_modality.return_value = _text_hits(
-            [[{"note_id": basic_note, "distance": 0.1}]]
-        )
-        result = _call(mcp_app, "search_notes", {"queries": ["math question"]})
+    def test_text_query(self, wrapper, sem_index, mcp_sem, basic_note):
+        _plant(sem_index, [(basic_note, 0.1)])
+        result = _call(mcp_sem, "search_notes", {"queries": ["math question"]})
         assert len(result["results"]) == 1
         assert result["results"][0]["source"] == "math question"
         matches = result["results"][0]["matches"]
@@ -139,38 +183,27 @@ class TestSearchNotesResults:
         assert matches[0]["id"] == basic_note
         assert matches[0]["score"] == 0.9
 
-    def test_id_query(self, wrapper, mock_index, mcp_app, basic_note):
+    def test_id_query(self, wrapper, sem_index, mcp_sem, basic_note):
         other = _seed(
             wrapper, [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Q", "Back": "A"}}]
         )[0]["id"]
-        mock_index.search_by_modality.return_value = _text_hits(
-            [[{"note_id": other, "distance": 0.2}]]
-        )
-        result = _call(mcp_app, "search_notes", {"ids": [basic_note]})
+        _plant(sem_index, [(other, 0.2)])
+        result = _call(mcp_sem, "search_notes", {"ids": [basic_note]})
         assert len(result["results"]) == 1
         assert result["results"][0]["source"] == f"note #{basic_note}"
 
-    def test_exclude_ids(self, wrapper, mock_index, mcp_app, basic_note):
+    def test_exclude_ids(self, wrapper, sem_index, mcp_sem, basic_note):
         other = _seed(
             wrapper, [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Q", "Back": "A"}}]
         )[0]["id"]
-        mock_index.search_by_modality.return_value = _text_hits(
-            [
-                [
-                    {"note_id": basic_note, "distance": 0.05},
-                    {"note_id": other, "distance": 0.2},
-                ]
-            ]
-        )
-        result = _call(mcp_app, "search_notes", {"queries": ["test"], "exclude_ids": [basic_note]})
+        _plant(sem_index, [(basic_note, 0.05), (other, 0.2)])
+        result = _call(mcp_sem, "search_notes", {"queries": ["test"], "exclude_ids": [basic_note]})
         matches = result["results"][0]["matches"]
         assert all(m["id"] != basic_note for m in matches)
 
-    def test_deck_filter(self, wrapper, mock_index, mcp_app, basic_note):
-        mock_index.search_by_modality.return_value = _text_hits(
-            [[{"note_id": basic_note, "distance": 0.1}]]
-        )
-        result = _call(mcp_app, "search_notes", {"queries": ["test"], "deck": "Nonexistent"})
+    def test_deck_filter(self, wrapper, sem_index, mcp_sem, basic_note):
+        _plant(sem_index, [(basic_note, 0.1)])
+        result = _call(mcp_sem, "search_notes", {"queries": ["test"], "deck": "Nonexistent"})
         assert result["results"][0]["matches"] == []
 
 
@@ -181,83 +214,64 @@ class TestUnifiedSearch:
         note = {"deck": "Test", "note_type": "Basic", "fields": {"Front": front, "Back": "x"}}
         return _seed(wrapper, [note])[0]["id"]
 
-    def test_exact_match_without_semantic(self, wrapper, mock_index, mcp_app):
-        mock_index.search_by_modality.return_value = _text_hits([[]])  # no semantic hits
+    def test_exact_match_without_semantic(self, wrapper, sem_index, mcp_sem):
+        # Nothing planted → no semantic hits; the literal path alone surfaces it.
         self._seed_front(wrapper, "Electron transport chain")
-        m = _call(mcp_app, "search_notes", {"queries": ["transport"]})["results"][0]["matches"]
+        m = _call(mcp_sem, "search_notes", {"queries": ["transport"]})["results"][0]["matches"]
         assert len(m) == 1
         assert m[0]["score"] is None
         assert m[0]["substring"]["matched_fields"] == ["Front"]
 
-    def test_both_score_and_substring(self, wrapper, mock_index, mcp_app):
+    def test_both_score_and_substring(self, wrapper, sem_index, mcp_sem):
         nid = self._seed_front(wrapper, "Electron transport chain")
-        mock_index.search_by_modality.return_value = _text_hits(
-            [[{"note_id": nid, "distance": 0.1}]]
-        )  # score 0.9
-        m = _call(mcp_app, "search_notes", {"queries": ["transport"]})["results"][0]["matches"][0]
+        _plant(sem_index, [(nid, 0.1)])  # score 0.9
+        m = _call(mcp_sem, "search_notes", {"queries": ["transport"]})["results"][0]["matches"][0]
         assert m["score"] == 0.9
         assert m["substring"] is not None
 
-    def test_threshold_does_not_drop_exact(self, wrapper, mock_index, mcp_app):
+    def test_threshold_does_not_drop_exact(self, wrapper, sem_index, mcp_sem):
         nid = self._seed_front(wrapper, "unique phrase here")
         # Semantic score 0.01 is below threshold → not attached; exact still includes it.
-        mock_index.search_by_modality.return_value = _text_hits(
-            [[{"note_id": nid, "distance": 0.99}]]
-        )
-        m = _call(mcp_app, "search_notes", {"queries": ["unique phrase"], "threshold": 0.5})[
+        _plant(sem_index, [(nid, 0.99)])
+        m = _call(mcp_sem, "search_notes", {"queries": ["unique phrase"], "threshold": 0.5})[
             "results"
         ][0]["matches"]
         assert len(m) == 1
         assert m[0]["score"] is None
         assert m[0]["substring"] is not None
 
-    def test_exact_first_ordering(self, wrapper, mock_index, mcp_app):
+    def test_exact_first_ordering(self, wrapper, sem_index, mcp_sem):
         exact_nid = self._seed_front(wrapper, "alpha beta gamma")
         sem_only = self._seed_front(wrapper, "unrelated content")
-        # semantic returns the unrelated note with a high score; exact match has none
-        mock_index.search_by_modality.return_value = _text_hits(
-            [[{"note_id": sem_only, "distance": 0.05}]]
-        )  # 0.95
-        m = _call(mcp_app, "search_notes", {"queries": ["beta gamma"]})["results"][0]["matches"]
+        # semantic ranks the unrelated note with a high score; exact match has none
+        _plant(sem_index, [(sem_only, 0.05)])  # 0.95
+        m = _call(mcp_sem, "search_notes", {"queries": ["beta gamma"]})["results"][0]["matches"]
         ids = [x["id"] for x in m]
         assert ids[0] == exact_nid  # literal hit ranks first despite no score
 
-    def test_literal_hit_missed_by_prefilter_still_floats(self, wrapper, mock_index, mcp_app):
-        # #236 review F1: the exact tier follows the `substring` annotation, not search_substring
-        # membership — so a literal hit Anki's normalized *term* pre-filter misses (markup text) or
-        # that fell beyond its limit still floats. Simulate the miss by emptying the pre-filter; the
-        # note's content still literally contains the query, so the semantic recompute floats it.
-        from unittest.mock import AsyncMock
-
-        literal = self._seed_front(wrapper, "alpha beta gamma")
+    def test_literal_hit_missed_by_prefilter_still_floats(self, wrapper, sem_index, mcp_sem):
+        # #236 review F1: the exact tier follows the `substring` annotation, not pre-filter
+        # membership — a literal hit that reaches note_data only through the SEMANTIC ranking
+        # (no derived store here, and a deck scope below would be the other route) still gets
+        # the annotation recompute and floats. The query contains a '*' so Anki's wildcard
+        # pre-filter can't literally match it, but the field text does contain it.
+        literal = self._seed_front(wrapper, "alpha *beta* gamma")
         sem_only = self._seed_front(wrapper, "unrelated content")
-        wrapper.search_substring = AsyncMock(return_value=[])  # pre-filter "misses" everything
-        mock_index.search_by_modality.return_value = _text_hits(
-            [
-                [
-                    {"note_id": sem_only, "distance": 0.05},  # 0.95 — strong semantic, no literal
-                    {"note_id": literal, "distance": 0.20},  # 0.80 — weaker, literal "beta gamma"
-                ]
-            ]
-        )
-        m = _call(mcp_app, "search_notes", {"queries": ["beta gamma"], "threshold": 0.5})[
+        _plant(sem_index, [(sem_only, 0.05), (literal, 0.20)])
+        m = _call(mcp_sem, "search_notes", {"queries": ["*beta* gamma"], "threshold": 0.5})[
             "results"
         ][0]["matches"]
         assert [x["id"] for x in m][0] == literal  # floats above the stronger-semantic non-literal
         assert m[0]["substring"] is not None
 
-    def test_tags_filter(self, wrapper, mock_index, mcp_app, basic_note):
-        mock_index.search_by_modality.return_value = _text_hits(
-            [[{"note_id": basic_note, "distance": 0.1}]]
-        )
-        result = _call(mcp_app, "search_notes", {"queries": ["test"], "tags": ["nonexistent-tag"]})
+    def test_tags_filter(self, wrapper, sem_index, mcp_sem, basic_note):
+        _plant(sem_index, [(basic_note, 0.1)])
+        result = _call(mcp_sem, "search_notes", {"queries": ["test"], "tags": ["nonexistent-tag"]})
         assert result["results"][0]["matches"] == []
 
-    def test_result_includes_content(self, wrapper, mock_index, mcp_app, basic_note):
-        mock_index.search_by_modality.return_value = _text_hits(
-            [[{"note_id": basic_note, "distance": 0.1}]]
-        )
-        result = _call(mcp_app, "search_notes", {"queries": ["test"]})
+    def test_result_includes_content(self, wrapper, sem_index, mcp_sem, basic_note):
+        _plant(sem_index, [(basic_note, 0.1)])
+        result = _call(mcp_sem, "search_notes", {"queries": ["test"]})
         match = result["results"][0]["matches"][0]
         assert "content" in match
         assert match["content"]["Front"] == "What is 2+2?"
@@ -286,21 +300,11 @@ class TestUnifiedSearch:
         with pytest.raises(ToolError):
             _call(mcp_app, "search_notes", {"ids": list(range(51))})
 
-    def test_deck_filter_overfetches(self, mcp_app, mock_index):
-        """With a deck filter, search over-fetches a wider window (2.3)."""
-        mock_index.search_by_modality.return_value = _text_hits([[]])
-        _call(mcp_app, "search_notes", {"queries": ["test"], "deck": "D", "top_k": 5})
-        assert mock_index.search_by_modality.call_args[1]["top_k"] >= 50  # >= top_k * 10
+    # (The over-fetch window internals moved into the kernel with the #331
+    # re-home; the outcome they exist for is pinned by
+    # test_deck_filter_returns_deep_in_scope_match below.)
 
-    def test_no_overfetch_without_filter(self, mcp_app, mock_index):
-        """Without deck/tag filters, the window is just top_k (+ excludes)."""
-        mock_index.search_by_modality.return_value = _text_hits([[]])
-        _call(mcp_app, "search_notes", {"queries": ["test"], "top_k": 5})
-        assert mock_index.search_by_modality.call_args[1]["top_k"] == 5
-
-    def test_deck_filter_returns_deep_in_scope_match(
-        self, wrapper, mock_index, mcp_app, basic_note
-    ):
+    def test_deck_filter_returns_deep_in_scope_match(self, wrapper, sem_index, mcp_sem, basic_note):
         """An in-deck note ranked behind out-of-deck neighbors is still returned
         — the widened window must not silently under-return (audit 2.3).
 
@@ -312,137 +316,98 @@ class TestUnifiedSearch:
             wrapper,
             [{"deck": "Other", "note_type": "Basic", "fields": {"Front": "O", "Back": "A"}}],
         )[0]["id"]
-        mock_index.search_by_modality.return_value = _text_hits(
-            [
-                [
-                    {"note_id": other, "distance": 0.05},
-                    {"note_id": basic_note, "distance": 0.20},
-                ]
-            ]
-        )
-        result = _call(mcp_app, "search_notes", {"queries": ["q"], "deck": "Test"})
+        _plant(sem_index, [(other, 0.05), (basic_note, 0.20)])
+        result = _call(mcp_sem, "search_notes", {"queries": ["q"], "deck": "Test"})
         matches = result["results"][0]["matches"]
         assert [m["id"] for m in matches] == [basic_note]
 
-    def test_score_rounded_to_3_decimals(self, wrapper, mock_index, mcp_app, basic_note):
-        mock_index.search_by_modality.return_value = _text_hits(
-            [[{"note_id": basic_note, "distance": 0.12345}]]
-        )
-        result = _call(mcp_app, "search_notes", {"queries": ["test"]})
+    def test_score_rounded_to_3_decimals(self, wrapper, sem_index, mcp_sem, basic_note):
+        _plant(sem_index, [(basic_note, 0.12345)])
+        result = _call(mcp_sem, "search_notes", {"queries": ["test"]})
         score = result["results"][0]["matches"][0]["score"]
         assert score == round(1.0 - 0.12345, 3)
 
-    def test_image_modality_hit_surfaces_unthresholded(self, wrapper, mock_index, mcp_app):
+    def test_image_modality_hit_surfaces_unthresholded(self, wrapper, sem_index, mcp_sem):
         # An image-modality match with no text match still surfaces the note: the image ranking is
         # its own RRF signal and is NOT thresholded (the text-calibrated threshold is meaningless
         # across the CLIP gap; flooring image hits is the #201b activation gate's job). The surfaced
         # score is the (gap-depressed but real) image cosine.
         nid = self._seed_front(wrapper, "diagram of the krebs cycle")
-        mock_index.search_by_modality.return_value = [
-            {"image": [{"note_id": nid, "distance": 0.7}]}  # 0.30 sim — below threshold, still kept
-        ]
-        m = _call(mcp_app, "search_notes", {"queries": ["mitochondria"], "threshold": 0.5})[
+        _plant(sem_index, [(nid, 0.7)], modality="image")  # 0.30 sim — below threshold, kept
+        m = _call(mcp_sem, "search_notes", {"queries": ["mitochondria"], "threshold": 0.5})[
             "results"
         ][0]["matches"]
         assert [x["id"] for x in m] == [nid]
         assert m[0]["score"] == 0.3
 
-    def test_text_modality_stays_thresholded(self, wrapper, mock_index, mcp_app):
+    def test_text_modality_stays_thresholded(self, wrapper, sem_index, mcp_sem):
         # The text ranking keeps its threshold: a weak text-only hit with no literal match drops.
         nid = self._seed_front(wrapper, "unrelated content here")
-        mock_index.search_by_modality.return_value = _text_hits(
-            [[{"note_id": nid, "distance": 0.9}]]  # 0.10 sim — below threshold
-        )
-        m = _call(mcp_app, "search_notes", {"queries": ["xyz"], "threshold": 0.5})["results"][0][
+        _plant(sem_index, [(nid, 0.9)])  # 0.10 sim — below threshold
+        m = _call(mcp_sem, "search_notes", {"queries": ["xyz"], "threshold": 0.5})["results"][0][
             "matches"
         ]
         assert m == []
 
-    def test_score_is_max_over_matched_modalities(self, wrapper, mock_index, mcp_app):
+    def test_score_is_max_over_matched_modalities(self, wrapper, sem_index, mcp_sem):
         # A note matching in both text and image gets the *max* similarity as its surfaced score.
         nid = self._seed_front(wrapper, "alpha")
-        mock_index.search_by_modality.return_value = [
-            {
-                "text": [{"note_id": nid, "distance": 0.1}],  # 0.90 text
-                "image": [{"note_id": nid, "distance": 0.7}],  # 0.30 image
-            }
-        ]
-        m = _call(mcp_app, "search_notes", {"queries": ["alpha query"]})["results"][0]["matches"][0]
+        _plant(sem_index, [(nid, 0.1)])  # 0.90 text
+        _plant(sem_index, [(nid, 0.7)], modality="image")  # 0.30 image
+        m = _call(mcp_sem, "search_notes", {"queries": ["alpha query"]})["results"][0]["matches"][0]
         assert m["score"] == 0.9  # max(0.90 text, 0.30 image)
 
-    def test_image_gate_passes_strong_match(self, wrapper, mock_index, mcp_app):
+    def test_image_gate_passes_strong_match(self, wrapper, sem_index, mcp_sem):
         # #201b: calibrated floor = mean + ACTIVATION_MARGIN·std = 0.20 + 1.0·0.05 = 0.25. A best
         # image sim of 0.30 clears it → the (image-only) note surfaces, scored by the image sim.
         nid = self._seed_front(wrapper, "krebs cycle diagram")
-        mock_index.activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
-        mock_index.search_by_modality.return_value = [
-            {"image": [{"note_id": nid, "distance": 0.70}]}  # sim 0.30 > 0.25
-        ]
-        m = _call(mcp_app, "search_notes", {"queries": ["mitochondria"]})["results"][0]["matches"]
+        sem_index._activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        _plant(sem_index, [(nid, 0.70)], modality="image")  # sim 0.30 > 0.25
+        m = _call(mcp_sem, "search_notes", {"queries": ["mitochondria"]})["results"][0]["matches"]
         assert [x["id"] for x in m] == [nid]
         assert m[0]["score"] == 0.3
 
-    def test_image_gate_drops_weak_match(self, wrapper, mock_index, mcp_app):
+    def test_image_gate_drops_weak_match(self, wrapper, sem_index, mcp_sem):
         # Best image sim 0.20 is below the 0.25 floor → the image modality is gated out, so an
         # image-only match does not surface (no spurious image card for an off-topic query).
         nid = self._seed_front(wrapper, "krebs cycle diagram")
-        mock_index.activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
-        mock_index.search_by_modality.return_value = [
-            {"image": [{"note_id": nid, "distance": 0.80}]}  # sim 0.20 <= 0.25
-        ]
-        m = _call(mcp_app, "search_notes", {"queries": ["mitochondria"]})["results"][0]["matches"]
+        sem_index._activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        _plant(sem_index, [(nid, 0.80)], modality="image")  # sim 0.20 <= 0.25
+        m = _call(mcp_sem, "search_notes", {"queries": ["mitochondria"]})["results"][0]["matches"]
         assert m == []
 
-    def test_image_gate_keeps_text_matched_note(self, wrapper, mock_index, mcp_app):
+    def test_image_gate_keeps_text_matched_note(self, wrapper, sem_index, mcp_sem):
         # Gating the image modality must not drop a note that *also* matches text above threshold;
         # it surfaces with the text score, and the gated image sim is not folded into `score`.
         nid = self._seed_front(wrapper, "alpha")
-        mock_index.activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
-        mock_index.search_by_modality.return_value = [
-            {
-                "text": [{"note_id": nid, "distance": 0.20}],  # sim 0.80 (above threshold)
-                "image": [{"note_id": nid, "distance": 0.80}],  # sim 0.20 (gated out)
-            }
-        ]
-        m = _call(mcp_app, "search_notes", {"queries": ["alpha query"]})["results"][0]["matches"][0]
+        sem_index._activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        _plant(sem_index, [(nid, 0.20)])  # sim 0.80 (above threshold)
+        _plant(sem_index, [(nid, 0.80)], modality="image")  # sim 0.20 (gated out)
+        m = _call(mcp_sem, "search_notes", {"queries": ["alpha query"]})["results"][0]["matches"][0]
         assert m["id"] == nid
         assert m["score"] == 0.8  # text sim only; the gated image sim is not the max
 
-    def test_image_gate_judges_surviving_hit(self, wrapper, mock_index, mcp_app):
+    def test_image_gate_judges_surviving_hit(self, wrapper, sem_index, mcp_sem):
         # #201b review F1: the gate must judge the best image hit that *survives* exclusion/scope,
         # not the raw rank-1. Here the strong rank-1 image hit is the excluded anchor; the only
         # surviving image hit is weak (below the 0.25 floor) → the modality must be gated out.
         anchor = self._seed_front(wrapper, "anchor card")
         weak = self._seed_front(wrapper, "weakly related card")
-        mock_index.activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
-        mock_index.search_by_modality.return_value = [
-            {
-                "image": [
-                    {"note_id": anchor, "distance": 0.65},  # sim 0.35 > floor, but excluded
-                    {"note_id": weak, "distance": 0.80},  # sim 0.20 <= floor → the surviving best
-                ]
-            }
-        ]
-        m = _call(mcp_app, "search_notes", {"queries": ["q"], "exclude_ids": [anchor]})["results"][
+        sem_index._activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        _plant(sem_index, [(anchor, 0.65), (weak, 0.80)], modality="image")
+        m = _call(mcp_sem, "search_notes", {"queries": ["q"], "exclude_ids": [anchor]})["results"][
             0
         ]["matches"]
         assert m == []  # gated on the surviving (weak) hit, so nothing surfaces
 
-    def test_image_gate_passes_strong_surviving_hit(self, wrapper, mock_index, mcp_app):
+    def test_image_gate_passes_strong_surviving_hit(self, wrapper, sem_index, mcp_sem):
         # The mirror: with the strong anchor excluded, a surviving hit that itself clears the floor
         # still surfaces — the gate isn't fooled in either direction.
         anchor = self._seed_front(wrapper, "anchor card")
         strong = self._seed_front(wrapper, "strongly matching card")
-        mock_index.activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
-        mock_index.search_by_modality.return_value = [
-            {
-                "image": [
-                    {"note_id": anchor, "distance": 0.55},  # sim 0.45, excluded
-                    {"note_id": strong, "distance": 0.66},  # sim 0.34 > floor → surfaces
-                ]
-            }
-        ]
-        m = _call(mcp_app, "search_notes", {"queries": ["q"], "exclude_ids": [anchor]})["results"][
+        sem_index._activation_stats = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        _plant(sem_index, [(anchor, 0.55), (strong, 0.66)], modality="image")
+        m = _call(mcp_sem, "search_notes", {"queries": ["q"], "exclude_ids": [anchor]})["results"][
             0
         ]["matches"]
         assert [x["id"] for x in m] == [strong]
@@ -459,60 +424,45 @@ class TestProvenance:
     def _matches(mcp_app, query: str) -> list[dict]:
         return _call(mcp_app, "search_notes", {"queries": [query]})["results"][0]["matches"]
 
-    def test_text_only(self, wrapper, mock_index, mcp_app):
+    def test_text_only(self, wrapper, sem_index, mcp_sem):
         nid = self._seed_front(wrapper, "mitochondria powerhouse")
-        mock_index.search_by_modality.return_value = _text_hits(
-            [[{"note_id": nid, "distance": 0.2}]]
-        )
-        m = self._matches(mcp_app, "cellular energy")[0]
+        _plant(sem_index, [(nid, 0.2)])
+        m = self._matches(mcp_sem, "cellular energy")[0]
         assert [(p["signal"], p["rank"]) for p in m["provenance"]] == [("text", 1)]
         assert m["score"] == 0.8  # back-compat field stays, consistent with the text signal
 
-    def test_image_modality_facet(self, wrapper, mock_index, mcp_app):
+    def test_image_modality_facet(self, wrapper, sem_index, mcp_sem):
         # The semantic signal name *is* the matched-modality facet — `image` ⇒ "matched on image".
         nid = self._seed_front(wrapper, "krebs cycle diagram card")
-        mock_index.search_by_modality.return_value = [
-            {"image": [{"note_id": nid, "distance": 0.7}]}  # uncalibrated → gate off → surfaces
-        ]
-        m = self._matches(mcp_app, "mitochondria")[0]
+        _plant(sem_index, [(nid, 0.7)], modality="image")  # uncalibrated → gate off → surfaces
+        m = self._matches(mcp_sem, "mitochondria")[0]
         assert [p["signal"] for p in m["provenance"]] == ["image"]
         assert m["score"] == 0.3
 
-    def test_exact_only(self, wrapper, mock_index, mcp_app):
+    def test_exact_only(self, wrapper, sem_index, mcp_sem):
         self._seed_front(wrapper, "unique exact phrase")
-        mock_index.search_by_modality.return_value = _text_hits([[]])  # no semantic hit
-        m = self._matches(mcp_app, "exact phrase")[0]
+        m = self._matches(mcp_sem, "exact phrase")[0]  # nothing planted → no semantic hit
         assert [p["signal"] for p in m["provenance"]] == ["exact"]
         assert m["score"] is None  # back-compat: exact-only carries no score
         assert m["substring"] is not None  # ...but the substring detail stays
 
-    def test_text_and_exact(self, wrapper, mock_index, mcp_app):
+    def test_text_and_exact(self, wrapper, sem_index, mcp_sem):
         nid = self._seed_front(wrapper, "Electron transport chain")
-        mock_index.search_by_modality.return_value = _text_hits(
-            [[{"note_id": nid, "distance": 0.1}]]
-        )
-        m = self._matches(mcp_app, "transport")[0]
+        _plant(sem_index, [(nid, 0.1)])
+        m = self._matches(mcp_sem, "transport")[0]
         # Both fire at rank 1 → ordered by signal name (exact < text); back-compat fields agree.
         assert {p["signal"]: p["rank"] for p in m["provenance"]} == {"text": 1, "exact": 1}
         assert m["score"] == 0.9
         assert m["substring"] is not None
 
-    def test_ordered_by_rank_then_signal(self, wrapper, mock_index, mcp_app):
+    def test_ordered_by_rank_then_signal(self, wrapper, sem_index, mcp_sem):
         a = self._seed_front(wrapper, "alpha card")
         b = self._seed_front(wrapper, "beta card")
         nid = self._seed_front(wrapper, "gamma card")
         # nid trails a, b in text (rank 3) but leads the image ranking (rank 1).
-        mock_index.search_by_modality.return_value = [
-            {
-                "text": [
-                    {"note_id": a, "distance": 0.10},
-                    {"note_id": b, "distance": 0.15},
-                    {"note_id": nid, "distance": 0.20},
-                ],
-                "image": [{"note_id": nid, "distance": 0.65}],
-            }
-        ]
-        matches = self._matches(mcp_app, "q")
+        _plant(sem_index, [(a, 0.10), (b, 0.15), (nid, 0.20)])
+        _plant(sem_index, [(nid, 0.65)], modality="image")
+        matches = self._matches(mcp_sem, "q")
         assert all(m["provenance"] for m in matches)  # every returned match carries provenance
         prov = {m["id"]: [(p["signal"], p["rank"]) for p in m["provenance"]] for m in matches}
         assert prov[nid] == [("image", 1), ("text", 3)]  # strongest (lowest-rank) signal first
@@ -543,23 +493,20 @@ class TestDerivedSearch:
         s.close()
 
     @pytest.fixture()
-    def mcp_derived(self, wrapper, mock_index, derived):
+    def mcp_derived(self, wrapper, sem_index, derived):
         mcp = FastMCP("test")
-        register_tools(mcp, wrapper, index=mock_index, derived=derived)
+        register_tools(mcp, wrapper, index=sem_index, derived=derived)
         return mcp
 
     def _seed_front(self, wrapper, front: str) -> int:
         note = {"deck": "Test", "note_type": "Basic", "fields": {"Front": front, "Back": "x"}}
         return _seed(wrapper, [note])[0]["id"]
 
-    def test_substring_via_store_matches_find_notes(
-        self, wrapper, mock_index, mcp_derived, derived
-    ):
+    def test_substring_via_store_matches_find_notes(self, wrapper, mcp_derived, derived):
         # An exact substring hit comes through the store (candidate) + substring_info (authority),
         # identical to the find_notes path: matched field + the `exact` provenance.
         nid = self._seed_front(wrapper, "Electron transport chain")
         _build_derived(wrapper, derived)
-        mock_index.search_by_modality.return_value = _text_hits([[]])  # no semantic hits
         res = _call(mcp_derived, "search_notes", {"queries": ["transport"]})
         m = res["results"][0]["matches"]
         assert [x["id"] for x in m] == [nid]
@@ -570,14 +517,11 @@ class TestDerivedSearch:
         assert [p["signal"] for p in m[0]["provenance"]] == ["exact"]
         assert m[0].get("fuzzy") is None
 
-    def test_fuzzy_only_hit_surfaces_with_provenance(
-        self, wrapper, mock_index, mcp_derived, derived
-    ):
+    def test_fuzzy_only_hit_surfaces_with_provenance(self, wrapper, mcp_derived, derived):
         # A typo query the note doesn't literally contain surfaces via the `fuzzy` signal alone:
         # no score, no substring, provenance == [fuzzy], carrying the source/ref/snippet window.
         nid = self._seed_front(wrapper, "Mitochondria are the powerhouse")
         _build_derived(wrapper, derived)
-        mock_index.search_by_modality.return_value = _text_hits([[]])
         res = _call(mcp_derived, "search_notes", {"queries": ["mitochndria"]})
         m = res["results"][0]["matches"]
         assert [x["id"] for x in m] == [nid]
@@ -589,12 +533,11 @@ class TestDerivedSearch:
         assert hit["fuzzy"]["ref"] == "Front"
         assert "Mitochondria" in hit["fuzzy"]["snippet"]
 
-    def test_literal_tiers_above_fuzzy(self, wrapper, mock_index, mcp_derived, derived):
+    def test_literal_tiers_above_fuzzy(self, wrapper, mcp_derived, derived):
         # The exact-match override still wins: a literal hit floats above a fuzzy-only near-miss.
         literal = self._seed_front(wrapper, "Mitochondria diagram")
         fuzzy_only = self._seed_front(wrapper, "mitochndrial membrane")  # typo → no literal hit
         _build_derived(wrapper, derived)
-        mock_index.search_by_modality.return_value = _text_hits([[]])
         m = _call(mcp_derived, "search_notes", {"queries": ["mitochondria"]})["results"][0][
             "matches"
         ]
@@ -603,32 +546,29 @@ class TestDerivedSearch:
         assert "exact" in prov[literal]
         assert prov[fuzzy_only] == ["fuzzy"]  # the near-miss is fuzzy-only
 
-    def test_no_fuzzy_signal_when_store_unavailable(self, wrapper, mock_index, mcp_app):
+    def test_no_fuzzy_signal_when_store_unavailable(self, wrapper, sem_index, mcp_sem):
         # Fallback safety: with no derived store (mcp_app), a typo query emits no fuzzy match —
         # substring still works via find_notes, exactly as before #98.
         self._seed_front(wrapper, "Mitochondria are the powerhouse")
-        mock_index.search_by_modality.return_value = _text_hits([[]])
-        m = _call(mcp_app, "search_notes", {"queries": ["mitochndria"]})["results"][0]["matches"]
+        m = _call(mcp_sem, "search_notes", {"queries": ["mitochndria"]})["results"][0]["matches"]
         assert m == []
 
-    def test_exact_hit_carries_no_fuzzy(self, wrapper, mock_index, mcp_derived, derived):
+    def test_exact_hit_carries_no_fuzzy(self, wrapper, mcp_derived, derived):
         # Review F4: a clean exact (literal) match must not also be badged `fuzzy`, even though it
         # shares every trigram — `fuzzy` is reserved for the distinguishing near-miss signal.
         nid = self._seed_front(wrapper, "powerhouse of the cell")
         _build_derived(wrapper, derived)
-        mock_index.search_by_modality.return_value = _text_hits([[]])
         m = _call(mcp_derived, "search_notes", {"queries": ["powerhouse"]})["results"][0]["matches"]
         hit = next(x for x in m if x["id"] == nid)
         assert "fuzzy" not in [p["signal"] for p in hit["provenance"]]
         assert hit.get("fuzzy") is None
 
-    def test_result_capped_at_top_k(self, wrapper, mock_index, mcp_derived, derived):
+    def test_result_capped_at_top_k(self, wrapper, mcp_derived, derived):
         # Review F5: the fused union (text/image/exact/fuzzy, each up to top_k) is capped to top_k,
         # so a broad fuzzy signal can't inflate a query's result count past the documented cap.
         for i in range(8):
             self._seed_front(wrapper, f"mitochondrion variant {i}")  # all fuzzy-match the typo
         _build_derived(wrapper, derived)
-        mock_index.search_by_modality.return_value = _text_hits([[]])
         m = _call(mcp_derived, "search_notes", {"queries": ["mitochndrion"], "top_k": 3})[
             "results"
         ][0]["matches"]

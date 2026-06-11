@@ -297,6 +297,12 @@ impl CollectionCore {
     /// Serialize many notes in a fixed number of queries — `_notes_to_dicts`:
     /// note rows + first-card decks via the DB proxy, names from the
     /// notetype/deck services; input order kept, missing ids skipped.
+    /// Public per-id note dicts (the kernel's search assembly reads candidates
+    /// one at a time, skipping unreadable notes like the Python original).
+    pub fn note_dicts(&self, note_ids: &[i64], with_fields: bool) -> NativeResult<Vec<Value>> {
+        self.notes_to_dicts(note_ids, with_fields)
+    }
+
     fn notes_to_dicts(&self, note_ids: &[i64], with_fields: bool) -> NativeResult<Vec<Value>> {
         if note_ids.is_empty() {
             return Ok(Vec::new());

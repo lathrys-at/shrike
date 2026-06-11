@@ -49,7 +49,6 @@ from shrike.kernel import (
 )
 from shrike.log import configure_logging
 from shrike.paths import cache_dir, state_dir
-from shrike.search_fusion import make_search_pipeline
 from shrike.tools import register_tools
 
 logger = logging.getLogger("shrike.server")
@@ -429,7 +428,10 @@ def _register_custom_routes(
         logger.info("Shutdown complete")
 
         async def _exit_after_response() -> None:
-            await asyncio.sleep(0.1)
+            # Long enough for the response (and its access-log line) to flush
+            # to the client even on a loaded machine — 0.1s raced under the
+            # Bazel sandbox (the client saw a dropped connection, not the 200).
+            await asyncio.sleep(0.5)
             os._exit(0)
 
         asyncio.create_task(_exit_after_response())
@@ -890,7 +892,6 @@ def main() -> None:
         index=index,
         saver=saver,
         derived=derived,
-        pipeline=make_search_pipeline(),
         allow_private_fetch=allow_private_media_fetch,
         server_path_roots=server_path_roots,
         media_base_url=media_base_url,

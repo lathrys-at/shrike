@@ -619,6 +619,18 @@ class VectorIndex:
         with self._lock:
             return self._engine.search_by_modality(query_array, top_k)
 
+    def embed_queries(self, texts: list[str]) -> list[list[float]] | None:
+        """Query vectors for *texts*, or ``None`` when no backend is attached.
+
+        The re-homed search assembly (#331) embeds host-side and passes the
+        vectors across the FFI (the recorded design point: the Python-held
+        llama backend can't be called from Rust, and a handful of query
+        vectors crossing is today's reality anyway).
+        """
+        if not self.available or not texts:
+            return None
+        return self._embedding.embed_texts(texts)  # type: ignore[union-attr]
+
     def _calibrate_activation(self) -> None:
         """Recompute per-(non-text-)modality best-match statistics for the activation gate (#201b).
 

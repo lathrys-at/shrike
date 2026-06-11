@@ -24,16 +24,15 @@ import logging
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import shrike_native
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 
 from shrike.collection import (
     CollectionWrapper,
-    substring_info,
 )
-from shrike.derived import DerivedTextStore, LexicalMatch
+from shrike.derived import DerivedTextStore
 from shrike.index import IndexSaver, IndexState, VectorIndex, activation_floor
 from shrike.schemas import (
     CollectionCheckResponse,
@@ -56,6 +55,7 @@ from shrike.schemas import (
     NoteTypeInput,
     RenameTagResponse,
     SearchResponse,
+    SearchResultGroup,
     StoreMediaItem,
     StoreMediaResponse,
     TemplateOp,
@@ -67,7 +67,6 @@ from shrike.schemas import (
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
 )
-from shrike.search_fusion import SearchPipeline, make_search_pipeline
 
 logger = logging.getLogger("shrike.tools")
 
@@ -122,7 +121,6 @@ class ActionContext:
     index: VectorIndex | None = None
     saver: IndexSaver | None = None
     derived: DerivedTextStore | None = None
-    pipeline: SearchPipeline | None = None
     allow_private_fetch: bool = False
     server_path_roots: list[str] | None = None
     media_base_url: str | None = None
@@ -161,11 +159,6 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
     def _action(fn: Any) -> Any:
         actions.append(ActionDef(name=fn.__name__, impl=fn, doc=fn.__doc__))
         return fn
-
-    # The fusion seam (#274): injected by the harness (#278 C5), defaulting to
-    # the native pipeline — unconditional since the cutover. One instance per
-    # registry build, closed over by search_notes.
-    pipeline = ctx.pipeline if ctx.pipeline is not None else make_search_pipeline()
 
     # Since the cutover the note-type ops run in the native core; its input
     # error is a ValueError and plays the old NoteTypeOpError's role verbatim.
@@ -519,280 +512,68 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
 
         # Assemble search sources: each query string (semantic + substring) and
         # each id anchor (semantic only). Anchors are excluded from their results.
-        text_sources: list[tuple[str, str, str]] = []  # (kind, label, text)
+        sources: list[tuple[str, str, bool]] = []  # (label, text, is_query)
         for q in queries or []:
-            text_sources.append(("query", q, q))
+            sources.append((q, q, True))
         if ids:
             note_texts = await wrapper.note_texts_for_embedding(ids)
             for nid, text in zip(ids, note_texts, strict=True):
                 if text:
-                    text_sources.append(("id", f"note #{nid}", text))
+                    sources.append((f"note #{nid}", text, False))
                     exclude_set.add(nid)
 
-        if not text_sources:
+        if not sources:
             return SearchResponse(message="No valid queries or note IDs to search.")
 
-        # Semantic pass (batched), per modality. Over-fetch to cover excluded ids and post-hoc
-        # deck/tag/substring filtering, which can otherwise under-return. search_by_modality returns
-        # one {modality: [{note_id, distance}, ...]} map per source — each modality a separate
-        # rank-based RRF signal, so the CLIP modality gap can't bury image hits under text ones.
-        sem_by_source: dict[int, dict[str, list[dict[str, Any]]]] = {}
+        # Query vectors (host-side embedding — the recorded #331 design point);
+        # the assembly itself is re-homed in shrike_kernel::actions.
+        vectors: list[list[float]] = []
         if semantic_ok:
             assert index is not None
-            fetch_k = top_k + len(exclude_set)
-            if deck or tags:
-                fetch_k = max(fetch_k, top_k * 10)
-                if index.size:
-                    fetch_k = min(fetch_k, index.size)
-            raw = index.search_by_modality([t for (_, _, t) in text_sources], top_k=fetch_k)
-            sem_by_source = dict(enumerate(raw))
+            embedded = index.embed_queries([t for (_, t, _) in sources])
+            if embedded is None:
+                semantic_ok = False
+            else:
+                vectors = embedded
 
-        # Activation gate (#201b): the floor the image ranking's best match must clear to count.
-        # None (text-only / pre-#201b / uncalibrated index) → no gating, i.e. #201a behaviour.
+        # Orchestrator state the kernel will own after S3 (#332): the #201b
+        # image activation floor and the index size for the over-fetch clamp.
         image_floor = (
             activation_floor(index.activation_stats.get("image"), ACTIVATION_MARGIN)
             if index is not None
             else None
         )
+        # The native handles live past the engine protocols (S3 removes the reach-in).
+        index_handle = (
+            cast(Any, index._engine)._rust if (semantic_ok and index is not None) else None
+        )
+        derived_handle = (
+            derived._engine._rust
+            if derived is not None and derived.available and derived._engine is not None
+            else None
+        )
 
-        def _in_scope(note_data: dict[str, Any]) -> bool:
-            if deck and note_data.get("deck") != deck:
-                return False
-            if tags:
-                note_tags = set(note_data.get("tags", []))
-                if not all(t in note_tags for t in tags):
-                    return False
-            return True
-
-        async def _rank_modality(
-            hits: list[dict[str, Any]],
-            note_data: dict[int, dict[str, Any]],
-            sem_score: dict[int, float],
-            *,
-            thresholded: bool,
-        ) -> list[int]:
-            """One modality's hits → a scoped, deduped note ranking (best-first), capped at top_k.
-
-            Populates ``note_data`` for any new in-scope candidate and folds each note's similarity
-            into ``sem_score`` as the running max over the modalities it matched (the surfaced
-            score). ``thresholded`` gates on the (text-calibrated) cosine ``threshold`` — applied to
-            the text ranking, but **not** the image one, where the gap makes that threshold
-            meaningless (flooring image hits is the #201b activation gate's job).
-            """
-            ranking: list[int] = []
-            for m in hits:
-                nid = m["note_id"]
-                if nid in exclude_set:
-                    continue
-                score = round(1.0 - m["distance"], 3)
-                if thresholded and score < threshold:
-                    break  # raw is distance-ascending → the rest are below threshold
-                if nid not in note_data:
-                    try:
-                        data = await wrapper.note_to_dict(nid, "full")
-                    except Exception:
-                        logger.debug(
-                            "search_notes: skipping unreadable note %s", nid, exc_info=True
-                        )
-                        continue
-                    if not _in_scope(data):
-                        continue  # out of deck/tag scope — keep it out of note_data entirely
-                    note_data[nid] = data
-                ranking.append(nid)
-                prev = sem_score.get(nid)
-                sem_score[nid] = score if prev is None else max(prev, score)
-                if len(ranking) >= top_k:
-                    break
-            return ranking
-
-        async def _collect_substring_candidates(
-            text: str, note_data: dict[int, dict[str, Any]]
-        ) -> None:
-            """Populate ``note_data`` with literal-substring candidates for ``text``.
-
-            Prefers the derived-text store's FTS5 trigram index (fast), but **only when unscoped**:
-            the store ranks collection-wide and scope is applied afterward, so for a
-            ``deck``/``tags`` query whose term is common collection-wide but rare in-scope, in-scope
-            hits can sit beyond the bm25 window and be dropped — a recall regression the scope-aware
-            ``find_notes`` path (which puts ``deck:``/``tag:`` in the query) doesn't have. So scoped
-            queries use the fallback; the store handles the common unscoped case. Either way
-            ``substring_info`` downstream is the authority that confirms + annotates each candidate,
-            so both paths agree on what counts as a literal hit.
-            """
-            lex = None
-            if derived is not None and not (deck or tags):
-                lex = await asyncio.to_thread(
-                    derived.search_substring, text, top_k + len(exclude_set)
-                )
-            if lex is None:
-                # Fallback: the find_notes path already applies scope + the substring annotation.
-                for note in await wrapper.search_substring(
-                    text, deck=deck, tags=tags or None, exclude_ids=list(exclude_set), limit=top_k
-                ):
-                    note_data[note["id"]] = note
-                return
-            added = 0
-            for lm in lex:
-                nid = lm.note_id
-                if nid in exclude_set or nid in note_data:  # store may return a row per field
-                    continue
-                try:
-                    data = await wrapper.note_to_dict(nid, "full")
-                except Exception:
-                    logger.debug("search_notes: skipping unreadable note %s", nid, exc_info=True)
-                    continue
-                if not _in_scope(data):
-                    continue
-                note_data[nid] = data
-                added += 1
-                if added >= top_k:
-                    break
-
-        async def _collect_fuzzy(
-            text: str, note_data: dict[int, dict[str, Any]]
-        ) -> tuple[list[int], dict[int, LexicalMatch]]:
-            """Fuzzy (trigram/typo) ranking + per-note evidence from the derived-text store (#98).
-
-            Returns a scoped, deduped note ranking (best-first, capped at top_k) and a
-            ``{note_id: LexicalMatch}`` of the matched (source, ref, snippet). Empty when the store
-            can't serve it — the fuzzy signal simply doesn't join the fusion (graceful).
-            """
-            if derived is None or not derived.available:
-                return [], {}
-            hits = await asyncio.to_thread(derived.search_fuzzy, text, top_k)
-            ranking: list[int] = []
-            evidence: dict[int, LexicalMatch] = {}
-            for nid, lm in hits:
-                if nid in exclude_set or nid in evidence:
-                    continue
-                if nid not in note_data:
-                    try:
-                        data = await wrapper.note_to_dict(nid, "full")
-                    except Exception:
-                        logger.debug(
-                            "search_notes: skipping unreadable note %s", nid, exc_info=True
-                        )
-                        continue
-                    if not _in_scope(data):
-                        continue
-                    note_data[nid] = data
-                ranking.append(nid)
-                evidence[nid] = lm
-                if len(ranking) >= top_k:
-                    break
-            return ranking, evidence
-
-        results: list[dict[str, Any]] = []
-        for i, (kind, label, text) in enumerate(text_sources):
-            # Each signal ranks its own candidates (best-first); rrf_fuse blends them by rank and
-            # the exact-match override tiers literal hits above the rest (the one place RRF's
-            # magnitude-blindness is wrong). note_data caches every in-scope candidate's full dict.
-            note_data: dict[int, dict[str, Any]] = {}
-
-            # Literal-substring candidates (query sources only). The derived-text store's FTS5
-            # trigram index (or the find_notes fallback) is a fast, scoped pre-filter;
-            # `substring_info` (recomputed below over every candidate) is the *authority* for what
-            # counts as a literal hit — so a literal match the pre-filter's normalization misses
-            # (text in markup/attributes) or that fell beyond its limit is still floated, keeping
-            # the annotation and the exact tier in lockstep.
-            if kind == "query":
-                await _collect_substring_candidates(text, note_data)
-
-            # Per-modality semantic rankings (scoped, excluded), distance-ascending. The text
-            # ranking is thresholded as before; the image ranking is not (see _rank_modality). Each
-            # note's surfaced score is its running max similarity over the modalities it matched.
-            modality_hits = sem_by_source.get(i, {})
-            sem_score: dict[int, float] = {}
-            ranking_text = await _rank_modality(
-                modality_hits.get("text", []), note_data, sem_score, thresholded=True
-            )
-            # Image modality, then the activation gate (#201b). Rank into a scratch score first so
-            # the gate is judged on the best image hit that *survives* exclusion + deck/tag scope —
-            # not the raw rank-1, which might be the excluded anchor or an out-of-scope note and
-            # would let the gate open for weaker in-scope hits it exists to suppress.
-            image_score: dict[int, float] = {}
-            ranking_image = await _rank_modality(
-                modality_hits.get("image", []), note_data, image_score, thresholded=False
-            )
-            if (
-                ranking_image
-                and image_floor is not None
-                and image_score[ranking_image[0]] <= image_floor
-            ):
-                ranking_image = []  # no good-enough *surviving* image match → gate the modality out
-                image_score = {}
-            # Fold the kept image sims into the shared (max-over-modalities) surfaced score.
-            for nid, isim in image_score.items():
-                prev = sem_score.get(nid)
-                sem_score[nid] = isim if prev is None else max(prev, isim)
-
-            # Fuzzy (derived-text trigram/typo) ranking + evidence — query sources only. Run before
-            # the exact loop so a fuzzy candidate that *also* literally matches still joins the
-            # exact tier (it's now in note_data and gets a substring annotation below).
-            ranking_fuzzy: list[int] = []
-            fuzzy_evidence: dict[int, LexicalMatch] = {}
-            if kind == "query":
-                ranking_fuzzy, fuzzy_evidence = await _collect_fuzzy(text, note_data)
-
-            # Exact ranking = every candidate whose content literally contains the query (the
-            # `substring` annotation), so annotation ⟺ floated. Pre-filter hits already carry it.
-            exact_ids: list[int] = []
-            if kind == "query":
-                for nid, data in note_data.items():
-                    if "substring" not in data:
-                        data["substring"] = substring_info(data.get("content"), text)
-                    if data.get("substring") is not None:
-                        exact_ids.append(nid)
-
-            # A literal hit shares every trigram, so an exact note is *trivially* also a fuzzy
-            # match — redundant noise that would set a `fuzzy` annotation + a spurious
-            # `fuzzy · match:Front` badge on a clean exact hit. Drop exact notes from the fuzzy
-            # signal so `fuzzy` means the *distinguishing* lexical signal (a near-miss).
-            if exact_ids and ranking_fuzzy:
-                exact_set = set(exact_ids)
-                ranking_fuzzy = [nid for nid in ranking_fuzzy if nid not in exact_set]
-                fuzzy_evidence = {
-                    nid: lm for nid, lm in fuzzy_evidence.items() if nid not in exact_set
-                }
-
-            fused = pipeline.fuse(
-                {
-                    "text": ranking_text,
-                    "image": ranking_image,
-                    "exact": exact_ids,
-                    "fuzzy": ranking_fuzzy,
-                },
+        raw = await wrapper.run(
+            lambda c: shrike_native.action_search_notes(
+                c,
+                index_handle,
+                derived_handle,
+                sources,
+                vectors,
+                top_k,
+                threshold,
+                deck=deck,
+                tags=tags or None,
+                exclude=sorted(exclude_set),
+                image_floor=image_floor,
                 weights=SEARCH_WEIGHTS,
-                priority_signals=frozenset({"exact"}),
+                semantic=semantic_ok,
+                index_size=index.size if index is not None else 0,
             )
-
-            # Provenance (#182): which signals surfaced each result, best (lowest) rank first (ties
-            # by signal name). hit.signals is already {signal_name: 1-based rank} from rrf_fuse —
-            # just rename keys. (Best-rank, not "strongest contribution": those coincide only under
-            # equal SEARCH_WEIGHTS; rank order is the weight-independent guarantee the sort makes.)
-            matches: list[dict[str, Any]] = []
-            for hit in fused:
-                match = {
-                    **note_data[hit.note_id],
-                    "score": sem_score.get(hit.note_id),
-                    "provenance": [
-                        {"signal": sig, "rank": rank}
-                        for sig, rank in sorted(hit.signals.items(), key=lambda kv: (kv[1], kv[0]))
-                    ],
-                }
-                lm = fuzzy_evidence.get(hit.note_id)
-                if lm is not None:  # the source-aware fuzzy window (#98)
-                    match["fuzzy"] = {"source": lm.source, "ref": lm.ref, "snippet": lm.snippet}
-                matches.append(match)
-            # Cap to top_k (fused is best-first). With four signals (text/image/exact/fuzzy) each
-            # contributing up to top_k, the union would run ~4×top_k and tack low-relevance fuzzy
-            # near-misses onto already-successful queries; top_k is the documented per-query result
-            # cap. The exact-first tier keeps literal hits; a typo/sparse query's fuzzy hits *are*
-            # the top, so they survive the cap.
-            results.append({"source": label, "matches": matches[:top_k]})
-
-        note_outcome(f"{len(results)} groups, {sum(len(r['matches']) for r in results)} matches")
-        return SearchResponse.model_validate({"results": results, "message": message})
+        )
+        groups = TypeAdapter(list[SearchResultGroup]).validate_json(raw)
+        note_outcome(f"{len(groups)} groups, {sum(len(g.matches) for g in groups)} matches")
+        return SearchResponse(results=groups, message=message)
 
     @_action
     async def upsert_notes(

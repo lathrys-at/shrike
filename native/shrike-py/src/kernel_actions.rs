@@ -82,3 +82,59 @@ pub(crate) fn action_collection_query(
     })
     .map_err(to_py_err)
 }
+
+/// `search_notes` (#331): the whole fused-search assembly in the kernel. The
+/// harness passes the live engine handles, one query vector per source when
+/// semantic ranking is on, and the orchestrator state (image floor, index
+/// size) the kernel will own after S3 (#332).
+#[pyfunction]
+#[pyo3(signature = (core, index_engine, derived_engine, sources, vectors, top_k, threshold, deck=None, tags=None, exclude=None, image_floor=None, weights=None, semantic=false, index_size=0))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn action_search_notes(
+    py: Python<'_>,
+    core: PyRef<'_, CollectionCore>,
+    index_engine: Option<PyRef<'_, crate::NativeIndexEngine>>,
+    derived_engine: Option<PyRef<'_, crate::DerivedTextEngine>>,
+    sources: Vec<(String, String, bool)>,
+    vectors: Vec<Vec<f32>>,
+    top_k: usize,
+    threshold: f64,
+    deck: Option<String>,
+    tags: Option<Vec<String>>,
+    exclude: Option<Vec<i64>>,
+    image_floor: Option<f64>,
+    weights: Option<std::collections::BTreeMap<String, f64>>,
+    semantic: bool,
+    index_size: usize,
+) -> PyResult<String> {
+    let inner = core.core_ref();
+    let index = index_engine.as_ref().map(|e| &e.inner);
+    let derived = derived_engine.as_ref().map(|e| &e.inner);
+    let sources: Vec<shrike_kernel::actions::SearchSource> = sources
+        .into_iter()
+        .map(
+            |(label, text, is_query)| shrike_kernel::actions::SearchSource {
+                label,
+                text,
+                is_query,
+            },
+        )
+        .collect();
+    let args = shrike_kernel::actions::SearchArgs {
+        top_k,
+        threshold,
+        deck,
+        tags: tags.unwrap_or_default(),
+        exclude: exclude.unwrap_or_default(),
+        image_floor,
+        weights: weights.unwrap_or_default(),
+        semantic,
+        index_size,
+    };
+    py.detach(|| {
+        let groups =
+            shrike_kernel::actions::search_notes(inner, index, derived, &sources, &vectors, &args)?;
+        serde_json::to_string(&groups).map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
+    })
+    .map_err(to_py_err)
+}

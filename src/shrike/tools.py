@@ -26,7 +26,6 @@ from shrike.collection import CollectionWrapper
 from shrike.derived import DerivedTextStore
 from shrike.index import IndexSaver, VectorIndex
 from shrike.mcp_adapter import _safe_tool, register_actions
-from shrike.search_fusion import SearchPipeline
 
 __all__ = [
     "ACTIVATION_MARGIN",
@@ -44,7 +43,6 @@ def register_tools(
     saver: IndexSaver | None = None,
     *,
     derived: DerivedTextStore | None = None,
-    pipeline: SearchPipeline | None = None,
     allow_private_fetch: bool = False,
     server_path_roots: list[str] | None = None,
     media_base_url: str | None = None,
@@ -55,7 +53,6 @@ def register_tools(
         index=index,
         saver=saver,
         derived=derived,
-        pipeline=pipeline,
         allow_private_fetch=allow_private_fetch,
         server_path_roots=server_path_roots,
         media_base_url=media_base_url,
