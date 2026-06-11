@@ -116,7 +116,7 @@ struct Shared {
 
 /// The embed-free orchestration core over one engine + its sidecars.
 pub struct IndexOrchestrator {
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
     engine: MultiModalIndex,
     shared: Mutex<Shared>,
 }
@@ -500,5 +500,463 @@ mod tests {
         let job = timers.jobs.lock().unwrap().pop().unwrap();
         job();
         assert_eq!(saver.pending_changes(), 0);
+    }
+}
+
+// ── embed-coupled ops (#332, S3c-3) ──────────────────────────────────────────
+// The orchestrator's write side, as kernel async fns over the Embedder seam
+// (the harness's PyEmbedder, or any native impl). Background builds are plain
+// futures the harness drives (an asyncio task over the bridge) — no
+// spawn_compute primitive, per the runtime model.
+
+use crate::Embedder;
+
+/// Calibration parameters (mirror `index.CALIB_SAMPLE` / `CALIB_MIN`).
+pub const CALIB_SAMPLE: usize = 256;
+pub const CALIB_MIN: usize = 30;
+/// Embed/add chunk size (mirrors `index.BATCH_SIZE`).
+pub const BATCH_SIZE: usize = 64;
+const TEXT: &str = "text";
+
+/// One note's embedding inputs (mirrors the Python `NoteEmbedInput`).
+#[derive(Debug, Clone)]
+pub struct EmbedInput {
+    pub note_id: i64,
+    pub text: String,
+    pub image_names: Vec<String>,
+}
+
+/// The media resolver the harness injects for image-capable backends: read
+/// bytes lazily at embed time; `exists` is the cheap stat the per-note hash
+/// folds in. (Mirrors the Python image resolver pair.)
+pub trait ImageResolver: Send + Sync {
+    fn read(&self, name: &str) -> Option<Vec<u8>>;
+    fn exists(&self, name: &str) -> bool;
+}
+
+/// The image half of the embedder seam, split from [`Embedder`] so text-only
+/// backends (and the minimal core) never see it. A backend advertises image
+/// capability by the harness passing `Some(images)` at assembly.
+pub trait ImageEmbedder: Send + Sync {
+    fn embed_images(
+        &self,
+        images: Vec<Vec<u8>>,
+    ) -> futures::future::BoxFuture<'_, NativeResult<Vec<Vec<f32>>>>;
+}
+
+impl IndexOrchestrator {
+    fn hash_for(
+        &self,
+        input: &EmbedInput,
+        images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+    ) -> String {
+        let embeds_images = images.is_some();
+        let exists = |name: &str| images.map(|(_, r)| r.exists(name)).unwrap_or(false);
+        note_hash(&input.text, &input.image_names, embeds_images, &exists)
+    }
+
+    /// Embed and (replace-)add notes — text vectors always; one vector per
+    /// *resolvable* image when an image embedder + resolver are supplied.
+    /// Maintains the per-note hashes (so the next reconcile sees these notes
+    /// as current). Mirrors `VectorIndex.add`.
+    pub async fn add(
+        &self,
+        inputs: &[EmbedInput],
+        embedder: &dyn Embedder,
+        images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+    ) -> NativeResult<usize> {
+        if inputs.is_empty() {
+            return Ok(0);
+        }
+        let mut added = 0usize;
+        for batch in inputs.chunks(BATCH_SIZE) {
+            let texts: Vec<String> = batch.iter().map(|i| i.text.clone()).collect();
+            let vectors = embedder.embed(texts).await?;
+            let ndim = vectors.first().map(Vec::len).unwrap_or(0);
+            if ndim == 0 {
+                return Err(NativeError::internal("embedder returned empty vectors"));
+            }
+            let keys: Vec<i64> = batch.iter().map(|i| i.note_id).collect();
+
+            // Image vectors, read + embedded lazily (only for notes being added).
+            let mut image_keys: Vec<i64> = Vec::new();
+            let mut image_vectors: Vec<Vec<f32>> = Vec::new();
+            if let Some((image_embedder, resolver)) = images {
+                let mut bytes: Vec<Vec<u8>> = Vec::new();
+                for input in batch {
+                    for name in &input.image_names {
+                        if let Some(data) = resolver.read(name) {
+                            image_keys.push(input.note_id);
+                            bytes.push(data);
+                        }
+                    }
+                }
+                if !bytes.is_empty() {
+                    image_vectors = image_embedder.embed_images(bytes).await?;
+                }
+            }
+
+            self.engine.ensure(TEXT, ndim)?;
+            // Replace semantics: drop a re-added note's existing vectors first.
+            let _ = self.engine.remove(&keys)?;
+            self.engine.add(TEXT, &keys, &vectors)?;
+            if !image_keys.is_empty() {
+                let image_ndim = image_vectors.first().map(Vec::len).unwrap_or(0);
+                self.engine.ensure("image", image_ndim)?;
+                self.engine.add("image", &image_keys, &image_vectors)?;
+            }
+
+            let mut shared = self.shared.lock().expect("orchestrator poisoned");
+            if let Some(hashes) = shared.note_hashes.as_mut() {
+                for input in batch {
+                    hashes.insert(input.note_id, self.hash_for(input, images));
+                }
+            }
+            added += batch.len();
+        }
+        Ok(added)
+    }
+
+    /// Remove every vector for the given notes (all modalities) and their
+    /// hashes. Returns the count of notes actually present (text removals).
+    pub fn remove(&self, note_ids: &[i64]) -> NativeResult<usize> {
+        if note_ids.is_empty() {
+            return Ok(0);
+        }
+        let removed = self.engine.remove(note_ids)?;
+        let mut shared = self.shared.lock().expect("orchestrator poisoned");
+        if let Some(hashes) = shared.note_hashes.as_mut() {
+            for nid in note_ids {
+                hashes.remove(nid);
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Create an empty, ready index for an empty collection (#148 semantics).
+    pub fn materialize_empty(&self, ndim: usize, col_mod: i64, model_id: Option<&str>) {
+        if self.engine.ndim().is_some() {
+            return; // an index already exists — drift handling is reconcile's job
+        }
+        if self.engine.ensure(TEXT, ndim).is_err() {
+            return;
+        }
+        let mut shared = self.shared.lock().expect("orchestrator poisoned");
+        if shared.note_hashes.is_none() {
+            shared.note_hashes = Some(BTreeMap::new());
+        }
+        shared.col_mod = Some(col_mod);
+        shared.model_id = model_id.map(str::to_owned);
+        shared.state = OrchestratorState::Ready;
+        drop(shared);
+        let _ = self.save();
+    }
+
+    /// Full rebuild: clear, re-embed everything, recalibrate, persist.
+    /// Mirrors `VectorIndex.rebuild` (progress lands in `build_progress`).
+    pub async fn rebuild(
+        &self,
+        inputs: Vec<EmbedInput>,
+        col_mod: i64,
+        model_id: Option<String>,
+        embedder: &dyn Embedder,
+        images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+    ) -> NativeResult<()> {
+        let total = inputs.len() as u64;
+        {
+            let mut shared = self.shared.lock().expect("orchestrator poisoned");
+            shared.state = OrchestratorState::Building;
+            shared.build_progress = (0, total);
+            shared.error = None;
+            shared.schema = INDEX_SCHEMA_VERSION; // rebuilds land on the current layout
+            shared.note_hashes = Some(BTreeMap::new());
+        }
+        self.engine.clear();
+
+        let result: NativeResult<()> = async {
+            let mut indexed = 0u64;
+            for batch in inputs.chunks(BATCH_SIZE) {
+                self.add(batch, embedder, images).await?;
+                indexed += batch.len() as u64;
+                self.shared
+                    .lock()
+                    .expect("orchestrator poisoned")
+                    .build_progress = (indexed, total);
+            }
+            {
+                let mut shared = self.shared.lock().expect("orchestrator poisoned");
+                shared.col_mod = Some(col_mod);
+                shared.model_id = model_id;
+            }
+            self.calibrate_activation()?;
+            self.save()?;
+            Ok(())
+        }
+        .await;
+
+        let mut shared = self.shared.lock().expect("orchestrator poisoned");
+        match &result {
+            Ok(()) => shared.state = OrchestratorState::Ready,
+            Err(e) => {
+                shared.state = OrchestratorState::Error;
+                shared.error = Some(format!("{e:?}"));
+            }
+        }
+        result
+    }
+
+    /// Incremental reconcile: re-embed only changed/new notes, drop vanished
+    /// ones; end state identical to a full rebuild over the same inputs.
+    /// Falls back to `rebuild` when there is no prior per-note state.
+    /// Mirrors `VectorIndex.reconcile`.
+    pub async fn reconcile(
+        &self,
+        inputs: Vec<EmbedInput>,
+        col_mod: i64,
+        model_id: Option<String>,
+        embedder: &dyn Embedder,
+        images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+    ) -> NativeResult<()> {
+        let new_hashes: BTreeMap<i64, String> = inputs
+            .iter()
+            .map(|i| (i.note_id, self.hash_for(i, images)))
+            .collect();
+        let Some((to_embed, to_remove)) = self.reconcile_diff(&new_hashes) else {
+            return self
+                .rebuild(inputs, col_mod, model_id, embedder, images)
+                .await;
+        };
+        if to_embed.is_empty() && to_remove.is_empty() {
+            // A non-embedding edit bumped col.mod: advance the watermark only.
+            let mut shared = self.shared.lock().expect("orchestrator poisoned");
+            shared.col_mod = Some(col_mod);
+            drop(shared);
+            self.save()?;
+            return Ok(());
+        }
+        {
+            let mut shared = self.shared.lock().expect("orchestrator poisoned");
+            shared.state = OrchestratorState::Building;
+            shared.build_progress = (0, to_embed.len() as u64);
+        }
+        let result: NativeResult<()> = async {
+            if !to_remove.is_empty() {
+                self.remove(&to_remove)?;
+            }
+            let embed_set: std::collections::HashSet<i64> = to_embed.iter().copied().collect();
+            let changed: Vec<EmbedInput> = inputs
+                .into_iter()
+                .filter(|i| embed_set.contains(&i.note_id))
+                .collect();
+            self.add(&changed, embedder, images).await?;
+            {
+                let mut shared = self.shared.lock().expect("orchestrator poisoned");
+                shared.note_hashes = Some(new_hashes);
+                shared.col_mod = Some(col_mod);
+                shared.model_id = model_id;
+            }
+            self.calibrate_activation()?;
+            self.save()?;
+            Ok(())
+        }
+        .await;
+        let mut shared = self.shared.lock().expect("orchestrator poisoned");
+        match &result {
+            Ok(()) => shared.state = OrchestratorState::Ready,
+            Err(e) => {
+                shared.state = OrchestratorState::Error;
+                shared.error = Some(format!("{e:?}"));
+            }
+        }
+        result
+    }
+
+    /// Recompute the #201b activation stats from the engine's own sampling
+    /// (text-only collections get none — the gate stays off).
+    pub fn calibrate_activation(&self) -> NativeResult<()> {
+        let stats = self
+            .engine
+            .calibrate_activation(CALIB_SAMPLE, 1, CALIB_MIN)?;
+        let mut shared = self.shared.lock().expect("orchestrator poisoned");
+        shared.activation = Some(
+            stats
+                .into_iter()
+                .map(|(modality, n, mean, std)| {
+                    (
+                        modality,
+                        BTreeMap::from([
+                            ("n".to_owned(), n),
+                            ("mean".to_owned(), mean),
+                            ("std".to_owned(), std),
+                        ]),
+                    )
+                })
+                .collect(),
+        );
+        Ok(())
+    }
+
+    /// The status block (state, size, progress, stamps) for the harness.
+    pub fn status(&self) -> serde_json::Value {
+        let shared = self.shared.lock().expect("orchestrator poisoned");
+        let state = match shared.state {
+            OrchestratorState::Ready => "ready",
+            OrchestratorState::Building => "building",
+            OrchestratorState::Unavailable => "unavailable",
+            OrchestratorState::Error => "error",
+        };
+        serde_json::json!({
+            "state": state,
+            "size": self.engine.size(),
+            "ndim": self.engine.ndim(),
+            "col_mod": shared.col_mod,
+            "model_id": shared.model_id,
+            "progress": {"indexed": shared.build_progress.0, "total": shared.build_progress.1},
+            "error": shared.error,
+            "activation": shared.activation,
+        })
+    }
+}
+
+#[cfg(test)]
+mod op_tests {
+    use super::*;
+    use futures::executor::block_on;
+    use futures::future::BoxFuture;
+
+    /// Deterministic 4-dim unit vectors from a text hash (no model needed).
+    struct StubEmbedder;
+    impl Embedder for StubEmbedder {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            Box::pin(async move {
+                Ok(texts
+                    .iter()
+                    .map(|t| {
+                        let h = hash_text(t);
+                        let b = u8::from_str_radix(&h[..2], 16).unwrap() as f32 / 255.0;
+                        let n = (b * b + 1.0).sqrt();
+                        vec![b / n, 1.0 / n, 0.0, 0.0]
+                    })
+                    .collect())
+            })
+        }
+    }
+
+    fn temp_orch() -> Arc<IndexOrchestrator> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-orch-ops-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let engine = MultiModalIndex::new(vec![TEXT.to_owned(), "image".to_owned()]).unwrap();
+        Arc::new(IndexOrchestrator::open(dir, engine))
+    }
+
+    fn input(nid: i64, text: &str) -> EmbedInput {
+        EmbedInput {
+            note_id: nid,
+            text: text.to_owned(),
+            image_names: vec![],
+        }
+    }
+
+    #[test]
+    fn rebuild_then_incremental_add_and_remove() {
+        let orch = temp_orch();
+        block_on(orch.rebuild(
+            vec![input(1, "alpha"), input(2, "beta")],
+            10,
+            Some("m".into()),
+            &StubEmbedder,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(orch.state(), OrchestratorState::Ready);
+        assert_eq!(orch.engine().size(), 2);
+        assert_eq!(orch.col_mod(), Some(10));
+        assert!(!orch.check_drift(10, Some("m"), false));
+
+        block_on(orch.add(&[input(3, "gamma")], &StubEmbedder, None)).unwrap();
+        assert_eq!(orch.engine().size(), 3);
+        assert_eq!(orch.remove(&[1, 99]).unwrap(), 1); // 99 not present
+        assert_eq!(orch.engine().size(), 2);
+    }
+
+    #[test]
+    fn reconcile_matches_rebuild_end_state() {
+        // The invariant the per-note hashes exist for: an incremental
+        // reconcile lands on the identical state a full rebuild would.
+        let inputs_v1 = vec![input(1, "one"), input(2, "two"), input(3, "three")];
+        let inputs_v2 = vec![input(1, "one"), input(2, "two EDITED"), input(4, "four")];
+
+        let reconciled = temp_orch();
+        block_on(reconciled.rebuild(inputs_v1, 1, Some("m".into()), &StubEmbedder, None)).unwrap();
+        block_on(reconciled.reconcile(inputs_v2.clone(), 2, Some("m".into()), &StubEmbedder, None))
+            .unwrap();
+
+        let rebuilt = temp_orch();
+        block_on(rebuilt.rebuild(inputs_v2, 2, Some("m".into()), &StubEmbedder, None)).unwrap();
+
+        assert_eq!(reconciled.engine().size(), rebuilt.engine().size());
+        let mut a = reconciled.engine().keys();
+        let mut b = rebuilt.engine().keys();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b);
+        for key in a {
+            assert_eq!(reconciled.engine().get(key), rebuilt.engine().get(key));
+        }
+    }
+
+    #[test]
+    fn watermark_only_drift_advances_without_embedding() {
+        let orch = temp_orch();
+        let inputs = vec![input(1, "alpha")];
+        block_on(orch.rebuild(inputs.clone(), 1, Some("m".into()), &StubEmbedder, None)).unwrap();
+        // Same content, new col_mod (a tags/deck edit): no re-embed, stamp moves.
+        block_on(orch.reconcile(inputs, 2, Some("m".into()), &StubEmbedder, None)).unwrap();
+        assert_eq!(orch.col_mod(), Some(2));
+        assert_eq!(orch.engine().size(), 1);
+    }
+
+    #[test]
+    fn persistence_round_trips_without_drift() {
+        let orch = temp_orch();
+        block_on(orch.rebuild(
+            vec![input(1, "alpha"), input(2, "beta")],
+            7,
+            Some("m".into()),
+            &StubEmbedder,
+            None,
+        ))
+        .unwrap();
+        let dir = orch.dir.clone();
+        drop(orch);
+
+        let engine = MultiModalIndex::new(vec![TEXT.to_owned(), "image".to_owned()]).unwrap();
+        let reopened = IndexOrchestrator::open(dir, engine);
+        assert_eq!(reopened.engine().size(), 2);
+        assert_eq!(reopened.col_mod(), Some(7));
+        assert!(!reopened.check_drift(7, Some("m"), false));
+        // The hashes sidecar survived too: a same-content reconcile is a no-op.
+        let (to_embed, to_remove) = reopened
+            .reconcile_diff(&BTreeMap::from([
+                (1, hash_text("alpha")),
+                (2, hash_text("beta")),
+            ]))
+            .unwrap();
+        assert!(to_embed.is_empty() && to_remove.is_empty());
+    }
+
+    #[test]
+    fn materialize_empty_is_ready_and_stamped() {
+        let orch = temp_orch();
+        orch.materialize_empty(4, 3, Some("m"));
+        assert_eq!(orch.state(), OrchestratorState::Ready);
+        assert!(!orch.check_drift(3, Some("m"), false));
+        // Later notes index incrementally (the #148 behaviour).
+        block_on(orch.add(&[input(1, "late")], &StubEmbedder, None)).unwrap();
+        assert_eq!(orch.engine().size(), 1);
     }
 }

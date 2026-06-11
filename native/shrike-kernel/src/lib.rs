@@ -190,6 +190,16 @@ pub struct KernelHit {
     pub signals: Vec<(String, i64)>,
 }
 
+/// One note in a bulk upsert batch — the kernel's batch unit (every kernel op
+/// is batch-shaped; the single-note call is sugar over a batch of one).
+#[derive(Debug, Clone)]
+pub struct NoteSpec {
+    pub notetype_id: i64,
+    pub deck_id: i64,
+    pub fields: Vec<String>,
+    pub tags: Vec<String>,
+}
+
 /// The kernel: one open collection + the derived/vector stores + fusion,
 /// every op an async fn over the injected executor. No threads owned, no
 /// runtime assumed, no transport, no Python.
@@ -238,9 +248,9 @@ impl<E: Embedder> Kernel<E> {
             .await?
     }
 
-    /// Create a note (the #77 duplicate policy applies) and index it: the
-    /// embedding + vector add and the derived-text ingest happen *off* the
-    /// collection thread — compute never routes back through the queue.
+    /// Create one note — sugar over [`upsert_notes`] with a batch of one (the
+    /// batch op is the real implementation; per-item errors surface directly
+    /// here since the batch is a single item).
     pub async fn upsert_note(
         &self,
         notetype_id: i64,
@@ -249,44 +259,85 @@ impl<E: Embedder> Kernel<E> {
         tags: Vec<String>,
         policy: DuplicatePolicy,
     ) -> NativeResult<CreateOutcome> {
+        let spec = NoteSpec {
+            notetype_id,
+            deck_id,
+            fields,
+            tags,
+        };
+        let mut results = self.upsert_notes(vec![spec], policy).await?;
+        results.remove(0)
+    }
+
+    /// Create a batch of notes (the #77 duplicate policy applies per item) and
+    /// index them — batch-shaped end to end: ONE collection job runs every
+    /// create (per-item results, so one bad note never sinks the batch), ONE
+    /// read job renders embed text + derived rows for everything created, ONE
+    /// batched embed call produces all vectors, then one index add and a
+    /// per-note derived ingest. Compute (embedding, index, derived) happens
+    /// *off* the collection queue — it never routes back through it.
+    pub async fn upsert_notes(
+        &self,
+        notes: Vec<NoteSpec>,
+        policy: DuplicatePolicy,
+    ) -> NativeResult<Vec<NativeResult<CreateOutcome>>> {
         // `.instrument`, never an entered guard across an await: the span
         // follows the future across polls (and threads), and the future stays
         // Send — spawnable on any multithreaded runtime.
-        let span = tracing::debug_span!("kernel.upsert_note", notetype_id, deck_id);
+        let span = tracing::debug_span!("kernel.upsert_notes", batch = notes.len());
         async move {
-            // The collection write, then the compute fan-out — each transition
-            // an await, never a block: read embed text → embed → index add →
-            // derived ingest → watermark.
-            let outcome = self
+            // One serialized job for the whole batch of writes.
+            let outcomes: Vec<NativeResult<CreateOutcome>> = self
                 .collection
-                .run(move |core| core.create_note(notetype_id, deck_id, &fields, &tags, policy))
-                .await??;
-            if let CreateOutcome::Created(note_id) = outcome {
+                .run(move |core| {
+                    notes
+                        .iter()
+                        .map(|n| {
+                            core.create_note(n.notetype_id, n.deck_id, &n.fields, &n.tags, policy)
+                        })
+                        .collect()
+                })
+                .await?;
+            let created: Vec<i64> = outcomes
+                .iter()
+                .filter_map(|o| match o {
+                    Ok(CreateOutcome::Created(id)) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            if !created.is_empty() {
                 // The SAME normalized render + raw field rows the Python host
                 // uses (#278 step 2) — embedding text and derived rows come
-                // from the read surface, not an ad-hoc join.
-                let (text, refs) = self
+                // from the read surface, not an ad-hoc join. One job for the
+                // whole created set.
+                let ids = created.clone();
+                let (texts, rows) = self
                     .collection
-                    .run(
-                        move |core| -> NativeResult<(String, Vec<(String, String)>)> {
-                            let text = core.note_texts(&[note_id])?.remove(0);
-                            let refs = core
-                                .derived_field_rows(&[note_id])?
-                                .into_iter()
-                                .map(|(_, _, name, value)| (name, value))
-                                .collect();
-                            Ok((text, refs))
-                        },
-                    )
+                    .run(move |core| -> NativeResult<_> {
+                        let texts = core.note_texts(&ids)?;
+                        let rows = core.derived_field_rows(&ids)?;
+                        Ok((texts, rows))
+                    })
                     .await??;
-                let vectors = self.embedder.embed(vec![text]).await?;
-                self.index.remove(&[note_id])?;
-                self.index.add(TEXT, &[note_id], &vectors)?;
-                self.derived.ingest(note_id, FIELD_SOURCE, &refs)?;
+                // One embed call for the whole batch — the backend batches
+                // internally up to its proven-safe size.
+                let vectors = self.embedder.embed(texts).await?;
+                self.index.remove(&created)?;
+                self.index.add(TEXT, &created, &vectors)?;
+                // Group the derived rows per note (rows come back grouped by
+                // note already; ingest replaces per (note, source)).
+                let mut refs: BTreeMap<i64, Vec<(String, String)>> = BTreeMap::new();
+                for (nid, _source, name, value) in rows {
+                    refs.entry(nid).or_default().push((name, value));
+                }
+                for note_id in &created {
+                    let note_refs = refs.remove(note_id).unwrap_or_default();
+                    self.derived.ingest(*note_id, FIELD_SOURCE, &note_refs)?;
+                }
                 let col_mod = self.collection.run(|core| core.col_mod()).await??;
                 self.derived.set_col_mod(col_mod)?;
             }
-            Ok(outcome)
+            Ok(outcomes)
         }
         .instrument(span)
         .await
@@ -479,49 +530,55 @@ mod no_cpython_smoke {
         .unwrap();
 
         let basic = kernel.notetype_id("Basic").await.unwrap();
-        async fn make(
-            kernel: &Kernel<HashEmbedder>,
-            basic: i64,
-            front: &str,
-            back: &str,
-        ) -> CreateOutcome {
-            kernel
-                .upsert_note(
-                    basic,
-                    1,
-                    vec![front.to_string(), back.to_string()],
-                    vec!["smoke".to_string()],
-                    DuplicatePolicy::Error,
-                )
-                .await
-                .unwrap()
-        }
-        let CreateOutcome::Created(mito) = make(
-            &kernel,
-            basic,
-            "the mitochondria powerhouse",
-            "energy of the cell",
-        )
-        .await
+        let spec = |front: &str, back: &str| NoteSpec {
+            notetype_id: basic,
+            deck_id: 1,
+            fields: vec![front.to_string(), back.to_string()],
+            tags: vec!["smoke".to_string()],
+        };
+        // The single-note sugar (delegates to the batch op).
+        let CreateOutcome::Created(mito) = kernel
+            .upsert_note(
+                basic,
+                1,
+                vec![
+                    "the mitochondria powerhouse".into(),
+                    "energy of the cell".into(),
+                ],
+                vec!["smoke".to_string()],
+                DuplicatePolicy::Error,
+            )
+            .await
+            .unwrap()
         else {
             panic!("create failed")
         };
-        make(
-            &kernel,
-            basic,
-            "newton laws of motion",
-            "classical mechanics",
-        )
-        .await;
-        make(
-            &kernel,
-            basic,
-            "paris is the capital of france",
-            "geography",
-        )
-        .await;
 
-        // Duplicate policy is live end to end.
+        // The batch op proper: one call → one collection job for the creates,
+        // one read job, ONE batched embed. The middle item is a duplicate and
+        // a structural error rides per-item — neither sinks the batch.
+        let batch = kernel
+            .upsert_notes(
+                vec![
+                    spec("newton laws of motion", "classical mechanics"),
+                    spec("the mitochondria powerhouse", "dupe"),
+                    NoteSpec {
+                        fields: vec!["".into(), "empty first field".into()],
+                        ..spec("", "")
+                    },
+                    spec("paris is the capital of france", "geography"),
+                ],
+                DuplicatePolicy::Skip,
+            )
+            .await
+            .unwrap();
+        assert_eq!(batch.len(), 4);
+        assert!(matches!(batch[0], Ok(CreateOutcome::Created(_))));
+        assert_eq!(batch[1].as_ref().unwrap(), &CreateOutcome::SkippedDuplicate);
+        assert!(batch[2].is_err(), "structural error must ride per-item");
+        assert!(matches!(batch[3], Ok(CreateOutcome::Created(_))));
+
+        // Duplicate policy is live end to end through the single-note sugar.
         let dup = kernel
             .upsert_note(
                 basic,
