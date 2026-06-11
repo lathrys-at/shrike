@@ -23,8 +23,10 @@ import asyncio
 import logging
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
+import shrike_native
 from pydantic import Field
 
 from shrike.collection import (
@@ -218,10 +220,14 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         type (standard/cloze) but not full template HTML or CSS — use
         `note_type_details` to request full definitions for specific note
         types when you need to inspect or author templates."""
-        include_list: list[str] | None = [str(s) for s in include] if include else None
+        include_list: list[str] = [str(s) for s in include] if include else []
         logger.debug("collection_info sections=%s", ",".join(include_list or ["summary"]))
-        result = await wrapper.get_collection_info(include_list, note_type_details)
-        return CollectionInfo.model_validate(result)
+        # Re-homed (#331): the whole body runs in shrike_kernel::actions, on
+        # the collection worker (the same serialization every op rides).
+        raw = await wrapper.run(
+            lambda c: shrike_native.action_collection_info(c, include_list, note_type_details)
+        )
+        return CollectionInfo.model_validate_json(raw)
 
     @_action
     async def list_notes(
@@ -309,17 +315,28 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         ]
         logger.debug("list_notes %s limit=%d", " ".join(filters), limit)
 
-        result = await wrapper.list_notes(
-            ids=ids or None,
-            deck=deck,
-            tags=tags or None,
-            note_type=note_type,
-            modified_since=modified_since,
-            fields_mode=fields or "full",
-            limit=limit,
+        cutoff: int | None = None
+        if modified_since:
+            dt = datetime.fromisoformat(modified_since)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            cutoff = int(dt.timestamp())
+        # Re-homed (#331): the whole body runs in shrike_kernel::actions.
+        raw = await wrapper.run(
+            lambda c: shrike_native.action_list_notes(
+                c,
+                ids=ids or None,
+                deck=deck,
+                tags=tags or None,
+                note_type=note_type,
+                modified_since_epoch=cutoff,
+                with_fields=(fields or "full") == "full",
+                limit=limit,
+            )
         )
-        note_outcome(f"{len(result.get('notes', []))}/{result.get('total', 0)} notes")
-        return ListNotesResponse.model_validate(result)
+        result = ListNotesResponse.model_validate_json(raw)
+        note_outcome(f"{len(result.notes)}/{result.total} notes")
+        return result
 
     @_action
     async def collection_query(
@@ -361,13 +378,19 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         reported as an input error."""
         logger.debug("collection_query %r fields=%s limit=%d", query, fields, limit)
         try:
-            result = await wrapper.query(query, fields_mode=fields, limit=limit)
+            # Re-homed (#331): the whole body runs in shrike_kernel::actions.
+            raw = await wrapper.run(
+                lambda c: shrike_native.action_collection_query(
+                    c, query, with_fields=fields == "full", limit=limit
+                )
+            )
         except NoteTypeOpError as e:
             # The native input error (a malformed search expression); the
             # decoder already strips Anki's U+2068/U+2069 isolation marks.
             raise ToolInputError(str(e)) from e
-        note_outcome(f"{len(result['notes'])}/{result['total']} notes")
-        return ListNotesResponse.model_validate(result)
+        result = ListNotesResponse.model_validate_json(raw)
+        note_outcome(f"{len(result.notes)}/{result.total} notes")
+        return result
 
     @_action
     async def search_notes(

@@ -22,11 +22,13 @@ bundled-sqlite = ["shrike-derived/bundled"]
 # CollectionWrapper runs on the native core, so every shrike_native build
 # carries it (protoc required at build time; Bazel provides a hermetic one).
 # Still a named feature so a compute-only embed/index build remains possible.
-anki-core = ["dep:shrike-collection"]
+anki-core = ["dep:shrike-collection", "dep:shrike-kernel"]
 
 [dependencies]
 pyo3 = { workspace = true }
 shrike-collection = { path = "../shrike-collection", optional = true }
+shrike-kernel = { path = "../shrike-kernel", optional = true }
+serde_json = "1"
 shrike-compute = { path = "../shrike-compute" }
 shrike-derived = { path = "../shrike-derived", default-features = false }
 shrike-embed = { path = "../shrike-embed" }

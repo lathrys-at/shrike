@@ -19,7 +19,10 @@ rust_library(
         "//native/shrike-embed:shrike_embed",
         "//native/shrike-ffi:shrike_ffi",
         "//native/shrike-index:shrike_index",
+        "//native/shrike-schemas:shrike_schemas",
         "@crates//:futures",
+        "@crates//:serde",
+        "@crates//:serde_json",
         "@crates//:tracing",
     ],
 )

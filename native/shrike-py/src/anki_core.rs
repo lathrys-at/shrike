@@ -27,6 +27,14 @@ pub(crate) struct CollectionCore {
     inner: Core,
 }
 
+impl CollectionCore {
+    /// The wrapped core, for the per-action bindings (#331) that compose
+    /// kernel action bodies over the live handle.
+    pub(crate) fn core_ref(&self) -> &Core {
+        &self.inner
+    }
+}
+
 #[pymethods]
 impl CollectionCore {
     /// Open (creating if needed) the collection at `collection_path`.

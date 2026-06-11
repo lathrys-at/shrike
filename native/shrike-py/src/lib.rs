@@ -25,6 +25,8 @@ use shrike_ffi::{ErrorKind, NativeError};
 
 #[cfg(feature = "anki-core")]
 mod anki_core;
+#[cfg(feature = "anki-core")]
+mod kernel_actions;
 
 pyo3::create_exception!(
     _native,
@@ -620,6 +622,16 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // allowlist covers its absence from default builds.
     #[cfg(feature = "anki-core")]
     m.add_class::<anki_core::CollectionCore>()?;
+    #[cfg(feature = "anki-core")]
+    {
+        m.add_function(wrap_pyfunction!(kernel_actions::rehomed_actions, m)?)?;
+        m.add_function(wrap_pyfunction!(kernel_actions::action_collection_info, m)?)?;
+        m.add_function(wrap_pyfunction!(kernel_actions::action_list_notes, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            kernel_actions::action_collection_query,
+            m
+        )?)?;
+    }
     m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;
     m.add_function(wrap_pyfunction!(rrf_fuse, m)?)?;

@@ -29,6 +29,8 @@
 //! the Python harness rebased onto `shrike-py` kernel bindings, retiring the
 //! transitional Python schedulers from #275.
 
+pub mod actions;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
