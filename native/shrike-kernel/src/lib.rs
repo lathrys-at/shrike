@@ -78,6 +78,22 @@ impl Embedder for shrike_embed::TextEmbedder {
     }
 }
 
+/// Embedders share freely: an `Arc`'d embedder is an embedder (the binding
+/// hands one embedder to the kernel and keeps a handle for query embeds).
+impl<T: Embedder> Embedder for Arc<T> {
+    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+        (**self).embed(texts)
+    }
+
+    fn fingerprint(&self) -> Option<String> {
+        (**self).fingerprint()
+    }
+
+    fn dim(&self) -> Option<usize> {
+        (**self).dim()
+    }
+}
+
 /// The scheduling contract the harness injects (#308). The kernel never
 /// spawns threads or assumes a runtime; whoever assembles a kernel supplies
 /// this, exactly as it plugs transports.
@@ -197,6 +213,12 @@ impl SerializedCollection {
     pub async fn close(&self) -> NativeResult<()> {
         self.run(|core| core.close()).await?
     }
+
+    /// The shared core, for a harness that runs its own (executor-disciplined)
+    /// direct ops over the same collection the kernel owns.
+    pub fn core_arc(&self) -> Arc<CollectionCore> {
+        Arc::clone(&self.core)
+    }
 }
 
 /// One fused search hit: note id, fused score, per-signal 1-based ranks.
@@ -281,6 +303,12 @@ impl<E: Embedder> Kernel<E> {
     /// The orchestrator (state, status, drift) — the harness's status surface.
     pub fn index(&self) -> &index_orchestrator::IndexOrchestrator {
         &self.orchestrator
+    }
+
+    /// The serialized collection — the harness's seam for sharing the core
+    /// (its direct ops must honor the same executor discipline).
+    pub fn collection(&self) -> &SerializedCollection {
+        &self.collection
     }
 
     /// Bring the index in line with the collection if anything drifted while

@@ -194,6 +194,11 @@ impl IndexOrchestrator {
         &self.engine
     }
 
+    /// The shared engine, for a harness search handle over the same vectors.
+    pub fn engine_arc(&self) -> Arc<MultiModalIndex> {
+        Arc::clone(&self.engine)
+    }
+
     /// The drift policy (mirrors `VectorIndex.check_drift`): nothing loaded /
     /// no stamp / model change / a v1 layout under an image-capable backend →
     /// rebuild; a bare `col_mod` move → reconcile; otherwise current.

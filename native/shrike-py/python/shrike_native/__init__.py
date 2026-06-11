@@ -52,6 +52,8 @@ with contextlib.suppress(ImportError):
     from shrike_native._native import action_list_notes  # noqa: F401
     from shrike_native._native import action_search_notes  # noqa: F401
     from shrike_native._native import AsyncCollection  # noqa: F401
+    from shrike_native._native import AsyncKernel  # noqa: F401
+    from shrike_native._native import async_kernel_open  # noqa: F401
     from shrike_native._native import async_collection_open  # noqa: F401
     from shrike_native._native import decode_media_b64  # noqa: F401
     from shrike_native._native import fetch_media_url  # noqa: F401

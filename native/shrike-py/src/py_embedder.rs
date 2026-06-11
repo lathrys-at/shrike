@@ -77,12 +77,24 @@ impl EmbedDone {
 }
 
 /// The kernel-facing handle: a Python backend + the loop that hosts its calls.
+/// Fingerprint/dim are captured once at assembly (cheap Python attribute
+/// reads) so the kernel's drift rules never call into Python mid-op.
 pub(crate) struct PyEmbedderHandle {
     backend: Py<PyAny>,
     event_loop: Py<PyAny>,
+    fingerprint: Option<String>,
+    dim: Option<usize>,
 }
 
 impl Embedder for PyEmbedderHandle {
+    fn fingerprint(&self) -> Option<String> {
+        self.fingerprint.clone()
+    }
+
+    fn dim(&self) -> Option<usize> {
+        self.dim
+    }
+
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, VecResult> {
         let (tx, rx) = oneshot::channel::<VecResult>();
         let tx = Arc::new(Mutex::new(Some(tx)));
@@ -126,10 +138,23 @@ impl PyEmbedder {
     fn capture(py: Python<'_>, backend: Py<PyAny>) -> PyResult<Self> {
         let asyncio = py.import("asyncio")?;
         let event_loop = asyncio.call_method0("get_running_loop")?;
+        // Optional metadata for the kernel's drift rules, read once here (the
+        // EmbedderBackend protocol's model_fingerprint()/embedding_dim).
+        let bound = backend.bind(py);
+        let fingerprint = bound
+            .call_method0("model_fingerprint")
+            .ok()
+            .and_then(|v| v.extract::<String>().ok());
+        let dim = bound
+            .call_method0("embedding_dim")
+            .ok()
+            .and_then(|v| v.extract::<usize>().ok());
         Ok(Self {
             handle: Arc::new(PyEmbedderHandle {
                 backend,
                 event_loop: event_loop.unbind(),
+                fingerprint,
+                dim,
             }),
         })
     }

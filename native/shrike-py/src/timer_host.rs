@@ -110,6 +110,16 @@ impl LoopTimerHost {
 }
 
 impl LoopTimerHost {
+    /// Capture the running loop from Rust (the non-pymethod twin of
+    /// `capture`, for bindings that assemble a host internally).
+    pub(crate) fn capture_host(py: Python<'_>) -> PyResult<Self> {
+        let asyncio = py.import("asyncio")?;
+        let event_loop = asyncio.call_method0("get_running_loop")?;
+        Ok(Self {
+            event_loop: event_loop.unbind(),
+        })
+    }
+
     /// A non-pyclass twin over the same loop — for handing an owned
     /// `Arc<dyn TimerHost>` to kernel constructors (a pyclass instance
     /// itself lives behind `Py<...>` and can't be `Arc`'d directly).

@@ -24,7 +24,9 @@ type FieldMapRow = (i64, Vec<String>, Vec<String>);
 /// lifecycle; `close()` is explicit, like the facade it will eventually back).
 #[pyclass(frozen)]
 pub(crate) struct CollectionCore {
-    inner: Core,
+    /// `Arc`-shared since #332 (S3d): the kernel and the harness's direct ops
+    /// hold ONE open collection (serialization is the executor's discipline).
+    inner: std::sync::Arc<Core>,
 }
 
 impl CollectionCore {
@@ -32,6 +34,11 @@ impl CollectionCore {
     /// kernel action bodies over the live handle.
     pub(crate) fn core_ref(&self) -> &Core {
         &self.inner
+    }
+
+    /// A harness handle over an existing (kernel-owned) core.
+    pub(crate) fn from_arc(inner: std::sync::Arc<Core>) -> Self {
+        Self { inner }
     }
 }
 
@@ -43,7 +50,9 @@ impl CollectionCore {
         let inner = py
             .detach(move || Core::open(&collection_path))
             .map_err(to_py_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: std::sync::Arc::new(inner),
+        })
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
