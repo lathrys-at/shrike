@@ -257,6 +257,7 @@ def _register_custom_routes(
     """
     wrapper = kernel.wrapper
     saver = kernel.saver
+    from starlette.background import BackgroundTask
     from starlette.requests import Request
     from starlette.responses import FileResponse, JSONResponse, Response
 
@@ -428,14 +429,17 @@ def _register_custom_routes(
         logger.info("Shutdown complete")
 
         async def _exit_after_response() -> None:
-            # Long enough for the response (and its access-log line) to flush
-            # to the client even on a loaded machine — 0.1s raced under the
-            # Bazel sandbox (the client saw a dropped connection, not the 200).
-            await asyncio.sleep(0.5)
+            # Runs as the response's BackgroundTask — i.e. only AFTER the body
+            # has been sent (a sleep-timer grace raced the process exit under a
+            # saturated CI runner: the client saw a connection reset, not the
+            # 200). The brief sleep lets the OS-level write drain before exit.
+            await asyncio.sleep(0.1)
             os._exit(0)
 
-        asyncio.create_task(_exit_after_response())
-        return JSONResponse({"status": "ok", "pid": os.getpid()})
+        return JSONResponse(
+            {"status": "ok", "pid": os.getpid()},
+            background=BackgroundTask(_exit_after_response),
+        )
 
 
 def main() -> None:
