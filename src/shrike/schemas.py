@@ -961,6 +961,19 @@ class DerivedStatus(BaseModel):
     col_mod: int | None = None
 
 
+class RecognitionStatus(BaseModel):
+    """The recognition (OCR/ASR) service's self-report (#228/#221).
+
+    A flat shape like ``DerivedStatus``: ``state`` is ``unavailable`` (no backend
+    configured), ``ready`` (attached, sweeping/idle), or ``error`` (the backend's
+    dependency is missing or a sweep failed). ``backend`` is the kind (``apple``)
+    when one is attached. Defaulted so older payloads validate.
+    """
+
+    state: Literal["unavailable", "ready", "error"] = "unavailable"
+    backend: str | None = None
+
+
 class DedupStats(BaseModel):
     """Rolling dedup best-match statistics (#207): one sample per upsert draft
     note — the best SEMANTIC neighbor cosine, or a `no_match` tick when none
@@ -1008,6 +1021,8 @@ class ServerStatus(BaseModel):
     # Dedup best-match statistics (#207) — None until the first upsert with
     # neighbors runs (and on payloads from older servers).
     dedup: DedupStats | None = None
+    # Recognition (OCR/ASR) state (#228) — defaulted so older payloads validate.
+    recognition: RecognitionStatus = RecognitionStatus()
 
 
 # -- custom-endpoint responses (discriminated on `status`) -------------------

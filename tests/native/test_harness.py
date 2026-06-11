@@ -58,6 +58,8 @@ class TestHarness:
             assert status["embedding"]["state"] == "not_configured"
             assert status["index"]["state"] == "unavailable"
             assert status["locking"] == "permanent"
+            # Recognition is off until a backend is configured (#228).
+            assert status["recognition"] == {"state": "unavailable", "backend": None}
 
             # Index verbs degrade correctly without a backend.
             with pytest.raises(KernelConfigError):
@@ -195,6 +197,34 @@ class TestRecognition:
             await harness.boot(start_embedding=False)
             with pytest.raises(KernelConfigError):
                 harness.attach_recognizer(_StubOcr())
+            await harness.close()
+
+        asyncio.run(flow())
+
+    def test_start_recognition_unknown_backend_degrades_to_error(self, tmp_path) -> None:
+        # The runtime surface: an unknown/unavailable backend marks the
+        # recognition state 'error' without disturbing the rest of boot.
+        async def flow():
+            media = {"x.png": b"text"}
+            runtime = EmbeddingRuntime(model=None)
+            derived = DerivedTextStore(
+                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
+            )
+            harness = await Harness.assemble(
+                collection_path=str(tmp_path / "collection.anki2"),
+                cache_dir=str(tmp_path / "cache"),
+                runtime=runtime,
+                derived=derived,
+                cooperative=False,
+                hold_seconds=5.0,
+                media_read=media.get,
+                media_exists=lambda name: name in media,
+            )
+            await harness.boot(start_embedding=False)
+
+            harness.start_recognition("nope")
+            status = await harness.status()
+            assert status["recognition"]["state"] == "error"
             await harness.close()
 
         asyncio.run(flow())

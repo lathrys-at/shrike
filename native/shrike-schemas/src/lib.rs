@@ -901,6 +901,23 @@ pub enum LockingMode {
     Cooperative,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecognitionState {
+    #[default]
+    Unavailable,
+    Ready,
+    Error,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct RecognitionStatus {
+    #[serde(default)]
+    pub state: RecognitionState,
+    #[serde(default)]
+    pub backend: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct DedupStats {
     #[serde(default)]
@@ -936,6 +953,9 @@ pub struct ServerStatus {
     /// neighbors runs.
     #[serde(default)]
     pub dedup: Option<DedupStats>,
+    /// Recognition (OCR/ASR) state (#228).
+    #[serde(default)]
+    pub recognition: RecognitionStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1107,6 +1127,7 @@ catalog![
     ("IndexProgress", IndexProgress),
     ("IndexStatus", IndexStatus),
     ("DedupStats", DedupStats),
+    ("RecognitionStatus", RecognitionStatus),
     ("DerivedStatus", DerivedStatus),
     ("ServerStatus", ServerStatus),
     ("IndexRebuildResponse", IndexRebuildResponse),

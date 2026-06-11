@@ -55,6 +55,7 @@ src/shrike/                       # Python package (src layout) — the harness 
 ├── paths.py                      # Platform-canonical directories (via platformdirs)
 ├── log.py                        # Logging config, log parsing and styling
 ├── embedding.py                  # EmbedderBackend facades + EmbeddingRuntime (backend lifecycle)
+├── recognition.py                # RecognizerBackend protocol + AppleVisionBackend (#228 OCR; `vision` extra)
 ├── index.py                      # VectorIndex/IndexSaver — STANDALONE/TEST contexts only since the
 │                                 #   harness rebase (#353); the server's index lives in the kernel (#355)
 ├── derived.py                    # DerivedTextStore — FTS5 facade (read paths; kernel ingests in server mode)
@@ -396,6 +397,37 @@ The embedding service can be cycled independently of the Shrike server. `Embeddi
 - **Generic arg passthrough:** `--embedding-arg` (repeatable; config `embedding.extra_args` as a list; `SHRIKE_EMBEDDING_ARGS` as one shlex string) appends raw tokens to the llama-server command for the long tail of **runtime-only** flags (`--flash-attn`, `--ubatch-size`, gpu split, …). Each entry is `shlex`-split at command-build time and appended last. Two guardrails: (1) Shrike-owned flags (`--model`/`-m`/`--host`/`--port`/`--embeddings`/`--embedding`, plus their value token) are stripped with a warning — `--host` especially, since llama-server is pinned to loopback (audit §1.1); (2) the effective passthrough is folded into `model_id`, so **any** change forces a rebuild (conservative — Shrike can't tell a vector-affecting flag from a perf-only one in an opaque bag). **Vector-affecting flags must be typed settings** (like `--embedding-pooling`), not buried here. Normalization is *not* such a setting: USearch's `cos` metric is scale-invariant (verified in `index.py`), so `--embd-normalize` is moot.
 - Starting llama-server blocks (model load + health wait), so the HTTP handler runs it via `asyncio.to_thread` to keep the event loop responsive.
 - **Orphan reaping:** `EmbeddingService` records the llama-server PID in `<state-dir>/embedding.pid` (written after spawn, removed on clean stop). If Shrike is hard-killed (SIGKILL, incl. the daemon's own force-kill path), llama-server is orphaned and keeps holding its port. On the next `start()`, `_reap_orphan` detects a recorded PID that is still alive *and* holding the port and terminates it (SIGTERM→SIGKILL) before binding. `PR_SET_PDEATHSIG` is intentionally avoided: the parent-death signal keys on the spawning *thread*, and start runs under `asyncio.to_thread`, so a reclaimed pool thread could kill a live server.
+
+### Recognition (OCR) — #228
+
+**Recognition is the kernel's second injected capability** (the #342 slot pattern,
+sibling of the embed slot): an OCR engine the harness attaches at assembly turns
+note media into searchable text. Off by default; `--ocr-backend apple` (config
+`recognition.ocr`, env `SHRIKE_OCR_BACKEND`) selects macOS Vision via the
+`shrike[vision]` extra (pyobjc; no model download — Vision ships with the OS). A
+missing dependency degrades the recognition state to `error` without disturbing
+boot. The Python contract is `RecognizerBackend` (`recognition.py`): a *blocking*
+`recognize(items: list[bytes]) -> list[tuple[str, float, str]]` — (text,
+confidence, segments-JSON) — plus `model_fingerprint()`; `PyRecognizer.capture`
+bridges it to the kernel with the PyEmbedder dispatch shape (loop → thread pool →
+oneshot, never the collection executor).
+
+**One pass, many consumers** (the epic's load-bearing rule): the kernel's
+`recognize_pending(max_items)` sweeps bounded batches of pending (note, image)
+pairs — pending = a resolvable image with no OCR row, or everything after the
+recognizer *fingerprint* changes (an OS upgrade re-derives, like a model change
+rebuilds vectors) — and persists BOTH the flattened text (derived rows,
+`source='ocr'` → substring/fuzzy search + provenance light up through the
+existing seam) and the per-segment structure (the `segments` table; boxes today,
+#230 occlusion's input). Gating (#199, `RecognitionGate` kernel-side): confidence
++ substance to store at all, a higher substance bar to mint a vector. Gated text
+embeds via the TEXT encoder as extra vectors under the note key in the `text`
+space (no modality gap; max-over-items ranking falls out), and the per-note
+fingerprint folds the OCR text — byte-identical with none, so upgrades never
+spuriously rebuild. The derived store's drift rebuild is **field-source-scoped**
+(schema v2): a boot drift never discards recognition rows. The harness drives
+sweeps in the background (`recognition_sweep`, one batch per executor occupancy);
+`/status` carries `recognition: {state, backend}`.
 
 ### Vector index and consistency
 

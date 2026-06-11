@@ -12,6 +12,7 @@ only genuinely blocking work — a model load — hops to a thread).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -197,6 +198,11 @@ class Harness:
         self._media_exists = media_exists
         self.index_view = KernelIndexView(kernel, runtime)
         self.dedup_stats = DedupStatsRecorder()
+        # Recognition (#228/#221): the attached OCR/ASR backend kind + state,
+        # and the background sweep task. None until start_recognition runs.
+        self._recognition_kind: str | None = None
+        self._recognition_state: str = "unavailable"
+        self._recognition_task: asyncio.Task[Any] | None = None
 
     @classmethod
     async def assemble(
@@ -311,6 +317,10 @@ class Harness:
         }
         if (dedup := self.dedup_stats.snapshot()) is not None:
             status["dedup"] = dedup
+        status["recognition"] = {
+            "state": self._recognition_state,
+            "backend": self._recognition_kind,
+        }
         return status
 
     def _index_status(self) -> dict[str, Any]:
@@ -440,6 +450,45 @@ class Harness:
             if max_batches is not None and batches >= max_batches:
                 report["total_stored"] = total_stored
                 return report
+
+    def start_recognition(self, kind: str) -> None:
+        """Construct + attach an OCR/ASR backend by kind (#221) and launch a
+        background sweep. Degrades to 'error' state on a missing dependency
+        (the extra isn't installed) or an unknown kind — never kills boot."""
+        from shrike.recognition import make_recognizer
+
+        try:
+            backend = make_recognizer(kind)
+            self.attach_recognizer(backend)
+        except (ImportError, ValueError, KernelConfigError) as e:
+            logger.error("Recognition backend %r unavailable: %s", kind, e)
+            self._recognition_state = "error"
+            return
+        self._recognition_kind = kind
+        self._recognition_state = "ready"
+        logger.info("Recognition backend attached: %s", kind)
+        self._recognition_task = asyncio.ensure_future(self._drive_recognition())
+
+    async def _drive_recognition(self) -> None:
+        """Background recognition: sweep to completion, off the request path.
+        A failure marks the state without disturbing the rest of the server."""
+        try:
+            await self.recognition_sweep()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Recognition sweep failed", exc_info=True)
+            self._recognition_state = "error"
+
+    def stop_recognition(self) -> None:
+        """Detach the recognizer and cancel any running sweep."""
+        if self._recognition_task is not None and not self._recognition_task.done():
+            self._recognition_task.cancel()
+        self._recognition_task = None
+        with contextlib.suppress(Exception):
+            self.detach_recognizer()
+        self._recognition_kind = None
+        self._recognition_state = "unavailable"
 
     async def _drive_boot_reindex(self) -> None:
         if await self.kernel.reindex_if_needed():

@@ -640,6 +640,14 @@ def main() -> None:
         help="Don't start the embedding service at boot even if a model is configured "
         "(start it later with 'shrike embedding start')",
     )
+    parser.add_argument(
+        "--ocr-backend",
+        default=None,
+        choices=["apple"],
+        help="OCR backend for recognizing text in note media (#228). Off by default; "
+        "'apple' uses macOS Vision (requires the 'vision' extra). Recognized text "
+        "feeds lexical search and the vector index in the background.",
+    )
     args = parser.parse_args()
 
     log_dir = configure_logging(
@@ -841,6 +849,12 @@ def main() -> None:
             media_exists=_img_exists,
         )
         await harness.boot(start_embedding=bool(args.embedding_model) and not args.no_embedding)
+
+        # Recognition (#228/#221): attach the OCR backend and sweep in the
+        # background. Off unless --ocr-backend is set; a missing extra degrades
+        # to an 'error' state without disturbing the rest of the server.
+        if args.ocr_backend:
+            harness.start_recognition(args.ocr_backend)
 
         # These handlers cover the boot window AND the post-drain replay:
         # uvicorn's serve() installs its own SIGTERM/SIGINT handlers (drain

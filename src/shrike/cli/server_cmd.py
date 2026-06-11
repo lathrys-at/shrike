@@ -18,6 +18,7 @@ from shrike.cli.config import (
     resolve_embedding,
     resolve_index_save,
     resolve_locking,
+    resolve_recognition,
     resolve_transport,
     save_config,
     transport_args,
@@ -114,6 +115,13 @@ def _render_status(status: ServerStatus) -> None:
         output.kv("Derived text", "[dim]unavailable[/dim]")
     if der.fts5 and der.col_mod is not None:
         output.kv("Collection mod", str(der.col_mod), indent=2)
+
+    # Recognition (#228): OCR/ASR over note media. Shown only when configured.
+    rec = status.recognition
+    if rec.state == "ready":
+        output.kv("Recognition", f"[green]ready[/green] ([cyan]{rec.backend}[/cyan])")
+    elif rec.state == "error":
+        output.kv("Recognition", "[red]error[/red]")
 
 
 def _wait_for_server(
@@ -275,6 +283,14 @@ def server() -> None:
     "(start it later with 'shrike embedding start').",
 )
 @click.option(
+    "--ocr-backend",
+    type=click.Choice(["apple"]),
+    default=None,
+    help="OCR backend for recognizing text in note media (#228). Off by default; "
+    "'apple' uses macOS Vision (needs the 'vision' extra). Recognized text feeds "
+    "lexical search and the vector index in the background.",
+)
+@click.option(
     "--save-config",
     "save_config_flag",
     is_flag=True,
@@ -312,6 +328,7 @@ def server_start(
     embedding_onnx_provider: tuple[str, ...],
     embedding_batch_size: int | None,
     no_embedding: bool,
+    ocr_backend: str | None,
     save_config_flag: bool,
 ) -> None:
     """Start the Shrike MCP server as a background daemon.
@@ -365,6 +382,10 @@ def server_start(
         batch_size=embedding_batch_size,
     )
     embedding_cli_args = embedding_args(resolved_embedding, no_embedding=no_embedding)
+    resolved_recognition = resolve_recognition(config, ocr_backend=ocr_backend)
+    recognition_cli_args = (
+        ["--ocr-backend", resolved_recognition["ocr"]] if resolved_recognition["ocr"] else []
+    )
     remote_args = ["--allow-remote"] if allow_remote else []
 
     # Resolve transport-security additions (config → env → flags) for the spawned
@@ -462,6 +483,7 @@ def server_start(
             *index_save_args,
             *locking_cli_args,
             *embedding_cli_args,
+            *recognition_cli_args,
         ]
         from shrike.server import main
 
@@ -498,6 +520,7 @@ def server_start(
                 *index_save_args,
                 *locking_cli_args,
                 *embedding_cli_args,
+                *recognition_cli_args,
             ],
             stdout=bootstrap_log_file,
             stderr=bootstrap_log_file,

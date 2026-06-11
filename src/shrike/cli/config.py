@@ -268,6 +268,20 @@ def resolve_embedding(
     return resolved
 
 
+def resolve_recognition(
+    config: dict[str, Any], *, ocr_backend: str | None = None
+) -> dict[str, Any]:
+    """Resolve recognition (OCR/ASR) parameters via the flag → env → config
+    cascade (#221/#223), mirroring ``resolve_embedding``.
+
+    ``None`` for ``ocr_backend`` means recognition is off — today's behaviour
+    byte-for-byte. Env var: ``SHRIKE_OCR_BACKEND``. Config: ``recognition.ocr``.
+    """
+    rec = config.get("recognition", {})
+    backend = ocr_backend or os.environ.get("SHRIKE_OCR_BACKEND") or rec.get("ocr")
+    return {"ocr": backend or None}
+
+
 def resolve_cache_dir(config: dict[str, Any], cache_dir_override: str | None = None) -> str | None:
     """Vector-index cache directory via flag → env → config.
 
