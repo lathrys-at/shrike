@@ -51,6 +51,41 @@ impl DuplicatePolicy {
     }
 }
 
+/// Sync auth (#39): the hkey + endpoint pair `sync_login` returns and every
+/// sync op consumes. Plain types — anki_proto stays inside the adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncAuthInfo {
+    pub hkey: String,
+    pub endpoint: Option<String>,
+}
+
+/// `sync_status`'s answer: would a sync change anything, and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncCheck {
+    /// `no_changes` | `normal_sync` | `full_sync`.
+    pub required: String,
+    pub new_endpoint: Option<String>,
+}
+
+/// `sync_collection`'s outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncOutcome {
+    /// `no_changes` | `normal_sync` | `full_sync` | `full_download` | `full_upload`.
+    pub required: String,
+    pub server_message: String,
+    pub new_endpoint: Option<String>,
+    pub server_media_usn: i32,
+}
+
+/// `media_sync_status`'s snapshot (progress strings are anki's own wording).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSyncState {
+    pub active: bool,
+    pub checked: Option<String>,
+    pub added: Option<String>,
+    pub removed: Option<String>,
+}
+
 /// The per-note outcome of `create_note` (the upsert result union's spine).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateOutcome {
@@ -259,6 +294,109 @@ impl CollectionCore {
         self.adapter.remove_notes(note_ids)
     }
 
+    // ── sync (#39): proto-free pass-throughs over the adapter ────────────────
+
+    /// Exchange username/password for the sync auth key (the password never
+    /// persists past this call). `endpoint` selects a self-hosted server.
+    pub fn sync_login(
+        &self,
+        username: &str,
+        password: &str,
+        endpoint: Option<&str>,
+    ) -> NativeResult<SyncAuthInfo> {
+        let (hkey, endpoint) = self.adapter.sync_login(username, password, endpoint)?;
+        Ok(SyncAuthInfo { hkey, endpoint })
+    }
+
+    /// Cheap "would a sync change anything?" probe.
+    pub fn sync_status(&self, auth: &SyncAuthInfo) -> NativeResult<SyncCheck> {
+        let (required, new_endpoint) = self
+            .adapter
+            .sync_status(&auth.hkey, auth.endpoint.as_deref())?;
+        Ok(SyncCheck {
+            required: match required {
+                1 => "normal_sync",
+                2 => "full_sync",
+                _ => "no_changes",
+            }
+            .to_string(),
+            new_endpoint,
+        })
+    }
+
+    /// The normal (incremental) collection sync. Blocks for the network
+    /// round-trips; `required` in the outcome says whether a full
+    /// upload/download must follow (the caller orchestrates that — it needs
+    /// the collection closed).
+    pub fn sync_collection(&self, auth: &SyncAuthInfo) -> NativeResult<SyncOutcome> {
+        let (required, server_message, new_endpoint, server_media_usn) = self
+            .adapter
+            .sync_collection(&auth.hkey, auth.endpoint.as_deref(), false)?;
+        Ok(SyncOutcome {
+            required: match required {
+                1 => "normal_sync",
+                2 => "full_sync",
+                3 => "full_download",
+                4 => "full_upload",
+                _ => "no_changes",
+            }
+            .to_string(),
+            server_message,
+            new_endpoint,
+            server_media_usn,
+        })
+    }
+
+    /// Full upload or download — the collection must be CLOSED (released)
+    /// first; the caller reopens + re-checks index drift after.
+    pub fn full_upload_or_download(
+        &self,
+        auth: &SyncAuthInfo,
+        upload: bool,
+        server_usn: Option<i32>,
+    ) -> NativeResult<()> {
+        self.adapter.full_upload_or_download(
+            &auth.hkey,
+            auth.endpoint.as_deref(),
+            upload,
+            server_usn,
+        )
+    }
+
+    /// Kick off media sync in anki's own background; poll `media_sync_status`.
+    pub fn sync_media(&self, auth: &SyncAuthInfo) -> NativeResult<()> {
+        self.adapter
+            .sync_media(&auth.hkey, auth.endpoint.as_deref())
+    }
+
+    pub fn media_sync_status(&self) -> NativeResult<MediaSyncState> {
+        let (active, progress) = self.adapter.media_sync_status()?;
+        let (checked, added, removed) = match progress {
+            Some((c, a, r)) => (Some(c), Some(a), Some(r)),
+            None => (None, None, None),
+        };
+        Ok(MediaSyncState {
+            active,
+            checked,
+            added,
+            removed,
+        })
+    }
+
+    pub fn abort_sync(&self) -> NativeResult<()> {
+        self.adapter.abort_sync()
+    }
+
+    pub fn abort_media_sync(&self) -> NativeResult<()> {
+        self.adapter.abort_media_sync()
+    }
+
+    /// Trust a custom certificate (PEM) for a self-hosted server (#34); an
+    /// empty string clears it. Returns whether the backend accepted it.
+    pub fn set_custom_certificate(&self, cert_pem: &str) -> NativeResult<bool> {
+        self.adapter.set_custom_certificate(cert_pem)
+    }
+
     /// The card ids generated by one note (lowest-ordinal first is not
     /// guaranteed; callers needing deck-of-note order sort upstream).
     pub fn cards_of_note(&self, note_id: i64) -> NativeResult<Vec<i64>> {
@@ -300,6 +438,42 @@ mod tests {
     }
 
     const DEFAULT_DECK: i64 = 1;
+
+    #[test]
+    fn sync_service_index_tripwires() {
+        // The (service=1, method) pins for the sync surface (#39): the LOCAL
+        // methods round-trip against a temp collection; the networked probe
+        // dials a closed local port — a CONNECTION error proves the request
+        // decoded into the right method (an index shuffle would surface as a
+        // decode/panic failure instead). AnkiWeb is never contacted.
+        let (core, dir) = temp_core();
+
+        // media_sync_status: idle on a fresh collection.
+        let status = core.media_sync_status().unwrap();
+        assert!(!status.active);
+
+        // Aborts are no-ops when nothing runs.
+        core.abort_sync().unwrap();
+        core.abort_media_sync().unwrap();
+
+        // set_custom_certificate: the call round-trips (a bool comes back —
+        // the index pin); garbage PEM is rejected.
+        let _ = core.set_custom_certificate("").unwrap();
+        assert!(!core.set_custom_certificate("not a pem").unwrap());
+
+        // sync_status derives the answer from LOCAL sync state (no server
+        // contact on this path): a fresh collection needs a full sync — a
+        // domain-correct answer proves the (service, method) pin.
+        let auth = SyncAuthInfo {
+            hkey: "k".to_string(),
+            endpoint: Some("http://127.0.0.1:1/".to_string()),
+        };
+        let check = core.sync_status(&auth).unwrap();
+        assert_eq!(check.required, "full_sync");
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn open_create_search_read_update_delete_round_trip() {

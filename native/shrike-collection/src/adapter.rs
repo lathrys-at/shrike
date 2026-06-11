@@ -18,6 +18,7 @@ use prost::Message;
 use shrike_ffi::{NativeError, NativeResult};
 
 // ── service indices (Backend dispatcher, tag 25.09.4) ───────────────────────
+const SVC_SYNC: u32 = 1;
 const SVC_COLLECTION: u32 = 3;
 const SVC_CARDS: u32 = 5;
 const SVC_DECKS: u32 = 7;
@@ -29,6 +30,16 @@ const SVC_MEDIA: u32 = 39;
 const SVC_TAGS: u32 = 43;
 
 // ── method indices ───────────────────────────────────────────────────────────
+const SYNC_MEDIA: u32 = 0;
+const SYNC_ABORT_MEDIA: u32 = 1;
+const SYNC_MEDIA_STATUS: u32 = 2;
+const SYNC_LOGIN: u32 = 3;
+const SYNC_STATUS: u32 = 4;
+const SYNC_COLLECTION: u32 = 5;
+const SYNC_FULL_UPLOAD_OR_DOWNLOAD: u32 = 6;
+const SYNC_ABORT: u32 = 7;
+const SYNC_SET_CUSTOM_CERTIFICATE: u32 = 8;
+
 const COLLECTION_OPEN: u32 = 0;
 const COLLECTION_CLOSE: u32 = 1;
 
@@ -161,6 +172,132 @@ impl ServiceAdapter {
             .map_err(|err_bytes| decode_backend_error(&err_bytes))?;
         Resp::decode(out.as_slice())
             .map_err(|e| NativeError::internal(format!("decode response: {e}")))
+    }
+
+    // ── sync (#39: backend service 1 — AnkiWeb / self-hosted) ─────────────────
+
+    fn sync_auth(hkey: &str, endpoint: Option<&str>) -> anki_proto::sync::SyncAuth {
+        anki_proto::sync::SyncAuth {
+            hkey: hkey.to_string(),
+            endpoint: endpoint.map(str::to_string),
+            io_timeout_secs: None,
+        }
+    }
+
+    /// Exchange username/password for the sync auth key. `endpoint` selects a
+    /// self-hosted server (None = AnkiWeb). The password transits this one
+    /// call and is never stored here. Returns `(hkey, endpoint)`.
+    pub fn sync_login(
+        &self,
+        username: &str,
+        password: &str,
+        endpoint: Option<&str>,
+    ) -> NativeResult<(String, Option<String>)> {
+        let req = anki_proto::sync::SyncLoginRequest {
+            username: username.to_string(),
+            password: password.to_string(),
+            endpoint: endpoint.map(str::to_string),
+        };
+        let auth: anki_proto::sync::SyncAuth = self.call(SVC_SYNC, SYNC_LOGIN, &req)?;
+        Ok((auth.hkey, auth.endpoint))
+    }
+
+    /// Cheap "would a sync change anything?" probe. Returns the raw
+    /// `required` discriminant + the server's new endpoint, if any.
+    pub fn sync_status(
+        &self,
+        hkey: &str,
+        endpoint: Option<&str>,
+    ) -> NativeResult<(i32, Option<String>)> {
+        let resp: anki_proto::sync::SyncStatusResponse =
+            self.call(SVC_SYNC, SYNC_STATUS, &Self::sync_auth(hkey, endpoint))?;
+        Ok((resp.required, resp.new_endpoint))
+    }
+
+    /// The normal (incremental) collection sync. Blocks for the network
+    /// round-trips. Returns `(required, server_message, new_endpoint,
+    /// server_media_usn)`.
+    pub fn sync_collection(
+        &self,
+        hkey: &str,
+        endpoint: Option<&str>,
+        sync_media: bool,
+    ) -> NativeResult<(i32, String, Option<String>, i32)> {
+        let req = anki_proto::sync::SyncCollectionRequest {
+            auth: Some(Self::sync_auth(hkey, endpoint)),
+            sync_media,
+        };
+        let resp: anki_proto::sync::SyncCollectionResponse =
+            self.call(SVC_SYNC, SYNC_COLLECTION, &req)?;
+        Ok((
+            resp.required,
+            resp.server_message,
+            resp.new_endpoint,
+            resp.server_media_usn,
+        ))
+    }
+
+    /// Full upload or download. The collection must be CLOSED first (the
+    /// caller orchestrates release → this → reopen); `server_usn` from the
+    /// preceding `sync_collection` keeps media syncing consistent (None
+    /// skips media).
+    pub fn full_upload_or_download(
+        &self,
+        hkey: &str,
+        endpoint: Option<&str>,
+        upload: bool,
+        server_usn: Option<i32>,
+    ) -> NativeResult<()> {
+        let req = anki_proto::sync::FullUploadOrDownloadRequest {
+            auth: Some(Self::sync_auth(hkey, endpoint)),
+            upload,
+            server_usn,
+        };
+        let _: anki_proto::generic::Empty =
+            self.call(SVC_SYNC, SYNC_FULL_UPLOAD_OR_DOWNLOAD, &req)?;
+        Ok(())
+    }
+
+    /// Kick off media sync in anki's own background; poll `media_sync_status`.
+    pub fn sync_media(&self, hkey: &str, endpoint: Option<&str>) -> NativeResult<()> {
+        let _: anki_proto::generic::Empty =
+            self.call(SVC_SYNC, SYNC_MEDIA, &Self::sync_auth(hkey, endpoint))?;
+        Ok(())
+    }
+
+    /// Media-sync snapshot: `(active, Some((checked, added, removed)))`.
+    #[allow(clippy::type_complexity)]
+    pub fn media_sync_status(&self) -> NativeResult<(bool, Option<(String, String, String)>)> {
+        let req = anki_proto::generic::Empty::default();
+        let resp: anki_proto::sync::MediaSyncStatusResponse =
+            self.call(SVC_SYNC, SYNC_MEDIA_STATUS, &req)?;
+        Ok((
+            resp.active,
+            resp.progress.map(|p| (p.checked, p.added, p.removed)),
+        ))
+    }
+
+    pub fn abort_sync(&self) -> NativeResult<()> {
+        let req = anki_proto::generic::Empty::default();
+        let _: anki_proto::generic::Empty = self.call(SVC_SYNC, SYNC_ABORT, &req)?;
+        Ok(())
+    }
+
+    pub fn abort_media_sync(&self) -> NativeResult<()> {
+        let req = anki_proto::generic::Empty::default();
+        let _: anki_proto::generic::Empty = self.call(SVC_SYNC, SYNC_ABORT_MEDIA, &req)?;
+        Ok(())
+    }
+
+    /// Trust a custom certificate (PEM) for a self-hosted server (#34).
+    /// An empty string clears it.
+    pub fn set_custom_certificate(&self, cert_pem: &str) -> NativeResult<bool> {
+        let req = anki_proto::generic::String {
+            val: cert_pem.to_string(),
+        };
+        let out: anki_proto::generic::Bool =
+            self.call(SVC_SYNC, SYNC_SET_CUSTOM_CERTIFICATE, &req)?;
+        Ok(out.val)
     }
 
     // ── lifecycle ────────────────────────────────────────────────────────────
