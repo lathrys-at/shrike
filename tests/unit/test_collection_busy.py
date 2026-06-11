@@ -102,8 +102,10 @@ class TestKernelBusyNormalization:
 
         import asyncio
 
-        with caplog.at_level(logging.WARNING, logger="shrike.tools"):
-            with pytest.raises(CollectionBusyError) as exc:
-                asyncio.run(kernel_op())
+        with (
+            caplog.at_level(logging.WARNING, logger="shrike.tools"),
+            pytest.raises(CollectionBusyError) as exc,
+        ):
+            asyncio.run(kernel_op())
         assert COLLECTION_BUSY_CODE in str(exc.value)
         assert not any(r.exc_info for r in caplog.records), "busy must not traceback"

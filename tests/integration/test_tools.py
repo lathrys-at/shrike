@@ -1533,3 +1533,39 @@ class TestBatchLimits:
     def test_delete_notes_over_100_rejected(self, mcp):
         with pytest.raises(RuntimeError, match="at most 100"):
             mcp("delete_notes", {"ids": list(range(101))})
+
+
+class TestSigtermShutdown:
+    """SIGTERM tears down cleanly: uvicorn's handlers drain the server, then
+    the post-serve teardown flushes/closes and releases the lock (found by the
+    post-series review — serve() previously returned with no teardown)."""
+
+    def test_sigterm_drains_and_tears_down(self, server_factory):
+        import os
+        import pathlib
+        import signal as _signal
+
+        info = server_factory("sigterm")
+        status_url = info.url.rsplit("/", 1)[0] + "/status"
+        pid = httpx.get(status_url, timeout=5.0).json()["pid"]
+
+        os.kill(pid, _signal.SIGTERM)
+        # Liveness via the endpoint, not os.kill(pid, 0): the spawned server
+        # stays a zombie under the test runner until reaped, so signal-0
+        # keeps succeeding after exit.
+        for _ in range(75):
+            try:
+                httpx.get(status_url, timeout=1.0)
+            except httpx.HTTPError:
+                break
+            time.sleep(0.2)
+        else:
+            pytest.fail("server still serving after SIGTERM")
+
+        logs = ""
+        for _ in range(50):
+            logs = "".join(p.read_text() for p in pathlib.Path(info.log_dir).glob("*.log"))
+            if "Shutdown complete" in logs:
+                break
+            time.sleep(0.2)
+        assert "Shutdown complete" in logs
