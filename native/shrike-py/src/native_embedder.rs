@@ -174,6 +174,31 @@ impl NativeEmbedder {
         })
     }
 
+    /// Compose the remote-embeddings engine (#342 P4) — llama-server today,
+    /// any OpenAI-compatible endpoint tomorrow. Same shape as `from_onnx`;
+    /// network requests run on the lane's pool threads, never the loop.
+    #[staticmethod]
+    #[pyo3(signature = (engine, *, fingerprint, dim, safe_batch))]
+    fn from_remote(
+        py: Python<'_>,
+        engine: PyRef<'_, crate::RemoteEmbedder>,
+        fingerprint: Option<String>,
+        dim: Option<usize>,
+        safe_batch: usize,
+    ) -> PyResult<Self> {
+        let lane: Arc<dyn ComputeExecutor> = Arc::new(AsyncioComputeLane::capture(py)?);
+        let tuned = Arc::new(WithPolicy::new(
+            engine.engine_arc(),
+            fingerprint,
+            dim,
+            safe_batch,
+        ));
+        Ok(Self {
+            text: Arc::new(OnExecutor::new(tuned, lane)),
+            images: None,
+        })
+    }
+
     /// Compose the CLIP dual encoder: one engine, both modalities — the same
     /// adapted instance serves the text and image halves over one lane.
     #[staticmethod]

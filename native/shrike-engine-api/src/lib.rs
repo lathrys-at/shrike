@@ -47,6 +47,8 @@
 //! platform API unavailable) is `NativeError::unavailable`; a contract
 //! violation (malformed payload, wrong arity) is `internal`.
 
+pub mod probe;
+
 use std::sync::Arc;
 
 use futures::future::BoxFuture;

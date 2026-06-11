@@ -41,6 +41,8 @@ class NativeInternalError(RuntimeError): ...
 class NativeBusyError(RuntimeError): ...
 
 IMAGE_PREP_VERSION_RS: int
+BATCH_DRIFT_TOL: float
+BATCH_PROBE_TEXTS: list[str]
 
 def version() -> str: ...
 def build_info() -> str: ...
@@ -202,7 +204,28 @@ class PyEmbedder:
     def capture(backend: object) -> PyEmbedder: ...
 
 @final
+class RemoteEmbedder:
+    def __new__(
+        cls,
+        base_url: str,
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+    ) -> RemoteEmbedder: ...
+    def embed_chunk(self, texts: list[str]) -> list[list[float]]: ...
+    def health_ok(self) -> bool: ...
+    def model_info(self) -> tuple[str | None, str]: ...
+
+@final
 class NativeEmbedder:
+    @staticmethod
+    def from_remote(
+        engine: RemoteEmbedder,
+        *,
+        fingerprint: str | None,
+        dim: int | None,
+        safe_batch: int,
+    ) -> NativeEmbedder: ...
     @staticmethod
     def from_onnx(
         engine: OnnxTextEmbedder,

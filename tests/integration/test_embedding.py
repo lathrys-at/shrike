@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+import shrike_native
 
 from tests.integration.conftest import requires_llama_server
 
@@ -105,6 +106,10 @@ class TestEmbeddingServiceViaShrike:
         svc._process = type("FakeProc", (), {"poll": lambda self: None})()
         svc._safe_batch = 16  # bypassing start()/__init__, simulate a batch-safe probe
         svc._batch_cap = None
+        # The native client pair __init__/start() would have built (#342 P4):
+        # the unpinned fallback drives REAL requests against live llama-server.
+        svc._client = shrike_native.RemoteEmbedder(embedding_server.embedding_url)
+        svc._remote = None
 
         result = svc.embed_texts(["hello", "world"])
         assert len(result) == 2
@@ -121,6 +126,10 @@ class TestEmbeddingServiceViaShrike:
         svc._process = type("FakeProc", (), {"poll": lambda self: None})()
         svc._safe_batch = 16  # bypassing start()/__init__, simulate a batch-safe probe
         svc._batch_cap = None
+        # The native client pair __init__/start() would have built (#342 P4):
+        # the unpinned fallback drives REAL requests against live llama-server.
+        svc._client = shrike_native.RemoteEmbedder(embedding_server.embedding_url)
+        svc._remote = None
 
         r1 = svc.embed_texts(["a single sentence"])
         r2 = svc.embed_texts(["another sentence", "and one more", "three total"])

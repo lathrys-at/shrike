@@ -15,6 +15,8 @@ from shrike_native._native import rehomed_actions as rehomed_actions
 from shrike_native._native import fetch_media_url as fetch_media_url
 from shrike_native._native import (
     AppleVisionRecognizer,
+    BATCH_DRIFT_TOL,
+    BATCH_PROBE_TEXTS,
     IMAGE_PREP_VERSION_RS,
     ClipEmbedder,
     DerivedTextEngine,
@@ -36,6 +38,7 @@ from shrike_native._native import (
     LoopTimerHost,
     NativeEmbedder,
     PyEmbedder,
+    RemoteEmbedder,
     Recognizer,
     WorkerExecutor,
     init_onnx_runtime,
@@ -51,6 +54,8 @@ from shrike_native._native import (
 
 __all__ = [
     "AppleVisionRecognizer",
+    "BATCH_DRIFT_TOL",
+    "BATCH_PROBE_TEXTS",
     "ClipEmbedder",
     "DerivedTextEngine",
     "IMAGE_PREP_VERSION_RS",
@@ -72,6 +77,7 @@ __all__ = [
     "LoopTimerHost",
     "NativeEmbedder",
     "PyEmbedder",
+    "RemoteEmbedder",
     "Recognizer",
     "WorkerExecutor",
     "init_onnx_runtime",

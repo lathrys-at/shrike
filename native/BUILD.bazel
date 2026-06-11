@@ -24,6 +24,7 @@ py_test(
         "//native/shrike-compute:Cargo.toml",
         "//native/shrike-derived:Cargo.toml",
         "//native/shrike-embed:Cargo.toml",
+        "//native/shrike-embed-remote:Cargo.toml",
         "//native/shrike-engine-api:Cargo.toml",
         "//native/shrike-ffi:Cargo.toml",
         "//native/shrike-index:Cargo.toml",

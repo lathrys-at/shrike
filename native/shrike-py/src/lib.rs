@@ -21,6 +21,8 @@
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+// Trait import for the remote engine's chunk method (its only embed surface).
+use shrike_engine_api::EmbedText as _;
 use shrike_ffi::{ErrorKind, NativeError};
 
 #[cfg(feature = "anki-core")]
@@ -352,6 +354,60 @@ impl ClipEmbedder {
     }
 }
 
+/// The generic remote-embeddings engine (#342 P4) under the llama facade —
+/// and the future `backend: remote` kind (URL + key, no subprocess). One
+/// `/v1/embeddings` request per chunk, GIL released; identity ingredients
+/// (`/v1/models` id + meta) served raw for the facade's fingerprint policy.
+#[pyclass(frozen)]
+pub(crate) struct RemoteEmbedder {
+    inner: std::sync::Arc<shrike_embed_remote::RemoteEmbedder>,
+}
+
+impl RemoteEmbedder {
+    /// The engine, shared (see [`OnnxTextEmbedder::engine_arc`]).
+    pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_embed_remote::RemoteEmbedder> {
+        std::sync::Arc::clone(&self.inner)
+    }
+}
+
+#[pymethods]
+impl RemoteEmbedder {
+    #[new]
+    #[pyo3(signature = (base_url, *, api_key=None, model=None))]
+    fn new(base_url: String, api_key: Option<String>, model: Option<String>) -> Self {
+        Self {
+            inner: std::sync::Arc::new(shrike_embed_remote::RemoteEmbedder::new(
+                shrike_embed_remote::RemoteEmbedderConfig {
+                    base_url,
+                    api_key,
+                    model,
+                },
+            )),
+        }
+    }
+
+    /// Embed one chunk of texts as a single request (one vector per input).
+    fn embed_chunk(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<Vec<f32>>> {
+        py.detach(|| self.inner.embed_chunk(&texts))
+            .map_err(to_py_err)
+    }
+
+    /// `GET /health` returns 200.
+    fn health_ok(&self, py: Python<'_>) -> bool {
+        py.detach(|| self.inner.health_ok())
+    }
+
+    /// `(model_id, meta_json)` from `/v1/models` — `(None, "{}")` when the
+    /// endpoint doesn't serve it; fingerprint assembly stays facade policy.
+    fn model_info(&self, py: Python<'_>) -> (Option<String>, String) {
+        py.detach(|| {
+            let info = self.inner.model_info();
+            let meta = serde_json::Value::Object(info.meta).to_string();
+            (info.id, meta)
+        })
+    }
+}
+
 // ── Derived-text engine (#281) ──────────────────────────────────────────────
 
 /// Whether the linked SQLite has FTS5 with the trigram tokenizer (#300).
@@ -678,6 +734,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<OnnxTextEmbedder>()?;
     m.add_class::<ClipEmbedder>()?;
+    m.add_class::<RemoteEmbedder>()?;
     m.add_class::<NativeIndexEngine>()?;
     m.add_class::<DerivedTextEngine>()?;
     m.add_class::<py_recognizer::PyRecognizer>()?;
@@ -720,6 +777,14 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // The native image-prep pipeline version — folded into the clip-rs
     // fingerprint by the facade (a pixel-math change must invalidate vectors).
     m.add("IMAGE_PREP_VERSION_RS", shrike_embed::IMAGE_PREP_VERSION_RS)?;
+    // The batch-safety probe surface (#342 P4): the spiked set + tolerance,
+    // for tests that pin sensitivity/ceiling against the same texts the
+    // native probe embeds.
+    m.add(
+        "BATCH_PROBE_TEXTS",
+        shrike_engine_api::probe::BATCH_PROBE_TEXTS.to_vec(),
+    )?;
+    m.add("BATCH_DRIFT_TOL", shrike_engine_api::probe::BATCH_DRIFT_TOL)?;
     m.add("NativeInputError", py.get_type::<NativeInputError>())?;
     m.add(
         "NativeUnavailableError",

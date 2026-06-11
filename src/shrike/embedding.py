@@ -20,6 +20,7 @@ The backend exposes a simple sync interface:
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import shlex
@@ -33,7 +34,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import httpx
+import shrike_native
 
 from shrike.embed_batching import probe_max_safe_batch
 from shrike.embed_text import EMBED_TEXT_VERSION
@@ -140,6 +141,10 @@ class LlamaServerBackend:
         self._process: subprocess.Popen[bytes] | None = None
         self._base_url = f"http://{host}:{port}"
         self._model_name: str | None = None
+        # The native HTTP client (#342 P4): one unpinned client for health and
+        # model metadata; a model-pinned twin is built once the name is known.
+        self._client = shrike_native.RemoteEmbedder(self._base_url)
+        self._remote: Any = None
 
     @property
     def running(self) -> bool:
@@ -345,8 +350,11 @@ class LlamaServerBackend:
                 f"llama-server failed to become healthy within {HEALTH_TIMEOUT}s (exit code: {rc})"
             )
 
-        # Cache the model's reported name/alias so embed() can pin it.
+        # Cache the model's reported name/alias and build the model-pinned
+        # embed client (a multi-model endpoint resolves the right one; a
+        # single-model llama-server ignores the pin).
         self._model_name = self.model_info().get("id") or Path(self._model).name
+        self._remote = shrike_native.RemoteEmbedder(self._base_url, model=self._model_name)
 
         # Batch-safety probe (universal across backends): confirm a note's vector is
         # independent of its batch-mates before batching requests. llama computes in fp,
@@ -380,17 +388,13 @@ class LlamaServerBackend:
         )
 
     def _wait_healthy(self) -> bool:
-        """Poll GET /health until it returns 200 or we time out."""
+        """Poll GET /health (via the native client) until 200 or timeout."""
         deadline = time.monotonic() + HEALTH_TIMEOUT
         while time.monotonic() < deadline:
             if self._process and self._process.poll() is not None:
                 return False
-            try:
-                resp = httpx.get(f"{self._base_url}/health", timeout=2.0)
-                if resp.status_code == 200:
-                    return True
-            except (httpx.ConnectError, httpx.TimeoutException):
-                pass
+            if self._client.health_ok():
+                return True
             time.sleep(HEALTH_POLL_INTERVAL)
         return False
 
@@ -432,6 +436,7 @@ class LlamaServerBackend:
 
         logger.info("Embedding service stopped (PID %s)", pid)
         self._process = None
+        self._remote = None
         self._clear_pid_file()
 
     def health(self) -> dict[str, Any]:
@@ -439,20 +444,16 @@ class LlamaServerBackend:
         if not self.running:
             return {"available": False}
 
-        try:
-            resp = httpx.get(f"{self._base_url}/health", timeout=2.0)
-            return {
-                "available": resp.status_code == 200,
-                "pid": self._process.pid if self._process else None,
-                "url": self._base_url,
-                "model": self._model,
-                # batch_safe is the model's probed capability; batch is the *effective*
-                # behaviour (a --embedding-batch-size cap of 1 forces serial).
-                "batch_safe": self._safe_batch >= 2,
-                "batch": "batched" if self._effective_batch(2) >= 2 else "serial",
-            }
-        except (httpx.ConnectError, httpx.TimeoutException):
-            return {"available": False, "pid": self._process.pid if self._process else None}
+        return {
+            "available": self._client.health_ok(),
+            "pid": self._process.pid if self._process else None,
+            "url": self._base_url,
+            "model": self._model,
+            # batch_safe is the model's probed capability; batch is the *effective*
+            # behaviour (a --embedding-batch-size cap of 1 forces serial).
+            "batch_safe": self._safe_batch >= 2,
+            "batch": "batched" if self._effective_batch(2) >= 2 else "serial",
+        }
 
     def model_info(self) -> dict[str, Any]:
         """Metadata for the loaded model, from llama-server's ``/v1/models``.
@@ -464,16 +465,11 @@ class LlamaServerBackend:
         """
         if not self.running:
             return {}
-        try:
-            resp = httpx.get(f"{self._base_url}/v1/models", timeout=5.0)
-            resp.raise_for_status()
-            entries = resp.json().get("data") or []
-            if not entries:
-                return {}
-            entry = entries[0]
-            return {"id": entry.get("id"), "meta": entry.get("meta") or {}}
-        except (httpx.HTTPError, ValueError, KeyError, IndexError):
+        ident, meta_json = self._client.model_info()
+        meta = json.loads(meta_json)
+        if ident is None and not meta:
             return {}
+        return {"id": ident, "meta": meta}
 
     def embedding_dim(self) -> int | None:
         """The loaded model's embedding dimension (``n_embd``), or ``None``.
@@ -571,28 +567,29 @@ class LlamaServerBackend:
         return max(1, min(limit, n))
 
     def _embed_chunk(self, texts: list[str]) -> list[list[float]]:
-        """Embed a list of texts as a single ``/v1/embeddings`` request."""
-        payload: dict[str, Any] = {"input": texts}
-        if self._model_name:
-            # Pin the model so a future external multi-model endpoint resolves
-            # the right one. A single-model llama-server ignores this.
-            payload["model"] = self._model_name
+        """One ``/v1/embeddings`` request via the native client (which pins
+        the model and orders vectors by the response's own ``index``)."""
+        client = self._remote if self._remote is not None else self._client
+        vectors: list[list[float]] = client.embed_chunk(texts)
+        return vectors
 
-        resp = httpx.post(
-            f"{self._base_url}/v1/embeddings",
-            json=payload,
-            timeout=60.0,
+    def native_embedder(self) -> Any:
+        """The kernel-slot handle (#342 P4): the model-pinned remote client
+        composed behind the engine contract, so kernel embeds run native
+        end-to-end (lane → pool thread → HTTP) and never re-enter this
+        facade — the same handover the onnx/clip facades make. The facade
+        keeps lifecycle (spawn, health-wait, the probe, orphan reaping),
+        identity assembly, and ``health()``. Must be called from a coroutine
+        context (it captures the running loop).
+        """
+        if not self.running or self._remote is None:
+            raise RuntimeError("Embedding service is not running")
+        return shrike_native.NativeEmbedder.from_remote(
+            self._remote,
+            fingerprint=self.model_fingerprint(),
+            dim=self.embedding_dim(),
+            safe_batch=self._effective_batch(self._safe_batch),
         )
-        resp.raise_for_status()
-
-        data = resp.json()
-        # Order by the response's own `index` rather than trusting positional order: with
-        # large batches now the norm for safe models, an out-of-order `data` would otherwise
-        # silently assign each note a batch-mate's vector. llama preserves order today; this
-        # is a cheap guard that survives a backend that doesn't.
-        items = sorted(data["data"], key=lambda d: d.get("index", 0))
-        results: list[list[float]] = [item["embedding"] for item in items]
-        return results
 
 
 # Backward-compatible alias: the llama-server backend was the original (and only)

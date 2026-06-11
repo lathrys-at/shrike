@@ -7,10 +7,10 @@ import signal
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
+import shrike_native
 
 from shrike.embed_text import EMBED_TEXT_VERSION
 from shrike.embedding import EmbeddingRuntime, EmbeddingService
@@ -32,6 +32,40 @@ def _set_running(svc: EmbeddingService, pid: int = 123) -> None:
     proc.pid = pid
     svc._process = proc
     svc._safe_batch = 16  # as the startup probe would set for fp llama-server
+
+
+class _StubClient:
+    """The native RemoteEmbedder seam (#342 P4): the HTTP behaviours (index
+    ordering, model pinning, auth, error mapping) are pinned in the Rust
+    crate; these stubs pin the FACADE's policy around the client."""
+
+    def __init__(
+        self,
+        *,
+        healthy: bool = True,
+        info: tuple[str | None, str] = (None, "{}"),
+        vectors: list[list[float]] | None = None,
+        embed_error: Exception | None = None,
+    ) -> None:
+        self.healthy = healthy
+        self.info = info
+        self.vectors = vectors or []
+        self.embed_error = embed_error
+        self.health_calls = 0
+        self.embed_calls: list[list[str]] = []
+
+    def health_ok(self) -> bool:
+        self.health_calls += 1
+        return self.healthy
+
+    def model_info(self) -> tuple[str | None, str]:
+        return self.info
+
+    def embed_chunk(self, texts: list[str]) -> list[list[float]]:
+        self.embed_calls.append(list(texts))
+        if self.embed_error is not None:
+            raise self.embed_error
+        return self.vectors[: len(texts)]
 
 
 class TestInit:
@@ -231,16 +265,13 @@ class TestStart:
 
 
 class TestWaitHealthy:
-    def test_returns_true_on_200(self, svc: EmbeddingService) -> None:
+    def test_returns_true_on_healthy(self, svc: EmbeddingService) -> None:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         svc._process = mock_proc
+        svc._client = _StubClient(healthy=True)
 
-        mock_resp = Mock()
-        mock_resp.status_code = 200
-
-        with patch("shrike.embedding.httpx.get", return_value=mock_resp):
-            assert svc._wait_healthy() is True
+        assert svc._wait_healthy() is True
 
     def test_returns_false_on_process_exit(self, svc: EmbeddingService) -> None:
         mock_proc = MagicMock()
@@ -250,29 +281,21 @@ class TestWaitHealthy:
         with patch("shrike.embedding.HEALTH_TIMEOUT", 0.1):
             assert svc._wait_healthy() is False
 
-    def test_retries_on_connect_error(self, svc: EmbeddingService) -> None:
+    def test_retries_until_healthy(self, svc: EmbeddingService) -> None:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         svc._process = mock_proc
 
-        mock_resp = Mock()
-        mock_resp.status_code = 200
+        class _SlowStart(_StubClient):
+            def health_ok(self) -> bool:
+                self.health_calls += 1
+                return self.health_calls >= 3  # refused twice, then up
 
-        call_count = 0
-
-        def side_effect(*args: Any, **kwargs: Any) -> Mock:
-            nonlocal call_count
-            call_count += 1
-            if call_count < 3:
-                raise httpx.ConnectError("refused")
-            return mock_resp
-
-        with (
-            patch("shrike.embedding.httpx.get", side_effect=side_effect),
-            patch("shrike.embedding.HEALTH_POLL_INTERVAL", 0.01),
-        ):
+        stub = _SlowStart()
+        svc._client = stub
+        with patch("shrike.embedding.HEALTH_POLL_INTERVAL", 0.01):
             assert svc._wait_healthy() is True
-            assert call_count == 3
+        assert stub.health_calls == 3
 
 
 class TestStop:
@@ -334,11 +357,8 @@ class TestHealth:
         mock_proc.pid = 456
         svc._process = mock_proc
 
-        mock_resp = Mock()
-        mock_resp.status_code = 200
-
-        with patch("shrike.embedding.httpx.get", return_value=mock_resp):
-            result = svc.health()
+        svc._client = _StubClient(healthy=True)
+        result = svc.health()
 
         assert result["available"] is True
         assert result["pid"] == 456
@@ -350,8 +370,8 @@ class TestHealth:
         mock_proc.pid = 456
         svc._process = mock_proc
 
-        with patch("shrike.embedding.httpx.get", side_effect=httpx.ConnectError("refused")):
-            result = svc.health()
+        svc._client = _StubClient(healthy=False)
+        result = svc.health()
 
         assert result["available"] is False
         assert result["pid"] == 456
@@ -363,66 +383,35 @@ class TestEmbed:
             svc.embed_texts(["hello"])
 
     def test_returns_vectors(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        svc._process = mock_proc
-        svc._safe_batch = 16  # batch-safe, so both texts go in one request
+        _set_running(svc)
+        stub = _StubClient(vectors=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        svc._remote = stub
 
-        mock_resp = Mock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "data": [
-                {"embedding": [0.1, 0.2, 0.3]},
-                {"embedding": [0.4, 0.5, 0.6]},
-            ]
-        }
-        mock_resp.raise_for_status = Mock()
+        result = svc.embed_texts(["hello", "world"])
 
-        with patch("shrike.embedding.httpx.post", return_value=mock_resp):
-            result = svc.embed_texts(["hello", "world"])
+        assert result == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+        # Batch-safe → both texts in ONE request.
+        assert stub.embed_calls == [["hello", "world"]]
 
-        assert len(result) == 2
-        assert result[0] == [0.1, 0.2, 0.3]
-        assert result[1] == [0.4, 0.5, 0.6]
+    def test_prefers_the_pinned_client(self, svc: EmbeddingService) -> None:
+        # Once start() built the model-pinned client, embeds go through it
+        # (index-ordering and pinning themselves are pinned in the Rust crate).
+        _set_running(svc)
+        pinned = _StubClient(vectors=[[1.0]])
+        unpinned = _StubClient(vectors=[[9.9]])
+        svc._remote, svc._client = pinned, unpinned
 
-    def test_orders_by_response_index(self, svc: EmbeddingService) -> None:
-        # A response whose data items arrive out of order must be reassembled by `index`,
-        # so each input gets its own vector (not a batch-mate's).
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        svc._process = mock_proc
-        svc._safe_batch = 16
+        assert svc.embed_texts(["hi"]) == [[1.0]]
+        assert pinned.embed_calls and not unpinned.embed_calls
 
-        mock_resp = Mock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "data": [
-                {"index": 1, "embedding": [0.4, 0.5]},
-                {"index": 0, "embedding": [0.1, 0.2]},
-            ]
-        }
-        mock_resp.raise_for_status = Mock()
-
-        with patch("shrike.embedding.httpx.post", return_value=mock_resp):
-            result = svc.embed_texts(["first", "second"])
-
-        assert result[0] == [0.1, 0.2]  # index 0
-        assert result[1] == [0.4, 0.5]  # index 1
-
-    def test_propagates_http_errors(self, svc: EmbeddingService) -> None:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        svc._process = mock_proc
-
-        mock_resp = Mock()
-        mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "500", request=Mock(), response=Mock()
+    def test_propagates_client_errors(self, svc: EmbeddingService) -> None:
+        # A failed request surfaces (NativeUnavailableError from the client);
+        # the facade never swallows it into fake vectors.
+        _set_running(svc)
+        svc._remote = _StubClient(
+            embed_error=shrike_native.NativeUnavailableError("embeddings request failed")
         )
-
-        with (
-            patch("shrike.embedding.httpx.post", return_value=mock_resp),
-            pytest.raises(httpx.HTTPStatusError),
-        ):
+        with pytest.raises(shrike_native.NativeUnavailableError):
             svc.embed_texts(["hello"])
 
 
@@ -430,30 +419,19 @@ class TestModelInfo:
     def test_not_running_returns_empty(self, svc: EmbeddingService) -> None:
         assert svc.model_info() == {}
 
-    def test_parses_v1_models(self, svc: EmbeddingService) -> None:
+    def test_parses_client_model_info(self, svc: EmbeddingService) -> None:
         _set_running(svc)
-        mock_resp = Mock()
-        mock_resp.raise_for_status = Mock()
-        mock_resp.json.return_value = {
-            "data": [{"id": "m.gguf", "meta": {"n_embd": 384, "size": 100}}]
-        }
-        with patch("shrike.embedding.httpx.get", return_value=mock_resp):
-            info = svc.model_info()
+        svc._client = _StubClient(info=("m.gguf", '{"n_embd": 384, "size": 100}'))
+        info = svc.model_info()
         assert info["id"] == "m.gguf"
         assert info["meta"]["n_embd"] == 384
 
-    def test_empty_data_returns_empty(self, svc: EmbeddingService) -> None:
+    def test_absent_identity_returns_empty(self, svc: EmbeddingService) -> None:
+        # The client's graceful default — a down endpoint or one serving no
+        # /v1/models — maps to the facade's {} (fingerprint falls back to file).
         _set_running(svc)
-        mock_resp = Mock()
-        mock_resp.raise_for_status = Mock()
-        mock_resp.json.return_value = {"data": []}
-        with patch("shrike.embedding.httpx.get", return_value=mock_resp):
-            assert svc.model_info() == {}
-
-    def test_http_error_returns_empty(self, svc: EmbeddingService) -> None:
-        _set_running(svc)
-        with patch("shrike.embedding.httpx.get", side_effect=httpx.ConnectError("x")):
-            assert svc.model_info() == {}
+        svc._client = _StubClient(info=(None, "{}"))
+        assert svc.model_info() == {}
 
 
 class TestEmbeddingDim:
@@ -558,32 +536,31 @@ class TestModelFingerprint:
 
 
 class TestEmbedModelPinning:
-    def _fake_post(self, captured: dict[str, Any]):
-        def post(url: str, json: dict[str, Any], timeout: float) -> Mock:
-            captured["json"] = json
-            r = Mock()
-            r.raise_for_status = Mock()
-            r.json.return_value = {"data": [{"embedding": [0.1]}]}
-            return r
-
-        return post
-
-    def test_pins_model_name(self, svc: EmbeddingService) -> None:
-        _set_running(svc)
-        svc._model_name = "m.gguf"
+    def test_start_builds_the_model_pinned_client(self, svc: EmbeddingService) -> None:
+        # start()'s tail caches the reported model name and constructs the
+        # pinned embed client with it (the pin's wire effect — `"model"` in
+        # the request body, omitted when None — is pinned in the Rust crate).
         captured: dict[str, Any] = {}
-        with patch("shrike.embedding.httpx.post", side_effect=self._fake_post(captured)):
-            svc.embed_texts(["hi"])
-        assert captured["json"]["model"] == "m.gguf"
-        assert captured["json"]["input"] == ["hi"]
 
-    def test_no_pin_when_name_unknown(self, svc: EmbeddingService) -> None:
-        _set_running(svc)
-        svc._model_name = None
-        captured: dict[str, Any] = {}
-        with patch("shrike.embedding.httpx.post", side_effect=self._fake_post(captured)):
-            svc.embed_texts(["hi"])
-        assert "model" not in captured["json"]
+        class _CapturingCtor:
+            def __init__(self, base_url: str, **kwargs: Any) -> None:
+                captured["base_url"] = base_url
+                captured.update(kwargs)
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 99
+        with (
+            patch.object(svc, "_find_llama_server", return_value="/bin/llama-server"),
+            patch("shrike.embedding.subprocess.Popen", return_value=mock_proc),
+            patch.object(svc, "_wait_healthy", return_value=True),
+            patch.object(svc, "model_info", return_value={"id": "m.gguf", "meta": {}}),
+            patch("shrike.embedding.probe_max_safe_batch", return_value=16),
+            patch("shrike.embedding.shrike_native.RemoteEmbedder", _CapturingCtor),
+        ):
+            svc.start()
+        assert captured["model"] == "m.gguf"
+        assert captured["base_url"] == svc.url
 
 
 class TestEmbeddingRuntime:

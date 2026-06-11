@@ -11,6 +11,8 @@ import contextlib
 
 from shrike_native._native import (
     AppleVisionRecognizer,
+    BATCH_DRIFT_TOL,
+    BATCH_PROBE_TEXTS,
     IMAGE_PREP_VERSION_RS,
     ClipEmbedder,
     DerivedTextEngine,
@@ -33,6 +35,7 @@ from shrike_native._native import (
     LoopTimerHost,
     NativeEmbedder,
     PyEmbedder,
+    RemoteEmbedder,
     Recognizer,
     WorkerExecutor,
     parallel_sum,
@@ -65,6 +68,8 @@ with contextlib.suppress(ImportError):
 
 __all__ = [
     "AppleVisionRecognizer",
+    "BATCH_DRIFT_TOL",
+    "BATCH_PROBE_TEXTS",
     "ClipEmbedder",
     "DerivedTextEngine",
     "IMAGE_PREP_VERSION_RS",
@@ -87,6 +92,7 @@ __all__ = [
     "LoopTimerHost",
     "NativeEmbedder",
     "PyEmbedder",
+    "RemoteEmbedder",
     "Recognizer",
     "WorkerExecutor",
     "rrf_fuse",
