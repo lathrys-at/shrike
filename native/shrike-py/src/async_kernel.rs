@@ -193,6 +193,25 @@ impl AsyncKernel {
         })
     }
 
+    /// The wire-shaped bulk upsert (named fields, create AND update,
+    /// dry_run): per-item results JSON in the action's existing vocabulary,
+    /// with kernel-internal index/derived maintenance over everything
+    /// written — the op the MCP upsert_notes action rides.
+    fn upsert_notes_json<'py>(
+        &self,
+        py: Python<'py>,
+        notes_json: String,
+        on_duplicate: String,
+        dry_run: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            kernel
+                .upsert_notes_json(notes_json, on_duplicate, dry_run)
+                .await
+        })
+    }
+
     /// Delete notes; vectors, fingerprints, and derived rows go with them.
     fn delete_notes<'py>(
         &self,

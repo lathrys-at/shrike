@@ -449,6 +449,90 @@ impl Kernel {
         Ok(total)
     }
 
+    /// Post-write maintenance for a set of created/updated notes: ONE read
+    /// job for embed inputs + derived rows, one orchestrator add (replace
+    /// semantics — when an embedder is attached; notes are created and
+    /// lexically indexed regardless), per-note derived ingest, and the
+    /// watermark advance. The shared tail of every upsert shape.
+    async fn index_written(&self, written: &[i64]) -> NativeResult<()> {
+        if written.is_empty() {
+            return Ok(());
+        }
+        let ids = written.to_vec();
+        let (raw_inputs, rows) = self
+            .collection
+            .run(move |core| -> NativeResult<_> {
+                let inputs = core.note_embed_inputs(&ids)?;
+                let rows = core.derived_field_rows(&ids)?;
+                Ok((inputs, rows))
+            })
+            .await??;
+        let svc = self.embed_service();
+        if let Some(svc) = &svc {
+            let inputs: Vec<index_orchestrator::EmbedInput> = raw_inputs
+                .into_iter()
+                .map(
+                    |(note_id, text, image_names)| index_orchestrator::EmbedInput {
+                        note_id,
+                        text,
+                        image_names,
+                    },
+                )
+                .collect();
+            self.orchestrator
+                .add(&inputs, &*svc.embedder, svc.images_pair())
+                .await?;
+        }
+        // Group the derived rows per note (ingest replaces per (note, source)).
+        let mut refs: BTreeMap<i64, Vec<(String, String)>> = BTreeMap::new();
+        for (nid, _source, name, value) in rows {
+            refs.entry(nid).or_default().push((name, value));
+        }
+        for note_id in written {
+            let note_refs = refs.remove(note_id).unwrap_or_default();
+            self.derived.ingest(*note_id, FIELD_SOURCE, &note_refs)?;
+        }
+        self.advance_watermarks(svc.is_some()).await
+    }
+
+    /// The wire-shaped bulk upsert (#77): the collection core's NAMED upsert
+    /// — `id`?/`note_type`/`deck`/`fields` map/`tags`, create AND update,
+    /// `dry_run`, per-item results JSON — run as ONE collection job, then the
+    /// kernel-internal index/derived maintenance over everything written.
+    /// This is the op the MCP `upsert_notes` action rides (S3d-2).
+    pub async fn upsert_notes_json(
+        &self,
+        notes_json: String,
+        on_duplicate: String,
+        dry_run: bool,
+    ) -> NativeResult<String> {
+        let span = tracing::debug_span!("kernel.upsert_notes_json", dry_run);
+        async move {
+            let results_json = self
+                .collection
+                .run(move |core| core.upsert_notes(&notes_json, &on_duplicate, dry_run))
+                .await??;
+            if !dry_run {
+                let results: Vec<serde_json::Value> = serde_json::from_str(&results_json)
+                    .map_err(|e| NativeError::internal(format!("upsert results: {e}")))?;
+                let written: Vec<i64> = results
+                    .iter()
+                    .filter(|r| {
+                        matches!(
+                            r.get("status").and_then(serde_json::Value::as_str),
+                            Some("created") | Some("updated")
+                        )
+                    })
+                    .filter_map(|r| r.get("id").and_then(serde_json::Value::as_i64))
+                    .collect();
+                self.index_written(&written).await?;
+            }
+            Ok(results_json)
+        }
+        .instrument(span)
+        .await
+    }
+
     /// Advance the derived-store watermark — and, when the index was actually
     /// maintained by this op (an embedder is attached), the index watermark +
     /// a debounced flush. With no embedder the index watermark stays put, so
@@ -533,52 +617,7 @@ impl Kernel {
                     _ => None,
                 })
                 .collect();
-            if !created.is_empty() {
-                // The SAME normalized render + raw field rows the Python host
-                // uses (#278 step 2) — embedding text and derived rows come
-                // from the read surface, not an ad-hoc join. One job for the
-                // whole created set.
-                let ids = created.clone();
-                let (raw_inputs, rows) = self
-                    .collection
-                    .run(move |core| -> NativeResult<_> {
-                        let inputs = core.note_embed_inputs(&ids)?;
-                        let rows = core.derived_field_rows(&ids)?;
-                        Ok((inputs, rows))
-                    })
-                    .await??;
-                // One orchestrator add for the whole batch (it chunks the
-                // embeds internally and maintains the per-note fingerprints)
-                // — only with an embedder attached; notes are created and
-                // lexically indexed regardless.
-                let svc = self.embed_service();
-                if let Some(svc) = &svc {
-                    let inputs: Vec<index_orchestrator::EmbedInput> = raw_inputs
-                        .into_iter()
-                        .map(
-                            |(note_id, text, image_names)| index_orchestrator::EmbedInput {
-                                note_id,
-                                text,
-                                image_names,
-                            },
-                        )
-                        .collect();
-                    self.orchestrator
-                        .add(&inputs, &*svc.embedder, svc.images_pair())
-                        .await?;
-                }
-                // Group the derived rows per note (rows come back grouped by
-                // note already; ingest replaces per (note, source)).
-                let mut refs: BTreeMap<i64, Vec<(String, String)>> = BTreeMap::new();
-                for (nid, _source, name, value) in rows {
-                    refs.entry(nid).or_default().push((name, value));
-                }
-                for note_id in &created {
-                    let note_refs = refs.remove(note_id).unwrap_or_default();
-                    self.derived.ingest(*note_id, FIELD_SOURCE, &note_refs)?;
-                }
-                self.advance_watermarks(svc.is_some()).await?;
-            }
+            self.index_written(&created).await?;
             Ok(outcomes)
         }
         .instrument(span)

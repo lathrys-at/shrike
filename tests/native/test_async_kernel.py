@@ -310,3 +310,66 @@ class TestRebuildIndex:
             await kernel.close()
 
         asyncio.run(flow())
+
+
+class TestNamedUpsert:
+    def test_wire_shape_create_update_and_maintenance(self, tmp_path) -> None:
+        async def flow():
+            backend = _Backend()
+            kernel = await _open(tmp_path, backend)
+            await kernel.reindex_if_needed()
+            engine = kernel.engine_handle()
+
+            created = json.loads(
+                await kernel.upsert_notes_json(
+                    json.dumps(
+                        [
+                            {
+                                "note_type": "Basic",
+                                "deck": "Default",
+                                "fields": {"Front": "the krebs cycle", "Back": "atp"},
+                            }
+                        ]
+                    ),
+                    "error",
+                    False,
+                )
+            )
+            assert created[0]["status"] == "created"
+            nid = created[0]["id"]
+            assert engine.contains(nid), "create maintained the index"
+            vec_before = engine.get(nid)
+
+            # The UPDATE half: same id, new text → re-embedded (replace).
+            updated = json.loads(
+                await kernel.upsert_notes_json(
+                    json.dumps([{"id": nid, "fields": {"Front": "the calvin cycle"}}]),
+                    "error",
+                    False,
+                )
+            )
+            assert updated[0]["status"] == "updated"
+            assert engine.get(nid) != vec_before, "update re-embedded the note"
+            assert not await kernel.reindex_if_needed(), "watermarks current"
+
+            # dry_run writes nothing and maintains nothing.
+            dry = json.loads(
+                await kernel.upsert_notes_json(
+                    json.dumps(
+                        [
+                            {
+                                "note_type": "Basic",
+                                "deck": "Default",
+                                "fields": {"Front": "never written", "Back": "x"},
+                            }
+                        ]
+                    ),
+                    "error",
+                    True,
+                )
+            )
+            assert dry[0]["status"] == "ok"
+            assert engine.size() == 1
+            await kernel.close()
+
+        asyncio.run(flow())

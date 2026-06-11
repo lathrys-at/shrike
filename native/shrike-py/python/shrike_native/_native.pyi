@@ -273,6 +273,9 @@ class AsyncKernel:
         notes: list[tuple[int, int, list[str], list[str]]],
         on_duplicate: str,
     ) -> Future[list[tuple[str, int | None, str | None]]]: ...
+    def upsert_notes_json(
+        self, notes_json: str, on_duplicate: str, dry_run: bool
+    ) -> Future[str]: ...
     def delete_notes(self, note_ids: list[int]) -> Future[int]: ...
     def search(
         self, query: str, top_k: int
