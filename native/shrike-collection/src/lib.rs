@@ -65,6 +65,10 @@ pub struct CollectionCore {
     adapter: ServiceAdapter,
     collection_path: String,
     media_dir: String,
+    /// Cooperative idle-release state (#64): set by `release`, cleared by
+    /// `reopen` — `ensure_open` re-acquires on demand so an op that lands
+    /// while released self-heals instead of erroring CollectionNotOpen.
+    released: std::sync::atomic::AtomicBool,
 }
 
 impl CollectionCore {
@@ -78,6 +82,7 @@ impl CollectionCore {
         let media_dir = format!("{base}.media");
         adapter.open_collection(collection_path, &media_dir, &format!("{base}.media.db2"))?;
         Ok(Self {
+            released: std::sync::atomic::AtomicBool::new(false),
             adapter,
             collection_path: collection_path.to_string(),
             media_dir,
@@ -92,7 +97,20 @@ impl CollectionCore {
     /// the instance reusable via [`reopen`]. Already-closed is a no-op.
     pub fn release(&self) -> NativeResult<()> {
         let _ = self.adapter.close_collection();
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Re-acquire if (and only if) idle-released — the open-on-demand half of
+    /// cooperative locking, run before every serialized job. Returns whether
+    /// a reopen happened. Contention surfaces as the BUSY tier via `reopen`.
+    pub fn ensure_open(&self) -> NativeResult<bool> {
+        if !self.released.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(false);
+        }
+        self.reopen()?;
+        Ok(true)
     }
 
     /// Re-acquire after a release (#64/#79). The file opened fine at boot, so
@@ -101,6 +119,8 @@ impl CollectionCore {
     /// BUSY tier, mirroring the Python wrapper's contextual classification.
     /// The caller decides whether to retry; nothing here waits.
     pub fn reopen(&self) -> NativeResult<()> {
+        self.released
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let _ = self.adapter.close_collection(); // a half-open handle is fine to close
         let base = self
             .collection_path

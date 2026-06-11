@@ -194,7 +194,10 @@ impl SerializedCollection {
     }
 
     /// Run a job against the collection, serialized; the await IS the
-    /// transition point ops chain continuations onto.
+    /// transition point ops chain continuations onto. Re-acquires first if
+    /// idle-released (#64's open-on-demand, kernel-side — so a cooperative
+    /// release between any two jobs self-heals; contention surfaces as the
+    /// BUSY tier from `ensure_open`).
     pub async fn run<T: Send + 'static>(
         &self,
         job: impl FnOnce(&CollectionCore) -> T + Send + 'static,
@@ -203,11 +206,11 @@ impl SerializedCollection {
         let (tx, rx) = oneshot::channel();
         self.executor
             .submit(Box::new(move || {
-                let _ = tx.send(job(&core));
+                let _ = tx.send(core.ensure_open().map(|_| job(&core)));
             }))
             .await;
         rx.await
-            .map_err(|_| NativeError::internal("executor dropped a collection job"))
+            .map_err(|_| NativeError::internal("executor dropped a collection job"))?
     }
 
     pub async fn close(&self) -> NativeResult<()> {
@@ -873,6 +876,55 @@ mod no_cpython_smoke {
             assert!(kernel.reindex_if_needed().await.unwrap());
             let hits = kernel.search("capital of france", 5).await.unwrap();
             assert!(hits[0].signals.iter().any(|(s, _)| s == "text"));
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
+    fn kernel_ops_reopen_after_cooperative_release() {
+        // The #64 open-on-demand, kernel-side: an idle release between ops
+        // (or between one op's jobs) self-heals on the next serialized job
+        // instead of erroring CollectionNotOpen.
+        futures::executor::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+                Arc::new(MutexExecutor::default()),
+                None,
+            )
+            .await
+            .unwrap();
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+
+            kernel.release().await.unwrap();
+            let outcome = kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["created while released".into(), "b".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(outcome, CreateOutcome::Created(_)));
+
+            // And the wire-shaped op too, straight after another release.
+            kernel.release().await.unwrap();
+            let results = kernel
+                .upsert_notes_json(
+                    r#"[{"note_type": "Basic", "deck": "Default",
+                         "fields": {"Front": "second", "Back": "b"}}]"#
+                        .to_string(),
+                    "error".to_string(),
+                    false,
+                )
+                .await
+                .unwrap();
+            assert!(results.contains("\"created\""), "got: {results}");
 
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();

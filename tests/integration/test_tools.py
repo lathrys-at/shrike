@@ -1413,8 +1413,20 @@ class TestCooperativeLocking:
         # After the idle window it releases again (poll, timing-tolerant).
         assert wait_for_release(client, time.time() + 8)
 
-        # Re-acquire still works after release.
-        assert client.query("deck:*").total == 0
+        # Re-acquire still works after release — including a WRITE through
+        # the kernel ops (the reopen-on-demand is kernel-side since the
+        # review fix; reads alone masked the regression).
+        created = client.upsert_notes(
+            [
+                {
+                    "note_type": "Basic",
+                    "deck": "Coop",
+                    "fields": {"Front": "written after idle release", "Back": "b"},
+                }
+            ]
+        )
+        assert created.results[0].status == "created"
+        assert client.query("deck:Coop").total == 1
 
     def test_default_server_is_permanent(self, server):
         from shrike.client import ShrikeClient
