@@ -34,6 +34,9 @@ futures = "0.3"
 shrike-compute = { path = "../shrike-compute" }
 shrike-derived = { path = "../shrike-derived", default-features = false }
 shrike-embed = { path = "../shrike-embed" }
+# The engine contract (#342): the binding composes engines (WithPolicy +
+# OnExecutor over the asyncio lane) into the kernel's Arc<dyn Embedder> slot.
+shrike-engine-api = { path = "../shrike-engine-api" }
 shrike-ffi = { workspace = true }
 shrike-index = { path = "../shrike-index" }
 shrike-schemas = { path = "../shrike-schemas" }

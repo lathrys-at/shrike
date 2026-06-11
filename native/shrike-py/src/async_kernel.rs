@@ -16,6 +16,7 @@ use shrike_collection::{CreateOutcome, DuplicatePolicy};
 use shrike_kernel::{Kernel, MutexExecutor, NoteSpec, SerialExecutor, SerializedCollection};
 
 use crate::asyncio_bridge::future_into_py;
+use crate::native_embedder::NativeEmbedder;
 use crate::py_embedder::{PyEmbedder, PyEmbedderHandle, PyMediaResolver};
 use crate::timer_host::LoopTimerHost;
 use crate::worker_executor::WorkerExecutor;
@@ -108,6 +109,16 @@ impl AsyncKernel {
     }
 }
 
+/// Either embedder shape at the attach seam (#342 P2): the native composition
+/// (engines direct to the kernel slot, no Python on the embed path) or the
+/// captured-Python-backend handle (llama until P4; the test seam + custom
+/// backends forever).
+#[derive(FromPyObject)]
+enum AnyEmbedder<'py> {
+    Native(PyRef<'py, NativeEmbedder>),
+    Captured(PyRef<'py, PyEmbedder>),
+}
+
 /// Build the kernel's image pair from a captured embedder + the resolver
 /// callables: present only when the backend embeds images AND the harness
 /// supplied BOTH callables (read + the cheap stat).
@@ -154,17 +165,35 @@ pub(crate) fn async_kernel_open<'py>(
 #[pymethods]
 impl AsyncKernel {
     /// Attach (or swap) the embedding service — embedding start / model
-    /// change. Follow up with `reindex_if_needed` (a model change is drift).
+    /// change. Takes either embedder shape ([`AnyEmbedder`]): the native
+    /// composition embeds without re-entering Python; the captured handle
+    /// dispatches to the Python backend. Follow up with `reindex_if_needed`
+    /// (a model change is drift).
     #[pyo3(signature = (embedder, media_read=None, media_exists=None))]
     fn attach_embedder(
         &self,
-        embedder: PyRef<'_, PyEmbedder>,
+        embedder: AnyEmbedder<'_>,
         media_read: Option<Py<PyAny>>,
         media_exists: Option<Py<PyAny>>,
     ) {
-        let handle = Arc::clone(&embedder.handle);
-        let images = image_pair(&handle, media_read, media_exists);
-        self.inner.attach_embedder(handle, images);
+        match embedder {
+            AnyEmbedder::Native(native) => {
+                let images = match (&native.images, media_read, media_exists) {
+                    (Some(img), Some(read), Some(exists)) => Some((
+                        Box::new(Arc::clone(img)) as Box<dyn shrike_kernel::ImageEmbedder>,
+                        Box::new(PyMediaResolver::new(read, exists))
+                            as Box<dyn shrike_kernel::ImageResolver>,
+                    )),
+                    _ => None,
+                };
+                self.inner.attach_embedder(Arc::clone(&native.text), images);
+            }
+            AnyEmbedder::Captured(captured) => {
+                let handle = Arc::clone(&captured.handle);
+                let images = image_pair(&handle, media_read, media_exists);
+                self.inner.attach_embedder(handle, images);
+            }
+        }
     }
 
     /// Detach the embedding service (embedding stop): the index flushes and

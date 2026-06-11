@@ -139,7 +139,10 @@ pub trait Embedder: Send + Sync + 'static {
     }
 }
 
-impl<T: Embedder> Embedder for Arc<T> {
+/// Engines share freely — and `?Sized` means an `Arc<dyn Embedder>` is
+/// itself an `Embedder`, so hosts pass type-erased handles anywhere a
+/// concrete engine fits (the same for every blanket impl below).
+impl<T: Embedder + ?Sized> Embedder for Arc<T> {
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
         (**self).embed(texts)
     }
@@ -159,7 +162,7 @@ pub trait ImageEmbedder: Send + Sync {
     fn embed_images(&self, images: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>>;
 }
 
-impl<T: ImageEmbedder> ImageEmbedder for Arc<T> {
+impl<T: ImageEmbedder + ?Sized> ImageEmbedder for Arc<T> {
     fn embed_images(&self, images: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
         (**self).embed_images(images)
     }
@@ -212,7 +215,7 @@ pub trait Recognizer: Send + Sync + 'static {
     }
 }
 
-impl<T: Recognizer> Recognizer for Arc<T> {
+impl<T: Recognizer + ?Sized> Recognizer for Arc<T> {
     fn recognize(&self, items: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
         (**self).recognize(items)
     }
@@ -246,7 +249,7 @@ pub trait EmbedText: Send + Sync + 'static {
     }
 }
 
-impl<T: EmbedText> EmbedText for Arc<T> {
+impl<T: EmbedText + ?Sized> EmbedText for Arc<T> {
     fn embed_chunk(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>> {
         (**self).embed_chunk(texts)
     }
@@ -269,7 +272,7 @@ pub trait EmbedImages: Send + Sync + 'static {
     fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>>;
 }
 
-impl<T: EmbedImages> EmbedImages for Arc<T> {
+impl<T: EmbedImages + ?Sized> EmbedImages for Arc<T> {
     fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>> {
         (**self).embed_image_chunk(images)
     }
@@ -284,13 +287,77 @@ pub trait RecognizeMedia: Send + Sync + 'static {
     }
 }
 
-impl<T: RecognizeMedia> RecognizeMedia for Arc<T> {
+impl<T: RecognizeMedia + ?Sized> RecognizeMedia for Arc<T> {
     fn recognize_chunk(&self, items: &[MediaItem]) -> NativeResult<Vec<Recognition>> {
         (**self).recognize_chunk(items)
     }
 
     fn fingerprint(&self) -> Option<String> {
         (**self).fingerprint()
+    }
+}
+
+/// Host-assembled identity and batch policy over a pure-compute engine.
+/// Fingerprint strings are host policy (they fold settings the engine can't
+/// know — text-prep versions, pooling flags); `safe_batch` comes from a
+/// host-run probe over the *loaded* model; `dim` may already be known from
+/// the same probe. The host pins all three at composition time, so engine
+/// crates carry none of them: wrap the engine in `WithPolicy` and hand the
+/// result to an adapter.
+pub struct WithPolicy<E> {
+    engine: Arc<E>,
+    fingerprint: Option<String>,
+    dim: Option<usize>,
+    safe_batch: usize,
+}
+
+impl<E> WithPolicy<E> {
+    pub fn new(
+        engine: Arc<E>,
+        fingerprint: Option<String>,
+        dim: Option<usize>,
+        safe_batch: usize,
+    ) -> Self {
+        Self {
+            engine,
+            fingerprint,
+            dim,
+            safe_batch: safe_batch.max(1),
+        }
+    }
+}
+
+impl<E: EmbedText> EmbedText for WithPolicy<E> {
+    fn embed_chunk(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>> {
+        self.engine.embed_chunk(texts)
+    }
+
+    fn safe_batch(&self) -> usize {
+        self.safe_batch
+    }
+
+    fn fingerprint(&self) -> Option<String> {
+        self.fingerprint.clone()
+    }
+
+    fn dim(&self) -> Option<usize> {
+        self.dim.or_else(|| self.engine.dim())
+    }
+}
+
+impl<E: EmbedImages> EmbedImages for WithPolicy<E> {
+    fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>> {
+        self.engine.embed_image_chunk(images)
+    }
+}
+
+impl<E: RecognizeMedia> RecognizeMedia for WithPolicy<E> {
+    fn recognize_chunk(&self, items: &[MediaItem]) -> NativeResult<Vec<Recognition>> {
+        self.engine.recognize_chunk(items)
+    }
+
+    fn fingerprint(&self) -> Option<String> {
+        self.fingerprint.clone()
     }
 }
 
@@ -499,6 +566,31 @@ mod tests {
         let texts: Vec<String> = ["x", "yy"].iter().map(|s| s.to_string()).collect();
         let out = futures::executor::block_on(inline.embed(texts)).unwrap();
         assert_eq!(out, vec![vec![1.0], vec![2.0]]);
+    }
+
+    #[test]
+    fn with_policy_overrides_identity_and_batch() {
+        let toy = Arc::new(Toy {
+            batch_cap: 64, // the engine's own answer — WithPolicy must win
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let tuned = WithPolicy::new(
+            Arc::clone(&toy),
+            Some("host:fp:textprep=3".into()),
+            Some(384),
+            2,
+        );
+        assert_eq!(tuned.safe_batch(), 2);
+        assert_eq!(tuned.fingerprint().as_deref(), Some("host:fp:textprep=3"));
+        assert_eq!(tuned.dim(), Some(384));
+        // The adapter chunks by the POLICY batch, not the engine's.
+        let adapted = OnExecutor::new(Arc::new(tuned), Arc::new(InlineComputeExecutor));
+        let texts: Vec<String> = ["a", "bb", "ccc"].iter().map(|s| s.to_string()).collect();
+        let out = futures::executor::block_on(adapted.embed(texts)).unwrap();
+        assert_eq!(out, vec![vec![1.0], vec![2.0], vec![3.0]]);
+        assert_eq!(*toy.calls.lock().unwrap(), vec![2, 1]);
+        // safe_batch is floored at 1 (a zero would loop forever).
+        assert_eq!(WithPolicy::new(toy, None, None, 0).safe_batch(), 1);
     }
 
     #[test]

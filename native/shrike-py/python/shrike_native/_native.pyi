@@ -202,6 +202,29 @@ class PyEmbedder:
     def capture(backend: object) -> PyEmbedder: ...
 
 @final
+class NativeEmbedder:
+    @staticmethod
+    def from_onnx(
+        engine: OnnxTextEmbedder,
+        *,
+        fingerprint: str | None,
+        dim: int | None,
+        safe_batch: int,
+    ) -> NativeEmbedder: ...
+    @staticmethod
+    def from_clip(
+        engine: ClipEmbedder,
+        *,
+        fingerprint: str | None,
+        dim: int | None,
+        safe_batch: int,
+    ) -> NativeEmbedder: ...
+
+def native_embedder_probe(
+    embedder: NativeEmbedder, texts: list[str]
+) -> Future[list[list[float]]]: ...
+
+@final
 class Recognizer:
     @staticmethod
     def capture(backend: object) -> Recognizer: ...
@@ -269,7 +292,7 @@ def async_collection_open(
 class AsyncKernel:
     def attach_embedder(
         self,
-        embedder: PyEmbedder,
+        embedder: NativeEmbedder | PyEmbedder,
         media_read: Callable[[str], bytes | None] | None = None,
         media_exists: Callable[[str], bool] | None = None,
     ) -> None: ...

@@ -11,6 +11,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     deps = [
+        "//native/shrike-engine-api:shrike_engine_api",
         "//native/shrike-ffi:shrike_ffi",
         "@crates//:image",
         "@crates//:ndarray",

@@ -12,6 +12,9 @@ name = "shrike_embed"
 # Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py.
 [dependencies]
 shrike-ffi = { workspace = true }
+# The engine contract (#342): this crate implements the sync compute traits
+# (EmbedText/EmbedImages) in-crate; hosts wrap them in an adapter at attach.
+shrike-engine-api = { path = "../shrike-engine-api" }
 # load-dynamic (no download-binaries): the onnxruntime shared library is dlopened
 # at runtime from the *pinned onnxruntime Python wheel* the Python backend already
 # installs (decision recorded in native/README.md + #269) — no duplicated runtime,
