@@ -410,3 +410,42 @@ class TestWrapperOverKernel:
             await kernel.close()
 
         asyncio.run(flow())
+
+
+class TestCooperativeReopen:
+    def test_kernel_writes_self_heal_after_release(self, tmp_path) -> None:
+        # The review-found regression: an idle release closed the collection
+        # and kernel write ops errored CollectionNotOpen (the reopen-on-demand
+        # lived only in the Python wrapper). Kernel-side ensure_open fixes it.
+        async def flow():
+            kernel = await _open(tmp_path, _Backend())
+            await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+
+            await kernel.release()
+            results = await kernel.upsert_notes(
+                [(basic, 1, ["written while released", "b"], [])], "error"
+            )
+            assert results[0][0] == "created"
+
+            await kernel.release()
+            wire = json.loads(
+                await kernel.upsert_notes_json(
+                    json.dumps(
+                        [
+                            {
+                                "note_type": "Basic",
+                                "deck": "Default",
+                                "fields": {"Front": "wire after release", "Back": "b"},
+                            }
+                        ]
+                    ),
+                    "error",
+                    False,
+                )
+            )
+            assert wire[0]["status"] == "created"
+            await kernel.close()
+
+        asyncio.run(flow())

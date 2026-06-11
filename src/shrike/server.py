@@ -842,6 +842,11 @@ def main() -> None:
         )
         await harness.boot(start_embedding=bool(args.embedding_model) and not args.no_embedding)
 
+        # These handlers cover the boot window AND the post-drain replay:
+        # uvicorn's serve() installs its own SIGTERM/SIGINT handlers (drain
+        # gracefully), then its capture_signals contextmanager REPLAYS the
+        # received signal to these originals on exit — so a runtime SIGTERM
+        # drains uvicorn first and lands here for the flush/close/exit.
         def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
             sig_name = signal.Signals(signum).name
             logger.info("Received %s, shutting down", sig_name)
@@ -894,6 +899,16 @@ def main() -> None:
             log_config=None,
         )
         await uvicorn.Server(config).serve()
+
+        # serve() returned without a replayed signal (e.g. should_exit set
+        # programmatically): run the same teardown the signal path performs.
+        # Normally unreached — a SIGTERM replays into _signal_shutdown above,
+        # and /shutdown exits before serve() returns.
+        logger.info("Server drained; shutting down")
+        with contextlib.suppress(Exception):
+            await harness.close()
+        server_lock.release()
+        logger.info("Shutdown complete")
 
     asyncio.run(_serve())
 

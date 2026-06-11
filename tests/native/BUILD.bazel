@@ -1,0 +1,40 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("//tools/bazel:defs.bzl", "pytest_test")
+load("@shrike_pip//:requirements.bzl", "requirement")
+
+package(default_testonly = True)
+
+py_library(
+    name = "conftest",
+    srcs = [
+        "__init__.py",
+        "conftest.py",
+    ],
+    deps = [
+        "//src/shrike",
+        "//tests/oracles",
+        requirement("anki"),  # the pip TEST ORACLE (cross-core parity subprocesses)
+    ],
+)
+
+# The native binding + kernel-assembly suite (asyncio bridge, AsyncKernel,
+# KernelIndex, Harness, the collection-core parity harness). Discovered to be
+# OFF the CI lanes entirely after #285 made tests Bazel-only (no target here)
+# — added by the post-series review so the 50+ binding tests gate PRs again.
+pytest_test(
+    name = "native",
+    srcs = glob(["test_*.py"]),
+    deps = [":conftest"],
+    size = "medium",
+)
+
+# Source files for the //:sdist source distribution (#245).
+filegroup(
+    name = "dist_files",
+    testonly = False,
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel", "**/__pycache__/**", "**/*.pyc", "**/*.pyo"],
+    ),
+    visibility = ["//visibility:public"],
+)
