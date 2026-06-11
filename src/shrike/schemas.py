@@ -244,11 +244,20 @@ class SearchMatch(Note):
 
 
 class Neighbor(BaseModel):
-    """A similar note attached to an upsert result."""
+    """A near-duplicate candidate attached to an upsert result (#204).
+
+    ``score`` is the cosine similarity when the candidate was semantically
+    ranked — ``None`` for a lexical-only hit (#206: a near-verbatim dupe the
+    embedding threshold missed has no meaningful cosine to report).
+    ``provenance`` says which signals surfaced it (#208), in the same
+    ``{signal, rank}`` shape as search provenance (#182): ``text`` for the
+    semantic match, ``fuzzy`` for the trigram lexical overlap.
+    """
 
     id: int
-    score: float
+    score: float | None = None
     tags: list[str] = []
+    provenance: list[SignalContribution] = []
 
 
 class TemplateInfo(BaseModel):

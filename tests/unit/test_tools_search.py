@@ -842,3 +842,169 @@ class TestTwoTierSearch:
         result = _call(mcp_sem, "search_notes", {"ids": [a]})
         assert result["completeness"] == "full"
         assert b in [m["id"] for m in result["results"][0]["matches"]]
+
+
+class TestDedupNeighbors:
+    """The generation-dedup hardening (#204): the lexical-overlap signal
+    (#206), the precision-oriented threshold (#207), and per-signal
+    provenance (#208) on upsert neighbors."""
+
+    @pytest.fixture()
+    def derived(self, tmp_path):
+        from shrike.derived import DerivedTextStore
+
+        s = DerivedTextStore(path=tmp_path / "shrike.db")
+        yield s
+        s.close()
+
+    @pytest.fixture()
+    def mcp_dedup(self, wrapper, sem_index, derived):
+        mcp = FastMCP("test")
+        register_tools(mcp, wrapper, index=sem_index, derived=derived)
+        return mcp
+
+    def _neighbors(self, result: dict[str, Any]) -> list[dict[str, Any]]:
+        return result["results"][0].get("neighbors", [])
+
+    def test_near_verbatim_dupe_surfaces_lexically(self, wrapper, sem_index, mcp_dedup, derived):
+        # An existing near-verbatim card, planted semantically FAR (cosine 0 —
+        # under any threshold) so only the trigram overlap can catch it.
+        existing = _seed(
+            wrapper,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {
+                        "Front": "the krebs cycle produces atp in mitochondria",
+                        "Back": "x",
+                    },
+                }
+            ],
+        )[0]["id"]
+        _build_derived(wrapper, derived)
+        _plant(sem_index, [(existing, 1.0)])  # distance 1.0 → cosine 0
+
+        result = _upsert(
+            mcp_dedup,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {
+                        "Front": "the krebs cycle produces atp in mitochondria!",
+                        "Back": "y",
+                    },
+                }
+            ],
+        )
+        neighbors = self._neighbors(result)
+        hit = next(n for n in neighbors if n["id"] == existing)
+        assert hit["score"] is None, "lexical-only — no cosine to report"
+        assert [p["signal"] for p in hit["provenance"]] == ["fuzzy"]
+
+    def test_semantic_neighbor_carries_text_provenance(
+        self, wrapper, sem_index, mcp_dedup, derived
+    ):
+        existing = _seed(
+            wrapper,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": "photosynthesis overview", "Back": "x"},
+                }
+            ],
+        )[0]["id"]
+        _build_derived(wrapper, derived)
+        _plant(sem_index, [(existing, 0.1)])  # cosine 0.9 ≥ the 0.6 default
+
+        result = _upsert(
+            mcp_dedup,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": "zz completely different words zz", "Back": "y"},
+                }
+            ],
+        )
+        neighbors = self._neighbors(result)
+        hit = next(n for n in neighbors if n["id"] == existing)
+        assert hit["score"] == 0.9
+        assert {p["signal"] for p in hit["provenance"]} == {"text"}
+
+    def test_both_signals_merge_on_one_candidate(self, wrapper, sem_index, mcp_dedup, derived):
+        existing = _seed(
+            wrapper,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": "glycolysis happens in the cytoplasm", "Back": "x"},
+                }
+            ],
+        )[0]["id"]
+        _build_derived(wrapper, derived)
+        _plant(sem_index, [(existing, 0.1)])
+
+        result = _upsert(
+            mcp_dedup,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": "glycolysis happens in the cytoplasm too", "Back": "y"},
+                }
+            ],
+        )
+        hit = next(n for n in self._neighbors(result) if n["id"] == existing)
+        assert hit["score"] == 0.9
+        assert {p["signal"] for p in hit["provenance"]} == {"text", "fuzzy"}
+
+    def test_default_threshold_is_precision_oriented(self, wrapper, sem_index, mcp_dedup, derived):
+        # Cosine 0.55: above the old shared 0.5 search default, below the
+        # deliberate 0.6 dedup default (#207) — and lexically unrelated, so
+        # nothing backstops it. It must NOT surface.
+        existing = _seed(
+            wrapper,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": "qq unrelated wording qq", "Back": "x"},
+                }
+            ],
+        )[0]["id"]
+        _build_derived(wrapper, derived)
+        _plant(sem_index, [(existing, 0.45)])
+
+        result = _upsert(
+            mcp_dedup,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": "zz different thing zz", "Back": "y"},
+                }
+            ],
+        )
+        # Not a SEMANTIC neighbor at the default gate (an incidental trigram
+        # overlap may still surface it lexically — that's the backstop, and
+        # it reports score None, never a cosine).
+        semantic_ids = [n["id"] for n in self._neighbors(result) if n["score"] is not None]
+        assert existing not in semantic_ids
+        # An explicit lower threshold opts back in (the knob stayed).
+        result = _upsert(
+            mcp_dedup,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": "zz third thing zz", "Back": "y"},
+                }
+            ],
+            neighbor_threshold=0.5,
+        )
+        hit = next(n for n in self._neighbors(result) if n["id"] == existing)
+        assert hit["score"] == 0.55

@@ -148,9 +148,16 @@ pub struct SearchMatch {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct Neighbor {
     pub id: i64,
-    pub score: f64,
+    /// Cosine similarity when semantically ranked; None for a lexical-only
+    /// near-verbatim hit (#206).
+    #[serde(default)]
+    pub score: Option<f64>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Which signals surfaced the candidate (#208) — the search-provenance
+    /// shape (#182): `text` (semantic) and/or `fuzzy` (lexical overlap).
+    #[serde(default)]
+    pub provenance: Vec<SignalContribution>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]

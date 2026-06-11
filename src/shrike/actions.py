@@ -101,6 +101,24 @@ SEARCH_WEIGHTS = {"text": 1.0, "image": 1.0, "tag": 1.0, "exact": 1.0, "fuzzy": 
 # gated (no typing-fragment problem).
 MIN_SEMANTIC_QUERY_CHARS = 3
 
+# The dedup-neighbor threshold (#207) — DELIBERATELY above the search-ranking
+# default (0.5): dedup is a precision answer an agent acts on, and the two
+# error directions cost differently. A false positive (flagging a non-dupe)
+# suppresses a legitimately new card outright; a marginal candidate that IS
+# shown still lets the agent decide. So the cosine gate leans precise (fewer
+# spurious flags), and the recall it gives up on near-verbatim restatements is
+# backstopped by the lexical-overlap signal (#206), which catches exactly the
+# lexically-close dupes a cosine threshold misses. Calibration from dedup's
+# own traffic is the recorded follow-up; this traffic deliberately NEVER feeds
+# the #201 search-gate calibration (which samples stored vectors offline — a
+# different population, structurally separate).
+DEDUP_NEIGHBOR_THRESHOLD = 0.6
+
+# Lexical-overlap cheapness gate (#206): the trigram OR-query grows with text
+# length, so the draft text is truncated before the fuzzy lookup — plenty for
+# near-verbatim detection, bounded for the high-volume dedup path.
+DEDUP_LEXICAL_QUERY_CHARS = 200
+
 # Intra-modal activation gate (#201b). A non-text modality's ranking is fed to the fusion only when
 # its best match for the query exceeds `mean + ACTIVATION_MARGIN·std` of that modality's calibrated
 # typical best match (index.activation_stats) — otherwise the modality "had no good match" and its
@@ -677,9 +695,14 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             Field(
                 ge=0.0,
                 le=1.0,
-                description="Minimum cosine similarity for a neighbor to be included. Default 0.5.",
+                description=(
+                    "Minimum cosine similarity for a semantically-ranked neighbor. "
+                    "Default 0.6 — deliberately above the search default: dedup is a "
+                    "precision answer, and near-verbatim dupes below it are still "
+                    "caught by the lexical-overlap signal (no cosine gate)."
+                ),
             ),
-        ] = 0.5,
+        ] = DEDUP_NEIGHBOR_THRESHOLD,
         on_duplicate: Annotated[
             Literal["error", "skip", "allow"],
             Field(
@@ -861,8 +884,12 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         top_k: int,
         threshold: float,
     ) -> bool:
-        """Search for similar notes and attach neighbors to each upsert result.
+        """Attach near-duplicate candidates to each upsert result (#204).
 
+        Two complementary signals per note (#206): the semantic match catches
+        paraphrase dupes (cosine-thresholded), and a trigram lexical-overlap
+        check catches near-verbatim restatements that score marginally on
+        embeddings — each hit carrying `{signal, rank}` provenance (#208).
         Returns True if the neighbor search completed (each created/updated
         result now carries a `neighbors` list, possibly empty), False if it
         failed — in which case the caller should signal a retry.
@@ -873,8 +900,11 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             raw_results = index.search(texts, top_k=top_k + len(exclude_set))
 
             id_to_neighbors: dict[int, list[dict[str, Any]]] = {}
-            for nid, matches in zip(changed_ids, raw_results, strict=True):
-                neighbors: list[dict[str, Any]] = []
+            for nid, text, matches in zip(changed_ids, texts, raw_results, strict=True):
+                # Semantic candidates: paraphrase dupes (rank = the note's
+                # position in this draft's own cosine ranking).
+                candidates: dict[int, dict[str, Any]] = {}
+                sem_rank = 0
                 for m in matches:
                     score = round(1.0 - m["distance"], 3)
                     if score < threshold:
@@ -882,6 +912,51 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                     neighbor_id = m["note_id"]
                     if neighbor_id in exclude_set:
                         continue
+                    sem_rank += 1
+                    candidates[neighbor_id] = {
+                        "score": score,
+                        "provenance": [{"signal": "text", "rank": sem_rank}],
+                    }
+                    if sem_rank >= top_k:
+                        break
+
+                # Lexical overlap (#206): near-verbatim dupes the cosine gate
+                # missed. No cosine to report → score stays None.
+                if derived is not None and derived.available and text.strip():
+                    fuzzy_rank = 0
+                    try:
+                        fuzzy_rows = derived.search_fuzzy(
+                            text[:DEDUP_LEXICAL_QUERY_CHARS], top_k=top_k + len(exclude_set)
+                        )
+                    except Exception:
+                        logger.debug("dedup lexical overlap unavailable", exc_info=True)
+                        fuzzy_rows = []
+                    for fid, _match in fuzzy_rows:
+                        if fid in exclude_set:
+                            continue
+                        fuzzy_rank += 1
+                        entry = candidates.get(fid)
+                        if entry is None:
+                            candidates[fid] = {
+                                "score": None,
+                                "provenance": [{"signal": "fuzzy", "rank": fuzzy_rank}],
+                            }
+                        else:
+                            entry["provenance"].append({"signal": "fuzzy", "rank": fuzzy_rank})
+                        if fuzzy_rank >= top_k:
+                            break
+
+                # Semantically-scored candidates first (descending score),
+                # lexical-only after (by their fuzzy rank); cap at top_k.
+                ordered = sorted(
+                    candidates.items(),
+                    key=lambda kv: (
+                        -(kv[1]["score"] if kv[1]["score"] is not None else -1.0),
+                        kv[1]["provenance"][0]["rank"],
+                    ),
+                )
+                neighbors: list[dict[str, Any]] = []
+                for neighbor_id, info in ordered:
                     try:
                         note_data = await wrapper.note_to_dict(neighbor_id, "meta")
                     except Exception:
@@ -894,8 +969,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                     neighbors.append(
                         {
                             "id": neighbor_id,
-                            "score": score,
+                            "score": info["score"],
                             "tags": note_data.get("tags", []),
+                            "provenance": info["provenance"],
                         }
                     )
                     if len(neighbors) >= top_k:
