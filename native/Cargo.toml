@@ -9,9 +9,6 @@
 
 [workspace]
 resolver = "2"
-# Spike crates are deliberately OUT of the workspace: they pull heavyweight
-# external trees (the anki monorepo) and build only when run explicitly.
-exclude = ["spikes/*"]
 members = [
     "_demo",
     "shrike-cabi",

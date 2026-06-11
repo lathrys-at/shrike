@@ -263,7 +263,7 @@
         "usagesDigest": "uQZDCNt+/5EDhxLgcFUr+ioH2Y3nKzrqY7lQ0jnnTZQ=",
         "recordedFileInputs": {
           "@@//native/Cargo.lock": "deb690c98452581082e69cc115c58ed400ab876ea6377128a4fa53c564a641cc",
-          "@@//native/Cargo.toml": "fcd7b99e29e4083af83da5375b5a547b4d0bb787c0128b2d307fd4e8f25b58c5",
+          "@@//native/Cargo.toml": "f6a15a5725e9d6f8ae738b8f0cee54fa5c2ade046953a9be3910dd0e4e9cb9c6",
           "@@//native/_demo/Cargo.toml": "833ef01900b52b84364fe729393a63aa0b2c92cb3e017f3f39ca1ea8d60531b5",
           "@@//native/shrike-cabi/Cargo.toml": "237cb32d067bc5a71fe8c96c7446ddfb0addc8721fa80e1b853550cd8a0872d0",
           "@@//native/shrike-collection/Cargo.toml": "4ca11620f49996dbbcaa44b03f59798a682194d67c4772e1f484e72a49a07eaa",

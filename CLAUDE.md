@@ -8,37 +8,56 @@ Shrike manages Anki flashcard collections without running Anki's GUI. It exposes
 
 ### Architecture
 
+**Since the kernel inversion (#279/#332, June 2026) the compute core is Rust.**
+The server is an *assembling harness*: it opens one `AsyncKernel` (the Rust
+kernel bound for asyncio) on the event loop, registers services on it (the
+embedding backend via `attach_embedder` — the #342 service slot), and serves.
+The kernel owns the collection (anki via its protobuf service layer ONLY), the
+vector index orchestration (drift, per-note fingerprints, debounced saves),
+and the derived-text ingest; write actions route through maintained kernel ops
+(`upsert_notes_json`, `delete_notes`, `reindex_notes`, `forget_notes`,
+`metadata_changed`). Scheduling is *injected*: the harness thread runs the
+kernel's `WorkerExecutor`; the kernel owns no threads and assumes no runtime
+(no tokio — the asyncio loop polls kernel futures via the runtime-less bridge).
+
 ```
-CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP)
+CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP, server.py = the host)
                                       │
-                                      ├──▶ CollectionWrapper (anki.Collection)
-                                      │         └──▶ collection.anki2 (SQLite)
-                                      │
-                                      ├──▶ VectorIndex (per-modality USearch HNSW)
-                                      │         ├──▶ EmbeddingService (llama-server)
-                                      │         └──▶ index.usearch (+ index.image.usearch) + index.meta.json
-                                      │
-                                      └──▶ DerivedTextStore (FTS5 trigram sidecar)
-                                                └──▶ shrike.db (substring + fuzzy lexical search)
+                                      └──▶ Harness (harness.py: assembly + operational verbs)
+                                              │
+                                              └──▶ AsyncKernel (Rust shrike-kernel via shrike-py)
+                                                      ├──▶ collection.anki2 (anki protobuf services)
+                                                      ├──▶ IndexOrchestrator (per-modality USearch HNSW)
+                                                      │       └──▶ index.usearch (+ index.image.usearch) + index.meta.json
+                                                      ├──▶ DerivedEngine (FTS5 trigram sidecar, shrike.db)
+                                                      └──▶ EmbedService slot ◀── EmbeddingRuntime backend (llama/onnx/clip)
 ```
+
+Embedded hosts skip Python entirely: `native/shrike-cabi` is the manual
+C-ABI surface (#333) over the minimal kernel profile (#338, no ort).
 
 ## Project layout
 
 ```
-src/shrike/                       # Python package (src layout)
+src/shrike/                       # Python package (src layout) — the harness half
 ├── __init__.py                   # Re-exports __version__ from generated _version.py (hatch-vcs)
-├── server.py                     # MCP server entry point (argparse, FastMCP)
-├── collection.py                 # CollectionWrapper — all Anki DB operations
-├── note_types.py                 # upsert_note_types() — create/update note types
+├── server.py                     # MCP host: argparse, FastMCP, routes; main() tail = asyncio.run(_serve())
+├── harness.py                    # Harness (kernel-mode core: assembly + verbs) + KernelIndexView
+├── collection.py                 # CollectionWrapper — async facade over the shared core
+│                                 #   (kernel mode via over_kernel; standalone mode for tests)
+├── note_types.py                 # Note-type op shims over the native core
 ├── daemon.py                     # Daemon lifecycle — file locks, spawn, shutdown
-├── tools.py                      # Registers 24 MCP tools; returns response models (emits outputSchema)
-├── schemas.py                    # Pydantic models — single source of truth for every tool request/response + status shape
-├── client.py                     # ShrikeClient — standalone HTTP client; typed per-tool methods, daemon lifecycle
+├── actions.py                    # The action registry (24 actions) — kernel-mode write paths
+├── tools.py                      # Binds the registry to MCP; returns response models (outputSchema)
+├── mcp_adapter.py                # _safe_tool policy + per-call INFO logging
+├── schemas.py                    # Pydantic wire models (the BINDING; shrike-schemas in Rust is canonical)
+├── client.py                     # ShrikeClient — standalone HTTP client; typed per-tool methods
 ├── paths.py                      # Platform-canonical directories (via platformdirs)
 ├── log.py                        # Logging config, log parsing and styling
-├── embedding.py                  # EmbeddingService (llama-server subprocess) + EmbeddingRuntime (start/stop lifecycle)
-├── index.py                      # VectorIndex — USearch HNSW index for note embeddings
-├── derived.py                    # DerivedTextStore — FTS5 trigram sidecar (shrike.db): substring + fuzzy
+├── embedding.py                  # EmbedderBackend facades + EmbeddingRuntime (backend lifecycle)
+├── index.py                      # VectorIndex/IndexSaver — STANDALONE/TEST contexts only since the
+│                                 #   harness rebase (#353); the server's index lives in the kernel (#355)
+├── derived.py                    # DerivedTextStore — FTS5 facade (read paths; kernel ingests in server mode)
 └── cli/
     ├── __init__.py               # Root Click group, global options (--config, --url, --json, --pretty)
     ├── client.py                 # Re-export shim → shrike.client (keeps imports working)
@@ -66,7 +85,7 @@ tests/
 │   ├── test_logging.py
 │   ├── test_embedding.py         # EmbeddingService unit tests (mocked subprocess)
 │   ├── test_config.py            # Config loading and embedding args
-│   ├── test_index.py             # VectorIndex unit tests (mocked embeddings)
+│   ├── test_index.py             # VectorIndex unit tests (standalone facade; see #355)
 │   ├── test_derived.py           # DerivedTextStore unit tests (real FTS5: build/substring/fuzzy/seam/drift)
 │   ├── test_note_embedding_text.py  # CollectionWrapper.note_texts_for_embedding
 │   ├── test_tools_search.py     # search_notes, upsert neighbors, delete index updates
@@ -74,6 +93,8 @@ tests/
 │   ├── test_daemon.py           # stop_server HTTP→SIGTERM→SIGKILL escalation
 │   ├── test_collection_concurrency.py  # single-worker-thread serialization
 │   └── test_media.py            # media store/fetch/list/delete, SSRF guard, prune unused_media (mocked URL fetch)
+├── native/                       # the native extension + kernel bindings (asyncio bridge,
+│                                 #   AsyncKernel, KernelIndex, Harness assembly, C-ABI parity)
 └── integration/                  # real server subprocess + HTTP transport
     ├── conftest.py               # shared session server + per-test collection reset; mcp/runner; isolated_server
     ├── test_tools.py
@@ -82,6 +103,17 @@ tests/
     ├── test_security.py          # custom-route Host/Origin guard + non-loopback refusal
     ├── test_embedding.py         # Embedding tests + orphan reaping (requires llama-server + GGUF model)
     └── test_semantic.py          # Semantic search, neighbors, index CLI (requires llama-server)
+native/                           # the Rust workspace (the compute core)
+├── shrike-kernel/                # THE kernel: collection + index orchestration + derived + fusion
+├── shrike-collection/            # anki via its protobuf service layer (the ONLY anki coupling)
+├── shrike-index/                 # per-modality USearch engine
+├── shrike-derived/               # FTS5 trigram engine
+├── shrike-embed/                 # ort/tokenizers text + CLIP encoders (feature-gated, #338)
+├── shrike-compute/               # rrf_fuse + fused embed→index paths
+├── shrike-schemas/               # serde+schemars wire types (CANONICAL; schemas.py binds)
+├── shrike-ffi/                   # the shared error taxonomy
+├── shrike-py/                    # the pyo3 binding (the ONLY pyo3 crate) + shrike_native package
+└── shrike-cabi/                  # the manual C-ABI surface (#333) + embedded C smoke host
 docs/
 └── mcp-tools.md                  # Tool documentation (human-readable; machine schema is served
                                   # live by the server and defined in shrike/schemas.py)
