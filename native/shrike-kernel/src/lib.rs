@@ -413,6 +413,42 @@ impl Kernel {
         Ok(true)
     }
 
+    /// Explicit FULL index rebuild (the `/index/rebuild` semantics): drop and
+    /// re-embed everything — never the incremental path (reconcile is only
+    /// the automatic drift route). Returns the note count. Errors Unavailable
+    /// with no embedder attached.
+    pub async fn rebuild_index(&self) -> NativeResult<usize> {
+        let Some(svc) = self.embed_service() else {
+            return Err(NativeError::unavailable(
+                "no embedding service attached — start embedding first",
+            ));
+        };
+        let col_mod = self.col_mod().await?;
+        let model_id = svc.embedder.fingerprint();
+        let raw = self
+            .collection
+            .run(|core| -> NativeResult<_> {
+                let ids = core.find_notes("")?;
+                core.note_embed_inputs(&ids)
+            })
+            .await??;
+        let inputs: Vec<index_orchestrator::EmbedInput> = raw
+            .into_iter()
+            .map(
+                |(note_id, text, image_names)| index_orchestrator::EmbedInput {
+                    note_id,
+                    text,
+                    image_names,
+                },
+            )
+            .collect();
+        let total = inputs.len();
+        self.orchestrator
+            .rebuild(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
+            .await?;
+        Ok(total)
+    }
+
     /// Advance the derived-store watermark — and, when the index was actually
     /// maintained by this op (an embedder is attached), the index watermark +
     /// a debounced flush. With no embedder the index watermark stays put, so
