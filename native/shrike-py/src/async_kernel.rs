@@ -241,6 +241,24 @@ impl AsyncKernel {
         crate::anki_core::CollectionCore::from_arc(self.inner.collection().core_arc())
     }
 
+    /// Run a harness callable as ONE serialized job on the kernel's executor
+    /// — the escape hatch carrying the long tail of direct collection ops
+    /// (media, prune, note-type edits) without binding each verb: the
+    /// callable closes over `core_handle()` and runs where every other
+    /// collection job runs (GIL attached for its duration). A Python
+    /// exception rethrows as-is through the awaitable. Re-entrancy rule: the
+    /// job must never await another kernel op (a deadlock by contract).
+    fn run_job<'py>(&self, py: Python<'py>, job: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        crate::asyncio_bridge::pyresult_future_into_py(py, async move {
+            kernel
+                .collection()
+                .run(move |_core| Python::attach(|py| job.call0(py)))
+                .await
+                .map_err(crate::to_py_err)?
+        })
+    }
+
     /// Cooperative idle-release (#64) — awaitable.
     fn release<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);

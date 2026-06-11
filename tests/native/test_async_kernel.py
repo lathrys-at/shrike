@@ -227,3 +227,24 @@ class TestAsyncKernelImages:
 
         backend = asyncio.run(flow())
         assert backend.image_calls == [1], "one image embed for the one resolvable file"
+
+
+class TestRunJob:
+    def test_run_job_serializes_and_rethrows(self, tmp_path) -> None:
+        async def flow():
+            kernel = await _open(tmp_path, _Backend())
+            core = kernel.core_handle()
+
+            # The callable runs on the kernel executor over the shared core.
+            basic = await kernel.run_job(lambda: core.notetype_id("Basic"))
+            assert isinstance(basic, int)
+
+            # A Python exception rethrows as-is through the awaitable.
+            def boom() -> None:
+                raise ValueError("job exploded")
+
+            with pytest.raises(ValueError, match="job exploded"):
+                await kernel.run_job(boom)
+            await kernel.close()
+
+        asyncio.run(flow())

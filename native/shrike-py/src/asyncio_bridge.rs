@@ -104,6 +104,29 @@ impl PollCallback {
     }
 }
 
+/// Bridge a future that already speaks Python (`PyResult<Py<PyAny>>`) — the
+/// `run_job` shape, where the payload IS a Python value and a failure IS a
+/// Python exception to rethrow as-is (no NativeError mapping).
+pub(crate) fn pyresult_future_into_py<'py, F>(
+    py: Python<'py>,
+    fut: F,
+) -> PyResult<Bound<'py, PyAny>>
+where
+    F: Future<Output = PyResult<Py<PyAny>>> + Send + 'static,
+{
+    let asyncio = py.import("asyncio")?;
+    let event_loop = asyncio.call_method0("get_running_loop")?;
+    let py_future = event_loop.call_method0("create_future")?;
+
+    let erased: ErasedFuture = Box::pin(async move {
+        let out = fut.await;
+        Box::new(move |_py: Python<'_>| out) as Conversion
+    });
+
+    schedule_first_poll(py, erased, &py_future, &event_loop)?;
+    Ok(py_future)
+}
+
 /// Bridge a kernel future into an `asyncio.Future` awaitable on the running
 /// loop. Must be called from a coroutine context (the loop must be running).
 pub(crate) fn future_into_py<'py, F, T>(py: Python<'py>, fut: F) -> PyResult<Bound<'py, PyAny>>
@@ -126,6 +149,18 @@ where
         }) as Conversion
     });
 
+    schedule_first_poll(py, erased, &py_future, &event_loop)?;
+    Ok(py_future)
+}
+
+/// Wrap the erased future in a poll callback and kick off its first poll as
+/// an ordinary loop callback (shared by both bridge entry points).
+fn schedule_first_poll(
+    py: Python<'_>,
+    erased: ErasedFuture,
+    py_future: &Bound<'_, PyAny>,
+    event_loop: &Bound<'_, PyAny>,
+) -> PyResult<()> {
     let poll_cb = Py::new(
         py,
         PollCallback {
@@ -134,7 +169,6 @@ where
             event_loop: event_loop.clone().unbind(),
         },
     )?;
-    // Kick off the first poll as an ordinary loop callback.
     event_loop.call_method1("call_soon", (poll_cb,))?;
-    Ok(py_future)
+    Ok(())
 }
