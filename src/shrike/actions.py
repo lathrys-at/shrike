@@ -1372,9 +1372,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                         saver.request_save()
                     logger.debug("Index updated after migrate: %d vectors", len(changed))
                 except Exception:
-                    logger.warning(
-                        "Failed to update index after migrate_note_type", exc_info=True
-                    )
+                    logger.warning("Failed to update index after migrate_note_type", exc_info=True)
 
         return MigrateNoteTypeResponse.model_validate(result)
 
