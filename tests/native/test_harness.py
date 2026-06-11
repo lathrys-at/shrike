@@ -228,3 +228,94 @@ class TestRecognition:
             await harness.close()
 
         asyncio.run(flow())
+
+
+class TestDedupOverOcr:
+    def test_dedup_search_covers_ocr_vectors_max_over_items(self, tmp_path) -> None:
+        # #205: the dedup neighbor path (KernelIndexView.search — the exact
+        # call _attach_neighbors makes) matches a draft against ALL of a
+        # note's text-modality vectors, max-over-items: a card whose content
+        # lives ONLY inside an image surfaces as a near-dupe through its OCR
+        # vector, while the card's own field text shares nothing with the
+        # draft. Text-to-text — no modality gap, no activation gate.
+        import hashlib
+        from types import SimpleNamespace
+
+        from shrike.harness import KernelIndexView
+
+        class _TokenHash:
+            """Token-overlap cosine: shared words → similarity."""
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                out = []
+                for t in texts:
+                    v = [0.0] * 32
+                    for tok in t.lower().split():
+                        h = int(hashlib.blake2b(tok.encode(), digest_size=2).hexdigest(), 16)
+                        v[h % 32] += 1.0
+                    n = sum(x * x for x in v) ** 0.5 or 1.0
+                    out.append([x / n for x in v])
+                return out
+
+            def model_fingerprint(self) -> str:
+                return "tok:v1"
+
+            def embedding_dim(self) -> int:
+                return 32
+
+        async def flow():
+            media = {"cycle.png": b"oxaloacetate condenses with acetyl coa"}
+            runtime = EmbeddingRuntime(model=None)
+            derived = DerivedTextStore(
+                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
+            )
+            harness = await Harness.assemble(
+                collection_path=str(tmp_path / "collection.anki2"),
+                cache_dir=str(tmp_path / "cache"),
+                runtime=runtime,
+                derived=derived,
+                cooperative=False,
+                hold_seconds=5.0,
+                media_read=media.get,
+                media_exists=lambda name: name in media,
+            )
+            await harness.boot(start_embedding=False)
+            backend = _TokenHash()
+            harness.kernel.attach_embedder(shrike_native.PyEmbedder.capture(backend))
+            await harness.kernel.reindex_if_needed()
+
+            notes = await harness.wrapper.upsert_notes(
+                [
+                    {
+                        "note_type": "Basic",
+                        "deck": "Default",
+                        "fields": {"Front": 'See diagram <img src="cycle.png">', "Back": "b"},
+                    },
+                    {
+                        "note_type": "Basic",
+                        "deck": "Default",
+                        "fields": {"Front": "qq unrelated filler card qq", "Back": "b"},
+                    },
+                ]
+            )
+            diagram_id = notes[0]["id"]
+
+            harness.attach_recognizer(_StubOcr())
+            report = await harness.recognition_sweep(batch_size=4)
+            assert report["total_stored"] == 1
+
+            # The dedup path's exact call, with the same backend embedding the
+            # draft query (a fresh view over the kernel's engine, like the
+            # server wires it).
+            view = KernelIndexView(harness.kernel, SimpleNamespace(backend=backend))  # type: ignore[arg-type]
+            draft = "oxaloacetate condenses with acetyl coa today"
+            hits = view.search([draft], top_k=5)[0]
+            scores = {h["note_id"]: 1.0 - h["distance"] for h in hits}
+            assert diagram_id in scores, "the image-only content surfaced as a near-dupe"
+            assert scores[diagram_id] >= 0.6, (
+                f"clears the dedup threshold via the OCR vector: {scores[diagram_id]:.3f}"
+            )
+
+            await harness.close()
+
+        asyncio.run(flow())
