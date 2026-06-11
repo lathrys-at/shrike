@@ -50,12 +50,12 @@ socks = [
     "httpx[socks]>=0.27",
 ]
 # In-process ONNX embedding backend (--embedding-backend onnx). Optional — the
-# default llama-server backend needs neither. onnxruntime runs the graph;
-# tokenizers (HuggingFace, Rust-backed) does the tokenization. The base wheel covers
-# CPU (and CoreML on macOS, i.e. Apple GPU/ANE).
+# default llama-server backend doesn't need it. The onnxruntime wheel carries the
+# shared runtime the native (Rust ort) engine dlopens; tokenization runs crate-side
+# (the Rust tokenizers crate) since the #278 cutover, so no Python tokenizers dep.
+# The base wheel covers CPU (and CoreML on macOS, i.e. Apple GPU/ANE).
 onnx = [
     "onnxruntime>=1.17",
-    "tokenizers>=0.20",
 ]
 # Same backend, CUDA/TensorRT build for NVIDIA GPUs (--embedding-onnx-provider
 # CUDAExecutionProvider). Install INSTEAD of `onnx`, not alongside: the onnxruntime
@@ -63,14 +63,12 @@ onnx = [
 # is an analogous manual `pip install onnxruntime-directml`.
 onnx-gpu = [
     "onnxruntime-gpu>=1.17",
-    "tokenizers>=0.20",
 ]
-# In-process CLIP backend (--embedding-backend clip) for image<->text search: onnxruntime +
-# tokenizers (as for onnx) plus pillow for image decode/preprocessing (no torch/torchvision).
+# In-process CLIP backend (--embedding-backend clip) for image<->text search. Same
+# carrier as `onnx`: image decode/preprocessing and tokenization run crate-side
+# since the #278 cutover (no torch/torchvision, no Python pillow/tokenizers).
 clip = [
     "onnxruntime>=1.17",
-    "tokenizers>=0.20",
-    "pillow>=10",
 ]
 dev = [
     # The pip anki package is the TEST ORACLE only since the #278 cutover
@@ -79,6 +77,10 @@ dev = [
     # usearch-python is test-only since the #278 cutover: the suite uses it to
     # author pre-#201a (v1) index layouts; the runtime engine is shrike-index.
     "usearch>=2.12",
+    # tokenizers + pillow are test-only since the #278 cutover (fixture image
+    # authoring + tokenizer-convention preconditions); inference runs crate-side.
+    "tokenizers>=0.20",
+    "pillow>=10",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
@@ -140,7 +142,7 @@ module = ["jsonschema.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["onnxruntime.*", "tokenizers.*", "PIL.*"]
+module = ["onnxruntime.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

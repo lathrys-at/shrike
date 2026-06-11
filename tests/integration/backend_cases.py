@@ -2,9 +2,10 @@
 
 Each :class:`BackendCase` describes one ``EmbedderBackend`` configuration runnable
 through ``test_backend_conformance.py``. **Registering a new backend implementation
-is one entry here** — that's the point: when a native (Rust) implementation of the
-same protocol lands (#270/#271), its acceptance gate is this suite plus a
-``parity_ref`` pointing at the Python implementation it replaces.
+is one entry here** — that's the point: a new implementation's acceptance gate is
+this suite plus a ``parity_ref`` pointing at the implementation it replaces (the
+native engines #270/#271 earned default status this way; their Python references
+retired with the #278 cutover, so today's cases run restart parity).
 
 Parity semantics (epic #265 convention 7): a case whose ``parity_ref`` is ``None``
 is compared against *a fresh instance of itself* (restart parity — fingerprint
@@ -69,27 +70,21 @@ class BackendCase:
     marks: tuple[Any, ...] = field(default=())
 
 
-def _make_onnx(
-    model_fixture: str, *, native: bool = False
-) -> Callable[[pytest.FixtureRequest], EmbedderBackend]:
+def _make_onnx(model_fixture: str) -> Callable[[pytest.FixtureRequest], EmbedderBackend]:
     def make(request: pytest.FixtureRequest) -> EmbedderBackend:
         from shrike.embedding_onnx import OnnxBackend
 
         model: Path = request.getfixturevalue(model_fixture)
-        return OnnxBackend(model=str(model), native=native)
+        return OnnxBackend(model=str(model))
 
     return make
 
 
-def _make_clip(request: pytest.FixtureRequest, *, native: bool = False) -> EmbedderBackend:
+def _make_clip(request: pytest.FixtureRequest) -> EmbedderBackend:
     from shrike.embedding_clip import ClipBackend
 
     model: Path = request.getfixturevalue("clip_model")
-    return ClipBackend(model=str(model), native=native)
-
-
-def _make_clip_native(request: pytest.FixtureRequest) -> EmbedderBackend:
-    return _make_clip(request, native=True)
+    return ClipBackend(model=str(model))
 
 
 def _make_llama(request: pytest.FixtureRequest) -> EmbedderBackend:
@@ -117,94 +112,46 @@ def cases() -> list[BackendCase]:
     )
 
     return [
-        # The Rust engine (#270) under the same OnnxBackend facade, compared
-        # against the Python implementation it replaces. Measured: vectors are
-        # float-noise-different (pooling summation order), NOT bit-exact — so it
-        # does not claim the onnx: namespace (epic convention 7) and the parity
-        # test asserts the fingerprints differ + vectors agree within tolerance.
-        BackendCase(
-            id="onnx-rs-minilm-int8",
-            ndim=384,
-            fingerprint_prefixes=("onnx-rs:",),
-            make=_make_onnx("onnx_model", native=True),
-            restart_exact=True,
-            batch_exact=True,
-            parity_ref=_make_onnx("onnx_model"),
-            claims_reference_namespace=False,
-            marks=(requires_onnxruntime, requires_shrike_native),
-        ),
-        BackendCase(
-            id="onnx-rs-minilm-fp32",
-            ndim=384,
-            fingerprint_prefixes=("onnx-rs:",),
-            make=_make_onnx("onnx_fp32_model", native=True),
-            restart_exact=True,
-            batch_exact=True,
-            parity_ref=_make_onnx("onnx_fp32_model"),
-            claims_reference_namespace=False,
-            marks=(requires_onnxruntime, requires_shrike_native),
-        ),
-        BackendCase(
-            id="onnx-rs-distilroberta-int8",
-            ndim=768,
-            fingerprint_prefixes=("onnx-rs:",),
-            make=_make_onnx("distilroberta_model", native=True),
-            restart_exact=True,
-            batch_exact=True,
-            parity_ref=_make_onnx("distilroberta_model"),
-            claims_reference_namespace=False,
-            marks=(requires_onnxruntime, requires_shrike_native),
-        ),
+        # The native ONNX engine (#270), the only engine since the #278 cutover.
+        # The onnx-rs: fingerprint namespace is its frozen vector-space identity
+        # from the dual-engine bake (indexes built then load without a rebuild).
         BackendCase(
             id="onnx-minilm-int8",
             ndim=384,
-            fingerprint_prefixes=("onnx:",),
+            fingerprint_prefixes=("onnx-rs:",),
             make=_make_onnx("onnx_model"),
             restart_exact=True,
             batch_exact=True,
-            marks=(requires_onnxruntime,),
+            marks=(requires_onnxruntime, requires_shrike_native),
         ),
         BackendCase(
             id="onnx-minilm-fp32",
             ndim=384,
-            fingerprint_prefixes=("onnx:",),
+            fingerprint_prefixes=("onnx-rs:",),
             make=_make_onnx("onnx_fp32_model"),
             restart_exact=True,
             batch_exact=True,
-            marks=(requires_onnxruntime,),
+            marks=(requires_onnxruntime, requires_shrike_native),
         ),
         BackendCase(
             id="onnx-distilroberta-int8",
             ndim=768,
-            fingerprint_prefixes=("onnx:",),
+            fingerprint_prefixes=("onnx-rs:",),
             make=_make_onnx("distilroberta_model"),
             restart_exact=True,
             batch_exact=True,
-            marks=(requires_onnxruntime,),
+            marks=(requires_onnxruntime, requires_shrike_native),
         ),
+        # The native CLIP engine (#271), the only engine since the #278 cutover
+        # (clip-rs: namespace kept for the same reason). Image-path semantics
+        # are asserted as retrieval equivalence in test_clip_native.py.
         BackendCase(
             id="clip-vit-b32",
             ndim=512,
-            fingerprint_prefixes=("clip:",),
+            fingerprint_prefixes=("clip-rs:",),
             make=_make_clip,
             restart_exact=True,
             batch_exact=True,
-            marks=(requires_clip,),
-        ),
-        # The Rust CLIP engine (#271). Text-path vectors agree with the Python
-        # engine at tolerance tier; the IMAGE path is pixel-different (image
-        # crate Catmull-Rom vs PIL bicubic), so the kind namespaces clip-rs: and
-        # image parity is asserted as retrieval equivalence in
-        # test_clip_native.py, not vector equality.
-        BackendCase(
-            id="clip-rs-vit-b32",
-            ndim=512,
-            fingerprint_prefixes=("clip-rs:",),
-            make=_make_clip_native,
-            restart_exact=True,
-            batch_exact=True,
-            parity_ref=_make_clip,
-            claims_reference_namespace=False,
             marks=(requires_clip, requires_shrike_native),
         ),
         BackendCase(

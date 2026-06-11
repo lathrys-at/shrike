@@ -43,11 +43,12 @@ if TYPE_CHECKING:
     from shrike.index import VectorIndex
 
 # Embedding backend kinds the runtime can construct (see EmbeddingRuntime).
-# "onnx-rs" is the Rust engine behind the same OnnxBackend facade (#270): same
-# models, same provider resolution, in-crate tokenization/pooling — it coexists
-# with "onnx" through the parity bake (vectors are float-noise-different, so the
-# kinds keep distinct fingerprint namespaces and never mix index spaces).
-SUPPORTED_BACKENDS = ("llama", "onnx", "onnx-rs", "clip", "clip-rs")
+# The onnx/clip backends run the native (Rust) engines, unconditional since the
+# #278 cutover; "onnx-rs"/"clip-rs" — the kinds that selected those engines
+# during the dual-engine parity bake (#270/#271) — remain accepted as aliases so
+# existing configs keep working.
+SUPPORTED_BACKENDS = ("llama", "onnx", "clip")
+BACKEND_ALIASES = {"onnx-rs": "onnx", "clip-rs": "clip"}
 DEFAULT_BACKEND = "llama"
 
 logger = logging.getLogger("shrike.embedding")
@@ -635,7 +636,7 @@ class EmbeddingRuntime:
         batch_size: int | None = None,
     ) -> None:
         self._index = index
-        self._backend_kind = backend
+        self._backend_kind = BACKEND_ALIASES.get(backend, backend)
         self._model = model
         self._host = host
         self._port = port
@@ -771,7 +772,7 @@ class EmbeddingRuntime:
         only when that backend is actually selected.
         """
         assert self._model is not None  # callers check before constructing
-        if self._backend_kind in ("onnx", "onnx-rs"):
+        if self._backend_kind == "onnx":
             from shrike.embedding_onnx import OnnxBackend
 
             return OnnxBackend(
@@ -784,9 +785,8 @@ class EmbeddingRuntime:
                 max_length=self._context_size,
                 batch_size=self._batch_size,
                 log_dir=self._log_dir,
-                native=self._backend_kind == "onnx-rs",
             )
-        if self._backend_kind in ("clip", "clip-rs"):
+        if self._backend_kind == "clip":
             from shrike.embedding_clip import ClipBackend
 
             return ClipBackend(
@@ -794,7 +794,6 @@ class EmbeddingRuntime:
                 providers=self._onnx_providers,
                 batch_size=self._batch_size,
                 log_dir=self._log_dir,
-                native=self._backend_kind == "clip-rs",
             )
         if self._backend_kind == "llama":
             return LlamaServerBackend(

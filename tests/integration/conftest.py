@@ -678,25 +678,24 @@ requires_llama_server = pytest.mark.skipif(
 
 
 def _has_onnxruntime() -> bool:
-    return (
-        importlib.util.find_spec("onnxruntime") is not None
-        and importlib.util.find_spec("tokenizers") is not None
-    )
+    return importlib.util.find_spec("onnxruntime") is not None
 
 
 requires_onnxruntime = pytest.mark.skipif(
     not _has_onnxruntime(),
-    reason="onnxruntime/tokenizers not installed (pip install 'shrike[onnx]')",
+    reason="onnxruntime not installed (pip install 'shrike[onnx]')",
 )
 
 
 def _has_clip() -> bool:
+    # PIL is a *test* dep here (fixture image authoring) — the backend itself
+    # decodes/preprocesses crate-side and needs only the onnxruntime carrier.
     return _has_onnxruntime() and importlib.util.find_spec("PIL") is not None
 
 
 requires_clip = pytest.mark.skipif(
     not _has_clip(),
-    reason="onnxruntime/tokenizers/pillow not installed (pip install 'shrike[clip]')",
+    reason="onnxruntime/pillow not installed (pip install 'shrike[clip]' + pillow)",
 )
 
 

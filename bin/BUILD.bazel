@@ -27,9 +27,9 @@ py_binary(
     visibility = ["//visibility:public"],
     deps = [
         "//src/shrike:shrike",
+        # The onnxruntime wheel carries the shared runtime the native engine
+        # dlopens; tokenization/image-prep run crate-side (#278 cutover).
         requirement("onnxruntime"),
-        requirement("pillow"),
-        requirement("tokenizers"),
     ],
 )
 

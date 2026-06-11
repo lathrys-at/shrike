@@ -1,9 +1,10 @@
-"""End-to-end test of the onnx-rs backend kind (#270).
+"""End-to-end test of the native ONNX backend (#270) through the real server.
 
-The conformance + parity coverage lives in test_backend_conformance.py (the
-onnx-rs-* cases); this exercises the kind through the real server: boot with
-``--embedding-backend onnx-rs``, index, and search — proving the facade, the
-runtime kind plumbing, and the native engine compose over the wire.
+The conformance coverage lives in test_backend_conformance.py (the onnx-*
+cases); this boots a server with ``--embedding-backend onnx-rs`` — the retired
+dual-engine kind, kept as an accepted alias of ``onnx`` since the #278 cutover —
+then indexes and searches, proving the facade, the kind plumbing (incl. the
+alias), and the native engine compose over the wire.
 """
 
 from __future__ import annotations
@@ -45,7 +46,8 @@ class TestOnnxRsServer:
     def test_health_reports_native_backend(self, srv: ServerInfo) -> None:
         base = srv.url.rsplit("/", 1)[0]
         emb = httpx.get(f"{base}/status", timeout=5.0).json()["embedding"]
-        assert emb["backend"] == "onnx-rs"
+        # The onnx-rs alias normalizes to the canonical kind in status.
+        assert emb["backend"] == "onnx"
         assert emb["active_providers"]
 
     def test_index_and_search(self, srv: ServerInfo) -> None:
