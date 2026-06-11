@@ -5057,6 +5057,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shrike-engine-api"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "shrike-ffi",
+]
+
+[[package]]
 name = "shrike-ffi"
 version = "0.0.0"
 dependencies = [
@@ -5084,7 +5094,7 @@ dependencies = [
  "shrike-collection",
  "shrike-compute",
  "shrike-derived",
- "shrike-embed",
+ "shrike-engine-api",
  "shrike-ffi",
  "shrike-index",
  "shrike-schemas",

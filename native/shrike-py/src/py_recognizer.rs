@@ -20,7 +20,7 @@ use futures::future::BoxFuture;
 use pyo3::prelude::*;
 
 use shrike_ffi::{NativeError, NativeResult};
-use shrike_kernel::recognize::{Recognition, Recognizer, Segment};
+use shrike_kernel::{MediaItem, Recognition, Recognizer, Segment};
 
 type RecResult = NativeResult<Vec<Recognition>>;
 
@@ -114,7 +114,10 @@ pub(crate) struct PyRecognizerHandle {
 }
 
 impl Recognizer for PyRecognizerHandle {
-    fn recognize(&self, items: Vec<Vec<u8>>) -> BoxFuture<'_, RecResult> {
+    fn recognize(&self, items: Vec<MediaItem>) -> BoxFuture<'_, RecResult> {
+        // The Python wire stays `list[bytes]` (the RecognizerBackend
+        // contract); native engines are where the mime hint pays off.
+        let items: Vec<Vec<u8>> = items.into_iter().map(|m| m.bytes).collect();
         let (tx, rx) = oneshot::channel::<RecResult>();
         let tx = Arc::new(Mutex::new(Some(tx)));
         let scheduled = Python::attach(|py| -> PyResult<()> {

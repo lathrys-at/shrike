@@ -582,7 +582,7 @@ mod tests {
 // futures the harness drives (an asyncio task over the bridge) — no
 // spawn_compute primitive, per the runtime model.
 
-use crate::Embedder;
+use crate::{Embedder, ImageEmbedder, ImageResolver, MediaItem};
 
 /// Calibration parameters (mirror `index.CALIB_SAMPLE` / `CALIB_MIN`).
 pub const CALIB_SAMPLE: usize = 256;
@@ -605,34 +605,8 @@ pub struct EmbedInput {
     pub ocr_texts: Vec<String>,
 }
 
-/// The media resolver the harness injects for image-capable backends: read
-/// bytes lazily at embed time; `exists` is the cheap stat the per-note hash
-/// folds in. (Mirrors the Python image resolver pair.)
-pub trait ImageResolver: Send + Sync {
-    fn read(&self, name: &str) -> Option<Vec<u8>>;
-    fn exists(&self, name: &str) -> bool;
-}
-
-/// The image half of the embedder seam, split from [`Embedder`] so text-only
-/// backends (and the minimal core) never see it. A backend advertises image
-/// capability by the harness passing `Some(images)` at assembly.
-pub trait ImageEmbedder: Send + Sync {
-    fn embed_images(
-        &self,
-        images: Vec<Vec<u8>>,
-    ) -> futures::future::BoxFuture<'_, NativeResult<Vec<Vec<f32>>>>;
-}
-
-/// An `Arc`'d image embedder is an image embedder (assembly hands the same
-/// handle to both halves of the seam).
-impl<T: ImageEmbedder> ImageEmbedder for Arc<T> {
-    fn embed_images(
-        &self,
-        images: Vec<Vec<u8>>,
-    ) -> futures::future::BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
-        (**self).embed_images(images)
-    }
-}
+// The media-resolver and image-embedder seams live in shrike-engine-api
+// (#342); the orchestrator consumes them through the crate-root re-exports.
 
 impl IndexOrchestrator {
     fn hash_for(
@@ -678,17 +652,17 @@ impl IndexOrchestrator {
             let mut image_keys: Vec<i64> = Vec::new();
             let mut image_vectors: Vec<Vec<f32>> = Vec::new();
             if let Some((image_embedder, resolver)) = images {
-                let mut bytes: Vec<Vec<u8>> = Vec::new();
+                let mut items: Vec<MediaItem> = Vec::new();
                 for input in batch {
                     for name in &input.image_names {
                         if let Some(data) = resolver.read(name) {
                             image_keys.push(input.note_id);
-                            bytes.push(data);
+                            items.push(MediaItem::from_named(name, data));
                         }
                     }
                 }
-                if !bytes.is_empty() {
-                    image_vectors = image_embedder.embed_images(bytes).await?;
+                if !items.is_empty() {
+                    image_vectors = image_embedder.embed_images(items).await?;
                 }
             }
 

@@ -46,55 +46,11 @@ use shrike_derived::DerivedEngine;
 use shrike_ffi::{NativeError, NativeResult};
 use shrike_index::MultiModalIndex;
 
-/// The embedder seam the kernel needs — the Rust counterpart of the Python
-/// `EmbedderBackend` protocol's compute slice. `shrike_embed::TextEmbedder`
-/// satisfies it for real models; tests use a deterministic stub.
-pub trait Embedder: Send + Sync + 'static {
-    /// Embed a batch. Async so a harness can supply a genuinely asynchronous
-    /// embedder (a remote service, a platform ML API); CPU-bound embedders
-    /// return a ready future.
-    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>>;
-
-    /// The model fingerprint for index drift detection (`model_id` in the
-    /// sidecar) — `None` means "unknown" and skips the model-change rule.
-    fn fingerprint(&self) -> Option<String> {
-        None
-    }
-
-    /// The embedding dimension, when known up front (lets an empty collection
-    /// materialize a ready index without a probe embed).
-    fn dim(&self) -> Option<usize> {
-        None
-    }
-}
-
-#[cfg(feature = "onnx-embed")]
-impl Embedder for shrike_embed::TextEmbedder {
-    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
-        Box::pin(async move { self.embed_chunk(&texts) })
-    }
-
-    fn dim(&self) -> Option<usize> {
-        // The inherent method (explicit path: this trait method shadows it).
-        shrike_embed::TextEmbedder::dim(self)
-    }
-}
-
-/// Embedders share freely: an `Arc`'d embedder is an embedder (the binding
-/// hands one embedder to the kernel and keeps a handle for query embeds).
-impl<T: Embedder> Embedder for Arc<T> {
-    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
-        (**self).embed(texts)
-    }
-
-    fn fingerprint(&self) -> Option<String> {
-        (**self).fingerprint()
-    }
-
-    fn dim(&self) -> Option<usize> {
-        (**self).dim()
-    }
-}
+// The engine contract (#342): traits live in shrike-engine-api — the kernel
+// consumes them and re-exports for downstream paths; it names no engine.
+pub use shrike_engine_api::{
+    Embedder, ImageEmbedder, ImageResolver, MediaItem, Recognition, Recognizer, Segment,
+};
 
 /// The scheduling contract the harness injects (#308). The kernel never
 /// spawns threads or assumes a runtime; whoever assembles a kernel supplies
@@ -280,8 +236,8 @@ pub struct Kernel {
 /// reads bytes through (independent of the embed slot — an OCR-only
 /// deployment has no image embedder).
 pub struct RecognizeService {
-    pub recognizer: Arc<dyn recognize::Recognizer>,
-    pub resolver: Arc<dyn index_orchestrator::ImageResolver>,
+    pub recognizer: Arc<dyn Recognizer>,
+    pub resolver: Arc<dyn ImageResolver>,
 }
 
 /// The derived-store source recognized image text lands under (#199/#228).
@@ -299,22 +255,14 @@ pub struct EmbedService {
 
 impl EmbedService {
     /// The image pair as the borrow shape the orchestrator ops take.
-    fn images_pair(
-        &self,
-    ) -> Option<(
-        &dyn index_orchestrator::ImageEmbedder,
-        &dyn index_orchestrator::ImageResolver,
-    )> {
+    fn images_pair(&self) -> Option<(&dyn ImageEmbedder, &dyn ImageResolver)> {
         self.images.as_ref().map(|(e, r)| (&**e, &**r))
     }
 }
 
 /// The injected image pair: who embeds image bytes + who resolves filenames
 /// to bytes (lazily, at embed time).
-pub type KernelImages = (
-    Box<dyn index_orchestrator::ImageEmbedder>,
-    Box<dyn index_orchestrator::ImageResolver>,
-);
+pub type KernelImages = (Box<dyn ImageEmbedder>, Box<dyn ImageResolver>);
 
 const FIELD_SOURCE: &str = "field";
 
@@ -385,8 +333,8 @@ impl Kernel {
     /// second instance. The harness follows up by driving the pending sweep.
     pub fn attach_recognizer(
         &self,
-        recognizer: Arc<dyn recognize::Recognizer>,
-        resolver: Arc<dyn index_orchestrator::ImageResolver>,
+        recognizer: Arc<dyn Recognizer>,
+        resolver: Arc<dyn ImageResolver>,
     ) {
         *self.recognize.write().expect("recognize slot poisoned") =
             Some(Arc::new(RecognizeService {
@@ -670,11 +618,13 @@ impl Kernel {
 
         // One pass, many consumers: recognize the batch, keep text AND
         // segments.
-        let bytes: Vec<Vec<u8>> = pending
+        let items: Vec<MediaItem> = pending
             .iter()
-            .map(|(_, name)| svc.resolver.read(name).unwrap_or_default())
+            .map(|(_, name)| {
+                MediaItem::from_named(name, svc.resolver.read(name).unwrap_or_default())
+            })
             .collect();
-        let recognitions = svc.recognizer.recognize(bytes).await?;
+        let recognitions = svc.recognizer.recognize(items).await?;
         if recognitions.len() != pending.len() {
             return Err(NativeError::internal(format!(
                 "recognizer returned {} results for {} items",
@@ -1354,20 +1304,20 @@ mod no_cpython_smoke {
 
     struct StubRecognizer;
 
-    impl recognize::Recognizer for StubRecognizer {
+    impl Recognizer for StubRecognizer {
         fn recognize(
             &self,
-            items: Vec<Vec<u8>>,
-        ) -> BoxFuture<'_, NativeResult<Vec<recognize::Recognition>>> {
+            items: Vec<MediaItem>,
+        ) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
             Box::pin(async move {
                 Ok(items
                     .iter()
                     .map(|b| {
-                        let text = String::from_utf8_lossy(b).to_string();
-                        recognize::Recognition {
+                        let text = String::from_utf8_lossy(&b.bytes).to_string();
+                        Recognition {
                             text: text.clone(),
                             confidence: 0.95,
-                            segments: vec![recognize::Segment {
+                            segments: vec![Segment {
                                 text,
                                 confidence: 0.95,
                                 bbox: Some([0.0, 0.0, 1.0, 0.1]),
@@ -1385,7 +1335,7 @@ mod no_cpython_smoke {
 
     struct MapResolver(std::collections::HashMap<String, Vec<u8>>);
 
-    impl index_orchestrator::ImageResolver for MapResolver {
+    impl ImageResolver for MapResolver {
         fn read(&self, name: &str) -> Option<Vec<u8>> {
             self.0.get(name).cloned()
         }

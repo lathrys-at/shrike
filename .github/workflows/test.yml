@@ -202,7 +202,7 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
           # The minimal-core profile (#338): the kernel/compute crates must
           # keep compiling with the heavy capabilities (ort/ONNX) gated off.
-          cargo clippy -p shrike-kernel -p shrike-compute --no-default-features --all-targets -- -D warnings
+          cargo clippy -p shrike-compute --no-default-features --all-targets -- -D warnings
 
   # The authoritative test lane: the unit + non-embedding integration suites run
   # under Bazel (`//... -//native/...` = the unit/integration aggregates + the

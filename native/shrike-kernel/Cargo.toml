@@ -17,15 +17,11 @@ name = "shrike_kernel"
 # The concrete ONNX embedder impl is feature-gated (#338): a minimal kernel
 # (collection + index + derived + fusion, harness-provided embedder) links no
 # ONNX runtime. The Embedder TRAIT stays unconditional — it's the seam.
-[features]
-default = ["onnx-embed"]
-onnx-embed = ["dep:shrike-embed"]
-
 [dependencies]
 shrike-collection = { path = "../shrike-collection" }
 shrike-compute = { path = "../shrike-compute", default-features = false }
 shrike-derived = { path = "../shrike-derived" }
-shrike-embed = { path = "../shrike-embed", optional = true }
+shrike-engine-api = { path = "../shrike-engine-api" }
 shrike-ffi = { workspace = true }
 shrike-index = { path = "../shrike-index" }
 shrike-schemas = { path = "../shrike-schemas" }

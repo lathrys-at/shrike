@@ -20,8 +20,8 @@ use futures::future::BoxFuture;
 use pyo3::prelude::*;
 
 use shrike_ffi::{NativeError, NativeResult};
-use shrike_kernel::index_orchestrator::{ImageEmbedder, ImageResolver};
 use shrike_kernel::Embedder;
+use shrike_kernel::{ImageEmbedder, ImageResolver, MediaItem};
 
 type VecResult = NativeResult<Vec<Vec<f32>>>;
 
@@ -162,8 +162,12 @@ impl Embedder for PyEmbedderHandle {
 }
 
 impl ImageEmbedder for PyEmbedderHandle {
-    fn embed_images(&self, images: Vec<Vec<u8>>) -> BoxFuture<'_, VecResult> {
-        self.dispatch(EmbedPayload::Images(images))
+    fn embed_images(&self, images: Vec<MediaItem>) -> BoxFuture<'_, VecResult> {
+        // The Python wire stays `list[bytes]` — the mime hint is for native
+        // engines; Python backends (and PIL) sniff.
+        self.dispatch(EmbedPayload::Images(
+            images.into_iter().map(|m| m.bytes).collect(),
+        ))
     }
 }
 

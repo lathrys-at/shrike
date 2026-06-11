@@ -183,7 +183,7 @@ impl AsyncKernel {
         media_exists: Py<PyAny>,
     ) {
         let handle = Arc::clone(&recognizer.handle);
-        let resolver: Arc<dyn shrike_kernel::index_orchestrator::ImageResolver> =
+        let resolver: Arc<dyn shrike_kernel::ImageResolver> =
             Arc::new(PyMediaResolver::new(media_read, media_exists));
         self.inner.attach_recognizer(handle, resolver);
     }

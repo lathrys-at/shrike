@@ -6,27 +6,35 @@ exports_files(["Cargo.toml"])
 
 # The pure-Rust kernel (#279): collection (via anki's protobuf services) +
 # index + derived store + fusion. Natively async, owns no threads, assumes
-# no runtime (#308/#310) — serialization and execution are injected. NO pyo3
-# in this dep tree (the layering check + the no-CPython smoke are the proof).
+# no runtime (#308/#310) — serialization and execution are injected. Since
+# #342 the kernel has NO features and names NO engine: it consumes the
+# shrike-engine-api traits and composes whatever engines the host attaches.
+# NO pyo3 in this dep tree (the layering check + the no-CPython smoke prove
+# both rules).
+#
+# Two targets remain ONLY because shrike-compute still has a fused/minimal
+# split and one binary must link a single compute instance: the binding
+# links the fused compute, the C host the minimal one. The kernel sources
+# and features are identical.
+_KERNEL_DEPS_COMMON = [
+    "//native/shrike-collection:shrike_collection",
+    "//native/shrike-derived:shrike_derived",
+    "//native/shrike-engine-api:shrike_engine_api",
+    "//native/shrike-ffi:shrike_ffi",
+    "//native/shrike-index:shrike_index",
+    "//native/shrike-schemas:shrike_schemas",
+    "@crates//:blake2",
+    "@crates//:futures",
+    "@crates//:serde",
+    "@crates//:serde_json",
+    "@crates//:tracing",
+]
+
 rust_library(
     name = "shrike_kernel",
     srcs = glob(["src/**/*.rs"]),
-    crate_features = ["onnx-embed"],  # the full build; the minimal core (#338) omits it
     edition = "2021",
-    deps = [
-        "//native/shrike-collection:shrike_collection",
-        "//native/shrike-compute:shrike_compute",
-        "//native/shrike-derived:shrike_derived",
-        "//native/shrike-embed:shrike_embed",
-        "//native/shrike-ffi:shrike_ffi",
-        "//native/shrike-index:shrike_index",
-        "//native/shrike-schemas:shrike_schemas",
-        "@crates//:blake2",
-        "@crates//:futures",
-        "@crates//:serde",
-        "@crates//:serde_json",
-        "@crates//:tracing",
-    ],
+    deps = _KERNEL_DEPS_COMMON + ["//native/shrike-compute:shrike_compute"],
 )
 
 # The #279 no-CPython acceptance smoke: links the kernel without Python and
@@ -37,25 +45,11 @@ rust_test(
     crate = ":shrike_kernel",
 )
 
-# The minimal core profile (#338): no onnx-embed → no ort in the link. The
-# C-ABI surface (//native/shrike-cabi) builds against THIS target; the
-# minimal-profile clippy lane covers the cargo side of the same profile.
+# The C-ABI build (//native/shrike-cabi): same kernel, minimal compute.
 rust_library(
     name = "shrike_kernel_minimal",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "shrike_kernel",
     edition = "2021",
-    deps = [
-        "//native/shrike-collection:shrike_collection",
-        "//native/shrike-compute:shrike_compute_minimal",
-        "//native/shrike-derived:shrike_derived",
-        "//native/shrike-ffi:shrike_ffi",
-        "//native/shrike-index:shrike_index",
-        "//native/shrike-schemas:shrike_schemas",
-        "@crates//:blake2",
-        "@crates//:futures",
-        "@crates//:serde",
-        "@crates//:serde_json",
-        "@crates//:tracing",
-    ],
+    deps = _KERNEL_DEPS_COMMON + ["//native/shrike-compute:shrike_compute_minimal"],
 )

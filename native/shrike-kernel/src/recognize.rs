@@ -1,70 +1,14 @@
-//! The recognition seam (#228/#218, kernel-side): OCR/ASR engines produce
-//! TEXT (+ structure) from media bytes — the kernel's second injected
-//! capability, the exact sibling of [`crate::Embedder`] and the second
-//! concrete slice of #342's pluggable-engine architecture. The kernel never
-//! knows which engine recognizes (Apple Vision via the harness, Tesseract, a
-//! remote service); it consumes the trait, and the harness attaches an
-//! implementation at assembly — or doesn't, and recognition is simply off.
+//! Recognition gating (#199/#228) — the KERNEL's policy half of the
+//! recognition capability. The engine contract ([`Recognizer`],
+//! [`Recognition`], [`Segment`]) lives in `shrike-engine-api` (#342); what
+//! stays here is what the kernel decides for itself: which recognitions are
+//! substantive enough to store, and which mint a vector.
 //!
-//! One pass, many consumers (#228's load-bearing requirement): a
-//! [`Recognition`] retains both the flattened text AND the per-segment
-//! structure (boxes for OCR; time spans for ASR later), so the index/lexical
-//! consumers and the positional consumer (#230 occlusion) share one
-//! invocation — never flatten-and-discard.
+//! [`Recognizer`]: shrike_engine_api::Recognizer
+//! [`Recognition`]: shrike_engine_api::Recognition
+//! [`Segment`]: shrike_engine_api::Segment
 
-use futures::future::BoxFuture;
-
-use shrike_ffi::NativeResult;
-
-/// One recognized segment: a line/word for OCR (with an optional normalized
-/// `[x, y, w, h]` box) — the shape generalizes to time spans for ASR (a
-/// `bbox` of `[start, 0, duration, 0]` is deliberately NOT used; ASR adds its
-/// own field when it lands, without breaking this).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct Segment {
-    pub text: String,
-    pub confidence: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bbox: Option<[f64; 4]>,
-}
-
-/// One media item's recognition: the flattened text (reading order), the
-/// overall confidence (engine-defined aggregate), and the retained segments.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct Recognition {
-    pub text: String,
-    pub confidence: f64,
-    #[serde(default)]
-    pub segments: Vec<Segment>,
-}
-
-/// The recognizer the harness injects — async like [`crate::Embedder`] (a
-/// platform API or remote engine is genuinely asynchronous; CPU engines
-/// return ready futures), with the same optional identity metadata.
-pub trait Recognizer: Send + Sync + 'static {
-    /// Recognize a batch of media items (bytes in, one [`Recognition`] per
-    /// item, order-preserving). An unreadable item yields an empty
-    /// recognition (text "", confidence 0) rather than failing the batch.
-    fn recognize(&self, items: Vec<Vec<u8>>) -> BoxFuture<'_, NativeResult<Vec<Recognition>>>;
-
-    /// Stable engine identity (model/OS version) — a changed fingerprint
-    /// invalidates derived text on the next pending sweep, exactly as the
-    /// embedder fingerprint invalidates vectors.
-    fn fingerprint(&self) -> Option<String> {
-        None
-    }
-}
-
-/// Recognizers share freely, like embedders.
-impl<T: Recognizer> Recognizer for std::sync::Arc<T> {
-    fn recognize(&self, items: Vec<Vec<u8>>) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
-        (**self).recognize(items)
-    }
-
-    fn fingerprint(&self) -> Option<String> {
-        (**self).fingerprint()
-    }
-}
+use shrike_engine_api::Recognition;
 
 /// The gating policy (#199): which recognitions mint an OCR vector, and
 /// which enter the lexical store at all. Confidence + substance separate
@@ -150,29 +94,5 @@ mod tests {
         );
         // Whitespace doesn't count as substance.
         assert_eq!(gate.judge(&rec("   a   ", 0.9)), GateOutcome::Drop);
-    }
-
-    #[test]
-    fn recognition_serde_round_trips_with_segments() {
-        let r = Recognition {
-            text: "label".into(),
-            confidence: 0.8,
-            segments: vec![Segment {
-                text: "label".into(),
-                confidence: 0.8,
-                bbox: Some([0.1, 0.2, 0.3, 0.05]),
-            }],
-        };
-        let json = serde_json::to_string(&r).unwrap();
-        let back: Recognition = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, r);
-        // A box-less segment omits the key (the ASR-friendly shape).
-        let no_box = serde_json::to_string(&Segment {
-            text: "t".into(),
-            confidence: 1.0,
-            bbox: None,
-        })
-        .unwrap();
-        assert!(!no_box.contains("bbox"));
     }
 }

@@ -1,10 +1,15 @@
-"""Crate-layering gate (#269, epic #265 convention 5).
+"""Crate-layering gate (#269, epic #265 convention 5; engine purity #342).
 
-`pyo3` is allowed ONLY in the Python binding crates: `shrike-py` (the real
-binding module) and the `_demo` polyglot proof. Kernel/compute crates must stay
-pure Rust — that's what makes the stretch end-state (a no-CPython kernel)
-structural rather than aspirational. This test reads every crate manifest in
-the workspace and fails if any other crate declares a pyo3 dependency.
+Two structural rules over every workspace manifest:
+
+1. `pyo3` is allowed ONLY in the Python binding crates: `shrike-py` (the real
+   binding module) and the `_demo` polyglot proof. Kernel/compute crates must
+   stay pure Rust — that's what makes the no-CPython kernel structural rather
+   than aspirational.
+2. `shrike-kernel` names NO engine crate (#342): it consumes the
+   shrike-engine-api traits and composes whatever engines the host attaches —
+   a dependency on a concrete engine (ort embedding, a platform recognizer, a
+   remote client, subprocess management) is an architecture regression.
 """
 
 from __future__ import annotations
@@ -15,6 +20,15 @@ from pathlib import Path
 
 # Crates allowed to depend on pyo3 (by Cargo package name).
 PYO3_ALLOWED = {"shrike-py", "shrike-native-demo"}
+
+# Engine crates the kernel must NEVER name (#342). Grown as engine crates are
+# added; the kernel's only engine-shaped dep is shrike-engine-api (the traits).
+ENGINE_CRATES = {
+    "shrike-embed",
+    "shrike-recognize-apple",
+    "shrike-embed-remote",
+    "shrike-llama-server",
+}
 
 
 def manifest_paths() -> list[Path]:
@@ -61,6 +75,14 @@ def main() -> int:
                 f"{path}: crate '{package}' depends on pyo3 — only {sorted(PYO3_ALLOWED)} may"
                 " (epic #265 convention 5: compute/kernel crates stay pure Rust)"
             )
+        if package == "shrike-kernel":
+            leaked = sorted(deps & ENGINE_CRATES)
+            if leaked:
+                failures.append(
+                    f"{path}: shrike-kernel names engine crate(s) {leaked} — the kernel"
+                    " composes engines it is GIVEN (#342); add the implementation to its"
+                    " own crate behind the shrike-engine-api traits instead"
+                )
     for failure in failures:
         print(failure, file=sys.stderr)
     return 1 if failures else 0

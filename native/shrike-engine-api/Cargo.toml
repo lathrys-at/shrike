@@ -1,0 +1,20 @@
+# The engine contract crate (#342): the traits the kernel consumes and every
+# engine crate implements. A LEAF — no engine deps, no kernel dep, no pyo3,
+# no runtime. If a change here needs more than shrike-ffi + futures + serde,
+# it belongs somewhere else.
+[package]
+name = "shrike-engine-api"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+shrike-ffi = { workspace = true }
+# Runtime-agnostic future types only — no tokio (or any executor) assumption,
+# the same rule as the kernel (#308/#310).
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+futures = { version = "0.3", features = ["executor"] }

@@ -11,9 +11,10 @@ license.workspace = true
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
-# The minimal kernel profile (#338): no onnx-embed → no ort linked. The
-# embedded host registers its own embedder (or none — lexical-only).
-shrike-kernel = { path = "../shrike-kernel", default-features = false }
+# The kernel names no engine since #342 (it has no features at all) — no ort
+# in this link. The embedded host registers its own embedder (or none —
+# lexical-only).
+shrike-kernel = { path = "../shrike-kernel" }
 shrike-ffi = { workspace = true }
 futures = "0.3"
 serde_json = "1"
