@@ -21,6 +21,9 @@ shrike-derived = { path = "../shrike-derived" }
 shrike-embed = { path = "../shrike-embed" }
 shrike-ffi = { workspace = true }
 shrike-index = { path = "../shrike-index" }
+shrike-schemas = { path = "../shrike-schemas" }
+serde = "1"
+serde_json = "1"
 tracing = "0.1"
 # Runtime-AGNOSTIC async building blocks (#310): futures is the abstraction
 # library, not a runtime — no tokio (or any executor) assumption in this crate.
