@@ -246,6 +246,17 @@ impl AsyncKernel {
         future_into_py(py, async move { kernel.rebuild_index().await })
     }
 
+    /// Re-embed + re-ingest specific notes after a text edit outside the
+    /// upsert ops (find/replace, migration) — awaitable.
+    fn reindex_notes<'py>(
+        &self,
+        py: Python<'py>,
+        note_ids: Vec<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        future_into_py(py, async move { kernel.reindex_notes(&note_ids).await })
+    }
+
     /// The boot/reload drift path (awaitable; drive as a background task).
     fn reindex_if_needed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);

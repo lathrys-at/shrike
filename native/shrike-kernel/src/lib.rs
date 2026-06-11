@@ -453,7 +453,13 @@ impl Kernel {
     /// job for embed inputs + derived rows, one orchestrator add (replace
     /// semantics — when an embedder is attached; notes are created and
     /// lexically indexed regardless), per-note derived ingest, and the
-    /// watermark advance. The shared tail of every upsert shape.
+    /// watermark advance. The shared tail of every upsert shape — public as
+    /// `reindex_notes` for harness ops that edit note text outside the
+    /// upsert ops (find/replace, note-type migration).
+    pub async fn reindex_notes(&self, written: &[i64]) -> NativeResult<()> {
+        self.index_written(written).await
+    }
+
     async fn index_written(&self, written: &[i64]) -> NativeResult<()> {
         if written.is_empty() {
             return Ok(());
