@@ -1,0 +1,19 @@
+[package]
+name = "shrike-schemas"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Rust-canonical wire contracts: serde types + schemars JSON Schema (#330)."
+
+[lib]
+name = "shrike_schemas"
+
+# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+# Literal-valued fields (Pydantic's Literal[True] / single-string defaults that
+# aren't union tags) — MustBe!() types that only (de)serialize their one value.
+monostate = "0.1"

@@ -22,6 +22,7 @@ members = [
     "shrike-index",
     "shrike-kernel",
     "shrike-py",
+    "shrike-schemas",
 ]
 
 [workspace.package]
