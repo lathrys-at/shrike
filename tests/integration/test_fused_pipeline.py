@@ -2,7 +2,7 @@
 
 Two layers: a direct VectorIndex parity check — the fused embed→add/search
 calls (vectors never crossing the FFI) return the same results as the per-side
-native paths — and a fully-native server (onnx-rs backend + native index +
+native paths — and a fully-native server (native onnx backend + native index +
 native compute) exercising upsert→index→search over the wire.
 """
 
@@ -40,7 +40,7 @@ class TestFusedIndexParity:
         }
         inputs = [NoteEmbedInput(nid, t) for nid, t in texts.items()]
 
-        backend = OnnxBackend(model=str(onnx_model), native=True)
+        backend = OnnxBackend(model=str(onnx_model))
         backend.start()
         try:
             fused_idx = VectorIndex(tmp_path / "fused", backend=backend)
@@ -68,12 +68,12 @@ class TestFusedIndexParity:
 class TestFullyNativeServer:
     @pytest.fixture(scope="class")
     def srv(self, server_factory, onnx_model) -> ServerInfo:
-        # Index/derived/compute are native unconditionally since the #278
-        # cutover; the onnx-rs backend makes the server native end to end.
+        # Index/derived/compute/backends are all native unconditionally since
+        # the #278 cutover — every server is native end to end.
         server = server_factory(
             "fully-native",
             embedding_model=str(onnx_model),
-            extra_args=["--embedding-backend", "onnx-rs"],
+            extra_args=["--embedding-backend", "onnx"],
         )
         base = server.url.rsplit("/", 1)[0]
         deadline = time.monotonic() + 60.0

@@ -25,7 +25,12 @@ from shrike._mcp_perf import install_validator_cache
 from shrike.collection import DEFAULT_LOCK_HOLD, CollectionWrapper
 from shrike.daemon import AlreadyRunningError, ServerLock
 from shrike.derived import DerivedTextStore
-from shrike.embedding import DEFAULT_BACKEND, SUPPORTED_BACKENDS, EmbeddingRuntime
+from shrike.embedding import (
+    BACKEND_ALIASES,
+    DEFAULT_BACKEND,
+    SUPPORTED_BACKENDS,
+    EmbeddingRuntime,
+)
 from shrike.index import (
     DEFAULT_SAVE_DELAY,
     DEFAULT_SAVE_THRESHOLD,
@@ -553,7 +558,7 @@ def main() -> None:
     parser.add_argument(
         "--embedding-backend",
         default=None,
-        choices=list(SUPPORTED_BACKENDS),
+        choices=[*SUPPORTED_BACKENDS, *BACKEND_ALIASES],
         help="Embedding backend: 'llama' (llama-server subprocess, GGUF/MLX) or "
         "'onnx' (in-process onnxruntime; needs the 'onnx' optional dependency). "
         "Default: llama.",

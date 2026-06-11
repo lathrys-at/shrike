@@ -158,12 +158,12 @@ class TestBackendParity:
         self, backend_server: tuple[ServerInfo, str, int]
     ) -> None:
         # The fingerprint prefix is what keeps a backend's vectors from ever colliding
-        # with another's for the "same" model (onnx: vs meta:/file:).
+        # with another's for the "same" model (onnx-rs: vs meta:/file:).
         srv, backend, _ = backend_server
         idx = httpx.get(f"{_base_url(srv)}/status", timeout=5.0).json()["index"]
         model_id = idx.get("model_id", "")
         if backend.startswith("onnx"):
-            assert model_id.startswith("onnx:")
+            assert model_id.startswith("onnx-rs:")
         else:
             assert model_id.startswith(("meta:", "file:"))
 

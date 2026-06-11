@@ -32,7 +32,7 @@ from shrike.daemon import (
     read_server_meta,
     stop_server,
 )
-from shrike.embedding import SUPPORTED_BACKENDS
+from shrike.embedding import BACKEND_ALIASES, SUPPORTED_BACKENDS
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
 from shrike.schemas import ServerStatus
 
@@ -219,7 +219,7 @@ def server() -> None:
 )
 @click.option(
     "--embedding-backend",
-    type=click.Choice(list(SUPPORTED_BACKENDS), case_sensitive=False),
+    type=click.Choice([*SUPPORTED_BACKENDS, *BACKEND_ALIASES], case_sensitive=False),
     help="Embedding backend: 'llama' (llama-server, GGUF/MLX) or 'onnx' (in-process "
     "onnxruntime; needs the 'onnx' optional dependency). Default: llama.",
 )

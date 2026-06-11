@@ -1,10 +1,13 @@
-"""Tests for the CLIP backend (shrike.embedding_clip), with onnxruntime/tokenizers/PIL faked.
+# NOTE (#278 cutover): the Python-engine internals these tests used to pin —
+# the text/image session feeds, preprocessing math, L2 normalization — retired
+# with the Python engine (they run crate-side now, pinned by the integration
+# model tests). What remains here is the facade's own behaviour.
+"""Tests for the CLIP backend facade (shrike.embedding_clip), with a fake native engine.
 
 The shared-space *quality* (a text query near the matching image) needs a real model and lives
-in the integration suite; here we fake the heavy deps so the mechanics — the text/image feeds,
-L2 normalization, the image-preprocessing math, provider resolution, fingerprint, health, and
-the batch-safety wiring — are covered without the `clip` extra (the coverage lane installs only
-`.[dev]`).
+in the integration suite; here we fake the onnxruntime carrier and the native engine so the
+mechanics — graph/variant discovery, preprocessor-config parsing, provider resolution,
+fingerprint, health, and the batch-safety wiring — are covered without the `clip` extra.
 """
 
 from __future__ import annotations
@@ -15,7 +18,6 @@ import types
 from pathlib import Path
 from unittest.mock import patch
 
-import numpy as np
 import pytest
 
 from shrike.embedding_base import IMAGE, TEXT
@@ -28,113 +30,36 @@ _DIM = 8
 # -- fakes -------------------------------------------------------------------
 
 
-class _FakeInput:
-    def __init__(self, name: str, type: str = "tensor(int64)") -> None:
-        self.name = name
-        self.type = type
+class _FakeEngine:
+    """Content-independent (batch-safe) engine; records chunk sizes + init kwargs."""
 
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.init_kwargs = kwargs
+        self.text_calls: list[int] = []
+        self.image_calls: list[int] = []
+        self._providers = list(kwargs.get("providers") or ["CPUExecutionProvider"])
 
-class _FakeOutput:
-    def __init__(self, shape: list) -> None:
-        self.shape = shape
-
-
-class _FakeTextSession:
-    def __init__(self, providers: list[str] | None = None) -> None:
-        self._providers = list(providers or ["CPUExecutionProvider"])
-        self.last_feed: dict | None = None
-        self.run_calls: list[int] = []
-
-    def get_inputs(self) -> list[_FakeInput]:
-        return [_FakeInput("input_ids")]  # CLIP text declares only input_ids
-
-    def get_outputs(self) -> list[_FakeOutput]:
-        return [_FakeOutput(["batch", _DIM])]  # text_embeds [batch, dim], static dim
-
-    def get_providers(self) -> list[str]:
+    def active_providers(self) -> list[str]:
         return self._providers
 
-    def run(self, _outputs: object, feed: dict) -> list[np.ndarray]:
-        self.last_feed = feed
-        n = feed["input_ids"].shape[0]
-        self.run_calls.append(n)
-        # Deterministic, content-independent → batch-safe (all-ones rows, distinct magnitude).
-        return [np.ones((n, _DIM), dtype=np.float32) * 2.0]
+    def dim(self) -> int | None:
+        return _DIM
+
+    def embed_text_chunk(self, texts: list[str]) -> list[list[float]]:
+        self.text_calls.append(len(texts))
+        return [[1.0 / (_DIM**0.5)] * _DIM for _ in texts]
+
+    def embed_image_chunk(self, images: list[bytes]) -> list[list[float]]:
+        self.image_calls.append(len(images))
+        return [[1.0 / (_DIM**0.5)] * _DIM for _ in images]
 
 
-class _FakeVisionSession(_FakeTextSession):
-    def get_inputs(self) -> list[_FakeInput]:
-        return [_FakeInput("pixel_values", "tensor(float)")]
-
-    def run(self, _outputs: object, feed: dict) -> list[np.ndarray]:
-        self.last_feed = feed
-        n = feed["pixel_values"].shape[0]
-        self.run_calls.append(n)
-        return [np.full((n, _DIM), 3.0, dtype=np.float32)]
-
-
-class _FakeVariantTextSession(_FakeTextSession):
+class _FakeVariantEngine(_FakeEngine):
     """Output direction depends on batch size → the probe forces serial."""
 
-    def run(self, _outputs: object, feed: dict) -> list[np.ndarray]:
-        self.last_feed = feed
-        n = feed["input_ids"].shape[0]
-        self.run_calls.append(n)
-        arr = np.ones((n, _DIM), dtype=np.float32)
-        arr[:, 0] = float(n)
-        return [arr]
-
-
-class _FakeMaskedTextSession(_FakeTextSession):
-    """Declares both input_ids (int32) and attention_mask (int64) — exercises the F3 feed path."""
-
-    def get_inputs(self) -> list[_FakeInput]:
-        return [
-            _FakeInput("input_ids", "tensor(int32)"),
-            _FakeInput("attention_mask", "tensor(int64)"),
-        ]
-
-
-class _FakeEncoding:
-    def __init__(self, ids: list[int]) -> None:
-        self.ids = ids
-        self.attention_mask = [1] * len(ids)
-
-
-class _FakeTokenizer:
-    def enable_truncation(self, **_kw: object) -> None:
-        pass
-
-    def enable_padding(self, *, length: int = 77, **_kw: object) -> None:
-        self._length = length
-
-    def encode_batch(self, texts: list[str]) -> list[_FakeEncoding]:
-        return [_FakeEncoding([1] * 77) for _ in texts]
-
-
-class _FakeImage:
-    """A minimal PIL.Image stand-in: tracks size, returns a constant-value array."""
-
-    def __init__(self, size: tuple[int, int] = (300, 200), value: int = 128) -> None:
-        self.size = size
-        self._value = value
-
-    def convert(self, _mode: str) -> _FakeImage:
-        return self
-
-    def resize(self, size: tuple[int, int], _resample: object = None) -> _FakeImage:
-        self.size = size
-        return self
-
-    def crop(self, box: tuple[int, int, int, int]) -> _FakeImage:
-        left, top, right, bottom = box
-        self.size = (right - left, bottom - top)
-        return self
-
-    def __array__(self, dtype: object = None) -> np.ndarray:
-        w, h = self.size
-        arr = np.full((h, w, 3), self._value, dtype=np.uint8)
-        return arr.astype(dtype) if dtype else arr
+    def embed_text_chunk(self, texts: list[str]) -> list[list[float]]:
+        self.text_calls.append(len(texts))
+        return [[float(len(texts)), *([0.5] * (_DIM - 1))] for _ in texts]
 
 
 def _model_dir(tmp_path: Path, *, variant: str = "") -> Path:
@@ -161,32 +86,21 @@ def _model_dir(tmp_path: Path, *, variant: str = "") -> Path:
 def _start(
     be: ClipBackend,
     *,
-    text_session: type = _FakeTextSession,
+    engine_cls: type = _FakeEngine,
     available: list[str] | None = None,
 ) -> None:
-    """Inject fake onnxruntime/tokenizers/PIL so start() runs without the clip extra."""
+    """Inject a fake onnxruntime carrier + native engine so start() runs without the extra."""
     fake_ort = types.ModuleType("onnxruntime")
     avail = available or ["CPUExecutionProvider"]
-
-    def _make_session(path: str, providers: list[str] | None = None) -> object:
-        cls = text_session if "text_model" in path else _FakeVisionSession
-        return cls(providers)
-
-    fake_ort.InferenceSession = _make_session  # type: ignore[attr-defined]
     fake_ort.get_available_providers = lambda: list(avail)  # type: ignore[attr-defined]
 
-    fake_tok = types.ModuleType("tokenizers")
-    fake_tok.Tokenizer = types.SimpleNamespace(from_file=lambda _p: _FakeTokenizer())  # type: ignore[attr-defined]
+    fake_native = types.ModuleType("shrike_native")
+    fake_native.init_onnx_runtime = lambda _path: None  # type: ignore[attr-defined]
+    fake_native.ClipEmbedder = engine_cls  # type: ignore[attr-defined]
 
-    fake_pil = types.ModuleType("PIL")
-    fake_image = types.ModuleType("PIL.Image")
-    fake_image.open = lambda _fp: _FakeImage()  # type: ignore[attr-defined]
-    fake_image.Resampling = types.SimpleNamespace(BICUBIC=3)  # type: ignore[attr-defined]
-    fake_pil.Image = fake_image  # type: ignore[attr-defined]
-
-    with patch.dict(
-        sys.modules,
-        {"onnxruntime": fake_ort, "tokenizers": fake_tok, "PIL": fake_pil, "PIL.Image": fake_image},
+    with (
+        patch.dict(sys.modules, {"onnxruntime": fake_ort, "shrike_native": fake_native}),
+        patch("shrike.embedding_onnx.locate_ort_dylib", lambda: Path("/fake/libort.so")),
     ):
         be.start()
 
@@ -222,43 +136,39 @@ class TestClipBackend:
         ):
             be.start()
 
-    def test_embed_texts_feeds_input_ids(self, tmp_path: Path) -> None:
+    def test_embed_texts_shape(self, tmp_path: Path) -> None:
         be = ClipBackend(model=str(_model_dir(tmp_path)))
         _start(be)
         vecs = be.embed_texts(["a cat", "a dog"])
         assert len(vecs) == 2
         assert len(vecs[0]) == _DIM
-        assert set(be._text_sess.last_feed) == {"input_ids"}
-        assert be._text_sess.last_feed["input_ids"].shape == (2, 77)
-        # L2-normalized.
-        assert np.isclose(np.linalg.norm(vecs[0]), 1.0)
 
-    def test_embed_images_preprocesses_to_pixel_values(self, tmp_path: Path) -> None:
+    def test_embed_images_marshals_bytes(self, tmp_path: Path) -> None:
         be = ClipBackend(model=str(_model_dir(tmp_path)))
         _start(be)
         vecs = be.embed_images([b"img-bytes", b"img-bytes"])
         assert len(vecs) == 2
         assert len(vecs[0]) == _DIM
-        # pixel_values are [B, 3, 224, 224].
-        assert be._vis_sess.last_feed["pixel_values"].shape == (2, 3, 224, 224)
-        assert np.isclose(np.linalg.norm(vecs[0]), 1.0)
+        assert be._native_engine.image_calls  # bytes reached the engine
 
-    def test_preprocess_normalizes_and_transposes(self, tmp_path: Path) -> None:
+    def test_engine_receives_preprocessor_scalars(self, tmp_path: Path) -> None:
+        # Only scalars cross the FFI: mean/std/resize/crop parsed here, passed in.
         be = ClipBackend(model=str(_model_dir(tmp_path)))
         _start(be)
-        chw = be._preprocess(_FakeImage(value=128))
-        assert chw.shape == (3, 224, 224)
-        # (128/255 - mean) / std, per channel.
-        expected = (128 / 255.0 - be._mean) / be._std
-        assert np.allclose(chw[:, 0, 0], expected)
+        kw = be._native_engine.init_kwargs
+        assert kw["resize"] == 256 and kw["crop"] == 224
+        assert pytest.approx(kw["image_mean"][0]) == 0.48145466
+        assert kw["context"] == 77
 
     def test_dim_and_fingerprint(self, tmp_path: Path) -> None:
         be = ClipBackend(model=str(_model_dir(tmp_path)))
         _start(be)
         assert be.embedding_dim() == _DIM
         fp = be.model_fingerprint()
-        assert fp.startswith("clip:text_model.onnx:")
-        assert "vision_model.onnx:" in fp and "imgprep=" in fp and "textprep=" in fp
+        # clip-rs: is the native engine's vector-space identity, kept verbatim
+        # from the dual-engine bake (#271) — indexes built then load unchanged.
+        assert fp.startswith("clip-rs:text_model.onnx:")
+        assert "vision_model.onnx:" in fp and "imgprep=rs" in fp and "textprep=" in fp
 
     def test_auto_discovers_quantized_only(self, tmp_path: Path) -> None:
         # A quantized-only export (the CI fixture's shape) loads without any variant param (F1).
@@ -299,16 +209,6 @@ class TestClipBackend:
         _start(be)
         assert be._resize == 248 and be._crop == 224
 
-    def test_feeds_declared_attention_mask_with_dtype(self, tmp_path: Path) -> None:
-        # F3: a text graph declaring input_ids(int32)+attention_mask gets both, each its dtype.
-        be = ClipBackend(model=str(_model_dir(tmp_path)))
-        _start(be, text_session=_FakeMaskedTextSession)
-        be.embed_texts(["a cat"])
-        feed = be._text_sess.last_feed
-        assert set(feed) == {"input_ids", "attention_mask"}
-        assert feed["input_ids"].dtype == np.int32  # declared int32 → cast down
-        assert feed["attention_mask"].dtype == np.int64
-
     def test_health(self, tmp_path: Path) -> None:
         be = ClipBackend(model=str(_model_dir(tmp_path)))
         _start(be)
@@ -322,17 +222,17 @@ class TestClipBackend:
         be = ClipBackend(model=str(_model_dir(tmp_path)))
         _start(be)  # default fake is content-independent → safe
         assert be._safe_batch >= 2
-        be._text_sess.run_calls.clear()
+        be._native_engine.text_calls.clear()
         be.embed_texts(["a", "b", "c"])
-        assert be._text_sess.run_calls == [3]
+        assert be._native_engine.text_calls == [3]
 
     def test_variant_model_serial(self, tmp_path: Path) -> None:
         be = ClipBackend(model=str(_model_dir(tmp_path)))
-        _start(be, text_session=_FakeVariantTextSession)
+        _start(be, engine_cls=_FakeVariantEngine)
         assert be._safe_batch == 1
-        be._text_sess.run_calls.clear()
+        be._native_engine.text_calls.clear()
         be.embed_texts(["a", "b", "c"])
-        assert be._text_sess.run_calls == [1, 1, 1]
+        assert be._native_engine.text_calls == [1, 1, 1]
 
     def test_not_running_raises(self) -> None:
         be = ClipBackend(model="x")

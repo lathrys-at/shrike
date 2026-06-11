@@ -7,7 +7,7 @@ from shrike.cli.config import resolve_embedding
 from shrike.cli.index_cmd import _poll_progress
 from shrike.cli.output import output_options
 from shrike.client import ShrikeClient
-from shrike.embedding import SUPPORTED_BACKENDS
+from shrike.embedding import BACKEND_ALIASES, SUPPORTED_BACKENDS
 from shrike.schemas import EmbeddingStatus
 
 
@@ -45,7 +45,7 @@ def embedding_status(ctx: click.Context) -> None:
 @click.option(
     "--embedding-backend",
     "backend",
-    type=click.Choice(list(SUPPORTED_BACKENDS), case_sensitive=False),
+    type=click.Choice([*SUPPORTED_BACKENDS, *BACKEND_ALIASES], case_sensitive=False),
     help="Embedding backend: 'llama' or 'onnx' (needs the 'onnx' extra). Default: llama.",
 )
 @click.option(

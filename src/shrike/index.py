@@ -274,7 +274,7 @@ class VectorIndex:
         """The (native embedder, native engine) pair for the fused FFI paths (#274).
 
         Non-None only when *both* sides are native — the engine is the Rust
-        NativeIndexEngine and the attached backend is the onnx-rs OnnxBackend —
+        NativeIndexEngine and the attached backend is the native OnnxBackend —
         and the backend is text-only. Then embed→add and embed→search compose
         inside one GIL-released native call and the vectors never cross the FFI.
         Any other combination uses the regular per-side paths unchanged.

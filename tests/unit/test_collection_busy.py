@@ -50,7 +50,7 @@ def _held(path: str):
 class TestBusyAcquire:
     async def test_reacquire_against_held_lock_raises_busy(self, tmp_path):
         path = str(tmp_path / "c.anki2")
-        w = CollectionWrapper(path, cooperative=True, hold_seconds=0.05)
+        w = CollectionWrapper(path, cooperative=True, hold_seconds=30.0)
         try:
             await w.run(lambda c: len(c.find_notes("deck:*")))  # boot-open works
             w.release_now()
@@ -71,7 +71,7 @@ class TestBusyAcquire:
 
     async def test_busy_message_is_actionable(self, tmp_path):
         path = str(tmp_path / "c.anki2")
-        w = CollectionWrapper(path, cooperative=True, hold_seconds=0.05)
+        w = CollectionWrapper(path, cooperative=True, hold_seconds=30.0)
         try:
             await w.run(lambda c: len(c.find_notes("deck:*")))
             w.release_now()
