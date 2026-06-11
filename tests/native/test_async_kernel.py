@@ -46,10 +46,11 @@ class _Backend:
 
 
 async def _open(tmp_path, backend):
-    embedder = shrike_native.PyEmbedder.capture(backend)
-    return await shrike_native.async_kernel_open(
-        str(tmp_path / "collection.anki2"), str(tmp_path / "cache"), embedder
+    kernel = await shrike_native.async_kernel_open(
+        str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
     )
+    kernel.attach_embedder(shrike_native.PyEmbedder.capture(backend))
+    return kernel
 
 
 class TestAsyncKernel:
@@ -194,15 +195,10 @@ class TestAsyncKernelImages:
 
         async def flow():
             backend = _ImageBackend()
-            embedder = shrike_native.PyEmbedder.capture(backend)
             kernel = await shrike_native.async_kernel_open(
-                str(tmp_path / "collection.anki2"),
-                str(tmp_path / "cache"),
-                embedder,
-                None,
-                read,
-                exists,
+                str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
             )
+            kernel.attach_embedder(shrike_native.PyEmbedder.capture(backend), read, exists)
             await kernel.reindex_if_needed()
             core = kernel.core_handle()
             basic = core.notetype_id("Basic")
@@ -245,6 +241,39 @@ class TestRunJob:
 
             with pytest.raises(ValueError, match="job exploded"):
                 await kernel.run_job(boom)
+            await kernel.close()
+
+        asyncio.run(flow())
+
+
+class TestEmbedderSlot:
+    def test_detach_degrades_and_reattach_recovers(self, tmp_path) -> None:
+        async def flow():
+            backend = _Backend()
+            kernel = await _open(tmp_path, backend)
+            await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+
+            kernel.detach_embedder()
+            assert json.loads(kernel.index_status_json())["state"] == "unavailable"
+            # Creates still work and lexical search still serves.
+            results = await kernel.upsert_notes(
+                [(basic, 1, ["paris is the capital of france", "geo"], [])], "error"
+            )
+            assert results[0][0] == "created"
+            hits = await kernel.search("capital of france", 5)
+            assert hits[0][0] == results[0][1]
+            assert all(s != "text" for s, _ in hits[0][2])
+
+            # Re-attach (a fresh capture, like an embedding restart): the index
+            # watermark stayed put, so reindex embeds the note created while
+            # detached.
+            kernel.attach_embedder(shrike_native.PyEmbedder.capture(backend))
+            assert json.loads(kernel.index_status_json())["state"] == "ready"
+            assert await kernel.reindex_if_needed()
+            hits = await kernel.search("capital of france", 5)
+            assert any(s == "text" for s, _ in hits[0][2])
             await kernel.close()
 
         asyncio.run(flow())

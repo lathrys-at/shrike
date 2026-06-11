@@ -261,6 +261,13 @@ def async_collection_open(
 ) -> Future[AsyncCollection]: ...
 @final
 class AsyncKernel:
+    def attach_embedder(
+        self,
+        embedder: PyEmbedder,
+        media_read: Callable[[str], bytes | None] | None = None,
+        media_exists: Callable[[str], bool] | None = None,
+    ) -> None: ...
+    def detach_embedder(self) -> None: ...
     def upsert_notes(
         self,
         notes: list[tuple[int, int, list[str], list[str]]],
@@ -284,10 +291,7 @@ class AsyncKernel:
 def async_kernel_open(
     collection_path: str,
     cache_dir: str,
-    embedder: PyEmbedder,
     executor: WorkerExecutor | None = None,
-    media_read: Callable[[str], bytes | None] | None = None,
-    media_exists: Callable[[str], bool] | None = None,
 ) -> Future[AsyncKernel]: ...
 
 class CollectionCore:

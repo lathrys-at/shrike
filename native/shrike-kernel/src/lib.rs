@@ -33,7 +33,7 @@ pub mod actions;
 pub mod index_orchestrator;
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
@@ -246,15 +246,37 @@ pub struct NoteSpec {
 /// upserts/deletes keep the orchestrator's vectors, fingerprints, and
 /// watermarks current, and the debounced saver (over the injected
 /// [`TimerHost`]) bounds what a crash can discard.
-pub struct Kernel<E: Embedder> {
+pub struct Kernel {
     collection: SerializedCollection,
     orchestrator: Arc<index_orchestrator::IndexOrchestrator>,
     saver: Option<Arc<index_orchestrator::DebouncedSaver>>,
     derived: DerivedEngine,
-    embedder: E,
-    /// The image half of the embedding seam, injected at assembly when the
-    /// backend embeds images AND the harness supplies a media resolver.
-    images: Option<KernelImages>,
+    /// The attachable embedding service (#342's first registry slot):
+    /// swappable at runtime — the harness attaches on embedding start,
+    /// detaches on stop, and a model swap is detach + attach. Ops that need
+    /// embedding degrade (lexical-only search, unindexed-but-created upserts)
+    /// when the slot is empty, mirroring the Python host's gating.
+    embed: RwLock<Option<Arc<EmbedService>>>,
+}
+
+/// One attached embedding capability: the text embedder + optionally its
+/// image half (present only for an image-advertising backend with a media
+/// resolver).
+pub struct EmbedService {
+    pub embedder: Arc<dyn Embedder>,
+    pub images: Option<KernelImages>,
+}
+
+impl EmbedService {
+    /// The image pair as the borrow shape the orchestrator ops take.
+    fn images_pair(
+        &self,
+    ) -> Option<(
+        &dyn index_orchestrator::ImageEmbedder,
+        &dyn index_orchestrator::ImageResolver,
+    )> {
+        self.images.as_ref().map(|(e, r)| (&**e, &**r))
+    }
 }
 
 /// The injected image pair: who embeds image bytes + who resolves filenames
@@ -267,7 +289,7 @@ pub type KernelImages = (
 const TEXT: &str = "text";
 const FIELD_SOURCE: &str = "field";
 
-impl<E: Embedder> Kernel<E> {
+impl Kernel {
     /// Open a collection and its sidecar stores (cache_dir holds the derived
     /// store and the index files, like the Python host's cache layout).
     /// `executor` is the harness-injected scheduling (see [`SerialExecutor`]);
@@ -277,10 +299,8 @@ impl<E: Embedder> Kernel<E> {
     pub async fn open(
         collection_path: &str,
         cache_dir: &str,
-        embedder: E,
         executor: Arc<dyn SerialExecutor>,
         timers: Option<Arc<dyn TimerHost>>,
-        images: Option<KernelImages>,
     ) -> NativeResult<Self> {
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
@@ -307,19 +327,31 @@ impl<E: Embedder> Kernel<E> {
             orchestrator,
             saver,
             derived,
-            embedder,
-            images,
+            embed: RwLock::new(None),
         })
     }
 
-    /// The image pair as the borrow shape the orchestrator ops take.
-    fn images_pair(
-        &self,
-    ) -> Option<(
-        &dyn index_orchestrator::ImageEmbedder,
-        &dyn index_orchestrator::ImageResolver,
-    )> {
-        self.images.as_ref().map(|(e, r)| (&**e, &**r))
+    /// Attach an embedding service (embedding start / model swap). The
+    /// orchestrator flips back to ready if it was only unavailable; the
+    /// harness follows up with `reindex_if_needed` (a model change is drift).
+    pub fn attach_embedder(&self, embedder: Arc<dyn Embedder>, images: Option<KernelImages>) {
+        *self.embed.write().expect("embed slot poisoned") =
+            Some(Arc::new(EmbedService { embedder, images }));
+        self.orchestrator.mark_ready_if_loaded();
+    }
+
+    /// Detach the embedding service (embedding stop): flush the index (the
+    /// on-disk vectors are kept) and mark it unavailable. The collection and
+    /// the lexical search surfaces stay fully live.
+    pub fn detach_embedder(&self) {
+        *self.embed.write().expect("embed slot poisoned") = None;
+        let _ = self.orchestrator.save();
+        self.orchestrator.mark_unavailable();
+    }
+
+    /// The currently attached embedding service, if any.
+    pub fn embed_service(&self) -> Option<Arc<EmbedService>> {
+        self.embed.read().expect("embed slot poisoned").clone()
     }
 
     /// The orchestrator (state, status, drift) — the harness's status surface.
@@ -340,11 +372,14 @@ impl<E: Embedder> Kernel<E> {
     /// reindexing ran. The harness drives this as a background task — the
     /// kernel serves while it runs.
     pub async fn reindex_if_needed(&self) -> NativeResult<bool> {
+        let Some(svc) = self.embed_service() else {
+            return Ok(false); // no embedder → nothing to (re)index
+        };
         let col_mod = self.col_mod().await?;
-        let model_id = self.embedder.fingerprint();
+        let model_id = svc.embedder.fingerprint();
         if !self
             .orchestrator
-            .check_drift(col_mod, model_id.as_deref(), self.images.is_some())
+            .check_drift(col_mod, model_id.as_deref(), svc.images.is_some())
         {
             return Ok(false);
         }
@@ -356,7 +391,7 @@ impl<E: Embedder> Kernel<E> {
             })
             .await??;
         if raw.is_empty() {
-            if let Some(dim) = self.embedder.dim() {
+            if let Some(dim) = svc.embedder.dim() {
                 self.orchestrator
                     .materialize_empty(dim, col_mod, model_id.as_deref());
             }
@@ -373,25 +408,23 @@ impl<E: Embedder> Kernel<E> {
             )
             .collect();
         self.orchestrator
-            .reconcile(
-                inputs,
-                col_mod,
-                model_id,
-                &self.embedder,
-                self.images_pair(),
-            )
+            .reconcile(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
             .await?;
         Ok(true)
     }
 
-    /// Advance both derived-store and index watermarks to the collection's
-    /// current `col.mod` and request a debounced index flush.
-    async fn advance_watermarks(&self) -> NativeResult<()> {
+    /// Advance the derived-store watermark — and, when the index was actually
+    /// maintained by this op (an embedder is attached), the index watermark +
+    /// a debounced flush. With no embedder the index watermark stays put, so
+    /// the next attach sees drift and reconciles (cheap via the fingerprints).
+    async fn advance_watermarks(&self, index_maintained: bool) -> NativeResult<()> {
         let col_mod = self.collection.run(|core| core.col_mod()).await??;
         self.derived.set_col_mod(col_mod)?;
-        self.orchestrator.set_col_mod(col_mod);
-        if let Some(saver) = &self.saver {
-            saver.request_save();
+        if index_maintained {
+            self.orchestrator.set_col_mod(col_mod);
+            if let Some(saver) = &self.saver {
+                saver.request_save();
+            }
         }
         Ok(())
     }
@@ -479,20 +512,25 @@ impl<E: Embedder> Kernel<E> {
                     })
                     .await??;
                 // One orchestrator add for the whole batch (it chunks the
-                // embeds internally and maintains the per-note fingerprints).
-                let inputs: Vec<index_orchestrator::EmbedInput> = raw_inputs
-                    .into_iter()
-                    .map(
-                        |(note_id, text, image_names)| index_orchestrator::EmbedInput {
-                            note_id,
-                            text,
-                            image_names,
-                        },
-                    )
-                    .collect();
-                self.orchestrator
-                    .add(&inputs, &self.embedder, self.images_pair())
-                    .await?;
+                // embeds internally and maintains the per-note fingerprints)
+                // — only with an embedder attached; notes are created and
+                // lexically indexed regardless.
+                let svc = self.embed_service();
+                if let Some(svc) = &svc {
+                    let inputs: Vec<index_orchestrator::EmbedInput> = raw_inputs
+                        .into_iter()
+                        .map(
+                            |(note_id, text, image_names)| index_orchestrator::EmbedInput {
+                                note_id,
+                                text,
+                                image_names,
+                            },
+                        )
+                        .collect();
+                    self.orchestrator
+                        .add(&inputs, &*svc.embedder, svc.images_pair())
+                        .await?;
+                }
                 // Group the derived rows per note (rows come back grouped by
                 // note already; ingest replaces per (note, source)).
                 let mut refs: BTreeMap<i64, Vec<(String, String)>> = BTreeMap::new();
@@ -503,7 +541,7 @@ impl<E: Embedder> Kernel<E> {
                     let note_refs = refs.remove(note_id).unwrap_or_default();
                     self.derived.ingest(*note_id, FIELD_SOURCE, &note_refs)?;
                 }
-                self.advance_watermarks().await?;
+                self.advance_watermarks(svc.is_some()).await?;
             }
             Ok(outcomes)
         }
@@ -519,7 +557,8 @@ impl<E: Embedder> Kernel<E> {
             .await??;
         self.orchestrator.remove(&note_ids)?;
         self.derived.remove(&note_ids, None)?;
-        self.advance_watermarks().await?;
+        self.advance_watermarks(self.embed_service().is_some())
+            .await?;
         Ok(removed)
     }
 
@@ -531,16 +570,19 @@ impl<E: Embedder> Kernel<E> {
         let span = tracing::debug_span!("kernel.search", top_k);
         async move {
             // Semantic signal — the embed is the await; the engine/derived reads
-            // are fast in-memory/SQLite calls chained after it.
-            let qvec = self.embedder.embed(vec![query.to_string()]).await?;
-            let semantic = self
-                .orchestrator
-                .engine()
-                .search_by_modality(&qvec, top_k, None)?;
+            // are fast in-memory/SQLite calls chained after it. With no
+            // embedder attached, search degrades to the lexical signals.
             let mut rankings: Vec<(String, Vec<i64>)> = Vec::new();
-            if let Some(per_query) = semantic.first() {
-                for (modality, (ids, _dists)) in per_query {
-                    rankings.push((modality.clone(), ids.clone()));
+            if let Some(svc) = self.embed_service() {
+                let qvec = svc.embedder.embed(vec![query.to_string()]).await?;
+                let semantic = self
+                    .orchestrator
+                    .engine()
+                    .search_by_modality(&qvec, top_k, None)?;
+                if let Some(per_query) = semantic.first() {
+                    for (modality, (ids, _dists)) in per_query {
+                        rankings.push((modality.clone(), ids.clone()));
+                    }
                 }
             }
 
@@ -688,6 +730,56 @@ mod no_cpython_smoke {
     }
 
     #[test]
+    fn detach_degrades_and_reattach_recovers() {
+        // The embed slot is runtime-swappable (#342): detached, the kernel
+        // still creates notes and serves lexical search; re-attached, the
+        // stale index watermark makes reindex catch up on what it missed.
+        futures::executor::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+                Arc::new(MutexExecutor::default()),
+                None,
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+
+            kernel.detach_embedder();
+            let outcome = kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["paris is the capital of france".into(), "geo".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap();
+            let CreateOutcome::Created(nid) = outcome else {
+                panic!("create must work without an embedder")
+            };
+            // Lexical-only: the literal hit lands, no semantic signal exists.
+            let hits = kernel.search("capital of france", 5).await.unwrap();
+            assert_eq!(hits[0].note_id, nid);
+            assert!(hits[0].signals.iter().all(|(s, _)| s != "text"));
+
+            // Re-attach: the index watermark stayed put, so reindex sees
+            // drift and embeds the note created while detached.
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            assert!(kernel.reindex_if_needed().await.unwrap());
+            let hits = kernel.search("capital of france", 5).await.unwrap();
+            assert!(hits[0].signals.iter().any(|(s, _)| s == "text"));
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
     fn open_upsert_search_close_without_python() {
         // The harness picks the runtime: here futures' minimal block_on —
         // no tokio, nothing owned by the kernel.
@@ -703,13 +795,13 @@ mod no_cpython_smoke {
         let kernel = Kernel::open(
             col.to_str().unwrap(),
             cache.to_str().unwrap(),
-            HashEmbedder,
             Arc::new(MutexExecutor::default()),
-            None,
             None,
         )
         .await
         .unwrap();
+        // The harness attaches the embedding service (#342's registry slot).
+        kernel.attach_embedder(Arc::new(HashEmbedder), None);
 
         // Boot path: a fresh empty collection materializes a ready index, so
         // the upserts below maintain per-note fingerprints incrementally.
@@ -807,13 +899,12 @@ mod no_cpython_smoke {
         let kernel2 = Kernel::open(
             col.to_str().unwrap(),
             cache.to_str().unwrap(),
-            HashEmbedder,
             Arc::new(MutexExecutor::default()),
-            None,
             None,
         )
         .await
         .unwrap();
+        kernel2.attach_embedder(Arc::new(HashEmbedder), None);
         assert!(kernel2.reindex_if_needed().await.unwrap()); // drift → reconcile
         assert!(!kernel2.reindex_if_needed().await.unwrap()); // now current
         let hits = kernel2.search("newton laws of motion", 5).await.unwrap();

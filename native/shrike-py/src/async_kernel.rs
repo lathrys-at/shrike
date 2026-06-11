@@ -97,48 +97,46 @@ fn outcome_to_wire(outcome: shrike_ffi::NativeResult<CreateOutcome>) -> UpsertWi
 /// engine/core handles for its read/search surfaces.
 #[pyclass(frozen)]
 pub(crate) struct AsyncKernel {
-    inner: Arc<Kernel<Arc<PyEmbedderHandle>>>,
+    inner: Arc<Kernel>,
+}
+
+/// Build the kernel's image pair from a captured embedder + the resolver
+/// callables: present only when the backend embeds images AND the harness
+/// supplied BOTH callables (read + the cheap stat).
+fn image_pair(
+    handle: &Arc<PyEmbedderHandle>,
+    media_read: Option<Py<PyAny>>,
+    media_exists: Option<Py<PyAny>>,
+) -> Option<shrike_kernel::KernelImages> {
+    match (handle.embeds_images(), media_read, media_exists) {
+        (true, Some(read), Some(exists)) => Some((
+            Box::new(Arc::clone(handle)),
+            Box::new(PyMediaResolver::new(read, exists)),
+        )),
+        _ => None,
+    }
 }
 
 /// Open a kernel asynchronously; resolves to an [`AsyncKernel`]. Call from a
 /// coroutine context (the loop hosts the timers and the embed dispatches).
+/// The embedding service attaches separately (`attach_embedder`) — the
+/// embedder slot is runtime-swappable (#342), so a kernel opens (and serves
+/// lexical search + every collection op) with none.
 #[pyfunction]
-#[pyo3(signature = (collection_path, cache_dir, embedder, executor=None, media_read=None, media_exists=None))]
+#[pyo3(signature = (collection_path, cache_dir, executor=None))]
 pub(crate) fn async_kernel_open<'py>(
     py: Python<'py>,
     collection_path: String,
     cache_dir: String,
-    embedder: PyRef<'py, PyEmbedder>,
     executor: Option<PyRef<'py, WorkerExecutor>>,
-    media_read: Option<Py<PyAny>>,
-    media_exists: Option<Py<PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let executor: Arc<dyn SerialExecutor> = match executor {
         Some(ex) => Arc::new(ex.handle()),
         None => Arc::new(MutexExecutor::default()),
     };
     let timers: Arc<dyn shrike_kernel::TimerHost> = Arc::new(LoopTimerHost::capture_host(py)?);
-    let handle = Arc::clone(&embedder.handle);
-    // The image pair exists only when the backend embeds images AND the
-    // harness supplied BOTH resolver callables (read + the cheap stat).
-    let images: Option<shrike_kernel::KernelImages> =
-        match (handle.embeds_images(), media_read, media_exists) {
-            (true, Some(read), Some(exists)) => Some((
-                Box::new(Arc::clone(&handle)),
-                Box::new(PyMediaResolver::new(read, exists)),
-            )),
-            _ => None,
-        };
     future_into_py(py, async move {
-        let kernel = Kernel::open(
-            &collection_path,
-            &cache_dir,
-            handle,
-            executor,
-            Some(timers),
-            images,
-        )
-        .await?;
+        let kernel = Kernel::open(&collection_path, &cache_dir, executor, Some(timers)).await?;
         Ok(AsyncKernel {
             inner: Arc::new(kernel),
         })
@@ -147,6 +145,25 @@ pub(crate) fn async_kernel_open<'py>(
 
 #[pymethods]
 impl AsyncKernel {
+    /// Attach (or swap) the embedding service — embedding start / model
+    /// change. Follow up with `reindex_if_needed` (a model change is drift).
+    #[pyo3(signature = (embedder, media_read=None, media_exists=None))]
+    fn attach_embedder(
+        &self,
+        embedder: PyRef<'_, PyEmbedder>,
+        media_read: Option<Py<PyAny>>,
+        media_exists: Option<Py<PyAny>>,
+    ) {
+        let handle = Arc::clone(&embedder.handle);
+        let images = image_pair(&handle, media_read, media_exists);
+        self.inner.attach_embedder(handle, images);
+    }
+
+    /// Detach the embedding service (embedding stop): the index flushes and
+    /// reports unavailable; the collection and lexical search stay live.
+    fn detach_embedder(&self, py: Python<'_>) {
+        py.detach(|| self.inner.detach_embedder())
+    }
     /// Create a batch of notes (the #77 duplicate policy per item) and index
     /// them — ONE collection job, ONE read job, batched embeds (an awaitable;
     /// per-item results, one bad note never sinks the batch).
