@@ -620,7 +620,7 @@ class EmbeddingRuntime:
     def __init__(
         self,
         *,
-        index: VectorIndex,
+        index: VectorIndex | None = None,
         backend: str = DEFAULT_BACKEND,
         model: str | None = None,
         host: str = DEFAULT_HOST,
@@ -763,7 +763,10 @@ class EmbeddingRuntime:
                 raise
             self._last_start_failed = False
             self._backend = be
-            self._index.set_backend(be)
+            # Legacy facade coupling; the kernel-mode server attaches the
+            # backend itself (PyEmbedder.capture must run on the loop).
+            if self._index is not None:
+                self._index.set_backend(be)
             return be
 
     def _make_backend(self) -> EmbedderBackend:
@@ -822,7 +825,8 @@ class EmbeddingRuntime:
         with self._lock:
             if self._backend is None:
                 return False
-            self._index.set_backend(None)
+            if self._index is not None:
+                self._index.set_backend(None)
             self._backend.stop()
             self._backend = None
             self._last_start_failed = False
