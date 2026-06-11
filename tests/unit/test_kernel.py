@@ -44,7 +44,7 @@ class TestSchedulerPort:
 
         def probe(col) -> int:
             seen["thread"] = threading.current_thread().name
-            return col.note_count()
+            return len(col.find_notes("deck:*"))
 
         count = scheduler.run_on_collection(probe)
         assert isinstance(count, int)

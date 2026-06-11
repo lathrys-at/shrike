@@ -20,13 +20,16 @@ def main() -> int:
     import shrike.schemas  # noqa: F401
     import shrike.server  # noqa: F401
     import shrike.tools  # noqa: F401
-    from shrike.embed_text import normalize_for_embedding
+    from shrike.embed_text import EMBED_TEXT_VERSION
 
-    # Pure function — HTML strip + cloze reveal, no collection or network.
-    out = normalize_for_embedding("<b>Bonjour</b> {{c1::le monde}}")
-    assert "Bonjour" in out and "le monde" in out, f"unexpected: {out!r}"
+    # Since the #278 cutover the normalization runs in the native core; the
+    # smoke proves the native module is importable and carries it.
+    import shrike_native
 
-    print(f"library_smoke OK — shrike {shrike.__version__}; modules import; embed_text works")
+    assert hasattr(shrike_native, "CollectionCore")
+    assert EMBED_TEXT_VERSION >= 1
+
+    print(f"library_smoke OK — shrike {shrike.__version__}; modules import; native core present")
     return 0
 
 

@@ -1,4 +1,4 @@
-"""Note-type-surface parity (#278 series, step 4).
+"""Note-type-surface behaviors (#278 step 4; cross-core parity retired at the cutover).
 
 The native note-type ops against the Python `shrike.note_types` results: the
 cross-core case runs the same sequence through the pip core in a subprocess on
@@ -10,8 +10,6 @@ renames/moves) are pinned natively, where the note contents can be read back.
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 
 import pytest
 
@@ -37,55 +35,6 @@ FIELD_OPS = [
     {"op": "reposition", "name": "C", "position": 0},
 ]
 
-_PIP_SIDE = r"""
-import asyncio, json, sys
-from shrike.collection import CollectionWrapper
-from shrike.note_types import (
-    find_and_replace_note_types,
-    update_note_type_field_metadata,
-    update_note_type_fields,
-    upsert_note_types,
-)
-
-CREATE = json.loads(sys.argv[2])
-OPS = json.loads(sys.argv[3])
-
-async def main():
-    w = CollectionWrapper(sys.argv[1])
-    out = {}
-
-    def on_worker(col):
-        out["create"] = upsert_note_types(col, CREATE)
-        out["field_ops"] = update_note_type_fields(col, "Custom", OPS)
-        out["fr"] = find_and_replace_note_types(
-            col, "Custom", search="color: red", replacement="color: blue",
-        )
-        out["fr_regex"] = find_and_replace_note_types(
-            col, "Custom", search=r"\{\{(A2)\}\}", replacement=r"<b>{{\1}}</b>",
-            regex=True, css=False,
-        )
-        out["meta"] = update_note_type_field_metadata(
-            col, "Custom", [{"name": "A2", "font": "Courier", "size": 14}]
-        )
-        return None
-
-    await w.run(on_worker)
-    # migrate: create one note then move it to Basic, dropping fields.
-    created = await w.upsert_notes([{
-        "note_type": "Custom", "deck": "Default",
-        "fields": {"C": "c-data", "A2": "a-data"},
-    }])
-    nid = created[0]["id"]
-    out["migrate"] = await w.migrate_note_type(
-        [nid], "Basic", {"C": "Front", "A2": "Back"}, dry_run=False
-    )
-    out["migrate"]["changed"] = len(out["migrate"]["changed"])
-    w.close()
-    print(json.dumps(out))
-
-asyncio.run(main())
-"""
-
 
 def _no_id(d: dict) -> dict:
     return {k: v for k, v in d.items() if k != "id"}
@@ -95,47 +44,34 @@ def _no_ids(items: list) -> list:
     return [_no_id(i) for i in items]
 
 
-def test_cross_core_note_type_parity(tmp_path, native_core):
-    pip_col = tmp_path / "pip" / "collection.anki2"
-    pip_col.parent.mkdir()
-    proc = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            _PIP_SIDE,
-            str(pip_col),
-            json.dumps(CREATE_BATCH),
-            json.dumps(FIELD_OPS),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    pip = json.loads(proc.stdout)
-
+def test_note_type_surface_end_to_end(native_core):
+    # The cross-core comparison retired with the cutover (the wrapper IS the
+    # native core now; the per-case behavior suite lives in tests/unit). This
+    # keeps the end-to-end flow + result shapes pinned at the binding level.
     native_create = json.loads(native_core.upsert_note_types(json.dumps(CREATE_BATCH)))
-    assert _no_ids(native_create) == _no_ids(pip["create"])
+    assert native_create[0]["status"] == "created"
+    assert native_create[1]["status"] == "error"
 
     native_ops = json.loads(native_core.update_note_type_fields("Custom", json.dumps(FIELD_OPS)))
-    assert _no_id(native_ops) == _no_id(pip["field_ops"])
+    assert native_ops["fields"] == ["C", "A2", "D", "B"]
 
     native_fr = json.loads(
         native_core.find_replace_note_types("Custom", "color: red", "color: blue")
     )
-    assert _no_id(native_fr) == _no_id(pip["fr"])
+    assert native_fr["replacements"] == 1 and native_fr["css_changed"] is True
     native_fr_regex = json.loads(
         native_core.find_replace_note_types(
             "Custom", r"\{\{(A2)\}\}", r"<b>{{\1}}</b>", True, True, True, True, False
         )
     )
-    assert _no_id(native_fr_regex) == _no_id(pip["fr_regex"])
+    assert native_fr_regex["replacements"] == 1
 
     native_meta = json.loads(
         native_core.update_note_type_field_metadata(
             "Custom", json.dumps([{"name": "A2", "font": "Courier", "size": 14}])
         )
     )
-    assert _no_id(native_meta) == _no_id(pip["meta"])
+    assert native_meta["fields_updated"] == ["A2"]
 
     # migrate parity (counts + drop reporting; ids are per-collection).
     created = json.loads(
@@ -155,8 +91,10 @@ def test_cross_core_note_type_parity(tmp_path, native_core):
     native_migrate = json.loads(
         native_core.migrate_note_type([nid], "Basic", json.dumps({"C": "Front", "A2": "Back"}))
     )
-    native_migrate["changed"] = len(native_migrate["changed"])
-    assert native_migrate == pip["migrate"]
+    assert native_migrate["to_note_type"] == "Basic"
+    assert native_migrate["dropped_fields"] == ["D", "B"] or set(
+        native_migrate["dropped_fields"]
+    ) == {"D", "B"}
     # data followed the map
     assert native_core.get_note(nid)[2] == ["c-data", "a-data"]
 

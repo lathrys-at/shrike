@@ -6,18 +6,22 @@ template remap, reported drops, validation, and id/card preservation.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from shrike.note_types import upsert_note_types
+from tests.unit._native_shims import upsert_note_types
 
 
 def _add(wrapper, model, fields, *, deck="D"):
     def build(c):
-        n = c.new_note(c.models.by_name(model))
-        for k, v in fields.items():
-            n[k] = v
-        c.add_note(n, c.decks.id(deck))
-        return n.id
+        return json.loads(
+            c.upsert_notes(
+                json.dumps([{"note_type": model, "deck": deck, "fields": dict(fields)}]),
+                "allow",
+                False,
+            )
+        )[0]["id"]
 
     return wrapper.run_sync(build)
 
@@ -32,17 +36,31 @@ def _make_type(wrapper, name, fields):
 
 
 def _migrate(wrapper, ids, to, fmap, **kw):
-    return wrapper.run_sync(lambda c: wrapper._migrate_note_type(ids, to, fmap, **kw))
+    template_map = kw.pop("template_map", None)
+    dry_run = kw.pop("dry_run", False)
+    assert not kw, kw
+    return wrapper.run_sync(
+        lambda c: json.loads(
+            c.migrate_note_type(
+                ids, to, json.dumps(fmap), json.dumps(template_map) if template_map else "", dry_run
+            )
+        )
+    )
 
 
 def _note(wrapper, nid):
-    return wrapper.run_sync(lambda c: (c.get_note(nid).mid, dict(c.get_note(nid).items())))
+    def read(c):
+        _, mid, fields, _ = c.get_note(nid)
+        _, names, values = c.note_field_map([nid])[0]
+        return mid, dict(zip(names, values, strict=False))
+
+    return wrapper.run_sync(read)
 
 
 class TestMigrateNoteType:
     def test_basic_to_cloze_moves_content_preserves_id(self, wrapper):
         nid = _add(wrapper, "Basic", {"Front": "FRONTVAL", "Back": "BACKVAL"})
-        cloze_mid = wrapper.run_sync(lambda c: c.models.by_name("Cloze")["id"])
+        cloze_mid = wrapper.run_sync(lambda c: c.notetype_id("Cloze"))
 
         result = _migrate(wrapper, [nid], "Cloze", {"Front": "Text", "Back": "Back Extra"})
         assert result["changed"] == [nid]
@@ -73,7 +91,7 @@ class TestMigrateNoteType:
 
     def test_dry_run_reports_but_does_not_change(self, wrapper):
         nid = _add(wrapper, "Basic", {"Front": "a", "Back": "b"})
-        basic_mid = wrapper.run_sync(lambda c: c.get_note(nid).mid)
+        basic_mid = wrapper.run_sync(lambda c: c.get_note(nid)[1])
         result = _migrate(wrapper, [nid], "Cloze", {"Front": "Text"}, dry_run=True)
         assert result["dry_run"] is True
         assert result["dropped_fields"] == ["Back"]
@@ -84,7 +102,7 @@ class TestMigrateNoteType:
     def test_card_count_preserved_single_template(self, wrapper):
         nid = _add(wrapper, "Basic", {"Front": "q", "Back": "a"})
         _migrate(wrapper, [nid], "Cloze", {"Front": "Text", "Back": "Back Extra"})
-        assert len(wrapper.run_sync(lambda c: c.card_ids_of_note(nid))) == 1
+        assert len(wrapper.run_sync(lambda c: c.cards_of_note(nid))) == 1
 
     def test_template_map(self, wrapper):
         nid = _add(wrapper, "Basic", {"Front": "q", "Back": "a"})

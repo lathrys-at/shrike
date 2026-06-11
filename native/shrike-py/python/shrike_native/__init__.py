@@ -38,6 +38,8 @@ from shrike_native._native import (
 # name simply doesn't exist (the harness skips).
 with contextlib.suppress(ImportError):
     from shrike_native._native import CollectionCore  # noqa: F401
+    from shrike_native._native import decode_media_b64  # noqa: F401
+    from shrike_native._native import fetch_media_url  # noqa: F401
 
 __all__ = [
     "ClipEmbedder",

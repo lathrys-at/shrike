@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from shrike.note_types import (
+from tests.unit._native_shims import (
     NoteTypeOpError,
     find_and_replace_note_types,
     update_note_type_fields,
@@ -14,7 +16,7 @@ from shrike.note_types import (
 class TestCreateNoteType:
     async def test_create_standard(self, wrapper):
         results = upsert_note_types(
-            wrapper.col,
+            wrapper.core,
             [
                 {
                     "name": "Custom",
@@ -47,7 +49,7 @@ class TestCreateNoteType:
 
     async def test_create_cloze(self, wrapper):
         results = upsert_note_types(
-            wrapper.col,
+            wrapper.core,
             [
                 {
                     "name": "My Cloze",
@@ -72,7 +74,7 @@ class TestCreateNoteType:
 
     async def test_create_multiple_templates(self, wrapper):
         results = upsert_note_types(
-            wrapper.col,
+            wrapper.core,
             [
                 {
                     "name": "Vocab",
@@ -103,7 +105,7 @@ class TestCreateNoteType:
 
     async def test_create_duplicate_name_fails(self, wrapper):
         results = upsert_note_types(
-            wrapper.col,
+            wrapper.core,
             [
                 {
                     "name": "Basic",
@@ -117,12 +119,12 @@ class TestCreateNoteType:
         assert "already exists" in results[0]["error"].lower()
 
     async def test_create_missing_required_fields(self, wrapper):
-        results = upsert_note_types(wrapper.col, [{"name": "Incomplete"}])
+        results = upsert_note_types(wrapper.core, [{"name": "Incomplete"}])
         assert results[0]["status"] == "error"
 
     async def test_can_create_notes_with_new_type(self, wrapper):
         upsert_note_types(
-            wrapper.col,
+            wrapper.core,
             [
                 {
                     "name": "Custom",
@@ -147,7 +149,7 @@ class TestCreateNoteType:
 class TestUpdateNoteType:
     def _create_custom_type(self, wrapper):
         results = upsert_note_types(
-            wrapper.col,
+            wrapper.core,
             [
                 {
                     "name": "Editable",
@@ -161,13 +163,13 @@ class TestUpdateNoteType:
 
     async def test_update_name(self, wrapper):
         nt_id = self._create_custom_type(wrapper)
-        results = upsert_note_types(wrapper.col, [{"id": nt_id, "name": "Renamed"}])
+        results = upsert_note_types(wrapper.core, [{"id": nt_id, "name": "Renamed"}])
         assert results[0]["status"] == "updated"
         assert results[0]["name"] == "Renamed"
 
     async def test_update_css(self, wrapper):
         nt_id = self._create_custom_type(wrapper)
-        upsert_note_types(wrapper.col, [{"id": nt_id, "css": ".card { color: red; }"}])
+        upsert_note_types(wrapper.core, [{"id": nt_id, "css": ".card { color: red; }"}])
         info = await wrapper.get_collection_info(
             include=["note_types"], note_type_details=["Editable"]
         )
@@ -175,13 +177,13 @@ class TestUpdateNoteType:
         assert "color: red" in editable["detail"]["css"]
 
     async def test_update_nonexistent(self, wrapper):
-        results = upsert_note_types(wrapper.col, [{"id": 9999999999, "name": "Nope"}])
+        results = upsert_note_types(wrapper.core, [{"id": 9999999999, "name": "Nope"}])
         assert results[0]["status"] == "error"
         assert "not found" in results[0]["error"].lower()
 
     async def test_cannot_change_cloze_type(self, wrapper):
         results = upsert_note_types(
-            wrapper.col,
+            wrapper.core,
             [
                 {
                     "name": "StdType",
@@ -192,7 +194,7 @@ class TestUpdateNoteType:
             ],
         )
         nt_id = results[0]["id"]
-        results = upsert_note_types(wrapper.col, [{"id": nt_id, "is_cloze": True}])
+        results = upsert_note_types(wrapper.core, [{"id": nt_id, "is_cloze": True}])
         assert results[0]["status"] == "error"
         assert "cannot change" in results[0]["error"].lower()
 
@@ -200,7 +202,7 @@ class TestUpdateNoteType:
 class TestDeleteNoteType:
     def _create_unused_type(self, wrapper):
         results = upsert_note_types(
-            wrapper.col,
+            wrapper.core,
             [
                 {
                     "name": "Deletable",
@@ -255,17 +257,27 @@ def _type_with_note(wrapper, fields, values, templates=None):
         mid = upsert_note_types(
             c, [{"name": "DataSafe", "fields": fields, "templates": tmpls, "css": ""}]
         )[0]["id"]
-        note = c.new_note(c.models.get(mid))
-        for k, v in values.items():
-            note[k] = v
-        c.add_note(note, c.decks.id("DataSafe"))
-        return mid, note.id
+        created = json.loads(
+            c.upsert_notes(
+                json.dumps([{"note_type": "DataSafe", "deck": "DataSafe", "fields": dict(values)}]),
+                "allow",
+                False,
+            )
+        )[0]
+        assert created["status"] == "created", created
+        return mid, created["id"]
 
     return wrapper.run_sync(build)
 
 
 def _content(wrapper, nid):
-    return wrapper.run_sync(lambda c: dict(c.get_note(nid).items()))
+    def read(c):
+        rows = c.note_field_map([nid])
+        assert rows, f"note {nid} missing"
+        _, names, values = rows[0]
+        return dict(zip(names, values, strict=False))
+
+    return wrapper.run_sync(read)
 
 
 def _update_type(wrapper, payload):
@@ -343,22 +355,22 @@ class TestUpdateNoteTypeFieldsPreserveData:
 
     async def test_identical_templates_keep_cards(self, wrapper):
         mid, nid = _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
-        before = wrapper.run_sync(lambda c: c.find_cards(f"nid:{nid}"))
+        before = wrapper.run_sync(lambda c: c.cards_of_note(nid))
         _update_type(
             wrapper,
             {"id": mid, "templates": [{"name": "C", "front": "{{Front}}", "back": "{{Back}}"}]},
         )
-        after = wrapper.run_sync(lambda c: c.find_cards(f"nid:{nid}"))
+        after = wrapper.run_sync(lambda c: c.cards_of_note(nid))
         assert after == before  # same cards, scheduling history intact
 
     async def test_edit_template_body_keeps_cards(self, wrapper):
         mid, nid = _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
-        before = wrapper.run_sync(lambda c: c.find_cards(f"nid:{nid}"))
+        before = wrapper.run_sync(lambda c: c.cards_of_note(nid))
         _update_type(
             wrapper,
             {"id": mid, "templates": [{"name": "C", "front": "{{Front}}!", "back": "{{Back}}"}]},
         )
-        after = wrapper.run_sync(lambda c: c.find_cards(f"nid:{nid}"))
+        after = wrapper.run_sync(lambda c: c.cards_of_note(nid))
         assert after == before
         # the body change actually took effect
         info = await wrapper.get_collection_info(
@@ -485,10 +497,15 @@ def _type_with_cards(wrapper, template_names, field="F"):
         mid = upsert_note_types(
             c, [{"name": "TmplSafe", "fields": [field], "templates": tmpls, "css": ""}]
         )[0]["id"]
-        note = c.new_note(c.models.get(mid))
-        note[field] = "x"
-        c.add_note(note, c.decks.id("TmplSafe"))
-        return mid, note.id
+        created = json.loads(
+            c.upsert_notes(
+                json.dumps([{"note_type": "TmplSafe", "deck": "TmplSafe", "fields": {field: "x"}}]),
+                "allow",
+                False,
+            )
+        )[0]
+        assert created["status"] == "created", created
+        return mid, created["id"]
 
     return wrapper.run_sync(build)
 
@@ -497,13 +514,21 @@ def _cards_by_template(wrapper, nid, mid):
     """Map each of the note's cards to its template name -> card id."""
 
     def q(c):
-        out = {}
-        for cid in c.find_cards(f"nid:{nid}"):
-            ord_ = c.get_card(cid).ord
-            out[c.models.get(mid)["tmpls"][ord_]["name"]] = cid
-        return out
+        detail = json.loads(c.collection_info(["note_types"], [_name_of(c, mid)]))
+        names = [
+            t["name"]
+            for nt in detail["note_types"]
+            if nt["id"] == mid
+            for t in nt["detail"]["templates"]
+        ]
+        return {names[ord_]: cid for cid, ord_ in c.card_ords_of_note(nid)}
 
     return wrapper.run_sync(q)
+
+
+def _name_of(c, mid):
+    info = json.loads(c.collection_info(["note_types"], []))
+    return next(nt["name"] for nt in info["note_types"] if nt["id"] == mid)
 
 
 class TestUpdateNoteTypeTemplates:

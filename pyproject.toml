@@ -33,7 +33,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "AGPL-3.0-or-later"
 dependencies = [
-    "anki>=25.0",
     "mcp>=1.20",
     "click>=8.0",
     "filelock>=3.0",
@@ -75,6 +74,9 @@ clip = [
     "pillow>=10",
 ]
 dev = [
+    # The pip anki package is the TEST ORACLE only since the #278 cutover
+    # (subprocess fixtures + parity comparisons); the runtime is native.
+    "anki>=25.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",

@@ -6,10 +6,34 @@ from datetime import UTC, datetime
 def _backdate(wrapper, nid: int, mod: int) -> None:
     """Set a note's modification time directly (epoch seconds).
 
-    `modified_since` filters on `notes.mod`, so explicit timestamps make the
-    boundary deterministic without sleeping to manufacture a real-time gap.
+    `modified_since` filters on `notes.mod`; an explicit timestamp keeps the
+    boundary deterministic without sleeping. The native core exposes no raw
+    DB writes (deliberately), so the backdate runs through the pip-anki
+    ORACLE in a subprocess on the released file.
     """
-    wrapper.run_sync(lambda c: c.db.execute("update notes set mod = ? where id = ?", mod, nid))
+    import subprocess
+    import sys
+
+    wrapper.release_now()
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys\n"
+                "from anki.collection import Collection\n"
+                "col = Collection(sys.argv[1])\n"
+                "col.db.execute('update notes set mod = ? where id = ?',"
+                " int(sys.argv[2]), int(sys.argv[3]))\n"
+                "col.close()\n"
+            ),
+            wrapper._path,
+            str(mod),
+            str(nid),
+        ],
+        check=True,
+    )
+    wrapper.run_sync(lambda c: c.reopen())
 
 
 class TestListNotes:

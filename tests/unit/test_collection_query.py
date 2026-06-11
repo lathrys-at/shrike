@@ -17,8 +17,14 @@ from tests.unit.conftest import make_notes
 def _add(wrapper, front, back="x", *, tags=None, deck="D"):
     results = make_notes(
         wrapper,
-        [{"note_type": "Basic", "deck": deck, "fields": {"Front": front, "Back": back},
-          "tags": list(tags or [])}],
+        [
+            {
+                "note_type": "Basic",
+                "deck": deck,
+                "fields": {"Front": front, "Back": back},
+                "tags": list(tags or []),
+            }
+        ],
     )
     return results[0]["id"]
 

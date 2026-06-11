@@ -2,6 +2,8 @@
 # CollectionCore is feature-gated (#278, anki-core builds only): re-exported
 # via the `as` form (outside __all__), allowlisted for default-build stubtest.
 from shrike_native._native import CollectionCore as CollectionCore
+from shrike_native._native import decode_media_b64 as decode_media_b64
+from shrike_native._native import fetch_media_url as fetch_media_url
 from shrike_native._native import (
     IMAGE_PREP_VERSION_RS,
     ClipEmbedder,

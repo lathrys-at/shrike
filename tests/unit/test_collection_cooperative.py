@@ -7,6 +7,7 @@ acquire drift hook, plus that the default (permanent-hold) mode is unaffected.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -21,7 +22,7 @@ def coop(tmp_path):
         str(tmp_path / "c.anki2"),
         cooperative=True,
         hold_seconds=0.05,
-        on_acquire=lambda c: calls.append(c.mod),
+        on_acquire=lambda c: calls.append(c.col_mod()),
     )
     w.acquire_calls = calls  # type: ignore[attr-defined]
     yield w
@@ -54,15 +55,26 @@ class TestCooperativeLifecycle:
 
     async def test_data_survives_release(self, coop):
         def add(c):
-            n = c.new_note(c.models.by_name("Basic"))
-            n["Front"], n["Back"] = "persist", "x"
-            c.add_note(n, c.decks.id("D"))
-            return n.id
+            return json.loads(
+                c.upsert_notes(
+                    json.dumps(
+                        [
+                            {
+                                "note_type": "Basic",
+                                "deck": "D",
+                                "fields": {"Front": "persist", "Back": "x"},
+                            }
+                        ]
+                    ),
+                    "allow",
+                    False,
+                )
+            )[0]["id"]
 
         nid = await coop.run(add)
         await _wait_released(coop)
         assert not coop.is_open
-        found = await coop.run(lambda c: list(c.find_notes(f"nid:{nid}")))
+        found = await coop.run(lambda c: c.find_notes(f"nid:{nid}"))
         assert found == [nid]
 
     async def test_release_now_then_op_reacquires(self, coop):

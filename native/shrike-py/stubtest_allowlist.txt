@@ -10,3 +10,5 @@ shrike_native._native.CollectionCore
 shrike_native._native.__all__
 shrike_native._native.fetch_media_url
 shrike_native._native.decode_media_b64
+shrike_native.fetch_media_url
+shrike_native.decode_media_b64

@@ -86,11 +86,30 @@ class TestCollectionInfo:
 
         # Park every card in a filtered deck: cards get did=Filt, odid=original,
         # which Anki's deck: search attributes to *both* decks.
-        def make_filtered(c):
-            fid = c.decks.new_filtered("Filt")
-            c.sched.rebuild_filtered_deck(fid)
+        # Filtered decks are created by Anki desktop, not Shrike: author one
+        # with the pip-anki ORACLE in a subprocess on the released file, then
+        # let the wrapper re-acquire and observe it.
+        import subprocess
+        import sys
 
-        await wrapper.run(make_filtered)
+        wrapper.release_now()
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys\n"
+                    "from anki.collection import Collection\n"
+                    "col = Collection(sys.argv[1])\n"
+                    'fid = col.decks.new_filtered("Filt")\n'
+                    "col.sched.rebuild_filtered_deck(fid)\n"
+                    "col.close()\n"
+                ),
+                wrapper._path,
+            ],
+            check=True,
+        )
+        await wrapper.reopen()
 
         info = await wrapper.get_collection_info(include=["decks"])
         by_name = {d["name"]: d["note_count"] for d in info["decks"]}

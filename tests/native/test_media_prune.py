@@ -1,4 +1,5 @@
-"""Media + prune parity (#278 series, step 5a — the local halves; the SSRF
+"""Media + prune: wrapper-vs-binding consistency (#278 step 5a; the
+subprocess half now exercises the NATIVE-backed wrapper end to end — the local halves; the SSRF
 URL-fetch path is step 5b under the security-review gate).
 
 Cross-core: the same store/fetch/list/delete/check/prune sequence through
@@ -89,9 +90,9 @@ def test_cross_core_media_prune_parity(tmp_path, native_core):
     pip = json.loads(proc.stdout)
 
     # Same sequence natively.
-    stored = json.loads(native_core.store_media_bytes("pic.png", b"PNGDATA"))
+    stored = json.loads(native_core.store_media_bytes(b"PNGDATA", filename="pic.png"))
     assert stored["filename"] == pip["store"][0]["filename"] == "pic.png"
-    dup = json.loads(native_core.store_media_bytes("pic.png", b"PNGDATA"))
+    dup = json.loads(native_core.store_media_bytes(b"PNGDATA", filename="pic.png"))
     assert dup["filename"] == pip["store_dup"][0]["filename"] == "pic.png"
     native_core.upsert_notes(
         json.dumps(
@@ -105,7 +106,7 @@ def test_cross_core_media_prune_parity(tmp_path, native_core):
             ]
         )
     )
-    json.loads(native_core.store_media_bytes("junk.bin", b"JUNK"))
+    json.loads(native_core.store_media_bytes(b"JUNK", filename="junk.bin"))
     created = json.loads(
         native_core.upsert_notes(
             json.dumps(

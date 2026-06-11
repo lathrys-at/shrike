@@ -382,7 +382,7 @@ class CollectionWrapper:
 
         def _list(c: CollectionCore) -> dict[str, Any]:
             try:
-                return json.loads(
+                listed: dict[str, Any] = json.loads(
                     c.list_notes(
                         ids=ids,
                         deck=deck,
@@ -393,6 +393,7 @@ class CollectionWrapper:
                         limit=limit,
                     )
                 )
+                return listed
             except shrike_native.NativeInputError as e:
                 if "filter" in str(e):
                     # The tool layer's contract for the no-filter case.
@@ -514,9 +515,7 @@ class CollectionWrapper:
         return await self.run(_tags)
 
     async def rename_tag(self, old: str, new: str, note_ids: list[int]) -> dict[str, Any]:
-        return await self.run(
-            lambda c: {"notes_modified": c.rename_tag(old, new, note_ids)}
-        )
+        return await self.run(lambda c: {"notes_modified": c.rename_tag(old, new, note_ids)})
 
     async def upsert_decks(self, decks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return await self.run(lambda c: json.loads(c.upsert_decks(json.dumps(decks))))
@@ -561,9 +560,7 @@ class CollectionWrapper:
                 id_query = f"nid:{','.join(str(i) for i in ids)}"
                 combined = f"{id_query} {combined}" if combined else id_query
             if combined is None:
-                raise ValueError(
-                    "A scope is required: provide deck, tags, note_type, or ids."
-                )
+                raise ValueError("A scope is required: provide deck, tags, note_type, or ids.")
             candidates = c.find_notes(combined)
             if not candidates:
                 return {"notes_changed": 0, "dry_run": dry_run, "samples": [], "changed_ids": []}
@@ -691,7 +688,9 @@ class CollectionWrapper:
         dry_run: bool,
     ) -> tuple[dict[str, Any], list[int]]:
         def _prune(c: CollectionCore) -> tuple[dict[str, Any], list[int]]:
-            result = json.loads(c.prune(unused_tags, empty_notes, empty_cards, unused_media, dry_run))
+            result = json.loads(
+                c.prune(unused_tags, empty_notes, empty_cards, unused_media, dry_run)
+            )
             removed: list[int] = result.pop("removed_note_ids")
             return result, removed
 
@@ -827,9 +826,7 @@ class CollectionWrapper:
             }
         )
 
-    async def derived_rows(
-        self, note_ids: Sequence[int]
-    ) -> list[tuple[int, str, str, str]]:
+    async def derived_rows(self, note_ids: Sequence[int]) -> list[tuple[int, str, str, str]]:
         """``(note_id, "field", field_name, raw_value)`` rows for the derived store."""
         ids = list(note_ids)
         return await self.run(lambda c: c.derived_field_rows(ids))

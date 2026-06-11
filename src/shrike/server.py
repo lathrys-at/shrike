@@ -702,9 +702,7 @@ def main() -> None:
         logger.info(
             "Cooperative locking on: releasing the collection after %.0fs idle", hold_seconds
         )
-    summary = wrapper.run_sync(
-        lambda c: json.loads(c.collection_info(["summary"], []))["summary"]
-    )
+    summary = wrapper.run_sync(lambda c: json.loads(c.collection_info(["summary"], []))["summary"])
     notes, decks, note_types = summary["notes"], summary["decks"], summary["note_types"]
     logger.info(
         "Collection ready: %d notes, %d decks, %d note types",

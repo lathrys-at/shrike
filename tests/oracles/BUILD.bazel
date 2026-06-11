@@ -1,0 +1,12 @@
+load("@rules_python//python:defs.bzl", "py_library")
+
+package(default_testonly = True)
+
+# Python ORACLE implementations (#278 cutover): the runtime moved to Rust;
+# these are the byte-identity references the test suites compare against.
+py_library(
+    name = "oracles",
+    srcs = glob(["*.py"]),
+    imports = [".."],
+    visibility = ["//visibility:public"],
+)

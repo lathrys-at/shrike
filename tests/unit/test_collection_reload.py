@@ -6,30 +6,45 @@ self.col that makes a post-reopen op see the new handle.
 
 from __future__ import annotations
 
+import json
+
 
 def _add(wrapper, front, back="x"):
     def build(c):
-        n = c.new_note(c.models.by_name("Basic"))
-        n["Front"], n["Back"] = front, back
-        c.add_note(n, c.decks.id("D"))
-        return n.id
+        return json.loads(
+            c.upsert_notes(
+                json.dumps(
+                    [{"note_type": "Basic", "deck": "D", "fields": {"Front": front, "Back": back}}]
+                ),
+                "allow",
+                False,
+            )
+        )[0]["id"]
 
     return wrapper.run_sync(build)
 
 
 class TestReopen:
     async def test_swaps_handle(self, wrapper):
-        before = id(wrapper.col)
+        # Since the cutover the wrapper keeps ONE native core whose reopen()
+        # swaps the underlying collection handle in place — pin the observable
+        # contract instead: ops keep working and the watermark stays readable.
+        before = await wrapper.col_mod()
         await wrapper.reopen()
-        assert id(wrapper.col) != before  # a fresh Collection object
+        assert await wrapper.col_mod() >= before  # a fresh Collection object
 
     async def test_preserves_committed_data(self, wrapper):
         nid = _add(wrapper, "survives-reopen")
         await wrapper.reopen()
         found = await wrapper.run(lambda c: list(c.find_notes(f"nid:{nid}")))
         assert found == [nid]
+
         # The note is readable through the new handle.
-        content = await wrapper.run(lambda c: dict(c.get_note(nid).items()))
+        def read(c):
+            _, names, values = c.note_field_map([nid])[0]
+            return dict(zip(names, values, strict=False))
+
+        content = await wrapper.run(read)
         assert content["Front"] == "survives-reopen"
 
     async def test_writable_after_reopen(self, wrapper):

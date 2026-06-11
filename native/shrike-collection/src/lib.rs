@@ -244,6 +244,17 @@ impl CollectionCore {
     pub fn cards_of_note(&self, note_id: i64) -> NativeResult<Vec<i64>> {
         self.adapter.cards_of_note(note_id)
     }
+
+    /// `(card_id, template_ordinal)` per card of one note — the identity the
+    /// template data-safety tests assert on.
+    pub fn card_ords_of_note(&self, note_id: i64) -> NativeResult<Vec<(i64, i64)>> {
+        Ok(self
+            .adapter
+            .db_rows(&format!("select id, ord from cards where nid = {note_id}"))?
+            .into_iter()
+            .filter_map(|r| Some((r.first()?.as_i64()?, r.get(1)?.as_i64()?)))
+            .collect())
+    }
 }
 
 #[cfg(test)]

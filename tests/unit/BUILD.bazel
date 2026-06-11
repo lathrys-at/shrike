@@ -1,5 +1,6 @@
 load("@rules_python//python:defs.bzl", "py_library")
 load("//tools/bazel:defs.bzl", "pytest_test")
+load("@shrike_pip//:requirements.bzl", "requirement")
 
 package(default_testonly = True)
 
@@ -7,8 +8,15 @@ package(default_testonly = True)
 # pytest's per-directory conftest discovery finds it.
 py_library(
     name = "conftest",
-    srcs = ["conftest.py"],
-    deps = ["//src/shrike"],
+    srcs = [
+        "_native_shims.py",
+        "conftest.py",
+    ],
+    deps = [
+        "//src/shrike",
+        "//tests/oracles",
+        requirement("anki"),  # the pip TEST ORACLE (subprocess fixtures)
+    ],
 )
 
 # Excluded from the Bazel unit suite for now (the pip `test` lane still runs both):

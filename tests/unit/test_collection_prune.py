@@ -6,9 +6,9 @@ rule (embed_text.field_is_blank) directly, no server.
 
 from __future__ import annotations
 
-import pytest
-
 import json
+
+import pytest
 
 from tests.oracles.embed_text_oracle import field_is_blank
 from tests.unit.conftest import make_notes
@@ -41,10 +41,16 @@ def _prune(wrapper, **kw):
     kw.setdefault("empty_cards", False)
     kw.setdefault("unused_media", False)
     kw.setdefault("dry_run", True)
+
     def run(c):
         result = json.loads(
-            c.prune(kw["unused_tags"], kw["empty_notes"], kw["empty_cards"],
-                    kw["unused_media"], kw["dry_run"])
+            c.prune(
+                kw["unused_tags"],
+                kw["empty_notes"],
+                kw["empty_cards"],
+                kw["unused_media"],
+                kw["dry_run"],
+            )
         )
         removed = result.pop("removed_note_ids")
         return result, removed
@@ -52,12 +58,11 @@ def _prune(wrapper, **kw):
     return wrapper.run_sync(run)
 
 
-
-
 def _find_empty(wrapper):
     """Empty-note ids via a dry-run prune (the native core owns the scan)."""
     result, _ = _prune(wrapper, empty_notes=True, dry_run=True)
     return result["empty_notes"]["removed"]
+
 
 def _note_exists(wrapper, nid):
     return bool(wrapper.run_sync(lambda c: c.find_notes(f"nid:{nid}")))
@@ -118,12 +123,18 @@ class TestUnusedTags:
 
         preview, _ = _prune(wrapper, unused_tags=True, dry_run=True)
         assert preview["unused_tags"]["tags"] == ["willremove"]
-        assert "willremove" in wrapper.run_sync(lambda c: json.loads(c.collection_info(["tags"], []))["tags"])  # not cleared yet
+        assert "willremove" in wrapper.run_sync(
+            lambda c: json.loads(c.collection_info(["tags"], []))["tags"]
+        )  # not cleared yet
 
         applied, _ = _prune(wrapper, unused_tags=True, dry_run=False)
         assert applied["unused_tags"]["removed"] == 1
-        assert "willremove" not in wrapper.run_sync(lambda c: json.loads(c.collection_info(["tags"], []))["tags"])
-        assert "used" in wrapper.run_sync(lambda c: json.loads(c.collection_info(["tags"], []))["tags"])
+        assert "willremove" not in wrapper.run_sync(
+            lambda c: json.loads(c.collection_info(["tags"], []))["tags"]
+        )
+        assert "used" in wrapper.run_sync(
+            lambda c: json.loads(c.collection_info(["tags"], []))["tags"]
+        )
 
     def test_parent_tag_with_child_notes_is_kept(self, wrapper):
         # A note tagged only "parent::child" keeps "parent" as in-use (hierarchy).
@@ -158,9 +169,13 @@ class TestPruneOrdering:
         result, removed = _prune(wrapper, empty_notes=True, unused_tags=True, dry_run=False)
         assert blank in removed
         assert not _note_exists(wrapper, blank)
-        assert "lonely" not in wrapper.run_sync(lambda c: json.loads(c.collection_info(["tags"], []))["tags"])
+        assert "lonely" not in wrapper.run_sync(
+            lambda c: json.loads(c.collection_info(["tags"], []))["tags"]
+        )
 
 
 def _set(c, nid, fields):
-    result = json.loads(c.upsert_notes(json.dumps([{"id": nid, "fields": fields}]), "allow", False))[0]
+    result = json.loads(
+        c.upsert_notes(json.dumps([{"id": nid, "fields": fields}]), "allow", False)
+    )[0]
     assert result["status"] == "updated", result

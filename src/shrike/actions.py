@@ -24,7 +24,6 @@ import logging
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
-from anki.errors import SearchError
 from pydantic import Field
 
 from shrike.collection import (
@@ -353,9 +352,10 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         logger.info("collection_query %r fields=%s limit=%d", query, fields, limit)
         try:
             result = await wrapper.query(query, fields_mode=fields, limit=limit)
-        except SearchError as e:
-            # Anki wraps interpolated values in U+2068/U+2069 isolation marks.
-            raise ToolInputError(str(e).replace("⁨", "").replace("⁩", "")) from e
+        except NoteTypeOpError as e:
+            # The native input error (a malformed search expression); the
+            # decoder already strips Anki's U+2068/U+2069 isolation marks.
+            raise ToolInputError(str(e)) from e
         logger.info("collection_query returned %d/%d notes", len(result["notes"]), result["total"])
         return ListNotesResponse.model_validate(result)
 

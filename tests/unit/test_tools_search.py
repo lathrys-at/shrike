@@ -32,9 +32,7 @@ def _seed(wrapper, notes):
     """
     import json
 
-    return wrapper.run_sync(
-        lambda c: json.loads(c.upsert_notes(json.dumps(notes), "allow", False))
-    )
+    return wrapper.run_sync(lambda c: json.loads(c.upsert_notes(json.dumps(notes), "allow", False)))
 
 
 def _call(mcp: FastMCP, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -523,7 +521,6 @@ class TestProvenance:
 
 def _build_derived(wrapper, derived) -> None:
     """Build the derived store from the collection's current notes (what the boot path does)."""
-    from shrike.collection import CollectionWrapper
 
     rows, mod = wrapper.run_sync(
         lambda c: (

@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import pytest
 
-from shrike.note_types import NoteTypeOpError, update_note_type_field_metadata, upsert_note_types
+from tests.unit._native_shims import (
+    NoteTypeOpError,
+    update_note_type_field_metadata,
+    upsert_note_types,
+)
 
 
 def _make(wrapper, name="Meta", fields=("Front", "Back")):
@@ -77,7 +81,14 @@ class TestSetFieldMetadata:
             _set(wrapper, "Meta", [{"name": "Front", "size": 99}, {"name": "Nope", "size": 99}])
         # The valid update did not apply (validation precedes any write).
         fields = wrapper.run_sync(
-            lambda c: {f["name"]: f["size"] for f in c.models.by_name("Meta")["flds"]}
+            lambda c: {
+                f["name"]: f["size"]
+                for nt in __import__("json").loads(c.collection_info(["note_types"], ["Meta"]))[
+                    "note_types"
+                ]
+                if nt["name"] == "Meta"
+                for f in nt["detail"]["fields"]
+            }
         )
         assert fields["Front"] != 99
 

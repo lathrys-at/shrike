@@ -12,6 +12,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from shrike.index import IndexSaver, IndexState, VectorIndex
 from shrike.tools import register_tools
+from tests.unit.conftest import make_notes
 
 
 def _call(mcp: FastMCP, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -21,7 +22,7 @@ def _call(mcp: FastMCP, name: str, args: dict[str, Any] | None = None) -> dict[s
 
 def _seed(wrapper, deck: str, front: str) -> int:
     note = {"deck": deck, "note_type": "Basic", "fields": {"Front": front, "Back": "x"}}
-    return wrapper.run_sync(lambda _c: wrapper._upsert_notes([note]))[0]["id"]
+    return make_notes(wrapper, [note])[0]["id"]
 
 
 @pytest.fixture()

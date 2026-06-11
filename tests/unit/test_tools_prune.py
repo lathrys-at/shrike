@@ -8,6 +8,7 @@ delete_notes); clearing unused tags is a col_mod-only metadata change. Dry-run
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -51,30 +52,44 @@ def _blank_note(wrapper):
 
 
 def _add(c):
-    n = c.new_note(c.models.by_name("Basic"))
-    n["Front"], n["Back"] = "tmp", "x"
-    c.add_note(n, c.decks.id("D"))
-    return n.id
+    return json.loads(
+        c.upsert_notes(
+            json.dumps(
+                [{"note_type": "Basic", "deck": "D", "fields": {"Front": "tmp", "Back": "x"}}]
+            ),
+            "allow",
+            False,
+        )
+    )[0]["id"]
 
 
 def _clear(c, nid):
-    n = c.get_note(nid)
-    for f in list(n.keys()):
-        n[f] = ""
-    c.update_note(n)
+    _, _, fields, _ = c.get_note(nid)
+    c.update_note(nid, ["" for _ in fields])
 
 
 def _orphan_tag(wrapper):
     nid = wrapper.run_sync(lambda c: _add_tagged(c))
-    wrapper.run_sync(lambda c: c.tags.bulk_remove([nid], "orphan"))
+    wrapper.run_sync(lambda c: c.update_note_tags([nid], remove=["orphan"]))
 
 
 def _add_tagged(c):
-    n = c.new_note(c.models.by_name("Basic"))
-    n["Front"], n["Back"] = "Q", "A"
-    n.tags = ["orphan"]
-    c.add_note(n, c.decks.id("D"))
-    return n.id
+    return json.loads(
+        c.upsert_notes(
+            json.dumps(
+                [
+                    {
+                        "note_type": "Basic",
+                        "deck": "D",
+                        "fields": {"Front": "Q", "Back": "A"},
+                        "tags": ["orphan"],
+                    }
+                ]
+            ),
+            "allow",
+            False,
+        )
+    )[0]["id"]
 
 
 class TestCollectionPruneTool:

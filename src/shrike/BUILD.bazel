@@ -14,7 +14,9 @@ py_library(
     srcs = glob(["**/*.py"]),
     imports = [".."],
     deps = [
-        requirement("anki"),
+        # The native core is REQUIRED since the #278 cutover — the collection
+        # layer runs in Rust; pip `anki` is a test oracle only (tests add it).
+        "//native/shrike-py:shrike_native",
         requirement("mcp"),
         requirement("click"),
         requirement("filelock"),

@@ -28,8 +28,14 @@ def mcp_app(wrapper):
 def _add(wrapper, front, *, tags=None):
     results = make_notes(
         wrapper,
-        [{"note_type": "Basic", "deck": "D", "fields": {"Front": front, "Back": "x"},
-          "tags": list(tags or [])}],
+        [
+            {
+                "note_type": "Basic",
+                "deck": "D",
+                "fields": {"Front": front, "Back": "x"},
+                "tags": list(tags or []),
+            }
+        ],
     )
     return results[0]["id"]
 

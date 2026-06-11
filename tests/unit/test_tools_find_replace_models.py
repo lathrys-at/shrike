@@ -17,8 +17,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
 from shrike.index import IndexSaver, IndexState, VectorIndex
-from shrike.note_types import upsert_note_types
 from shrike.tools import register_tools
+from tests.unit._native_shims import upsert_note_types
 
 
 def _call(mcp: FastMCP, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -78,7 +78,7 @@ class TestFindReplaceNoteTypesTool:
         # Templates/CSS are not embedding text — no vectors touched.
         mock_index.add.assert_not_called()
         mock_index.remove.assert_not_called()
-        assert mock_index.col_mod == wrapper.col.mod
+        assert mock_index.col_mod == wrapper.run_sync(lambda c: c.col_mod())
         mock_saver.request_save.assert_called_once()
 
     def test_no_match_does_not_bump(self, wrapper, model, mock_index, mock_saver, mcp_app):
