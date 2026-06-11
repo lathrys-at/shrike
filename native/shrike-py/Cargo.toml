@@ -38,6 +38,8 @@ shrike-embed = { path = "../shrike-embed" }
 # OnExecutor over the asyncio lane) into the kernel's Arc<dyn Embedder> slot.
 shrike-engine-api = { path = "../shrike-engine-api" }
 shrike-ffi = { workspace = true }
+# The Apple Vision OCR engine (#342 P3) — attached native, like the embedders.
+shrike-recognize-apple = { path = "../shrike-recognize-apple" }
 shrike-index = { path = "../shrike-index" }
 shrike-schemas = { path = "../shrike-schemas" }
 # First-class observability bridges (#310): pyo3-log forwards `log` records to

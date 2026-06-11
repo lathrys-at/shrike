@@ -421,10 +421,10 @@ The embedding service can be cycled independently of the Shrike server. `Embeddi
 **Recognition is the kernel's second injected capability** (the #342 slot pattern,
 sibling of the embed slot): an OCR engine the harness attaches at assembly turns
 note media into searchable text. Off by default; `--ocr-backend apple` (config
-`recognition.ocr`, env `SHRIKE_OCR_BACKEND`) selects macOS Vision via the
-`shrike[vision]` extra (pyobjc; no model download — Vision ships with the OS). A
-missing dependency degrades the recognition state to `error` without disturbing
-boot. The Python contract is `RecognizerBackend` (`recognition.py`): a *blocking*
+`recognition.ocr`, env `SHRIKE_OCR_BACKEND`) selects macOS Vision — native since
+#342 P3 (`shrike-recognize-apple`, objc2; no extra to install, no model download —
+Vision ships with the OS). Off-macOS the backend degrades the recognition state
+to `error` without disturbing boot. The Python contract is `RecognizerBackend` (`recognition.py`): a *blocking*
 `recognize(items: list[bytes]) -> list[tuple[str, float, str]]` — (text,
 confidence, segments-JSON) — plus `model_fingerprint()`; `PyRecognizer.capture`
 bridges it to the kernel with the PyEmbedder dispatch shape (loop → thread pool →

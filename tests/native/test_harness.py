@@ -9,6 +9,7 @@ routes serve — all without a model, mirroring a no-embedding boot.
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 
@@ -185,6 +186,66 @@ class TestRecognition:
             # The lexical consumer sees it through the SAME store file.
             rows = harness.derived.search_substring("oxaloacetate", limit=5)
             assert rows, "OCR text reached the lexical store"
+
+            harness.detach_recognizer()
+            await harness.close()
+
+        asyncio.run(flow())
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="Apple Vision is macOS-only")
+    def test_native_vision_sweep_end_to_end(self, tmp_path) -> None:
+        # #342 P3: the native recognizer rides the kernel sweep with no Python
+        # on the recognition path — harness attach takes the native pyclass
+        # straight through (AnyRecognizer::Native → OnExecutor → asyncio
+        # lane → Vision), and the recognized text lands as derived rows the
+        # lexical consumer reads back.
+        PIL = pytest.importorskip("PIL")  # noqa: F841 — fixture rendering only
+        import io
+
+        from PIL import Image, ImageDraw
+
+        from shrike.recognition import make_recognizer
+
+        img = Image.new("RGB", (640, 120), "white")
+        ImageDraw.Draw(img).text((20, 40), "oxaloacetate condenses", fill="black", font_size=28)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+
+        async def flow():
+            media = {"krebs.png": buf.getvalue()}
+            runtime = EmbeddingRuntime(model=None)
+            derived = DerivedTextStore(
+                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
+            )
+            harness = await Harness.assemble(
+                collection_path=str(tmp_path / "collection.anki2"),
+                cache_dir=str(tmp_path / "cache"),
+                runtime=runtime,
+                derived=derived,
+                cooperative=False,
+                hold_seconds=5.0,
+                media_read=media.get,
+                media_exists=lambda name: name in media,
+            )
+            await harness.boot(start_embedding=False)
+            await harness.wrapper.upsert_notes(
+                [
+                    {
+                        "note_type": "Basic",
+                        "deck": "Default",
+                        "fields": {"Front": 'See <img src="krebs.png">', "Back": "b"},
+                    }
+                ]
+            )
+
+            backend = make_recognizer("apple")
+            assert backend.model_fingerprint().startswith("apple-vision:")
+            harness.attach_recognizer(backend)
+            report = await harness.recognition_sweep(batch_size=4)
+            assert report["total_stored"] == 1
+
+            rows = harness.derived.search_substring("oxaloacetate", limit=5)
+            assert rows, "native OCR text reached the lexical store"
 
             harness.detach_recognizer()
             await harness.close()

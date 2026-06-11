@@ -119,6 +119,15 @@ enum AnyEmbedder<'py> {
     Captured(PyRef<'py, PyEmbedder>),
 }
 
+/// Either recognizer shape (#342 P3) — the same split as [`AnyEmbedder`]:
+/// the native Vision engine (adapted onto the asyncio lane at attach) or a
+/// captured Python backend (custom/test recognizers).
+#[derive(FromPyObject)]
+enum AnyRecognizer<'py> {
+    Native(PyRef<'py, crate::py_recognizer::AppleVisionRecognizer>),
+    Captured(PyRef<'py, crate::py_recognizer::PyRecognizer>),
+}
+
 /// Build the kernel's image pair from a captured embedder + the resolver
 /// callables: present only when the backend embeds images AND the harness
 /// supplied BOTH callables (read + the cheap stat).
@@ -205,16 +214,32 @@ impl AsyncKernel {
     /// Attach the recognition service (#228, the second #342 slot): an OCR/ASR
     /// engine plus the media-resolver callables it reads bytes through
     /// (independent of the embed slot — OCR works with a text-only embedder).
+    /// Takes either recognizer shape ([`AnyRecognizer`]); the native engine
+    /// is adapted onto the asyncio compute lane here (call from a coroutine).
     fn attach_recognizer(
         &self,
-        recognizer: PyRef<'_, crate::py_recognizer::PyRecognizer>,
+        py: Python<'_>,
+        recognizer: AnyRecognizer<'_>,
         media_read: Py<PyAny>,
         media_exists: Py<PyAny>,
-    ) {
-        let handle = Arc::clone(&recognizer.handle);
+    ) -> PyResult<()> {
         let resolver: Arc<dyn shrike_kernel::ImageResolver> =
             Arc::new(PyMediaResolver::new(media_read, media_exists));
-        self.inner.attach_recognizer(handle, resolver);
+        match recognizer {
+            AnyRecognizer::Native(native) => {
+                let lane: Arc<dyn shrike_engine_api::ComputeExecutor> =
+                    Arc::new(crate::native_embedder::AsyncioComputeLane::capture(py)?);
+                let adapted: Arc<dyn shrike_kernel::Recognizer> = Arc::new(
+                    shrike_engine_api::OnExecutor::new(native.engine_arc(), lane),
+                );
+                self.inner.attach_recognizer(adapted, resolver);
+            }
+            AnyRecognizer::Captured(captured) => {
+                let handle: Arc<dyn shrike_kernel::Recognizer> = Arc::clone(&captured.handle) as _;
+                self.inner.attach_recognizer(handle, resolver);
+            }
+        }
+        Ok(())
     }
 
     /// Detach the recognition service: derived text stays (still valid output

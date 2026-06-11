@@ -14,6 +14,7 @@ from shrike_native._native import decode_media_b64 as decode_media_b64
 from shrike_native._native import rehomed_actions as rehomed_actions
 from shrike_native._native import fetch_media_url as fetch_media_url
 from shrike_native._native import (
+    AppleVisionRecognizer,
     IMAGE_PREP_VERSION_RS,
     ClipEmbedder,
     DerivedTextEngine,
@@ -49,6 +50,7 @@ from shrike_native._native import (
 )
 
 __all__ = [
+    "AppleVisionRecognizer",
     "ClipEmbedder",
     "DerivedTextEngine",
     "IMAGE_PREP_VERSION_RS",

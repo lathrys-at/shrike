@@ -1,0 +1,23 @@
+# The Apple Vision OCR engine (#342 P3, porting #221): a per-concern engine
+# crate behind the shrike-engine-api traits. macOS-only innards — off macOS
+# the [target] block contributes nothing and the crate compiles to a stub
+# whose constructor returns `unavailable`, so the workspace builds everywhere.
+[package]
+name = "shrike-recognize-apple"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+shrike-engine-api = { path = "../shrike-engine-api" }
+shrike-ffi = { workspace = true }
+tracing = "0.1"
+
+# The objc2 family: framework crates version-lock as a 0.3.x set; the runtime
+# crate floats in its compatible range. Framework linking (-framework Vision)
+# rides the generated #[link] attrs — no build.rs, no linkopts.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-vision = "0.3.2"
+objc2-core-foundation = "0.3.2"

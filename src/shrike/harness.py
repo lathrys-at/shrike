@@ -415,15 +415,20 @@ class Harness:
         self.kernel.attach_embedder(embedder, self._media_read, self._media_exists)
 
     def attach_recognizer(self, backend: Any) -> None:
-        """Attach an OCR/ASR backend (#228) — the second #342 slot. The
-        backend satisfies the RecognizerBackend contract: a blocking
+        """Attach an OCR/ASR backend (#228) — the second #342 slot. A native
+        engine (``shrike_native.AppleVisionRecognizer``) goes to the kernel
+        directly — recognition then never re-enters Python; any other object
+        satisfying the RecognizerBackend contract (a blocking
         ``recognize(items: list[bytes]) -> list[tuple[str, float, str]]``
-        (text, confidence, segments-JSON) plus an optional
-        ``model_fingerprint()``. Must run on the event loop (capture grabs
-        the running loop, like PyEmbedder)."""
+        plus ``model_fingerprint()``) is captured behind the PyRecognizer
+        dispatch seam. Must run on the event loop (both paths grab the
+        running loop)."""
         if self._media_read is None or self._media_exists is None:
             raise KernelConfigError("recognition needs media access (media_read/media_exists)")
-        recognizer = shrike_native.Recognizer.capture(backend)
+        if isinstance(backend, shrike_native.AppleVisionRecognizer):
+            recognizer: Any = backend
+        else:
+            recognizer = shrike_native.Recognizer.capture(backend)
         self.kernel.attach_recognizer(recognizer, self._media_read, self._media_exists)
 
     def detach_recognizer(self) -> None:

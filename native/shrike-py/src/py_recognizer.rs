@@ -1,7 +1,8 @@
 //! `PyRecognizer` (#228): the kernel's `Recognizer` seam implemented over the
 //! harness's backend — the same inversion as `PyEmbedder` (the kernel drives
-//! ANY Python-held recognizer: Apple Vision via pyobjc, Tesseract, a remote
-//! engine — without knowing Python exists), and the same threading shape:
+//! ANY Python-held recognizer without knowing Python exists). Since #342 P3
+//! Apple Vision is native (`AppleVisionRecognizer` below, attached direct);
+//! what rides this capture seam is custom/test backends. Threading shape:
 //! `recognize()` returns a oneshot-backed future; the call is scheduled onto
 //! the asyncio loop, which dispatches the blocking `backend.recognize` to
 //! asyncio's default thread-pool executor and resolves the oneshot from the
@@ -145,6 +146,62 @@ impl Recognizer for PyRecognizerHandle {
 
     fn fingerprint(&self) -> Option<String> {
         self.fingerprint.clone()
+    }
+}
+
+/// The native Apple Vision engine (#342 P3) as the Python-visible backend
+/// object: construction fails `unavailable` off macOS (the same
+/// degrade-don't-crash a missing pyobjc gave the retired Python backend),
+/// `recognize` is the blocking wire shape for direct callers/tests, and the
+/// kernel attach path takes `engine_arc()` — recognition then runs native
+/// end-to-end (engine → OnExecutor → asyncio lane), no Python on the sweep.
+#[pyclass(frozen)]
+pub(crate) struct AppleVisionRecognizer {
+    engine: Arc<shrike_recognize_apple::AppleVisionRecognizer>,
+}
+
+impl AppleVisionRecognizer {
+    pub(crate) fn engine_arc(&self) -> Arc<shrike_recognize_apple::AppleVisionRecognizer> {
+        Arc::clone(&self.engine)
+    }
+}
+
+#[pymethods]
+impl AppleVisionRecognizer {
+    #[new]
+    fn new() -> PyResult<Self> {
+        let engine =
+            shrike_recognize_apple::AppleVisionRecognizer::new().map_err(crate::to_py_err)?;
+        Ok(Self {
+            engine: Arc::new(engine),
+        })
+    }
+
+    /// The platform identity: `apple-vision:rev{N}:macos{X.Y[.Z]}` —
+    /// byte-compatible with the retired pyobjc backend, so the swap never
+    /// re-derives existing text.
+    fn model_fingerprint(&self) -> Option<String> {
+        Some(self.engine.fingerprint_str().to_string())
+    }
+
+    /// Blocking direct OCR in the RecognizerBackend wire shape
+    /// (`(text, confidence, segments_json)`, `""` for no segments) — for
+    /// tests and direct callers; the kernel path never comes through here.
+    fn recognize(&self, py: Python<'_>, items: Vec<Vec<u8>>) -> Vec<(String, f64, String)> {
+        py.detach(|| {
+            items
+                .iter()
+                .map(|bytes| {
+                    let r = self.engine.recognize_one(bytes);
+                    let segments_json = if r.segments.is_empty() {
+                        String::new()
+                    } else {
+                        serde_json::to_string(&r.segments).unwrap_or_default()
+                    };
+                    (r.text, r.confidence, segments_json)
+                })
+                .collect()
+        })
     }
 }
 

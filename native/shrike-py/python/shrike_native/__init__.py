@@ -10,6 +10,7 @@ in the native CI lane keeps them honest.
 import contextlib
 
 from shrike_native._native import (
+    AppleVisionRecognizer,
     IMAGE_PREP_VERSION_RS,
     ClipEmbedder,
     DerivedTextEngine,
@@ -63,6 +64,7 @@ with contextlib.suppress(ImportError):
     from shrike_native._native import rehomed_actions  # noqa: F401
 
 __all__ = [
+    "AppleVisionRecognizer",
     "ClipEmbedder",
     "DerivedTextEngine",
     "IMAGE_PREP_VERSION_RS",

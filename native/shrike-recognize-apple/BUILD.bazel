@@ -1,0 +1,38 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//native:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# The Apple Vision OCR engine (#342 P3): macOS-only innards behind the
+# engine-api traits; the off-macOS build is the unavailable stub, so this
+# target exists on every platform (the workspace's first cfg-conditional dep
+# — crate_universe renders the [target.'cfg(macos)'] deps as a select).
+rust_library(
+    name = "shrike_recognize_apple",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        "//native/shrike-engine-api:shrike_engine_api",
+        "//native/shrike-ffi:shrike_ffi",
+        "@crates//:tracing",
+    ] + select({
+        "@platforms//os:macos": [
+            "@crates//:objc2",
+            "@crates//:objc2-core-foundation",
+            "@crates//:objc2-foundation",
+            "@crates//:objc2-vision",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+# Live on macOS (drives the real Vision framework over the checked-in PNG
+# fixture); the off-macOS run covers the stub. The fixture rides
+# compile_data — include_bytes! resolves at rustc time in the sandbox.
+rust_test(
+    name = "shrike_recognize_apple_test",
+    size = "medium",
+    compile_data = glob(["tests/fixtures/*.png"]),
+    crate = ":shrike_recognize_apple",
+)
