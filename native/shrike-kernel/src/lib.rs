@@ -31,6 +31,7 @@
 
 pub mod actions;
 pub mod index_orchestrator;
+pub mod tag_centroids;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -260,6 +261,12 @@ pub struct Kernel {
     /// embedding degrade (lexical-only search, unindexed-but-created upserts)
     /// when the slot is empty, mirroring the Python host's gating.
     embed: RwLock<Option<Arc<EmbedService>>>,
+    /// Tag-centroid state (#178/#179): the live key→tag map for the engine's
+    /// `tag.text` space + the hygiene knobs. Centroids recompute at the tail
+    /// of every index-changing op (a pure function of in-engine text vectors
+    /// + membership, so no extra watermark).
+    tag_keys: tag_centroids::TagKeyMap,
+    tag_config: tag_centroids::TagCentroidConfig,
 }
 
 /// One attached embedding capability: the text embedder + optionally its
@@ -289,8 +296,18 @@ pub type KernelImages = (
     Box<dyn index_orchestrator::ImageResolver>,
 );
 
-const TEXT: &str = "text";
 const FIELD_SOURCE: &str = "field";
+
+/// The NOTE-item vector spaces (#178): every note search is scoped to these,
+/// so other entity kinds sharing the engine (per-(tag, modality) centroids in
+/// `tag.*` spaces) can never surface a non-note key from a note query — the
+/// no-leakage property is structural, not a post-filter.
+pub const NOTE_MODALITIES: &[&str] = &["text", "image"];
+
+/// The per-modality tag-centroid spaces (#178/#179): `tag.text` holds the
+/// renormalized mean of member notes' TEXT vectors per tag (never a
+/// cross-modal mean — the modality gap makes one semantically empty).
+pub const TAG_TEXT_SPACE: &str = "tag.text";
 
 impl Kernel {
     /// Open a collection and its sidecar stores (cache_dir holds the derived
@@ -308,10 +325,13 @@ impl Kernel {
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
         let collection = SerializedCollection::open(collection_path.to_string(), executor).await?;
-        let engine = Arc::new(MultiModalIndex::new(vec![
-            TEXT.to_string(),
-            "image".to_string(),
-        ])?);
+        let engine = Arc::new(MultiModalIndex::new(
+            NOTE_MODALITIES
+                .iter()
+                .map(|m| m.to_string())
+                .chain(std::iter::once(TAG_TEXT_SPACE.to_string()))
+                .collect(),
+        )?);
         let orchestrator = Arc::new(index_orchestrator::IndexOrchestrator::open(
             cache_dir, engine,
         ));
@@ -332,7 +352,51 @@ impl Kernel {
             saver,
             derived,
             embed: RwLock::new(None),
+            tag_keys: tag_centroids::TagKeyMap::default(),
+            tag_config: tag_centroids::TagCentroidConfig::default(),
         })
+    }
+
+    /// The live tag-key map (key → tag string) for the `tag.text` space.
+    pub fn tag_keys(&self) -> &tag_centroids::TagKeyMap {
+        &self.tag_keys
+    }
+
+    /// Recompute every tag centroid from the engine's current text vectors +
+    /// one membership pass (#179). Cheap (hundreds of tags, in-memory vector
+    /// reads); runs at the tail of every index-changing op and is a no-op
+    /// shortcut when no embedder is attached (no text vectors to mean).
+    pub async fn refresh_tag_centroids(&self) -> NativeResult<usize> {
+        if self.embed_service().is_none() {
+            return Ok(0);
+        }
+        let (rows, total) = self
+            .collection
+            .run(|core| -> NativeResult<_> {
+                let rows = core.note_tag_rows()?;
+                let total = core.find_notes("")?.len();
+                Ok((rows, total))
+            })
+            .await??;
+        let built = tag_centroids::recompute(
+            self.orchestrator.engine(),
+            &rows,
+            total,
+            &self.tag_config,
+            &self.tag_keys,
+        )?;
+        if let Some(saver) = &self.saver {
+            saver.request_save();
+        }
+        Ok(built)
+    }
+
+    /// Best-effort refresh: the tag layer is conditionally-present and must
+    /// never fail the index op it rides on.
+    async fn refresh_tags_best_effort(&self) {
+        if let Err(e) = self.refresh_tag_centroids().await {
+            tracing::warn!(error = ?e, "tag centroid refresh failed");
+        }
     }
 
     /// Attach an embedding service (embedding start / model swap). The
@@ -399,6 +463,7 @@ impl Kernel {
                 self.orchestrator
                     .materialize_empty(dim, col_mod, model_id.as_deref());
             }
+            self.refresh_tags_best_effort().await;
             return Ok(true);
         }
         let inputs: Vec<index_orchestrator::EmbedInput> = raw
@@ -414,6 +479,7 @@ impl Kernel {
         self.orchestrator
             .reconcile(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
             .await?;
+        self.refresh_tags_best_effort().await;
         Ok(true)
     }
 
@@ -450,6 +516,7 @@ impl Kernel {
         self.orchestrator
             .rebuild(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
             .await?;
+        self.refresh_tags_best_effort().await;
         Ok(total)
     }
 
@@ -502,7 +569,10 @@ impl Kernel {
             let note_refs = refs.remove(note_id).unwrap_or_default();
             self.derived.ingest(*note_id, FIELD_SOURCE, &note_refs)?;
         }
-        self.advance_watermarks(svc.is_some()).await
+        self.advance_watermarks(svc.is_some()).await?;
+        // Tag centroids derive from the text vectors just written (#179).
+        self.refresh_tags_best_effort().await;
+        Ok(())
     }
 
     /// The wire-shaped bulk upsert (#77): the collection core's NAMED upsert
@@ -641,7 +711,9 @@ impl Kernel {
         self.orchestrator.remove(&note_ids)?;
         self.derived.remove(&note_ids, None)?;
         self.advance_watermarks(self.embed_service().is_some())
-            .await
+            .await?;
+        self.refresh_tags_best_effort().await;
+        Ok(())
     }
 
     /// A metadata-only collection change (tags/decks/templates/field metadata
@@ -662,6 +734,7 @@ impl Kernel {
         self.derived.remove(&note_ids, None)?;
         self.advance_watermarks(self.embed_service().is_some())
             .await?;
+        self.refresh_tags_best_effort().await;
         Ok(removed)
     }
 
@@ -678,10 +751,13 @@ impl Kernel {
             let mut rankings: Vec<(String, Vec<i64>)> = Vec::new();
             if let Some(svc) = self.embed_service() {
                 let qvec = svc.embedder.embed(vec![query.to_string()]).await?;
-                let semantic = self
-                    .orchestrator
-                    .engine()
-                    .search_by_modality(&qvec, top_k, None)?;
+                let note_spaces: Vec<String> =
+                    NOTE_MODALITIES.iter().map(|m| m.to_string()).collect();
+                let semantic = self.orchestrator.engine().search_by_modality(
+                    &qvec,
+                    top_k,
+                    Some(&note_spaces),
+                )?;
                 if let Some(per_query) = semantic.first() {
                     for (modality, (ids, _dists)) in per_query {
                         rankings.push((modality.clone(), ids.clone()));
@@ -925,6 +1001,65 @@ mod no_cpython_smoke {
                 .await
                 .unwrap();
             assert!(results.contains("\"created\""), "got: {results}");
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
+    fn tag_centroids_build_and_never_leak_into_note_search() {
+        // The #178/#179 layer end to end: tagged upserts → centroids in the
+        // tag.text space (hygiene-filtered) → note searches structurally
+        // blind to tag keys.
+        futures::executor::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+                Arc::new(MutexExecutor::default()),
+                None,
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            // 5 notes; 2 share `bio::cell` (under the 50% coverage cap, over
+            // the 2-member floor — and the hierarchy rolls up to `bio`).
+            let notes: Vec<serde_json::Value> = (0..5)
+                .map(|i| {
+                    serde_json::json!({
+                        "note_type": "Basic", "deck": "Default",
+                        "fields": {"Front": format!("note number {i}"), "Back": "b"},
+                        "tags": if i < 2 { vec!["bio::cell"] } else { vec![] },
+                    })
+                })
+                .collect();
+            kernel
+                .upsert_notes_json(
+                    serde_json::json!(notes).to_string(),
+                    "error".to_string(),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let keys = kernel.tag_keys();
+            assert!(!keys.is_empty(), "centroids built on the upsert tail");
+            let cell_key = tag_centroids::tag_key("bio::cell");
+            assert_eq!(keys.lookup(cell_key).as_deref(), Some("bio::cell"));
+            assert_eq!(
+                keys.lookup(tag_centroids::tag_key("bio")).as_deref(),
+                Some("bio"),
+                "hierarchy rolls up"
+            );
+            let engine = kernel.index().engine();
+            assert!(engine.modality_get(TAG_TEXT_SPACE, cell_key).is_some());
+
+            // A note search never surfaces a tag key.
+            let hits = kernel.search("note number", 20).await.unwrap();
+            assert!(hits.iter().all(|h| keys.lookup(h.note_id).is_none()));
 
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();

@@ -844,3 +844,35 @@ idle-release design needs. It's a **control endpoint + CLI, not an MCP tool**
 (operational, like `/index/rebuild` and `/embedding/*`), and `server.lock`
 (daemon liveness) is untouched — only Anki's collection lock is released and
 re-acquired.
+
+## Tag-vector namespacing (#178): named spaces in ONE engine, not a separate index file
+
+Tag centroids (#179) live in the **same `MultiModalIndex` engine as the note
+items**, under a distinct named space (`tag.text`, file
+`index.tag.text.usearch`) — option 1's separation with option 3's mechanics,
+because the #201a per-modality split already built the named-vector-space
+abstraction this issue asked for. One engine means one `model_id`/`ndim`/
+`metric` by construction (a tag centroid is only meaningful in the notes'
+space), one persistence path (the orchestrator's save/restore handles every
+space's file), and the **no-leakage property is structural**: note searches are
+scoped to `NOTE_MODALITIES` (`text`, `image`), so a tag key cannot surface from
+a note query — no post-filter, no key-range trick (rejected: `note_id`s are
+epoch-ms timestamps with no safe disjoint range).
+
+Keys are `blake2b-8(tag string)` masked positive (tags have no Anki numeric
+id); the **key→tag map is in-memory only**, rebuilt with every centroid
+recompute. The persisted tag space survives restarts but is searched only
+through that map, so a stale file can never mislabel a key — the signal is
+simply off until the first recompute, which boot triggers.
+
+**Consistency contract:** a centroid is a pure function of (a) the member
+notes' text vectors already in the engine and (b) one membership pass over
+`notes.tags` (hierarchy rolled up by `::`-prefix aggregation, so
+`science::physics` members also feed `science`). So there is **no separate
+watermark and no incremental diff**: the whole set (typically hundreds of
+tags) recomputes at the tail of every index-changing kernel op
+(reconcile/rebuild/upsert/delete/prune), best-effort — the tag layer is
+conditionally-present and never fails the op it rides on. Hygiene before
+vectors: a member floor (default 2), a structural-coverage cap (default 50%
+of notes), and a meta-tag blocklist (`leech`, `marked`) matched per `::`
+segment — `TagCentroidConfig`, the curation surface #179 calls for.

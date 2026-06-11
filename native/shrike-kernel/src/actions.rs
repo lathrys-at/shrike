@@ -585,7 +585,13 @@ pub fn search_notes(
                 fetch_k = fetch_k.min(args.index_size);
             }
         }
-        sem_by_source = index.search_by_modality(vectors, fetch_k, None)?;
+        // Scoped to the NOTE-item spaces: tag-centroid spaces (#178) share
+        // the engine but must never surface a tag key from a note search.
+        let note_spaces: Vec<String> = crate::NOTE_MODALITIES
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
+        sem_by_source = index.search_by_modality(vectors, fetch_k, Some(&note_spaces))?;
     }
 
     let mut results: Vec<Value> = Vec::new();

@@ -158,6 +158,29 @@ impl CollectionCore {
         Ok(out)
     }
 
+    /// `(note_id, [leaf tags])` for every tagged note — the tag-centroid
+    /// layer's membership source (#179): ONE pass over `notes.tags` (Anki
+    /// keeps it space-delimited), exact leaf strings; hierarchy roll-up is
+    /// the consumer's prefix aggregation.
+    pub fn note_tag_rows(&self) -> NativeResult<Vec<(i64, Vec<String>)>> {
+        let mut out = Vec::new();
+        for r in self
+            .adapter
+            .db_rows("select id, tags from notes where tags != ''")?
+        {
+            let (Some(id), Some(tags)) = (r[0].as_i64(), r[1].as_str()) else {
+                return Err(NativeError::internal(
+                    "unexpected notes tag row shape".to_string(),
+                ));
+            };
+            let leaves: Vec<String> = tags.split_whitespace().map(str::to_string).collect();
+            if !leaves.is_empty() {
+                out.push((id, leaves));
+            }
+        }
+        Ok(out)
+    }
+
     /// The raw Anki search escape hatch (`collection_query`): the full grammar
     /// straight to search, `list_notes`-shaped JSON out (`total` = the full
     /// match count before `limit`).
