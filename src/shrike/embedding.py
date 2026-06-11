@@ -52,7 +52,6 @@ logger = logging.getLogger("shrike.embedding")
 
 DEFAULT_PORT = 8373
 DEFAULT_HOST = "127.0.0.1"
-HEALTH_TIMEOUT = 30.0  # mirrored by the native manager; kept for messages/tests
 
 
 class LlamaServerBackend:

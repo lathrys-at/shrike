@@ -414,6 +414,14 @@ impl RemoteEmbedder {
 #[pyclass]
 pub(crate) struct LlamaServerManager {
     inner: std::sync::Mutex<shrike_llama_server::LlamaServerManager>,
+    /// Non-blocking observer state (the review's loop-stall finding): the
+    /// lifecycle Mutex is held for up to the 30s health-wait, and the
+    /// harness reads `running` on the LOOP thread — observers must never
+    /// contend with it. The cell is shared with the manager (set at spawn,
+    /// cleared on stop/observed exit); passthrough is pure config,
+    /// precomputed at construction.
+    pid_cell: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
+    passthrough: Vec<String>,
 }
 
 #[pymethods]
@@ -447,8 +455,11 @@ impl LlamaServerManager {
             extra_args,
             pid_file: pid_file.map(std::path::PathBuf::from),
         };
+        let manager = shrike_llama_server::LlamaServerManager::new(cfg);
         Self {
-            inner: std::sync::Mutex::new(shrike_llama_server::LlamaServerManager::new(cfg)),
+            pid_cell: manager.pid_cell(),
+            passthrough: manager.passthrough_tokens(false),
+            inner: std::sync::Mutex::new(manager),
         }
     }
 
@@ -463,21 +474,29 @@ impl LlamaServerManager {
         py.detach(|| self.inner.lock().expect("manager poisoned").stop())
     }
 
+    /// Non-blocking: a real child poll when the lifecycle lock is free; the
+    /// observed-PID cell when a start/stop holds it (mid-start a spawned
+    /// child reads as running — the Python facade's `poll()` semantics).
     fn running(&self) -> bool {
-        self.inner.lock().expect("manager poisoned").running()
+        match self.inner.try_lock() {
+            Ok(mut manager) => manager.running(),
+            Err(_) => self.pid_cell.lock().expect("pid cell poisoned").is_some(),
+        }
     }
 
+    /// Non-blocking, same split as [`Self::running`].
     fn pid(&self) -> Option<u32> {
-        self.inner.lock().expect("manager poisoned").pid()
+        match self.inner.try_lock() {
+            Ok(manager) => manager.pid(),
+            Err(_) => *self.pid_cell.lock().expect("pid cell poisoned"),
+        }
     }
 
-    /// The effective passthrough (reserved flags stripped, silent) — the
-    /// facade folds this into the fingerprint's `args=` suffix.
+    /// The effective passthrough (reserved flags stripped, silent) — pure
+    /// config, precomputed; the facade folds it into the fingerprint's
+    /// `args=` suffix.
     fn passthrough_tokens(&self) -> Vec<String> {
-        self.inner
-            .lock()
-            .expect("manager poisoned")
-            .passthrough_tokens(false)
+        self.passthrough.clone()
     }
 }
 

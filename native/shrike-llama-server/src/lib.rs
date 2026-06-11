@@ -62,6 +62,12 @@ pub struct LlamaServerManager {
     cfg: LlamaServerConfig,
     child: Option<Child>,
     base_url: String,
+    /// The observed child PID, shared with non-blocking observers: a host
+    /// status path must NEVER contend with the lifecycle lock a 30s
+    /// health-wait holds (the Python facade's `running` was a lock-free
+    /// `poll()`; this cell keeps that property). Set at spawn, cleared on
+    /// stop/observed exit; the micro-mutex is only ever held for a copy.
+    pid_cell: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
 }
 
 fn pid_alive(pid: i64) -> bool {
@@ -120,7 +126,15 @@ impl LlamaServerManager {
             cfg,
             child: None,
             base_url,
+            pid_cell: std::sync::Arc::default(),
         }
+    }
+
+    /// The shared observed-PID cell (see the field docs): `Some` while a
+    /// child is believed alive. Hosts read this instead of locking the
+    /// manager when the lifecycle lock may be held.
+    pub fn pid_cell(&self) -> std::sync::Arc<std::sync::Mutex<Option<u32>>> {
+        std::sync::Arc::clone(&self.pid_cell)
     }
 
     pub fn url(&self) -> &str {
@@ -133,10 +147,14 @@ impl LlamaServerManager {
 
     /// True while the spawned child is alive (a poll, not a cached flag).
     pub fn running(&mut self) -> bool {
-        match self.child.as_mut() {
+        let alive = match self.child.as_mut() {
             Some(child) => matches!(child.try_wait(), Ok(None)),
             None => false,
+        };
+        if !alive {
+            *self.pid_cell.lock().expect("pid cell poisoned") = None;
         }
+        alive
     }
 
     /// Locate the llama-server binary: explicit override (validated) >
@@ -341,6 +359,7 @@ impl LlamaServerManager {
             .stderr(stderr)
             .spawn()
             .map_err(|e| NativeError::unavailable(format!("could not spawn llama-server: {e}")))?;
+        *self.pid_cell.lock().expect("pid cell poisoned") = Some(child.id());
         self.child = Some(child);
         self.write_pid_file();
 
@@ -382,6 +401,7 @@ impl LlamaServerManager {
     /// Stop the child: SIGTERM, wait up to [`SHUTDOWN_TIMEOUT`], then
     /// SIGKILL. Clears the PID file.
     pub fn stop(&mut self) {
+        *self.pid_cell.lock().expect("pid cell poisoned") = None;
         let Some(mut child) = self.child.take() else {
             return;
         };
@@ -578,6 +598,28 @@ mod tests {
         let _ = sleeper.kill();
         let _ = sleeper.wait();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_cell_tracks_spawn_exit_and_stop() {
+        let mut m = manager(&[]);
+        let cell = m.pid_cell();
+        assert_eq!(*cell.lock().unwrap(), None);
+        let child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        *cell.lock().unwrap() = Some(child.id());
+        m.child = Some(child);
+        assert!(m.running());
+        assert!(cell.lock().unwrap().is_some());
+        m.stop();
+        assert_eq!(*cell.lock().unwrap(), None, "stop clears the cell");
+        // An observed exit clears it too.
+        let mut quick = Command::new("/bin/sleep").arg("0").spawn().unwrap();
+        let _ = quick.wait();
+        m.child = Some(quick);
+        *cell.lock().unwrap() = Some(1);
+        assert!(!m.running());
+        assert_eq!(*cell.lock().unwrap(), None, "observed exit clears the cell");
     }
 
     #[cfg(unix)]
