@@ -18,8 +18,11 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+#[cfg(feature = "fused")]
 use shrike_embed::TextEmbedder;
+#[cfg(feature = "fused")]
 use shrike_ffi::NativeResult;
+#[cfg(feature = "fused")]
 use shrike_index::{ModalityRanking, MultiModalIndex};
 
 /// Mirrors `shrike.search_fusion.RRF_K`.
@@ -78,6 +81,7 @@ pub fn rrf_fuse(
 
 /// Embed query texts and rank them per modality against the index — one
 /// GIL-released composition; the query vectors never leave native code.
+#[cfg(feature = "fused")]
 pub fn fused_search(
     embedder: &TextEmbedder,
     index: &MultiModalIndex,
@@ -99,6 +103,7 @@ pub fn fused_search(
 /// Embed note texts and (replace-)add them under their note ids — one
 /// GIL-released composition; the note vectors never leave native code.
 /// Returns the count added.
+#[cfg(feature = "fused")]
 pub fn fused_add(
     embedder: &TextEmbedder,
     index: &MultiModalIndex,

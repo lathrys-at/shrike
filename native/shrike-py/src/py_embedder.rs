@@ -1,0 +1,150 @@
+//! `PyEmbedder` (#332, S3c-2b): the kernel's `Embedder` seam implemented over
+//! the *harness's* backend — the inversion that lets the kernel drive ANY
+//! Python-held embedder (the ONNX facades, llama-server, a future platform
+//! API) without the kernel knowing Python exists.
+//!
+//! Threading shape (all machinery harness-owned, per the runtime model):
+//! `embed()` returns a oneshot-backed future; the call is scheduled onto the
+//! asyncio loop (`call_soon_threadsafe`), where a loop callback dispatches the
+//! actual `backend.embed_texts` to **asyncio's default thread-pool executor**
+//! (`loop.run_in_executor(None, ...)`) — embedding is blocking and slow, so it
+//! gets its own lane: never the collection executor (the re-entrancy rule),
+//! never a poll callback. A done-callback resolves the oneshot with the
+//! vectors (or the error, mapped to `Unavailable` — an embedding failure is a
+//! runtime-dependency failure, not a bug).
+
+use std::sync::{Arc, Mutex};
+
+use futures::channel::oneshot;
+use futures::future::BoxFuture;
+use pyo3::prelude::*;
+
+use shrike_ffi::{NativeError, NativeResult};
+use shrike_kernel::Embedder;
+
+type VecResult = NativeResult<Vec<Vec<f32>>>;
+
+/// Loop callback: dispatch the blocking embed to the pool and chain the
+/// done-callback. (Runs on the loop thread, GIL held.)
+#[pyclass]
+struct EmbedDispatch {
+    backend: Py<PyAny>,
+    event_loop: Py<PyAny>,
+    texts: Vec<String>,
+    tx: Arc<Mutex<Option<oneshot::Sender<VecResult>>>>,
+}
+
+#[pymethods]
+impl EmbedDispatch {
+    fn __call__(&self, py: Python<'_>) -> PyResult<()> {
+        let embed = self.backend.bind(py).getattr("embed_texts")?;
+        let pool_future = self
+            .event_loop
+            .bind(py)
+            .call_method1("run_in_executor", (py.None(), embed, self.texts.clone()))?;
+        let done = EmbedDone {
+            tx: Arc::clone(&self.tx),
+        };
+        pool_future.call_method1("add_done_callback", (Py::new(py, done)?,))?;
+        Ok(())
+    }
+}
+
+/// Pool-future done-callback: extract the vectors (or map the failure) and
+/// resolve the kernel's oneshot. (Runs on the loop thread, GIL held.)
+#[pyclass]
+struct EmbedDone {
+    tx: Arc<Mutex<Option<oneshot::Sender<VecResult>>>>,
+}
+
+#[pymethods]
+impl EmbedDone {
+    fn __call__(&self, py: Python<'_>, future: Bound<'_, PyAny>) -> PyResult<()> {
+        let outcome: VecResult = match future.call_method0("result") {
+            Ok(value) => value.extract::<Vec<Vec<f32>>>().map_err(|e| {
+                NativeError::internal(format!("embedder returned a non-vector payload: {e}"))
+            }),
+            Err(e) => Err(NativeError::unavailable(format!(
+                "harness embedder failed: {}",
+                e.value(py)
+            ))),
+        };
+        if let Some(tx) = self.tx.lock().expect("embedder poisoned").take() {
+            let _ = tx.send(outcome);
+        }
+        Ok(())
+    }
+}
+
+/// The kernel-facing handle: a Python backend + the loop that hosts its calls.
+pub(crate) struct PyEmbedderHandle {
+    backend: Py<PyAny>,
+    event_loop: Py<PyAny>,
+}
+
+impl Embedder for PyEmbedderHandle {
+    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, VecResult> {
+        let (tx, rx) = oneshot::channel::<VecResult>();
+        let tx = Arc::new(Mutex::new(Some(tx)));
+        let scheduled = Python::attach(|py| -> PyResult<()> {
+            let dispatch = EmbedDispatch {
+                backend: self.backend.clone_ref(py),
+                event_loop: self.event_loop.clone_ref(py),
+                texts,
+                tx,
+            };
+            self.event_loop
+                .bind(py)
+                .call_method1("call_soon_threadsafe", (Py::new(py, dispatch)?,))?;
+            Ok(())
+        });
+        Box::pin(async move {
+            if let Err(e) = scheduled {
+                return Err(NativeError::unavailable(format!(
+                    "could not schedule the embed onto the loop: {e}"
+                )));
+            }
+            rx.await.map_err(|_| {
+                NativeError::unavailable("the embed dispatch was dropped (loop gone?)")
+            })?
+        })
+    }
+}
+
+/// The Python-facing assembly surface: wraps a harness backend + the running
+/// loop into the kernel's embedder seam.
+#[pyclass]
+pub(crate) struct PyEmbedder {
+    pub(crate) handle: Arc<PyEmbedderHandle>,
+}
+
+#[pymethods]
+impl PyEmbedder {
+    /// Capture `backend` (anything with a blocking `embed_texts(list[str])`)
+    /// against the RUNNING loop. Call from a coroutine context at assembly.
+    #[staticmethod]
+    fn capture(py: Python<'_>, backend: Py<PyAny>) -> PyResult<Self> {
+        let asyncio = py.import("asyncio")?;
+        let event_loop = asyncio.call_method0("get_running_loop")?;
+        Ok(Self {
+            handle: Arc::new(PyEmbedderHandle {
+                backend,
+                event_loop: event_loop.unbind(),
+            }),
+        })
+    }
+}
+
+/// Test seam: drive one embed through the kernel's `Embedder` trait and the
+/// bridge — proves the full inversion (kernel future → loop dispatch → pool →
+/// done-callback → oneshot → bridged await) before the orchestrator's
+/// embed-coupled ops consume it.
+#[pyfunction]
+pub(crate) fn embedder_probe<'py>(
+    py: Python<'py>,
+    embedder: PyRef<'py, PyEmbedder>,
+    texts: Vec<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let handle = Arc::clone(&embedder.handle);
+    crate::asyncio_bridge::future_into_py(py, async move { handle.embed(texts).await })
+}

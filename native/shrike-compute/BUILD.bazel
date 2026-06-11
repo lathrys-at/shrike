@@ -9,6 +9,7 @@ exports_files(["Cargo.toml"])
 rust_library(
     name = "shrike_compute",
     srcs = glob(["src/**/*.rs"]),
+    crate_features = ["fused"],  # the full build; the minimal core (#338) omits it
     edition = "2021",
     deps = [
         "//native/shrike-embed:shrike_embed",

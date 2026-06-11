@@ -14,11 +14,18 @@ name = "shrike_kernel"
 # IS the embedded host #224 specs. It owns NO threads and assumes NO runtime
 # (#308/#310): serialization is injected via SerialExecutor, and every op is
 # an async fn the harness drives on its runtime of choice.
+# The concrete ONNX embedder impl is feature-gated (#338): a minimal kernel
+# (collection + index + derived + fusion, harness-provided embedder) links no
+# ONNX runtime. The Embedder TRAIT stays unconditional — it's the seam.
+[features]
+default = ["onnx-embed"]
+onnx-embed = ["dep:shrike-embed"]
+
 [dependencies]
 shrike-collection = { path = "../shrike-collection" }
-shrike-compute = { path = "../shrike-compute" }
+shrike-compute = { path = "../shrike-compute", default-features = false }
 shrike-derived = { path = "../shrike-derived" }
-shrike-embed = { path = "../shrike-embed" }
+shrike-embed = { path = "../shrike-embed", optional = true }
 shrike-ffi = { workspace = true }
 shrike-index = { path = "../shrike-index" }
 shrike-schemas = { path = "../shrike-schemas" }

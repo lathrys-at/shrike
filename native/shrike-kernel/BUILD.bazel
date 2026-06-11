@@ -11,6 +11,7 @@ exports_files(["Cargo.toml"])
 rust_library(
     name = "shrike_kernel",
     srcs = glob(["src/**/*.rs"]),
+    crate_features = ["onnx-embed"],  # the full build; the minimal core (#338) omits it
     edition = "2021",
     deps = [
         "//native/shrike-collection:shrike_collection",

@@ -9,8 +9,14 @@ description = "Fused search/upsert composition: RRF + embed→index paths (#274)
 [lib]
 name = "shrike_compute"
 
+# The fused embed→index paths carry the heavy deps (ort via shrike-embed);
+# a minimal core build (#338) keeps only the dependency-light RRF fusion.
+[features]
+default = ["fused"]
+fused = ["dep:shrike-embed", "dep:shrike-index"]
+
 # Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py.
 [dependencies]
 shrike-ffi = { workspace = true }
-shrike-embed = { path = "../shrike-embed" }
-shrike-index = { path = "../shrike-index" }
+shrike-embed = { path = "../shrike-embed", optional = true }
+shrike-index = { path = "../shrike-index", optional = true }

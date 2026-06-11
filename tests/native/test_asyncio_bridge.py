@@ -143,3 +143,36 @@ class TestLoopTimerHost:
             return await shrike_native.timer_probe(host, 5.0, cancel_after=0.01)
 
         assert _run(flow()) is False
+
+
+class TestPyEmbedder:
+    """S3c-2b: the kernel's Embedder seam driven by a harness backend."""
+
+    class _Backend:
+        def __init__(self, fail: bool = False) -> None:
+            self.fail = fail
+            self.calls: list[list[str]] = []
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            if self.fail:
+                raise RuntimeError("backend down")
+            self.calls.append(list(texts))
+            return [[float(len(t)), 1.0] for t in texts]
+
+    def test_kernel_trait_drives_the_python_backend(self) -> None:
+        backend = self._Backend()
+
+        async def flow() -> list[list[float]]:
+            emb = shrike_native.PyEmbedder.capture(backend)
+            return await shrike_native.embedder_probe(emb, ["ab", "cdef"])
+
+        assert _run(flow()) == [[2.0, 1.0], [4.0, 1.0]]
+        assert backend.calls == [["ab", "cdef"]]
+
+    def test_backend_failure_maps_to_unavailable(self) -> None:
+        async def flow() -> None:
+            emb = shrike_native.PyEmbedder.capture(self._Backend(fail=True))
+            with pytest.raises(shrike_native.NativeUnavailableError, match="backend down"):
+                await shrike_native.embedder_probe(emb, ["x"])
+
+        _run(flow())

@@ -54,6 +54,7 @@ pub trait Embedder: Send + Sync + 'static {
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>>;
 }
 
+#[cfg(feature = "onnx-embed")]
 impl Embedder for shrike_embed::TextEmbedder {
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
         Box::pin(async move { self.embed_chunk(&texts) })
