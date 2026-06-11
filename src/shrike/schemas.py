@@ -865,9 +865,10 @@ class FindReplaceResponse(BaseModel):
 
 
 class EmbeddingRunning(BaseModel):
-    """A live embedding service. ``url``/``model`` are absent only if the
-    /health probe failed while the process was up (then ``available`` is False);
-    that probe-dependence is genuine independent optionality."""
+    """A live embedding service. ``available`` is False when the /health
+    probe fails while the process is up (since #342 P4a the full fields ride
+    along either way); ``url``/``model`` stay optional for older wire shapes
+    and backends without them."""
 
     state: Literal["running"] = "running"
     available: bool = False

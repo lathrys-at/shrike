@@ -1,9 +1,9 @@
 //! `PyEmbedder` (#332, S3c-2b): the kernel's `Embedder` seam implemented over
 //! the *harness's* backend — the inversion that lets the kernel drive ANY
 //! Python-held embedder without the kernel knowing Python exists. Since the
-//! native-direct attach (#342 P2) the ONNX/CLIP facades bypass this path
-//! (`NativeEmbedder` in `native_embedder.rs`); what rides it is llama-server
-//! (until P4) and custom/test backends — permanently the escape hatch.
+//! native-direct attach (#342 P2/P4a) every production backend — ONNX, CLIP,
+//! and llama — bypasses this path (`NativeEmbedder` in `native_embedder.rs`);
+//! what rides it is custom/test backends — permanently the escape hatch.
 //!
 //! Threading shape (all machinery harness-owned, per the runtime model):
 //! `embed()` returns a oneshot-backed future; the call is scheduled onto the
