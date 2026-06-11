@@ -6,8 +6,8 @@
 use std::ffi::{CStr, CString};
 
 use shrike_cabi::{
-    shrike_index_status_json, shrike_kernel_close, shrike_kernel_open, shrike_last_error,
-    shrike_search, shrike_string_free, shrike_upsert_notes_json,
+    shrike_detach_embedder, shrike_index_status_json, shrike_kernel_close, shrike_kernel_open,
+    shrike_last_error, shrike_search, shrike_string_free, shrike_upsert_notes_json,
 };
 
 fn take_string(ptr: *mut std::ffi::c_char) -> String {
@@ -68,6 +68,8 @@ fn open_upsert_search_close_as_a_c_host() {
     let err = unsafe { CStr::from_ptr(shrike_last_error()) }.to_string_lossy();
     assert!(err.contains("JSON"), "got: {err}");
 
+    // The slot op is engine-agnostic: detaching with nothing attached is a no-op.
+    assert_eq!(unsafe { shrike_detach_embedder(kernel) }, 0);
     assert_eq!(unsafe { shrike_kernel_close(kernel) }, 0);
     std::fs::remove_dir_all(dir).ok();
 }

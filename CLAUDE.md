@@ -8,17 +8,33 @@ Shrike manages Anki flashcard collections without running Anki's GUI. It exposes
 
 ### Architecture
 
-**Since the kernel inversion (#279/#332, June 2026) the compute core is Rust.**
-The server is an *assembling harness*: it opens one `AsyncKernel` (the Rust
-kernel bound for asyncio) on the event loop, registers services on it (the
-embedding backend via `attach_embedder` — the #342 service slot), and serves.
-The kernel owns the collection (anki via its protobuf service layer ONLY), the
-vector index orchestration (drift, per-note fingerprints, debounced saves),
-and the derived-text ingest; write actions route through maintained kernel ops
-(`upsert_notes_json`, `delete_notes`, `reindex_notes`, `forget_notes`,
-`metadata_changed`). Scheduling is *injected*: the harness thread runs the
-kernel's `WorkerExecutor`; the kernel owns no threads and assumes no runtime
-(no tokio — the asyncio loop polls kernel futures via the runtime-less bridge).
+**Since the kernel inversion (#279/#332, June 2026) the compute core is Rust,
+and since the engine-plugin migration (#342, June 2026) the kernel is a pure
+plugin host.** The server is an *assembling harness*: it opens one
+`AsyncKernel` (the Rust kernel bound for asyncio) on the event loop,
+constructs engines from config, attaches them to the kernel's service slots
+(`attach_embedder`/`attach_recognizer`), and serves. The kernel composes
+`Arc<dyn Embedder>`/`Arc<dyn Recognizer>` it is *given* — it names no engine,
+no runtime (ort), no platform, no transport; the contracts live in
+`shrike-engine-api` (async traits the kernel consumes; sync compute traits
+engines implement; `Inline`/`OnExecutor` adapters the host composes with its
+own execution lane; the batch-safety probe). Each engine is its own crate:
+`shrike-embed` (ort text + CLIP), `shrike-recognize-apple` (Vision OCR),
+`shrike-embed-remote` (any OpenAI-compatible embeddings endpoint) — with
+`shrike-llama-server` as the *lifecycle manager* that produces the local
+endpoint the remote engine talks to (manage-class, not an engine). Every
+production backend attaches native — kernel embeds/recognitions never enter
+Python; `PyEmbedder`/`PyRecognizer` capture remains the custom/test-backend
+escape hatch. The kernel owns the collection (anki via its protobuf service
+layer ONLY), the vector index orchestration (drift, per-note fingerprints,
+debounced saves), and the derived-text ingest; write actions route through
+maintained kernel ops (`upsert_notes_json`, `delete_notes`, `reindex_notes`,
+`forget_notes`, `metadata_changed`). Scheduling is *injected*: the harness
+thread runs the kernel's `WorkerExecutor`; the kernel owns no threads and
+assumes no runtime (no tokio — the asyncio loop polls kernel futures via the
+runtime-less bridge), and engine compute runs on host-assigned
+`ComputeExecutor` lanes (the asyncio thread pool in the server) with
+independent batch futures `try_join`ed by the kernel.
 
 ```
 CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP, server.py = the host)
@@ -30,7 +46,9 @@ CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP, server.py = the
                                                       ├──▶ IndexOrchestrator (per-modality USearch HNSW)
                                                       │       └──▶ index.usearch (+ index.image.usearch) + index.meta.json
                                                       ├──▶ DerivedEngine (FTS5 trigram sidecar, shrike.db)
-                                                      └──▶ EmbedService slot ◀── EmbeddingRuntime backend (llama/onnx/clip)
+                                                      ├──▶ EmbedService slot ◀── engine crates via shrike-engine-api
+                                                      │       (shrike-embed ort/CLIP; shrike-embed-remote ◀── shrike-llama-server)
+                                                      └──▶ RecognizeService slot ◀── shrike-recognize-apple (Vision OCR)
 ```
 
 Embedded hosts skip Python entirely: `native/shrike-cabi` is the manual
@@ -109,7 +127,12 @@ native/                           # the Rust workspace (the compute core)
 ├── shrike-collection/            # anki via its protobuf service layer (the ONLY anki coupling)
 ├── shrike-index/                 # per-modality USearch engine
 ├── shrike-derived/               # FTS5 trigram engine
-├── shrike-embed/                 # ort/tokenizers text + CLIP encoders (feature-gated, #338)
+├── shrike-engine-api/            # THE engine contract (#342): kernel-facing traits, sync compute
+│                                 #   traits, Inline/OnExecutor adapters, WithPolicy, the batch probe
+├── shrike-embed/                 # ort/tokenizers text + CLIP engines (implement the contract in-crate)
+├── shrike-embed-remote/          # EmbedText over any OpenAI-compatible endpoint (ureq; llama/cloud/tailnet)
+├── shrike-llama-server/          # llama-server lifecycle ONLY (spawn/health/reap/stop) — not an engine
+├── shrike-recognize-apple/       # Apple Vision OCR engine (objc2; off-macOS unavailable stub)
 ├── shrike-compute/               # rrf_fuse + fused embed→index paths
 ├── shrike-schemas/               # serde+schemars wire types (CANONICAL; schemas.py binds)
 ├── shrike-ffi/                   # the shared error taxonomy

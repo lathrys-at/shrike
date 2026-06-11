@@ -876,3 +876,61 @@ conditionally-present and never fails the op it rides on. Hygiene before
 vectors: a member floor (default 2), a structural-coverage cap (default 50%
 of notes), and a meta-tag blocklist (`leech`, `marked`) matched per `::`
 segment — `TagCentroidConfig`, the curation surface #179 calls for.
+
+## The engine-plugin architecture: a pure kernel, per-concern engine crates (#342, June 2026)
+
+**The kernel composes engines it is *given* — it never names one.** Since the
+migration (P1–P5, PRs #368–#373) the contracts live in `shrike-engine-api` (a
+leaf: shrike-ffi + futures + serde), and every concrete engine is its own
+crate: `shrike-embed` (ort text + CLIP), `shrike-recognize-apple` (Vision,
+objc2), `shrike-embed-remote` (any OpenAI-compatible endpoint). Hosts —
+the Python server, the C-ABI surface, future Swift/Kotlin apps — construct
+engines from config and attach them to the kernel's named slots. The
+layering check enforces it structurally: `shrike-kernel` may depend on no
+engine crate, ever.
+
+**Two conformance routes, chosen by the engine's natural shape.** The kernel
+only sees runtime-agnostic async traits (`Embedder`/`ImageEmbedder`/
+`Recognizer`). A naturally-sync engine (ort inference, a sync HTTP client)
+implements chunk-level sync compute traits (`EmbedText`/`EmbedImages`/
+`RecognizeMedia`) and the host bridges with an adapter at composition time —
+`Inline` (the C host's calling-thread model) or `OnExecutor` over a
+host-injected `ComputeExecutor` lane (the server's asyncio thread pool). A
+naturally-async engine implements the async traits directly. Execution
+*capacity and placement* are host facts (lane assignment); pipeline
+*topology* — what must order — stays kernel-owned, with independent engine
+futures `try_join`ed (a host-described execution graph was rejected: it
+would push the kernel's consistency invariants into a meta-layer every host
+re-implements).
+
+**Named slots, not a registry — until n>2 capability *kinds*.** Two slots
+(embed, recognize) compose cleanly; a keyed modality→engine registry is
+recorded as the step to take when a third capability kind (ASR/audio)
+actually lands, not before.
+
+**Identity and batch policy are host-assembled, not engine-known.**
+Fingerprint strings fold host policy (`pool=`/`args=`/`textprep=`);
+`safe_batch` comes from the host-run probe over the loaded model (the
+spiked 64-text set, ported to `shrike-engine-api::probe` as shared engine
+policy — the Python host's `embed_batching` sources the set from it).
+`WithPolicy` carries all three onto a pure-compute engine.
+
+**Engines and managers are different concerns.** Talking to an embeddings
+endpoint (`shrike-embed-remote`) is separate from launching one
+(`shrike-llama-server`, a manage-class capability per #338 that mobile
+builds never include). llama-server is just the on-device instance of the
+general case; a cloud/tailnet deployment composes the remote engine with no
+manager at all.
+
+**The #340 cross-cdylib answer:** engine crates link into the single
+binding cdylib via cargo features — never trait objects across `.so`
+boundaries (no stable Rust ABI; one `shrike_native` build carries the
+engines its features select, and the cabi surface gates engine
+registration the same way, `--features engine-onnx`).
+
+**Python facades stay, as assembly.** `OnnxBackend`/`ClipBackend`/
+`LlamaServerBackend` keep construction-time work (file/provider resolution,
+the probe, fingerprint assembly, `health()`) and hand the kernel a native
+composition (`NativeEmbedder.from_onnx/from_clip/from_remote`); the
+`PyEmbedder`/`PyRecognizer` capture seam remains permanently as the
+custom/test-backend escape hatch — no production path rides it.

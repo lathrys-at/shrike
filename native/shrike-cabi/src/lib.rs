@@ -33,17 +33,20 @@ use futures::executor::block_on;
 
 use shrike_kernel::{Kernel, MutexExecutor};
 
+#[cfg(feature = "engine-onnx")]
+mod engine;
+
 thread_local! {
     static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
 }
 
-fn set_last_error(message: String) {
+pub(crate) fn set_last_error(message: String) {
     let c = CString::new(message.replace('\0', " "))
         .unwrap_or_else(|_| CString::new("error message unrepresentable").unwrap());
     LAST_ERROR.with(|slot| *slot.borrow_mut() = Some(c));
 }
 
-fn clear_last_error() {
+pub(crate) fn clear_last_error() {
     LAST_ERROR.with(|slot| *slot.borrow_mut() = None);
 }
 
@@ -70,14 +73,31 @@ pub unsafe extern "C" fn shrike_string_free(s: *mut c_char) {
     }
 }
 
+/// Detach the embedding service (the index flushes and reports unavailable;
+/// collection ops and lexical search stay live). Always available — the slot
+/// op is engine-agnostic.
+///
+/// # Safety
+/// `handle` must come from [`crate::shrike_kernel_open`].
+#[no_mangle]
+pub unsafe extern "C" fn shrike_detach_embedder(handle: *mut ShrikeKernel) -> i32 {
+    clear_last_error();
+    let Some(h) = (unsafe { handle.as_ref() }) else {
+        set_last_error("handle must not be null".into());
+        return -1;
+    };
+    h.kernel.detach_embedder();
+    0
+}
+
 /// An open kernel, opaque to the host.
 pub struct ShrikeKernel {
-    kernel: Kernel,
+    pub(crate) kernel: Kernel,
 }
 
 /// # Safety
 /// `s` must be a valid NUL-terminated C string (or null, which errors).
-unsafe fn arg_str<'a>(s: *const c_char, name: &str) -> Result<&'a str, ()> {
+pub(crate) unsafe fn arg_str<'a>(s: *const c_char, name: &str) -> Result<&'a str, ()> {
     if s.is_null() {
         set_last_error(format!("{name} must not be null"));
         return Err(());

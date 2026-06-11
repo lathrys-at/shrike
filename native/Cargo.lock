@@ -5204,6 +5204,8 @@ version = "0.0.0"
 dependencies = [
  "futures",
  "serde_json",
+ "shrike-embed",
+ "shrike-engine-api",
  "shrike-ffi",
  "shrike-kernel",
  "tracing",
