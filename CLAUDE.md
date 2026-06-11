@@ -55,7 +55,7 @@ src/shrike/                       # Python package (src layout) — the harness 
 ├── paths.py                      # Platform-canonical directories (via platformdirs)
 ├── log.py                        # Logging config, log parsing and styling
 ├── embedding.py                  # EmbedderBackend facades + EmbeddingRuntime (backend lifecycle)
-├── recognition.py                # RecognizerBackend protocol + AppleVisionBackend (#228 OCR; `vision` extra)
+├── recognition.py                # RecognizerBackend protocol + make_recognizer (#228 OCR; native engine since #342 P3)
 ├── index.py                      # VectorIndex/IndexSaver — STANDALONE/TEST contexts only since the
 │                                 #   harness rebase (#353); the server's index lives in the kernel (#355)
 ├── derived.py                    # DerivedTextStore — FTS5 facade (read paths; kernel ingests in server mode)

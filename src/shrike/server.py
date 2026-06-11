@@ -645,7 +645,7 @@ def main() -> None:
         default=None,
         choices=["apple"],
         help="OCR backend for recognizing text in note media (#228). Off by default; "
-        "'apple' uses macOS Vision (requires the 'vision' extra). Recognized text "
+        "'apple' uses macOS Vision (native — no extra needed). Recognized text "
         "feeds lexical search and the vector index in the background.",
     )
     args = parser.parse_args()
