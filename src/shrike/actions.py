@@ -90,7 +90,10 @@ def note_outcome(message: str) -> None:
 # below the rest because it's the noisiest (a near-miss is weaker evidence than a literal or
 # semantic hit). Equal-ish today; the tuning harness + further signals (tag #179) will make these
 # config/`--search-*` knobs. The exact-match override (priority tier) is orthogonal to the weight.
-SEARCH_WEIGHTS = {"text": 1.0, "image": 1.0, "exact": 1.0, "fuzzy": 0.5}
+# `tag` is the high-precision tag-centroid signal (#179): an activated tag's
+# members enter the fusion as their own ranking — weighted like the semantic
+# signals (precision justifies parity; RRF's rank decay bounds flooding).
+SEARCH_WEIGHTS = {"text": 1.0, "image": 1.0, "tag": 1.0, "exact": 1.0, "fuzzy": 0.5}
 
 # Intra-modal activation gate (#201b). A non-text modality's ranking is fed to the fusion only when
 # its best match for the query exceeds `mean + ACTIVATION_MARGIN·std` of that modality's calibrated
@@ -575,6 +578,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 deck=deck,
                 tags=tags or None,
                 exclude=sorted(exclude_set),
+                kernel=kernel,
                 image_floor=image_floor,
                 weights=SEARCH_WEIGHTS,
                 semantic=semantic_ok,

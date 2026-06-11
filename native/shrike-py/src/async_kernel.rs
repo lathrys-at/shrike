@@ -100,6 +100,14 @@ pub(crate) struct AsyncKernel {
     inner: Arc<Kernel>,
 }
 
+impl AsyncKernel {
+    /// The wrapped kernel, for sibling bindings composing over the live
+    /// handle (the search action reads its tag state).
+    pub(crate) fn kernel_arc(&self) -> Arc<Kernel> {
+        Arc::clone(&self.inner)
+    }
+}
+
 /// Build the kernel's image pair from a captured embedder + the resolver
 /// callables: present only when the backend embeds images AND the harness
 /// supplied BOTH callables (read + the cheap stat).

@@ -108,12 +108,20 @@ pub fn membership(rows: &[(i64, Vec<String>)]) -> BTreeMap<String, Vec<i64>> {
     map
 }
 
-/// The live key→tag map for the centroids currently in the engine's tag
-/// space. Empty until the first recompute (the persisted space is searched
-/// only through this map, so a stale file can't mislabel keys).
+/// The live tag state for the centroids currently in the engine's tag space:
+/// key→tag names plus key→member note ids (the retrieval signal's expansion
+/// set). Empty until the first recompute (the persisted space is searched
+/// only through this state, so a stale file can't mislabel keys or expand to
+/// stale members).
 #[derive(Default)]
 pub struct TagKeyMap {
-    inner: RwLock<BTreeMap<i64, String>>,
+    inner: RwLock<TagState>,
+}
+
+#[derive(Default)]
+struct TagState {
+    names: BTreeMap<i64, String>,
+    members: BTreeMap<i64, Vec<i64>>,
 }
 
 impl TagKeyMap {
@@ -121,20 +129,32 @@ impl TagKeyMap {
         self.inner
             .read()
             .expect("tag keys poisoned")
+            .names
             .get(&key)
             .cloned()
     }
 
+    /// The member note ids behind a centroid key (empty if unknown).
+    pub fn members(&self, key: i64) -> Vec<i64> {
+        self.inner
+            .read()
+            .expect("tag keys poisoned")
+            .members
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn len(&self) -> usize {
-        self.inner.read().expect("tag keys poisoned").len()
+        self.inner.read().expect("tag keys poisoned").names.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    fn replace(&self, map: BTreeMap<i64, String>) {
-        *self.inner.write().expect("tag keys poisoned") = map;
+    fn replace(&self, names: BTreeMap<i64, String>, members: BTreeMap<i64, Vec<i64>>) {
+        *self.inner.write().expect("tag keys poisoned") = TagState { names, members };
     }
 }
 
@@ -150,6 +170,7 @@ pub fn recompute(
 ) -> NativeResult<usize> {
     let members_by_tag = membership(rows);
     let mut tag_keys: BTreeMap<i64, String> = BTreeMap::new();
+    let mut tag_members: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
     let mut centroid_keys: Vec<i64> = Vec::new();
     let mut centroids: Vec<Vec<f32>> = Vec::new();
 
@@ -196,6 +217,7 @@ pub fn recompute(
             continue;
         }
         tag_keys.insert(key, tag.clone());
+        tag_members.insert(key, members.clone());
         centroid_keys.push(key);
         centroids.push(centroid);
     }
@@ -207,8 +229,87 @@ pub fn recompute(
         engine.add(TAG_TEXT_SPACE, &centroid_keys, &centroids)?;
     }
     let built = centroid_keys.len();
-    keys.replace(tag_keys);
+    keys.replace(tag_keys, tag_members);
     Ok(built)
+}
+
+/// Retrieval knobs (#179): how many top tags may activate per query, and the
+/// note-ranking cap so one giant tag can't flood the fusion.
+pub const TAG_TOP_TAGS: usize = 3;
+pub const TAG_RANK_CAP: usize = 50;
+
+/// The tag activation floor — deliberately BELOW the semantic note threshold:
+/// a centroid is a MEAN over members, so dilution systematically lowers its
+/// attainable cosine against any single query (a perfectly on-topic tag with
+/// one off-topic member already sits well under the best member's score).
+/// Offline calibration against the tag space (the #201b approach) is the
+/// future refinement; this fixed floor is the v1 knob.
+pub const TAG_ACTIVATION: f64 = 0.35;
+
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// The tag retrieval signal (#179): rank the `tag.text` space with the query
+/// vector, activate tags whose centroid cosine clears `threshold` (the same
+/// floor the semantic note ranking uses — centroids live in the text space,
+/// so the scales are commensurable), cap activation at `top_tags`, and expand
+/// to member notes: best tag first, members within a tag ordered by their own
+/// text-vector cosine to the query, deduped across tags (first appearance
+/// wins), capped at `cap`. Conditionally present: no tags / no activation /
+/// empty state → an empty ranking, which contributes nothing to RRF.
+pub fn tag_ranking(
+    engine: &MultiModalIndex,
+    keys: &TagKeyMap,
+    query: &[f32],
+    threshold: f64,
+    top_tags: usize,
+    cap: usize,
+) -> Vec<i64> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let Ok(rankings) = engine.search_by_modality(
+        &[query.to_vec()],
+        top_tags,
+        Some(&[TAG_TEXT_SPACE.to_string()]),
+    ) else {
+        return Vec::new();
+    };
+    let mut out: Vec<i64> = Vec::new();
+    let mut seen: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    let Some(per_query) = rankings.first() else {
+        return Vec::new();
+    };
+    let Some((ranked_keys, distances)) = per_query.get(TAG_TEXT_SPACE) else {
+        return Vec::new();
+    };
+    for (key, dist) in ranked_keys.iter().zip(distances) {
+        // cos = 1 - distance; the ranking is distance-ascending, so the first
+        // miss ends activation.
+        if f64::from(1.0 - dist) < threshold {
+            break;
+        }
+        let mut members: Vec<(i64, f32)> = keys
+            .members(*key)
+            .iter()
+            .filter_map(|nid| {
+                let vectors = engine.modality_get("text", *nid)?;
+                let v = vectors.first()?;
+                (v.len() == query.len()).then(|| (*nid, dot(query, v)))
+            })
+            .collect();
+        members.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for (nid, _) in members {
+            if seen.insert(nid) {
+                out.push(nid);
+                if out.len() >= cap {
+                    return out;
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -249,6 +350,51 @@ mod tests {
         assert_eq!(tag_key("cardio"), tag_key("cardio"));
         assert_ne!(tag_key("cardio"), tag_key("cardiology"));
         assert!(tag_key("anything") >= 0);
+    }
+
+    #[test]
+    fn tag_ranking_activates_orders_and_degrades() {
+        let engine = MultiModalIndex::new(vec![
+            "text".to_string(),
+            "image".to_string(),
+            TAG_TEXT_SPACE.to_string(),
+        ])
+        .unwrap();
+        engine.ensure("text", 2).unwrap();
+        // Two members near the x-axis (one closer), plus off-topic notes so
+        // coverage hygiene passes.
+        engine
+            .add(
+                "text",
+                &[1, 2, 3, 4, 5],
+                &[
+                    vec![1.0, 0.0],
+                    vec![0.9, (1.0f32 - 0.81).sqrt()],
+                    vec![0.0, 1.0],
+                    vec![0.0, 1.0],
+                    vec![0.0, 1.0],
+                ],
+            )
+            .unwrap();
+        let rows = vec![
+            (1, vec!["topic".to_string()]),
+            (2, vec!["topic".to_string()]),
+        ];
+        let keys = TagKeyMap::default();
+        recompute(&engine, &rows, 5, &TagCentroidConfig::default(), &keys).unwrap();
+        assert_eq!(keys.members(tag_key("topic")), vec![1, 2]);
+
+        // An on-axis query activates `topic`; members come back in their own
+        // cosine order (1 before 2).
+        let ranking = tag_ranking(&engine, &keys, &[1.0, 0.0], 0.5, 3, 50);
+        assert_eq!(ranking, vec![1, 2]);
+
+        // An orthogonal query clears no activation → empty (degrades).
+        let off = tag_ranking(&engine, &keys, &[0.0, 1.0], 0.5, 3, 50);
+        assert!(off.is_empty());
+
+        // The cap bounds the expansion.
+        assert_eq!(tag_ranking(&engine, &keys, &[1.0, 0.0], 0.5, 3, 1).len(), 1);
     }
 
     #[test]

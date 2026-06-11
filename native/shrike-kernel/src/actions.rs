@@ -565,6 +565,7 @@ pub fn search_notes(
     core: &CollectionCore,
     index: Option<&MultiModalIndex>,
     derived: Option<&DerivedEngine>,
+    tag_keys: Option<&crate::tag_centroids::TagKeyMap>,
     sources: &[SearchSource],
     vectors: &[Vec<f32>],
     args: &SearchArgs,
@@ -654,6 +655,36 @@ pub fn search_notes(
                 image_score.clear();
             }
         }
+        // Tag-centroid signal (#179): conditionally present — activated tags
+        // expand to member notes through the SAME scope/exclusion machinery
+        // (synthetic order-preserving distances into a scratch score map, so
+        // tag evidence never masquerades as a semantic `score`).
+        let mut ranking_tag: Vec<i64> = Vec::new();
+        if args.semantic {
+            if let (Some(keys), Some(engine), Some(qvec)) = (tag_keys, index, vectors.get(i)) {
+                let member_ids = crate::tag_centroids::tag_ranking(
+                    engine,
+                    keys,
+                    qvec,
+                    crate::tag_centroids::TAG_ACTIVATION,
+                    crate::tag_centroids::TAG_TOP_TAGS,
+                    crate::tag_centroids::TAG_RANK_CAP,
+                );
+                let synth: Vec<f32> = (0..member_ids.len()).map(|r| r as f32 * 1e-4).collect();
+                let mut scratch: HashMap<i64, f64> = HashMap::new();
+                ranking_tag = rank_modality(
+                    core,
+                    &member_ids,
+                    &synth,
+                    &mut note_data,
+                    &mut scratch,
+                    &exclude,
+                    args,
+                    false,
+                );
+            }
+        }
+
         for (nid, isim) in &image_score {
             let entry = sem_score.entry(*nid).or_insert(*isim);
             if *isim > *entry {
@@ -695,6 +726,7 @@ pub fn search_notes(
         let rankings: Vec<(String, Vec<i64>)> = vec![
             ("text".into(), ranking_text),
             ("image".into(), ranking_image),
+            ("tag".into(), ranking_tag),
             ("exact".into(), exact_ids),
             ("fuzzy".into(), ranking_fuzzy),
         ];
@@ -789,6 +821,7 @@ mod search_tests {
             &core,
             None,
             Some(&derived),
+            None,
             &[query("mitochondria"), query("mitochondira")], // exact + transposition
             &[],
             &args(10),
@@ -833,6 +866,7 @@ mod search_tests {
             &core,
             Some(&index),
             None,
+            None,
             &[query("nothing-literal-matches-this")],
             &[vec![1.0, 0.0]],
             &a1,
@@ -854,6 +888,7 @@ mod search_tests {
         let groups = search_notes(
             &core,
             Some(&index),
+            None,
             None,
             &[query("x-y-z-no-literal")],
             &[vec![1.0, 0.0]],
@@ -888,6 +923,7 @@ mod search_tests {
             &core,
             Some(&index),
             Some(&derived),
+            None,
             &[query("ATP synthase")],
             &[vec![1.0, 0.0]], // semantically closest to the NON-literal note
             &a1,
@@ -926,6 +962,7 @@ mod search_tests {
         let groups = search_notes(
             &core,
             Some(&index),
+            None,
             None,
             &[query("zz-nothing-literal")],
             &[vec![1.0, 0.0]],

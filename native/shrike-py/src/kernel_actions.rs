@@ -88,7 +88,7 @@ pub(crate) fn action_collection_query(
 /// semantic ranking is on, and the orchestrator state (image floor, index
 /// size) the kernel will own after S3 (#332).
 #[pyfunction]
-#[pyo3(signature = (core, index_engine, derived_engine, sources, vectors, top_k, threshold, deck=None, tags=None, exclude=None, image_floor=None, weights=None, semantic=false, index_size=0))]
+#[pyo3(signature = (core, index_engine, derived_engine, sources, vectors, top_k, threshold, deck=None, tags=None, exclude=None, image_floor=None, weights=None, semantic=false, index_size=0, kernel=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn action_search_notes(
     py: Python<'_>,
@@ -106,7 +106,11 @@ pub(crate) fn action_search_notes(
     weights: Option<std::collections::BTreeMap<String, f64>>,
     semantic: bool,
     index_size: usize,
+    kernel: Option<PyRef<'_, crate::async_kernel::AsyncKernel>>,
 ) -> PyResult<String> {
+    // The tag-centroid state (#179) rides the kernel handle; cloned out so
+    // the GIL-bound PyRef never crosses the detach.
+    let tag_kernel = kernel.as_ref().map(|k| k.kernel_arc());
     let inner = core.core_ref();
     let index = index_engine.as_ref().map(|e| &*e.inner);
     let derived = derived_engine.as_ref().map(|e| &e.inner);
@@ -132,8 +136,10 @@ pub(crate) fn action_search_notes(
         index_size,
     };
     py.detach(|| {
-        let groups =
-            shrike_kernel::actions::search_notes(inner, index, derived, &sources, &vectors, &args)?;
+        let tag_keys = tag_kernel.as_ref().map(|k| k.tag_keys());
+        let groups = shrike_kernel::actions::search_notes(
+            inner, index, derived, tag_keys, &sources, &vectors, &args,
+        )?;
         serde_json::to_string(&groups).map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
     })
     .map_err(to_py_err)

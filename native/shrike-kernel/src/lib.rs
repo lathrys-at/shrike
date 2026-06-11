@@ -763,6 +763,20 @@ impl Kernel {
                         rankings.push((modality.clone(), ids.clone()));
                     }
                 }
+                // Tag-centroid signal (#179): conditionally present.
+                if let Some(qvec0) = qvec.first() {
+                    let tag_notes = tag_centroids::tag_ranking(
+                        self.orchestrator.engine(),
+                        &self.tag_keys,
+                        qvec0,
+                        tag_centroids::TAG_ACTIVATION,
+                        tag_centroids::TAG_TOP_TAGS,
+                        tag_centroids::TAG_RANK_CAP,
+                    );
+                    if !tag_notes.is_empty() {
+                        rankings.push(("tag".to_string(), tag_notes));
+                    }
+                }
             }
 
             // Lexical signals (substring authority + fuzzy), from the derived store.
@@ -801,6 +815,7 @@ impl Kernel {
             let mut weights = BTreeMap::new();
             weights.insert("text".to_string(), 1.0);
             weights.insert("image".to_string(), 1.0);
+            weights.insert("tag".to_string(), 1.0);
             weights.insert("exact".to_string(), 1.0);
             weights.insert("fuzzy".to_string(), 0.5);
             let mut priority = std::collections::HashSet::new();
@@ -1060,6 +1075,74 @@ mod no_cpython_smoke {
             // A note search never surfaces a tag key.
             let hits = kernel.search("note number", 20).await.unwrap();
             assert!(hits.iter().all(|h| keys.lookup(h.note_id).is_none()));
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
+    fn tag_signal_surfaces_off_topic_members() {
+        // The #179 payoff: a member whose own text doesn't match the query
+        // still surfaces because its TAG's centroid (dominated by on-topic
+        // siblings) activates and expands.
+        futures::executor::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+                Arc::new(MutexExecutor::default()),
+                None,
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            // Tag `krebs`: two on-topic notes + one member with unrelated
+            // text; plus untagged off-topic filler for hygiene coverage.
+            let mut notes: Vec<serde_json::Value> = vec![
+                serde_json::json!({"note_type": "Basic", "deck": "Default",
+                    "fields": {"Front": "krebs cycle citric acid", "Back": "b"},
+                    "tags": ["krebs"]}),
+                serde_json::json!({"note_type": "Basic", "deck": "Default",
+                    "fields": {"Front": "krebs cycle mitochondria atp", "Back": "b"},
+                    "tags": ["krebs"]}),
+                serde_json::json!({"note_type": "Basic", "deck": "Default",
+                    "fields": {"Front": "zzz unrelated mnemonic", "Back": "b"},
+                    "tags": ["krebs"]}),
+            ];
+            for i in 0..6 {
+                notes.push(serde_json::json!({"note_type": "Basic", "deck": "Default",
+                    "fields": {"Front": format!("filler topic {i}"), "Back": "b"},
+                    "tags": []}));
+            }
+            let results: Vec<serde_json::Value> = serde_json::from_str(
+                &kernel
+                    .upsert_notes_json(
+                        serde_json::json!(notes).to_string(),
+                        "error".to_string(),
+                        false,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let mnemonic_id = results[2]["id"].as_i64().unwrap();
+
+            assert!(!kernel.tag_keys().is_empty(), "centroid state built");
+            let key = tag_centroids::tag_key("krebs");
+            assert_eq!(kernel.tag_keys().members(key).len(), 3);
+            let hits = kernel.search("krebs cycle citric acid", 9).await.unwrap();
+            let with_tag: Vec<&KernelHit> = hits
+                .iter()
+                .filter(|h| h.signals.iter().any(|(s, _)| s == "tag"))
+                .collect();
+            assert!(!with_tag.is_empty(), "the tag signal contributed");
+            assert!(
+                hits.iter().any(|h| h.note_id == mnemonic_id),
+                "the off-topic member surfaced via its tag"
+            );
 
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
