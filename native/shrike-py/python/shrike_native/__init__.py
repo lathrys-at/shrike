@@ -29,6 +29,8 @@ from shrike_native._native import (
     init_onnx_runtime,
     parallel_sum,
     rrf_fuse,
+    schema_catalog,
+    schema_roundtrip,
     version,
 )
 
@@ -61,5 +63,7 @@ __all__ = [
     "init_onnx_runtime",
     "rrf_fuse",
     "parallel_sum",
+    "schema_catalog",
+    "schema_roundtrip",
     "version",
 ]

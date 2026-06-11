@@ -106,6 +106,21 @@ fn init_logging() -> PyResult<()> {
     Ok(())
 }
 
+/// The Rust-canonical wire contracts (#330): `{python_model_name: json_schema}`
+/// for every type in shrike-schemas -- the contract test's Rust side.
+#[pyfunction]
+fn schema_catalog() -> std::collections::HashMap<&'static str, String> {
+    shrike_schemas::schema_catalog().into_iter().collect()
+}
+
+/// Deserialize `json` as the named wire type and re-serialize it through the
+/// Rust types -- the instance-level wire-parity probe. Raises NativeInputError
+/// for an unknown name or a payload the type rejects.
+#[pyfunction]
+fn schema_roundtrip(name: &str, json: &str) -> PyResult<String> {
+    shrike_schemas::roundtrip(name, json).map_err(NativeInputError::new_err)
+}
+
 /// The SSRF-guarded media URL fetch (#278 step 5b) standalone: the facades'
 /// CONCURRENT prepare path downloads off the collection worker thread, then
 /// writes bytes through it — same architecture as the Python original.
@@ -608,6 +623,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;
     m.add_function(wrap_pyfunction!(rrf_fuse, m)?)?;
+    m.add_function(wrap_pyfunction!(schema_catalog, m)?)?;
+    m.add_function(wrap_pyfunction!(schema_roundtrip, m)?)?;
     m.add_function(wrap_pyfunction!(fused_search_text, m)?)?;
     m.add_function(wrap_pyfunction!(fused_add_text, m)?)?;
     // The native image-prep pipeline version — folded into the clip-rs

@@ -80,6 +80,7 @@ crate.from_cargo(
         "//native/shrike-index:Cargo.toml",
         "//native/shrike-kernel:Cargo.toml",
         "//native/shrike-py:Cargo.toml",
+        "//native/shrike-schemas:Cargo.toml",
     ],
 )
 # usearch's cxx_build leaves OUT_DIR symlinks into the ephemeral build sandbox,

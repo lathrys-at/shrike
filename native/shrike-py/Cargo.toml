@@ -32,6 +32,7 @@ shrike-derived = { path = "../shrike-derived", default-features = false }
 shrike-embed = { path = "../shrike-embed" }
 shrike-ffi = { workspace = true }
 shrike-index = { path = "../shrike-index" }
+shrike-schemas = { path = "../shrike-schemas" }
 # First-class observability bridges (#310): pyo3-log forwards `log` records to
 # Python's stdlib `logging`; tracing's `log-always` compat feature makes every
 # native tracing event emit such a record even with a tracing subscriber set
