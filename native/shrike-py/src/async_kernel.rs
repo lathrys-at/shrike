@@ -172,6 +172,43 @@ impl AsyncKernel {
     fn detach_embedder(&self, py: Python<'_>) {
         py.detach(|| self.inner.detach_embedder())
     }
+
+    /// Attach the recognition service (#228, the second #342 slot): an OCR/ASR
+    /// engine plus the media-resolver callables it reads bytes through
+    /// (independent of the embed slot — OCR works with a text-only embedder).
+    fn attach_recognizer(
+        &self,
+        recognizer: PyRef<'_, crate::py_recognizer::PyRecognizer>,
+        media_read: Py<PyAny>,
+        media_exists: Py<PyAny>,
+    ) {
+        let handle = Arc::clone(&recognizer.handle);
+        let resolver: Arc<dyn shrike_kernel::index_orchestrator::ImageResolver> =
+            Arc::new(PyMediaResolver::new(media_read, media_exists));
+        self.inner.attach_recognizer(handle, resolver);
+    }
+
+    /// Detach the recognition service: derived text stays (still valid output
+    /// of the engine that produced it); only new recognition stops.
+    fn detach_recognizer(&self, py: Python<'_>) {
+        py.detach(|| self.inner.detach_recognizer())
+    }
+
+    /// One bounded recognition sweep (#228): recognize up to `max_items`
+    /// pending images, persist gated text + segments, re-embed the affected
+    /// notes. Returns a JSON report ({status, recognized, stored, remaining});
+    /// the harness loops in the background while `remaining > 0`.
+    fn recognize_pending<'py>(
+        &self,
+        py: Python<'py>,
+        max_items: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let report = inner.recognize_pending(max_items).await?;
+            Ok(report.to_string())
+        })
+    }
     /// Create a batch of notes (the #77 duplicate policy per item) and index
     /// them — ONE collection job, ONE read job, batched embeds (an awaitable;
     /// per-item results, one bad note never sinks the batch).

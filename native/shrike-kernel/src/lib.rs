@@ -31,6 +31,7 @@
 
 pub mod actions;
 pub mod index_orchestrator;
+pub mod recognize;
 pub mod tag_centroids;
 
 use std::collections::BTreeMap;
@@ -267,7 +268,26 @@ pub struct Kernel {
     /// + membership, so no extra watermark).
     tag_keys: tag_centroids::TagKeyMap,
     tag_config: tag_centroids::TagCentroidConfig,
+    /// The recognition service (#228/#342, the second registry slot):
+    /// OCR/ASR engines the harness attaches at runtime, exactly like the
+    /// embed slot — the kernel runs the pipeline over whatever is registered
+    /// and recognition is simply off when nothing is.
+    recognize: RwLock<Option<Arc<RecognizeService>>>,
+    recognition_gate: recognize::RecognitionGate,
 }
+
+/// One attached recognition capability: the engine + the media resolver it
+/// reads bytes through (independent of the embed slot — an OCR-only
+/// deployment has no image embedder).
+pub struct RecognizeService {
+    pub recognizer: Arc<dyn recognize::Recognizer>,
+    pub resolver: Arc<dyn index_orchestrator::ImageResolver>,
+}
+
+/// The derived-store source recognized image text lands under (#199/#228).
+pub const OCR_SOURCE: &str = "ocr";
+/// The derived-store meta key holding the recognizer fingerprint.
+pub const RECOGNIZER_FINGERPRINT_KEY: &str = "recognizer_fingerprint";
 
 /// One attached embedding capability: the text embedder + optionally its
 /// image half (present only for an image-advertising backend with a media
@@ -343,8 +363,10 @@ impl Kernel {
                 index_orchestrator::DEFAULT_SAVE_THRESHOLD,
             )
         });
-        let derived =
-            DerivedEngine::open(&format!("{}/shrike.db", cache_dir.trim_end_matches('/')), 1)?;
+        let derived = DerivedEngine::open(
+            &format!("{}/shrike.db", cache_dir.trim_end_matches('/')),
+            DerivedEngine::SCHEMA_VERSION,
+        )?;
         tracing::debug!(collection = collection_path, "kernel opened");
         Ok(Self {
             collection,
@@ -354,7 +376,38 @@ impl Kernel {
             embed: RwLock::new(None),
             tag_keys: tag_centroids::TagKeyMap::default(),
             tag_config: tag_centroids::TagCentroidConfig::default(),
+            recognize: RwLock::new(None),
+            recognition_gate: recognize::RecognitionGate::default(),
         })
+    }
+
+    /// Attach (or swap) the recognition service — the #342 slot pattern,
+    /// second instance. The harness follows up by driving the pending sweep.
+    pub fn attach_recognizer(
+        &self,
+        recognizer: Arc<dyn recognize::Recognizer>,
+        resolver: Arc<dyn index_orchestrator::ImageResolver>,
+    ) {
+        *self.recognize.write().expect("recognize slot poisoned") =
+            Some(Arc::new(RecognizeService {
+                recognizer,
+                resolver,
+            }));
+    }
+
+    /// Detach the recognition service. Already-derived text stays (it remains
+    /// valid output of the engine that produced it); only new recognition
+    /// stops.
+    pub fn detach_recognizer(&self) {
+        *self.recognize.write().expect("recognize slot poisoned") = None;
+    }
+
+    /// The currently attached recognition service, if any.
+    pub fn recognize_service(&self) -> Option<Arc<RecognizeService>> {
+        self.recognize
+            .read()
+            .expect("recognize slot poisoned")
+            .clone()
     }
 
     /// The live tag-key map (key → tag string) for the `tag.text` space.
@@ -466,16 +519,7 @@ impl Kernel {
             self.refresh_tags_best_effort().await;
             return Ok(true);
         }
-        let inputs: Vec<index_orchestrator::EmbedInput> = raw
-            .into_iter()
-            .map(
-                |(note_id, text, image_names)| index_orchestrator::EmbedInput {
-                    note_id,
-                    text,
-                    image_names,
-                },
-            )
-            .collect();
+        let inputs = self.compose_embed_inputs(raw);
         self.orchestrator
             .reconcile(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
             .await?;
@@ -502,16 +546,7 @@ impl Kernel {
                 core.note_embed_inputs(&ids)
             })
             .await??;
-        let inputs: Vec<index_orchestrator::EmbedInput> = raw
-            .into_iter()
-            .map(
-                |(note_id, text, image_names)| index_orchestrator::EmbedInput {
-                    note_id,
-                    text,
-                    image_names,
-                },
-            )
-            .collect();
+        let inputs = self.compose_embed_inputs(raw);
         let total = inputs.len();
         self.orchestrator
             .rebuild(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
@@ -531,6 +566,183 @@ impl Kernel {
         self.index_written(written).await
     }
 
+    /// Compose orchestrator inputs from collection rows + the derived
+    /// store's gated recognized texts (#199/#228): the index derives from
+    /// BOTH, so reconcile == rebuild keeps holding after recognition, and a
+    /// note's OCR text mints vectors on any (re-)embed path. Vector-worthiness
+    /// re-judges from the stored text (confidence already gated at ingest).
+    fn compose_embed_inputs(
+        &self,
+        raw: Vec<(i64, String, Vec<String>)>,
+    ) -> Vec<index_orchestrator::EmbedInput> {
+        let mut ocr_map: std::collections::HashMap<i64, Vec<String>> =
+            std::collections::HashMap::new();
+        match self.derived.texts_for_source(OCR_SOURCE) {
+            Ok(rows) => {
+                let min = self.recognition_gate.min_chars_vector;
+                for (nid, _r, text) in rows {
+                    if text.trim().chars().count() >= min {
+                        ocr_map.entry(nid).or_default().push(text);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "reading recognized texts failed; embedding without them");
+            }
+        }
+        raw.into_iter()
+            .map(
+                |(note_id, text, image_names)| index_orchestrator::EmbedInput {
+                    note_id,
+                    text,
+                    image_names,
+                    ocr_texts: ocr_map.remove(&note_id).unwrap_or_default(),
+                },
+            )
+            .collect()
+    }
+
+    /// One bounded recognition sweep (#228): recognize up to `max_items`
+    /// pending (note, image) pairs, persist gated text + segments to the
+    /// derived store, and re-embed the affected notes so OCR vectors mint.
+    /// Pending = a resolvable image with no OCR row (or all of them, after a
+    /// recognizer-fingerprint change invalidates the prior text). Returns
+    /// `{status, recognized, stored, remaining}` — the harness loops while
+    /// `remaining > 0`, so one call never occupies the executor for long.
+    pub async fn recognize_pending(&self, max_items: usize) -> NativeResult<serde_json::Value> {
+        let Some(svc) = self.recognize_service() else {
+            return Ok(serde_json::json!({"status": "unavailable"}));
+        };
+
+        // Fingerprint drift: a changed engine invalidates ALL recognized text
+        // (the analog of the embedder's model_id rebuild).
+        let fingerprint = svc.recognizer.fingerprint().unwrap_or_default();
+        let stored = self
+            .derived
+            .meta_get(RECOGNIZER_FINGERPRINT_KEY)?
+            .unwrap_or_default();
+        if !stored.is_empty() && stored != fingerprint {
+            let stale: Vec<i64> = self
+                .derived
+                .refs_for_source(OCR_SOURCE)?
+                .into_iter()
+                .map(|(nid, _)| nid)
+                .collect();
+            if !stale.is_empty() {
+                tracing::info!(
+                    notes = stale.len(),
+                    "recognizer fingerprint changed; invalidating recognized text"
+                );
+                self.derived.remove(&stale, Some(OCR_SOURCE))?;
+            }
+        }
+
+        // Pending set: resolvable images without an OCR row.
+        let raw = self
+            .collection
+            .run(|core| -> NativeResult<_> {
+                let ids = core.find_notes("")?;
+                core.note_embed_inputs(&ids)
+            })
+            .await??;
+        let done: std::collections::HashSet<(i64, String)> = self
+            .derived
+            .refs_for_source(OCR_SOURCE)?
+            .into_iter()
+            .collect();
+        let mut pending: Vec<(i64, String)> = Vec::new();
+        for (note_id, _text, image_names) in &raw {
+            for name in image_names {
+                if !done.contains(&(*note_id, name.clone())) && svc.resolver.exists(name) {
+                    pending.push((*note_id, name.clone()));
+                }
+            }
+        }
+        let total_pending = pending.len();
+        pending.truncate(max_items);
+        if pending.is_empty() {
+            self.derived
+                .meta_set(RECOGNIZER_FINGERPRINT_KEY, &fingerprint)?;
+            return Ok(serde_json::json!({
+                "status": "idle", "recognized": 0, "stored": 0, "remaining": 0
+            }));
+        }
+
+        // One pass, many consumers: recognize the batch, keep text AND
+        // segments.
+        let bytes: Vec<Vec<u8>> = pending
+            .iter()
+            .map(|(_, name)| svc.resolver.read(name).unwrap_or_default())
+            .collect();
+        let recognitions = svc.recognizer.recognize(bytes).await?;
+        if recognitions.len() != pending.len() {
+            return Err(NativeError::internal(format!(
+                "recognizer returned {} results for {} items",
+                recognitions.len(),
+                pending.len()
+            )));
+        }
+
+        // Persist per note: ingest REPLACES a note's rows for the source, so
+        // merge with what already exists. A gated-out item stores an EMPTY
+        // ref row marker? No — gated-out items simply store nothing; the
+        // pending set will re-offer them, so remember them as done via a
+        // zero-text row is wrong (it would index ""). Instead they re-judge
+        // each sweep only if the image still resolves — cheap (no
+        // re-recognition: the gate runs before storage, so re-offering means
+        // re-recognizing; accept that for dropped items, they're rare and
+        // bounded by max_items).
+        let mut existing: std::collections::HashMap<i64, Vec<(String, String)>> =
+            std::collections::HashMap::new();
+        for (nid, r, text) in self.derived.texts_for_source(OCR_SOURCE)? {
+            existing.entry(nid).or_default().push((r, text));
+        }
+        let mut stored_count = 0usize;
+        let mut touched: std::collections::BTreeMap<i64, Vec<(String, String)>> =
+            std::collections::BTreeMap::new();
+        let mut segments: Vec<(i64, String, String)> = Vec::new();
+        for ((note_id, name), recognition) in pending.iter().zip(recognitions.iter()) {
+            match self.recognition_gate.judge(recognition) {
+                recognize::GateOutcome::Drop => continue,
+                recognize::GateOutcome::Lexical | recognize::GateOutcome::LexicalAndVector => {
+                    touched
+                        .entry(*note_id)
+                        .or_insert_with(|| existing.get(note_id).cloned().unwrap_or_default())
+                        .push((name.clone(), recognition.text.clone()));
+                    if !recognition.segments.is_empty() {
+                        let json = serde_json::to_string(&recognition.segments)
+                            .map_err(|e| NativeError::internal(format!("segments: {e}")))?;
+                        segments.push((*note_id, name.clone(), json));
+                    }
+                    stored_count += 1;
+                }
+            }
+        }
+        let affected: Vec<i64> = touched.keys().copied().collect();
+        for (note_id, refs_text) in &touched {
+            self.derived.ingest(*note_id, OCR_SOURCE, refs_text)?;
+        }
+        for (note_id, name, json) in &segments {
+            self.derived
+                .put_segments(*note_id, OCR_SOURCE, name, json)?;
+        }
+        self.derived
+            .meta_set(RECOGNIZER_FINGERPRINT_KEY, &fingerprint)?;
+
+        // Re-embed the affected notes: their hash now folds the OCR text, so
+        // this mints the vectors and the next reconcile sees them current.
+        if !affected.is_empty() {
+            self.index_written(&affected).await?;
+        }
+
+        Ok(serde_json::json!({
+            "status": "ran",
+            "recognized": pending.len(),
+            "stored": stored_count,
+            "remaining": total_pending.saturating_sub(pending.len()),
+        }))
+    }
+
     async fn index_written(&self, written: &[i64]) -> NativeResult<()> {
         if written.is_empty() {
             return Ok(());
@@ -546,16 +758,7 @@ impl Kernel {
             .await??;
         let svc = self.embed_service();
         if let Some(svc) = &svc {
-            let inputs: Vec<index_orchestrator::EmbedInput> = raw_inputs
-                .into_iter()
-                .map(
-                    |(note_id, text, image_names)| index_orchestrator::EmbedInput {
-                        note_id,
-                        text,
-                        image_names,
-                    },
-                )
-                .collect();
+            let inputs = self.compose_embed_inputs(raw_inputs);
             self.orchestrator
                 .add(&inputs, &*svc.embedder, svc.images_pair())
                 .await?;
@@ -1145,6 +1348,146 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    struct StubRecognizer;
+
+    impl recognize::Recognizer for StubRecognizer {
+        fn recognize(
+            &self,
+            items: Vec<Vec<u8>>,
+        ) -> BoxFuture<'_, NativeResult<Vec<recognize::Recognition>>> {
+            Box::pin(async move {
+                Ok(items
+                    .iter()
+                    .map(|b| {
+                        let text = String::from_utf8_lossy(b).to_string();
+                        recognize::Recognition {
+                            text: text.clone(),
+                            confidence: 0.95,
+                            segments: vec![recognize::Segment {
+                                text,
+                                confidence: 0.95,
+                                bbox: Some([0.0, 0.0, 1.0, 0.1]),
+                            }],
+                        }
+                    })
+                    .collect())
+            })
+        }
+
+        fn fingerprint(&self) -> Option<String> {
+            Some("stub:v1".to_string())
+        }
+    }
+
+    struct MapResolver(std::collections::HashMap<String, Vec<u8>>);
+
+    impl index_orchestrator::ImageResolver for MapResolver {
+        fn read(&self, name: &str) -> Option<Vec<u8>> {
+            self.0.get(name).cloned()
+        }
+
+        fn exists(&self, name: &str) -> bool {
+            self.0.contains_key(name)
+        }
+    }
+
+    #[test]
+    fn recognition_pipeline_mints_lexical_and_vector_consumers() {
+        // The #228 end-to-end: one recognition pass per image feeds the
+        // lexical store (rows + segments) AND the text-space vector, so a
+        // query matching only the text INSIDE an image surfaces the note.
+        futures::executor::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+                Arc::new(MutexExecutor::default()),
+                None,
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            let notes = vec![
+                serde_json::json!({"note_type": "Basic", "deck": "Default",
+                    "fields": {"Front": "See the diagram <img src=\"krebs.png\">", "Back": "b"}}),
+                serde_json::json!({"note_type": "Basic", "deck": "Default",
+                    "fields": {"Front": "zzz filler mnemonic", "Back": "b"}}),
+            ];
+            let results: Vec<serde_json::Value> = serde_json::from_str(
+                &kernel
+                    .upsert_notes_json(
+                        serde_json::json!(notes).to_string(),
+                        "error".to_string(),
+                        false,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let diagram_id = results[0]["id"].as_i64().unwrap();
+
+            // No recognizer attached → the sweep reports unavailable.
+            let off = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(off["status"], "unavailable");
+
+            let mut media = std::collections::HashMap::new();
+            media.insert(
+                "krebs.png".to_string(),
+                b"the krebs cycle produces energy carriers".to_vec(),
+            );
+            kernel.attach_recognizer(Arc::new(StubRecognizer), Arc::new(MapResolver(media)));
+
+            let report = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(report["status"], "ran");
+            assert_eq!(report["stored"], 1);
+            assert_eq!(report["remaining"], 0);
+
+            // Lexical consumer: a literal phrase living ONLY inside the image
+            // hits, with ocr provenance riding the existing seam.
+            let hits = kernel.search("energy carriers", 5).await.unwrap();
+            let hit = hits
+                .iter()
+                .find(|h| h.note_id == diagram_id)
+                .expect("ocr text searchable");
+            assert!(hit.signals.iter().any(|(sig, _)| sig == "exact"));
+
+            // Vector consumer: a non-literal query (no substring) still
+            // surfaces the note through its OCR vector in the text space.
+            let sem = kernel.search("carriers energy", 5).await.unwrap();
+            let sem_hit = sem
+                .iter()
+                .find(|h| h.note_id == diagram_id)
+                .expect("ocr vector ranks");
+            assert!(sem_hit.signals.iter().any(|(sig, _)| sig == "text"));
+
+            // The sweep is idempotent: a second call has nothing to do.
+            let again = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(again["status"], "idle");
+
+            // Persistence + reconcile==rebuild: a fresh kernel over the same
+            // cache sees no drift (the hash folds the OCR text) and still
+            // serves both consumers.
+            kernel.close().await.unwrap();
+            let kernel2 = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+                Arc::new(MutexExecutor::default()),
+                None,
+            )
+            .await
+            .unwrap();
+            kernel2.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel2.reindex_if_needed().await.unwrap();
+            let sem2 = kernel2.search("carriers energy", 5).await.unwrap();
+            assert!(sem2.iter().any(|h| h.note_id == diagram_id));
+
+            kernel2.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
         });
     }

@@ -56,6 +56,11 @@ impl DerivedEngine {
     /// Open (or create) the store and ensure the schema, resetting the derived
     /// data on a schema-version mismatch (no migrations — it's a rebuildable
     /// cache). Errors are `unavailable` — the facade recovers by discarding.
+    /// The current sidecar schema. v2 (#228): the `segments` table for
+    /// recognition structure (boxes/spans) + recognition meta keys. A bump
+    /// drops everything — recognition rows re-derive via the pending sweep.
+    pub const SCHEMA_VERSION: i64 = 2;
+
     pub fn open(path: &str, schema_version: i64) -> NativeResult<Self> {
         let conn = Connection::open(path).map_err(db_err)?;
         conn.pragma_update(None, "journal_mode", "WAL")
@@ -79,6 +84,8 @@ impl DerivedEngine {
                     .map_err(db_err)?;
                 conn.execute("DROP TABLE IF EXISTS rowmap", [])
                     .map_err(db_err)?;
+                conn.execute("DROP TABLE IF EXISTS segments", [])
+                    .map_err(db_err)?;
                 conn.execute("DELETE FROM meta WHERE key='col_mod'", [])
                     .map_err(db_err)?;
             }
@@ -92,6 +99,13 @@ impl DerivedEngine {
             "CREATE TABLE IF NOT EXISTS rowmap(\
              rowid INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, \
              source TEXT NOT NULL, ref TEXT NOT NULL)",
+            [],
+        )
+        .map_err(db_err)?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS segments(\
+             note_id INTEGER NOT NULL, source TEXT NOT NULL, ref TEXT NOT NULL, \
+             json TEXT NOT NULL, PRIMARY KEY(note_id, source, ref))",
             [],
         )
         .map_err(db_err)?;
@@ -179,6 +193,24 @@ impl DerivedEngine {
             rusqlite::params_from_iter(rowids.iter()),
         )
         .map_err(db_err)?;
+        // Segments share the row keys: drop them with their rows.
+        let nmarks = vec!["?"; note_ids.len()].join(",");
+        let seg_clause = match source {
+            Some(_) => format!("note_id IN ({nmarks}) AND source = ?"),
+            None => format!("note_id IN ({nmarks})"),
+        };
+        let mut seg_params: Vec<Box<dyn rusqlite::ToSql>> = note_ids
+            .iter()
+            .map(|n| Box::new(*n) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        if let Some(s) = source {
+            seg_params.push(Box::new(s.to_string()));
+        }
+        conn.execute(
+            &format!("DELETE FROM segments WHERE {seg_clause}"),
+            rusqlite::params_from_iter(seg_params.iter().map(|p| p.as_ref())),
+        )
+        .map_err(db_err)?;
         Ok(())
     }
 
@@ -229,11 +261,23 @@ impl DerivedEngine {
 
     /// Full (re)build from (note_id, source, ref, text) rows; stamps col_mod.
     /// One transaction — a failure rolls everything back.
+    ///
+    /// The rebuild is **collection-derived-sources-scoped** (#228): it
+    /// replaces `field` rows (cheap — re-read from the collection) but
+    /// PRESERVES recognition-derived rows (`ocr`/`asr` — expensive, with
+    /// their own fingerprint-keyed invalidation), so a boot-drift rebuild
+    /// never forces re-recognition. Recognition rows whose note vanished
+    /// from the new row set are pruned (the note was deleted).
     pub fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
-        tx.execute("DELETE FROM idx", []).map_err(db_err)?;
-        tx.execute("DELETE FROM rowmap", []).map_err(db_err)?;
+        tx.execute(
+            "DELETE FROM idx WHERE rowid IN (SELECT rowid FROM rowmap WHERE source = 'field')",
+            [],
+        )
+        .map_err(db_err)?;
+        tx.execute("DELETE FROM rowmap WHERE source = 'field'", [])
+            .map_err(db_err)?;
         for (note_id, source, reference, text) in rows {
             if text.trim().is_empty() {
                 continue;
@@ -247,12 +291,117 @@ impl DerivedEngine {
             )
             .map_err(db_err)?;
         }
+        // Prune recognition rows (and their segments) for notes no longer in
+        // the collection: the build rows are the authoritative note set.
+        let live: std::collections::HashSet<i64> = rows.iter().map(|r| r.0).collect();
+        let stale: Vec<i64> = {
+            let mut stmt = tx
+                .prepare("SELECT DISTINCT note_id FROM rowmap WHERE source != 'field'")
+                .map_err(db_err)?;
+            let ids: Vec<i64> = stmt
+                .query_map([], |r| r.get(0))
+                .map_err(db_err)?
+                .collect::<Result<_, _>>()
+                .map_err(db_err)?;
+            ids.into_iter().filter(|n| !live.contains(n)).collect()
+        };
+        if !stale.is_empty() {
+            Self::delete_rows(&tx, &stale, None)?;
+        }
         tx.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('col_mod', ?1)",
             [col_mod],
         )
         .map_err(db_err)?;
         tx.commit().map_err(db_err)
+    }
+
+    /// A free-form meta value (e.g. the recognizer fingerprint, #228).
+    pub fn meta_get(&self, key: &str) -> NativeResult<Option<String>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok())
+    }
+
+    pub fn meta_set(&self, key: &str, value: &str) -> NativeResult<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+            rusqlite::params![key, value],
+        )
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Store one item's recognition structure (#228: segments JSON — boxes
+    /// for OCR, time spans for ASR) alongside its text row, keyed like the
+    /// row. One pass, many consumers: #230 (occlusion) reads these back.
+    pub fn put_segments(
+        &self,
+        note_id: i64,
+        source: &str,
+        reference: &str,
+        json: &str,
+    ) -> NativeResult<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO segments(note_id, source, ref, json) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![note_id, source, reference, json],
+        )
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    pub fn get_segments(
+        &self,
+        note_id: i64,
+        source: &str,
+        reference: &str,
+    ) -> NativeResult<Option<String>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT json FROM segments WHERE note_id=?1 AND source=?2 AND ref=?3",
+                rusqlite::params![note_id, source, reference],
+                |r| r.get::<_, String>(0),
+            )
+            .ok())
+    }
+
+    /// All (note_id, ref) pairs for one source — the pending sweep's "what
+    /// has already been recognized" set (#228).
+    pub fn refs_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT note_id, ref FROM rowmap WHERE source = ?1")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(db_err)?
+            .collect::<Result<Vec<(i64, String)>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// All (note_id, ref, text) rows for one source — the embed-input
+    /// composition reads recognized text back for vector minting (#199).
+    pub fn texts_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.note_id, m.ref, idx.txt FROM idx \
+                 JOIN rowmap m ON m.rowid = idx.rowid WHERE m.source = ?1",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([source], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(db_err)?
+            .collect::<Result<Vec<(i64, String, String)>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
     }
 
     /// One FTS5 MATCH (rank-ordered), returning provenance + snippet rows.
@@ -443,6 +592,86 @@ mod tests {
         let err = e.match_rows("AND AND (", 10, false, None).unwrap_err();
         assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn rebuild_preserves_recognition_rows_and_prunes_orphans() {
+        // #228: a drift rebuild replaces `field` rows but never discards
+        // recognition-derived rows (re-recognition is expensive) — except for
+        // notes that vanished from the collection.
+        let (e, _dir) = store();
+        e.build(
+            &[(1, "field".into(), "Front".into(), "the mitochondria".into())],
+            100,
+        )
+        .unwrap();
+        e.ingest(
+            1,
+            "ocr",
+            &[("diagram.png".into(), "electron transport chain".into())],
+        )
+        .unwrap();
+        e.put_segments(
+            1,
+            "ocr",
+            "diagram.png",
+            r#"[{"text":"electron","confidence":0.9}]"#,
+        )
+        .unwrap();
+        e.ingest(2, "ocr", &[("gone.png".into(), "orphaned text".into())])
+            .unwrap();
+
+        // Rebuild with note 1 present, note 2 gone.
+        e.build(
+            &[(
+                1,
+                "field".into(),
+                "Front".into(),
+                "the mitochondria EDITED".into(),
+            )],
+            200,
+        )
+        .unwrap();
+
+        // Note 1's OCR row + segments survived; note 2's is pruned.
+        let ocr = e.refs_for_source("ocr").unwrap();
+        assert_eq!(ocr, vec![(1, "diagram.png".to_string())]);
+        assert!(e.get_segments(1, "ocr", "diagram.png").unwrap().is_some());
+        assert!(e.get_segments(2, "ocr", "gone.png").unwrap().is_none());
+
+        // The OCR text is still searchable; the edited field text too.
+        let hits = e
+            .search_substring("electron transport", 10, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits[0].0, 1);
+        assert_eq!(hits[0].1, "ocr");
+        let field_hits = e.search_substring("EDITED", 10, None).unwrap().unwrap();
+        assert_eq!(field_hits[0].1, "field");
+
+        // texts_for_source reads recognized text back for vector minting.
+        let texts = e.texts_for_source("ocr").unwrap();
+        assert_eq!(
+            texts,
+            vec![(
+                1,
+                "diagram.png".to_string(),
+                "electron transport chain".to_string()
+            )]
+        );
+
+        // remove(note, Some("ocr")) clears the row AND its segments.
+        e.remove(&[1], Some("ocr")).unwrap();
+        assert!(e.refs_for_source("ocr").unwrap().is_empty());
+        assert!(e.get_segments(1, "ocr", "diagram.png").unwrap().is_none());
+
+        // Meta keys round-trip (the recognizer fingerprint home).
+        assert!(e.meta_get("recognizer_fingerprint").unwrap().is_none());
+        e.meta_set("recognizer_fingerprint", "vision:1").unwrap();
+        assert_eq!(
+            e.meta_get("recognizer_fingerprint").unwrap().as_deref(),
+            Some("vision:1")
+        );
     }
 
     #[test]

@@ -449,3 +449,104 @@ class TestCooperativeReopen:
             await kernel.close()
 
         asyncio.run(flow())
+
+
+class _StubRecognizer:
+    """The RecognizerBackend wire contract: blocking recognize() returning
+    (text, confidence, segments_json) tuples; one result per item."""
+
+    def __init__(self, fingerprint: str = "stub:v1") -> None:
+        self._fingerprint = fingerprint
+        self.calls: list[int] = []
+
+    def recognize(self, items: list[bytes]) -> list[tuple[str, float, str]]:
+        self.calls.append(len(items))
+        out = []
+        for data in items:
+            text = data.decode("utf-8", errors="replace")
+            segments = json.dumps(
+                [{"text": text, "confidence": 0.92, "bbox": [0.0, 0.0, 1.0, 0.2]}]
+            )
+            out.append((text, 0.92, segments))
+        return out
+
+    def model_fingerprint(self) -> str:
+        return self._fingerprint
+
+
+class TestRecognition:
+    """The #228 pipeline through the binding: the asyncio dispatch (loop →
+    thread pool → oneshot), the bounded sweep, and both consumers."""
+
+    def test_sweep_feeds_lexical_and_vector_consumers(self, tmp_path) -> None:
+        async def flow():
+            backend = _Backend()
+            kernel = await _open(tmp_path, backend)
+            await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+
+            await kernel.upsert_notes(
+                [(basic, 1, ['See <img src="cycle.png">', "back"], [])], "error"
+            )
+
+            media = {"cycle.png": b"the citric acid cycle spins in the matrix"}
+            recognizer = _StubRecognizer()
+            kernel.attach_recognizer(
+                shrike_native.Recognizer.capture(recognizer),
+                media.get,
+                lambda name: name in media,
+            )
+
+            report = json.loads(await kernel.recognize_pending(10))
+            assert report["status"] == "ran"
+            assert report["stored"] == 1
+            assert recognizer.calls == [1]
+
+            # Lexical: the phrase lives only inside the image.
+            hits = await kernel.search("citric acid", 5)
+            assert hits, "OCR text is lexically searchable"
+            # Idempotent: nothing pending on the second sweep.
+            again = json.loads(await kernel.recognize_pending(10))
+            assert again["status"] == "idle"
+            assert recognizer.calls == [1], "no re-recognition"
+
+            await kernel.close()
+
+        asyncio.run(flow())
+
+    def test_fingerprint_change_invalidates(self, tmp_path) -> None:
+        async def flow():
+            backend = _Backend()
+            kernel = await _open(tmp_path, backend)
+            await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            await kernel.upsert_notes([(basic, 1, ['Img <img src="a.png">', "b"], [])], "error")
+            media = {"a.png": b"recognized by engine version one"}
+
+            first = _StubRecognizer("engine:v1")
+            kernel.attach_recognizer(
+                shrike_native.Recognizer.capture(first), media.get, lambda n: n in media
+            )
+            assert json.loads(await kernel.recognize_pending(10))["stored"] == 1
+
+            # Same engine re-attached: nothing to do.
+            kernel.attach_recognizer(
+                shrike_native.Recognizer.capture(first), media.get, lambda n: n in media
+            )
+            assert json.loads(await kernel.recognize_pending(10))["status"] == "idle"
+
+            # A NEW engine fingerprint invalidates and re-recognizes.
+            second = _StubRecognizer("engine:v2")
+            kernel.attach_recognizer(
+                shrike_native.Recognizer.capture(second), media.get, lambda n: n in media
+            )
+            rerun = json.loads(await kernel.recognize_pending(10))
+            assert rerun["status"] == "ran"
+            assert rerun["stored"] == 1
+            assert second.calls == [1]
+
+            await kernel.close()
+
+        asyncio.run(flow())
