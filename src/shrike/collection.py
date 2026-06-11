@@ -191,12 +191,50 @@ class CollectionWrapper:
         self._on_acquire = on_acquire
         self._open_flag = False
         self._release_handle: asyncio.TimerHandle | None = None
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shrike-collection")
+        # Standalone mode (tests, library use): the wrapper owns the worker
+        # thread. The server uses `over_kernel` instead (#332 S3d-2), where the
+        # kernel's injected executor is the one serialization domain.
+        self._kernel: Any | None = None
+        self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="shrike-collection"
+        )
         # Open on the worker thread so the lifecycle is owned by the same thread
         # that orders every subsequent operation. (Cooperative mode opens at
         # boot too; the idle-release lifecycle takes over afterwards.)
         self._executor.submit(self._open).result()
         atexit.register(self.close)
+
+    @classmethod
+    def over_kernel(
+        cls,
+        kernel: Any,
+        path: str,
+        *,
+        cooperative: bool = False,
+        hold_seconds: float = DEFAULT_LOCK_HOLD,
+    ) -> CollectionWrapper:
+        """The server's mode (#332 S3d-2): wrap the kernel's OWN collection.
+
+        ``core`` is the kernel's Arc-shared ``core_handle()`` and every op runs
+        as one ``kernel.run_job`` on the kernel's injected executor — the same
+        serialization domain the kernel's Rust ops use, so harness direct ops
+        and kernel ops are ordered together. No thread is owned here;
+        ``run_sync``/``release_now`` are unsupported (loop-free phases don't
+        exist in this mode — assembly happens on the loop).
+        """
+        self = cls.__new__(cls)
+        self._path = os.path.abspath(path)
+        self._closed = False
+        self._cooperative = cooperative
+        self._hold = hold_seconds
+        self._on_acquire = None
+        self._open_flag = True
+        self._release_handle = None
+        self._kernel = kernel
+        self._executor = None
+        self.core = kernel.core_handle()
+        atexit.register(self.close)
+        return self
 
     def _open(self) -> None:
         logger.debug("Opening collection at %s", self._path)
@@ -268,6 +306,12 @@ class CollectionWrapper:
         """
         loop = asyncio.get_running_loop()
         try:
+            if self._kernel is not None:
+                # Kernel mode: ONE serialized job on the kernel's executor —
+                # the same domain its own Rust ops run under (re-acquire +
+                # busy mapping + acquire hook included, inside the job).
+                return await self._kernel.run_job(lambda: self._locked(fn))  # type: ignore[no-any-return]
+            assert self._executor is not None
             return await loop.run_in_executor(self._executor, lambda: self._locked(fn))
         finally:
             if self._cooperative and not self._closed:
@@ -280,8 +324,11 @@ class CollectionWrapper:
         loop and so cannot ``await``. Still routes through the worker thread
         (re-acquiring first if released), preserving the single-owner ordering.
         No idle-release is armed here — there is no loop; the next async op or
-        an explicit ``release_now`` handles release.
+        an explicit ``release_now`` handles release. Standalone mode only: in
+        kernel mode assembly runs on the loop, so loop-free phases don't exist.
         """
+        if self._executor is None:
+            raise RuntimeError("run_sync is unsupported in kernel mode; await run() instead")
         return self._executor.submit(lambda: self._locked(fn)).result()
 
     # -- cooperative idle-release (#64) --------------------------------------
@@ -294,10 +341,16 @@ class CollectionWrapper:
 
     def _fire_release(self) -> None:
         self._release_handle = None
-        # Release on the worker thread; fire-and-forget so the loop never blocks.
-        # A re-acquire racing this is safe — _release no-ops if already re-opened
-        # and _locked re-opens before any access.
-        self._executor.submit(self._release)
+        # Release on the worker/executor; fire-and-forget so the loop never
+        # blocks. A re-acquire racing this is safe — _release no-ops if already
+        # re-opened and _locked re-opens before any access.
+        if self._kernel is not None:
+            # Loop callback context: a running loop exists, so the job
+            # schedules; the returned future is deliberately dropped.
+            self._kernel.run_job(self._release)
+        else:
+            assert self._executor is not None
+            self._executor.submit(self._release)
 
     def _release(self) -> None:
         if not self._open_flag or self._closed:
@@ -312,7 +365,10 @@ class CollectionWrapper:
 
         For the boot path (release after the initial drift check so a
         never-touched idle daemon doesn't hold the lock) and tests.
+        Standalone mode only; kernel mode releases via ``kernel.release()``.
         """
+        if self._executor is None:
+            raise RuntimeError("release_now is unsupported in kernel mode")
         self._executor.submit(self._release).result()
 
     async def reopen(self) -> None:
@@ -342,6 +398,10 @@ class CollectionWrapper:
         if self._release_handle is not None:
             self._release_handle.cancel()
             self._release_handle = None
+        if self._executor is None:
+            # Kernel mode: the kernel owns the collection — its close()
+            # (driven by the server's shutdown path) closes the core.
+            return
         logger.debug("Closing collection")
         with contextlib.suppress(Exception):
             self._executor.submit(self.core.close).result()

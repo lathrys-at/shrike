@@ -373,3 +373,40 @@ class TestNamedUpsert:
             await kernel.close()
 
         asyncio.run(flow())
+
+
+class TestWrapperOverKernel:
+    def test_wrapper_ops_serialize_through_the_kernel(self, tmp_path) -> None:
+        from shrike.collection import CollectionWrapper
+
+        async def flow():
+            kernel = await shrike_native.async_kernel_open(
+                str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
+            )
+            wrapper = CollectionWrapper.over_kernel(kernel, str(tmp_path / "collection.anki2"))
+            # The wrapper's async surface rides run_job over the shared core.
+            assert await wrapper.col_mod() >= 0
+            notes = await wrapper.upsert_notes(
+                [
+                    {
+                        "note_type": "Basic",
+                        "deck": "Default",
+                        "fields": {"Front": "via wrapper", "Back": "b"},
+                    }
+                ]
+            )
+            assert notes[0]["status"] == "created"
+            # The kernel sees the same collection (one shared core).
+            assert await kernel.col_mod() >= 0
+
+            # Loop-free phases don't exist in kernel mode.
+            with pytest.raises(RuntimeError, match="kernel mode"):
+                wrapper.run_sync(lambda c: c.col_mod())
+            with pytest.raises(RuntimeError, match="kernel mode"):
+                wrapper.release_now()
+
+            wrapper.close()  # must NOT close the kernel's core
+            assert await kernel.col_mod() >= 0
+            await kernel.close()
+
+        asyncio.run(flow())
