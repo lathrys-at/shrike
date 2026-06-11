@@ -79,3 +79,31 @@ class TestBusyAcquire:
                 await w.run(lambda c: len(c.find_notes("deck:*")))
         finally:
             w.close()
+
+
+class TestKernelBusyNormalization:
+    """A kernel-routed op's NativeBusyError normalizes to the typed busy
+    surface in _safe_tool (the #65 contract: coded message, WARNING, no
+    traceback) — found by the post-series review."""
+
+    def test_native_busy_normalizes_through_safe_tool(self, caplog):
+        import logging
+
+        import pytest
+        import shrike_native
+
+        from shrike.collection import CollectionBusyError
+        from shrike.mcp_adapter import _safe_tool
+        from shrike.schemas import COLLECTION_BUSY_CODE
+
+        @_safe_tool
+        async def kernel_op() -> None:
+            raise shrike_native.NativeBusyError("CollectionBusy: file held")
+
+        import asyncio
+
+        with caplog.at_level(logging.WARNING, logger="shrike.tools"):
+            with pytest.raises(CollectionBusyError) as exc:
+                asyncio.run(kernel_op())
+        assert COLLECTION_BUSY_CODE in str(exc.value)
+        assert not any(r.exc_info for r in caplog.records), "busy must not traceback"

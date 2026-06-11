@@ -20,6 +20,7 @@ import logging
 import time
 from typing import Any
 
+import shrike_native
 from mcp.server.fastmcp import FastMCP
 
 from shrike.actions import ActionDef, ToolInputError, _call_outcome
@@ -93,6 +94,13 @@ def _safe_tool(fn: Any) -> Any:
                 # collection. Surface the coded message (client maps it), no trace.
                 logger.warning("%s in %s", e, fn.__name__)
                 raise
+            except shrike_native.NativeBusyError as e:
+                # The same contention, surfaced by a kernel-routed op (the
+                # kernel's ensure_open hit a held file): normalize to the
+                # typed busy surface so the client's retry contract holds.
+                busy = CollectionBusyError()
+                logger.warning("%s in %s", busy, fn.__name__)
+                raise busy from e
             except Exception:
                 logger.exception("Unhandled error in %s", fn.__name__)
                 raise
@@ -114,6 +122,10 @@ def _safe_tool(fn: Any) -> Any:
         except CollectionBusyError as e:
             logger.warning("%s in %s", e, fn.__name__)
             raise
+        except shrike_native.NativeBusyError as e:
+            busy = CollectionBusyError()
+            logger.warning("%s in %s", busy, fn.__name__)
+            raise busy from e
         except Exception:
             logger.exception("Unhandled error in %s", fn.__name__)
             raise
