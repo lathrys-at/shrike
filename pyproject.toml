@@ -40,7 +40,6 @@ dependencies = [
     "platformdirs>=4.0",
     "pyyaml>=6.0",
     "rich>=13.0",
-    "usearch>=2.12",
     "numpy>=1.26",
 ]
 
@@ -77,6 +76,9 @@ dev = [
     # The pip anki package is the TEST ORACLE only since the #278 cutover
     # (subprocess fixtures + parity comparisons); the runtime is native.
     "anki>=25.0",
+    # usearch-python is test-only since the #278 cutover: the suite uses it to
+    # author pre-#201a (v1) index layouts; the runtime engine is shrike-index.
+    "usearch>=2.12",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
@@ -125,20 +127,12 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 check_untyped_defs = true
 
+# The native extension is built by scripts/build-native.sh (or ships as the
+# shrike-native wheel). Where it IS installed its .pyi stubs apply (and
+# stubtest gates them); on a stub-less environment (CI's lint lane) mypy must
+# not fail on the import.
 [[tool.mypy.overrides]]
-module = ["anki.*"]
-ignore_missing_imports = true
-
-# The native extension is an optional install (built by scripts/build-native.sh
-# or the shrike-native wheel); the facades import it lazily. Where it IS
-# installed its .pyi stubs apply (and stubtest gates them); where it isn't,
-# mypy must not fail on the lazy import.
-[[tool.mypy.overrides]]
-module = ["shrike_native", "shrike_native.*"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["usearch.*"]
+module = ["shrike_native"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

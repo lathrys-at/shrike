@@ -42,7 +42,6 @@ from shrike.embedding_base import (
 # SEARCH_OVERFETCH is re-exported for compatibility.
 from shrike.index_engine import (
     SEARCH_OVERFETCH,
-    UsearchIndexEngine,
     make_index_engine,
     modality_file_paths,
 )
@@ -58,7 +57,6 @@ __all__ = [
     "IndexSaver",
     "IndexState",
     "NoteEmbedInput",
-    "UsearchIndexEngine",
     "VectorIndex",
     "activation_floor",
 ]
@@ -153,7 +151,7 @@ class VectorIndex:
         self._image_exists_fn: ImageExists | None = None
         # The storage engine (#267): per-modality USearch sub-indexes, dedup, file persistence,
         # calibration. The orchestrator (this class) holds policy and delegates storage to it.
-        # Python by default; the native engine (#273) when SHRIKE_NATIVE_INDEX is set.
+        # Native (shrike-index, #273) — unconditional since the #278 cutover.
         self._engine = make_index_engine()
         self._col_mod: int | None = None
         self._model_id: str | None = None

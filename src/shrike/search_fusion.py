@@ -23,7 +23,6 @@ This module is pure: rankings of ints in, fused order out. No embedding / index 
 
 from __future__ import annotations
 
-import os
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -160,21 +159,9 @@ class NativeSearchPipeline:
         return [FusedHit(nid, score, dict(signals)) for nid, score, signals in raw]
 
 
-def native_compute_requested() -> bool:
-    """Whether the operator opted into the native fused pipeline (#274 bake flag)."""
-    return os.environ.get("SHRIKE_NATIVE_COMPUTE", "").lower() in ("1", "true", "yes")
-
-
 def make_search_pipeline() -> SearchPipeline:
-    """Build the configured pipeline: native when requested and installed, else reference."""
-    if native_compute_requested():
-        try:
-            return NativeSearchPipeline()
-        except ImportError:
-            import logging
-
-            logging.getLogger("shrike.tools").warning(
-                "SHRIKE_NATIVE_COMPUTE set but the shrike-native extension is not "
-                "installed; using the reference search pipeline."
-            )
-    return ReferenceSearchPipeline()
+    """The native fused pipeline — unconditional since the #278 cutover (the
+    SHRIKE_NATIVE_COMPUTE bake flag retired with it; the pure-Python rrf_fuse
+    stays in this module as the documented reference the parity tests pin
+    against the native fusion)."""
+    return NativeSearchPipeline()

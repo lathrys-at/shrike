@@ -16,6 +16,7 @@ import pytest
 
 from shrike.search_fusion import (
     RRF_K,
+    NativeSearchPipeline,
     ReferenceSearchPipeline,
     SearchPipeline,
     make_search_pipeline,
@@ -44,9 +45,9 @@ class TestProtocol:
     def test_reference_satisfies_protocol(self) -> None:
         assert isinstance(ReferenceSearchPipeline(), SearchPipeline)
 
-    def test_factory_defaults_to_reference(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("SHRIKE_NATIVE_COMPUTE", raising=False)
-        assert isinstance(make_search_pipeline(), ReferenceSearchPipeline)
+    @requires_shrike_native
+    def test_factory_builds_the_native_pipeline(self) -> None:
+        assert isinstance(make_search_pipeline(), NativeSearchPipeline)
 
     def test_reference_matches_bare_rrf_fuse(self) -> None:
         rankings = {"text": [1, 2, 3], "exact": [3]}
@@ -58,19 +59,9 @@ class TestProtocol:
 @requires_shrike_native
 class TestNativeParity:
     def test_native_satisfies_protocol(self) -> None:
-        from shrike.search_fusion import NativeSearchPipeline
-
         assert isinstance(NativeSearchPipeline(), SearchPipeline)
 
-    def test_factory_selects_native(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from shrike.search_fusion import NativeSearchPipeline
-
-        monkeypatch.setenv("SHRIKE_NATIVE_COMPUTE", "1")
-        assert isinstance(make_search_pipeline(), NativeSearchPipeline)
-
     def test_property_native_equals_reference(self) -> None:
-        from shrike.search_fusion import NativeSearchPipeline
-
         reference = ReferenceSearchPipeline()
         native = NativeSearchPipeline()
         rng = random.Random(0xC0FFEE)
@@ -86,8 +77,6 @@ class TestNativeParity:
                 assert r.signals == n.signals, f"case {case}: provenance differs"
 
     def test_custom_k_carries(self) -> None:
-        from shrike.search_fusion import NativeSearchPipeline
-
         rankings = {"text": [1, 2], "exact": [2]}
         ref = ReferenceSearchPipeline().fuse(rankings, k=7)
         nat = NativeSearchPipeline().fuse(rankings, k=7)

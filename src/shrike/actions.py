@@ -146,9 +146,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         actions.append(ActionDef(name=fn.__name__, impl=fn, doc=fn.__doc__))
         return fn
 
-    # The fusion seam (#274): the reference (pure-Python rrf_fuse) pipeline by
-    # default; the native one when SHRIKE_NATIVE_COMPUTE is set. One instance
-    # per registry build, closed over by search_notes.
+    # The fusion seam (#274): the native pipeline, unconditional since the
+    # #278 cutover. One instance per registry build, closed over by
+    # search_notes.
     pipeline = make_search_pipeline()
 
     # Since the cutover the note-type ops run in the native core; its input

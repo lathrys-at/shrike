@@ -1,10 +1,11 @@
-"""Native derived-text engine (#281): cross-engine interop + always-available FTS5.
+# NOTE (#278 cutover): the Python-engine degradation + cross-engine file-compat
+# tests retired with the Python engines; the native engine is the only path.
+"""Native derived-text engine (#281): on-disk round-trip + always-available FTS5.
 
-The behavioural parity gate is test_derived.py run with SHRIKE_NATIVE_DERIVED=1
-(it passes unmodified — CI's gated native lane). This file pins the rest: a
-``shrike.db`` written by either engine opens and searches identically under the
-other (plain SQLite file compatibility), and the native path never needs the
-FTS5 availability probe.
+The behavioural gate is test_derived.py, which runs entirely on the native
+engine since the #278 cutover. This file pins the rest: a ``shrike.db`` written
+by one instance opens and searches identically under a fresh one (plain SQLite
+file compatibility), and the bundled-SQLite build never fails the FTS5 probe.
 """
 
 from __future__ import annotations
@@ -39,57 +40,32 @@ def _assert_store_serves(store: DerivedTextStore) -> None:
 
 @requires_shrike_native
 class TestNativeDerivedEngine:
-    def test_native_engine_selected_and_serves(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_native_engine_selected_and_serves(self, tmp_path: Path) -> None:
         from shrike.derived import NativeDerivedEngine
 
-        monkeypatch.setenv("SHRIKE_NATIVE_DERIVED", "1")
         store = DerivedTextStore(path=tmp_path / "shrike.db")
         assert isinstance(store._engine, NativeDerivedEngine)
         store.build(ROWS, col_mod=100)
         _assert_store_serves(store)
         store.close()
 
-    def test_python_written_db_opens_under_native(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_on_disk_db_round_trips(self, tmp_path: Path) -> None:
         store = DerivedTextStore(path=tmp_path / "shrike.db")
         store.build(ROWS, col_mod=100)
         store.close()
 
-        monkeypatch.setenv("SHRIKE_NATIVE_DERIVED", "1")
         reopened = DerivedTextStore(path=tmp_path / "shrike.db")
-        assert reopened.col_mod == 100  # no rebuild needed across the engine switch
+        assert reopened.col_mod == 100  # no rebuild needed across a reopen
         assert reopened.check_drift(100) is False
         _assert_store_serves(reopened)
         reopened.close()
 
-    def test_native_written_db_opens_under_python(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("SHRIKE_NATIVE_DERIVED", "1")
-        store = DerivedTextStore(path=tmp_path / "shrike.db")
-        store.build(ROWS, col_mod=42)
-        store.close()
-
-        monkeypatch.delenv("SHRIKE_NATIVE_DERIVED")
-        from shrike.derived import SqliteDerivedEngine
-
-        reopened = DerivedTextStore(path=tmp_path / "shrike.db")
-        assert isinstance(reopened._engine, SqliteDerivedEngine)
-        assert reopened.col_mod == 42
-        assert reopened.check_drift(42) is False
-        _assert_store_serves(reopened)
-        reopened.close()
-
-    def test_probe_passes_on_native_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_probe_passes_on_native_path(self) -> None:
         # Under the default (bundled-SQLite) build the native probe must pass —
         # the #281 guarantee. A platform-linked build (#300) probes the host
         # library instead; this dev/CI build is the bundled one.
         import shrike_native
 
-        monkeypatch.setenv("SHRIKE_NATIVE_DERIVED", "1")
         assert DerivedTextStore._probe_fts5() is True
         assert shrike_native.derived_fts5_probe() is True
 
@@ -100,18 +76,3 @@ class TestNativeDerivedEngine:
 
         if shrike_native.derived_sqlite_bundled():
             assert shrike_native.derived_fts5_probe() is True
-
-    def test_missing_extension_degrades_to_stdlib_engine(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from shrike import derived
-
-        monkeypatch.setenv("SHRIKE_NATIVE_DERIVED", "1")
-        monkeypatch.setattr(
-            derived.NativeDerivedEngine,
-            "__init__",
-            lambda self, path: (_ for _ in ()).throw(ImportError("not installed")),
-        )
-        store = DerivedTextStore(path=tmp_path / "shrike.db")
-        assert isinstance(store._engine, derived.SqliteDerivedEngine)
-        store.close()

@@ -56,7 +56,6 @@ py_wheel(
     license = "AGPL-3.0-or-later",
     python_requires = ">=3.12",
     requires = [
-        "anki>=25.0",
         "mcp>=1.20",
         "click>=8.0",
         "filelock>=3.0",
@@ -64,7 +63,6 @@ py_wheel(
         "platformdirs>=4.0",
         "pyyaml>=6.0",
         "rich>=13.0",
-        "usearch>=2.12",
         "numpy>=1.26",
     ],
     # Mirrors pyproject's [project.optional-dependencies] exactly (incl. `dev`, which
@@ -87,6 +85,8 @@ py_wheel(
             "pillow>=10",
         ],
         "dev": [
+            "anki>=25.0",
+            "usearch>=2.12",
             "pytest>=8.0",
             "pytest-asyncio>=0.24",
             "pytest-cov>=5.0",

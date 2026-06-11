@@ -43,14 +43,14 @@ class TestFusedIndexParity:
         backend = OnnxBackend(model=str(onnx_model), native=True)
         backend.start()
         try:
-            monkeypatch.setenv("SHRIKE_NATIVE_INDEX", "1")
             fused_idx = VectorIndex(tmp_path / "fused", backend=backend)
             assert fused_idx._fused_text_handles() is not None  # the fused path is live
             fused_idx.rebuild(inputs, col_mod=1, model_id="m")
 
-            monkeypatch.delenv("SHRIKE_NATIVE_INDEX")
+            # Same backend + engine, fused composition forced off: the per-side
+            # paths (vectors crossing the FFI) must produce the identical index.
             plain_idx = VectorIndex(tmp_path / "plain", backend=backend)
-            assert plain_idx._fused_text_handles() is None
+            monkeypatch.setattr(plain_idx, "_fused_text_handles", lambda: None)
             plain_idx.rebuild(inputs, col_mod=1, model_id="m")
 
             for query in ("rate of change calculus", "physics of motion"):
@@ -67,13 +67,9 @@ class TestFusedIndexParity:
 @requires_shrike_native
 class TestFullyNativeServer:
     @pytest.fixture(scope="class")
-    def srv(self, server_factory, onnx_model, request: pytest.FixtureRequest) -> ServerInfo:
-        # The spawned server inherits the env: all three native bake flags on.
-        mp = pytest.MonkeyPatch()
-        request.addfinalizer(mp.undo)
-        mp.setenv("SHRIKE_NATIVE_INDEX", "1")
-        mp.setenv("SHRIKE_NATIVE_COMPUTE", "1")
-        mp.setenv("SHRIKE_NATIVE_DERIVED", "1")
+    def srv(self, server_factory, onnx_model) -> ServerInfo:
+        # Index/derived/compute are native unconditionally since the #278
+        # cutover; the onnx-rs backend makes the server native end to end.
         server = server_factory(
             "fully-native",
             embedding_model=str(onnx_model),

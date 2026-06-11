@@ -24,7 +24,6 @@ py_library(
         requirement("platformdirs"),
         requirement("pyyaml"),
         requirement("rich"),
-        requirement("usearch"),
         requirement("numpy"),
     ],
 )
