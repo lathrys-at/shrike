@@ -109,6 +109,17 @@ impl LoopTimerHost {
     }
 }
 
+impl LoopTimerHost {
+    /// A non-pyclass twin over the same loop — for handing an owned
+    /// `Arc<dyn TimerHost>` to kernel constructors (a pyclass instance
+    /// itself lives behind `Py<...>` and can't be `Arc`'d directly).
+    pub(crate) fn sibling(&self, py: Python<'_>) -> LoopTimerHost {
+        LoopTimerHost {
+            event_loop: self.event_loop.clone_ref(py),
+        }
+    }
+}
+
 impl TimerHost for LoopTimerHost {
     fn schedule(&self, delay_secs: f64, job: Job) -> Box<dyn TimerCancel> {
         let state = Arc::new(Mutex::new(TimerState::default()));

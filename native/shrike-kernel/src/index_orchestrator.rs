@@ -107,17 +107,17 @@ struct Shared {
     /// note_id → embedding-text fingerprint; `None` = no per-note state (an
     /// old or never-built index) → the next reconcile full-rebuilds.
     note_hashes: Option<BTreeMap<i64, String>>,
-    /// Populated by the embed-coupled ops (the S3c-3 slice); read by status().
-    #[allow(dead_code)]
+    /// Populated by the embed-coupled ops; read by status().
     build_progress: (u64, u64),
-    #[allow(dead_code)]
     error: Option<String>,
 }
 
-/// The embed-free orchestration core over one engine + its sidecars.
+/// The embed-free orchestration core over one engine + its sidecars. The
+/// engine is `Arc`-shared: the harness's search surface holds the same engine
+/// the orchestrator maintains (one set of vectors, two roles).
 pub struct IndexOrchestrator {
     pub(crate) dir: PathBuf,
-    engine: MultiModalIndex,
+    engine: Arc<MultiModalIndex>,
     shared: Mutex<Shared>,
 }
 
@@ -126,7 +126,7 @@ impl IndexOrchestrator {
     /// (the Python `_load` semantics: corrupt meta → unloaded; corrupt/missing
     /// hashes → `None` (rebuild-on-reconcile); engine restore failure clears
     /// both so drift forces a full rebuild).
-    pub fn open(dir: impl Into<PathBuf>, engine: MultiModalIndex) -> Self {
+    pub fn open(dir: impl Into<PathBuf>, engine: Arc<MultiModalIndex>) -> Self {
         let dir = dir.into();
         let mut shared = Shared {
             state: OrchestratorState::Unavailable,
@@ -253,6 +253,31 @@ impl IndexOrchestrator {
 
     pub fn set_col_mod(&self, value: i64) {
         self.shared.lock().expect("orchestrator poisoned").col_mod = Some(value);
+    }
+
+    pub fn model_id(&self) -> Option<String> {
+        self.shared
+            .lock()
+            .expect("orchestrator poisoned")
+            .model_id
+            .clone()
+    }
+
+    pub fn build_progress(&self) -> (u64, u64) {
+        self.shared
+            .lock()
+            .expect("orchestrator poisoned")
+            .build_progress
+    }
+
+    /// True when per-note fingerprints exist (an incremental reconcile is
+    /// possible; absent → the next drift handles via full rebuild).
+    pub fn has_note_hashes(&self) -> bool {
+        self.shared
+            .lock()
+            .expect("orchestrator poisoned")
+            .note_hashes
+            .is_some()
     }
 
     /// Persist the engine files + both sidecars (the Python `save` semantics:
@@ -434,7 +459,7 @@ mod tests {
             std::process::id(),
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        let engine = MultiModalIndex::new(vec!["text".to_owned()]).unwrap();
+        let engine = Arc::new(MultiModalIndex::new(vec!["text".to_owned()]).unwrap());
         Arc::new(IndexOrchestrator::open(dir, engine))
     }
 
@@ -855,7 +880,8 @@ mod op_tests {
             std::process::id(),
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        let engine = MultiModalIndex::new(vec![TEXT.to_owned(), "image".to_owned()]).unwrap();
+        let engine =
+            Arc::new(MultiModalIndex::new(vec![TEXT.to_owned(), "image".to_owned()]).unwrap());
         Arc::new(IndexOrchestrator::open(dir, engine))
     }
 
@@ -940,7 +966,8 @@ mod op_tests {
         let dir = orch.dir.clone();
         drop(orch);
 
-        let engine = MultiModalIndex::new(vec![TEXT.to_owned(), "image".to_owned()]).unwrap();
+        let engine =
+            Arc::new(MultiModalIndex::new(vec![TEXT.to_owned(), "image".to_owned()]).unwrap());
         let reopened = IndexOrchestrator::open(dir, engine);
         assert_eq!(reopened.engine().size(), 2);
         assert_eq!(reopened.col_mod(), Some(7));
