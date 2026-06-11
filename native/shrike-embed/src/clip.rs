@@ -14,6 +14,7 @@
 use std::sync::Mutex;
 
 use image::imageops::FilterType;
+use shrike_engine_api::MediaItem;
 use shrike_ffi::{NativeError, NativeResult};
 use tokenizers::Tokenizer;
 
@@ -153,15 +154,17 @@ impl ClipEmbedder {
         Ok(vectors.rows().into_iter().map(|r| r.to_vec()).collect())
     }
 
-    /// Embed one chunk of images, each given as encoded bytes (PNG/JPEG/...).
-    pub fn embed_image_chunk(&self, images: &[Vec<u8>]) -> NativeResult<Vec<Vec<f32>>> {
+    /// Embed one chunk of images, each an encoded [`MediaItem`] (PNG/JPEG/…).
+    /// The mime hint is unused today — the decoder sniffs magic bytes — but
+    /// the typed item keeps the signature aligned with the engine contract.
+    pub fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>> {
         if images.is_empty() {
             return Ok(Vec::new());
         }
         let c = self.crop as usize;
         let mut pixels = Vec::with_capacity(images.len() * 3 * c * c);
-        for bytes in images {
-            pixels.extend(self.preprocess(bytes)?);
+        for item in images {
+            pixels.extend(self.preprocess(&item.bytes)?);
         }
         let tensor = ort::value::Tensor::from_array(([images.len(), 3, c, c], pixels))
             .map_err(|e| NativeError::internal(format!("pixel tensor: {e}")))?;
@@ -179,6 +182,12 @@ impl ClipEmbedder {
         let vectors = l2_normalize_rows(vectors);
         *self.dim.lock().expect("dim lock poisoned") = Some(vectors.ncols());
         Ok(vectors.rows().into_iter().map(|r| r.to_vec()).collect())
+    }
+
+    /// Internal bytes-shaped entry, kept for the binding's probe path.
+    pub fn embed_image_bytes_chunk(&self, images: Vec<Vec<u8>>) -> NativeResult<Vec<Vec<f32>>> {
+        let items: Vec<MediaItem> = images.into_iter().map(MediaItem::untyped).collect();
+        self.embed_image_chunk(&items)
     }
 
     /// CLIP preprocessing → CHW f32: decode, resize shortest edge, center-crop,
@@ -214,5 +223,26 @@ impl ClipEmbedder {
             }
         }
         Ok(chw)
+    }
+}
+
+/// The engine contract (#342, route 1): the dual encoder is one engine
+/// implementing BOTH compute traits — text and image chunks project into the
+/// shared CLIP space. Identity/batch policy come from the host (`WithPolicy`),
+/// execution from an adapter lane; `safe_batch` stays the probed-by-host
+/// default, exactly as for [`crate::TextEmbedder`].
+impl shrike_engine_api::EmbedText for ClipEmbedder {
+    fn embed_chunk(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>> {
+        self.embed_text_chunk(texts)
+    }
+
+    fn dim(&self) -> Option<usize> {
+        ClipEmbedder::dim(self)
+    }
+}
+
+impl shrike_engine_api::EmbedImages for ClipEmbedder {
+    fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>> {
+        ClipEmbedder::embed_image_chunk(self, images)
     }
 }

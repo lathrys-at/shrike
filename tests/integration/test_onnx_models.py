@@ -199,3 +199,59 @@ class TestOnnxRealFp32:
         texts = ["one", "two", "three", "four", "five"]
         assert np.array_equal(np.array(capped.embed_texts(texts)), np.array(be.embed_texts(texts)))
         capped.stop()
+
+
+@requires_onnxruntime
+class TestNativeAttach:
+    """#342 P2: the native-direct kernel attach — no Python on the embed path.
+
+    The facade keeps construction (file/provider resolution, the probe,
+    fingerprint assembly); ``native_embedder()`` hands the kernel a fully
+    native composition. The pin: a counter on the facade's ``embed_texts`` /
+    ``_embed_chunk`` proves a kernel upsert→index→search round trip embeds
+    real vectors while never re-entering the facade.
+    """
+
+    def test_kernel_embeds_never_enter_python(self, onnx_model: Path, tmp_path: Path) -> None:
+        import asyncio
+
+        import shrike_native
+
+        backend = OnnxBackend(model=str(onnx_model))
+        backend.start()
+        calls = {"embed_texts": 0, "_embed_chunk": 0}
+        for name in calls:
+            orig = getattr(backend, name)
+
+            def counting(texts: list[str], _orig=orig, _name=name) -> list[list[float]]:
+                calls[_name] += 1
+                return _orig(texts)
+
+            setattr(backend, name, counting)
+
+        async def flow() -> tuple[int | None, list]:
+            kernel = await shrike_native.async_kernel_open(
+                str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
+            )
+            handle = backend.native_embedder()
+            baseline = dict(calls)  # construction may probe; the HOT PATH may not
+            kernel.attach_embedder(handle)
+            await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            results = await kernel.upsert_notes(
+                [(basic, 1, ["mitochondria are the powerhouse of the cell", "ATP"], [])],
+                "error",
+            )
+            assert all(r[0] == "created" for r in results)
+            hits = await kernel.search("powerhouse organelle", 3)
+            ndim = kernel.engine_handle().ndim()
+            await kernel.close()
+            assert calls == baseline, f"kernel embeds re-entered the facade: {calls}"
+            return ndim, hits
+
+        ndim, hits = asyncio.run(flow())
+        backend.stop()
+        # Real vectors landed (the model's width) and semantic search ranks them.
+        assert ndim == _MINILM_NDIM
+        assert hits and any(s == "text" for s, _ in hits[0][2])

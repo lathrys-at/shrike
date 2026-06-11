@@ -326,6 +326,24 @@ class ClipBackend:
         prep = f"imgprep=rs{shrike_native.IMAGE_PREP_VERSION_RS}:textprep={EMBED_TEXT_VERSION}"
         return f"clip-rs:{tn}:{_sz(t)}:{vn}:{_sz(v)}:{prep}"
 
+    def native_embedder(self) -> Any:
+        """The kernel-slot handle (#342 P2): the dual encoder composed behind
+        the engine contract — ONE adapted instance serving both the text and
+        image halves, so kernel embeds (text, OCR re-embeds, image vectors)
+        never re-enter this facade. Must be called from a coroutine context
+        (it captures the running loop).
+        """
+        if not self.running:
+            raise RuntimeError("CLIP embedding backend is not running")
+        import shrike_native
+
+        return shrike_native.NativeEmbedder.from_clip(
+            self._native_engine,
+            fingerprint=self.model_fingerprint(),
+            dim=self.embedding_dim(),
+            safe_batch=self._effective_batch(self._safe_batch),
+        )
+
     def health(self) -> dict[str, Any]:
         return {
             "available": self.running,

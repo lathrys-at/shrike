@@ -405,7 +405,13 @@ class Harness:
         }
 
     def _attach(self, backend: EmbedderBackend) -> None:
-        embedder = shrike_native.PyEmbedder.capture(backend)
+        """Attach the backend to the kernel's embed slot (#342). A backend
+        exposing ``native_embedder()`` (the onnx/clip facades) hands over a
+        native composition — kernel embeds then never re-enter Python; any
+        other backend (llama until P4, custom/test backends) is captured
+        behind the PyEmbedder dispatch seam."""
+        native = getattr(backend, "native_embedder", None)
+        embedder = native() if callable(native) else shrike_native.PyEmbedder.capture(backend)
         self.kernel.attach_embedder(embedder, self._media_read, self._media_exists)
 
     def attach_recognizer(self, backend: Any) -> None:

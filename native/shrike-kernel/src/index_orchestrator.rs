@@ -641,18 +641,13 @@ impl IndexOrchestrator {
         let mut added = 0usize;
         for batch in inputs.chunks(BATCH_SIZE) {
             let texts: Vec<String> = batch.iter().map(|i| i.text.clone()).collect();
-            let vectors = embedder.embed(texts).await?;
-            let ndim = vectors.first().map(Vec::len).unwrap_or(0);
-            if ndim == 0 {
-                return Err(NativeError::internal("embedder returned empty vectors"));
-            }
             let keys: Vec<i64> = batch.iter().map(|i| i.note_id).collect();
 
-            // Image vectors, read + embedded lazily (only for notes being added).
+            // Image bytes, read lazily (only for notes being added) — keys
+            // built in lockstep with the items so they align with vectors.
             let mut image_keys: Vec<i64> = Vec::new();
-            let mut image_vectors: Vec<Vec<f32>> = Vec::new();
-            if let Some((image_embedder, resolver)) = images {
-                let mut items: Vec<MediaItem> = Vec::new();
+            let mut items: Vec<MediaItem> = Vec::new();
+            if let Some((_, resolver)) = images {
                 for input in batch {
                     for name in &input.image_names {
                         if let Some(data) = resolver.read(name) {
@@ -660,9 +655,6 @@ impl IndexOrchestrator {
                             items.push(MediaItem::from_named(name, data));
                         }
                     }
-                }
-                if !items.is_empty() {
-                    image_vectors = image_embedder.embed_images(items).await?;
                 }
             }
 
@@ -678,11 +670,35 @@ impl IndexOrchestrator {
                     ocr_texts.push(t.clone());
                 }
             }
-            let ocr_vectors: Vec<Vec<f32>> = if ocr_texts.is_empty() {
-                Vec::new()
-            } else {
-                embedder.embed(ocr_texts).await?
+
+            // The batch's engine work is independent — text, recognized-text,
+            // and image vectors share no ordering — so all futures are built
+            // BEFORE any await and joined. The kernel only states the
+            // independence; whether they truly overlap is the host's lane
+            // assignment (two engines on one GPU share a narrow lane, a
+            // remote engine gets a wide one).
+            let text_fut = embedder.embed(texts);
+            let ocr_fut = async {
+                if ocr_texts.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    embedder.embed(ocr_texts).await
+                }
             };
+            let image_fut = async {
+                match images {
+                    Some((image_embedder, _)) if !items.is_empty() => {
+                        image_embedder.embed_images(items).await
+                    }
+                    _ => Ok(Vec::new()),
+                }
+            };
+            let (vectors, ocr_vectors, image_vectors) =
+                futures::try_join!(text_fut, ocr_fut, image_fut)?;
+            let ndim = vectors.first().map(Vec::len).unwrap_or(0);
+            if ndim == 0 {
+                return Err(NativeError::internal("embedder returned empty vectors"));
+            }
 
             self.engine.ensure(TEXT, ndim)?;
             // Replace semantics: drop a re-added note's existing vectors first.
@@ -958,6 +974,98 @@ mod op_tests {
             image_names: vec![],
             ocr_texts: vec![],
         }
+    }
+
+    /// Event log for the overlap pin: (engine, edge) pairs in arrival order.
+    type Events = Arc<std::sync::Mutex<Vec<(&'static str, &'static str)>>>;
+
+    /// A thread-backed slow engine: compute starts when the future is BUILT
+    /// (the eager-adapter shape — `OnExecutor` submits at call time) and
+    /// completes through a oneshot ~50ms later, recording start/end edges.
+    struct SlowEngine {
+        name: &'static str,
+        events: Events,
+    }
+
+    impl SlowEngine {
+        fn run(&self, n: usize) -> BoxFuture<'static, NativeResult<Vec<Vec<f32>>>> {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            let (name, events) = (self.name, Arc::clone(&self.events));
+            events.lock().unwrap().push((name, "start"));
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                events.lock().unwrap().push((name, "end"));
+                let _ = tx.send(Ok(vec![vec![1.0, 0.0, 0.0, 0.0]; n]));
+            });
+            Box::pin(async move {
+                rx.await
+                    .map_err(|_| NativeError::internal("slow engine dropped"))?
+            })
+        }
+    }
+
+    impl Embedder for SlowEngine {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            self.run(texts.len())
+        }
+    }
+
+    impl ImageEmbedder for SlowEngine {
+        fn embed_images(
+            &self,
+            images: Vec<MediaItem>,
+        ) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            self.run(images.len())
+        }
+    }
+
+    struct AlwaysResolver;
+    impl ImageResolver for AlwaysResolver {
+        fn read(&self, _name: &str) -> Option<Vec<u8>> {
+            Some(vec![1, 2, 3])
+        }
+        fn exists(&self, _name: &str) -> bool {
+            true
+        }
+    }
+
+    /// The pipeline-parallelism pin (#342 P2): `add` builds the batch's text
+    /// and image engine futures BEFORE awaiting either, so two engines whose
+    /// compute runs off-thread overlap. The old text-then-image sequential
+    /// awaits would start the image engine only after the text engine
+    /// finished — the interleaving below would be impossible.
+    #[test]
+    fn batch_engine_futures_overlap() {
+        let events: Events = Arc::default();
+        let text = SlowEngine {
+            name: "text",
+            events: Arc::clone(&events),
+        };
+        let image = SlowEngine {
+            name: "image",
+            events: Arc::clone(&events),
+        };
+        let orch = temp_orch();
+        let mut one = input(1, "alpha");
+        one.image_names = vec!["a.png".to_owned()];
+        block_on(orch.add(&[one], &text, Some((&image, &AlwaysResolver)))).unwrap();
+
+        let log = events.lock().unwrap().clone();
+        let pos = |engine: &str, edge: &str| {
+            log.iter()
+                .position(|(n, e)| *n == engine && *e == edge)
+                .unwrap_or_else(|| panic!("missing {engine}:{edge} in {log:?}"))
+        };
+        assert!(
+            pos("image", "start") < pos("text", "end"),
+            "image embed must start while the text embed is in flight: {log:?}"
+        );
+        assert!(
+            pos("text", "start") < pos("image", "end"),
+            "text embed must start while the image embed is in flight: {log:?}"
+        );
+        // And both actually landed: a text vector + an image vector.
+        assert_eq!(orch.engine().size(), 2);
     }
 
     #[test]

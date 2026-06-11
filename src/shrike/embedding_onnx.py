@@ -337,6 +337,26 @@ class OnnxBackend:
             name, size = path.name, -1
         return f"onnx-rs:{name}:{size}:pool={self._pooling}:textprep={EMBED_TEXT_VERSION}"
 
+    def native_embedder(self) -> Any:
+        """The kernel-slot handle (#342 P2): the loaded engine composed behind
+        the engine contract (identity + probed batch policy + the asyncio
+        compute lane), so kernel embeds run native end-to-end and never
+        re-enter this facade. The facade keeps construction, the probe,
+        fingerprint assembly, and ``health()`` — ``embed_texts`` remains for
+        direct callers (the probe itself, tests). Must be called from a
+        coroutine context (it captures the running loop).
+        """
+        if not self.running:
+            raise RuntimeError("ONNX embedding backend is not running")
+        import shrike_native
+
+        return shrike_native.NativeEmbedder.from_onnx(
+            self._native_engine,
+            fingerprint=self.model_fingerprint(),
+            dim=self.embedding_dim(),
+            safe_batch=self._effective_batch(self._safe_batch),
+        )
+
     def health(self) -> dict[str, Any]:
         """Status dict for ``/status`` (carries at least ``available``)."""
         return {

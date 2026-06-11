@@ -31,6 +31,7 @@ mod asyncio_bridge;
 #[cfg(feature = "anki-core")]
 mod kernel_actions;
 mod kernel_index;
+mod native_embedder;
 mod py_embedder;
 mod py_recognizer;
 mod timer_host;
@@ -214,8 +215,16 @@ fn init_onnx_runtime(py: Python<'_>, dylib_path: String) -> PyResult<()> {
 /// dropping the object frees them (the facade's `stop()` just drops its
 /// reference).
 #[pyclass(frozen)]
-struct OnnxTextEmbedder {
-    inner: shrike_embed::TextEmbedder,
+pub(crate) struct OnnxTextEmbedder {
+    inner: std::sync::Arc<shrike_embed::TextEmbedder>,
+}
+
+impl OnnxTextEmbedder {
+    /// The loaded engine, shared — `NativeEmbedder` composes the kernel-slot
+    /// handle from the same instance the facade probed (#342 P2).
+    pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_embed::TextEmbedder> {
+        std::sync::Arc::clone(&self.inner)
+    }
 }
 
 #[pymethods]
@@ -243,7 +252,9 @@ impl OnnxTextEmbedder {
         let inner = py
             .detach(move || shrike_embed::TextEmbedder::load(cfg))
             .map_err(to_py_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: std::sync::Arc::new(inner),
+        })
     }
 
     /// Embed one chunk of texts as a single batch (one vector per input).
@@ -274,8 +285,15 @@ impl OnnxTextEmbedder {
 /// center-crop, normalize) runs crate-side via the `image` crate, with the
 /// whole pipeline GIL-released.
 #[pyclass(frozen)]
-struct ClipEmbedder {
-    inner: shrike_embed::ClipEmbedder,
+pub(crate) struct ClipEmbedder {
+    inner: std::sync::Arc<shrike_embed::ClipEmbedder>,
+}
+
+impl ClipEmbedder {
+    /// The loaded engine, shared (see [`OnnxTextEmbedder::engine_arc`]).
+    pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_embed::ClipEmbedder> {
+        std::sync::Arc::clone(&self.inner)
+    }
 }
 
 #[pymethods]
@@ -309,7 +327,9 @@ impl ClipEmbedder {
         let inner = py
             .detach(move || shrike_embed::ClipEmbedder::load(cfg))
             .map_err(to_py_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: std::sync::Arc::new(inner),
+        })
     }
 
     fn embed_text_chunk(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<Vec<f32>>> {
@@ -319,7 +339,7 @@ impl ClipEmbedder {
 
     /// Embed one chunk of images, each given as encoded bytes.
     fn embed_image_chunk(&self, py: Python<'_>, images: Vec<Vec<u8>>) -> PyResult<Vec<Vec<f32>>> {
-        py.detach(|| self.inner.embed_image_chunk(&images))
+        py.detach(|| self.inner.embed_image_bytes_chunk(images))
             .map_err(to_py_err)
     }
 
@@ -683,9 +703,11 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<worker_executor::WorkerExecutor>()?;
     m.add_class::<timer_host::LoopTimerHost>()?;
     m.add_class::<py_embedder::PyEmbedder>()?;
+    m.add_class::<native_embedder::NativeEmbedder>()?;
     m.add_class::<kernel_index::KernelIndex>()?;
     m.add_class::<kernel_index::KernelIndexSaver>()?;
     m.add_function(wrap_pyfunction!(py_embedder::embedder_probe, m)?)?;
+    m.add_function(wrap_pyfunction!(native_embedder::native_embedder_probe, m)?)?;
     m.add_function(wrap_pyfunction!(timer_host::timer_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;

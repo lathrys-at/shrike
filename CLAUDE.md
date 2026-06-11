@@ -568,8 +568,10 @@ pipelined rather than serial:
   review against the requirements on the ready PR — via a **subagent
   (prefer the latest Opus model)** — *before* labeling, so review findings
   never burn a CI re-run. Keep working while the review is in flight.
-- **Then label, then merge.** Apply `ci` once review findings are addressed;
-  while CI runs, proactively move on to the next step; merge on green.
+- **Then label, auto-merge, move on.** Apply `ci` once review findings are
+  addressed, and immediately set the PR to merge when green
+  (`gh pr merge --auto --squash`) — don't poll for green; while CI runs,
+  proactively move on to the next step.
 - **Subagents assist with research, orientation, and review — never
   authorship.** All code and tests are developed by the agent itself; use
   subagents wherever they speed up or improve the work (codebase orientation,

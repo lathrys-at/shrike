@@ -77,3 +77,50 @@ class TestClipVisionPath:
         v_pil = np.array(be.embed_images([pil])[0], dtype=np.float32)
         np.testing.assert_array_equal(v_bytes, v_path)
         np.testing.assert_allclose(v_bytes, v_pil, atol=1e-5)
+
+    def test_kernel_native_attach_embeds_images(self, be, tmp_path: Path) -> None:
+        """#342 P2: the CLIP composition attaches native — ONE adapted engine
+        serves both kernel halves, and neither text nor image embeds re-enter
+        the facade (the counter pin)."""
+        import asyncio
+
+        import shrike_native
+
+        media = {"red.png": _png_bytes((200, 30, 30))}
+        calls = {"embed_texts": 0, "embed_images": 0}
+        originals = {name: getattr(be, name) for name in calls}
+        for name, orig in originals.items():
+
+            def counting(items, _orig=orig, _name=name):  # type: ignore[no-untyped-def]
+                calls[_name] += 1
+                return _orig(items)
+
+            setattr(be, name, counting)
+
+        async def flow() -> bool:
+            kernel = await shrike_native.async_kernel_open(
+                str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
+            )
+            handle = be.native_embedder()
+            baseline = dict(calls)  # construction may probe; the hot path may not
+            kernel.attach_embedder(handle, media.get, lambda n: n in media)
+            await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            results = await kernel.upsert_notes(
+                [(basic, 1, ['a colour swatch <img src="red.png">', "back"], [])],
+                "error",
+            )
+            assert all(r[0] == "created" for r in results)
+            nid = results[0][1]
+            engine = kernel.engine_handle()
+            has_image = engine.modality_contains("image", nid)
+            await kernel.close()
+            assert calls == baseline, f"kernel embeds re-entered the facade: {calls}"
+            return has_image
+
+        try:
+            assert asyncio.run(flow())  # the image vector landed, natively
+        finally:
+            for name, orig in originals.items():
+                setattr(be, name, orig)

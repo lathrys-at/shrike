@@ -413,6 +413,21 @@ impl TextEmbedder {
     }
 }
 
+/// The engine contract (#342, route 1): pure chunk-level compute — the host
+/// supplies identity + batch policy (`WithPolicy`) and execution (an adapter
+/// lane) at composition. `safe_batch` deliberately stays the trait default
+/// (1): batch safety is *probed on the loaded model* by the host, never
+/// asserted by the engine.
+impl shrike_engine_api::EmbedText for TextEmbedder {
+    fn embed_chunk(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>> {
+        TextEmbedder::embed_chunk(self, texts)
+    }
+
+    fn dim(&self) -> Option<usize> {
+        TextEmbedder::dim(self)
+    }
+}
+
 /// Reduce token embeddings [B,S,H] to sentence vectors [B,H] (mirrors
 /// `OnnxBackend._pool`).
 fn pool(token_emb: &ndarray::Array3<f32>, mask: &Array2<i64>, pooling: Pooling) -> Array2<f32> {

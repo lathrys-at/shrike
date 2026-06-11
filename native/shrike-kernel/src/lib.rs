@@ -898,12 +898,55 @@ impl Kernel {
     pub async fn search(&self, query: &str, top_k: usize) -> NativeResult<Vec<KernelHit>> {
         let span = tracing::debug_span!("kernel.search", top_k);
         async move {
-            // Semantic signal — the embed is the await; the engine/derived reads
-            // are fast in-memory/SQLite calls chained after it. With no
-            // embedder attached, search degrades to the lexical signals.
+            // The query embed and the lexical reads are independent, so the
+            // embed future is built (its compute scheduled by the host's
+            // adapter) BEFORE the sync derived-store reads run on the polling
+            // thread, and awaited after — the orchestrator's no-false-ordering
+            // rule applied to search. With no embedder attached, search
+            // degrades to the lexical signals.
+            let svc = self.embed_service();
+            let embed_fut = svc
+                .as_ref()
+                .map(|svc| svc.embedder.embed(vec![query.to_string()]));
+
+            // Lexical signals (substring authority + fuzzy), from the derived store.
+            let quoted = format!("\"{}\"", query.replace('"', "\"\""));
+            let exact: Vec<i64> = self
+                .derived
+                .match_rows(&quoted, top_k as i64, false, None)?
+                .into_iter()
+                .map(|(nid, ..)| nid)
+                .collect();
+
+            let grams: Vec<String> = {
+                let lower = query.to_lowercase();
+                let chars: Vec<char> = lower.chars().collect();
+                (0..chars.len().saturating_sub(2))
+                    .map(|i| chars[i..i + 3].iter().collect::<String>())
+                    .collect()
+            };
+            let fuzzy: Option<Vec<i64>> = if grams.len() >= 2 {
+                let expr = grams
+                    .iter()
+                    .map(|g| format!("\"{}\"", g.replace('"', "\"\"")))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                Some(
+                    self.derived
+                        .match_rows(&expr, (top_k * 4) as i64, false, None)?
+                        .into_iter()
+                        .map(|(nid, ..)| nid)
+                        .collect(),
+                )
+            } else {
+                None
+            };
+
+            // Collect the semantic signal; assembly order stays the frozen
+            // #274 one (semantic modalities, tag, exact, fuzzy).
             let mut rankings: Vec<(String, Vec<i64>)> = Vec::new();
-            if let Some(svc) = self.embed_service() {
-                let qvec = svc.embedder.embed(vec![query.to_string()]).await?;
+            if let Some(fut) = embed_fut {
+                let qvec = fut.await?;
                 let note_spaces: Vec<String> =
                     NOTE_MODALITIES.iter().map(|m| m.to_string()).collect();
                 let semantic = self.orchestrator.engine().search_by_modality(
@@ -931,36 +974,8 @@ impl Kernel {
                     }
                 }
             }
-
-            // Lexical signals (substring authority + fuzzy), from the derived store.
-            let quoted = format!("\"{}\"", query.replace('"', "\"\""));
-            let exact: Vec<i64> = self
-                .derived
-                .match_rows(&quoted, top_k as i64, false, None)?
-                .into_iter()
-                .map(|(nid, ..)| nid)
-                .collect();
             rankings.push(("exact".to_string(), exact));
-
-            let grams: Vec<String> = {
-                let lower = query.to_lowercase();
-                let chars: Vec<char> = lower.chars().collect();
-                (0..chars.len().saturating_sub(2))
-                    .map(|i| chars[i..i + 3].iter().collect::<String>())
-                    .collect()
-            };
-            if grams.len() >= 2 {
-                let expr = grams
-                    .iter()
-                    .map(|g| format!("\"{}\"", g.replace('"', "\"\"")))
-                    .collect::<Vec<_>>()
-                    .join(" OR ");
-                let fuzzy: Vec<i64> = self
-                    .derived
-                    .match_rows(&expr, (top_k * 4) as i64, false, None)?
-                    .into_iter()
-                    .map(|(nid, ..)| nid)
-                    .collect();
+            if let Some(fuzzy) = fuzzy {
                 rankings.push(("fuzzy".to_string(), fuzzy));
             }
 
