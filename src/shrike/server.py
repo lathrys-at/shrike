@@ -871,6 +871,7 @@ def main() -> None:
             index=harness.index_view,
             derived=derived,
             kernel=harness.kernel,
+            dedup_stats=harness.dedup_stats,
             allow_private_fetch=allow_private_media_fetch,
             server_path_roots=server_path_roots,
             media_base_url=media_base_url,

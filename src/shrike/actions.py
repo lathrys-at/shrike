@@ -164,6 +164,9 @@ class ActionContext:
     # go unused. `index` then carries the KernelIndexView (duck-typed: the
     # search-facing surface only).
     kernel: Any | None = None
+    # The dedup best-match recorder (#207) — harness-owned; None in
+    # standalone/test contexts that don't care.
+    dedup_stats: Any | None = None
     allow_private_fetch: bool = False
     server_path_roots: list[str] | None = None
     media_base_url: str | None = None
@@ -194,6 +197,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
     saver = ctx.saver
     derived = ctx.derived
     kernel = ctx.kernel
+    dedup_stats = ctx.dedup_stats
     allow_private_fetch = ctx.allow_private_fetch
     server_path_roots = ctx.server_path_roots
     media_base_url = ctx.media_base_url
@@ -976,6 +980,16 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                             entry["provenance"].append({"signal": "fuzzy", "rank": fuzzy_rank})
                         if fuzzy_rank >= top_k:
                             break
+
+                # The calibration sample (#207): the draft's best SEMANTIC
+                # match, or a no-match tick — fed from dedup's own traffic,
+                # never into the #201 search-gate calibration.
+                if dedup_stats is not None:
+                    best = max(
+                        (c["score"] for c in candidates.values() if c["score"] is not None),
+                        default=None,
+                    )
+                    dedup_stats.record(best)
 
                 # Semantically-scored candidates first (descending score),
                 # lexical-only after (by their fuzzy rank); cap at top_k.

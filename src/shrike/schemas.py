@@ -961,6 +961,19 @@ class DerivedStatus(BaseModel):
     col_mod: int | None = None
 
 
+class DedupStats(BaseModel):
+    """Rolling dedup best-match statistics (#207): one sample per upsert draft
+    note — the best SEMANTIC neighbor cosine, or a `no_match` tick when none
+    ranked. The calibration feedstock for the dedup threshold, deliberately
+    separate from the #201 search-gate calibration (different population).
+    `buckets[i]` counts best-scores in [i/20, (i+1)/20); 20 buckets over [0, 1].
+    """
+
+    samples: int = 0
+    no_match: int = 0
+    buckets: list[int] = []
+
+
 class ServerStatus(BaseModel):
     """A responding server's self-report from ``GET /status``.
 
@@ -992,6 +1005,9 @@ class ServerStatus(BaseModel):
     # (and the permanent-mode common case) validate.
     locking: Literal["permanent", "cooperative"] = "permanent"
     collection_held: bool = True
+    # Dedup best-match statistics (#207) — None until the first upsert with
+    # neighbors runs (and on payloads from older servers).
+    dedup: DedupStats | None = None
 
 
 # -- custom-endpoint responses (discriminated on `status`) -------------------

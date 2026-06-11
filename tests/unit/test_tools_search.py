@@ -1008,3 +1008,62 @@ class TestDedupNeighbors:
         )
         hit = next(n for n in self._neighbors(result) if n["id"] == existing)
         assert hit["score"] == 0.55
+
+
+class TestDedupStats:
+    """The #207 calibration feedstock: one best-semantic-match sample per
+    upsert draft, recorded from dedup's OWN traffic (never the #201 gate)."""
+
+    def test_recorder_buckets_and_no_match(self):
+        from shrike.harness import DedupStatsRecorder
+
+        rec = DedupStatsRecorder()
+        assert rec.snapshot() is None  # empty → absent from /status
+
+        rec.record(0.62)
+        rec.record(0.97)
+        rec.record(1.0)  # clamps into the last bucket
+        rec.record(None)
+        snap = rec.snapshot()
+        assert snap["samples"] == 4
+        assert snap["no_match"] == 1
+        assert snap["buckets"][12] == 1  # 0.62 → [0.60, 0.65)
+        assert snap["buckets"][19] == 2  # 0.97 and the clamped 1.0
+
+    def test_upsert_records_a_sample(self, wrapper, sem_index, mcp_dedup_stats, stats):
+        existing = _seed(
+            wrapper,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": "anchor card", "Back": "x"},
+                }
+            ],
+        )[0]["id"]
+        _plant(sem_index, [(existing, 0.1)])  # best match 0.9
+        _upsert(
+            mcp_dedup_stats,
+            [
+                {
+                    "deck": "Test",
+                    "note_type": "Basic",
+                    "fields": {"Front": "zz new card zz", "Back": "y"},
+                }
+            ],
+        )
+        snap = stats.snapshot()
+        assert snap["samples"] == 1
+        assert snap["buckets"][18] == 1  # 0.9 → [0.90, 0.95)
+
+    @pytest.fixture()
+    def stats(self):
+        from shrike.harness import DedupStatsRecorder
+
+        return DedupStatsRecorder()
+
+    @pytest.fixture()
+    def mcp_dedup_stats(self, wrapper, sem_index, stats):
+        mcp = FastMCP("test")
+        register_tools(mcp, wrapper, index=sem_index, dedup_stats=stats)
+        return mcp

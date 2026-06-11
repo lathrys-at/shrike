@@ -38,6 +38,38 @@ class KernelConfigError(Exception):
     """A caller-actionable configuration error (the HTTP host maps it to a 400)."""
 
 
+class DedupStatsRecorder:
+    """Rolling dedup best-match statistics (#207): one sample per upsert
+    draft note — the best SEMANTIC neighbor cosine, or a no-match tick.
+    The calibration feedstock for the dedup threshold; loop-confined (the
+    actions record on the event loop), so no lock. Process-lifetime only —
+    a restart starts fresh (durable accumulation is a later refinement)."""
+
+    BUCKETS = 20
+
+    def __init__(self) -> None:
+        self.samples = 0
+        self.no_match = 0
+        self.buckets = [0] * self.BUCKETS
+
+    def record(self, best: float | None) -> None:
+        self.samples += 1
+        if best is None:
+            self.no_match += 1
+            return
+        index = min(int(best * self.BUCKETS), self.BUCKETS - 1)
+        self.buckets[max(index, 0)] += 1
+
+    def snapshot(self) -> dict[str, Any] | None:
+        if self.samples == 0:
+            return None
+        return {
+            "samples": self.samples,
+            "no_match": self.no_match,
+            "buckets": list(self.buckets),
+        }
+
+
 class KernelIndexView:
     """The search-facing slice of the old ``VectorIndex``, live over the kernel.
 
@@ -164,6 +196,7 @@ class Harness:
         self._media_read = media_read
         self._media_exists = media_exists
         self.index_view = KernelIndexView(kernel, runtime)
+        self.dedup_stats = DedupStatsRecorder()
 
     @classmethod
     async def assemble(
@@ -269,13 +302,16 @@ class Harness:
         """The core status block — everything in ``/status`` minus host concerns."""
         # health() may probe llama-server over HTTP — off the loop.
         embedding = await asyncio.to_thread(self.runtime.health)
-        return {
+        status: dict[str, Any] = {
             "embedding": embedding,
             "index": self._index_status(),
             "derived": self.derived.status(),
             "locking": "cooperative" if self.wrapper.cooperative else "permanent",
             "collection_held": self.wrapper.is_open,
         }
+        if (dedup := self.dedup_stats.snapshot()) is not None:
+            status["dedup"] = dedup
+        return status
 
     def _index_status(self) -> dict[str, Any]:
         """The kernel's index status in the facade's diagnostic shape (state,

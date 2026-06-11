@@ -902,6 +902,16 @@ pub enum LockingMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct DedupStats {
+    #[serde(default)]
+    pub samples: i64,
+    #[serde(default)]
+    pub no_match: i64,
+    #[serde(default)]
+    pub buckets: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ServerStatus {
     #[serde(default)]
     pub running: LiteralTrue,
@@ -922,6 +932,10 @@ pub struct ServerStatus {
     pub locking: LockingMode,
     #[serde(default = "default_true")]
     pub collection_held: bool,
+    /// Dedup best-match statistics (#207) — None until the first upsert with
+    /// neighbors runs.
+    #[serde(default)]
+    pub dedup: Option<DedupStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1092,6 +1106,7 @@ catalog![
     ("EmbeddingStatus", EmbeddingStatus),
     ("IndexProgress", IndexProgress),
     ("IndexStatus", IndexStatus),
+    ("DedupStats", DedupStats),
     ("DerivedStatus", DerivedStatus),
     ("ServerStatus", ServerStatus),
     ("IndexRebuildResponse", IndexRebuildResponse),
