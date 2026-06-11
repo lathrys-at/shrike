@@ -884,3 +884,118 @@ class TestNoEmbeddingBoot:
         assert resp.json()["status"] == "started"
         status = httpx.get(f"{base}/status", timeout=5.0).json()
         assert status["embedding"]["available"] is True
+
+
+class TestSearchQuality:
+    """Result-QUALITY pins across the full signal mix (real model): the tag
+    centroid layer, the activation floor, the exact-match override, and
+    cross-tag pollution — the places where a new signal could quietly distort
+    rankings. Each test cleans up what it creates (tag centroids refresh on
+    the upsert/delete tails)."""
+
+    def test_tag_surfaces_off_topic_member_below_direct_hits(self, semantic_mcp, collection_server):
+        _wait_for_index_ready(collection_server)
+        # A cell-biology-tagged note whose own text says nothing about the
+        # topic: only the tag can surface it for a mitochondria query.
+        r = semantic_mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "deck": "Biology",
+                        "note_type": "Basic",
+                        "fields": {
+                            "Front": "Remember to review the chapter twelve summary notes",
+                            "Back": "Personal reminder",
+                        },
+                        "tags": ["cell-biology"],
+                    }
+                ]
+            },
+        )
+        nid = r["results"][0]["id"]
+        try:
+            result = semantic_mcp(
+                "search_notes",
+                {"queries": ["mitochondria ATP production"], "top_k": 10},
+            )
+            matches = result["results"][0]["matches"]
+            ids = [m["id"] for m in matches]
+            assert nid in ids, "the tag signal surfaces the off-topic member"
+            # …but never ABOVE the directly-relevant notes: the top hit is
+            # semantically (or literally) on-topic, not tag-boosted filler.
+            top_signals = {p["signal"] for p in matches[0]["provenance"]}
+            assert "text" in top_signals or "exact" in top_signals
+            assert matches[0]["id"] != nid, "tag-only filler must not take rank 1"
+        finally:
+            semantic_mcp("delete_notes", {"ids": [nid]})
+
+    def test_off_topic_query_activates_no_tags(self, semantic_mcp, collection_server):
+        _wait_for_index_ready(collection_server)
+        # Nothing in the corpus is about this; with real cosines the
+        # activation floor must hold — no result may carry tag provenance.
+        result = semantic_mcp(
+            "search_notes",
+            {"queries": ["purple elephant umbrella dancing"], "top_k": 10},
+        )
+        for group in result["results"]:
+            for m in group["matches"]:
+                signals = {p["signal"] for p in m.get("provenance", [])}
+                assert "tag" not in signals, (
+                    f"off-topic query activated a tag for note {m['id']}: {signals}"
+                )
+
+    def test_exact_match_pins_above_tag_boosted_siblings(self, semantic_mcp, collection_server):
+        _wait_for_index_ready(collection_server)
+        # "citric acid cycle" is literal text of exactly one card; the
+        # cell-biology tag plausibly activates and boosts its siblings — the
+        # literal hit must still take rank 1 (the exact-match override).
+        result = semantic_mcp("search_notes", {"queries": ["citric acid cycle"], "top_k": 5})
+        matches = result["results"][0]["matches"]
+        assert matches, "the literal hit must be found"
+        assert matches[0].get("substring"), "rank 1 is the literal hit"
+
+    def test_no_cross_tag_pollution(self, semantic_mcp, collection_server):
+        _wait_for_index_ready(collection_server)
+        # A clearly genetics-shaped query: the top hits must be genetics
+        # cards, not members of OTHER activated tags riding the fusion.
+        result = semantic_mcp(
+            "search_notes",
+            {"queries": ["enzyme that transcribes DNA into RNA"], "top_k": 3},
+        )
+        matches = result["results"][0]["matches"]
+        assert matches
+        assert "genetics" in matches[0].get("tags", []), (
+            f"rank 1 should be a genetics card, got tags={matches[0].get('tags')}"
+        )
+
+    def test_blocklisted_tag_never_contributes(self, semantic_mcp, collection_server):
+        _wait_for_index_ready(collection_server)
+        # Notes tagged ONLY `leech` (hygiene-blocklisted) on a topic of their
+        # own: a query for that topic must carry no tag provenance — the
+        # blocklist keeps meta-tags out of the centroid space.
+        r = semantic_mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "deck": "Misc",
+                        "note_type": "Basic",
+                        "fields": {"Front": f"Volcanic eruption fact {i}", "Back": "Geology"},
+                        "tags": ["leech"],
+                    }
+                    for i in range(3)
+                ]
+            },
+        )
+        ids = [item["id"] for item in r["results"]]
+        try:
+            result = semantic_mcp(
+                "search_notes", {"queries": ["volcanic eruption geology"], "top_k": 10}
+            )
+            for group in result["results"]:
+                for m in group["matches"]:
+                    signals = {p["signal"] for p in m.get("provenance", [])}
+                    assert "tag" not in signals, f"blocklisted tag contributed for note {m['id']}"
+        finally:
+            semantic_mcp("delete_notes", {"ids": ids})
