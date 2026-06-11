@@ -124,3 +124,22 @@ class TestWorkerExecutor:
         ex.worker_loop()
         with pytest.raises(shrike_native.NativeInternalError):
             ex.worker_loop()  # the receiver is already claimed
+
+
+class TestLoopTimerHost:
+    """S3c-1: the harness's asyncio timers, injected into the kernel's TimerHost port."""
+
+    def test_timer_fires_through_the_loop(self) -> None:
+        async def flow() -> bool:
+            host = shrike_native.LoopTimerHost.capture()
+            return await shrike_native.timer_probe(host, 0.01)
+
+        assert _run(flow()) is True
+
+    def test_cancel_suppresses_the_job(self) -> None:
+        async def flow() -> bool:
+            host = shrike_native.LoopTimerHost.capture()
+            # Cancel (at 10ms) far before the 5s job would fire.
+            return await shrike_native.timer_probe(host, 5.0, cancel_after=0.01)
+
+        assert _run(flow()) is False

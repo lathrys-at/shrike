@@ -30,6 +30,7 @@ mod async_kernel;
 mod asyncio_bridge;
 #[cfg(feature = "anki-core")]
 mod kernel_actions;
+mod timer_host;
 mod worker_executor;
 
 pyo3::create_exception!(
@@ -662,6 +663,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(async_kernel::async_collection_open, m)?)?;
     }
     m.add_class::<worker_executor::WorkerExecutor>()?;
+    m.add_class::<timer_host::LoopTimerHost>()?;
+    m.add_function(wrap_pyfunction!(timer_host::timer_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;
     m.add_function(wrap_pyfunction!(rrf_fuse, m)?)?;

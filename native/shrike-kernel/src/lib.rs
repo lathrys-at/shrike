@@ -83,6 +83,27 @@ pub trait SerialExecutor: Send + Sync {
     fn submit(&self, job: Box<dyn FnOnce() + Send + 'static>) -> BoxFuture<'static, ()>;
 }
 
+/// The debounce/idle-timer contract the harness injects (#332 S3c-1) — the
+/// sibling of [`SerialExecutor`], for the kernel's two timer consumers (the
+/// index saver's debounced flush; the cooperative idle release). One-shot:
+/// `schedule` arms a job after `delay_secs`; the returned handle cancels it
+/// (a no-op once fired). No threads owned here either — the asyncio harness
+/// backs this with `loop.call_later`, an embedded host with its own timers.
+pub trait TimerHost: Send + Sync {
+    fn schedule(
+        &self,
+        delay_secs: f64,
+        job: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Box<dyn TimerCancel>;
+}
+
+/// Cancels a scheduled (not-yet-fired) timer job. Dropping without calling
+/// `cancel` leaves the timer armed (cancellation is explicit, like the
+/// asyncio handle it mirrors).
+pub trait TimerCancel: Send {
+    fn cancel(&self);
+}
+
 /// The simplest conforming executor: mutual exclusion on the calling thread.
 /// Serialized (the mutex), thread-agnostic (runs wherever the caller is), no
 /// threads owned. A real harness may instead pin a worker thread (the Python

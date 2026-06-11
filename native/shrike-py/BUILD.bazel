@@ -23,6 +23,7 @@ rust_shared_library(
         "src/asyncio_bridge.rs",
         "src/kernel_actions.rs",
         "src/lib.rs",
+        "src/timer_host.rs",
         "src/worker_executor.rs",
     ],
     edition = "2021",
