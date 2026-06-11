@@ -398,8 +398,10 @@ fn run_on_lane<R: Send + 'static>(
     }));
     Box::pin(async move {
         submitted.await?;
+        // A dropped job is an executor-availability condition (a lane torn
+        // down mid-flight, e.g. host shutdown) — not an engine bug.
         rx.await
-            .map_err(|_| NativeError::internal("compute lane dropped the job"))?
+            .map_err(|_| NativeError::unavailable("compute lane dropped the job"))?
     })
 }
 
