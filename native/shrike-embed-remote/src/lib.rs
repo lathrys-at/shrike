@@ -22,6 +22,34 @@ const EMBED_TIMEOUT: Duration = Duration::from_secs(60);
 const META_TIMEOUT: Duration = Duration::from_secs(5);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Bounded retry on the embed path (the request is idempotent): cloud
+/// endpoints 429/503 routinely (rate limits, cold scale-up), so a transient
+/// failure must not sink the chunk. Mirrors the probe's small explicit
+/// attempts loop; this is a sync engine on the runtime's blocking pool, so
+/// the backoff is a plain `std::thread::sleep`.
+const EMBED_ATTEMPTS: u32 = 3;
+const BACKOFF_BASE: Duration = Duration::from_millis(250);
+/// A server-supplied `Retry-After` is honored but never trusted past this.
+const RETRY_AFTER_CAP: Duration = Duration::from_secs(10);
+
+/// 429 and 5xx are transient (rate limit, restart, overload); any other
+/// status is a request problem a retry can't fix.
+fn retryable_status(code: u16) -> bool {
+    code == 429 || (500..600).contains(&code)
+}
+
+/// The `Retry-After` seconds form, capped. The HTTP-date form is ignored
+/// (the default backoff covers it).
+fn retry_after(resp: &ureq::Response) -> Option<Duration> {
+    let secs: u64 = resp.header("retry-after")?.trim().parse().ok()?;
+    Some(Duration::from_secs(secs).min(RETRY_AFTER_CAP))
+}
+
+/// Exponential: 250ms, 500ms, … for attempt 1, 2, …
+fn backoff(attempt: u32) -> Duration {
+    BACKOFF_BASE * 2u32.saturating_pow(attempt.saturating_sub(1))
+}
+
 pub struct RemoteEmbedderConfig {
     /// e.g. `http://127.0.0.1:8373` (no trailing slash needed).
     pub base_url: String,
@@ -67,13 +95,24 @@ pub struct ModelInfo {
 }
 
 impl RemoteEmbedder {
-    pub fn new(cfg: RemoteEmbedderConfig) -> Self {
-        Self {
+    /// Construction validates the API key — it is interpolated into the
+    /// `Authorization` header, so a control character (a pasted key with a
+    /// stray newline) or leading/trailing whitespace must fail loudly here
+    /// as `invalid_input`, not as a garbled or injected header later.
+    pub fn new(cfg: RemoteEmbedderConfig) -> NativeResult<Self> {
+        if let Some(key) = &cfg.api_key {
+            if key.chars().any(char::is_control) || key.trim() != key {
+                return Err(NativeError::invalid_input(
+                    "api_key must not contain control characters or leading/trailing whitespace",
+                ));
+            }
+        }
+        Ok(Self {
             base_url: cfg.base_url.trim_end_matches('/').to_string(),
             api_key: cfg.api_key,
             model: cfg.model,
             agent: ureq::AgentBuilder::new().build(),
-        }
+        })
     }
 
     fn request(&self, method: &str, path: &str, timeout: Duration) -> ureq::Request {
@@ -138,14 +177,49 @@ impl EmbedText for RemoteEmbedder {
         if let Some(model) = &self.model {
             payload["model"] = serde_json::Value::String(model.clone());
         }
-        let resp = self
-            .request("POST", "/v1/embeddings", EMBED_TIMEOUT)
-            .send_json(payload)
-            .map_err(|e| {
-                // A refused/failed request is a service-availability problem
-                // (down, mid-restart, auth rejected), not an engine bug.
-                NativeError::unavailable(format!("embeddings request failed: {e}"))
-            })?;
+        let mut attempt = 1u32;
+        let resp = loop {
+            let err = match self
+                .request("POST", "/v1/embeddings", EMBED_TIMEOUT)
+                .send_json(&payload)
+            {
+                Ok(resp) => break resp,
+                Err(e) => e,
+            };
+            // A refused/failed request is a service-availability problem
+            // (down, mid-restart, auth rejected), not an engine bug. 429/5xx
+            // and transport failures are transient → bounded retry; any
+            // other status fails immediately.
+            let transient = match &err {
+                ureq::Error::Status(code, _) => retryable_status(*code),
+                ureq::Error::Transport(_) => true,
+            };
+            if !transient {
+                return Err(NativeError::unavailable(format!(
+                    "embeddings request failed: {err}"
+                )));
+            }
+            if attempt >= EMBED_ATTEMPTS {
+                return Err(NativeError::unavailable(format!(
+                    "embeddings request failed after {EMBED_ATTEMPTS} attempt(s): {err}"
+                )));
+            }
+            let delay = match &err {
+                ureq::Error::Status(_, resp) => {
+                    retry_after(resp).unwrap_or_else(|| backoff(attempt))
+                }
+                ureq::Error::Transport(_) => backoff(attempt),
+            };
+            tracing::warn!(
+                attempt,
+                max_attempts = EMBED_ATTEMPTS,
+                delay_ms = delay.as_millis() as u64,
+                error = %err,
+                "transient embeddings failure; retrying"
+            );
+            std::thread::sleep(delay);
+            attempt += 1;
+        };
         let body: EmbeddingsResponse = resp
             .into_json()
             .map_err(|e| NativeError::internal(format!("malformed embeddings response: {e}")))?;
@@ -158,6 +232,17 @@ impl EmbedText for RemoteEmbedder {
         }
         let mut items = body.data;
         items.sort_by_key(|d| d.index);
+        // All vectors must share one width — a mixed-width response is a
+        // malformed service response (the index would reject or corrupt on
+        // it). No expected dim lives in this crate (that's host policy, in
+        // `WithPolicy`), so uniformity is the invariant asserted here.
+        let width = items[0].embedding.len();
+        if let Some(bad) = items.iter().find(|d| d.embedding.len() != width) {
+            return Err(NativeError::internal(format!(
+                "endpoint returned mixed-width embeddings ({width} vs {})",
+                bad.embedding.len()
+            )));
+        }
         Ok(items.into_iter().map(|d| d.embedding).collect())
     }
 }
@@ -169,49 +254,59 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::mpsc;
 
-    /// A one-request canned HTTP server on an ephemeral port: returns
-    /// (base_url, a receiver yielding the raw request head+body).
-    fn one_shot_server(
-        status_line: &'static str,
-        body: String,
-    ) -> (String, mpsc::Receiver<String>) {
+    /// A canned HTTP server on an ephemeral port, serving one connection per
+    /// response in sequence (each closes its connection, so a retry is a
+    /// fresh accept): returns (base_url, a receiver yielding each raw
+    /// request head+body). A `status_line` may carry extra header lines
+    /// (`"HTTP/1.1 429 …\r\nRetry-After: 1"`).
+    fn canned_server(responses: Vec<(&'static str, String)>) -> (String, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut head = String::new();
-            let mut content_length = 0usize;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if let Some(v) = line
-                    .to_ascii_lowercase()
-                    .strip_prefix("content-length:")
-                    .map(str::trim)
-                {
-                    content_length = v.parse().unwrap_or(0);
+            for (status_line, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(v) = line
+                        .to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(str::trim)
+                    {
+                        content_length = v.parse().unwrap_or(0);
+                    }
+                    let done = line == "\r\n" || line == "\n" || line.is_empty();
+                    head.push_str(&line);
+                    if done {
+                        break;
+                    }
                 }
-                let done = line == "\r\n" || line == "\n" || line.is_empty();
-                head.push_str(&line);
-                if done {
-                    break;
+                let mut req_body = vec![0u8; content_length];
+                if content_length > 0 {
+                    reader.read_exact(&mut req_body).unwrap();
                 }
+                head.push_str(&String::from_utf8_lossy(&req_body));
+                let _ = tx.send(head);
+                let response = format!(
+                    "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                stream.write_all(response.as_bytes()).unwrap();
             }
-            let mut req_body = vec![0u8; content_length];
-            if content_length > 0 {
-                reader.read_exact(&mut req_body).unwrap();
-            }
-            head.push_str(&String::from_utf8_lossy(&req_body));
-            let _ = tx.send(head);
-            let response = format!(
-                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len(),
-            );
-            stream.write_all(response.as_bytes()).unwrap();
         });
         (format!("http://{addr}"), rx)
+    }
+
+    /// The one-request special case.
+    fn one_shot_server(
+        status_line: &'static str,
+        body: String,
+    ) -> (String, mpsc::Receiver<String>) {
+        canned_server(vec![(status_line, body)])
     }
 
     fn engine(base_url: String, model: Option<&str>, key: Option<&str>) -> RemoteEmbedder {
@@ -220,6 +315,7 @@ mod tests {
             api_key: key.map(String::from),
             model: model.map(String::from),
         })
+        .unwrap()
     }
 
     #[test]
@@ -258,8 +354,50 @@ mod tests {
     }
 
     #[test]
-    fn http_error_maps_to_unavailable() {
-        let (url, _rx) = one_shot_server("HTTP/1.1 503 Service Unavailable", "{}".into());
+    fn retries_through_transient_503() {
+        let ok = serde_json::json!({"data": [{"index": 0, "embedding": [1.0, 2.0]}]}).to_string();
+        let (url, rx) = canned_server(vec![
+            ("HTTP/1.1 503 Service Unavailable", "{}".into()),
+            ("HTTP/1.1 200 OK", ok),
+        ]);
+        let out = engine(url, None, None).embed_chunk(&["a".into()]).unwrap();
+        assert_eq!(out, vec![vec![1.0, 2.0]]);
+        // Both attempts actually reached the server.
+        assert!(rx.recv().unwrap().starts_with("POST /v1/embeddings"));
+        assert!(rx.recv().unwrap().starts_with("POST /v1/embeddings"));
+    }
+
+    #[test]
+    fn honors_retry_after_on_429() {
+        let ok = serde_json::json!({"data": [{"index": 0, "embedding": [1.0, 2.0]}]}).to_string();
+        let (url, _rx) = canned_server(vec![
+            (
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1",
+                "{}".into(),
+            ),
+            ("HTTP/1.1 200 OK", ok),
+        ]);
+        let started = std::time::Instant::now();
+        let out = engine(url, None, None).embed_chunk(&["a".into()]).unwrap();
+        assert_eq!(out, vec![vec![1.0, 2.0]]);
+        // The server-requested 1s overrides the 250ms default backoff — the
+        // lower bound proves the header was honored, and can't flake.
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn bad_request_does_not_retry() {
+        // A 200 is queued behind the 400 — a retry would succeed, so the
+        // error proves the 400 failed immediately.
+        let ok = serde_json::json!({"data": [{"index": 0, "embedding": [1.0, 2.0]}]}).to_string();
+        let (url, _rx) = canned_server(vec![
+            ("HTTP/1.1 400 Bad Request", "{}".into()),
+            ("HTTP/1.1 200 OK", ok),
+        ]);
         let err = engine(url, None, None)
             .embed_chunk(&["a".into()])
             .unwrap_err();
@@ -267,6 +405,52 @@ mod tests {
             err.to_string().contains("embeddings request failed"),
             "{err}"
         );
+        assert!(!err.to_string().contains("attempt"), "{err}");
+    }
+
+    #[test]
+    fn exhausted_retries_map_to_unavailable() {
+        let (url, _rx) = canned_server(vec![
+            ("HTTP/1.1 503 Service Unavailable", "{}".to_string());
+            3
+        ]);
+        let err = engine(url, None, None)
+            .embed_chunk(&["a".into()])
+            .unwrap_err();
+        assert!(err.to_string().contains("after 3 attempt(s)"), "{err}");
+    }
+
+    #[test]
+    fn mixed_width_response_is_an_internal_error() {
+        let body = serde_json::json!({"data": [
+            {"index": 0, "embedding": [1.0, 2.0]},
+            {"index": 1, "embedding": [3.0]},
+        ]})
+        .to_string();
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body);
+        let err = engine(url, None, None)
+            .embed_chunk(&["a".into(), "b".into()])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("mixed-width embeddings (2 vs 1)"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bad_api_key_rejected_at_construction() {
+        for key in ["sk\r\nX-Injected: 1", " sk-test", "sk-test ", "sk\ttest"] {
+            // `.err()` rather than `.unwrap_err()`: the engine is deliberately
+            // not `Debug` (the struct holds the API key).
+            let err = RemoteEmbedder::new(RemoteEmbedderConfig {
+                base_url: "http://127.0.0.1:9".into(),
+                api_key: Some(key.into()),
+                model: None,
+            })
+            .err()
+            .expect("construction must reject the key");
+            assert!(err.to_string().contains("api_key"), "{key:?}: {err}");
+        }
     }
 
     #[test]

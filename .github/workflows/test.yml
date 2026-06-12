@@ -72,8 +72,8 @@ jobs:
       bazel: ${{ steps.filter.outputs.bazel }}
       native: ${{ steps.filter.outputs.native }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -152,15 +152,17 @@ jobs:
     if: needs.changes.outputs.code == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # full history + tags so hatch-vcs can derive the version at install
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       # uv installs deps ~3x faster than pip (parallel + hardlinked cache),
       # cutting the per-job dependency install that runs in every lane.
-      - uses: astral-sh/setup-uv@v5
+      # Exact tag: setup-uv v8+ publishes no moving major tag (immutable
+      # releases) — `@v8` does not resolve, so pin the full version.
+      - uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: pyproject.toml
@@ -229,13 +231,13 @@ jobs:
     if: needs.changes.outputs.bazel == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Two caches, split by update cadence. The bazelisk + Bazel binaries and the
       # repository cache (downloaded wheels + the Python/Rust toolchains) change
       # only when the pins do, so key them on the locks: a pure restore otherwise,
       # never re-uploading the toolchains every run.
       - name: Cache Bazel toolchains + repo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/shrike/bazelisk
@@ -249,7 +251,7 @@ jobs:
       # re-executes everything. Suffix the save key with the run id so each run
       # writes a fresh superset; restore-keys pulls the most recent prior one.
       - name: Cache Bazel action results
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/shrike/bazel-disk
           key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
@@ -287,9 +289,9 @@ jobs:
     if: needs.changes.outputs.embedding == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Cache Bazel toolchains + repo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/shrike/bazelisk
@@ -298,7 +300,7 @@ jobs:
           key: bazel-repo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
           restore-keys: bazel-repo-${{ runner.os }}-${{ runner.arch }}-
       - name: Cache Bazel action results
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/shrike/bazel-disk
           key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
@@ -327,12 +329,12 @@ jobs:
       matrix:
         os: [ubuntu-24.04-arm, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Same split caches as the per-PR lane (different os/arch key scope, so no
       # collision): lock-keyed toolchains+repo, run-id-keyed action results so the
       # disk cache accumulates instead of freezing after its first save.
       - name: Cache Bazel toolchains + repo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/shrike/bazelisk
@@ -341,7 +343,7 @@ jobs:
           key: bazel-repo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
           restore-keys: bazel-repo-${{ runner.os }}-${{ runner.arch }}-
       - name: Cache Bazel action results
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/shrike/bazel-disk
           key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
