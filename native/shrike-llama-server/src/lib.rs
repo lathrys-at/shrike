@@ -12,9 +12,9 @@
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
-use std::net::TcpStream;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use shrike_ffi::{NativeError, NativeResult};
@@ -22,9 +22,10 @@ use shrike_ffi::{NativeError, NativeResult};
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 pub const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// After a SIGKILL escalation the port frees fast — a killed process can't
-/// linger like one ignoring SIGTERM.
-pub const SIGKILL_PORT_TIMEOUT: Duration = Duration::from_secs(2);
+/// After a SIGKILL escalation death is fast — a killed process can't linger
+/// like one ignoring SIGTERM. Also bounds the post-kill wait for the kernel
+/// to release the orphan's listener.
+pub const SIGKILL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// llama-server flags Shrike owns; the generic passthrough must not override
 /// them. `--embedding` is llama.cpp's alias for `--embeddings`.
@@ -109,14 +110,47 @@ fn terminate_raw(pid: i64, hard: bool) {
     }
 }
 
-fn port_in_use(host: &str, port: u16) -> bool {
-    let addrs: Vec<_> = match std::net::ToSocketAddrs::to_socket_addrs(&(host, port)) {
-        Ok(a) => a.collect(),
-        Err(_) => return false,
-    };
-    addrs
-        .iter()
-        .any(|addr| TcpStream::connect_timeout(addr, Duration::from_millis(500)).is_ok())
+/// "Is the port available to bind right now" — a `TcpListener::bind` probe
+/// (instant; a connect probe's 500ms timeout would dominate any wait loop
+/// built on it). The probe listener is dropped immediately.
+fn port_bindable(host: &str, port: u16) -> bool {
+    TcpListener::bind((host, port)).is_ok()
+}
+
+/// Something else holds the port — `EADDRINUSE` specifically, so an
+/// unrelated bind failure (e.g. an unresolvable host) never reads as "held"
+/// and corroborates a kill.
+fn port_held(host: &str, port: u16) -> bool {
+    matches!(
+        TcpListener::bind((host, port)),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse
+    )
+}
+
+/// Poll-wait for a PID to die. This is the kill confirmation: `pid_alive`
+/// going false, never the port — port state is not process identity (an
+/// unrelated process can grab the freed port mid-window). Only meaningful
+/// for a *non-child* PID (a prior process's orphan, reparented to init and
+/// reaped there); our own child would zombie until waited.
+fn wait_pid_dead(pid: i64, timeout: Duration) -> bool {
+    #[cfg(unix)]
+    {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !pid_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        !pid_alive(pid)
+    }
+    #[cfg(not(unix))]
+    {
+        // taskkill /F already terminated forcefully, and `pid_alive` has no
+        // cheap existence probe off unix — nothing to poll.
+        let _ = (pid, timeout);
+        true
+    }
 }
 
 impl LlamaServerManager {
@@ -277,8 +311,10 @@ impl LlamaServerManager {
     /// Kill a llama-server left over from a prior unclean shutdown. A
     /// recorded PID that is still alive *and* holding our port is an orphan;
     /// both signals are required so a recycled PID can't make us kill an
-    /// unrelated process.
-    pub fn reap_orphan(&self) {
+    /// unrelated process. Private: it clears the PID file as a side effect,
+    /// so it is strictly a pre-spawn step of [`start`](Self::start) — a host
+    /// calling it with a live child would wipe that child's reap record.
+    fn reap_orphan(&self) {
         let Some(path) = &self.cfg.pid_file else {
             return;
         };
@@ -289,7 +325,7 @@ impl LlamaServerManager {
             self.clear_pid_file();
             return;
         };
-        if pid_alive(pid) && port_in_use(&self.cfg.host, self.cfg.port) {
+        if pid_alive(pid) && port_held(&self.cfg.host, self.cfg.port) {
             tracing::warn!(
                 "Reaping orphaned llama-server (PID {pid}) holding port {}",
                 self.cfg.port
@@ -299,26 +335,33 @@ impl LlamaServerManager {
         self.clear_pid_file();
     }
 
-    /// SIGTERM, then SIGKILL, a stale PID — waiting for the port to free.
+    /// SIGTERM, then SIGKILL, a stale PID — confirming death via
+    /// `pid_alive` going false (never the port: an unrelated process could
+    /// grab the freed port mid-window and read as "kill failed"), then
+    /// waiting for the port to become bindable for the spawn that follows.
     fn terminate_pid(&self, pid: i64) {
         terminate_raw(pid, false);
-        if self.wait_port_free(SHUTDOWN_TIMEOUT) {
-            return;
+        if !wait_pid_dead(pid, SHUTDOWN_TIMEOUT) {
+            tracing::warn!("Orphan llama-server (PID {pid}) ignored SIGTERM, sending SIGKILL");
+            terminate_raw(pid, true);
+            if !wait_pid_dead(pid, SIGKILL_TIMEOUT) {
+                tracing::warn!("Orphan llama-server (PID {pid}) survived SIGKILL");
+            }
         }
-        tracing::warn!("Orphan llama-server (PID {pid}) ignored SIGTERM, sending SIGKILL");
-        terminate_raw(pid, true);
-        self.wait_port_free(SIGKILL_PORT_TIMEOUT);
+        // Death (dis)confirmed; separately wait for the kernel to release
+        // the orphan's listener so the spawn that follows can bind.
+        self.wait_port_bindable(SIGKILL_TIMEOUT);
     }
 
-    fn wait_port_free(&self, timeout: Duration) -> bool {
+    fn wait_port_bindable(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            if !port_in_use(&self.cfg.host, self.cfg.port) {
+            if port_bindable(&self.cfg.host, self.cfg.port) {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        !port_in_use(&self.cfg.host, self.cfg.port)
+        port_bindable(&self.cfg.host, self.cfg.port)
     }
 
     /// Spawn llama-server and wait for it to become healthy. Reaps any
@@ -364,13 +407,13 @@ impl LlamaServerManager {
         self.write_pid_file();
 
         if !self.wait_healthy() {
+            // Read the exit code once, AFTER the stop — a pre-stop
+            // `try_wait` reports a stale `None` for a child that exited
+            // microseconds later.
             let rc = self
-                .child
-                .as_mut()
-                .and_then(|c| c.try_wait().ok().flatten())
+                .stop_observing_exit()
                 .map(|s| s.code().map_or("signal".to_string(), |c| c.to_string()))
                 .unwrap_or_else(|| "None".to_string());
-            self.stop();
             return Err(NativeError::unavailable(format!(
                 "llama-server failed to become healthy within {}s (exit code: {rc})",
                 HEALTH_TIMEOUT.as_secs()
@@ -401,25 +444,31 @@ impl LlamaServerManager {
     /// Stop the child: SIGTERM, wait up to [`SHUTDOWN_TIMEOUT`], then
     /// SIGKILL. Clears the PID file.
     pub fn stop(&mut self) {
+        let _ = self.stop_observing_exit();
+    }
+
+    /// [`stop`](Self::stop), reporting the child's exit status where it was
+    /// observed — a genuine exit code for a child that had already died, a
+    /// signal status for one our SIGTERM/SIGKILL took down.
+    fn stop_observing_exit(&mut self) -> Option<ExitStatus> {
         *self.pid_cell.lock().expect("pid cell poisoned") = None;
-        let Some(mut child) = self.child.take() else {
-            return;
-        };
+        let mut child = self.child.take()?;
         let pid = child.id() as i64;
         if let Ok(Some(status)) = child.try_wait() {
             tracing::info!("Embedding service already exited (PID {pid}, code {status:?})");
             self.clear_pid_file();
-            return;
+            return Some(status);
         }
         tracing::info!("Stopping embedding service (PID {pid})");
         terminate_raw(pid, false);
         if !wait_child(&mut child, SHUTDOWN_TIMEOUT) {
             tracing::warn!("llama-server did not exit after SIGTERM, sending SIGKILL");
             let _ = child.kill();
-            wait_child(&mut child, Duration::from_secs(2));
+            wait_child(&mut child, SIGKILL_TIMEOUT);
         }
         tracing::info!("Embedding service stopped (PID {pid})");
         self.clear_pid_file();
+        child.try_wait().ok().flatten()
     }
 }
 
@@ -427,7 +476,9 @@ impl Drop for LlamaServerManager {
     fn drop(&mut self) {
         // The child is Shrike's direct responsibility; a dropped manager
         // must not leak a llama-server (the PID file still allows reaping
-        // if the whole process dies before Drop).
+        // if the whole process dies before Drop). NOTE: with a live child
+        // this can block several seconds — the SIGTERM wait
+        // ([`SHUTDOWN_TIMEOUT`]) plus the SIGKILL wait ([`SIGKILL_TIMEOUT`]).
         if self.child.is_some() {
             self.stop();
         }
@@ -598,6 +649,53 @@ mod tests {
         let _ = sleeper.kill();
         let _ = sleeper.wait();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bind_probe_distinguishes_free_held_and_unresolvable() {
+        // A fixed port below the ephemeral range (an ephemeral one, once
+        // dropped, can be re-handed to any concurrent outbound connection
+        // system-wide), distinct from the 18373 the other tests probe.
+        let port = 18374;
+        // Free: bindable, not held.
+        assert!(port_bindable("127.0.0.1", port));
+        assert!(!port_held("127.0.0.1", port));
+        // Held: a live listener → not bindable, held (EADDRINUSE).
+        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        assert!(!port_bindable("127.0.0.1", port));
+        assert!(port_held("127.0.0.1", port));
+        // Released: bindable again, no longer held.
+        drop(listener);
+        assert!(port_bindable("127.0.0.1", port));
+        assert!(!port_held("127.0.0.1", port));
+        // An unresolvable host is NOT "held" — a bind failure that isn't
+        // EADDRINUSE must never corroborate a kill.
+        assert!(!port_held("host.invalid.shrike-test", port));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_pid_confirms_death_via_pid_not_port() {
+        // A detached (reparented-to-init) sleeper, like a real orphan — our
+        // own child would zombie until waited, and `kill(pid, 0)` would
+        // still see it.
+        let out = Command::new("/bin/sh")
+            .args(["-c", "sleep 30 >/dev/null 2>&1 & echo $!"])
+            .output()
+            .unwrap();
+        let pid: i64 = String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(pid_alive(pid));
+        let m = manager(&[]); // port 18373 — free throughout
+        let started = Instant::now();
+        m.terminate_pid(pid);
+        assert!(!pid_alive(pid), "death confirmed via the PID");
+        // SIGTERM landed and was confirmed promptly — no SIGKILL tier, and
+        // no connect-timeout padding from a port-based confirmation.
+        assert!(started.elapsed() < SHUTDOWN_TIMEOUT);
     }
 
     #[cfg(unix)]
