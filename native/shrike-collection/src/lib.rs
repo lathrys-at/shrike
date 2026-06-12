@@ -286,6 +286,21 @@ mod tests {
 
     use super::*;
 
+    /// Test shim: drive the typed upsert with a JSON literal, assert on the
+    /// serialized results (the pre-#391 call shape the assertions were
+    /// written against).
+    fn upsert_json(
+        core: &CollectionCore,
+        notes_json: &str,
+        on_duplicate: &str,
+        dry_run: bool,
+    ) -> serde_json::Value {
+        let notes: Vec<shrike_schemas::NoteInput> = serde_json::from_str(notes_json).unwrap();
+        let policy = DuplicatePolicy::parse(on_duplicate).unwrap();
+        let results = core.upsert_notes(&notes, policy, dry_run).unwrap();
+        serde_json::to_value(&results).unwrap()
+    }
+
     fn temp_core() -> (CollectionCore, std::path::PathBuf) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -877,10 +892,7 @@ mod tests {
              "fields": {"Front": "<b> </b>&nbsp;", "Back": ""}}
         ]);
         // fields_check calls this EMPTY, so create it via allow + raw create.
-        let raw = core
-            .upsert_notes(&empty_batch.to_string(), "allow", false)
-            .unwrap();
-        let raw: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let raw = upsert_json(&core, &empty_batch.to_string(), "allow", false);
         assert_eq!(raw[0]["status"], "error"); // structurally empty is never written
                                                // Insert a genuinely empty-able note: text now, blanked by update.
         let CreateOutcome::Created(empty_nid) = core
@@ -1003,12 +1015,7 @@ mod tests {
             {"note_type": "Nope", "deck": "D", "fields": {"Front": "x"}},
             {"note_type": "Basic", "deck": "D", "fields": {"Bogus": "x"}},
         ]);
-        let results: serde_json::Value = serde_json::from_str(
-            &core
-                .upsert_notes(&batch.to_string(), "skip", false)
-                .unwrap(),
-        )
-        .unwrap();
+        let results = upsert_json(&core, &batch.to_string(), "skip", false);
         assert_eq!(results[0]["status"], "created");
         let nid = results[0]["id"].as_i64().unwrap();
         assert_eq!(results[1]["status"], "skipped");
@@ -1027,9 +1034,7 @@ mod tests {
         let dry = serde_json::json!([
             {"note_type": "Basic", "deck": "DryDeck", "fields": {"Front": "new", "Back": "b"}}
         ]);
-        let dry_results: serde_json::Value =
-            serde_json::from_str(&core.upsert_notes(&dry.to_string(), "error", true).unwrap())
-                .unwrap();
+        let dry_results = upsert_json(&core, &dry.to_string(), "error", true);
         assert_eq!(dry_results[0]["status"], "ok");
         assert_eq!(dry_results[0]["action"], "create");
         assert!(core.adapter.deck_id_by_name("DryDeck").unwrap().is_none());
@@ -1039,12 +1044,7 @@ mod tests {
         let update = serde_json::json!([
             {"id": nid, "fields": {"Back": "new back"}, "tags": ["t2"], "deck": "Default"}
         ]);
-        let up_results: serde_json::Value = serde_json::from_str(
-            &core
-                .upsert_notes(&update.to_string(), "error", false)
-                .unwrap(),
-        )
-        .unwrap();
+        let up_results = upsert_json(&core, &update.to_string(), "error", false);
         assert_eq!(up_results[0]["status"], "updated");
         let note = core.get_note(nid).unwrap();
         assert_eq!(
