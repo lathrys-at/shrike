@@ -3,7 +3,7 @@
 //! The engine (`shrike-index`) has owned storage since #273; this module owns
 //! what the Python orchestrator owned — the meta/hashes sidecars, the drift
 //! rules, the per-note change fingerprints, the state machine, and the
-//! debounced saver (over the injected [`TimerHost`]). File formats are
+//! debounced saver (tokio::time, #374). File formats are
 //! byte-compatible with the Python orchestrator's (`index.meta.json`,
 //! `index.hashes.json`), and the note hash is bit-identical to Python's
 //! `hashlib.blake2b(digest_size=8)` — so an index built before the swap loads
@@ -376,15 +376,17 @@ impl DebouncedSaver {
 
     /// Record a change: re-arm the idle timer, or flush now at the burst cap.
     pub fn request_save(self: &Arc<Self>) {
-        let flush_now = {
-            let mut pending = self.pending.lock().expect("saver poisoned");
-            pending.changes += 1;
-            if let Some(armed) = pending.armed.take() {
-                armed.abort();
-            }
-            pending.changes >= self.threshold
-        };
-        if flush_now {
+        // abort-old + spawn + store happen under ONE lock scope: two
+        // concurrent op tails re-arming must never each take a None and
+        // leave an orphaned (un-abortable) timer behind. The spawn is
+        // non-blocking, so holding the std mutex across it is fine.
+        let mut pending = self.pending.lock().expect("saver poisoned");
+        pending.changes += 1;
+        if let Some(armed) = pending.armed.take() {
+            armed.abort();
+        }
+        if pending.changes >= self.threshold {
+            drop(pending);
             self.flush();
             return;
         }
@@ -394,7 +396,7 @@ impl DebouncedSaver {
             tokio::time::sleep(delay).await;
             this.flush();
         });
-        self.pending.lock().expect("saver poisoned").armed = Some(task.abort_handle());
+        pending.armed = Some(task.abort_handle());
     }
 
     /// Unsaved changes since the last flush.
