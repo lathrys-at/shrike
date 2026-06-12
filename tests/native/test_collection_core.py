@@ -163,7 +163,17 @@ def test_cross_core_parity(tmp_path, native_core):
         text=True,
         check=True,
     )
-    pip = json.loads(proc.stdout)
+    # The JSON is the LAST stdout line — the anki import can emit benign
+    # chatter to stdout first (#458) — and a parse failure must show what the
+    # subprocess actually printed, not an opaque JSONDecodeError.
+    lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    try:
+        pip = json.loads(lines[-1] if lines else "")
+    except json.JSONDecodeError:
+        pytest.fail(
+            f"pip-side subprocess produced no JSON.\n"
+            f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+        )
 
     basic = native_core.notetype_id("Basic")
     nid = native_core.create_note(basic, DEFAULT_DECK, ["same front", "back"], ["mytag"])
