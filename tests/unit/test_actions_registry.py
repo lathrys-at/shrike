@@ -40,18 +40,28 @@ EXPECTED_ACTIONS = {
 }
 
 
-def test_registry_carries_the_full_tool_surface(wrapper) -> None:
-    actions = build_actions(ActionContext(wrapper=wrapper))
+def test_registry_carries_the_full_tool_surface(kharness) -> None:
+    actions = build_actions(ActionContext(wrapper=kharness.wrapper, kernel=kharness.kernel))
     assert {a.name for a in actions} == EXPECTED_ACTIONS
     assert len(actions) == 24
 
 
-def test_actions_are_translation_ready(wrapper) -> None:
+def test_actions_are_translation_ready(kharness) -> None:
     # Coarse async impls with documented contracts and model return annotations —
     # what lets another adapter (or the Rust registry at stretch slice 2) bind
     # the same registry without FastMCP.
-    for action in build_actions(ActionContext(wrapper=wrapper)):
+    ctx = ActionContext(wrapper=kharness.wrapper, kernel=kharness.kernel)
+    for action in build_actions(ctx):
         assert inspect.iscoroutinefunction(action.impl), action.name
         assert action.doc, f"{action.name} has no doc"
         signature = inspect.signature(action.impl)
         assert signature.return_annotation is not inspect.Signature.empty, action.name
+
+
+def test_build_actions_requires_a_kernel(wrapper) -> None:
+    # The standalone (facade) mode retired with #355: a kernel-less context is
+    # a configuration error, surfaced loudly at registry build time.
+    import pytest
+
+    with pytest.raises(ValueError, match="kernel mode"):
+        build_actions(ActionContext(wrapper=wrapper))

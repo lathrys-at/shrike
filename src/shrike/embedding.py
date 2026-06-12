@@ -17,7 +17,8 @@ The backend exposes a simple sync interface:
 
 ``EmbeddingService`` is kept as a backward-compatible alias of
 ``LlamaServerBackend``. ``EmbeddingRuntime`` selects a backend by *kind*
-(``llama``/``onnx``) and manages start/stop plus the binding to the index.
+(``llama``/``onnx``) and manages start/stop; the server harness attaches the
+started backend to the kernel's embed slot itself (#342).
 """
 
 from __future__ import annotations
@@ -28,16 +29,13 @@ import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import shrike_native
 
 from shrike.embed_batching import probe_max_safe_batch
 from shrike.embed_text import EMBED_TEXT_VERSION
 from shrike.embedding_base import TEXT, EmbedderBackend
-
-if TYPE_CHECKING:
-    from shrike.index import VectorIndex
 
 # Embedding backend kinds the runtime can construct (see EmbeddingRuntime).
 # The onnx/clip backends run the native (Rust) engines, unconditional since the
@@ -329,12 +327,13 @@ EmbeddingService = LlamaServerBackend
 
 
 class EmbeddingRuntime:
-    """Owns the embedding backend lifecycle and its binding to the vector index.
+    """Owns the embedding backend lifecycle.
 
     Backend-agnostic: it selects a backend by *kind* (``llama``/``onnx``), holds
-    the parameters needed to (re)start it, the current backend (or ``None`` when
-    stopped), and a reference to the index it attaches/detaches. A lock serializes
-    start/stop so concurrent requests can't spawn two backends.
+    the parameters needed to (re)start it, and the current backend (or ``None``
+    when stopped). A lock serializes start/stop so concurrent requests can't
+    spawn two backends. Attaching the started backend to the kernel's embed
+    slot is the harness's job (``Harness._attach``).
 
     Both backends share most params (model, pooling); the rest are backend-scoped
     and simply ignored by the one they don't apply to (``host``/``port``/
@@ -348,7 +347,6 @@ class EmbeddingRuntime:
     def __init__(
         self,
         *,
-        index: VectorIndex | None = None,
         backend: str = DEFAULT_BACKEND,
         model: str | None = None,
         host: str = DEFAULT_HOST,
@@ -365,7 +363,6 @@ class EmbeddingRuntime:
         normalize: bool = True,
         batch_size: int | None = None,
     ) -> None:
-        self._index = index
         self._backend_kind = BACKEND_ALIASES.get(backend, backend)
         self._model = model
         self._host = host
@@ -442,7 +439,7 @@ class EmbeddingRuntime:
         onnx_providers: Sequence[str] | None = None,
         batch_size: int | None = None,
     ) -> EmbedderBackend:
-        """Start the embedding backend and attach it to the index.
+        """Start the embedding backend.
 
         Non-``None`` overrides update the stored params (so a later restart
         reuses them). If a backend is already running, returns it unchanged.
@@ -491,10 +488,6 @@ class EmbeddingRuntime:
                 raise
             self._last_start_failed = False
             self._backend = be
-            # Legacy facade coupling; the kernel-mode server attaches the
-            # backend itself (PyEmbedder.capture must run on the loop).
-            if self._index is not None:
-                self._index.set_backend(be)
             return be
 
     def _make_backend(self) -> EmbedderBackend:
@@ -549,12 +542,10 @@ class EmbeddingRuntime:
         )
 
     def stop(self) -> bool:
-        """Detach from the index and stop the backend. Returns False if not running."""
+        """Stop the backend. Returns False if not running."""
         with self._lock:
             if self._backend is None:
                 return False
-            if self._index is not None:
-                self._index.set_backend(None)
             self._backend.stop()
             self._backend = None
             self._last_start_failed = False

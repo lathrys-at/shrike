@@ -1,70 +1,46 @@
 """Tool-layer tests for migrate_note_type (#75): index re-embed + validation.
 
-Remapped fields change embedding text, so an applied migration must re-embed the
-changed notes (their ids are unchanged) — like find_replace_notes. Dry-run and
-validation failures must not touch the index.
+Remapped fields change embedding text, so an applied migration must re-embed
+the changed notes (their ids are unchanged) via kernel.reindex_notes — like
+find_replace_notes. Dry-run and validation failures must not touch the index.
+Kernel-harness port (#355).
 """
 
 from __future__ import annotations
-
-import asyncio
-import json
-from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
-from shrike.index import IndexSaver, IndexState, VectorIndex
 from shrike.tools import register_tools
-
-
-def _call(mcp: FastMCP, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
-    _, structured = asyncio.run(mcp.call_tool(name, args or {}))
-    return structured
+from tests.unit.conftest import EmbedRecorder
 
 
 @pytest.fixture()
-def mock_index():
-    idx = MagicMock(spec=VectorIndex)
-    idx.state = IndexState.READY
-    idx.available = True
-    idx.col_mod = 0
-    return idx
+def backend():
+    return EmbedRecorder()
 
 
 @pytest.fixture()
-def mock_saver():
-    return MagicMock(spec=IndexSaver)
+def kproxy(kharness, backend):
+    kharness.attach_embedder(backend)
+    proxy = kharness.proxy()
+    proxy.spy("reindex_notes")
+    return proxy
 
 
 @pytest.fixture()
-def mcp_app(wrapper, mock_index, mock_saver):
+def mcp_app(kharness, kproxy):
     mcp = FastMCP("test")
-    register_tools(mcp, wrapper, index=mock_index, saver=mock_saver)
+    register_tools(mcp, kharness.wrapper, kernel=kproxy)
     return mcp
 
 
-def _add_basic(wrapper, front, back="x"):
-    def build(c):
-        return json.loads(
-            c.upsert_notes(
-                json.dumps(
-                    [{"note_type": "Basic", "deck": "D", "fields": {"Front": front, "Back": back}}]
-                ),
-                "allow",
-                False,
-            )
-        )[0]["id"]
-
-    return wrapper.run_sync(build)
-
-
 class TestMigrateNoteTypeTool:
-    def test_apply_reembeds_changed_notes(self, wrapper, mock_index, mock_saver, mcp_app):
-        nid = _add_basic(wrapper, "hello")
-        result = _call(
+    def test_apply_reembeds_changed_notes(self, kharness, backend, kproxy, mcp_app):
+        nid = kharness.seed_note("hello", deck="D")
+        embeds_before = len(backend.calls)
+        result = kharness.call_tool(
             mcp_app,
             "migrate_note_type",
             {
@@ -75,14 +51,19 @@ class TestMigrateNoteTypeTool:
             },
         )
         assert result["changed"] == [nid]
-        mock_index.add.assert_called_once()
-        assert [i.note_id for i in mock_index.add.call_args.args[0]] == [nid]
-        assert mock_index.col_mod == wrapper.run_sync(lambda c: c.col_mod())
-        mock_saver.request_save.assert_called_once()
+        assert kproxy.calls["reindex_notes"] == 1
+        # Exactly the migrated note re-embedded.
+        new_calls = backend.calls[embeds_before:]
+        assert len(new_calls) == 1
+        assert len(new_calls[0]) == 1
+        assert "hello" in new_calls[0][0]
+        assert kharness.index_status()["col_mod"] == kharness.col_mod()
+        assert kharness.reindex_if_needed() is False
 
-    def test_dry_run_does_not_touch_index(self, wrapper, mock_index, mock_saver, mcp_app):
-        nid = _add_basic(wrapper, "hi")
-        result = _call(
+    def test_dry_run_does_not_touch_index(self, kharness, backend, kproxy, mcp_app):
+        nid = kharness.seed_note("hi", deck="D")
+        embeds_before = len(backend.calls)
+        result = kharness.call_tool(
             mcp_app,
             "migrate_note_type",
             {
@@ -93,30 +74,30 @@ class TestMigrateNoteTypeTool:
             },
         )
         assert result["dry_run"] is True
-        mock_index.add.assert_not_called()
-        mock_saver.request_save.assert_not_called()
+        assert kproxy.calls["reindex_notes"] == 0
+        assert len(backend.calls) == embeds_before
 
-    def test_bad_field_map_is_tool_error(self, wrapper, mcp_app):
-        nid = _add_basic(wrapper, "x")
+    def test_bad_field_map_is_tool_error(self, kharness, mcp_app):
+        nid = kharness.seed_note("x", deck="D")
         with pytest.raises(ToolError):
-            _call(
+            kharness.call_tool(
                 mcp_app,
                 "migrate_note_type",
                 {"note_ids": [nid], "new_note_type": "Cloze", "field_map": {"Nope": "Text"}},
             )
 
-    def test_empty_field_map_rejected(self, wrapper, mcp_app):
-        nid = _add_basic(wrapper, "x")
+    def test_empty_field_map_rejected(self, kharness, mcp_app):
+        nid = kharness.seed_note("x", deck="D")
         with pytest.raises(ToolError):
-            _call(
+            kharness.call_tool(
                 mcp_app,
                 "migrate_note_type",
                 {"note_ids": [nid], "new_note_type": "Cloze", "field_map": {}},
             )
 
-    def test_empty_note_ids_rejected(self, mcp_app):
+    def test_empty_note_ids_rejected(self, kharness, mcp_app):
         with pytest.raises(ToolError):
-            _call(
+            kharness.call_tool(
                 mcp_app,
                 "migrate_note_type",
                 {"note_ids": [], "new_note_type": "Cloze", "field_map": {"Front": "Text"}},

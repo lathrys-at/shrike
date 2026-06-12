@@ -353,26 +353,24 @@ class TestEmbedModelPinning:
 
 
 class TestEmbeddingRuntime:
-    def test_start_constructs_and_attaches(self) -> None:
-        index = MagicMock()
-        runtime = EmbeddingRuntime(index=index, model="/m.gguf")
+    def test_start_constructs_and_starts(self) -> None:
+        runtime = EmbeddingRuntime(model="/m.gguf")
         fake_svc = MagicMock()
         fake_svc.running = True
         with patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc) as ctor:
             runtime.start()
         ctor.assert_called_once()
         fake_svc.start.assert_called_once()
-        index.set_backend.assert_called_once_with(fake_svc)
         assert runtime.service is fake_svc
         assert runtime.running is True
 
     def test_start_no_model_raises(self) -> None:
-        runtime = EmbeddingRuntime(index=MagicMock(), model=None)
+        runtime = EmbeddingRuntime(model=None)
         with pytest.raises(ValueError, match="No embedding model"):
             runtime.start()
 
     def test_start_applies_override(self) -> None:
-        runtime = EmbeddingRuntime(index=MagicMock(), model=None)
+        runtime = EmbeddingRuntime(model=None)
         fake_svc = MagicMock()
         fake_svc.running = True
         with patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc):
@@ -380,7 +378,7 @@ class TestEmbeddingRuntime:
         assert runtime.model == "/override.gguf"
 
     def test_start_passes_extra_args_to_service(self) -> None:
-        runtime = EmbeddingRuntime(index=MagicMock(), model="/m.gguf", extra_args=["--flash-attn"])
+        runtime = EmbeddingRuntime(model="/m.gguf", extra_args=["--flash-attn"])
         fake_svc = MagicMock()
         fake_svc.running = True
         with patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc) as ctor:
@@ -388,7 +386,7 @@ class TestEmbeddingRuntime:
         assert ctor.call_args.kwargs["extra_args"] == ["--flash-attn"]
 
     def test_start_noop_if_running(self) -> None:
-        runtime = EmbeddingRuntime(index=MagicMock(), model="/m.gguf")
+        runtime = EmbeddingRuntime(model="/m.gguf")
         existing = MagicMock()
         existing.running = True
         runtime._backend = existing
@@ -397,35 +395,33 @@ class TestEmbeddingRuntime:
         ctor.assert_not_called()
         assert svc is existing
 
-    def test_stop_detaches_and_stops(self) -> None:
-        index = MagicMock()
-        runtime = EmbeddingRuntime(index=index, model="/m.gguf")
+    def test_stop_stops_the_backend(self) -> None:
+        runtime = EmbeddingRuntime(model="/m.gguf")
         fake_svc = MagicMock()
         fake_svc.running = True
         runtime._backend = fake_svc
         assert runtime.stop() is True
-        index.set_backend.assert_called_once_with(None)
         fake_svc.stop.assert_called_once()
         assert runtime.service is None
 
     def test_stop_noop_if_not_running(self) -> None:
-        runtime = EmbeddingRuntime(index=MagicMock(), model="/m.gguf")
+        runtime = EmbeddingRuntime(model="/m.gguf")
         assert runtime.stop() is False
 
     def test_health_no_service(self) -> None:
-        runtime = EmbeddingRuntime(index=MagicMock())
+        runtime = EmbeddingRuntime()
         health = runtime.health()
         assert health["available"] is False
         assert health["state"] == "not_configured"
 
     def test_state_transitions(self) -> None:
         # No model → not_configured.
-        assert EmbeddingRuntime(index=MagicMock()).state == "not_configured"
+        assert EmbeddingRuntime().state == "not_configured"
         # Model present but not started → stopped.
-        assert EmbeddingRuntime(index=MagicMock(), model="/m.gguf").state == "stopped"
+        assert EmbeddingRuntime(model="/m.gguf").state == "stopped"
 
     def test_state_failed_after_start_error(self) -> None:
-        runtime = EmbeddingRuntime(index=MagicMock(), model="/m.gguf")
+        runtime = EmbeddingRuntime(model="/m.gguf")
         fake_svc = MagicMock()
         fake_svc.start.side_effect = RuntimeError("boom")
         with (
@@ -438,7 +434,7 @@ class TestEmbeddingRuntime:
     def test_state_failed_on_construction_error(self) -> None:
         # A failure in _make_backend itself (here: an unknown backend kind) must
         # also mark the runtime failed, not leave it reporting "stopped".
-        runtime = EmbeddingRuntime(index=MagicMock(), backend="bogus", model="/m.gguf")
+        runtime = EmbeddingRuntime(backend="bogus", model="/m.gguf")
         with pytest.raises(ValueError, match="Unknown embedding backend"):
             runtime.start()
         assert runtime.state == "failed"

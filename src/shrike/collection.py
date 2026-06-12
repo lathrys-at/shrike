@@ -334,7 +334,7 @@ class CollectionWrapper:
     # -- cooperative idle-release (#64) --------------------------------------
 
     def _schedule_release(self, loop: asyncio.AbstractEventLoop) -> None:
-        """(Re)arm the idle-release timer; mirrors IndexSaver's debounce."""
+        """(Re)arm the idle-release timer; mirrors the index saver's debounce."""
         if self._release_handle is not None:
             self._release_handle.cancel()
         self._release_handle = loop.call_later(self._hold, self._fire_release)

@@ -25,7 +25,6 @@ from shrike.actions import (
 )
 from shrike.collection import CollectionWrapper
 from shrike.derived import DerivedTextStore
-from shrike.index import IndexSaver
 from shrike.mcp_adapter import _safe_tool, register_actions
 
 __all__ = [
@@ -40,7 +39,6 @@ def register_tools(
     mcp: FastMCP,
     wrapper: CollectionWrapper,
     index: Any | None = None,
-    saver: IndexSaver | None = None,
     *,
     derived: DerivedTextStore | None = None,
     kernel: Any | None = None,
@@ -51,14 +49,13 @@ def register_tools(
 ) -> None:
     """Build the action registry against this server's context and bind it to MCP.
 
-    ``kernel`` (the AsyncKernel) puts the actions in kernel mode (#332 S3d-2):
-    write paths route through the maintained kernel ops, and ``index`` then
-    carries the search-facing ``KernelIndexView`` instead of the facade.
+    ``kernel`` (the AsyncKernel) is required (#355): write paths route through
+    the maintained kernel ops, and ``index`` carries the search-facing
+    ``KernelIndexView`` (or None when embedding is unconfigured).
     """
     context = ActionContext(
         wrapper=wrapper,
         index=index,
-        saver=saver,
         derived=derived,
         kernel=kernel,
         dedup_stats=dedup_stats,

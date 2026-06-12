@@ -4,8 +4,9 @@ load("@shrike_pip//:requirements.bzl", "requirement")
 
 package(default_testonly = True)
 
-# conftest.py (the wrapper/basic_note fixtures) rides in the test's runfiles so
-# pytest's per-directory conftest discovery finds it.
+# conftest.py (the wrapper/basic_note fixtures + the #355 kernel harness)
+# rides in the test's runfiles so pytest's per-directory conftest discovery
+# finds it.
 py_library(
     name = "conftest",
     srcs = [
@@ -16,7 +17,6 @@ py_library(
         "//src/shrike",
         "//tests/oracles",
         requirement("anki"),  # the pip TEST ORACLE (subprocess fixtures)
-        requirement("usearch"),  # test-only: authors pre-#201a (v1) index layouts
     ],
 )
 
