@@ -645,13 +645,11 @@ impl Kernel {
         // outcome can't change until the fingerprint does), not pending, so
         // it is never re-recognized and an all-gated window converges instead
         // of re-taking itself forever.
-        let raw = self
-            .collection
-            .run(|core| -> NativeResult<_> {
-                let ids = core.find_notes("")?;
-                core.note_embed_inputs(&ids)
-            })
-            .await??;
+        // Scoped read (#445): the pending diff needs only (note_id,
+        // image_names) — the old full note_embed_inputs render paid
+        // notetype lookups + normalization + strip per field for the WHOLE
+        // collection, once per sweep batch, and discarded the text.
+        let raw = self.collection.run(|core| core.note_image_refs()).await??;
         let mut done: std::collections::HashSet<(i64, String)> = self
             .derived
             .refs_for_source(OCR_SOURCE)?
@@ -659,7 +657,7 @@ impl Kernel {
             .collect();
         done.extend(self.derived.gated_refs_for_source(OCR_SOURCE)?);
         let mut pending: Vec<(i64, String)> = Vec::new();
-        for (note_id, _text, image_names) in &raw {
+        for (note_id, image_names) in &raw {
             for name in image_names {
                 if !done.contains(&(*note_id, name.clone())) && svc.resolver.exists(name) {
                     pending.push((*note_id, name.clone()));
@@ -719,9 +717,20 @@ impl Kernel {
         // it done instead of re-recognizing it forever. Markers are cleared
         // with the rows on a fingerprint change (above), so an engine upgrade
         // re-judges them like everything else.
+        // Scoped to the batch's notes (#445): the merge previously read the
+        // whole OCR table per sweep.
+        let sent_ids: Vec<i64> = sent
+            .iter()
+            .map(|(nid, _)| *nid)
+            .collect::<std::collections::BTreeSet<i64>>()
+            .into_iter()
+            .collect();
         let mut existing: std::collections::HashMap<i64, Vec<(String, String)>> =
             std::collections::HashMap::new();
-        for (nid, r, text) in self.derived.texts_for_source(OCR_SOURCE)? {
+        for (nid, r, text) in self
+            .derived
+            .texts_for_source_for_notes(OCR_SOURCE, &sent_ids)?
+        {
             existing.entry(nid).or_default().push((r, text));
         }
         let mut stored_count = 0usize;
