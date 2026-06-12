@@ -613,7 +613,7 @@ def _baseline(server: ServerInfo) -> Baseline:
 def _reset_shared_collection(request: pytest.FixtureRequest) -> Iterator[None]:
     """Reset the shared collection to baseline after each test that used it.
     Skipped for tests that don't touch the shared server (embedding tests on
-    `embedding_server`, or tests using `isolated_server`)."""
+    `collection_server`, or tests using `isolated_server`)."""
     if not {"server", "mcp", "runner", "cli_config"} & set(request.fixturenames):
         yield
         return

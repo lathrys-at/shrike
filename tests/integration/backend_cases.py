@@ -154,7 +154,7 @@ def cases() -> list[BackendCase]:
         ),
         # The native CLIP engine (#271), the only engine since the #278 cutover
         # (clip-rs: namespace kept for the same reason). Image-path semantics
-        # are asserted as retrieval equivalence in test_clip_native.py.
+        # are asserted as retrieval equivalence in test_clip_model.py.
         BackendCase(
             id="clip-vit-b32",
             ndim=512,
