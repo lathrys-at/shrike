@@ -50,14 +50,14 @@ jobs:
   # extension inside, one per supported platform. The linux pair builds on
   # ubuntu-22.04 deliberately — auditwheel grades the manylinux tag by the
   # glibc symbols the extension links, so the oldest supported runner gives the
-  # widest-installing tag (manylinux_2_35 at most). macOS x86_64 rides the
-  # macos-15-intel runner (the last hosted Intel image; macos-13 retired
-  # 2025-12) — that leg is build-and-check-only: the test matrix above has no
-  # Intel mac, so the x86_64 wheel ships untested by the suite (accepted; same
-  # abi3 source as the arm64 wheel the suite does cover). Neither extra runner
-  # is warmed by warm-cache.yml (it only runs the test.yml matrix), so those
-  # two legs cold-compile the Rust workspace at tag time — accepted: it's
-  # release cadence, not the PR loop.
+  # widest-installing tag (manylinux_2_35 at most). Intel macOS is deliberately
+  # NOT shipped (decided 2026-06-12): nobody on that hardware is the audience,
+  # and the wheel select() in the root BUILD keeps the macosx_11_0_x86_64 arm
+  # so an Intel-Mac user can still build from source — dropping the runner
+  # only drops the published artifact. The arm runner isn't warmed by
+  # warm-cache.yml (it only runs the test.yml matrix), so that leg
+  # cold-compiles the Rust workspace at tag time — accepted: it's release
+  # cadence, not the PR loop.
   build-wheels:
     name: Build wheel (${{ matrix.os }})
     needs: test
@@ -65,7 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-latest, macos-15-intel]
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-latest]
     steps:
       - uses: actions/checkout@v6
         with:
