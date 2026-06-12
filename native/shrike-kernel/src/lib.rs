@@ -1128,6 +1128,9 @@ impl Kernel {
             .collect();
         let mut prepared = Vec::with_capacity(handles.len());
         for handle in handles {
+            // A JoinError is a PANIC in prepare_one (every expected failure
+            // is already a per-item Failed) — a bug fails the whole batch
+            // deliberately, never a per-item error.
             prepared.push(
                 handle
                     .await
