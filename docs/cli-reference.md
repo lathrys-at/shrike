@@ -59,7 +59,7 @@ Start the server as a background daemon. The collection path can come from `--co
 | `--embedding-batch-size INTEGER` | Cap the embedding batch size (any backend). Default: batch as large as a startup self-check proves safe. A batch-variant model (e.g. int8 ONNX) is always embedded serially regardless. |
 | `--llama-server PATH` | Path to the `llama-server` binary (default: `LLAMA_SERVER_PATH` or `PATH`). `llama` backend only. |
 | `--no-embedding` | Start without the embedding service even if a model is configured. |
-| `--ocr-backend` | OCR backend for recognizing text in note images. Off by default; `apple` uses macOS Vision (ships with the OS, macOS 15+). Recognized text feeds exact/fuzzy search and the vector index in the background. |
+| `--ocr-backend` | OCR backend for recognizing text in note images. Off by default. `apple` (macOS Vision) is no longer compiled into the server — selecting it reports recognition as unavailable; the replacement is recognition over a configured endpoint ([#502](https://github.com/lathrys-at/shrike/issues/502)). |
 | `--save-config` | Persist the resolved flags to the config file. Without this, `server start` never writes config — it stays under your control and start always reflects the flags you pass. |
 
 The embedding flags above are also accepted by `shrike embedding start`, which cycles the service on an already-running server.

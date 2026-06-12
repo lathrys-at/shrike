@@ -64,9 +64,9 @@ socks = [
 gpu = [
     "onnxruntime-gpu>=1.17",
 ]
-# OCR via Apple's Vision framework (--ocr-backend apple, #228/#221) needs NO
-# extra since #342 P3: the engine is native (shrike-recognize-apple in the
-# shipped extension; Vision ships with macOS).
+# OCR: the Apple Vision engine is NOT in the server build (platform engines
+# are mobile-only — docs/distribution.md, #496); the server-profile OCR path
+# is the remote recognizer rows (#502). No extra either way.
 dev = [
     # The pip anki package is the TEST ORACLE only since the #278 cutover
     # (subprocess fixtures + parity comparisons); the runtime is native.
