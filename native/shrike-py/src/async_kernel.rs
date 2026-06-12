@@ -13,13 +13,12 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 
 use shrike_collection::{CreateOutcome, DuplicatePolicy};
-use shrike_kernel::{Kernel, MutexExecutor, NoteSpec, SerialExecutor, SerializedCollection};
+use shrike_kernel::{Kernel, NoteSpec, SerializedCollection};
 
 use crate::asyncio_bridge::future_into_py;
 use crate::native_embedder::NativeEmbedder;
 use crate::py_embedder::{PyEmbedder, PyEmbedderHandle, PyMediaResolver};
 use crate::timer_host::LoopTimerHost;
-use crate::worker_executor::WorkerExecutor;
 
 /// An open collection whose every op is an awaitable serialized through the
 /// kernel's injected executor.
@@ -29,29 +28,22 @@ pub(crate) struct AsyncCollection {
 }
 
 /// Open a collection asynchronously; resolves to an [`AsyncCollection`].
-///
-/// `executor` is the harness-injected scheduler (#332 S3b): pass a
-/// [`WorkerExecutor`] whose `worker_loop` runs on a harness-owned thread and
-/// collection jobs leave the asyncio loop entirely. Without one, the kernel's
-/// inline `MutexExecutor` runs jobs inside the poll callback (conforming —
-/// fine for tests and tiny embedded uses).
+/// Scheduling is the kernel's own (#374): the collection actor spawns onto
+/// the owned runtime; this host just awaits completions.
 #[pyfunction]
-#[pyo3(signature = (collection_path, executor=None))]
 pub(crate) fn async_collection_open<'py>(
     py: Python<'py>,
     collection_path: String,
-    executor: Option<PyRef<'py, WorkerExecutor>>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let executor: Arc<dyn SerialExecutor> = match executor {
-        Some(ex) => Arc::new(ex.handle()),
-        None => Arc::new(MutexExecutor::default()),
-    };
-    future_into_py(py, async move {
-        let collection = SerializedCollection::open(collection_path, executor).await?;
-        Ok(AsyncCollection {
-            inner: Arc::new(collection),
-        })
-    })
+    future_into_py(
+        py,
+        shrike_kernel::spawn_op(async move {
+            let collection = SerializedCollection::open(collection_path).await?;
+            Ok(AsyncCollection {
+                inner: Arc::new(collection),
+            })
+        }),
+    )
 }
 
 #[pymethods]
@@ -59,21 +51,30 @@ impl AsyncCollection {
     /// The collection's modification stamp (an awaitable).
     fn col_mod<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move { inner.run(|core| core.col_mod()).await? })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move { inner.run(|core| core.col_mod()).await? }),
+        )
     }
 
     /// Note ids matching a raw Anki search (an awaitable).
     fn find_notes<'py>(&self, py: Python<'py>, query: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            inner.run(move |core| core.find_notes(&query)).await?
-        })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move {
+                inner.run(move |core| core.find_notes(&query)).await?
+            }),
+        )
     }
 
     /// Close the collection (an awaitable).
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move { inner.close().await })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move { inner.close().await }),
+        )
     }
 }
 
@@ -151,24 +152,21 @@ fn image_pair(
 /// embedder slot is runtime-swappable (#342), so a kernel opens (and serves
 /// lexical search + every collection op) with none.
 #[pyfunction]
-#[pyo3(signature = (collection_path, cache_dir, executor=None))]
 pub(crate) fn async_kernel_open<'py>(
     py: Python<'py>,
     collection_path: String,
     cache_dir: String,
-    executor: Option<PyRef<'py, WorkerExecutor>>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let executor: Arc<dyn SerialExecutor> = match executor {
-        Some(ex) => Arc::new(ex.handle()),
-        None => Arc::new(MutexExecutor::default()),
-    };
     let timers: Arc<dyn shrike_kernel::TimerHost> = Arc::new(LoopTimerHost::capture_host(py)?);
-    future_into_py(py, async move {
-        let kernel = Kernel::open(&collection_path, &cache_dir, executor, Some(timers)).await?;
-        Ok(AsyncKernel {
-            inner: Arc::new(kernel),
-        })
-    })
+    future_into_py(
+        py,
+        shrike_kernel::spawn_op(async move {
+            let kernel = Kernel::open(&collection_path, &cache_dir, Some(timers)).await?;
+            Ok(AsyncKernel {
+                inner: Arc::new(kernel),
+            })
+        }),
+    )
 }
 
 #[pymethods]
@@ -258,10 +256,13 @@ impl AsyncKernel {
         max_items: usize,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            let report = inner.recognize_pending(max_items).await?;
-            Ok(report.to_string())
-        })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move {
+                let report = inner.recognize_pending(max_items).await?;
+                Ok(report.to_string())
+            }),
+        )
     }
     /// Create a batch of notes (the #77 duplicate policy per item) and index
     /// them — ONE collection job, ONE read job, batched embeds (an awaitable;
@@ -283,13 +284,16 @@ impl AsyncKernel {
             })
             .collect();
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            let outcomes = kernel.upsert_notes(specs, policy).await?;
-            Ok(outcomes
-                .into_iter()
-                .map(outcome_to_wire)
-                .collect::<Vec<_>>())
-        })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move {
+                let outcomes = kernel.upsert_notes(specs, policy).await?;
+                Ok(outcomes
+                    .into_iter()
+                    .map(outcome_to_wire)
+                    .collect::<Vec<_>>())
+            }),
+        )
     }
 
     /// The wire-shaped bulk upsert (named fields, create AND update,
@@ -304,11 +308,14 @@ impl AsyncKernel {
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            kernel
-                .upsert_notes_json(notes_json, on_duplicate, dry_run)
-                .await
-        })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move {
+                kernel
+                    .upsert_notes_json(notes_json, on_duplicate, dry_run)
+                    .await
+            }),
+        )
     }
 
     /// Drop already-deleted notes from the index + derived store (the prune
@@ -319,14 +326,20 @@ impl AsyncKernel {
         note_ids: Vec<i64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move { kernel.forget_notes(note_ids).await })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move { kernel.forget_notes(note_ids).await }),
+        )
     }
 
     /// Advance the watermarks after a metadata-only change (tags/decks/
     /// templates) — no re-embed, no drift on next boot. Awaitable.
     fn metadata_changed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move { kernel.metadata_changed().await })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move { kernel.metadata_changed().await }),
+        )
     }
 
     /// Delete notes; vectors, fingerprints, and derived rows go with them.
@@ -336,7 +349,10 @@ impl AsyncKernel {
         note_ids: Vec<i64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move { kernel.delete_notes(note_ids).await })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move { kernel.delete_notes(note_ids).await }),
+        )
     }
 
     /// Fused search: `(note_id, score, [(signal, rank)])` rows.
@@ -347,20 +363,26 @@ impl AsyncKernel {
         top_k: usize,
     ) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            let hits = kernel.search(&query, top_k).await?;
-            Ok(hits
-                .into_iter()
-                .map(|h| (h.note_id, h.score, h.signals))
-                .collect::<Vec<_>>())
-        })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move {
+                let hits = kernel.search(&query, top_k).await?;
+                Ok(hits
+                    .into_iter()
+                    .map(|h| (h.note_id, h.score, h.signals))
+                    .collect::<Vec<_>>())
+            }),
+        )
     }
 
     /// Explicit FULL rebuild (the `/index/rebuild` semantics) — awaitable;
     /// resolves to the note count. Progress reads via `index_status_json`.
     fn rebuild_index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move { kernel.rebuild_index().await })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move { kernel.rebuild_index().await }),
+        )
     }
 
     /// Re-embed + re-ingest specific notes after a text edit outside the
@@ -371,18 +393,27 @@ impl AsyncKernel {
         note_ids: Vec<i64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move { kernel.reindex_notes(&note_ids).await })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move { kernel.reindex_notes(&note_ids).await }),
+        )
     }
 
     /// The boot/reload drift path (awaitable; drive as a background task).
     fn reindex_if_needed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move { kernel.reindex_if_needed().await })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move { kernel.reindex_if_needed().await }),
+        )
     }
 
     fn col_mod<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move { kernel.col_mod().await })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move { kernel.col_mod().await }),
+        )
     }
 
     /// The index status block as JSON (state/size/progress/stamps).
@@ -421,6 +452,8 @@ impl AsyncKernel {
     /// job must never await another kernel op (a deadlock by contract).
     fn run_job<'py>(&self, py: Python<'py>, job: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
+        // Deliberately UN-spawned (the one PyResult-shaped path): the future
+        // is just channel sends/awaits, pollable on the loop as before.
         crate::asyncio_bridge::pyresult_future_into_py(py, async move {
             kernel
                 .collection()
@@ -433,22 +466,31 @@ impl AsyncKernel {
     /// Cooperative idle-release (#64) — awaitable.
     fn release<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move { kernel.release().await })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move { kernel.release().await }),
+        )
     }
 
     /// Re-acquire after a release — awaitable (busy surfaces as the typed
     /// BUSY error tier).
     fn reopen<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move { kernel.reopen().await })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move { kernel.reopen().await }),
+        )
     }
 
     /// Flush the index, then close the collection — awaitable.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            let _ = kernel.index().save();
-            kernel.collection().close().await
-        })
+        future_into_py(
+            py,
+            shrike_kernel::spawn_op(async move {
+                let _ = kernel.index().save();
+                kernel.collection().close().await
+            }),
+        )
     }
 }

@@ -15,7 +15,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import threading
 from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
@@ -182,7 +181,6 @@ class Harness:
         self,
         *,
         kernel: Any,
-        executor: Any,
         wrapper: CollectionWrapper,
         runtime: EmbeddingRuntime,
         derived: DerivedTextStore,
@@ -190,7 +188,6 @@ class Harness:
         media_exists: Any,
     ) -> None:
         self.kernel = kernel
-        self._executor = executor
         self.wrapper = wrapper
         self.runtime = runtime
         self.derived = derived
@@ -217,17 +214,15 @@ class Harness:
         media_read: Any,
         media_exists: Any,
     ) -> Harness:
-        """Open the kernel on the running loop with a dedicated harness thread
-        driving its executor (the one serialization domain for everything)."""
-        executor = shrike_native.WorkerExecutor()
-        threading.Thread(target=executor.worker_loop, name="shrike-collection", daemon=True).start()
-        kernel = await shrike_native.async_kernel_open(collection_path, cache_dir, executor)
+        """Open the kernel on the running loop. Scheduling is the kernel's
+        own (#374 — the owned tokio runtime spawns the collection actor);
+        the harness assembles services and awaits completions."""
+        kernel = await shrike_native.async_kernel_open(collection_path, cache_dir)
         wrapper = CollectionWrapper.over_kernel(
             kernel, collection_path, cooperative=cooperative, hold_seconds=hold_seconds
         )
         return cls(
             kernel=kernel,
-            executor=executor,
             wrapper=wrapper,
             runtime=runtime,
             derived=derived,
@@ -530,8 +525,9 @@ class Harness:
         self.derived.close()
         await asyncio.to_thread(self.runtime.stop)
         self.wrapper.close()
+        # kernel.close drains the collection actor (#374): nothing in flight
+        # when this returns — the interpreter-teardown guard.
         await self.kernel.close()
-        self._executor.shutdown()
 
 
 def _log_task_failure(task: asyncio.Task[Any]) -> None:

@@ -37,7 +37,6 @@ mod native_embedder;
 mod py_embedder;
 mod py_recognizer;
 mod timer_host;
-mod worker_executor;
 
 pyo3::create_exception!(
     _native,
@@ -851,7 +850,6 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<async_kernel::AsyncKernel>()?;
         m.add_function(wrap_pyfunction!(async_kernel::async_kernel_open, m)?)?;
     }
-    m.add_class::<worker_executor::WorkerExecutor>()?;
     m.add_class::<timer_host::LoopTimerHost>()?;
     m.add_class::<py_embedder::PyEmbedder>()?;
     m.add_class::<native_embedder::NativeEmbedder>()?;

@@ -11,9 +11,8 @@ name = "shrike_kernel"
 
 # Pure Rust — NO pyo3 anywhere in this dep tree (epic #265 convention 5; the
 # layering check + the no-CPython smoke test below are the proof). This crate
-# IS the embedded host #224 specs. It owns NO threads and assumes NO runtime
-# (#308/#310): serialization is injected via SerialExecutor, and every op is
-# an async fn the harness drives on its runtime of choice.
+# IS the embedded host #224 specs. Since #374 it owns its runtime: tokio in
+# the kernel, every op an idiomatic async fn, hosts adapt the action exchange.
 # Since #342 the kernel names NO engine and has NO features: the engine
 # contract lives in shrike-engine-api, and hosts attach whatever engines the
 # deployment composes (the layering check pins this structurally).
@@ -31,7 +30,10 @@ serde_json = "1"
 # hashlib.blake2b(digest_size=8) so the on-disk sidecar survives the swap.
 blake2 = "0.10"
 tracing = "0.1"
-# Runtime-AGNOSTIC async building blocks (#310): futures is the abstraction
-# library, not a runtime — no tokio (or any executor) assumption in this crate.
-# The harness picks the runtime; tests drive ops with futures::executor.
+# futures stays for the channel/future utility types shared with the engine
+# contract (BoxFuture at the dyn seams); the runtime itself is tokio (#374).
 futures = { version = "0.3", features = ["executor"] }
+# The owned runtime (#374): the kernel is idiomatic async Rust on its own
+# tokio — already transitive via anki, so zero new tree weight. `time` feeds
+# the debounced saver; `sync` the actor channels.
+tokio = { version = "1", features = ["rt-multi-thread", "rt", "sync", "time"] }

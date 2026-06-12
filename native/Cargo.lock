@@ -5300,6 +5300,7 @@ dependencies = [
  "shrike-ffi",
  "shrike-index",
  "shrike-schemas",
+ "tokio",
  "tracing",
 ]
 

@@ -28,7 +28,6 @@ rust_shared_library(
         "src/py_embedder.rs",
         "src/py_recognizer.rs",
         "src/timer_host.rs",
-        "src/worker_executor.rs",
     ],
     edition = "2021",
     rustc_flags = select({

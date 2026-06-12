@@ -2,21 +2,15 @@
 //!
 //! This crate composes the native compute plane into the embedded-host shape
 //! #224 specs: it owns the collection core (anki via its protobuf service
-//! layer, #278), the vector index engine, the derived-text store, and the
-//! fusion — and **no threading at all** (#308). The kernel never spawns a
-//! thread and assumes nothing about the runtime (no tokio assumption; anki's
-//! internal runtime is its own business behind the service layer). Scheduling
-//! is *injected* by the harness through the [`SerialExecutor`] contract,
-//! exactly as the harness plugs transports: collection ops need serialization
-//! with respect to each other, not a dedicated thread — execution may migrate
-//! across threads between jobs so long as the contract holds.
-//!
-//! **Natively async (#310):** every kernel op is an `async fn`; the
-//! transitions between collection ops are awaits that chain/fan out through
-//! the compute layer (embed → index add → derived ingest). Nothing here
-//! blocks by assumption and nothing names a runtime — the futures are
-//! runtime-agnostic, so the harness runs them on its executor of choice
-//! (asyncio via pyo3-async-runtimes, a mobile runtime, or a plain block_on).
+//! layer, #278), the vector index engine, the derived-text store, the
+//! fusion — and, since the tokio pivot (#374), **its own runtime**
+//! ([`runtime`]). The kernel is idiomatic async Rust: every op is an
+//! `async fn` composing with ordinary awaits (embed → index add → derived
+//! ingest), collection access serializes through a task-actor
+//! ([`SerializedCollection`]), and hosts adapt the *action exchange* — an op
+//! in, a completion-backed future out via [`spawn_op`] — never scheduling.
+//! (anki's own lazy runtime is never instantiated on Shrike's call paths;
+//! see [`runtime`].)
 //!
 //! There is **no pyo3 anywhere in this dependency tree** (epic #265 convention
 //! 5, enforced by `//native:layering_check`); the no-CPython smoke test in
@@ -38,6 +32,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::channel::oneshot;
+#[cfg(test)]
 use futures::future::BoxFuture;
 use tracing::Instrument;
 
@@ -46,39 +41,17 @@ use shrike_derived::DerivedEngine;
 use shrike_ffi::{NativeError, NativeResult};
 use shrike_index::MultiModalIndex;
 
+pub mod runtime;
+pub use runtime::{block_on, init_runtime, spawn_op};
+
 // The engine contract (#342): traits live in shrike-engine-api — the kernel
 // consumes them and re-exports for downstream paths; it names no engine.
 pub use shrike_engine_api::{
     Embedder, ImageEmbedder, ImageResolver, MediaItem, Recognition, Recognizer, Segment,
 };
 
-/// The scheduling contract the harness injects (#308). The kernel never
-/// spawns threads or assumes a runtime; whoever assembles a kernel supplies
-/// this, exactly as it plugs transports.
-///
-/// **Contract:**
-/// - Jobs submitted through one executor run **serialized FIFO** with respect
-///   to each other — never concurrently. (The collection's consistency model
-///   requires serialization, not thread affinity.)
-/// - Execution may happen on any thread, and may **migrate across threads
-///   between jobs** — anki's service layer is internally synchronized, so no
-///   thread-affinity is required, only mutual exclusion + ordering.
-/// - `submit` returns a **runtime-agnostic future** that resolves once the
-///   job has run; the executor decides where/when (inline, a worker, a pool —
-///   anything honoring serialization). The kernel never blocks on it; it
-///   awaits.
-/// - **Re-entrancy is forbidden**: a job must never submit to (and await)
-///   its own executor from within itself — with any conforming implementation
-///   that is a deadlock by contract, not an executor bug. Compute (embedding,
-///   index, derived work) runs *outside* collection jobs for exactly this
-///   reason.
-pub trait SerialExecutor: Send + Sync {
-    fn submit(&self, job: Box<dyn FnOnce() + Send + 'static>) -> BoxFuture<'static, ()>;
-}
-
-/// The debounce/idle-timer contract the harness injects (#332 S3c-1) — the
-/// sibling of [`SerialExecutor`], for the kernel's two timer consumers (the
-/// index saver's debounced flush; the cooperative idle release). One-shot:
+/// The debounce/idle-timer contract the harness injects (#332 S3c-1; slated
+/// for tokio::time in #374 B2) — the index saver's debounce rides it. One-shot:
 /// `schedule` arms a job after `delay_secs`; the returned handle cancels it
 /// (a no-op once fired). No threads owned here either — the asyncio harness
 /// backs this with `loop.call_later`, an embedded host with its own timers.
@@ -97,58 +70,70 @@ pub trait TimerCancel: Send {
     fn cancel(&self);
 }
 
-/// The simplest conforming executor: mutual exclusion on the calling thread.
-/// Serialized (the mutex), thread-agnostic (runs wherever the caller is), no
-/// threads owned. A real harness may instead pin a worker thread (the Python
-/// host), use a thread pool with an ordered queue, or an actor — anything
-/// honoring the contract.
-#[derive(Default)]
-pub struct MutexExecutor {
-    gate: Mutex<()>,
-}
-
-impl SerialExecutor for MutexExecutor {
-    fn submit(&self, job: Box<dyn FnOnce() + Send + 'static>) -> BoxFuture<'static, ()> {
-        // Degenerate-but-conforming: run inline under the gate, return ready.
-        // A real harness suspends instead (queue + wake) — the contract only
-        // fixes serialization, not where the work happens.
-        let _guard = self.gate.lock().expect("executor gate poisoned");
-        job();
-        Box::pin(async {})
-    }
-}
-
-/// The collection behind the injected executor: every access is one submitted
-/// job; the core never escapes. (CollectionCore is Send: anki's Backend is
-/// internally synchronized, which is what makes thread migration safe.)
+/// The collection as a task-actor (#374): every access is one job sent to a
+/// single spawned task that runs them **inline, sequentially** — FIFO
+/// serialization by construction, no thread affinity (the task owns the
+/// receiver and migrates freely across runtime workers between polls;
+/// `CollectionCore` is Send). Jobs are synchronous closures and never await,
+/// which makes the old re-entrancy rule structural. On a `current_thread`
+/// runtime the actor shares the one thread driving everything — the
+/// degenerate single-thread mode works by construction (no `block_in_place`
+/// anywhere).
 ///
-/// Public since #332 (S3): this is the embedded-host surface the asyncio
-/// bridge binds — open/run/close as runtime-agnostic futures over whatever
-/// executor the harness injected.
+/// Inline jobs briefly occupy whichever worker polls the actor — strictly
+/// less thread-hungry than the retired permanently-dedicated worker thread,
+/// and engine compute lives on the separate blocking pool so embeds never
+/// compete. anki's internal `block_on` exists only on sync/AnkiWeb service
+/// paths Shrike never calls (pinned in shrike-collection), so no
+/// nested-runtime hazard exists on our call paths.
 pub struct SerializedCollection {
     core: Arc<CollectionCore>,
-    executor: Arc<dyn SerialExecutor>,
+    /// `None` after [`SerializedCollection::shutdown`] — dropping the sender
+    /// is what ends the actor loop.
+    jobs: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Job>>>,
+    /// Awaited by [`SerializedCollection::shutdown`] so a kernel close
+    /// drains the actor before returning (nothing mid-job at teardown).
+    actor: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
 impl SerializedCollection {
-    pub async fn open(
-        collection_path: String,
-        executor: Arc<dyn SerialExecutor>,
-    ) -> NativeResult<Self> {
-        // Open through the executor too: the open IS a collection op.
-        let (tx, rx) = oneshot::channel();
-        executor
-            .submit(Box::new(move || {
-                let _ = tx.send(CollectionCore::open(&collection_path));
-            }))
-            .await;
-        let core = rx
+    pub async fn open(collection_path: String) -> NativeResult<Self> {
+        // The open IS the actor's first job: the core is created inside the
+        // task, so no collection access ever happens outside it.
+        let (opened_tx, opened_rx) = oneshot::channel();
+        let (jobs_tx, mut jobs_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let actor = runtime::handle().spawn(async move {
+            let core = match CollectionCore::open(&collection_path) {
+                Ok(core) => Arc::new(core),
+                Err(e) => {
+                    let _ = opened_tx.send(Err(e));
+                    return;
+                }
+            };
+            let _ = opened_tx.send(Ok(Arc::clone(&core)));
+            while let Some(job) = jobs_rx.recv().await {
+                job();
+            }
+        });
+        let core = opened_rx
             .await
-            .map_err(|_| NativeError::internal("executor dropped the open job"))??;
+            .map_err(|_| NativeError::internal("the collection actor dropped the open job"))??;
         Ok(Self {
-            core: Arc::new(core),
-            executor,
+            core,
+            jobs: Mutex::new(Some(jobs_tx)),
+            actor: Mutex::new(Some(actor)),
         })
+    }
+
+    /// A live sender, or the actor-is-gone error (post-shutdown).
+    fn sender(&self) -> NativeResult<tokio::sync::mpsc::UnboundedSender<Job>> {
+        self.jobs
+            .lock()
+            .expect("jobs slot poisoned")
+            .clone()
+            .ok_or_else(|| NativeError::internal("the collection actor is gone"))
     }
 
     /// Run a job against the collection, serialized; the await IS the
@@ -162,17 +147,28 @@ impl SerializedCollection {
     ) -> NativeResult<T> {
         let core = Arc::clone(&self.core);
         let (tx, rx) = oneshot::channel();
-        self.executor
-            .submit(Box::new(move || {
+        self.sender()?
+            .send(Box::new(move || {
                 let _ = tx.send(core.ensure_open().map(|_| job(&core)));
             }))
-            .await;
+            .map_err(|_| NativeError::internal("the collection actor is gone"))?;
         rx.await
             .map_err(|_| NativeError::internal("executor dropped a collection job"))?
     }
 
     pub async fn close(&self) -> NativeResult<()> {
         self.run(|core| core.close()).await?
+    }
+
+    /// Drain the actor: take-and-drop the sender (the channel closes; the
+    /// loop ends once queued jobs ran) and await the task — close returns
+    /// with nothing in flight (the interpreter-teardown guard). Idempotent.
+    pub async fn shutdown(&self) {
+        drop(self.jobs.lock().expect("jobs slot poisoned").take());
+        let handle = self.actor.lock().expect("actor slot poisoned").take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
     }
 
     /// The shared core, for a harness that runs its own (executor-disciplined)
@@ -201,9 +197,9 @@ pub struct NoteSpec {
 }
 
 /// The kernel: one open collection + the index orchestrator (which owns and
-/// maintains the engine) + the derived store + fusion, every op an async fn
-/// over the injected executor. No threads owned, no runtime assumed, no
-/// transport, no Python. Index maintenance is **kernel-internal** (#332 S3d):
+/// maintains the engine) + the derived store + fusion, every op an idiomatic
+/// async fn on the kernel's own runtime (#374). No transport, no Python.
+/// Index maintenance is **kernel-internal** (#332 S3d):
 /// upserts/deletes keep the orchestrator's vectors, fingerprints, and
 /// watermarks current, and the debounced saver (over the injected
 /// [`TimerHost`]) bounds what a crash can discard.
@@ -280,19 +276,18 @@ pub const TAG_TEXT_SPACE: &str = "tag.text";
 impl Kernel {
     /// Open a collection and its sidecar stores (cache_dir holds the derived
     /// store and the index files, like the Python host's cache layout).
-    /// `executor` is the harness-injected scheduling (see [`SerialExecutor`]);
-    /// `timers`, when given, arms the debounced index flush (without it, the
-    /// index persists only on explicit `save`/rebuild — fine for tests and
-    /// one-shot hosts).
+    /// Scheduling is the kernel's own (#374 — the owned runtime spawns the
+    /// collection actor); `timers`, when given, arms the debounced index
+    /// flush (without it, the index persists only on explicit `save`/rebuild
+    /// — fine for tests and one-shot hosts).
     pub async fn open(
         collection_path: &str,
         cache_dir: &str,
-        executor: Arc<dyn SerialExecutor>,
         timers: Option<Arc<dyn TimerHost>>,
     ) -> NativeResult<Self> {
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
-        let collection = SerializedCollection::open(collection_path.to_string(), executor).await?;
+        let collection = SerializedCollection::open(collection_path.to_string()).await?;
         let engine = Arc::new(MultiModalIndex::new(
             NOTE_MODALITIES
                 .iter()
@@ -1017,8 +1012,19 @@ impl Kernel {
         self.collection.run(|core| core.reopen()).await?
     }
 
-    pub async fn close(self) -> NativeResult<()> {
-        self.collection.close().await
+    /// Close the collection and drain the actor — close returns with nothing
+    /// in flight (the interpreter-teardown guard, #374 design 7). Works
+    /// through `&self` so shared handles (the binding's `Arc<Kernel>`) can
+    /// close; idempotent (a drained actor close is the actor-gone error,
+    /// swallowed here as already-closed).
+    pub async fn close(&self) -> NativeResult<()> {
+        let result = match self.collection.close().await {
+            // A second close after shutdown: the actor is gone — fine.
+            Err(e) if e.to_string().contains("actor is gone") => Ok(()),
+            other => other,
+        };
+        self.collection.shutdown().await;
+        result
     }
 }
 
@@ -1087,6 +1093,69 @@ mod no_cpython_smoke {
     /// kernel ops on any multithreaded runtime (the #310 contract — a !Send
     /// regression, e.g. an entered span guard held across an await, fails
     /// here instead of downstream).
+    /// #374 design 2: dropping the edge wrapper DETACHES observation — the
+    /// spawned op runs to completion (never an abort; a half-applied
+    /// collection write would be corruption). The regression guard against
+    /// a JoinHandle-shaped wrapper.
+    #[test]
+    fn dropping_the_op_wrapper_never_aborts_the_work() {
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let collection = SerializedCollection::open(
+                dir.join("collection.anki2").to_string_lossy().into_owned(),
+            )
+            .await
+            .unwrap();
+            let collection = Arc::new(collection);
+
+            // A slow write job, spawned through the edge and DROPPED.
+            let col = Arc::clone(&collection);
+            let (started_tx, started_rx) = oneshot::channel::<()>();
+            let wrapper = crate::spawn_op(async move {
+                col.run(move |core| {
+                    let _ = started_tx.send(());
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    core.col_mod()
+                })
+                .await?
+            });
+            drop(wrapper); // detach, not abort
+            started_rx.await.expect("the job still started");
+
+            // The actor stays healthy and serialized: the NEXT job runs
+            // after the detached one completed (FIFO), proving it wasn't
+            // torn down mid-flight.
+            let _stamp = collection.run(|core| core.col_mod()).await.unwrap();
+            collection.shutdown().await;
+            let _ = std::fs::remove_dir_all(dir);
+        });
+    }
+
+    /// The actor serializes FIFO: jobs sent in order run in order, even with
+    /// every completion awaited concurrently.
+    #[test]
+    fn collection_jobs_run_fifo() {
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let collection = SerializedCollection::open(
+                dir.join("collection.anki2").to_string_lossy().into_owned(),
+            )
+            .await
+            .unwrap();
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let futures: Vec<_> = (0..16)
+                .map(|i| {
+                    let log = Arc::clone(&log);
+                    collection.run(move |_core| log.lock().unwrap().push(i))
+                })
+                .collect();
+            futures::future::join_all(futures).await;
+            assert_eq!(*log.lock().unwrap(), (0..16).collect::<Vec<_>>());
+            collection.shutdown().await;
+            let _ = std::fs::remove_dir_all(dir);
+        });
+    }
+
     fn assert_send<F: std::future::Future + Send>(f: F) -> F {
         f
     }
@@ -1096,12 +1165,11 @@ mod no_cpython_smoke {
         // The embed slot is runtime-swappable (#342): detached, the kernel
         // still creates notes and serves lexical search; re-attached, the
         // stale index watermark makes reindex catch up on what it missed.
-        futures::executor::block_on(async {
+        crate::runtime::block_on(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
                 dir.join("cache").to_str().unwrap(),
-                Arc::new(MutexExecutor::default()),
                 None,
             )
             .await
@@ -1146,12 +1214,11 @@ mod no_cpython_smoke {
         // The #64 open-on-demand, kernel-side: an idle release between ops
         // (or between one op's jobs) self-heals on the next serialized job
         // instead of erroring CollectionNotOpen.
-        futures::executor::block_on(async {
+        crate::runtime::block_on(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
                 dir.join("cache").to_str().unwrap(),
-                Arc::new(MutexExecutor::default()),
                 None,
             )
             .await
@@ -1195,12 +1262,11 @@ mod no_cpython_smoke {
         // The #178/#179 layer end to end: tagged upserts → centroids in the
         // tag.text space (hygiene-filtered) → note searches structurally
         // blind to tag keys.
-        futures::executor::block_on(async {
+        crate::runtime::block_on(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
                 dir.join("cache").to_str().unwrap(),
-                Arc::new(MutexExecutor::default()),
                 None,
             )
             .await
@@ -1254,12 +1320,11 @@ mod no_cpython_smoke {
         // The #179 payoff: a member whose own text doesn't match the query
         // still surfaces because its TAG's centroid (dominated by on-topic
         // siblings) activates and expands.
-        futures::executor::block_on(async {
+        crate::runtime::block_on(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
                 dir.join("cache").to_str().unwrap(),
-                Arc::new(MutexExecutor::default()),
                 None,
             )
             .await
@@ -1365,12 +1430,11 @@ mod no_cpython_smoke {
         // The #228 end-to-end: one recognition pass per image feeds the
         // lexical store (rows + segments) AND the text-space vector, so a
         // query matching only the text INSIDE an image surfaces the note.
-        futures::executor::block_on(async {
+        crate::runtime::block_on(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
                 dir.join("cache").to_str().unwrap(),
-                Arc::new(MutexExecutor::default()),
                 None,
             )
             .await
@@ -1442,7 +1506,6 @@ mod no_cpython_smoke {
             let kernel2 = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
                 dir.join("cache").to_str().unwrap(),
-                Arc::new(MutexExecutor::default()),
                 None,
             )
             .await
@@ -1461,7 +1524,7 @@ mod no_cpython_smoke {
     fn open_upsert_search_close_without_python() {
         // The harness picks the runtime: here futures' minimal block_on —
         // no tokio, nothing owned by the kernel.
-        futures::executor::block_on(assert_send(smoke()));
+        crate::runtime::block_on(assert_send(smoke()));
     }
 
     async fn smoke() {
@@ -1469,15 +1532,9 @@ mod no_cpython_smoke {
         let col = dir.join("collection.anki2");
         let cache = dir.join("cache");
         // The harness assembles the scheduling: here the thread-free
-        // MutexExecutor — serialized, no owned threads, runs on the caller.
-        let kernel = Kernel::open(
-            col.to_str().unwrap(),
-            cache.to_str().unwrap(),
-            Arc::new(MutexExecutor::default()),
-            None,
-        )
-        .await
-        .unwrap();
+        let kernel = Kernel::open(col.to_str().unwrap(), cache.to_str().unwrap(), None)
+            .await
+            .unwrap();
         // The harness attaches the embedding service (#342's registry slot).
         kernel.attach_embedder(Arc::new(HashEmbedder), None);
 
@@ -1574,14 +1631,9 @@ mod no_cpython_smoke {
         // drift and reconciles — re-embedding every live note via the
         // collection read surface (find_notes + note_embed_inputs).
         kernel.close().await.unwrap();
-        let kernel2 = Kernel::open(
-            col.to_str().unwrap(),
-            cache.to_str().unwrap(),
-            Arc::new(MutexExecutor::default()),
-            None,
-        )
-        .await
-        .unwrap();
+        let kernel2 = Kernel::open(col.to_str().unwrap(), cache.to_str().unwrap(), None)
+            .await
+            .unwrap();
         kernel2.attach_embedder(Arc::new(HashEmbedder), None);
         assert!(kernel2.reindex_if_needed().await.unwrap()); // drift → reconcile
         assert!(!kernel2.reindex_if_needed().await.unwrap()); // now current

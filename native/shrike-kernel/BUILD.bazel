@@ -27,6 +27,7 @@ rust_library(
         "@crates//:futures",
         "@crates//:serde",
         "@crates//:serde_json",
+        "@crates//:tokio",
         "@crates//:tracing",
     ],
 )
@@ -37,4 +38,19 @@ rust_test(
     name = "shrike_kernel_test",
     size = "medium",
     crate = ":shrike_kernel",
+)
+
+# The degenerate single-thread proof (#374 design 3): its own test binary —
+# the runtime seam is process-global, so this must not share a process with
+# the multi-thread suite.
+rust_test(
+    name = "current_thread_test",
+    size = "medium",
+    srcs = ["tests/current_thread.rs"],
+    edition = "2021",
+    deps = [
+        ":shrike_kernel",
+        "//native/shrike-collection:shrike_collection",
+        "@crates//:tokio",
+    ],
 )

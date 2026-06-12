@@ -665,3 +665,58 @@ fn decode_backend_error(bytes: &[u8]) -> NativeError {
         Err(_) => NativeError::internal("undecodable backend error"),
     }
 }
+
+// ── runtime-singularity pin (#374 design 9) ─────────────────────────────────
+// anki's Backend owns a LAZY tokio runtime whose only initializer is
+// `runtime_handle()`, consumed solely by the sync/AnkiWeb/AnkiHub services.
+// Shrike never dispatches those services, so anki's runtime is NEVER
+// instantiated in this process — the kernel's owned runtime (#374) is the
+// only one. If sync support ever lands here, revisit: upstream a
+// handle-injection patch to anki, or sync via our own client on our runtime.
+// (Backend dispatcher, tag 25.09.4: sync=41, ankiweb=45, ankihub=47 — none
+// may appear in the service indices above.)
+#[cfg(test)]
+mod runtime_singularity {
+    /// The dispatcher indices of anki's runtime-spinning services at the
+    /// pinned tag. Bump alongside the SVC_* table on a tag bump.
+    const SVC_SYNC: u32 = 41;
+    const SVC_ANKIWEB: u32 = 45;
+    const SVC_ANKIHUB: u32 = 47;
+
+    #[test]
+    fn no_runtime_spinning_service_is_dispatched() {
+        // Compile-time-ish pin: every SVC_* this adapter dispatches, by value.
+        let dispatched = [
+            super::SVC_COLLECTION,
+            super::SVC_CARDS,
+            super::SVC_DECKS,
+            super::SVC_NOTETYPES,
+            super::SVC_NOTES,
+            super::SVC_CARD_RENDERING,
+            super::SVC_SEARCH,
+            super::SVC_MEDIA,
+            super::SVC_TAGS,
+        ];
+        for svc in [SVC_SYNC, SVC_ANKIWEB, SVC_ANKIHUB] {
+            assert!(
+                !dispatched.contains(&svc),
+                "service {svc} spins anki's internal runtime — Shrike must never dispatch it"
+            );
+        }
+        // And the source itself: no other SVC_ constant exists outside the
+        // dispatched list + this pin's own three (a new one must be reviewed
+        // against this pin). The needle is built dynamically so the filter
+        // line can't match itself.
+        let needle = format!("const {}_", "SVC");
+        let source = include_str!("adapter.rs");
+        let declared = source
+            .lines()
+            .filter(|l| l.trim_start().starts_with(&needle) && l.contains(": u32 ="))
+            .count();
+        assert_eq!(
+            declared,
+            dispatched.len() + 3,
+            "a new SVC_ index was added — review it against the runtime-singularity pin"
+        );
+    }
+}
