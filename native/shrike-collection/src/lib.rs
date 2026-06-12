@@ -1164,33 +1164,31 @@ mod tests {
 
         // Drive the whole public surface once.
         let (core, dir) = temp_core();
-        let created = core
-            .upsert_notes(
-                r#"[{"note_type":"Basic","deck":"Drive","fields":{"Front":"alpha <b>one</b>","Back":"a"}},
-                    {"note_type":"Basic","deck":"Drive","fields":{"Front":"beta two","Back":"b"}}]"#,
-                "error",
-                false,
-            )
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&created).unwrap();
+        let parsed = upsert_json(
+            &core,
+            r#"[{"note_type":"Basic","deck":"Drive","fields":{"Front":"alpha <b>one</b>","Back":"a"}},
+                {"note_type":"Basic","deck":"Drive","fields":{"Front":"beta two","Back":"b"}}]"#,
+            "error",
+            false,
+        );
         let id_a = parsed[0]["id"].as_i64().unwrap();
         let id_b = parsed[1]["id"].as_i64().unwrap();
         // Duplicate-checked create (fields_check) + an update (deck move →
         // set_card_deck) + a plain field update.
-        core.upsert_notes(
+        upsert_json(
+            &core,
             r#"[{"note_type":"Basic","deck":"Drive","fields":{"Front":"alpha <b>one</b>","Back":"dupe"}}]"#,
             "skip",
             false,
-        )
-        .unwrap();
-        core.upsert_notes(
+        );
+        upsert_json(
+            &core,
             &format!(
                 r#"[{{"id":{id_a},"deck":"Drive::Moved","fields":{{"Front":"alpha edited","Back":"a"}},"tags":["keep"]}}]"#
             ),
             "allow",
             false,
-        )
-        .unwrap();
+        );
         core.get_note(id_a).unwrap();
         core.cards_of_note(id_a).unwrap();
         core.note_texts(&[id_a]).unwrap();
@@ -1260,18 +1258,18 @@ mod tests {
             r#"[{"op":"add","name":"Empty","front":"{{C}}","back":"x"}]"#,
         )
         .unwrap();
-        core.upsert_notes(
+        upsert_json(
+            &core,
             &format!(r#"[{{"id":{id_b},"fields":{{"F":"beta two","B":"b","C":"temp"}}}}]"#),
             "allow",
             false,
-        )
-        .unwrap();
-        core.upsert_notes(
+        );
+        upsert_json(
+            &core,
             &format!(r#"[{{"id":{id_b},"fields":{{"F":"beta two","B":"b","C":""}}}}]"#),
             "allow",
             false,
-        )
-        .unwrap();
+        );
         core.upsert_note_types(
             r#"[{"name":"Unused","fields":["X"],"templates":[{"name":"Card 1","front":"{{X}}","back":"{{X}}"}],"css":""}]"#,
         )
