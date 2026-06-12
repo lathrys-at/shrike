@@ -169,6 +169,11 @@ pub fn recompute(
     keys: &TagKeyMap,
 ) -> NativeResult<usize> {
     let members_by_tag = membership(rows);
+    // Each distinct member's text vector is fetched ONCE (#445): a note in N
+    // tags (and every `::` prefix) previously paid N engine lock + copy round
+    // trips — ~200k fetches per recompute at 100k notes with hierarchy.
+    let mut vec_cache: std::collections::HashMap<i64, Option<Vec<f32>>> =
+        std::collections::HashMap::new();
     let mut tag_keys: BTreeMap<i64, String> = BTreeMap::new();
     let mut tag_members: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
     let mut centroid_keys: Vec<i64> = Vec::new();
@@ -186,18 +191,20 @@ pub fn recompute(
         let mut sum: Vec<f32> = Vec::new();
         let mut count = 0usize;
         for note_id in members {
-            let Some(vectors) = engine.modality_get("text", *note_id) else {
-                continue;
-            };
-            let Some(v) = vectors.first() else { continue };
+            let v = vec_cache.entry(*note_id).or_insert_with(|| {
+                engine
+                    .modality_get("text", *note_id)
+                    .and_then(|vectors| vectors.into_iter().next())
+            });
+            let Some(v) = v else { continue };
             if sum.is_empty() {
                 sum = vec![0.0; v.len()];
             }
             if v.len() != sum.len() {
                 continue;
             }
-            for (acc, x) in sum.iter_mut().zip(v) {
-                *acc += x;
+            for (acc, x) in sum.iter_mut().zip(v.iter()) {
+                *acc += *x;
             }
             count += 1;
         }

@@ -187,6 +187,18 @@ impl CollectionCore {
         Ok(out)
     }
 
+    /// Total note count via one SQL aggregate (#445): the tag-centroid
+    /// refresh previously ran `find_notes("")` — materializing every note id
+    /// through a protobuf SearchResponse — just to take `.len()`.
+    pub fn note_count(&self) -> NativeResult<usize> {
+        let rows = self.adapter.db_rows("select count(*) from notes")?;
+        rows.first()
+            .and_then(|r| r.first())
+            .and_then(Value::as_i64)
+            .map(|n| n as usize)
+            .ok_or_else(|| NativeError::internal("unexpected count row shape".to_string()))
+    }
+
     /// The raw Anki search escape hatch (`collection_query`): the full grammar
     /// straight to search, `list_notes`-shaped JSON out (`total` = the full
     /// match count before `limit`).

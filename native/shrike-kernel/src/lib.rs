@@ -374,7 +374,7 @@ impl Kernel {
             .collection
             .run(|core| -> NativeResult<_> {
                 let rows = core.note_tag_rows()?;
-                let total = core.find_notes("")?.len();
+                let total = core.note_count()?;
                 Ok((rows, total))
             })
             .await??;
@@ -465,7 +465,7 @@ impl Kernel {
             self.refresh_tags_best_effort().await;
             return Ok(true);
         }
-        let inputs = self.compose_embed_inputs(raw);
+        let inputs = self.compose_embed_inputs(raw, None);
         self.orchestrator
             .reconcile(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
             .await?;
@@ -492,7 +492,7 @@ impl Kernel {
                 core.note_embed_inputs(&ids)
             })
             .await??;
-        let inputs = self.compose_embed_inputs(raw);
+        let inputs = self.compose_embed_inputs(raw, None);
         let total = inputs.len();
         self.orchestrator
             .rebuild(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
@@ -520,10 +520,17 @@ impl Kernel {
     fn compose_embed_inputs(
         &self,
         raw: Vec<(i64, String, Vec<String>)>,
+        only_notes: Option<&[i64]>,
     ) -> Vec<index_orchestrator::EmbedInput> {
         let mut ocr_map: std::collections::HashMap<i64, Vec<String>> =
             std::collections::HashMap::new();
-        match self.derived.texts_for_source(OCR_SOURCE) {
+        // Per-op callers scope the read to the written notes (#445) — the
+        // full-set read is for rebuild/reconcile, which consume everything.
+        let texts = match only_notes {
+            Some(ids) => self.derived.texts_for_source_for_notes(OCR_SOURCE, ids),
+            None => self.derived.texts_for_source(OCR_SOURCE),
+        };
+        match texts {
             Ok(rows) => {
                 for (nid, _r, text) in rows {
                     if self.recognition_gate.vector_worthy(&text) {
@@ -733,20 +740,22 @@ impl Kernel {
             .await??;
         let svc = self.embed_service();
         if let Some(svc) = &svc {
-            let inputs = self.compose_embed_inputs(raw_inputs);
+            let inputs = self.compose_embed_inputs(raw_inputs, Some(written));
             self.orchestrator
                 .add(&inputs, &*svc.embedder, svc.images_pair())
                 .await?;
         }
-        // Group the derived rows per note (ingest replaces per (note, source)).
+        // Group the derived rows per note; ONE transaction for the whole
+        // batch (#445 — one commit per note was journal churn × batch size).
         let mut refs: BTreeMap<i64, Vec<(String, String)>> = BTreeMap::new();
         for (nid, _source, name, value) in rows {
             refs.entry(nid).or_default().push((name, value));
         }
-        for note_id in written {
-            let note_refs = refs.remove(note_id).unwrap_or_default();
-            self.derived.ingest(*note_id, FIELD_SOURCE, &note_refs)?;
-        }
+        let batch: Vec<(i64, Vec<(String, String)>)> = written
+            .iter()
+            .map(|note_id| (*note_id, refs.remove(note_id).unwrap_or_default()))
+            .collect();
+        self.derived.ingest_many(&batch, FIELD_SOURCE)?;
         self.advance_watermarks(svc.is_some()).await?;
         // Tag centroids derive from the text vectors just written (#179).
         self.refresh_tags_best_effort().await;

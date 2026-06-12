@@ -174,6 +174,16 @@ impl DerivedEngine {
             [],
         )
         .map_err(db_err)?;
+        // (source, note_id): refs_for_source/texts_for_source filter on
+        // `source` alone — without this leading-column index they full-scan
+        // rowmap, and texts_for_source(OCR) sits on every upsert's tail
+        // (#445). IF NOT EXISTS + create_tables-on-open retrofits existing
+        // stores.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS rowmap_source ON rowmap(source, note_id)",
+            [],
+        )
+        .map_err(db_err)?;
         Ok(())
     }
 
@@ -328,6 +338,29 @@ impl DerivedEngine {
         let tx = conn.transaction().map_err(db_err)?;
         Self::delete_rows(&tx, &[note_id], Some(source))?;
         Self::insert_rows(&tx, note_id, source, refs_text)?;
+        tx.commit().map_err(db_err)
+    }
+
+    /// Replace MANY notes' text rows for one source in ONE transaction
+    /// (#445): callers hold whole upsert batches, and one-commit-per-note
+    /// under DELETE journaling is journal create+fsync+delete per note. The
+    /// delete half batches across all ids; inserts pair idx↔rowmap per row
+    /// exactly like `ingest`.
+    pub fn ingest_many(
+        &self,
+        notes: &[(i64, Vec<(String, String)>)],
+        source: &str,
+    ) -> NativeResult<()> {
+        if notes.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(db_err)?;
+        let ids: Vec<i64> = notes.iter().map(|(id, _)| *id).collect();
+        Self::delete_rows(&tx, &ids, Some(source))?;
+        for (note_id, refs_text) in notes {
+            Self::insert_rows(&tx, *note_id, source, refs_text)?;
+        }
         tx.commit().map_err(db_err)
     }
 
@@ -488,6 +521,43 @@ impl DerivedEngine {
         Ok(rows)
     }
 
+    /// `texts_for_source` scoped to a note set (#445): the per-upsert embed
+    /// composition needs only the WRITTEN notes' recognized texts — the
+    /// full-set read belongs to rebuild/reconcile, not the op tail.
+    pub fn texts_for_source_for_notes(
+        &self,
+        source: &str,
+        note_ids: &[i64],
+    ) -> NativeResult<Vec<(i64, String, String)>> {
+        if note_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.lock();
+        let (id_clause, id_params) = Self::note_id_clause(&conn, "m.note_id", note_ids)?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT m.note_id, m.ref, idx.txt FROM idx \
+                 JOIN rowmap m ON m.rowid = idx.rowid WHERE m.source = ?1 AND {id_clause}"
+            ))
+            .map_err(db_err)?;
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(source.to_string()) as Box<dyn rusqlite::ToSql>];
+        params.extend(
+            id_params
+                .iter()
+                .map(|n| Box::new(*n) as Box<dyn rusqlite::ToSql>),
+        );
+        let rows = stmt
+            .query_map(
+                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(db_err)?
+            .collect::<Result<Vec<(i64, String, String)>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
     /// One FTS5 MATCH (rank-ordered), returning provenance + snippet rows.
     /// A bad expression is `invalid_input` — the facade maps it to its
     /// OperationalError fallback path. `scope`, when given, restricts the
@@ -624,6 +694,64 @@ mod tests {
         if sqlite_bundled() {
             assert!(fts5_trigram_available());
         }
+    }
+
+    #[test]
+    fn ingest_many_matches_per_note_ingest() {
+        // One-transaction batch ingest (#445) is behavior-identical to the
+        // per-note loop it replaces: rows replaced per (note, source), blank
+        // texts skipped, other notes untouched.
+        let (e, _dir) = store();
+        e.ingest(1, "field", &[("Front".into(), "old text one".into())])
+            .unwrap();
+        e.ingest_many(
+            &[
+                (1, vec![("Front".into(), "new text one".into())]),
+                (
+                    2,
+                    vec![
+                        ("Front".into(), "text two".into()),
+                        ("Back".into(), "  ".into()),
+                    ],
+                ),
+                (3, vec![]),
+            ],
+            "field",
+        )
+        .unwrap();
+        // Note 1 replaced (old gone), note 2 has exactly its non-blank row,
+        // note 3 has none.
+        let hits = e
+            .search_substring("new text one", 10, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1]);
+        let old = e
+            .search_substring("old text one", 10, None)
+            .unwrap()
+            .unwrap();
+        assert!(old.is_empty(), "the pre-batch row must be replaced");
+        assert_eq!(e.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn texts_for_source_for_notes_scopes_to_the_id_set() {
+        let (e, _dir) = store();
+        e.ingest(1, "ocr", &[("a.png".into(), "alpha text".into())])
+            .unwrap();
+        e.ingest(2, "ocr", &[("b.png".into(), "beta text".into())])
+            .unwrap();
+        e.ingest(3, "field", &[("Front".into(), "gamma".into())])
+            .unwrap();
+
+        let scoped = e.texts_for_source_for_notes("ocr", &[2, 3]).unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].0, 2);
+        assert_eq!(scoped[0].2, "beta text");
+        assert!(e.texts_for_source_for_notes("ocr", &[]).unwrap().is_empty());
+        // Agrees with the full read, filtered.
+        let full = e.texts_for_source("ocr").unwrap();
+        assert_eq!(full.len(), 2);
     }
 
     #[test]
