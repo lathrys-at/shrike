@@ -67,9 +67,9 @@ struct UpsertMemo {
 }
 
 impl CollectionCore {
-    /// The bulk upsert: each item is the wrapper's note-input dict (`id`?,
-    /// `note_type`?, `deck`?, `fields` map, `tags`?), JSON in / per-item
-    /// results JSON out — `created`/`updated`/`ok`(dry_run)/`skipped`/`error`
+    /// The bulk upsert: each item is a typed [`NoteInput`] (`id`?,
+    /// `note_type`?, `deck`?, `fields` map, `tags`?), per-item typed
+    /// results out — `created`/`updated`/`ok`(dry_run)/`skipped`/`error`
     /// with the same `reason` vocabulary as `_upsert_notes`.
     pub fn upsert_notes(
         &self,

@@ -881,8 +881,8 @@ impl Kernel {
 
     /// The wire-shaped bulk upsert (#77): the collection core's NAMED upsert
     /// — `id`?/`note_type`/`deck`/`fields` map/`tags`, create AND update,
-    /// `dry_run`, per-item results JSON — run as ONE collection job, then the
-    /// kernel-internal index/derived maintenance over everything written.
+    /// `dry_run`, typed per-item results — run as ONE collection job, then
+    /// the kernel-internal index/derived maintenance over everything written.
     /// This is the op the MCP `upsert_notes` action rides (S3d-2).
     pub async fn upsert_notes_wire(
         &self,
