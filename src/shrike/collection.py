@@ -157,7 +157,6 @@ def collect_embed_inputs(core: CollectionCore) -> tuple[list[NoteEmbedInput], in
     return inputs, core.col_mod()
 
 
-
 class CollectionWrapper:
     """Serializes every access to the native collection core.
 
