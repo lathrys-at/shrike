@@ -1,7 +1,8 @@
-//! The SSRF-guarded media URL fetch (#278 step 5b) — the port of
-//! `_resolve_public_ip` / `_fetch_media_url` / `_decode_media_b64` /
-//! `_path_within_any_root`. **Trust-boundary code**: changes here go through
-//! the security-review gate.
+//! The SSRF-guarded media URL fetch (#278 step 5b; kernel-owned since
+//! #389 B2) — the port of `_resolve_public_ip` / `_fetch_media_url` /
+//! `_decode_media_b64` (`path_within_any_root` stayed with the collection's
+//! write gates). **Trust-boundary code**: changes here go through the
+//! security-review gate.
 //!
 //! Pure Rust networking, NO anki coupling and NO async runtime: `ureq` is a
 //! synchronous client (no tokio, no owned threads — the #308 constraint).
