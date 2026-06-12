@@ -161,6 +161,45 @@ impl CollectionCore {
         Ok(out)
     }
 
+    /// `(note_id, image_names)` for every note whose raw fields reference an
+    /// `<img` tag — the recognition sweep's pending-set source (#445): the
+    /// sweep previously rendered the FULL collection's embedding inputs
+    /// (notetype lookups + normalization + strip per field) once per batch
+    /// and discarded the text. One SQL pass with an ASCII `lower()`
+    /// pre-filter — exactly the extractor's own ASCII-case-insensitive
+    /// probe, so the filter can never skip a note the extractor would
+    /// return names for — then the raw-field extractor (same per-field
+    /// extraction + in-order dedupe as `note_embed_inputs`).
+    pub fn note_image_refs(&self) -> NativeResult<Vec<(i64, Vec<String>)>> {
+        let mut out = Vec::new();
+        for r in self
+            .adapter
+            .db_rows("select id, flds from notes where instr(lower(flds), '<img') > 0")?
+        {
+            let (Some(id), Some(flds)) = (
+                r.first().and_then(Value::as_i64),
+                r.get(1).and_then(Value::as_str),
+            ) else {
+                return Err(NativeError::internal(
+                    "unexpected notes row shape".to_string(),
+                ));
+            };
+            let mut images: Vec<String> = Vec::new();
+            let mut seen: HashSet<String> = HashSet::new();
+            for value in flds.split('\u{1f}') {
+                for name in embed_text::extract_image_refs(value) {
+                    if seen.insert(name.clone()) {
+                        images.push(name);
+                    }
+                }
+            }
+            if !images.is_empty() {
+                out.push((id, images));
+            }
+        }
+        Ok(out)
+    }
+
     /// `(note_id, [leaf tags])` for every tagged note — the tag-centroid
     /// layer's membership source (#179): ONE pass over `notes.tags` (Anki
     /// keeps it space-delimited), exact leaf strings; hierarchy roll-up is
