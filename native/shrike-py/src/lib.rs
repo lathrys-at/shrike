@@ -783,44 +783,6 @@ fn rrf_fuse(
     })
 }
 
-/// Embed query texts and rank per modality — one GIL-released composition over
-/// the native text embedder + index engine; the vectors never cross the FFI.
-#[pyfunction]
-#[pyo3(signature = (embedder, engine, texts, k, modalities=None))]
-fn fused_search_text(
-    py: Python<'_>,
-    embedder: Py<OnnxTextEmbedder>,
-    engine: Py<NativeIndexEngine>,
-    texts: Vec<String>,
-    k: usize,
-    modalities: Option<Vec<String>>,
-) -> PyResult<ModalityRankings> {
-    let e = embedder.get();
-    let ix = engine.get();
-    py.detach(|| {
-        shrike_compute::fused_search(&e.inner, &ix.inner, &texts, k, modalities.as_deref())
-    })
-    .map_err(to_py_err)
-}
-
-/// Embed note texts and replace-add them under their ids — one GIL-released
-/// composition; the vectors never cross the FFI. Returns the count added.
-#[pyfunction]
-fn fused_add_text(
-    py: Python<'_>,
-    embedder: Py<OnnxTextEmbedder>,
-    engine: Py<NativeIndexEngine>,
-    modality: String,
-    keys: Vec<i64>,
-    texts: Vec<String>,
-    chunk: usize,
-) -> PyResult<usize> {
-    let e = embedder.get();
-    let ix = engine.get();
-    py.detach(|| shrike_compute::fused_add(&e.inner, &ix.inner, &modality, &keys, &texts, chunk))
-        .map_err(to_py_err)
-}
-
 /// The module init. Its name MUST match the imported module / the `.so`
 /// filename (`_native`), since PyO3 exports `PyInit__native` from it.
 #[pymodule]
@@ -887,8 +849,6 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rrf_fuse, m)?)?;
     m.add_function(wrap_pyfunction!(schema_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(schema_roundtrip, m)?)?;
-    m.add_function(wrap_pyfunction!(fused_search_text, m)?)?;
-    m.add_function(wrap_pyfunction!(fused_add_text, m)?)?;
     // The native image-prep pipeline version — folded into the clip-rs
     // fingerprint by the facade (a pixel-math change must invalidate vectors).
     m.add("IMAGE_PREP_VERSION_RS", shrike_embed::IMAGE_PREP_VERSION_RS)?;
