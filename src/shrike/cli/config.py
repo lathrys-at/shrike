@@ -479,7 +479,10 @@ def embedding_args(resolved: dict[str, Any], *, no_embedding: bool = False) -> l
 
 
 def resolve_embedding_profile(
-    config: dict[str, Any], embedding_overrides: dict[str, Any] | None
+    config: dict[str, Any],
+    embedding_overrides: dict[str, Any] | None,
+    *,
+    quiet: bool = False,
 ) -> dict[str, Any]:
     """Resolve the embedding params, v2-first (#498 slice 1).
 
@@ -492,6 +495,11 @@ def resolve_embedding_profile(
     flags survive one release for legacy configs and then go entirely.
     Without v2 sections, the legacy cascade runs unchanged (a deprecated
     legacy ``embedding:``/``recognition:`` section warns via the migration).
+
+    ``quiet`` suppresses the deprecation/ignored-env warnings — set by the
+    passive resolution every client command performs for auto-start
+    (``build_server_spec``), so only the explicit ``server start`` /
+    ``embedding start`` paths warn, and exactly once.
     """
     from shrike.profiles import (
         ProfileError,
@@ -502,8 +510,9 @@ def resolve_embedding_profile(
 
     caps = parse_capabilities(config)
     if caps.legacy:
-        for warning in caps.warnings:
-            print(f"warning: {warning}", file=sys.stderr)
+        if not quiet:
+            for warning in caps.warnings:
+                print(f"warning: {warning}", file=sys.stderr)
         return resolve_embedding(config, **(embedding_overrides or {}))
 
     overrides = {k: v for k, v in (embedding_overrides or {}).items() if v not in (None, [], ())}
@@ -529,7 +538,7 @@ def resolve_embedding_profile(
         )
         if os.environ.get(name)
     ]
-    if legacy_env:
+    if legacy_env and not quiet:
         print(
             f"warning: {', '.join(legacy_env)} ignored — the config declares "
             "embedders:/managed:, which is the only home for embedding settings "
@@ -540,8 +549,9 @@ def resolve_embedding_profile(
     import shrike_native  # lazy: keeps plain client commands import-light
 
     plan = resolve_profile(caps, shrike_native.build_features())
-    for warning in plan.warnings:
-        print(f"warning: {warning}", file=sys.stderr)
+    if not quiet:
+        for warning in plan.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
     resolved = plan_to_legacy_embedding(plan)
     for key in ("model", "llama_server"):
         if resolved.get(key):
@@ -580,7 +590,9 @@ def build_server_spec(
     resolved_log_dir = str(
         Path(log_dir or log_config.get("dir") or str(_default_log_dir())).expanduser()
     )
-    resolved_emb = resolve_embedding_profile(config, embedding_overrides)
+    # quiet: this resolution runs passively on every client command (the
+    # auto-start spec); the explicit start commands own the warnings.
+    resolved_emb = resolve_embedding_profile(config, embedding_overrides, quiet=True)
     resolved_index = resolve_index_save(config, **(index_save_overrides or {}))
     resolved_transport = resolve_transport(config, **(transport_overrides or {}))
     resolved_locking = resolve_locking(config, **(locking_overrides or {}))

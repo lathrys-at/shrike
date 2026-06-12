@@ -324,6 +324,10 @@ def _migrate_legacy(config: Mapping[str, Any]) -> Capabilities:
         )
         providers = tuple(str(p) for p in (emb.get("onnx_providers") or ()))
         batch_size = emb.get("batch_size")
+        if batch_size is not None and int(batch_size) < 1:
+            # Same rule as _parse_embedder/resolve_embedding — a migrated
+            # entry must never hold an illegal value.
+            raise ProfileError(f"embedding.batch_size must be >= 1 (got {batch_size})")
         pooling = emb.get("pooling")
         if backend in ("onnx", "onnx-rs"):
             embedders.append(

@@ -441,8 +441,12 @@ class TestLegacyBridge:
 
     def test_legacy_round_trip_matches_original_section(self):
         # A legacy llama config migrated to v2 and bridged back yields the
-        # same params the old cascade produced — the migration is lossless
-        # for the shapes it maps.
+        # original section's params — the migration mapping is lossless for
+        # the shapes it maps. (NOTE: production's legacy path short-circuits
+        # to resolve_embedding and never bridges — that byte-equivalence is
+        # pinned in test_config.py::test_legacy_config_runs_the_old_cascade.
+        # This test pins the MAPPING itself, which becomes the live path when
+        # the slice-2 facade rework consumes the plan natively.)
         legacy_section = {
             "embedding": {
                 "model": "~/m.gguf",

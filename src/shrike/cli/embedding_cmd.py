@@ -3,7 +3,7 @@ from __future__ import annotations
 import click
 
 from shrike.cli import output
-from shrike.cli.config import resolve_embedding
+from shrike.cli.config import resolve_embedding_profile
 from shrike.cli.index_cmd import _poll_progress
 from shrike.cli.output import output_options
 from shrike.client import ShrikeClient
@@ -130,20 +130,30 @@ def embedding_start(
     client: ShrikeClient = ctx.obj["client"]
     json_out: bool = ctx.obj["json"]
 
-    resolved = resolve_embedding(
-        config,
-        backend=backend,
-        model=model,
-        port=port,
-        context_size=context_size,
-        threads=threads,
-        gpu_layers=gpu_layers,
-        pooling=pooling,
-        extra_args=list(extra_args) or None,
-        llama_server=llama_server,
-        onnx_providers=list(onnx_providers) or None,
-        batch_size=batch_size,
-    )
+    # v2-first like `server start` (#498): a config declaring embedders:/managed:
+    # is the only home for these settings — the legacy flags/env are rejected/
+    # ignored under it; a legacy config runs the old cascade unchanged.
+    from shrike.profiles import ProfileError
+
+    try:
+        resolved = resolve_embedding_profile(
+            config,
+            {
+                "backend": backend,
+                "model": model,
+                "port": port,
+                "context_size": context_size,
+                "threads": threads,
+                "gpu_layers": gpu_layers,
+                "pooling": pooling,
+                "extra_args": list(extra_args) or None,
+                "llama_server": llama_server,
+                "onnx_providers": list(onnx_providers) or None,
+                "batch_size": batch_size,
+            },
+        )
+    except ProfileError as e:
+        raise click.ClickException(str(e)) from e
 
     with output.spinner("Starting embedding service…"):
         data = client.embedding_start(**resolved)
