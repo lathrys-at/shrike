@@ -80,6 +80,10 @@ jobs:
         run: |
           ./bazel test --keep_going \
             -- //... //tests/integration:embedding_core //tests/integration:embedding_backends
+      # THE point of #438: a flake-red warm must still seed main's scope, or
+      # every PR pays a cold build until a warm happens to go green.
+      - uses: ./.github/actions/bazel-save
+        if: always()
 
   # The lint lane's Rust cache (#319): the SAME rust-cache shared-key and the
   # SAME clippy command as test.yml's lint job, run on main so the saved entry

@@ -191,6 +191,11 @@ jobs:
         run: |
           ./bazel test \
             -- //... //tests/integration:embedding_core //tests/integration:embedding_backends
+      # Save even when tests failed (#438): the compiled graph + passing test
+      # results are valid regardless of which test flaked, and a red warm run
+      # must still seed main's scope.
+      - uses: ./.github/actions/bazel-save
+        if: always()
 
   # macOS + ARM never run on plain PRs or on merges to main — only by label.
   # Two labels gate this lane, by intent:
@@ -227,6 +232,8 @@ jobs:
         run: |
           ./bazel test \
             -- //... //tests/integration:embedding_core //tests/integration:embedding_backends
+      - uses: ./.github/actions/bazel-save
+        if: always()
 
   # Single required status check. Always runs, and passes iff every gated job
   # either succeeded or was legitimately skipped (its paths didn't change / not
