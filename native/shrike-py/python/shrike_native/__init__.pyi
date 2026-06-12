@@ -14,6 +14,9 @@ from shrike_native._native import decode_media_b64 as decode_media_b64
 from shrike_native._native import rehomed_actions as rehomed_actions
 from shrike_native._native import INDEX_SAVE_DELAY_DEFAULT as INDEX_SAVE_DELAY_DEFAULT
 from shrike_native._native import INDEX_SAVE_THRESHOLD_DEFAULT as INDEX_SAVE_THRESHOLD_DEFAULT
+from shrike_native._native import embedder_probe as embedder_probe
+from shrike_native._native import native_embedder_probe as native_embedder_probe
+from shrike_native._native import rrf_fuse as rrf_fuse
 from shrike_native._native import fetch_media_url as fetch_media_url
 from shrike_native._native import (
     AppleVisionRecognizer,
@@ -43,10 +46,7 @@ from shrike_native._native import (
     RemoteEmbedder,
     Recognizer,
     init_onnx_runtime,
-    embedder_probe,
-    native_embedder_probe,
     parallel_sum,
-    rrf_fuse,
     schema_catalog,
     schema_roundtrip,
     version,
