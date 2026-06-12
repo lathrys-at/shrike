@@ -8,8 +8,8 @@ name: Release
 # and cut a GitHub Release with them attached.
 #
 # Pre-release tags (`vX.Y.Z-rc.N`, `-alpha`, …) are marked as GitHub pre-releases.
-# PyPI publishing is intentionally out of scope (see #43) — decide separately
-# whether Shrike ships to PyPI before wiring trusted publishing in here.
+# Final releases are also published to PyPI via trusted publishing (the
+# `publish-pypi` job below, #43); pre-release tags skip that job.
 on:
   push:
     tags:
