@@ -582,19 +582,38 @@ impl Kernel {
         }
 
         // One pass, many consumers: recognize the batch, keep text AND
-        // segments.
-        let items: Vec<MediaItem> = pending
-            .iter()
-            .map(|(_, name)| {
-                MediaItem::from_named(name, svc.resolver.read(name).unwrap_or_default())
-            })
-            .collect();
-        let recognitions = svc.recognizer.recognize(items).await?;
-        if recognitions.len() != pending.len() {
+        // segments. A read that fails after the exists() check (TOCTOU
+        // delete, transient error, resolver bug) SKIPS the item rather than
+        // recognizing empty bytes (#386) — nothing is stored for it, so the
+        // next sweep re-offers it. `sent` and `items` are built together so
+        // the recognizer's output stays aligned with what was actually sent.
+        let mut sent: Vec<(i64, String)> = Vec::with_capacity(pending.len());
+        let mut items: Vec<MediaItem> = Vec::with_capacity(pending.len());
+        for (note_id, name) in &pending {
+            match svc.resolver.read(name) {
+                Some(bytes) => {
+                    items.push(MediaItem::from_named(name, bytes));
+                    sent.push((*note_id, name.clone()));
+                }
+                None => {
+                    tracing::warn!(
+                        image = %name,
+                        note_id,
+                        "media read failed after exists(); skipping until the next sweep"
+                    );
+                }
+            }
+        }
+        let recognitions = if items.is_empty() {
+            Vec::new()
+        } else {
+            svc.recognizer.recognize(items).await?
+        };
+        if recognitions.len() != sent.len() {
             return Err(NativeError::internal(format!(
                 "recognizer returned {} results for {} items",
                 recognitions.len(),
-                pending.len()
+                sent.len()
             )));
         }
 
@@ -616,7 +635,7 @@ impl Kernel {
         let mut touched: std::collections::BTreeMap<i64, Vec<(String, String)>> =
             std::collections::BTreeMap::new();
         let mut segments: Vec<(i64, String, String)> = Vec::new();
-        for ((note_id, name), recognition) in pending.iter().zip(recognitions.iter()) {
+        for ((note_id, name), recognition) in sent.iter().zip(recognitions.iter()) {
             match self.recognition_gate.judge(recognition) {
                 recognize::GateOutcome::Drop => continue,
                 recognize::GateOutcome::Lexical | recognize::GateOutcome::LexicalAndVector => {
@@ -650,9 +669,13 @@ impl Kernel {
             self.index_written(&affected).await?;
         }
 
+        // `recognized` counts what was actually sent; a skipped (unreadable)
+        // item still counts against this sweep's batch in `remaining`, so a
+        // persistently failing read can't spin the harness loop — it just
+        // stays pending for the next sweep.
         Ok(serde_json::json!({
             "status": "ran",
-            "recognized": pending.len(),
+            "recognized": sent.len(),
             "stored": stored_count,
             "remaining": total_pending.saturating_sub(pending.len()),
         }))
@@ -1377,15 +1400,33 @@ mod no_cpython_smoke {
         }
     }
 
-    struct MapResolver(std::collections::HashMap<String, Vec<u8>>);
+    struct MapResolver {
+        files: std::collections::HashMap<String, Vec<u8>>,
+        /// Names whose `read` fails even though `exists` reports them
+        /// present — the #386 TOCTOU-delete / transient-read shape. A
+        /// Mutex so a test can "heal" the read mid-flight.
+        unreadable: std::sync::Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl MapResolver {
+        fn new(files: std::collections::HashMap<String, Vec<u8>>) -> Self {
+            Self {
+                files,
+                unreadable: std::sync::Mutex::new(std::collections::HashSet::new()),
+            }
+        }
+    }
 
     impl ImageResolver for MapResolver {
         fn read(&self, name: &str) -> Option<Vec<u8>> {
-            self.0.get(name).cloned()
+            if self.unreadable.lock().unwrap().contains(name) {
+                return None;
+            }
+            self.files.get(name).cloned()
         }
 
         fn exists(&self, name: &str) -> bool {
-            self.0.contains_key(name)
+            self.files.contains_key(name)
         }
     }
 
@@ -1433,7 +1474,7 @@ mod no_cpython_smoke {
                 "krebs.png".to_string(),
                 b"the krebs cycle produces energy carriers".to_vec(),
             );
-            kernel.attach_recognizer(Arc::new(StubRecognizer), Arc::new(MapResolver(media)));
+            kernel.attach_recognizer(Arc::new(StubRecognizer), Arc::new(MapResolver::new(media)));
 
             let report = kernel.recognize_pending(10).await.unwrap();
             assert_eq!(report["status"], "ran");
@@ -1478,6 +1519,92 @@ mod no_cpython_smoke {
             assert!(sem2.iter().any(|h| h.note_id == diagram_id));
 
             kernel2.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
+    fn recognition_skips_unreadable_media_and_keeps_it_pending() {
+        // #386: exists() says present but read() returns None (TOCTOU
+        // delete, transient error) — the item must be SKIPPED, never
+        // recognized over empty bytes, and must stay pending so a later
+        // sweep (once the read heals) recognizes the real bytes.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            let notes = vec![serde_json::json!({"note_type": "Basic", "deck": "Default",
+                "fields": {"Front":
+                    "Two diagrams <img src=\"good.png\"> <img src=\"flaky.png\">",
+                    "Back": "b"}})];
+            kernel
+                .upsert_notes_json(
+                    serde_json::json!(notes).to_string(),
+                    "error".to_string(),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let mut media = std::collections::HashMap::new();
+            media.insert("good.png".to_string(), b"readable diagram text".to_vec());
+            media.insert("flaky.png".to_string(), b"flaky secret payload".to_vec());
+            let resolver = Arc::new(MapResolver::new(media));
+            resolver
+                .unreadable
+                .lock()
+                .unwrap()
+                .insert("flaky.png".to_string());
+            kernel.attach_recognizer(Arc::new(StubRecognizer), resolver.clone());
+
+            // Sweep 1: only the readable item is sent and stored; the
+            // unreadable one is skipped (not recognized as empty bytes) and
+            // counted against the batch so the harness loop can't spin.
+            let report = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(report["status"], "ran");
+            assert_eq!(report["recognized"], 1);
+            assert_eq!(report["stored"], 1);
+            assert_eq!(report["remaining"], 0);
+            let hits = kernel.search("flaky secret", 5).await.unwrap();
+            assert!(
+                !hits
+                    .iter()
+                    .any(|h| h.signals.iter().any(|(sig, _)| sig == "exact")),
+                "nothing stored lexically for the unreadable item"
+            );
+
+            // Sweep 2: still unreadable → still pending, still skipped — a
+            // sweep ran (it was offered again), but nothing was sent.
+            let again = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(again["status"], "ran");
+            assert_eq!(again["recognized"], 0);
+            assert_eq!(again["stored"], 0);
+
+            // Heal the read: the next sweep recognizes the REAL bytes.
+            resolver.unreadable.lock().unwrap().clear();
+            let healed = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(healed["status"], "ran");
+            assert_eq!(healed["recognized"], 1);
+            assert_eq!(healed["stored"], 1);
+            let hits = kernel.search("flaky secret", 5).await.unwrap();
+            assert!(
+                hits.iter()
+                    .any(|h| h.signals.iter().any(|(sig, _)| sig == "exact")),
+                "healed item recognized and stored"
+            );
+
+            // And now everything is done.
+            let idle = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(idle["status"], "idle");
+
+            kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
         });
     }
