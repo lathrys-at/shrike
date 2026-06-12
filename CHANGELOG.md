@@ -7,6 +7,13 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 
 ## [Unreleased]
 
+### Removed
+- In-process Apple Vision OCR is no longer compiled into the server (#496):
+  on-device platform models belong to the mobile apps, and the server-side
+  replacement is recognition over a configured endpoint (#502). Selecting
+  `--ocr-backend apple` now reports recognition as unavailable instead of
+  scanning images; text recognized by earlier versions stays searchable.
+
 ### Fixed
 - The published wheel can now actually run (#497): `shrike-mcp` ships as a
   platform-tagged wheel (cp312-abi3; macOS arm64/x86_64, Linux x86_64/aarch64)

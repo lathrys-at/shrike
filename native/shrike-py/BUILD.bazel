@@ -48,8 +48,8 @@ rust_shared_library(
         "bundled-sqlite",
         "engine-ort",
         "engine-remote",
-        # Transitional in the server set — see the feature's note in Cargo.toml.
-        "engine-apple",
+        # NO engine-apple: platform engines are never in the server build, on
+        # any OS (docs/distribution.md). Binding coverage is #514.
         "manage-llama",
     ],
     deps = [
@@ -63,7 +63,6 @@ rust_shared_library(
         "//native/shrike-index:shrike_index",
         "//native/shrike-kernel:shrike_kernel",
         "//native/shrike-llama-server:shrike_llama_server",
-        "//native/shrike-recognize-apple:shrike_recognize_apple",
         "//native/shrike-schemas:shrike_schemas",
         "@crates//:futures",
         "@crates//:tokio",

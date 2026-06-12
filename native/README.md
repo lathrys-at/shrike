@@ -70,9 +70,10 @@ scripts/build-native.sh            # debug; --release for optimized
 **The build matrix (#499; docs/distribution.md is canonical):** the
 engine/manager crates are cargo features on the binding crate — `engine-ort`
 (text + CLIP via ort), `engine-remote` (OpenAI-compatible embeddings;
-shrike-describe-remote joins at #485), `engine-apple` (Vision OCR —
-transitional in the server set, see Cargo.toml), `manage-llama` (llama-server
-lifecycle). The cargo default is the full SERVER set, pinned verbatim on
+shrike-describe-remote joins at #485), `engine-apple` (Vision OCR — MOBILE
+builds only, never the server set, on any OS; binding coverage is #514),
+`manage-llama` (llama-server lifecycle). The cargo default is the SERVER
+set, pinned verbatim on
 `//native/shrike-py:shrike_py_native`; the MOBILE set (anki-core +
 engine-remote + engine-apple — no ort, no managers) is proven by
 `//native/shrike-py:mobile_skeleton`, which the per-PR `//...` lane builds so

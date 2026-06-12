@@ -286,9 +286,10 @@ def server() -> None:
     "--ocr-backend",
     type=click.Choice(["apple"]),
     default=None,
-    help="OCR backend for recognizing text in note media (#228). Off by default; "
-    "'apple' uses macOS Vision (native — no extra needed). Recognized text feeds "
-    "lexical search and the vector index in the background.",
+    help="OCR backend for recognizing text in note media (#228). Off by default. "
+    "'apple' (macOS Vision) is no longer compiled into the server build — platform "
+    "engines are mobile-only (docs/distribution.md); selecting it degrades "
+    "recognition to an error state (the replacement is #502).",
 )
 @click.option(
     "--save-config",

@@ -13,7 +13,6 @@ from shrike_native._native import (
     BATCH_DRIFT_TOL,
     BATCH_PROBE_TEXTS,
     IMAGE_PREP_VERSION_RS,
-    AppleVisionRecognizer,
     ClipEmbedder,
     DerivedTextEngine,
     LlamaServerManager,
@@ -43,6 +42,14 @@ from shrike_native._native import (
     wire_protocol_version,
 )
 
+# Feature-gated (#499): present only in `engine-apple` builds — the mobile
+# set, NEVER the server build, on any OS (docs/distribution.md's boundary;
+# binding-path coverage while #504 is pending is #514). Outside __all__;
+# consumers (recognition.py, harness.py) look it up with getattr and degrade
+# when it's absent.
+with contextlib.suppress(ImportError):
+    from shrike_native._native import AppleVisionRecognizer  # noqa: F401
+
 # Feature-gated (#278 series, step 1): present only in `anki-core` builds
 # (the scripts/build-native.sh default since the cutover). Deliberately
 # outside __all__ — the parity harness (tests/native) imports it explicitly;
@@ -71,7 +78,6 @@ with contextlib.suppress(ImportError):
     )
 
 __all__ = [
-    "AppleVisionRecognizer",
     "BATCH_DRIFT_TOL",
     "BATCH_PROBE_TEXTS",
     "ClipEmbedder",

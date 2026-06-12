@@ -1,11 +1,12 @@
 # Re-exports of the compiled module's surface; __all__ marks them exported.
-# CollectionCore is feature-gated (#278, anki-core builds only): re-exported
-# via the `as` form (outside __all__), allowlisted for default-build stubtest.
+# CollectionCore (#278, anki-core builds) and AppleVisionRecognizer (#499,
+# engine-apple/mobile builds — never the server build) are feature-gated:
+# re-exported via the `as` form (outside __all__), allowlisted for stubtest
+# on builds that lack them.
 from shrike_native._native import (
     BATCH_DRIFT_TOL,
     BATCH_PROBE_TEXTS,
     IMAGE_PREP_VERSION_RS,
-    AppleVisionRecognizer,
     ClipEmbedder,
     DerivedTextEngine,
     LlamaServerManager,
@@ -36,6 +37,7 @@ from shrike_native._native import (
 )
 from shrike_native._native import INDEX_SAVE_DELAY_DEFAULT as INDEX_SAVE_DELAY_DEFAULT
 from shrike_native._native import INDEX_SAVE_THRESHOLD_DEFAULT as INDEX_SAVE_THRESHOLD_DEFAULT
+from shrike_native._native import AppleVisionRecognizer as AppleVisionRecognizer
 from shrike_native._native import AsyncCollection as AsyncCollection
 from shrike_native._native import AsyncKernel as AsyncKernel
 from shrike_native._native import CollectionCore as CollectionCore
@@ -54,7 +56,6 @@ from shrike_native._native import rehomed_actions as rehomed_actions
 from shrike_native._native import rrf_fuse as rrf_fuse
 
 __all__ = [
-    "AppleVisionRecognizer",
     "BATCH_DRIFT_TOL",
     "BATCH_PROBE_TEXTS",
     "ClipEmbedder",

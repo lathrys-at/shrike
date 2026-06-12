@@ -5,6 +5,10 @@
 # build still has its absences excused.
 shrike_native.CollectionCore
 shrike_native._native.CollectionCore
+# engine-apple builds only (#499 — mobile set, never the server build; #514
+# tracks binding coverage).
+shrike_native.AppleVisionRecognizer
+shrike_native._native.AppleVisionRecognizer
 # pyo3 auto-generates _native.__all__ from the registered names, so its VALUE
 # differs between build variants (anki-core adds CollectionCore) and can't
 # match one static stub. Allowlisting only the __all__ comparison keeps every

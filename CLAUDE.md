@@ -457,17 +457,22 @@ The embedding service can be cycled independently of the Shrike server. `Embeddi
 
 **Recognition is the kernel's second injected capability** (the #342 slot pattern,
 sibling of the embed slot): an OCR engine the harness attaches at assembly turns
-note media into searchable text. Off by default; `--ocr-backend apple` (config
-`recognition.ocr`, env `SHRIKE_OCR_BACKEND`) selects macOS Vision — native since
+note media into searchable text. Off by default. **The server build no longer
+compiles the Apple Vision engine** (#496's hard boundary, enforced 2026-06-12:
+platform engines — `engine-apple` — are mobile-only on every OS; the server's
+replacement is the remote recognizer rows, #502; binding-path test coverage is
+re-homed by #514): `--ocr-backend apple` (config `recognition.ocr`, env
+`SHRIKE_OCR_BACKEND`) now degrades the recognition state to `error` without
+disturbing boot, exactly like the off-macOS case always did. The engine itself
+(`shrike-recognize-apple`, in mobile/`engine-apple` builds) is native since
 #342 P3, and since #398 the platform glue is **Swift bolted behind Rust**
 (`swift/Recognize.swift` exports a 3-function C ABI driving Apple's Swift-only
 `RecognizeTextRequest` API, macOS 15+; nothing extra to install at runtime —
-Vision and the Swift runtime ship with the OS, but **building on macOS needs
-full Xcode**, whose swiftc build.rs/the bazel genrule invoke via xcrun). The
-fingerprint took a hard cut to `apple-vision-swift:{revision}:macos{X.Y.Z}`
-(the new API rides a newer text model — all OCR rows re-derive once).
-Off-macOS the backend degrades the recognition state to `error` without
-disturbing boot. The Python contract is `RecognizerBackend` (`recognition.py`): a *blocking*
+Vision and the Swift runtime ship with the OS, but **building it on macOS
+needs full Xcode**, whose swiftc build.rs/the bazel genrule invoke via xcrun;
+the server build no longer pays that). The fingerprint is
+`apple-vision-swift:{revision}:macos{X.Y.Z}`. Off-macOS the engine is an
+unavailable stub. The Python contract is `RecognizerBackend` (`recognition.py`): a *blocking*
 `recognize(items: list[bytes]) -> list[tuple[str, float, str]]` — (text,
 confidence, segments-JSON) — plus `model_fingerprint()`; `PyRecognizer.capture`
 bridges it to the kernel (the custom/test seam; blocking calls ride the kernel

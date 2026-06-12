@@ -36,15 +36,24 @@ class RecognizerBackend(Protocol):
 
 def make_recognizer(kind: str) -> RecognizerBackend:
     """Construct a recognition backend by kind (the `_make_backend` pattern).
-    Unavailability (the native engine off macOS) surfaces as ImportError so
-    the boot path degrades exactly as a missing optional dependency did."""
+    Unavailability — the engine not compiled into this build (platform
+    engines are mobile-only since the #496 boundary), or the native engine
+    off macOS on a build that has it — surfaces as ImportError so the boot
+    path degrades exactly as a missing optional dependency did."""
     if kind == "apple":
         import shrike_native
 
+        cls = getattr(shrike_native, "AppleVisionRecognizer", None)
+        if cls is None:
+            raise ImportError(
+                "the Apple Vision OCR engine is not compiled into this build — "
+                "platform engines are mobile-only (docs/distribution.md); the "
+                "server-profile replacement is the remote recognizer rows (#502)"
+            )
         try:
             # Typed through the protocol: the lint lane runs without the
             # native package installed, where the constructor types as Any.
-            backend: RecognizerBackend = shrike_native.AppleVisionRecognizer()
+            backend: RecognizerBackend = cls()
         except shrike_native.NativeUnavailableError as e:
             raise ImportError(str(e)) from e
         return backend

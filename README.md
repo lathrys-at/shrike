@@ -96,7 +96,7 @@ With this backend, a query like "diagram of the Krebs cycle" can find a card who
 
 ### Reading text inside images (OCR)
 
-On macOS, `--ocr-backend apple` runs Apple's Vision OCR over the images on your cards in the background (nothing extra to install — Vision ships with the OS). Recognized text becomes searchable like field text: exact and typo-tolerant matches work with any backend, and with an embedding backend the text is indexed for semantic search too. Results tell you which image matched.
+OCR support is being reworked. The server no longer bundles Apple's Vision OCR (on-device platform models belong to the mobile apps; the server's replacement is recognition over a configured endpoint, tracked in [#502](https://github.com/lathrys-at/shrike/issues/502)), so `--ocr-backend apple` currently reports recognition as unavailable rather than scanning your images. Text already recognized by an earlier version stays searchable. When recognition is active, recognized text becomes searchable like field text: exact and typo-tolerant matches work with any backend, and with an embedding backend the text is indexed for semantic search too.
 
 ### The index
 

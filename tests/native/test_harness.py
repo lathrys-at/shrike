@@ -260,6 +260,11 @@ class TestRecognition:
         asyncio.run(flow())
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="Apple Vision is macOS-only")
+    @pytest.mark.skipif(
+        not hasattr(shrike_native, "AppleVisionRecognizer"),
+        reason="engine-apple not compiled into this build (mobile-only since #496; "
+        "test re-homing is #514)",
+    )
     def test_native_vision_sweep_end_to_end(self, tmp_path) -> None:
         # #342 P3: the native recognizer rides the kernel sweep with no Python
         # on the recognition path — harness attach takes the native pyclass
