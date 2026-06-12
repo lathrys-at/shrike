@@ -119,8 +119,12 @@ jobs:
           echo "color=$COLOR" >> "$GITHUB_OUTPUT"
           echo "coverage: ${PCT}% (${COLOR})"
       # Leave a browsable line-by-line report so keeping coverage healthy is easy.
+      # --fail-under=0 like every other invocation here: `coverage html` also
+      # enforces pyproject's fail_under, and a below-target scheduled run must
+      # report (and publish the badge), never fail (#421 — exit 2 at 85% failed
+      # the whole workflow and skipped the badge).
       - name: Build HTML report
-        run: coverage html
+        run: coverage html --fail-under=0
       - name: Upload HTML report
         uses: actions/upload-artifact@v7
         with:
