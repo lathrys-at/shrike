@@ -966,7 +966,14 @@ impl Kernel {
     /// watermarks so the col_mod bump doesn't read as drift on next boot.
     pub async fn metadata_changed(&self) -> NativeResult<()> {
         self.advance_watermarks(self.embed_service().is_some())
-            .await
+            .await?;
+        // Tag-only ops (update_note_tags / rename_tag) ride this path and
+        // change MEMBERSHIP without an index op — centroids previously went
+        // stale until the next upsert/delete or reboot. The coalescing
+        // refresher makes the over-trigger on deck/template/field-metadata
+        // edits cheap, so request unconditionally (#445).
+        self.tag_refresh.request();
+        Ok(())
     }
 
     pub async fn delete_notes(&self, note_ids: Vec<i64>) -> NativeResult<usize> {
@@ -1371,10 +1378,27 @@ mod no_cpython_smoke {
             let hits = kernel.search("note number", 20).await.unwrap();
             assert!(hits.iter().all(|h| keys.lookup(h.note_id).is_none()));
 
+            // A tag-only edit (rename) rides metadata_changed, not an index
+            // op — it must also schedule a refresh so the key map tracks
+            // the new name (#445).
+            kernel
+                .collection()
+                .run(|core| core.rename_tag("bio::cell", "bio::organelle", &[]))
+                .await
+                .unwrap()
+                .unwrap();
+            kernel.metadata_changed().await.unwrap();
+            wait_for_tags(&kernel, |k| {
+                k.lookup(tag_centroids::tag_key("bio::organelle")).is_some()
+                    && k.lookup(tag_centroids::tag_key("bio::cell")).is_none()
+            })
+            .await;
+            let cell_key = tag_centroids::tag_key("bio::organelle");
+
             // Deleting a member triggers the refresh through the delete
-            // tail's membership probe (#445): bio::cell falls below
+            // tail's membership probe (#445): the tag falls below
             // min_members and its centroid retires.
-            let victim = keys.members(cell_key)[0];
+            let victim = kernel.tag_keys().members(cell_key)[0];
             kernel.delete_notes(vec![victim]).await.unwrap();
             wait_for_tags(&kernel, |k| k.lookup(cell_key).is_none()).await;
 
