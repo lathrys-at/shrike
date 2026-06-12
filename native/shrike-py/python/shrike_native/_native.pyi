@@ -75,6 +75,7 @@ def action_list_notes(
 def action_collection_query(
     core: CollectionCore, query: str, with_fields: bool = True, limit: int = 50
 ) -> str: ...
+def action_attach_neighbors(core: CollectionCore, index_engine: NativeIndexEngine | None, derived_engine: DerivedTextEngine | None, texts: list[str], vectors: list[list[float]], exclude: list[int], top_k: int, threshold: float) -> str: ...
 def action_search_notes(
     core: CollectionCore,
     index_engine: NativeIndexEngine | None,
