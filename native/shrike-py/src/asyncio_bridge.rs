@@ -19,10 +19,13 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
 use pyo3::prelude::*;
+use pyo3::pyclass::{PyTraverseError, PyVisit};
+use pyo3::types::{PyWeakrefMethods, PyWeakrefReference};
 use pyo3::BoundObject;
 
 use shrike_ffi::NativeResult;
@@ -35,36 +38,88 @@ use crate::to_py_err;
 type Conversion = Box<dyn FnOnce(Python<'_>) -> PyResult<Py<PyAny>> + Send>;
 type ErasedFuture = Pin<Box<dyn Future<Output = Conversion> + Send>>;
 
+/// Live [`PollCallback`] count — the bridge's leak tripwire (#387). Counted
+/// Rust-side (construction vs `Drop`) so the tests can assert release without
+/// trusting Python's GC to even *see* the objects.
+static LIVE_POLL_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn live_poll_callbacks() -> usize {
+    LIVE_POLL_CALLBACKS.load(Ordering::SeqCst)
+}
+
 /// Wakes by scheduling the poll callback back onto the asyncio loop — safe
 /// from any thread (`call_soon_threadsafe` is asyncio's cross-thread door).
 struct LoopWake {
     event_loop: Py<PyAny>,
-    poll_cb: Py<PollCallback>,
+    /// WEAK by design (#387): a pending future stores its waker, so a strong
+    /// reference here would close a cycle through Rust (future → waker →
+    /// callback → future slot) that Python's GC cannot traverse — a loop
+    /// abandoned mid-op would leak the op's whole bridge state for the life
+    /// of the interpreter. The reference that keeps the callback alive while
+    /// the op is observable is the asyncio future's done-callback
+    /// registration (see [`schedule_first_poll`]).
+    poll_cb: Py<PyWeakrefReference>,
 }
 
 impl Wake for LoopWake {
     fn wake(self: Arc<Self>) {
         Python::attach(|py| {
-            let _ = self.event_loop.call_method1(
-                py,
-                "call_soon_threadsafe",
-                (self.poll_cb.clone_ref(py),),
-            );
+            // Callback gone ⇒ the asyncio future died with its loop and
+            // nobody can observe the result — the wake has nowhere to land.
+            let Some(poll_cb) = self.poll_cb.bind(py).upgrade() else {
+                return;
+            };
+            let _ = self
+                .event_loop
+                .call_method1(py, "call_soon_threadsafe", (poll_cb,));
         });
     }
 }
 
-/// The loop callback that advances the bridged future by one poll.
-#[pyclass]
+/// The loop callback that advances the bridged future by one poll. Also
+/// registered as the asyncio future's done callback (#387): that registration
+/// is the strong reference keeping the bridge state alive while the op is
+/// observable (the waker's is weak), and it makes cancellation cleanup prompt
+/// — the cancelled branch below runs on the cancellation itself instead of
+/// waiting for a wake that may never come.
+///
+/// `weakref` because [`LoopWake`] holds it weakly; `__traverse__`/`__clear__`
+/// because the remaining `callback ↔ asyncio future` loop is a pure Python
+/// reference cycle the GC must be able to see through this class.
+#[pyclass(weakref)]
 pub(crate) struct PollCallback {
     future: Arc<Mutex<Option<ErasedFuture>>>,
     py_future: Py<PyAny>,
     event_loop: Py<PyAny>,
 }
 
+impl PollCallback {
+    fn new(future: ErasedFuture, py_future: Py<PyAny>, event_loop: Py<PyAny>) -> Self {
+        LIVE_POLL_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+        Self {
+            future: Arc::new(Mutex::new(Some(future))),
+            py_future,
+            event_loop,
+        }
+    }
+}
+
+impl Drop for PollCallback {
+    fn drop(&mut self) {
+        LIVE_POLL_CALLBACKS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[pymethods]
 impl PollCallback {
-    fn __call__(self_: Py<PollCallback>, py: Python<'_>) -> PyResult<()> {
+    // The optional argument is the done-callback shape: asyncio invokes
+    // `cb(future)`; the loop's own `call_soon` polls invoke `cb()`.
+    #[pyo3(signature = (_fut = None))]
+    fn __call__(
+        self_: Py<PollCallback>,
+        py: Python<'_>,
+        _fut: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
         let this = self_.borrow(py);
         // A cancelled asyncio.Future drops the Rust future (cooperative).
         if this
@@ -82,7 +137,7 @@ impl PollCallback {
         };
         let waker = Waker::from(Arc::new(LoopWake {
             event_loop: this.event_loop.clone_ref(py),
-            poll_cb: self_.clone_ref(py),
+            poll_cb: PyWeakrefReference::new(self_.bind(py).as_any())?.unbind(),
         }));
         let mut cx = Context::from_waker(&waker);
         match fut.as_mut().poll(&mut cx) {
@@ -100,6 +155,21 @@ impl PollCallback {
                 };
                 Ok(())
             }
+        }
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.py_future)?;
+        visit.call(&self.event_loop)
+    }
+
+    fn __clear__(&mut self) {
+        // Drop the pending Rust future: that releases the op's receiver and
+        // its stored waker (the bridge's only non-traversable references).
+        // The Py fields drop at dealloc, and the asyncio future's own
+        // tp_clear severs the done-callback edge of the cycle.
+        if let Ok(mut slot) = self.future.lock() {
+            slot.take();
         }
     }
 }
@@ -163,12 +233,44 @@ fn schedule_first_poll(
 ) -> PyResult<()> {
     let poll_cb = Py::new(
         py,
-        PollCallback {
-            future: Arc::new(Mutex::new(Some(erased))),
-            py_future: py_future.clone().unbind(),
-            event_loop: event_loop.clone().unbind(),
-        },
+        PollCallback::new(
+            erased,
+            py_future.clone().unbind(),
+            event_loop.clone().unbind(),
+        ),
     )?;
+    // The done-callback registration is the strong reference that keeps the
+    // bridge state alive while the op is observable — the waker holds the
+    // callback weakly (#387), so without it the callback would die after the
+    // first Pending poll. It also fires on cancellation, dropping the Rust
+    // future promptly via the cancelled branch of `__call__`.
+    py_future.call_method1("add_done_callback", (poll_cb.clone_ref(py),))?;
     event_loop.call_method1("call_soon", (poll_cb,))?;
     Ok(())
+}
+
+/// Test seam (#387): a bridged future that never resolves but *retains its
+/// waker* — the exact in-flight-op shape (a oneshot receiver parks its waker
+/// the same way) whose stored waker once formed the leaking cycle.
+struct ParkedForever(Option<Waker>);
+
+impl Future for ParkedForever {
+    type Output = NativeResult<i64>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.0 = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+/// Test seam (#387): the live [`PollCallback`] count.
+#[pyfunction]
+pub(crate) fn bridge_live_poll_callbacks() -> usize {
+    live_poll_callbacks()
+}
+
+/// Test seam (#387): bridge a waker-retaining, never-resolving future.
+#[pyfunction]
+pub(crate) fn bridge_parked_forever(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    future_into_py(py, ParkedForever(None))
 }

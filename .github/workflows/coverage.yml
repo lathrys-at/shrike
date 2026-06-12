@@ -42,13 +42,15 @@ jobs:
       pct: ${{ steps.fields.outputs.pct }}
       color: ${{ steps.fields.outputs.color }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0 # full history + tags so hatch-vcs can derive the version at install
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
+      # Exact tag: setup-uv v8+ publishes no moving major tag (immutable
+      # releases) — `@v8` does not resolve, so pin the full version.
+      - uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: pyproject.toml
@@ -123,7 +125,7 @@ jobs:
       - name: Build HTML report
         run: coverage html
       - name: Upload HTML report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-html
           path: htmlcov/
