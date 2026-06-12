@@ -213,11 +213,20 @@ class Harness:
         hold_seconds: float,
         media_read: Any,
         media_exists: Any,
+        index_save_delay: float | None = None,
+        index_save_threshold: int | None = None,
     ) -> Harness:
         """Open the kernel on the running loop. Scheduling is the kernel's
         own (#374 — the owned tokio runtime spawns the collection actor);
-        the harness assembles services and awaits completions."""
-        kernel = await shrike_native.async_kernel_open(collection_path, cache_dir)
+        the harness assembles services and awaits completions. The
+        ``index_save_*`` tuning reaches the kernel's debounced saver
+        (#355 item 2); ``None`` keeps the built-in defaults."""
+        kernel = await shrike_native.async_kernel_open(
+            collection_path,
+            cache_dir,
+            save_delay=index_save_delay,
+            save_threshold=index_save_threshold,
+        )
         wrapper = CollectionWrapper.over_kernel(
             kernel, collection_path, cooperative=cooperative, hold_seconds=hold_seconds
         )
