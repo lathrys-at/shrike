@@ -1,12 +1,6 @@
-//! Async kernel bindings (#332, S3a): the kernel's runtime-agnostic futures
-//! awaited natively on the harness's asyncio loop via the runtime-less bridge.
-//!
-//! This first slice binds the kernel's `SerializedCollection` — open / a
-//! collection op / close, each an `asyncio.Future` — proving the full chain:
-//! kernel future → injected executor → loop-driven polls → Python `await`.
-//! Later S3 slices widen this to the kernel's orchestration (index drift,
-//! saver debounce, runtime lifecycle) and swap the inline `MutexExecutor`
-//! for a harness-injected worker executor.
+//! Async kernel bindings (#332, S3a; reshaped by #374): every op is spawned
+//! onto the kernel's owned runtime at this edge (`spawn_op`) and surfaces as
+//! an `asyncio.Future` through the one-wake completion bridge.
 
 use std::sync::Arc;
 
@@ -20,7 +14,7 @@ use crate::native_embedder::NativeEmbedder;
 use crate::py_embedder::{PyEmbedder, PyEmbedderHandle, PyMediaResolver};
 
 /// An open collection whose every op is an awaitable serialized through the
-/// kernel's injected executor.
+/// kernel's collection actor.
 #[pyclass]
 pub(crate) struct AsyncCollection {
     inner: Arc<SerializedCollection>,
@@ -90,12 +84,12 @@ fn outcome_to_wire(outcome: shrike_ffi::NativeResult<CreateOutcome>) -> UpsertWi
     }
 }
 
-/// The full kernel bound for the harness (#332, S3d-1b): one open collection
-/// + the kernel-internal index orchestration + the derived store, every op an
-/// awaitable on the running loop. The harness assembles it from its own parts
-/// — a [`WorkerExecutor`] (or none), a [`PyEmbedder`] over its backend, and
-/// the loop's timers for the debounced index flush — then shares the kernel's
-/// engine/core handles for its read/search surfaces.
+/// The full kernel bound for the harness (#332, S3d-1b; #374): one open
+/// collection + the kernel-internal index orchestration + the derived store,
+/// every op spawned onto the kernel's own runtime at this edge and awaited
+/// as an asyncio future. The harness attaches services (engines via
+/// [`NativeEmbedder`]; custom backends via [`PyEmbedder`]) and shares the
+/// kernel's engine/core handles for its read/search surfaces.
 #[pyclass(frozen)]
 pub(crate) struct AsyncKernel {
     inner: Arc<Kernel>,
@@ -120,7 +114,7 @@ enum AnyEmbedder<'py> {
 }
 
 /// Either recognizer shape (#342 P3) — the same split as [`AnyEmbedder`]:
-/// the native Vision engine (adapted onto the asyncio lane at attach) or a
+/// the native Vision engine (adapted onto the blocking pool at attach) or a
 /// captured Python backend (custom/test recognizers).
 #[derive(FromPyObject)]
 enum AnyRecognizer<'py> {
@@ -146,7 +140,7 @@ fn image_pair(
 }
 
 /// Open a kernel asynchronously; resolves to an [`AsyncKernel`]. Call from a
-/// coroutine context (the loop hosts the timers and the embed dispatches).
+/// coroutine context (the completion bridge resolves on the running loop).
 /// The embedding service attaches separately (`attach_embedder`) — the
 /// embedder slot is runtime-swappable (#342), so a kernel opens (and serves
 /// lexical search + every collection op) with none.
@@ -214,20 +208,16 @@ impl AsyncKernel {
     /// is adapted onto the asyncio compute lane here (call from a coroutine).
     fn attach_recognizer(
         &self,
-        py: Python<'_>,
         recognizer: AnyRecognizer<'_>,
         media_read: Py<PyAny>,
         media_exists: Py<PyAny>,
-    ) -> PyResult<()> {
+    ) {
         let resolver: Arc<dyn shrike_kernel::ImageResolver> =
             Arc::new(PyMediaResolver::new(media_read, media_exists));
         match recognizer {
             AnyRecognizer::Native(native) => {
-                let lane: Arc<dyn shrike_engine_api::ComputeExecutor> =
-                    Arc::new(crate::native_embedder::AsyncioComputeLane::capture(py)?);
-                let adapted: Arc<dyn shrike_kernel::Recognizer> = Arc::new(
-                    shrike_engine_api::OnExecutor::new(native.engine_arc(), lane),
-                );
+                let adapted: Arc<dyn shrike_kernel::Recognizer> =
+                    Arc::new(shrike_engine_api::Blocking(native.engine_arc()));
                 self.inner.attach_recognizer(adapted, resolver);
             }
             AnyRecognizer::Captured(captured) => {
@@ -235,7 +225,6 @@ impl AsyncKernel {
                 self.inner.attach_recognizer(handle, resolver);
             }
         }
-        Ok(())
     }
 
     /// Detach the recognition service: derived text stays (still valid output
