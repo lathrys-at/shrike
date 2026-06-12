@@ -303,7 +303,11 @@ class MCPClient:
         self._url = url
         # Reuse one keep-alive connection: a fresh httpx.post per call pays a TCP
         # connect (~2.4ms) every time, and a session client makes ~700 calls.
-        self._client = httpx.Client(timeout=10.0)
+        # 30s: an upsert call embeds its whole batch synchronously, and on a
+        # cold CI runner the first llama embed also pays the one-time model
+        # preset build — 10s was a working-set assumption, not a contract
+        # (#441; the seeding upsert hit it).
+        self._client = httpx.Client(timeout=30.0)
 
     def __call__(self, tool_name: str, arguments: dict | None = None) -> dict:
         arguments = dict(arguments or {})
@@ -948,8 +952,13 @@ def collection_server(server_factory, embedding_model: Path) -> ServerInfo:
                     "tags": [concept["tag"]],
                 }
             )
-    result = mcp("upsert_notes", {"notes": all_notes})
-    created = sum(1 for r in result["results"] if r["status"] == "created")
+    # Chunked (#441): one 50-note call embeds 50 texts inside a single HTTP
+    # call window; chunks keep each call comfortably inside the client timeout
+    # even when the runner's first llama embed is cold.
+    created = 0
+    for i in range(0, len(all_notes), 10):
+        result = mcp("upsert_notes", {"notes": all_notes[i : i + 10]})
+        created += sum(1 for r in result["results"] if r["status"] == "created")
     assert created == 50, f"Expected 50 notes created, got {created}"
     wait_for_index_ready(srv)
     return srv
