@@ -535,6 +535,56 @@ The vector index is a **derived cache**, not a co-equal store. The Anki collecti
 - **`contextlib.suppress`** instead of bare `try/except/pass`
 - **`datetime.UTC`** not `timezone.utc` (ruff UP017)
 
+### Performance conventions (the #445 audit's distilled rules)
+
+The full kernel performance audit (issue #445, closed — the checkpoint→PR map
+and an explicit **"not-worth-fixing" list** live on it; re-finding those is
+wasted work) landed as PRs #447–#476. Ground performance decisions at a
+**100k-note collection**. The failure modes that actually recurred, and the
+house rules that prevent them:
+
+- **No collection reads inside per-item loops.** The N+1 is the repeat
+  offender: a singleton `note_dicts`/`note_texts` per candidate pays two SQL
+  queries plus a *full* `deck_names`/notetype enumeration each, serialized on
+  the collection actor. Discover the id set first, then ONE batched read
+  (`read_notes_batch`, `note_dicts(&ids)`, `texts_for_source_for_notes`), and
+  assemble from the map. **When porting policy between layers (Python →
+  kernel), port its batching with it** — #456 reintroduced the exact N+1 #454
+  had removed because the port kept the policy but dropped the batched read
+  (caught by re-auditing post-audit PRs; fixed in #476).
+- **Read only what the op needs.** Prefer scoped variants over
+  full-collection renders: `note_image_refs` (the recognition sweep needs
+  image names, not rendered text), the `any_tagged` probe, the notes-scoped
+  derived reads. Push a pre-filter into SQL only when its semantics match the
+  Rust side *exactly* (`instr(lower(flds), '<img')` — SQLite's `lower()` is
+  ASCII-only, identical to the extractor's byte probe).
+- **Per-op tails do no O(collection) work.** Derived signals (tag centroids)
+  refresh in a coalescing background task behind a cheap relevance probe; the
+  op tail only *requests*. Boot/rebuild paths keep synchronous refreshes so
+  "ready" means ready.
+- **Never hold a lock across file writes or compute.** Snapshot the small
+  shared state under the lock, write outside it (`IndexOrchestrator::save`);
+  serialize savers with a dedicated guard; blocking fs work rides
+  `spawn_blocking`, never an op tail or a runtime worker.
+- **One transaction per batch; prepared statements in row loops.** A journal
+  commit (fsync) per item is the hidden cost — `ingest_many` and
+  `set_note_tags_bulk` (anki's `UpdateNotes` is bulk) batch it away;
+  `Connection::execute` re-prepares per call, so loops use `prepare_cached`.
+- **Skip provably-identity work — but prove it from the pinned source.** The
+  strip-skip (no `<` and no `&` → anki's stripper is byte-identity) was
+  verified against anki's own `HTML` regex + `decode_entities` gate and is
+  pinned by a panicking-stripper test. A skip predicate justified only
+  empirically is a future correctness bug.
+- **Hand out views and `Arc`s, not clones; bound unbounded expansions.**
+  Arc'd per-notetype field-name lists, `Cow` pass-throughs for the common
+  case (`fill_clozes`), move-out assembly instead of re-cloning, per-batch
+  lookup memos (`UpsertMemo`), and ceilings with deterministic sampling where
+  an input scales with the collection (`MEMBER_SCORE_CEILING`).
+- **When an audit completes, re-audit what landed around it.** PRs merged
+  outside the audit's snapshot carry un-analyzed code; the post-#445 delta
+  pass found the #476 regression and cleared everything else (recorded on
+  #445 so it isn't re-found).
+
 ### Logging
 
 Logging is configured in `shrike/log.py`. Log format, parsing, and styling all live in that module — formatting knowledge should not be spread across CLI commands.
