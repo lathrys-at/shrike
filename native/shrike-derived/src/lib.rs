@@ -86,6 +86,13 @@ impl DerivedEngine {
             .map_err(db_err)?;
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(db_err)?;
+        // "One connection" holds per ENGINE, but two engines can share the
+        // file (the kernel's + the Python facade's read surface). With the
+        // default busy_timeout of 0 a read overlapping a write transaction
+        // got an instant SQLITE_BUSY instead of waiting out a brief lock
+        // (#445 audit correctness flag).
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(db_err)?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value)",
