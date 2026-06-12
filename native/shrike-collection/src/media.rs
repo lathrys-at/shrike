@@ -11,12 +11,15 @@ use crate::{embed_text, CollectionCore};
 
 /// `_safe_media_name`: reduce a caller-supplied name to a bare basename so it
 /// can only resolve inside the media dir (path-traversal guard for
-/// fetch/delete). Returns "" for a name that is only separators/dots.
+/// fetch/delete). Returns "" for a name that is only separators/dots — or
+/// only whitespace around them, which the emptiness check would otherwise
+/// pass (#382).
 fn safe_media_name(name: &str) -> String {
     let normalized = name.replace('\\', "/");
     let trimmed = normalized.trim_end_matches('/');
     let base = trimmed.rsplit('/').next().unwrap_or("");
-    if base.is_empty() || base == "." || base == ".." {
+    let checked = base.trim();
+    if checked.is_empty() || checked == "." || checked == ".." {
         String::new()
     } else {
         base.to_string()
@@ -359,7 +362,10 @@ impl CollectionCore {
         let strip = |s: &str| self.adapter.strip_html(s);
         let mut empty = Vec::new();
         for row in self.adapter.db_rows("select id, flds from notes")? {
-            let (Some(id), Some(flds)) = (row[0].as_i64(), row[1].as_str()) else {
+            let (Some(id), Some(flds)) = (
+                row.first().and_then(Value::as_i64),
+                row.get(1).and_then(Value::as_str),
+            ) else {
                 continue;
             };
             let mut all_blank = true;
@@ -544,6 +550,10 @@ mod tests {
         assert_eq!(safe_media_name(".."), "");
         assert_eq!(safe_media_name("dir/"), "dir");
         assert_eq!(safe_media_name("plain.png"), "plain.png");
+        // Whitespace-only (or whitespace-wrapped dots) is no name at all (#382).
+        assert_eq!(safe_media_name("   "), "");
+        assert_eq!(safe_media_name(" .. "), "");
+        assert_eq!(safe_media_name("a/  "), "");
     }
 
     #[test]

@@ -75,22 +75,49 @@ pytest_test(
     deps = [":conftest"],
 )
 
-# Embedding integration: one `manual` aggregate (so the per-PR //... lane never
-# fetches the hundreds of MB of model + llama-server externals; it runs in a
-# dedicated embedding lane, #262). Pulls every model as a pinned http_file and the
-# host llama-server as an http_archive; the conftest assembles them. Runs SERIALLY
-# (xdist=None): it's model-load-bound with session-scoped servers, so one process =
-# one llama boot + one load of each model, not N. //bin:server_embedding carries the
-# onnx/clip extras for the tests whose server loads a backend (test_backends).
+# Embedding integration: two `manual` halves (so the per-PR //... lane never
+# fetches the hundreds of MB of model + llama-server externals; they run as a
+# gated step in the bazel lane, #262/#418). Pulls models as pinned http_files and
+# the host llama-server as an http_archive; the conftest assembles whichever are
+# in a target's runfiles. Each half runs SERIALLY (xdist=None): it's
+# model-load-bound with session-scoped servers, so one process = one llama boot +
+# one load of each model, not N — but the two halves run CONCURRENTLY as separate
+# Bazel test actions, each booting only its own models, so the lane's wall cost
+# is ~max of the halves instead of their sum. Split balanced by measured per-file
+# cost (#418: core ≈ 12s, backends ≈ 17s locally), not by theme alone.
+
+# The llama-server core: the embedding-service lifecycle (incl. orphan reaping)
+# + semantic search / neighbors / index CLI against the GGUF model. The server
+# binary comes from the conftest's //bin:server data-dep (the lean default —
+# _server_launch_cmd falls back to it when server_embedding isn't in runfiles).
 pytest_test(
-    name = "embedding",
+    name = "embedding_core",
+    size = "large",
+    srcs = [
+        "test_embedding.py",
+        "test_semantic.py",
+    ],
+    tags = ["manual"],
+    xdist = None,
+    deps = [":conftest"],
+    data = [
+        ":llama_server",
+        "@model_gguf_minilm//file",
+    ],
+)
+
+# The backend zoo: per-backend contracts (llama / onnx fp32+int8 / clip) and the
+# model lineages. //bin:server_embedding carries the onnx/clip extras for the
+# tests whose server loads a backend (test_backends). Keeps llama_server + the
+# GGUF too: test_backends exercises LlamaServerBackend alongside the in-process
+# ones.
+pytest_test(
+    name = "embedding_backends",
     size = "large",
     srcs = [
         "test_backends.py",
         "test_clip_model.py",
-        "test_embedding.py",
         "test_onnx_models.py",
-        "test_semantic.py",
     ],
     tags = ["manual"],
     xdist = None,

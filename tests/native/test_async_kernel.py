@@ -515,6 +515,56 @@ class TestRecognition:
 
         asyncio.run(flow())
 
+    def test_raising_resolver_degrades_gracefully(self, tmp_path) -> None:
+        # #386: a buggy/misconfigured Python resolver raises — the binding
+        # logs and degrades (read → None, exists → False) instead of
+        # crashing the sweep or recognizing empty bytes.
+        async def flow():
+            backend = _Backend()
+            kernel = await _open(tmp_path, backend)
+            await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            await kernel.upsert_notes([(basic, 1, ['Img <img src="boom.png">', "b"], [])], "error")
+
+            def raising(name: str):
+                raise RuntimeError(f"resolver exploded on {name}")
+
+            recognizer = _StubRecognizer()
+
+            # exists raises → treated absent → nothing pending at all.
+            kernel.attach_recognizer(shrike_native.Recognizer.capture(recognizer), raising, raising)
+            report = json.loads(await kernel.recognize_pending(10))
+            assert report["status"] == "idle"
+            assert recognizer.calls == []
+
+            # exists succeeds but read raises → the item is skipped (never
+            # recognized over empty bytes), stored nothing, stays pending.
+            kernel.attach_recognizer(
+                shrike_native.Recognizer.capture(recognizer), raising, lambda n: True
+            )
+            report = json.loads(await kernel.recognize_pending(10))
+            assert report["status"] == "ran"
+            assert report["recognized"] == 0
+            assert report["stored"] == 0
+            assert recognizer.calls == []
+
+            # A healed resolver picks the item up on the next sweep.
+            media = {"boom.png": b"now readable after all"}
+            kernel.attach_recognizer(
+                shrike_native.Recognizer.capture(recognizer),
+                media.get,
+                lambda n: n in media,
+            )
+            report = json.loads(await kernel.recognize_pending(10))
+            assert report["status"] == "ran"
+            assert report["stored"] == 1
+            assert recognizer.calls == [1]
+
+            await kernel.close()
+
+        asyncio.run(flow())
+
     def test_fingerprint_change_invalidates(self, tmp_path) -> None:
         async def flow():
             backend = _Backend()

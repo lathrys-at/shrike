@@ -549,8 +549,8 @@ impl DerivedTextEngine {
         self.inner.set_col_mod(value).map_err(to_py_err)
     }
 
-    fn count(&self) -> i64 {
-        self.inner.count()
+    fn count(&self) -> PyResult<i64> {
+        self.inner.count().map_err(to_py_err)
     }
 
     fn ingest(
@@ -754,7 +754,8 @@ impl NativeIndexEngine {
 /// Reciprocal Rank Fusion — the native implementation of the frozen
 /// `search_fusion.py` spec. Same canonical accumulation order, same dedup, same
 /// `(tier, -score, note_id)` ordering; the Python parity property suite pins
-/// the two byte-for-byte.
+/// the two byte-for-byte. The one implementation lives in the kernel
+/// (`shrike_kernel::fusion`, #380).
 #[pyfunction]
 #[pyo3(signature = (rankings, weights, k=60, priority_signals=vec![]))]
 fn rrf_fuse(
@@ -766,7 +767,7 @@ fn rrf_fuse(
 ) -> Vec<FusedHit> {
     py.detach(move || {
         let priority: std::collections::HashSet<String> = priority_signals.into_iter().collect();
-        shrike_compute::rrf_fuse(&rankings, &weights, k, &priority)
+        shrike_kernel::fusion::rrf_fuse(&rankings, &weights, k, &priority)
     })
 }
 

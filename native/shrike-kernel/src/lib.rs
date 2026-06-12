@@ -24,6 +24,7 @@
 //! transitional Python schedulers from #275.
 
 pub mod actions;
+pub mod fusion;
 pub mod index_orchestrator;
 pub mod recognize;
 pub mod tag_centroids;
@@ -136,8 +137,25 @@ impl SerializedCollection {
             .map_err(|_| NativeError::internal("executor dropped a collection job"))?
     }
 
+    /// Close the collection on the actor. Idempotent: once the actor is
+    /// drained (a prior close/shutdown) the collection went down with it, so
+    /// already-gone is the already-closed outcome, not an error — typed here
+    /// rather than string-matched by the caller (#382). Mirrors `run` except
+    /// for that one rule.
     pub async fn close(&self) -> NativeResult<()> {
-        self.run(|core| core.close()).await?
+        let Ok(sender) = self.sender() else {
+            return Ok(());
+        };
+        let core = Arc::clone(&self.core);
+        let (tx, rx) = oneshot::channel();
+        let job: Job = Box::new(move || {
+            let _ = tx.send(core.ensure_open().and_then(|_| core.close()));
+        });
+        if sender.send(job).is_err() {
+            return Ok(()); // drained while queueing: same already-closed outcome
+        }
+        rx.await
+            .map_err(|_| NativeError::internal("executor dropped a collection job"))?
     }
 
     /// Drain the actor: take-and-drop the sender (the channel closes; the
@@ -405,6 +423,7 @@ impl Kernel {
     /// collection materializes an empty-but-ready index. Returns whether any
     /// reindexing ran. The harness drives this as a background task — the
     /// kernel serves while it runs.
+    #[must_use = "whether reindexing ran is the caller's signal to refresh status"]
     pub async fn reindex_if_needed(&self) -> NativeResult<bool> {
         let Some(svc) = self.embed_service() else {
             return Ok(false); // no embedder → nothing to (re)index
@@ -492,9 +511,8 @@ impl Kernel {
             std::collections::HashMap::new();
         match self.derived.texts_for_source(OCR_SOURCE) {
             Ok(rows) => {
-                let min = self.recognition_gate.min_chars_vector;
                 for (nid, _r, text) in rows {
-                    if text.trim().chars().count() >= min {
+                    if self.recognition_gate.vector_worthy(&text) {
                         ocr_map.entry(nid).or_default().push(text);
                     }
                 }
@@ -521,7 +539,9 @@ impl Kernel {
     /// Pending = a resolvable image with no OCR row (or all of them, after a
     /// recognizer-fingerprint change invalidates the prior text). Returns
     /// `{status, recognized, stored, remaining}` — the harness loops while
-    /// `remaining > 0`, so one call never occupies the executor for long.
+    /// `remaining > 0` and the batch made progress (`recognized > 0`), so
+    /// one call never occupies the executor for long and a permanently
+    /// unreadable window can't spin the driver.
     pub async fn recognize_pending(&self, max_items: usize) -> NativeResult<serde_json::Value> {
         let Some(svc) = self.recognize_service() else {
             return Ok(serde_json::json!({"status": "unavailable"}));
@@ -582,19 +602,38 @@ impl Kernel {
         }
 
         // One pass, many consumers: recognize the batch, keep text AND
-        // segments.
-        let items: Vec<MediaItem> = pending
-            .iter()
-            .map(|(_, name)| {
-                MediaItem::from_named(name, svc.resolver.read(name).unwrap_or_default())
-            })
-            .collect();
-        let recognitions = svc.recognizer.recognize(items).await?;
-        if recognitions.len() != pending.len() {
+        // segments. A read that fails after the exists() check (TOCTOU
+        // delete, transient error, resolver bug) SKIPS the item rather than
+        // recognizing empty bytes (#386) — nothing is stored for it, so the
+        // next sweep re-offers it. `sent` and `items` are built together so
+        // the recognizer's output stays aligned with what was actually sent.
+        let mut sent: Vec<(i64, String)> = Vec::with_capacity(pending.len());
+        let mut items: Vec<MediaItem> = Vec::with_capacity(pending.len());
+        for (note_id, name) in &pending {
+            match svc.resolver.read(name) {
+                Some(bytes) => {
+                    items.push(MediaItem::from_named(name, bytes));
+                    sent.push((*note_id, name.clone()));
+                }
+                None => {
+                    tracing::warn!(
+                        image = %name,
+                        note_id,
+                        "media read failed after exists(); skipping until the next sweep"
+                    );
+                }
+            }
+        }
+        let recognitions = if items.is_empty() {
+            Vec::new()
+        } else {
+            svc.recognizer.recognize(items).await?
+        };
+        if recognitions.len() != sent.len() {
             return Err(NativeError::internal(format!(
                 "recognizer returned {} results for {} items",
                 recognitions.len(),
-                pending.len()
+                sent.len()
             )));
         }
 
@@ -616,7 +655,7 @@ impl Kernel {
         let mut touched: std::collections::BTreeMap<i64, Vec<(String, String)>> =
             std::collections::BTreeMap::new();
         let mut segments: Vec<(i64, String, String)> = Vec::new();
-        for ((note_id, name), recognition) in pending.iter().zip(recognitions.iter()) {
+        for ((note_id, name), recognition) in sent.iter().zip(recognitions.iter()) {
             match self.recognition_gate.judge(recognition) {
                 recognize::GateOutcome::Drop => continue,
                 recognize::GateOutcome::Lexical | recognize::GateOutcome::LexicalAndVector => {
@@ -650,9 +689,16 @@ impl Kernel {
             self.index_written(&affected).await?;
         }
 
+        // `recognized` counts what was actually sent. A skipped (unreadable)
+        // item stores nothing, so it STAYS PENDING and the next call re-takes
+        // the same window — with an unreadable prefix of the pending order
+        // and more items beyond it, `remaining` stays > 0 indefinitely. The
+        // kernel does not terminate that loop; the HARNESS's driver stops on
+        // a no-progress batch (`recognized == 0`) and the next sweep trigger
+        // (boot, /reload, cooperative re-acquire) retries the read.
         Ok(serde_json::json!({
             "status": "ran",
-            "recognized": pending.len(),
+            "recognized": sent.len(),
             "stored": stored_count,
             "remaining": total_pending.saturating_sub(pending.len()),
         }))
@@ -824,8 +870,14 @@ impl Kernel {
     /// path: the collection op removed them internally; this is the sidecar
     /// half of `delete_notes`).
     pub async fn forget_notes(&self, note_ids: Vec<i64>) -> NativeResult<()> {
-        self.orchestrator.remove(&note_ids)?;
-        self.derived.remove(&note_ids, None)?;
+        self.drop_note_sidecars(&note_ids).await
+    }
+
+    /// The sidecar tail shared by every note-deletion shape (#382): drop the
+    /// notes' vectors + derived rows, advance the watermarks, refresh tags.
+    async fn drop_note_sidecars(&self, note_ids: &[i64]) -> NativeResult<()> {
+        self.orchestrator.remove(note_ids)?;
+        self.derived.remove(note_ids, None)?;
         self.advance_watermarks(self.embed_service().is_some())
             .await?;
         self.refresh_tags_best_effort().await;
@@ -846,11 +898,7 @@ impl Kernel {
             .collection
             .run(move |core| core.delete_notes(&ids))
             .await??;
-        self.orchestrator.remove(&note_ids)?;
-        self.derived.remove(&note_ids, None)?;
-        self.advance_watermarks(self.embed_service().is_some())
-            .await?;
-        self.refresh_tags_best_effort().await;
+        self.drop_note_sidecars(&note_ids).await?;
         Ok(removed)
     }
 
@@ -951,8 +999,7 @@ impl Kernel {
             weights.insert("fuzzy".to_string(), 0.5);
             let mut priority = std::collections::HashSet::new();
             priority.insert("exact".to_string());
-            let fused =
-                shrike_compute::rrf_fuse(&rankings, &weights, shrike_compute::RRF_K, &priority);
+            let fused = fusion::rrf_fuse(&rankings, &weights, fusion::RRF_K, &priority);
             Ok(fused
                 .into_iter()
                 .take(top_k)
@@ -983,14 +1030,10 @@ impl Kernel {
     /// Close the collection and drain the actor — close returns with nothing
     /// in flight (the interpreter-teardown guard, #374 design 7). Works
     /// through `&self` so shared handles (the binding's `Arc<Kernel>`) can
-    /// close; idempotent (a drained actor close is the actor-gone error,
-    /// swallowed here as already-closed).
+    /// close; idempotent (`SerializedCollection::close` treats a drained
+    /// actor as already-closed, #382).
     pub async fn close(&self) -> NativeResult<()> {
-        let result = match self.collection.close().await {
-            // A second close after shutdown: the actor is gone — fine.
-            Err(e) if e.to_string().contains("actor is gone") => Ok(()),
-            other => other,
-        };
+        let result = self.collection.close().await;
         self.collection.shutdown().await;
         result
     }
@@ -1171,6 +1214,9 @@ mod no_cpython_smoke {
             let hits = kernel.search("capital of france", 5).await.unwrap();
             assert!(hits[0].signals.iter().any(|(s, _)| s == "text"));
 
+            kernel.close().await.unwrap();
+            // Idempotent (#382): a second close after the actor drained is
+            // already-closed, not an actor-gone error.
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
         });
@@ -1377,15 +1423,33 @@ mod no_cpython_smoke {
         }
     }
 
-    struct MapResolver(std::collections::HashMap<String, Vec<u8>>);
+    struct MapResolver {
+        files: std::collections::HashMap<String, Vec<u8>>,
+        /// Names whose `read` fails even though `exists` reports them
+        /// present — the #386 TOCTOU-delete / transient-read shape. A
+        /// Mutex so a test can "heal" the read mid-flight.
+        unreadable: std::sync::Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl MapResolver {
+        fn new(files: std::collections::HashMap<String, Vec<u8>>) -> Self {
+            Self {
+                files,
+                unreadable: std::sync::Mutex::new(std::collections::HashSet::new()),
+            }
+        }
+    }
 
     impl ImageResolver for MapResolver {
         fn read(&self, name: &str) -> Option<Vec<u8>> {
-            self.0.get(name).cloned()
+            if self.unreadable.lock().unwrap().contains(name) {
+                return None;
+            }
+            self.files.get(name).cloned()
         }
 
         fn exists(&self, name: &str) -> bool {
-            self.0.contains_key(name)
+            self.files.contains_key(name)
         }
     }
 
@@ -1433,7 +1497,7 @@ mod no_cpython_smoke {
                 "krebs.png".to_string(),
                 b"the krebs cycle produces energy carriers".to_vec(),
             );
-            kernel.attach_recognizer(Arc::new(StubRecognizer), Arc::new(MapResolver(media)));
+            kernel.attach_recognizer(Arc::new(StubRecognizer), Arc::new(MapResolver::new(media)));
 
             let report = kernel.recognize_pending(10).await.unwrap();
             assert_eq!(report["status"], "ran");
@@ -1478,6 +1542,166 @@ mod no_cpython_smoke {
             assert!(sem2.iter().any(|h| h.note_id == diagram_id));
 
             kernel2.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
+    fn recognition_skips_unreadable_media_and_keeps_it_pending() {
+        // #386: exists() says present but read() returns None (TOCTOU
+        // delete, transient error) — the item must be SKIPPED, never
+        // recognized over empty bytes, and must stay pending so a later
+        // sweep (once the read heals) recognizes the real bytes.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            let notes = vec![serde_json::json!({"note_type": "Basic", "deck": "Default",
+                "fields": {"Front":
+                    "Two diagrams <img src=\"good.png\"> <img src=\"flaky.png\">",
+                    "Back": "b"}})];
+            kernel
+                .upsert_notes_json(
+                    serde_json::json!(notes).to_string(),
+                    "error".to_string(),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let mut media = std::collections::HashMap::new();
+            media.insert("good.png".to_string(), b"readable diagram text".to_vec());
+            media.insert("flaky.png".to_string(), b"flaky secret payload".to_vec());
+            let resolver = Arc::new(MapResolver::new(media));
+            resolver
+                .unreadable
+                .lock()
+                .unwrap()
+                .insert("flaky.png".to_string());
+            kernel.attach_recognizer(Arc::new(StubRecognizer), resolver.clone());
+
+            // Sweep 1: only the readable item is sent and stored; the
+            // unreadable one is skipped (not recognized as empty bytes) and
+            // counted against the batch so the harness loop can't spin.
+            let report = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(report["status"], "ran");
+            assert_eq!(report["recognized"], 1);
+            assert_eq!(report["stored"], 1);
+            assert_eq!(report["remaining"], 0);
+            let hits = kernel.search("flaky secret", 5).await.unwrap();
+            assert!(
+                !hits
+                    .iter()
+                    .any(|h| h.signals.iter().any(|(sig, _)| sig == "exact")),
+                "nothing stored lexically for the unreadable item"
+            );
+
+            // Sweep 2: still unreadable → still pending, still skipped — a
+            // sweep ran (it was offered again), but nothing was sent.
+            let again = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(again["status"], "ran");
+            assert_eq!(again["recognized"], 0);
+            assert_eq!(again["stored"], 0);
+
+            // Heal the read: the next sweep recognizes the REAL bytes.
+            resolver.unreadable.lock().unwrap().clear();
+            let healed = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(healed["status"], "ran");
+            assert_eq!(healed["recognized"], 1);
+            assert_eq!(healed["stored"], 1);
+            let hits = kernel.search("flaky secret", 5).await.unwrap();
+            assert!(
+                hits.iter()
+                    .any(|h| h.signals.iter().any(|(sig, _)| sig == "exact")),
+                "healed item recognized and stored"
+            );
+
+            // And now everything is done.
+            let idle = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(idle["status"], "idle");
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
+    fn unreadable_prefix_reports_no_progress_for_the_driver() {
+        // #386 livelock shape: total_pending > max_items with a permanently
+        // unreadable PREFIX of the pending order. Skipped items stay pending,
+        // so each call re-takes the same window — the kernel can't drain it.
+        // The report must let a driver detect the no-progress batch
+        // (recognized == 0 with remaining > 0) and stop instead of spinning.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            let notes = vec![serde_json::json!({"note_type": "Basic", "deck": "Default",
+                "fields": {"Front":
+                    "<img src=\"u1.png\"> <img src=\"u2.png\"> <img src=\"ok.png\">",
+                    "Back": "b"}})];
+            kernel
+                .upsert_notes_json(
+                    serde_json::json!(notes).to_string(),
+                    "error".to_string(),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let mut media = std::collections::HashMap::new();
+            media.insert("u1.png".to_string(), b"unreadable one".to_vec());
+            media.insert("u2.png".to_string(), b"unreadable two".to_vec());
+            media.insert("ok.png".to_string(), b"readable tail text".to_vec());
+            let resolver = Arc::new(MapResolver::new(media));
+            {
+                let mut unreadable = resolver.unreadable.lock().unwrap();
+                unreadable.insert("u1.png".to_string());
+                unreadable.insert("u2.png".to_string());
+            }
+            kernel.attach_recognizer(Arc::new(StubRecognizer), resolver.clone());
+
+            // The batch window covers only the unreadable prefix: nothing is
+            // sent, nothing stored, and the readable tail stays beyond the
+            // window — the exact shape a driver must stop on, since the next
+            // call would re-take the identical window.
+            let report = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(report["status"], "ran");
+            assert_eq!(report["recognized"], 0);
+            assert_eq!(report["stored"], 0);
+            assert_eq!(report["remaining"], 1);
+
+            // And it really would: a second call is byte-identical.
+            let again = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(again, report);
+
+            // Healed reads drain normally across batches, then go idle.
+            resolver.unreadable.lock().unwrap().clear();
+            let healed = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(healed["recognized"], 2);
+            assert_eq!(healed["stored"], 2);
+            assert_eq!(healed["remaining"], 1);
+            let tail = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(tail["recognized"], 1);
+            assert_eq!(tail["remaining"], 0);
+            let idle = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(idle["status"], "idle");
+
+            kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
         });
     }

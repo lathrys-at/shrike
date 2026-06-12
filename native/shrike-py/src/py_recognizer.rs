@@ -41,9 +41,10 @@ fn parse_results(raw: Vec<(String, f64, String)>) -> RecResult {
         .collect()
 }
 
-/// The kernel-facing handle: a Python backend + the loop hosting its calls.
-/// The fingerprint is captured once at assembly so the kernel's invalidation
-/// rules never call into Python mid-op.
+/// The kernel-facing handle: a Python backend whose blocking calls ride the
+/// kernel runtime's blocking pool (#374 — no captured loop). The fingerprint
+/// is captured once at assembly so the kernel's invalidation rules never
+/// call into Python mid-op.
 pub(crate) struct PyRecognizerHandle {
     backend: Py<PyAny>,
     fingerprint: Option<String>,
@@ -146,7 +147,7 @@ impl AppleVisionRecognizer {
 }
 
 /// The Python-visible wrapper the harness constructs at assembly:
-/// `Recognizer(backend, loop, fingerprint)`.
+/// `Recognizer.capture(backend)`.
 #[pyclass(name = "Recognizer")]
 pub struct PyRecognizer {
     pub(crate) handle: Arc<PyRecognizerHandle>,

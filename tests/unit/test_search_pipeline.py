@@ -1,7 +1,7 @@
 """SearchPipeline seam (#274): protocol conformance + native==reference parity.
 
 `search_fusion.rrf_fuse` is the frozen, readable spec of the fusion semantics;
-the native pipeline (`shrike_compute::rrf_fuse`) is a second implementation of
+the native pipeline (`shrike_kernel::fusion::rrf_fuse`) is a second implementation of
 the same `SearchPipeline` protocol. The property suite here is the drift alarm
 that justifies the dual implementation: randomized rankings/weights/priority
 tiers in → identical fused order, scores, and provenance out.

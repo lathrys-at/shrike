@@ -22,8 +22,8 @@
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
-use blake2::digest::{Update, VariableOutput};
-use blake2::Blake2bVar;
+use blake2::digest::consts::U8;
+use blake2::{Blake2b, Digest};
 
 use shrike_ffi::NativeResult;
 use shrike_index::MultiModalIndex;
@@ -68,13 +68,13 @@ impl TagCentroidConfig {
 }
 
 /// Stable i64 key for a tag string (blake2b-8; masked positive so keys can
-/// never collide with the sign conventions of note ids).
+/// never collide with the sign conventions of note ids). Fixed-size
+/// `Blake2b<U8>` — the same digest-length parameter block (so the same
+/// bytes) as `Blake2bVar::new(8)`, without the per-call fallible
+/// construction (#382).
 pub fn tag_key(tag: &str) -> i64 {
-    let mut hasher = Blake2bVar::new(8).expect("8-byte blake2b");
-    hasher.update(tag.as_bytes());
-    let mut out = [0u8; 8];
-    hasher.finalize_variable(&mut out).expect("8-byte output");
-    (i64::from_be_bytes(out)) & i64::MAX
+    let out = Blake2b::<U8>::digest(tag.as_bytes());
+    (i64::from_be_bytes(out.into())) & i64::MAX
 }
 
 /// Hierarchy roll-up: every `::` prefix of every leaf tag, including the leaf.

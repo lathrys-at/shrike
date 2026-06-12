@@ -192,6 +192,70 @@ class TestRecognition:
 
         asyncio.run(flow())
 
+    def test_sweep_stops_on_unreadable_prefix_instead_of_spinning(self, tmp_path) -> None:
+        # #386 livelock: with more pending than one batch and a permanently
+        # unreadable PREFIX of the pending order, the kernel re-takes the
+        # same window every call (skipped items stay pending). The sweep
+        # driver must stop on the no-progress batch (recognized == 0) and
+        # return — the next sweep trigger (boot, /reload, cooperative
+        # re-acquire) retries when the read may have healed.
+        async def flow():
+            unreadable = {"u1.png", "u2.png"}
+            media = {
+                "u1.png": b"unreadable prefix one",
+                "u2.png": b"unreadable prefix two",
+                "ok.png": b"readable tail oxaloacetate",
+            }
+            runtime = EmbeddingRuntime(model=None)
+            derived = DerivedTextStore(
+                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
+            )
+            harness = await Harness.assemble(
+                collection_path=str(tmp_path / "collection.anki2"),
+                cache_dir=str(tmp_path / "cache"),
+                runtime=runtime,
+                derived=derived,
+                cooperative=False,
+                hold_seconds=5.0,
+                media_read=lambda name: None if name in unreadable else media.get(name),
+                media_exists=lambda name: name in media,
+            )
+            await harness.boot(start_embedding=False)
+            await harness.wrapper.upsert_notes(
+                [
+                    {
+                        "note_type": "Basic",
+                        "deck": "Default",
+                        "fields": {
+                            "Front": '<img src="u1.png"> <img src="u2.png"> <img src="ok.png">',
+                            "Back": "b",
+                        },
+                    }
+                ]
+            )
+
+            harness.attach_recognizer(_StubOcr())
+            # Bounded wait: a livelocked loop awaits between batches, so a
+            # regression fails by timeout here rather than hanging the suite.
+            report = await asyncio.wait_for(harness.recognition_sweep(batch_size=2), timeout=30)
+            assert report["status"] == "ran"
+            assert report["recognized"] == 0
+            assert report["remaining"] == 1
+            assert report["total_stored"] == 0
+
+            # Healed reads drain to completion on the next sweep.
+            unreadable.clear()
+            report = await harness.recognition_sweep(batch_size=2)
+            assert report["total_stored"] == 3
+            assert report["remaining"] == 0
+            rows = harness.derived.search_substring("oxaloacetate", limit=5)
+            assert rows, "the tail item landed once the prefix healed"
+
+            harness.detach_recognizer()
+            await harness.close()
+
+        asyncio.run(flow())
+
     @pytest.mark.skipif(sys.platform != "darwin", reason="Apple Vision is macOS-only")
     def test_native_vision_sweep_end_to_end(self, tmp_path) -> None:
         # #342 P3: the native recognizer rides the kernel sweep with no Python

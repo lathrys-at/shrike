@@ -53,10 +53,19 @@ impl RecognitionGate {
         if recognition.confidence < self.min_confidence || chars < self.min_chars_lexical {
             return GateOutcome::Drop;
         }
-        if chars < self.min_chars_vector {
-            return GateOutcome::Lexical;
+        if self.vector_worthy(&recognition.text) {
+            GateOutcome::LexicalAndVector
+        } else {
+            GateOutcome::Lexical
         }
-        GateOutcome::LexicalAndVector
+    }
+
+    /// Whether recognized text is substantive enough to mint a vector — the
+    /// rule `judge` applies, owned here so the re-judge from *stored* text
+    /// (confidence already gated at ingest) asks the gate instead of
+    /// re-deriving the char-count threshold (#382).
+    pub fn vector_worthy(&self, text: &str) -> bool {
+        text.trim().chars().count() >= self.min_chars_vector
     }
 }
 
@@ -94,5 +103,15 @@ mod tests {
         );
         // Whitespace doesn't count as substance.
         assert_eq!(gate.judge(&rec("   a   ", 0.9)), GateOutcome::Drop);
+    }
+
+    #[test]
+    fn vector_worthy_matches_the_judge_threshold() {
+        let gate = RecognitionGate::default();
+        // Same rule judge applies: trimmed char count vs min_chars_vector.
+        assert!(!gate.vector_worthy("Mitochondrion"));
+        assert!(gate.vector_worthy("The inner membrane hosts the electron transport chain"));
+        // Whitespace padding doesn't count as substance.
+        assert!(!gate.vector_worthy(&format!("{}short{}", " ".repeat(30), " ".repeat(30))));
     }
 }

@@ -762,7 +762,7 @@ pub fn search_notes(
         ];
         let priority: HashSet<String> = std::iter::once("exact".to_owned()).collect();
         let fused =
-            shrike_compute::rrf_fuse(&rankings, &args.weights, shrike_compute::RRF_K, &priority);
+            crate::fusion::rrf_fuse(&rankings, &args.weights, crate::fusion::RRF_K, &priority);
 
         // Provenance (#182): best (lowest) rank first, ties by signal name.
         let mut matches: Vec<Value> = Vec::new();

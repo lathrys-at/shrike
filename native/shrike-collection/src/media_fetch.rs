@@ -193,15 +193,15 @@ pub fn fetch_media_url(url: &str, allow_private: bool) -> NativeResult<(Vec<u8>,
                 .build()
         } else {
             let pinned = resolve_public_ip(&host)?;
+            // The agent is rebuilt per hop and resolves only this URL, so the
+            // effective port comes from the parsed URL itself — the netloc
+            // string ureq hands the resolver doesn't split cleanly for
+            // bracketed IPv6 literals (#382).
+            let port = parsed.port_or_known_default().unwrap_or(0);
             ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_secs(URL_FETCH_TIMEOUT_SECS))
                 .redirects(0)
-                .resolver(move |netloc: &str| -> std::io::Result<Vec<SocketAddr>> {
-                    let port = netloc
-                        .rsplit(':')
-                        .next()
-                        .and_then(|p| p.parse::<u16>().ok())
-                        .unwrap_or(0);
+                .resolver(move |_netloc: &str| -> std::io::Result<Vec<SocketAddr>> {
                     Ok(vec![SocketAddr::new(pinned, port)])
                 })
                 .build()

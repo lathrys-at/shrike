@@ -4,7 +4,7 @@ name: Warm CI caches
 # PR's first Bazel run restores it instead of building cold: the Rust toolchain +
 # compiled crates + Python action results, AND the embedding externals (the pinned
 # llama-server + the GGUF/ONNX/CLIP models, fetched + checksum-verified into the
-# repository cache by building //tests/integration:embedding). A cache is only
+# repository cache by building the embedding halves). A cache is only
 # restorable from the current branch or the default branch; the test workflow runs
 # on PRs only, so without this nothing ever seeds main's scope and every PR misses
 # (#93). Cutting over the test lanes to Bazel (#262) retired the old pip llama-server
@@ -83,14 +83,14 @@ jobs:
       # `build`, not `test`: the expensive cold cost is compiling the Rust crates
       # for the PyO3 seam (a build action cached in the disk cache) and fetching the
       # embedding externals (cached in the repo cache). Building //... covers the
-      # Python + Rust graph; //tests/integration:embedding is `manual` (excluded from
-      # //...), so name it explicitly to pull its model + llama-server externals.
+      # Python + Rust graph; the embedding halves are `manual` (excluded from
+      # //...), so name them explicitly to pull the model + llama-server externals.
       - name: Warm the Bazel graph (//... + the embedding externals)
         run: |
           ./bazel build \
             --disk_cache="$HOME/.cache/shrike/bazel-disk" \
             --repository_cache="$HOME/.cache/shrike/bazel-repo" \
-            -- //... //tests/integration:embedding
+            -- //... //tests/integration:embedding_core //tests/integration:embedding_backends
 
   # The lint lane's Rust cache (#319): the SAME rust-cache shared-key and the
   # SAME clippy command as test.yml's lint job, run on main so the saved entry

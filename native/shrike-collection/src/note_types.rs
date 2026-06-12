@@ -426,16 +426,13 @@ impl CollectionCore {
         };
 
         let sub = |value: &str| -> (String, usize) {
-            let mut count = 0;
-            let new = pattern
-                .replace_all(value, |_caps: &fancy_regex::Captures<'_>| {
-                    count += 1;
-                    String::new() // placeholder; real expansion below
-                })
-                .into_owned();
-            // fancy-regex's closure replacer can't expand templates; do a
-            // second pass with the template expansion instead.
-            let _ = new;
+            // Count via find_iter (what replace_all walks anyway), then
+            // expand the template in ONE replace_all — not a discarded
+            // counting pass plus a second expansion pass (#382).
+            let count = pattern.find_iter(value).filter(|m| m.is_ok()).count();
+            if count == 0 {
+                return (value.to_string(), 0);
+            }
             let expanded = pattern.replace_all(value, template.as_str()).into_owned();
             (expanded, count)
         };
