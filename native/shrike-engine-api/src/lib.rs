@@ -15,12 +15,11 @@
 //! - **Route 1 — naturally-sync compute** (ort inference, a synchronous HTTP
 //!   client): implement the sync compute traits ([`EmbedText`],
 //!   [`EmbedImages`], [`RecognizeMedia`]) — chunk-level, `Send + Sync`, no
-//!   futures, no threads, no executors, assuming *nothing* about execution.
-//!   The host bridges to the async traits with an adapter at composition
-//!   time: [`Inline`] (compute on whatever thread polls — the C host's
-//!   calling-thread model) or [`OnExecutor`] (submit each chunk to a
-//!   host-injected [`ComputeExecutor`] lane). The adapter owns the batch
-//!   loop; batching is execution policy, not engine compute.
+//!   futures, no threads, assuming *nothing* about execution. The ONE
+//!   adapter, [`Blocking`], bridges to the async traits over the owned
+//!   runtime's blocking pool (#374): an eager `spawn_blocking` with the
+//!   `safe_batch` chunk loop inside — batching is execution policy, not
+//!   engine compute.
 //! - **Route 2 — naturally-async engines** (a completion-handler platform
 //!   API reached through ObjC/Swift glue; an async HTTP client): implement
 //!   the async traits directly — the future suspends and completes from the
@@ -29,17 +28,14 @@
 //!   this is the preferred shape: a blocking lane would waste a thread
 //!   waiting on a callback.
 //!
-//! # Execution is the host's, topology is the kernel's
+//! # Execution is the runtime's, topology is the kernel's
 //!
 //! Pipeline *topology* — what must order before what — is the kernel's
-//! consistency model. Execution *capacity and placement* are host facts,
-//! handed over through adapter composition: the host assigns a
-//! [`ComputeExecutor`] lane per engine (two engines sharing one GPU get the
-//! same lane; a remote engine gets a wide one; a mobile host maps lanes onto
-//! its own queues). Engines spawn no threads and assume no runtime — the
-//! same injected-scheduling principle as the kernel's `SerialExecutor`. An
-//! engine future must never submit to the kernel's collection executor
-//! (re-entrancy is a deadlock by contract).
+//! consistency model; independent engine futures are `try_join`ed by the
+//! kernel. Execution lives on the kernel's owned tokio runtime (#374):
+//! sync engines ride the blocking pool through [`Blocking`], async engines
+//! complete from their own sources. Engines spawn no threads themselves and
+//! never block a runtime worker.
 //!
 //! # Errors
 //!

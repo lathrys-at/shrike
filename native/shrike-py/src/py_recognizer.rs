@@ -93,7 +93,8 @@ impl Recognizer for PyRecognizerHandle {
 /// degrade-don't-crash a missing pyobjc gave the retired Python backend),
 /// `recognize` is the blocking wire shape for direct callers/tests, and the
 /// kernel attach path takes `engine_arc()` — recognition then runs native
-/// end-to-end (engine → OnExecutor → asyncio lane), no Python on the sweep.
+/// end-to-end (engine → Blocking → the runtime's blocking pool), no Python
+/// on the sweep.
 #[pyclass(frozen)]
 pub(crate) struct AppleVisionRecognizer {
     engine: Arc<shrike_recognize_apple::AppleVisionRecognizer>,
