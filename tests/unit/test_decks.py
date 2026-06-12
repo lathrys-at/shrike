@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+import shrike_native
+
 
 async def _deck_names(wrapper) -> set[str]:
     import json
@@ -76,8 +79,14 @@ class TestUpsertDecks:
         assert "index" in results[0]
 
     async def test_missing_name_is_error_item(self, wrapper):
-        results = await wrapper.upsert_decks([{}])
+        # Typed input (#391): a name-LESS item rejects at the binding parse
+        # (never legal — the tool layer's Pydantic DeckInput requires name);
+        # an EMPTY name stays the per-item error.
+        with pytest.raises(shrike_native.NativeInputError, match="decks must be a JSON list"):
+            await wrapper.upsert_decks([{}])
+        results = await wrapper.upsert_decks([{"name": ""}])
         assert results[0]["status"] == "error"
+        assert "name is required" in results[0]["error"]
 
     async def test_batch_isolates_failures(self, wrapper):
         results = await wrapper.upsert_decks(

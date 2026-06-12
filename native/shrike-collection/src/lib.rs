@@ -302,6 +302,14 @@ mod tests {
         serde_json::to_value(&results).unwrap()
     }
 
+    /// The deck counterpart (#391): JSON literals in, the typed op's
+    /// serialized results out, keeping the pre-typed assertions verbatim.
+    fn upsert_decks_json(core: &CollectionCore, decks_json: &str) -> serde_json::Value {
+        let decks: Vec<shrike_schemas::DeckInput> = serde_json::from_str(decks_json).unwrap();
+        let results = core.upsert_decks(&decks).unwrap();
+        serde_json::to_value(&results).unwrap()
+    }
+
     /// The note-type counterparts (#391): JSON literals in, the typed ops'
     /// serialized results out, keeping the pre-typed assertions verbatim.
     fn note_types_json(core: &CollectionCore, json_str: &str) -> serde_json::Value {
@@ -1173,51 +1181,63 @@ mod tests {
         assert_eq!(core.find_notes("\"deck:Default\"").unwrap(), vec![nid]);
 
         // Tags: add/remove (remove-before-add), set replace, not_found.
-        let (modified, not_found) = core
+        let tags_result = core
             .update_note_tags(&[nid, 999], None, &["x1".into()], &["t2".into()])
             .unwrap();
-        assert_eq!((modified, not_found), (1, vec![999]));
+        assert_eq!(tags_result.notes_modified, 1);
+        assert_eq!(tags_result.not_found, vec![999]);
         assert_eq!(core.get_note(nid).unwrap().tags, vec!["x1".to_string()]);
         core.update_note_tags(&[nid], Some(&["fresh".into()]), &[], &[])
             .unwrap();
         assert_eq!(core.get_note(nid).unwrap().tags, vec!["fresh".to_string()]);
 
         // rename_tag: exact on a note set, then collection-wide.
-        assert_eq!(core.rename_tag("fresh", "renamed", &[nid]).unwrap(), 1);
+        assert_eq!(
+            core.rename_tag("fresh", "renamed", &[nid])
+                .unwrap()
+                .notes_modified,
+            1
+        );
         assert_eq!(
             core.get_note(nid).unwrap().tags,
             vec!["renamed".to_string()]
         );
-        assert_eq!(core.rename_tag("renamed", "global", &[]).unwrap(), 1);
+        assert_eq!(
+            core.rename_tag("renamed", "global", &[])
+                .unwrap()
+                .notes_modified,
+            1
+        );
 
-        // Decks: upsert rename + clash, delete empty-only.
+        // Decks: upsert rename + clash, delete empty-only. Serialize through
+        // the wire types so the assertions also pin the tagged-union shape.
         let physics = core
             .adapter
             .deck_id_by_name("Science::Physics")
             .unwrap()
             .unwrap();
-        let deck_batch = serde_json::json!([
-            {"id": physics, "name": "Science::Mechanics"},
-            {"name": "Empty::Leaf"},
-        ]);
-        let deck_results: serde_json::Value =
-            serde_json::from_str(&core.upsert_decks(&deck_batch.to_string()).unwrap()).unwrap();
+        let deck_results = upsert_decks_json(
+            &core,
+            &serde_json::json!([
+                {"id": physics, "name": "Science::Mechanics"},
+                {"name": "Empty::Leaf"},
+            ])
+            .to_string(),
+        );
         assert_eq!(deck_results[0]["status"], "updated");
         assert_eq!(deck_results[1]["status"], "created");
-        let clash = serde_json::json!([{"id": physics, "name": "Default"}]);
-        let clash_results: serde_json::Value =
-            serde_json::from_str(&core.upsert_decks(&clash.to_string()).unwrap()).unwrap();
+        let clash_results = upsert_decks_json(
+            &core,
+            &serde_json::json!([{"id": physics, "name": "Default"}]).to_string(),
+        );
         assert_eq!(clash_results[0]["status"], "error");
 
-        let del: serde_json::Value = serde_json::from_str(
-            &core
-                .delete_decks(&["Empty::Leaf".into(), "Default".into(), "Ghost".into()])
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(del["deleted"][0], "Empty::Leaf");
-        assert_eq!(del["not_empty"][0], "Default"); // holds the note's card
-        assert_eq!(del["not_found"][0], "Ghost");
+        let del = core
+            .delete_decks(&["Empty::Leaf".into(), "Default".into(), "Ghost".into()])
+            .unwrap();
+        assert_eq!(del.deleted, vec!["Empty::Leaf"]);
+        assert_eq!(del.not_empty, vec!["Default"]); // holds the note's card
+        assert_eq!(del.not_found, vec!["Ghost"]);
 
         // find_replace_notes: literal apply + changed-id diff.
         let fr: serde_json::Value = serde_json::from_str(
@@ -1363,12 +1383,10 @@ mod tests {
             .unwrap();
 
         // Decks: create, rename, delete-empty (and id-by-name resolution).
-        core.upsert_decks(r#"[{"name":"Spare"}]"#).unwrap();
-        let decks: serde_json::Value =
-            serde_json::from_str(&core.upsert_decks(r#"[{"name":"Spare2"}]"#).unwrap()).unwrap();
+        upsert_decks_json(&core, r#"[{"name":"Spare"}]"#);
+        let decks = upsert_decks_json(&core, r#"[{"name":"Spare2"}]"#);
         let spare2 = decks[0]["id"].as_i64().unwrap();
-        core.upsert_decks(&format!(r#"[{{"id":{spare2},"name":"Spare3"}}]"#))
-            .unwrap();
+        upsert_decks_json(&core, &format!(r#"[{{"id":{spare2},"name":"Spare3"}}]"#));
         core.delete_decks(&["Spare3".to_string()]).unwrap();
 
         // Note types: stock create, positional update, identity ops, template

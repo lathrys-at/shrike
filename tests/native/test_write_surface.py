@@ -112,10 +112,12 @@ def test_cross_core_write_parity(tmp_path, native_core):
     assert _strip_ids(native_update) == _strip_ids(pip["update"])
     assert native_core.get_note(nid)[2][1] == "new back"
 
-    # Tags / rename: same counts + not_found echo.
-    modified, not_found = native_core.update_note_tags([nid, 999], add=["x1"], remove=["t2"])
-    assert {"notes_modified": modified, "not_found": not_found} == pip["tags"]
-    assert native_core.rename_tag("x1", "renamed", [nid]) == pip["rename"]["notes_modified"]
+    # Tags / rename: same counts + not_found echo (typed wire since #391 —
+    # both routes ride the same binding, so the dicts match whole).
+    native_tags = json.loads(native_core.update_note_tags([nid, 999], add=["x1"], remove=["t2"]))
+    assert native_tags == pip["tags"]
+    native_rename = json.loads(native_core.rename_tag("x1", "renamed", [nid]))
+    assert native_rename == pip["rename"]
 
     # Decks: upsert + empty-only delete result dicts (ids differ per file).
     native_decks = json.loads(native_core.upsert_decks(json.dumps([{"name": "Empty::Leaf"}])))
