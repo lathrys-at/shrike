@@ -1,11 +1,11 @@
 """Tool-layer tests for tag ops (#73): input validation + index col_mod bump.
 
 A tag change never alters a note's embedding vector (tags aren't part of the
-embedding text), but it does bump col.mod. The kernel must advance the stored
-watermarks (kernel.metadata_changed) WITHOUT re-embedding, so the next startup
-doesn't trigger a needless full rebuild. Runs on the #355 kernel harness:
-"vectors untouched" is asserted as "no new embed call", and "watermark
-advanced" as "index col_mod matches the collection + no drift".
+embedding text), but it does bump col.mod. Since the #391 re-home the kernel
+op itself advances the stored watermarks WITHOUT re-embedding, so the next
+startup doesn't trigger a needless full rebuild. "Vectors untouched" is
+asserted as "no new embed call", and "watermark advanced" as "index col_mod
+matches the collection + no drift" — observable state, not host-side spies.
 """
 
 from __future__ import annotations
@@ -24,17 +24,10 @@ def backend():
 
 
 @pytest.fixture()
-def kproxy(kharness, backend):
+def mcp_app(kharness, backend):
     kharness.attach_embedder(backend)
-    proxy = kharness.proxy()
-    proxy.spy("metadata_changed")
-    return proxy
-
-
-@pytest.fixture()
-def mcp_app(kharness, kproxy):
     mcp = FastMCP("test")
-    register_tools(mcp, kharness.wrapper, kernel=kproxy)
+    register_tools(mcp, kharness.wrapper, kernel=kharness.kernel)
     return mcp
 
 
@@ -53,31 +46,31 @@ class TestUpdateNoteTagsValidation:
 
 
 class TestUpdateNoteTagsBump:
-    def test_set_modifies_and_bumps_col_mod(self, kharness, backend, kproxy, mcp_app, kbasic_note):
+    def test_set_modifies_and_bumps_col_mod(self, kharness, backend, mcp_app, kbasic_note):
         embeds_before = len(backend.calls)
         result = kharness.call_tool(
             mcp_app, "update_note_tags", {"note_ids": [kbasic_note], "set": ["x"]}
         )
         assert result["notes_modified"] == 1
-        # Vectors untouched; only the watermark advanced.
+        # Vectors untouched; only the watermark advanced (the kernel tail).
         assert len(backend.calls) == embeds_before
-        assert kproxy.calls["metadata_changed"] == 1
         assert kharness.index_status()["col_mod"] == kharness.col_mod()
         assert kharness.reindex_if_needed() is False
 
-    def test_add_remove_bumps_col_mod(self, kharness, backend, kproxy, mcp_app, kbasic_note):
+    def test_add_remove_bumps_col_mod(self, kharness, backend, mcp_app, kbasic_note):
         embeds_before = len(backend.calls)
         kharness.call_tool(mcp_app, "update_note_tags", {"note_ids": [kbasic_note], "add": ["new"]})
         assert len(backend.calls) == embeds_before
-        assert kproxy.calls["metadata_changed"] == 1
         assert kharness.index_status()["col_mod"] == kharness.col_mod()
 
-    def test_no_match_does_not_bump(self, kharness, kproxy, mcp_app):
+    def test_no_match_does_not_bump(self, kharness, mcp_app):
         result = kharness.call_tool(
             mcp_app, "update_note_tags", {"note_ids": [9999999999999], "add": ["x"]}
         )
         assert result["notes_modified"] == 0
-        assert kproxy.calls["metadata_changed"] == 0
+        # Nothing modified, nothing written: collection and index stay
+        # consistent with no drift (the kernel tail no-ops on changed=0).
+        assert kharness.reindex_if_needed() is False
 
 
 class TestRenameTagTool:
@@ -85,11 +78,10 @@ class TestRenameTagTool:
         with pytest.raises(ToolError, match="identical"):
             kharness.call_tool(mcp_app, "rename_tag", {"old": "a", "new": "a"})
 
-    def test_rename_bumps_col_mod(self, kharness, backend, kproxy, mcp_app, kbasic_note):
+    def test_rename_bumps_col_mod(self, kharness, backend, mcp_app, kbasic_note):
         # kbasic_note has tag "math"; collection-wide rename.
         embeds_before = len(backend.calls)
         result = kharness.call_tool(mcp_app, "rename_tag", {"old": "math", "new": "arithmetic"})
         assert result["notes_modified"] == 1
         assert len(backend.calls) == embeds_before
-        assert kproxy.calls["metadata_changed"] == 1
         assert kharness.index_status()["col_mod"] == kharness.col_mod()

@@ -576,16 +576,14 @@ class CollectionWrapper:
         add: list[str],
         remove: list[str],
     ) -> dict[str, Any]:
-        def _tags(c: CollectionCore) -> dict[str, Any]:
-            modified, not_found = c.update_note_tags(
-                note_ids, set_tags=set_tags, add=add, remove=remove
+        return await self.run(
+            lambda c: json.loads(
+                c.update_note_tags(note_ids, set_tags=set_tags, add=add, remove=remove)
             )
-            return {"notes_modified": modified, "not_found": not_found}
-
-        return await self.run(_tags)
+        )
 
     async def rename_tag(self, old: str, new: str, note_ids: list[int]) -> dict[str, Any]:
-        return await self.run(lambda c: {"notes_modified": c.rename_tag(old, new, note_ids)})
+        return await self.run(lambda c: json.loads(c.rename_tag(old, new, note_ids)))
 
     async def upsert_decks(self, decks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return await self.run(lambda c: json.loads(c.upsert_decks(json.dumps(decks))))

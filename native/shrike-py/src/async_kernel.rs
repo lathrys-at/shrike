@@ -441,6 +441,77 @@ impl AsyncKernel {
         })
     }
 
+    // ── tag + deck ops (#391 re-home, long-tail group 2) ────────────────────
+
+    /// Edit tags on a note set (`set_tags` full-replace XOR add/remove);
+    /// response JSON, watermark tail kernel-side.
+    #[pyo3(signature = (note_ids, set_tags=None, add=None, remove=None))]
+    fn update_note_tags<'py>(
+        &self,
+        py: Python<'py>,
+        note_ids: Vec<i64>,
+        set_tags: Option<Vec<String>>,
+        add: Option<Vec<String>>,
+        remove: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let response = kernel
+                .update_note_tags(
+                    note_ids,
+                    set_tags,
+                    add.unwrap_or_default(),
+                    remove.unwrap_or_default(),
+                )
+                .await?;
+            crate::kernel_actions::wire(&response)
+        })
+    }
+
+    /// Rename a tag collection-wide (empty `note_ids`) or exactly on a set;
+    /// response JSON.
+    fn rename_tag<'py>(
+        &self,
+        py: Python<'py>,
+        old: String,
+        new: String,
+        note_ids: Vec<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let response = kernel.rename_tag(old, new, note_ids).await?;
+            crate::kernel_actions::wire(&response)
+        })
+    }
+
+    /// Create or rename decks in bulk; per-item results JSON.
+    fn upsert_decks<'py>(
+        &self,
+        py: Python<'py>,
+        decks_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let decks: Vec<shrike_schemas::DeckInput> =
+            serde_json::from_str(&decks_json).map_err(|e| {
+                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                    "decks must be a JSON list: {e}"
+                )))
+            })?;
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let results = kernel.upsert_decks(decks).await?;
+            crate::kernel_actions::wire(&results)
+        })
+    }
+
+    /// Delete decks by reference, empty-only; response JSON echoes the refs.
+    fn delete_decks<'py>(&self, py: Python<'py>, refs: Vec<String>) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let response = kernel.delete_decks(refs).await?;
+            crate::kernel_actions::wire(&response)
+        })
+    }
+
     // ── note-type ops (#391 re-home, long-tail group 3) ─────────────────────
 
     /// Create/update note-type definitions in bulk (#76 positional replace);
