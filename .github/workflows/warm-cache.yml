@@ -58,38 +58,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      # Same paths/keys as the bazel + embedding jobs in test.yml, so PRs restore
-      # exactly what this saves. The disk cache is content-addressed, so crates
-      # compiled here are cache hits for any PR with the same Cargo.lock + toolchain
-      # — the cross-PR win a per-branch cache can't give (every PR can read the
-      # default branch's scope, but not a sibling PR's). Linux x64 only: it mirrors
-      # the per-PR bazel lane; the rc cross-platform lane (arm64/macOS) is rare and
-      # warms on its own.
-      - name: Cache Bazel toolchains + repo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cache/shrike/bazelisk
-            ~/.cache/shrike/bazelisk-home
-            ~/.cache/shrike/bazel-repo
-          key: bazel-repo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
-          restore-keys: bazel-repo-${{ runner.os }}-${{ runner.arch }}-
-      - name: Cache Bazel action results
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/shrike/bazel-disk
-          key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
-          restore-keys: bazel-disk-${{ runner.os }}-${{ runner.arch }}-
-      # `build`, not `test`: the expensive cold cost is compiling the Rust crates
-      # for the PyO3 seam (a build action cached in the disk cache) and fetching the
-      # embedding externals (cached in the repo cache). Building //... covers the
-      # Python + Rust graph; the embedding halves are `manual` (excluded from
-      # //...), so name them explicitly to pull the model + llama-server externals.
-      - name: Warm the Bazel graph (//... + the embedding externals)
+      # The same composite as every Bazel lane, so PRs restore exactly what this
+      # saves. The disk cache is content-addressed, so crates compiled here are
+      # cache hits for any PR with the same Cargo.lock + toolchain — the
+      # cross-PR win a per-branch cache can't give (every PR can read the
+      # default branch's scope, but not a sibling PR's). Linux x64 only: it
+      # mirrors the per-PR tests lane; the rc cross-platform lane (arm64/macOS)
+      # is rare and warms on its own.
+      - uses: ./.github/actions/bazel-setup
+      # `test`, not `build` (#422): the disk cache holds TEST RESULTS too, and
+      # the per-PR lane runs the whole graph unconditionally — seeding main's
+      # scope with passing test results is what makes an untouched target on a
+      # PR a "(cached) PASSED" skip instead of a re-run. This also makes the
+      # warmer a daily green/red signal for main itself. --keep_going so one
+      # failure still warms everything else; the embedding halves are `manual`
+      # (excluded from //...), so name them explicitly to pull the model +
+      # llama-server externals.
+      - name: Warm the Bazel graph (build + test results + embedding externals)
         run: |
-          ./bazel build \
-            --disk_cache="$HOME/.cache/shrike/bazel-disk" \
-            --repository_cache="$HOME/.cache/shrike/bazel-repo" \
+          ./bazel test --keep_going \
             -- //... //tests/integration:embedding_core //tests/integration:embedding_backends
 
   # The lint lane's Rust cache (#319): the SAME rust-cache shared-key and the
@@ -104,15 +91,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-setup
         with:
-          workspaces: native
           shared-key: rust-lint
-          cache-on-failure: true
-      - name: Install protoc
-        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - name: Clippy (warms the dependency build)
         env:
           DESCRIPTORS_BIN: ${{ github.workspace }}/native/third_party/anki/anki_descriptors.bin
         run: cd native && cargo clippy --workspace --all-targets -- -D warnings
+
+  # The coverage lane's Rust cache (#422): coverage.yml builds the native
+  # extension with a debug `cargo build -p shrike-py` under the `rust-coverage`
+  # shared-key. Its scheduled runs (Mon/Wed/Fri, on main) self-seed that key —
+  # but a Cargo.lock bump merged between schedules would leave the next
+  # coverage run (or an rc PR's) cold. This job runs the same build on the same
+  # triggers as the other warms, so the coverage cache turns over with the
+  # locks like everything else.
+  warm-rust-coverage:
+    name: Warm Rust coverage cache (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/rust-setup
+        with:
+          shared-key: rust-coverage
+      - name: Build shrike-py (warms the dependency build)
+        env:
+          DESCRIPTORS_BIN: ${{ github.workspace }}/native/third_party/anki/anki_descriptors.bin
+        run: cd native && cargo build -p shrike-py

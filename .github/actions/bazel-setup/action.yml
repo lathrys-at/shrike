@@ -1,0 +1,41 @@
+name: Set up Bazel caches
+description: >
+  The two split-cadence Bazel caches every Bazel lane shares (#418/#422), plus
+  the flag wiring. Toolchains + repository cache are keyed on the pins — a pure
+  restore unless a lock changed, never re-uploading the toolchains every run.
+  The action/test-result disk cache must ACCUMULATE so an unchanged test is a
+  cache hit (skipped, not re-run): actions/cache never updates an existing key,
+  so a lock-stable key would freeze after its first save and every later run
+  would re-execute everything — the save key is suffixed with the run id so each
+  run writes a fresh superset, and restore-keys pulls the most recent prior one.
+  Finally, the cache paths are written into .bazelrc.user (gitignored,
+  try-imported by .bazelrc) as absolute paths — Bazel does not expand ~ in
+  flags — so every ./bazel invocation in the job picks them up without
+  per-call --disk_cache/--repository_cache flags.
+runs:
+  using: composite
+  steps:
+    - name: Cache Bazel toolchains + repo
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cache/shrike/bazelisk
+          ~/.cache/shrike/bazelisk-home
+          ~/.cache/shrike/bazel-repo
+        key: bazel-repo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
+        restore-keys: bazel-repo-${{ runner.os }}-${{ runner.arch }}-
+    - name: Cache Bazel action results
+      uses: actions/cache@v5
+      with:
+        path: ~/.cache/shrike/bazel-disk
+        key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+        restore-keys: bazel-disk-${{ runner.os }}-${{ runner.arch }}-
+    - name: Point Bazel at the caches via .bazelrc.user
+      shell: bash
+      # `common` so build/test/cquery all pick them up, and appended so a
+      # hypothetical pre-existing entry isn't clobbered.
+      run: |
+        {
+          echo "common --disk_cache=$HOME/.cache/shrike/bazel-disk"
+          echo "common --repository_cache=$HOME/.cache/shrike/bazel-repo"
+        } >> .bazelrc.user

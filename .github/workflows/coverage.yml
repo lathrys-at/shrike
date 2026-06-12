@@ -59,19 +59,14 @@ jobs:
       # The native extension (#400): since the cutover `shrike.collection` does
       # `import shrike_native`, which a plain pip install doesn't build — without
       # this step every run died at test collection (ModuleNotFoundError), so the
-      # whole lane was a 17-second no-op. Same rust-cache pattern as the lint
-      # lane, under its own shared-key (a debug `cargo build`, not clippy's
-      # check artifacts): scheduled runs execute on main, so each save lands in
-      # the default-branch cache scope — the schedule self-seeds the cache the
-      # rare rc-PR run restores from, no warm-cache.yml entry needed.
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      # whole lane was a 17-second no-op. The rust-setup composite carries the
+      # rust-cache + protoc preamble; `rust-coverage` is this lane's own
+      # shared-key (a debug `cargo build`, not clippy's check artifacts),
+      # seeded on main by the scheduled runs here and by warm-cache.yml's
+      # warm-rust-coverage on lock bumps (#422).
+      - uses: ./.github/actions/rust-setup
         with:
-          workspaces: native
           shared-key: rust-coverage
-          cache-on-failure: true
-      - name: Install protoc
-        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       # DESCRIPTORS_BIN: same reason as the lint lane — rust-cache prunes the
       # shared target dir the anki build scripts would otherwise hand the
       # descriptor set through; the checked-in pin keeps the build hermetic.

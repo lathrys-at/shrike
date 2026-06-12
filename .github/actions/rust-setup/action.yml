@@ -1,0 +1,30 @@
+name: Set up Rust cache + protoc
+description: >
+  The shared preamble of every cargo-based lane (#422): Swatinem/rust-cache over
+  the native workspace (keyed per-lane via shared-key — clippy's check artifacts
+  and a cargo build are different caches, and a lane restoring the other's entry
+  would just miss) and protoc (the anki tree's protobuf codegen needs it on the
+  runner). Each lane's cargo step still sets DESCRIPTORS_BIN itself: rust-cache
+  prunes the shared target dir the anki build scripts would otherwise hand the
+  descriptor set through, and the checked-in pin keeps the build hermetic under
+  a restored cache. Linux runners only (protoc comes via apt); the macOS lanes
+  build Rust through Bazel's hermetic toolchain and don't use this.
+inputs:
+  shared-key:
+    description: >
+      rust-cache shared-key for this lane (e.g. rust-lint, rust-coverage). The
+      warmer must use the same key as the lane it seeds — main's scope is the
+      only one every PR can restore from.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: native
+        shared-key: ${{ inputs.shared-key }}
+        cache-on-failure: true
+    - name: Install protoc
+      shell: bash
+      run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler

@@ -20,9 +20,15 @@ permissions:
   contents: write
 
 jobs:
-  # Full integration + embedding suite on every supported platform. This is the
-  # cross-platform job from test.yml, run unconditionally instead of gated on the
-  # `rc` label — a release must be green everywhere before we build or publish.
+  # The full Bazel graph + the embedding halves on every supported platform.
+  # This is the cross-platform job from test.yml run unconditionally instead of
+  # gated on the `rc` label (plus linux x64, which the per-PR lanes cover) — a
+  # release must be green everywhere before we build or publish. Harmonized
+  # onto Bazel in #422: the old pip-lane job here (pip install +
+  # install-llama-server.sh + pytest) stopped producing a working
+  # `shrike_native` at the native cutover and would have died at test
+  # collection on the next tag; the Bazel graph builds the extension and pins
+  # the model/llama-server externals (no HuggingFace fetch on release day).
   test:
     name: Full suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -32,22 +38,11 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0  # full history + tags so hatch-vcs can derive the version at install
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install llama-server
-        run: bash .github/scripts/install-llama-server.sh
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
-      - name: Run integration + embedding tests
-        env:
-          LD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
-          DYLD_LIBRARY_PATH: ${{ env.LLAMA_DIR }}
-        run: pytest tests/integration -v -m integration
+      - uses: ./.github/actions/bazel-setup
+      - name: Run the test graph
+        run: |
+          ./bazel test \
+            -- //... //tests/integration:embedding_core //tests/integration:embedding_backends
 
   # Build the release artifacts from the tagged commit, all via Bazel (#245): the
   # Python wheel (//:wheel) + sdist (//:sdist) and the anki-cards.skill bundle
@@ -62,6 +57,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # tags so the Bazel version stamp (git describe) resolves
+      # The same warmed caches as every other Bazel lane (#422) — without them
+      # this job cold-compiled the whole Rust workspace at tag time.
+      - uses: ./.github/actions/bazel-setup
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"  # for `twine check` only; Bazel uses its own toolchain
