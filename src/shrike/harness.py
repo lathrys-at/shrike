@@ -127,7 +127,10 @@ class KernelIndexView:
         backend = self._runtime.backend
         if backend is None or not texts:
             return None
-        # LRU per (backend identity, query) — loop-confined, no lock needed.
+        # LRU per (backend identity, query). Accessed from to_thread workers
+        # since #445 (no longer loop-confined): safe under the GIL — each dict
+        # op is atomic, and a race costs at worst a redundant embed or an
+        # off-by-one eviction, never corruption.
         base = id(backend)
         out: list[list[float] | None] = [None] * len(texts)
         missing: list[str] = []

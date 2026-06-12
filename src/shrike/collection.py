@@ -486,6 +486,22 @@ class CollectionWrapper:
 
         return await self.run(_one)
 
+    async def notes_by_id(self, nids: list[int], fields_mode: str) -> dict[int, dict[str, Any]]:
+        """Batch ``note_to_dict`` (#445): ONE collection job for the whole id
+        set — the neighbor assembly previously did one job per candidate (up
+        to ~500 sequential actor round trips per upsert batch). Missing ids
+        are simply absent from the map."""
+        if not nids:
+            return {}
+
+        def _many(core: CollectionCore) -> dict[int, dict[str, Any]]:
+            listed = json.loads(
+                core.list_notes(ids=nids, with_fields=fields_mode == "full", limit=len(nids))
+            )
+            return {n["id"]: n for n in listed["notes"]}
+
+        return await self.run(_many)
+
     async def search_substring(
         self,
         text: str,

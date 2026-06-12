@@ -549,16 +549,19 @@ impl DerivedTextEngine {
         // on drop — but the method keeps the engine surfaces aligned.
     }
 
-    fn get_col_mod(&self) -> Option<i64> {
-        self.inner.get_col_mod()
+    fn get_col_mod(&self, py: Python<'_>) -> Option<i64> {
+        py.detach(|| self.inner.get_col_mod())
     }
 
-    fn set_col_mod(&self, value: i64) -> PyResult<()> {
-        self.inner.set_col_mod(value).map_err(to_py_err)
+    fn set_col_mod(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        // A write-transaction commit (a journal sync) — off the GIL like the
+        // sibling methods (#445).
+        py.detach(|| self.inner.set_col_mod(value))
+            .map_err(to_py_err)
     }
 
-    fn count(&self) -> PyResult<i64> {
-        self.inner.count().map_err(to_py_err)
+    fn count(&self, py: Python<'_>) -> PyResult<i64> {
+        py.detach(|| self.inner.count()).map_err(to_py_err)
     }
 
     fn ingest(
