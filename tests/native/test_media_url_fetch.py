@@ -220,6 +220,8 @@ def test_b64_oversize_and_bad_input(native_core):
     )
     assert bad[0]["status"] == "error"
     assert "base64" in bad[0]["error"]
+    # A sourceless item fails StoreMediaItem.validate (the typed-input port
+    # of the Pydantic model_validator; #391) per item, not the batch.
     missing = json.loads(native_core.store_media_items(json.dumps([{}])))
     assert missing[0]["status"] == "error"
-    assert "one of data, url, or path" in missing[0]["error"]
+    assert "exactly one of" in missing[0]["error"]
