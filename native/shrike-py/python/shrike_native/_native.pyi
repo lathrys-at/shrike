@@ -5,7 +5,6 @@ CI lane fails if a Rust signature drifts from these.
 """
 
 from asyncio import Future
-
 from collections.abc import Callable
 from typing import final
 
@@ -49,6 +48,7 @@ BATCH_PROBE_TEXTS: list[str]
 def version() -> str: ...
 def bridge_live_poll_callbacks() -> int: ...
 def bridge_parked_forever() -> object: ...
+
 INDEX_SAVE_DELAY_DEFAULT: float
 INDEX_SAVE_THRESHOLD_DEFAULT: int
 
@@ -270,6 +270,7 @@ class AppleVisionRecognizer:
     def recognize(self, items: list[bytes]) -> list[tuple[str, float, str]]: ...
 
 def embedder_probe(embedder: PyEmbedder, texts: list[str]) -> Future[list[list[float]]]: ...
+
 @final
 class AsyncCollection:
     def col_mod(self) -> Future[int]: ...
@@ -277,6 +278,7 @@ class AsyncCollection:
     def close(self) -> Future[None]: ...
 
 def async_collection_open(collection_path: str) -> Future[AsyncCollection]: ...
+
 @final
 class AsyncKernel:
     def attach_embedder(
@@ -321,7 +323,12 @@ class AsyncKernel:
     def reopen(self) -> Future[None]: ...
     def close(self) -> Future[None]: ...
 
-def async_kernel_open(collection_path: str, cache_dir: str, save_delay: float | None = None, save_threshold: int | None = None) -> Future[AsyncKernel]: ...
+def async_kernel_open(
+    collection_path: str,
+    cache_dir: str,
+    save_delay: float | None = None,
+    save_threshold: int | None = None,
+) -> Future[AsyncKernel]: ...
 
 class CollectionCore:
     def __new__(cls, collection_path: str) -> CollectionCore: ...
