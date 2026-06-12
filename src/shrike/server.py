@@ -239,6 +239,7 @@ def _register_custom_routes(
     *,
     meta: dict[str, Any],
     security: TransportSecuritySettings | None,
+    request_shutdown: Callable[[], None],
 ) -> None:
     """Register custom HTTP endpoints on the server.
 
@@ -252,7 +253,6 @@ def _register_custom_routes(
     assembly, the media FileResponse, process exit).
     """
     wrapper = harness.wrapper
-    from starlette.background import BackgroundTask
     from starlette.requests import Request
     from starlette.responses import FileResponse, JSONResponse, Response
 
@@ -408,24 +408,17 @@ def _register_custom_routes(
     @app.custom_route("/shutdown", methods=["POST"])
     @_guard
     async def handle_shutdown(request: Request) -> JSONResponse:
-        # The harness teardown flushes the index (kernel close) and stops
-        # derived/embedding before the core closes.
-        await harness.close()
-        server_lock.release()
-        logger.info("Shutdown complete")
-
-        async def _exit_after_response() -> None:
-            # Runs as the response's BackgroundTask — i.e. only AFTER the body
-            # has been sent (a sleep-timer grace raced the process exit under a
-            # saturated CI runner: the client saw a connection reset, not the
-            # 200). The brief sleep lets the OS-level write drain before exit.
-            await asyncio.sleep(0.1)
-            os._exit(0)
-
-        return JSONResponse(
-            {"status": "ok", "pid": os.getpid()},
-            background=BackgroundTask(_exit_after_response),
-        )
+        # Graceful exit via uvicorn's own machinery (#344): flag should_exit
+        # and return a plain 200. Uvicorn completes in-flight responses —
+        # this one included — and closes every connection with a proper FIN
+        # before serve() returns; the harness teardown + lock release run on
+        # the serve() tail. The previous shape (close + BackgroundTask +
+        # sleep + os._exit) raced the client's read no matter the grace
+        # period: a process exit can turn the un-acked response bytes into a
+        # connection reset under a saturated runner, while a graceful close
+        # cannot.
+        request_shutdown()
+        return JSONResponse({"status": "ok", "pid": os.getpid()})
 
 
 def main() -> None:
@@ -895,12 +888,21 @@ def main() -> None:
             server_path_roots=server_path_roots,
             media_base_url=media_base_url,
         )
+        # The uvicorn Server is created after route registration, so the
+        # /shutdown route reaches it through this late-bound holder (#344).
+        server_holder: list[Any] = []
+
+        def _request_shutdown() -> None:
+            if server_holder:
+                server_holder[0].should_exit = True
+
         _register_custom_routes(
             mcp,
             harness,
             server_lock,
             meta=server_meta,
             security=transport_security,
+            request_shutdown=_request_shutdown,
         )
 
         logger.info(
@@ -917,13 +919,19 @@ def main() -> None:
             host=args.host,
             port=args.port,
             log_config=None,
+            # Bound the graceful drain so a hung in-flight request can't
+            # wedge a /shutdown forever (the daemon's stop path escalates to
+            # SIGTERM/SIGKILL regardless).
+            timeout_graceful_shutdown=5,
         )
-        await uvicorn.Server(config).serve()
+        server = uvicorn.Server(config)
+        server_holder.append(server)
+        await server.serve()
 
-        # serve() returned without a replayed signal (e.g. should_exit set
-        # programmatically): run the same teardown the signal path performs.
-        # Normally unreached — a SIGTERM replays into _signal_shutdown above,
-        # and /shutdown exits before serve() returns.
+        # serve() returned: either /shutdown set should_exit (#344 — the
+        # graceful path; teardown belongs here, after the listener drained)
+        # or uvicorn exited without a replayed signal. A SIGTERM replays into
+        # _signal_shutdown above instead.
         logger.info("Server drained; shutting down")
         with contextlib.suppress(Exception):
             await harness.close()
