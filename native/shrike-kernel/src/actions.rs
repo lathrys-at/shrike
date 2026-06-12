@@ -50,9 +50,13 @@ pub fn collection_info(
     core: &CollectionCore,
     include: &[String],
     note_type_details: &[String],
-) -> NativeResult<CollectionInfo> {
+) -> NativeResult<String> {
     let raw = core.collection_info(include, note_type_details)?;
-    validate("CollectionInfo", &raw)
+    validate::<CollectionInfo>("CollectionInfo", &raw)?;
+    // Return the ORIGINAL string (#445): the typed parse is the contract
+    // guard; re-serializing it cost a full third JSON pass per call (and
+    // alphabetized note fields through the BTreeMap, a wire-fidelity drift).
+    Ok(raw)
 }
 
 /// Structured filters for [`list_notes`]. `modified_since_epoch` is an
@@ -71,10 +75,7 @@ pub struct ListNotesParams {
 
 /// `list_notes` — filter/retrieve notes (filters ANDed; at least one given,
 /// enforced by the core as invalid input).
-pub fn list_notes(
-    core: &CollectionCore,
-    params: &ListNotesParams,
-) -> NativeResult<ListNotesResponse> {
+pub fn list_notes(core: &CollectionCore, params: &ListNotesParams) -> NativeResult<String> {
     let raw = core.list_notes(
         params.ids.as_deref(),
         params.deck.as_deref(),
@@ -84,7 +85,8 @@ pub fn list_notes(
         params.with_fields,
         params.limit,
     )?;
-    validate("ListNotesResponse", &raw)
+    validate::<ListNotesResponse>("ListNotesResponse", &raw)?;
+    Ok(raw)
 }
 
 /// `collection_query` — a raw Anki search expression (the read-only escape
@@ -95,9 +97,10 @@ pub fn collection_query(
     query: &str,
     with_fields: bool,
     limit: usize,
-) -> NativeResult<ListNotesResponse> {
+) -> NativeResult<String> {
     let raw = core.query(query, with_fields, limit)?;
-    validate("ListNotesResponse", &raw)
+    validate::<ListNotesResponse>("ListNotesResponse", &raw)?;
+    Ok(raw)
 }
 
 #[cfg(test)]
@@ -134,7 +137,10 @@ mod tests {
     fn collection_info_returns_typed_sections() {
         let (_dir, core) = temp_collection();
         add_note(&core, "Q", "A");
-        let info = collection_info(&core, &["summary".into(), "decks".into()], &[]).unwrap();
+        let info: CollectionInfo = serde_json::from_str(
+            &collection_info(&core, &["summary".into(), "decks".into()], &[]).unwrap(),
+        )
+        .unwrap();
         let summary = info.summary.expect("summary requested");
         assert_eq!(summary.notes, 1);
         assert!(info.decks.is_some());
@@ -147,14 +153,17 @@ mod tests {
         let (_dir, core) = temp_collection();
         let id = add_note(&core, "mitochondria", "powerhouse");
         add_note(&core, "momentum", "mass times velocity");
-        let resp = list_notes(
-            &core,
-            &ListNotesParams {
-                deck: Some("D".into()),
-                with_fields: true,
-                limit: 50,
-                ..Default::default()
-            },
+        let resp: ListNotesResponse = serde_json::from_str(
+            &list_notes(
+                &core,
+                &ListNotesParams {
+                    deck: Some("D".into()),
+                    with_fields: true,
+                    limit: 50,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(resp.total, 2);
@@ -186,7 +195,8 @@ mod tests {
     fn collection_query_runs_raw_expressions() {
         let (_dir, core) = temp_collection();
         add_note(&core, "the cell", "biology");
-        let resp = collection_query(&core, "deck:D", false, 10).unwrap();
+        let resp: ListNotesResponse =
+            serde_json::from_str(&collection_query(&core, "deck:D", false, 10).unwrap()).unwrap();
         assert_eq!(resp.total, 1);
         assert!(resp.notes[0].content.is_none()); // meta mode
         assert!(collection_query(&core, "prop:bogus(((", false, 10).is_err());
@@ -374,15 +384,33 @@ fn in_scope(data: &Value, deck: Option<&str>, tags: &[String]) -> bool {
     true
 }
 
-/// Read one note's full dict, skipping unreadable notes (the Python original
-/// catches and debug-logs per note).
-fn read_note(core: &CollectionCore, nid: i64) -> Option<Value> {
-    match core.note_dicts(&[nid], true) {
-        Ok(mut v) if !v.is_empty() => Some(v.remove(0)),
-        Ok(_) => None,
+/// Batch-hydrate candidate dicts (#445): ONE `note_dicts` call per ranking
+/// replaces the old one-call-per-candidate shape (each singleton paid two
+/// DB-proxy queries plus a full `deck_names` RPC plus a full notetype proto —
+/// per candidate, hundreds of times per search). Returns `nid -> dict` for
+/// ids not already hydrated; a missing/unreadable id is simply absent (the
+/// per-note skip the singleton path had).
+fn read_notes_batch(
+    core: &CollectionCore,
+    note_data: &NoteData,
+    ids: &[i64],
+) -> HashMap<i64, Value> {
+    let missing: Vec<i64> = ids
+        .iter()
+        .copied()
+        .filter(|nid| !note_data.contains(*nid))
+        .collect();
+    if missing.is_empty() {
+        return HashMap::new();
+    }
+    match core.note_dicts(&missing, true) {
+        Ok(dicts) => dicts
+            .into_iter()
+            .filter_map(|d| d.get("id").and_then(Value::as_i64).map(|id| (id, d)))
+            .collect(),
         Err(e) => {
-            tracing::debug!(nid, error = ?e, "search: skipping unreadable note");
-            None
+            tracing::debug!(error = ?e, "search: batch hydrate failed; candidates skipped");
+            HashMap::new()
         }
     }
 }
@@ -398,6 +426,16 @@ fn rank_modality(
     args: &SearchArgs,
     thresholded: bool,
 ) -> Vec<i64> {
+    // Prospective candidates (exclude/threshold pass) hydrate in ONE batch;
+    // the loop below then filters scope and ranks exactly as before.
+    let prospective: Vec<i64> = hits_keys
+        .iter()
+        .zip(hits_distances.iter())
+        .filter(|(nid, _)| !exclude.contains(nid))
+        .take_while(|(_, dist)| !thresholded || round3(1.0 - f64::from(**dist)) >= args.threshold)
+        .map(|(nid, _)| *nid)
+        .collect();
+    let mut hydrated = read_notes_batch(core, note_data, &prospective);
     let mut ranking: Vec<i64> = Vec::new();
     for (nid, dist) in hits_keys.iter().zip(hits_distances.iter()) {
         let nid = *nid;
@@ -409,7 +447,7 @@ fn rank_modality(
             break; // distance-ascending → the rest are below threshold
         }
         if !note_data.contains(nid) {
-            let data = match read_note(core, nid) {
+            let data = match hydrated.remove(&nid) {
                 Some(d) => d,
                 None => continue,
             };
@@ -475,12 +513,13 @@ fn collect_substring_candidates(
             .into_iter()
             .filter(|nid| !exclude.contains(nid))
             .collect();
+        let mut hydrated = read_notes_batch(core, note_data, &candidates);
         let mut added = 0usize;
-        for nid in candidates {
+        for nid in candidates.iter().copied() {
             if note_data.contains(nid) {
                 continue;
             }
-            let mut data = match read_note(core, nid) {
+            let mut data = match hydrated.remove(&nid) {
                 Some(d) => d,
                 None => continue,
             };
@@ -498,12 +537,18 @@ fn collect_substring_candidates(
         return Ok(());
     };
 
+    let row_ids: Vec<i64> = rows
+        .iter()
+        .map(|(nid, ..)| *nid)
+        .filter(|nid| !exclude.contains(nid))
+        .collect();
+    let mut hydrated = read_notes_batch(core, note_data, &row_ids);
     let mut added = 0usize;
     for (nid, source, reference, snippet) in rows {
         if exclude.contains(&nid) || note_data.contains(nid) {
             continue; // store may return a row per field
         }
-        let mut data = match read_note(core, nid) {
+        let mut data = match hydrated.remove(&nid) {
             Some(d) => d,
             None => continue,
         };
@@ -554,6 +599,12 @@ fn collect_fuzzy(
             return (Vec::new(), HashMap::new());
         }
     };
+    let hit_ids: Vec<i64> = hits
+        .iter()
+        .map(|(nid, ..)| *nid)
+        .filter(|nid| !exclude.contains(nid))
+        .collect();
+    let mut hydrated = read_notes_batch(core, note_data, &hit_ids);
     let mut ranking: Vec<i64> = Vec::new();
     let mut evidence: FuzzyEvidence = HashMap::new();
     for (nid, source, r, snippet) in hits {
@@ -561,7 +612,7 @@ fn collect_fuzzy(
             continue;
         }
         if !note_data.contains(nid) {
-            let data = match read_note(core, nid) {
+            let data = match hydrated.remove(&nid) {
                 Some(d2) => d2,
                 None => continue,
             };

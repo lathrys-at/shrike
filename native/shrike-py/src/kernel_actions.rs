@@ -28,11 +28,8 @@ pub(crate) fn action_collection_info(
     note_type_details: Vec<String>,
 ) -> PyResult<String> {
     let inner = core.core_ref();
-    py.detach(|| {
-        let info = shrike_kernel::actions::collection_info(inner, &include, &note_type_details)?;
-        serde_json::to_string(&info).map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
-    })
-    .map_err(to_py_err)
+    py.detach(|| shrike_kernel::actions::collection_info(inner, &include, &note_type_details))
+        .map_err(to_py_err)
 }
 
 #[pyfunction]
@@ -59,11 +56,8 @@ pub(crate) fn action_list_notes(
         with_fields,
         limit,
     };
-    py.detach(|| {
-        let resp = shrike_kernel::actions::list_notes(inner, &params)?;
-        serde_json::to_string(&resp).map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
-    })
-    .map_err(to_py_err)
+    py.detach(|| shrike_kernel::actions::list_notes(inner, &params))
+        .map_err(to_py_err)
 }
 
 #[pyfunction]
@@ -76,11 +70,8 @@ pub(crate) fn action_collection_query(
     limit: usize,
 ) -> PyResult<String> {
     let inner = core.core_ref();
-    py.detach(|| {
-        let resp = shrike_kernel::actions::collection_query(inner, &query, with_fields, limit)?;
-        serde_json::to_string(&resp).map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
-    })
-    .map_err(to_py_err)
+    py.detach(|| shrike_kernel::actions::collection_query(inner, &query, with_fields, limit))
+        .map_err(to_py_err)
 }
 
 /// `search_notes` (#331): the whole fused-search assembly in the kernel. The
