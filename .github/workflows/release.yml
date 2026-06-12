@@ -43,6 +43,8 @@ jobs:
         run: |
           ./bazel test \
             -- //... //tests/integration:embedding_core //tests/integration:embedding_backends
+      - uses: ./.github/actions/bazel-save
+        if: always()
 
   # Build the release artifacts from the tagged commit, all via Bazel (#245): the
   # Python wheel (//:wheel) + sdist (//:sdist) and the anki-cards.skill bundle
@@ -92,6 +94,8 @@ jobs:
         run: |
           ./bazel build //skills:skill --stamp
           cp -f "$(./bazel cquery --output=files //skills:skill)" dist/anki-cards.skill
+      - uses: ./.github/actions/bazel-save
+        if: always()
       - uses: actions/upload-artifact@v7
         with:
           name: dist

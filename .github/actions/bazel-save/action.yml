@@ -1,0 +1,28 @@
+name: Save Bazel caches
+description: >
+  The save half of bazel-setup (#438) — invoked with `if: always()` as the
+  LAST step of every Bazel lane, so caches seed even when tests failed. The
+  combined actions/cache action skipped its post-save on job failure, which
+  let a flake-red warm run starve main's scope (every PR then paid the full
+  cold build until a warm happened to go green). Saving on red is exactly
+  right here: the compiled graph and the PASSING test results are valid
+  regardless of which test flaked, and an iterating PR gets warm caches
+  across red→green pushes too. Keys MUST stay byte-identical to bazel-setup's
+  restore keys. Saving an already-existing key (the lock-stable bazel-repo
+  entry between lock bumps) logs a warning and skips — harmless.
+runs:
+  using: composite
+  steps:
+    - name: Save Bazel toolchains + repo
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          ~/.cache/shrike/bazelisk
+          ~/.cache/shrike/bazelisk-home
+          ~/.cache/shrike/bazel-repo
+        key: bazel-repo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
+    - name: Save Bazel action results
+      uses: actions/cache/save@v5
+      with:
+        path: ~/.cache/shrike/bazel-disk
+        key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
