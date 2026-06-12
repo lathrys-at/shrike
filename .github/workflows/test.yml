@@ -9,7 +9,9 @@ on:
   # until a PR carries `ci` (or `rc`, which implies full CI for a release
   # candidate). This defers every remote run until code review is complete, so a
   # PR that churns through review doesn't re-run the whole suite on each push —
-  # the free-tier Actions budget is spent once, at the end, when you add `ci`.
+  # the suite runs once, at the end, when you add `ci`. (Public repo: standard
+  # runners bill nothing — the deferral buys wall-clock/queue/noise, and keeps
+  # the posture safe if the repo ever goes private.)
   # `labeled` is in the trigger types so adding `ci`/`rc` re-fires the workflow
   # (the default types don't fire on label changes); `unlabeled` so removing the
   # label re-evaluates the `ci-ok` gate (flips it back to "add the ci label").
@@ -30,8 +32,21 @@ permissions:
 # (`refs/pull/<n>/merge`), so cancellation is scoped to the same PR — never across
 # PRs. The release workflow deliberately has no such group (a tag build must run
 # to completion).
+#
+# The group is ALSO keyed on the ci/rc label state (#400): pushing then labeling
+# delivers a `synchronize` event whose payload lacks the label moments before
+# the `labeled` event, and in one shared group whichever run starts second
+# cancels the first — when the label-less sentinel won, it killed the full suite
+# and left the fail-closed `ci-ok` as the survivor (the "every job skipping"
+# shape that needed a label toggle and a whole re-run). With the label state in
+# the key, sentinel runs (no label → only `ci-ok`, fails fast) and full runs
+# never cancel each other; a push to an already-labeled PR still cancels that
+# PR's stale full run (its `synchronize` payload carries the label). The
+# `action == 'unlabeled'` clause joins the labeled group so REMOVING ci/rc still
+# cancels an in-flight suite — the gate flips back to fail-closed instead of a
+# doomed run finishing green.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'rc') || github.event.action == 'unlabeled' }}
   cancel-in-progress: true
 
 jobs:
