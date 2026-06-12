@@ -263,6 +263,20 @@ def _wait_for_server(url: str, timeout: float = 10.0) -> None:
     raise TimeoutError(f"Server at {url} did not become ready within {timeout}s")
 
 
+def wait_for_index_ready(server: ServerInfo, timeout: float = 60.0) -> dict:
+    """Poll /status until the index is ready and non-empty (shared by the
+    embedding suites — every test that triggers a rebuild must wait it out
+    before returning, or the running rebuild leaks into later tests, #441)."""
+    base = server.url.rsplit("/", 1)[0]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        idx = httpx.get(f"{base}/status", timeout=5.0).json().get("index", {})
+        if idx.get("state") == "ready" and idx.get("size", 0) > 0:
+            return idx
+        time.sleep(0.05)
+    raise TimeoutError("Index did not become ready")
+
+
 class ServerInfo:
     """Connection details for a running test server."""
 
@@ -289,7 +303,11 @@ class MCPClient:
         self._url = url
         # Reuse one keep-alive connection: a fresh httpx.post per call pays a TCP
         # connect (~2.4ms) every time, and a session client makes ~700 calls.
-        self._client = httpx.Client(timeout=10.0)
+        # 30s: an upsert call embeds its whole batch synchronously, and on a
+        # cold CI runner the first llama embed also pays the one-time model
+        # preset build — 10s was a working-set assumption, not a contract
+        # (#441; the seeding upsert hit it).
+        self._client = httpx.Client(timeout=30.0)
 
     def __call__(self, tool_name: str, arguments: dict | None = None) -> dict:
         arguments = dict(arguments or {})
@@ -599,7 +617,7 @@ def _baseline(server: ServerInfo) -> Baseline:
 def _reset_shared_collection(request: pytest.FixtureRequest) -> Iterator[None]:
     """Reset the shared collection to baseline after each test that used it.
     Skipped for tests that don't touch the shared server (embedding tests on
-    `embedding_server`, or tests using `isolated_server`)."""
+    `collection_server`, or tests using `isolated_server`)."""
     if not {"server", "mcp", "runner", "cli_config"} & set(request.fixturenames):
         yield
         return
@@ -765,35 +783,182 @@ def embedding_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return download_with_retry(EMBEDDING_MODEL_URL, model_path)
 
 
+# Seed corpus for the shared collection_server: 10 concept clusters x 5 cards.
+CONCEPTS: list[dict[str, Any]] = [
+    {
+        "deck": "Biology",
+        "tag": "cell-biology",
+        "cards": [
+            ("What is a mitochondrion?", "An organelle that produces ATP"),
+            ("What is the inner mitochondrial membrane?", "Site of electron transport"),
+            ("What is ATP synthase?", "Enzyme that synthesizes ATP using proton gradient"),
+            ("What is the citric acid cycle?", "A metabolic pathway in the matrix"),
+            ("What is oxidative phosphorylation?", "ATP production via electron transport"),
+        ],
+    },
+    {
+        "deck": "Biology",
+        "tag": "genetics",
+        "cards": [
+            ("What is DNA?", "A double-stranded molecule encoding genetic information"),
+            ("What is RNA polymerase?", "The enzyme that transcribes DNA into RNA"),
+            ("What is a codon?", "A three-nucleotide sequence coding for an amino acid"),
+            ("What is mRNA?", "Messenger RNA carries genetic code from DNA to ribosomes"),
+            ("What is translation?", "The process of synthesizing protein from mRNA"),
+        ],
+    },
+    {
+        "deck": "Biology",
+        "tag": "evolution",
+        "cards": [
+            ("What is natural selection?", "Differential survival and reproduction of organisms"),
+            ("What is genetic drift?", "Random changes in allele frequency in a population"),
+            ("What is speciation?", "The formation of new and distinct species"),
+            ("What is fitness?", "An organism's ability to survive and reproduce"),
+            ("What is adaptation?", "A trait that increases fitness in a given environment"),
+        ],
+    },
+    {
+        "deck": "Chemistry",
+        "tag": "organic",
+        "cards": [
+            ("What is a covalent bond?", "A chemical bond formed by sharing electron pairs"),
+            ("What is an alkane?", "A saturated hydrocarbon with single bonds only"),
+            ("What is a functional group?", "An atom or group giving a molecule its properties"),
+            ("What is isomerism?", "Molecules with same formula but different structures"),
+            ("What is chirality?", "A molecule that is non-superimposable on its mirror image"),
+        ],
+    },
+    {
+        "deck": "Chemistry",
+        "tag": "thermodynamics",
+        "cards": [
+            ("What is enthalpy?", "The total heat content of a system at constant pressure"),
+            ("What is entropy?", "A measure of disorder or randomness in a system"),
+            ("What is Gibbs free energy?", "Energy available to do useful work: G = H - TS"),
+            ("What is an exothermic reaction?", "A reaction that releases heat to surroundings"),
+            ("What is equilibrium?", "When forward and reverse reaction rates are equal"),
+        ],
+    },
+    {
+        "deck": "Physics",
+        "tag": "mechanics",
+        "cards": [
+            ("What is Newton's first law?", "An object at rest stays at rest unless acted on"),
+            ("What is momentum?", "The product of an object's mass and velocity"),
+            ("What is kinetic energy?", "Energy of motion: KE = 0.5 * m * v^2"),
+            ("What is friction?", "A force opposing the relative motion of surfaces"),
+            ("What is acceleration?", "The rate of change of velocity over time"),
+        ],
+    },
+    {
+        "deck": "Physics",
+        "tag": "electromagnetism",
+        "cards": [
+            ("What is Coulomb's law?", "Force between charges is proportional to q1*q2/r^2"),
+            ("What is an electric field?", "A region where a charge experiences a force"),
+            ("What is magnetic flux?", "The total magnetic field passing through a surface"),
+            ("What is Faraday's law?", "A changing magnetic flux induces an electromotive force"),
+            ("What is capacitance?", "The ability to store electric charge: C = Q/V"),
+        ],
+    },
+    {
+        "deck": "Mathematics",
+        "tag": "calculus",
+        "cards": [
+            ("What is a derivative?", "The instantaneous rate of change of a function"),
+            ("What is an integral?", "The accumulation of quantities over an interval"),
+            ("What is the chain rule?", "d/dx[f(g(x))] = f'(g(x)) * g'(x)"),
+            ("What is a limit?", "The value a function approaches as input approaches a point"),
+            ("What is the fundamental theorem?", "Integration and differentiation are inverses"),
+        ],
+    },
+    {
+        "deck": "Mathematics",
+        "tag": "linear-algebra",
+        "cards": [
+            ("What is a matrix?", "A rectangular array of numbers arranged in rows and columns"),
+            ("What is an eigenvalue?", "A scalar lambda where Av = lambda*v for some vector v"),
+            ("What is a determinant?", "A scalar value computed from a square matrix"),
+            ("What is linear independence?", "No vector is a combination of others"),
+            ("What is a vector space?", "A set closed under addition and scaling"),
+        ],
+    },
+    {
+        "deck": "Computer Science",
+        "tag": "algorithms",
+        "cards": [
+            ("What is Big-O notation?", "Describes the upper bound of an algorithm's growth rate"),
+            ("What is a binary search?", "Searching a sorted array by halving the range"),
+            ("What is a hash table?", "A structure mapping keys to values via hashing"),
+            ("What is recursion?", "A function that calls itself to solve subproblems"),
+            ("What is dynamic programming?", "Solving overlapping subproblems"),
+        ],
+    },
+]
+
+
 @pytest.fixture(scope="session")
-def embedding_server(server_factory, embedding_model: Path) -> ServerInfo:
-    """Server with embedding service enabled.
+def collection_server(server_factory, embedding_model: Path) -> ServerInfo:
+    """ONE embedding-enabled server with a 50-note seeded collection, shared by
+    every read-only embedding/semantic class (#441 — was two servers: a bare
+    `embedding_server` plus a per-module seeded one). Session-scoped: the
+    embedding halves run serially (xdist=None in BUILD.bazel), and mutating
+    tests clean up after themselves.
 
-    Session-scoped: its consumers (`TestEmbeddingHealth`, `TestEmbeddings`,
-    `TestEmbeddingServiceViaShrike`) are read-only against a stateless embedding
-    endpoint, so one llama-server boot serves them all — avoids a model load (and
-    a teardown) per class.
-
-    Verifies the embedding service is actually available after server start.
-    Fails with diagnostics if it isn't (e.g. shared lib issues, model problems).
+    No explicit rebuild: an empty-at-boot server materializes a ready index at
+    boot (#148), so the seeding upserts index incrementally.
     """
-    srv = server_factory("embedding", embedding_model=str(embedding_model))
+    srv = server_factory("semantic", embedding_model=str(embedding_model))
 
+    # Poll for embedding availability: on a fresh CI runner llama-server's
+    # first boot builds its model-preset cache (~6s, single-threaded), which
+    # can stall /status past a single short read timeout (warm locally, so it
+    # never reproduces). Mirrors the poll loop of the fixtures this replaced.
     status_url = srv.url.rsplit("/", 1)[0] + "/status"
-    resp = httpx.get(status_url, timeout=5.0)
-    status = resp.json()
-    emb = status.get("embedding", {})
-    if not emb.get("available"):
+    status: dict[str, Any] = {}
+    deadline = time.monotonic() + 120.0
+    while time.monotonic() < deadline:
+        try:
+            status = httpx.get(status_url, timeout=10.0).json()
+        except (httpx.ReadTimeout, httpx.ConnectError):
+            time.sleep(0.05)
+            continue
+        if status.get("embedding", {}).get("available"):
+            break
+        time.sleep(0.05)
+    if not status.get("embedding", {}).get("available"):
         log_dir = Path(srv.log_dir)
         stderr_log = log_dir / "llama-server-stderr.log"
         stderr_content = stderr_log.read_text() if stderr_log.exists() else "(no stderr log)"
         server_log = log_dir / "shrike.log"
         server_content = server_log.read_text() if server_log.exists() else "(no server log)"
         raise RuntimeError(
-            f"Embedding service not available after server start.\n"
+            f"Embedding service not available within 120s of server start.\n"
             f"Status: {status}\n"
             f"--- llama-server stderr ---\n{stderr_content}\n"
             f"--- shrike server log ---\n{server_content}"
         )
 
+    mcp = MCPClient(srv.url)
+    all_notes = []
+    for concept in CONCEPTS:
+        for front, back in concept["cards"]:
+            all_notes.append(
+                {
+                    "deck": concept["deck"],
+                    "note_type": "Basic",
+                    "fields": {"Front": front, "Back": back},
+                    "tags": [concept["tag"]],
+                }
+            )
+    # Chunked (#441): one 50-note call embeds 50 texts inside a single HTTP
+    # call window; chunks keep each call comfortably inside the client timeout
+    # even when the runner's first llama embed is cold.
+    created = 0
+    for i in range(0, len(all_notes), 10):
+        result = mcp("upsert_notes", {"notes": all_notes[i : i + 10]})
+        created += sum(1 for r in result["results"] if r["status"] == "created")
+    assert created == 50, f"Expected 50 notes created, got {created}"
+    wait_for_index_ready(srv)
     return srv

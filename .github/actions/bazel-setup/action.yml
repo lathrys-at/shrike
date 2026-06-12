@@ -21,6 +21,9 @@ description: >
 runs:
   using: composite
   steps:
+    # ~/.cache/llama.cpp is llama-server's model-preset cache (#441): built
+    # once per model file (~6s), then every later llama boot is ~0.1s — the
+    # embedding suites boot several.
     # Since Bazel 9 (#420) the bazel-repo path ALSO carries the repo contents
     # cache (extracted repo directories, defaulting to
     # `{--repository_cache}/contents`), not just downloads — which is what
@@ -34,6 +37,7 @@ runs:
           ~/.cache/shrike/bazelisk
           ~/.cache/shrike/bazelisk-home
           ~/.cache/shrike/bazel-repo
+          ~/.cache/llama.cpp
         key: bazel-repo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
         restore-keys: bazel-repo-${{ runner.os }}-${{ runner.arch }}-
     - name: Restore Bazel action results

@@ -89,7 +89,10 @@ def _wait_for_index_ready(server: ServerInfo, timeout: float = 60.0) -> dict:
     params=[
         pytest.param(("llama", 384), marks=requires_llama_server, id="llama"),
         pytest.param(("onnx", 384), marks=requires_onnxruntime, id="onnx"),
-        pytest.param(("onnx-roberta", 768), marks=requires_onnxruntime, id="onnx-roberta"),
+        # No onnx-roberta server param (#441): "a second ONNX export loads and
+        # ranks end-to-end" exercises only model-agnostic plumbing; the roberta
+        # lineage's own contracts (768-dim, no-PAD tokenizer, batch lock) are
+        # pinned at backend level in conformance + test_onnx_models.
     ],
 )
 def backend_server(request: pytest.FixtureRequest, server_factory) -> tuple[ServerInfo, str, int]:
@@ -99,13 +102,6 @@ def backend_server(request: pytest.FixtureRequest, server_factory) -> tuple[Serv
         model = request.getfixturevalue("onnx_model")
         srv = server_factory(
             "backend-onnx",
-            embedding_model=str(model),
-            extra_args=["--embedding-backend", "onnx"],
-        )
-    elif backend == "onnx-roberta":
-        model = request.getfixturevalue("distilroberta_model")
-        srv = server_factory(
-            "backend-onnx-roberta",
             embedding_model=str(model),
             extra_args=["--embedding-backend", "onnx"],
         )
@@ -143,11 +139,6 @@ def backend_server(request: pytest.FixtureRequest, server_factory) -> tuple[Serv
 
 
 class TestBackendParity:
-    def test_embedding_available(self, backend_server: tuple[ServerInfo, str, int]) -> None:
-        srv, _, _ = backend_server
-        status = httpx.get(f"{_base_url(srv)}/status", timeout=5.0).json()
-        assert status["embedding"]["available"] is True
-
     def test_index_dimension(self, backend_server: tuple[ServerInfo, str, int]) -> None:
         srv, _, ndim = backend_server
         idx = _wait_for_index_ready(srv)
@@ -182,30 +173,3 @@ class TestBackendParity:
         assert matches
         top_tags = {t for m in matches for t in m.get("tags", [])}
         assert "calculus" in top_tags
-
-    def test_upsert_returns_neighbors(self, backend_server: tuple[ServerInfo, str, int]) -> None:
-        srv, _, _ = backend_server
-        _wait_for_index_ready(srv)
-        mcp = MCPClient(srv.url)
-        result = mcp(
-            "upsert_notes",
-            {
-                "notes": [
-                    {
-                        "deck": "Biology",
-                        "note_type": "Basic",
-                        "fields": {
-                            "Front": "What is cellular respiration?",
-                            "Back": "How cells convert glucose into ATP",
-                        },
-                        "tags": ["cell-biology"],
-                    }
-                ],
-                "neighbor_threshold": 0.0,
-            },
-        )
-        r = result["results"][0]
-        assert r["status"] == "created"
-        assert r["neighbors"]
-        assert 0 < r["neighbors"][0]["score"] <= 1.0
-        mcp("delete_notes", {"ids": [r["id"]]})

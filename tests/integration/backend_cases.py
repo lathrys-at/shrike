@@ -67,6 +67,14 @@ class BackendCase:
     # True when the case claims the reference's fingerprint namespace — then the
     # parity test requires byte-equal vectors AND an identical fingerprint.
     claims_reference_namespace: bool = False
+    # False (#441): restart parity re-instantiates the backend — skip the second
+    # instantiation when it proves nothing beyond another case's run. The llama
+    # fingerprint is a pure function of the pinned binary + GGUF (cross-instance
+    # equality is tautological; an upgrade changing it is caught by neither
+    # form), and restart byte-determinism is an ENGINE property — minilm-int8
+    # pins it for the ONNX engine, clip for the CLIP engine; fp32/roberta would
+    # re-prove the same engines.
+    restart_parity: bool = True
     marks: tuple[Any, ...] = field(default=())
 
 
@@ -131,6 +139,7 @@ def cases() -> list[BackendCase]:
             make=_make_onnx("onnx_fp32_model"),
             restart_exact=True,
             batch_exact=True,
+            restart_parity=False,
             marks=(requires_onnxruntime, requires_shrike_native),
         ),
         BackendCase(
@@ -140,11 +149,12 @@ def cases() -> list[BackendCase]:
             make=_make_onnx("distilroberta_model"),
             restart_exact=True,
             batch_exact=True,
+            restart_parity=False,
             marks=(requires_onnxruntime, requires_shrike_native),
         ),
         # The native CLIP engine (#271), the only engine since the #278 cutover
         # (clip-rs: namespace kept for the same reason). Image-path semantics
-        # are asserted as retrieval equivalence in test_clip_native.py.
+        # are asserted as retrieval equivalence in test_clip_model.py.
         BackendCase(
             id="clip-vit-b32",
             ndim=512,
@@ -163,6 +173,7 @@ def cases() -> list[BackendCase]:
             # tolerance-tier, not byte-equality (CPU-only CI could tighten this).
             restart_exact=False,
             batch_exact=False,
+            restart_parity=False,
             marks=(requires_llama_server,),
         ),
     ]

@@ -258,7 +258,7 @@ context manager that snapshots and unrolls a sub-section explicitly) and
 `isolated_server` / `isolated_mcp` / `isolated_runner` (opt-in fixtures that spawn
 a *dedicated* collection for the rare test that needs an exclusive, un-reset one —
 e.g. asserting on collection-wide tag counts, which the reset can't restore since
-Anki keeps the tag registry). Embedding tests use their own `embedding_server` /
+Anki keeps the tag registry). Embedding tests use their own `collection_server` /
 `collection_server` and are untouched by the reset.
 
 ### Linting

@@ -20,6 +20,7 @@ runs:
           ~/.cache/shrike/bazelisk
           ~/.cache/shrike/bazelisk-home
           ~/.cache/shrike/bazel-repo
+          ~/.cache/llama.cpp
         key: bazel-repo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
     - name: Save Bazel action results
       uses: actions/cache/save@v5
