@@ -69,11 +69,13 @@ jobs:
       # `test`, not `build` (#422): the disk cache holds TEST RESULTS too, and
       # the per-PR lane runs the whole graph unconditionally — seeding main's
       # scope with passing test results is what makes an untouched target on a
-      # PR a "(cached) PASSED" skip instead of a re-run. This also makes the
-      # warmer a daily green/red signal for main itself. --keep_going so one
-      # failure still warms everything else; the embedding halves are `manual`
-      # (excluded from //...), so name them explicitly to pull the model +
-      # llama-server externals.
+      # PR a "(cached) PASSED" skip instead of a re-run. That includes the
+      # embedding halves: they're `manual` (excluded from //... to protect the
+      # local dev loop), so they're named explicitly — which fetches the model
+      # + llama-server externals into the repository cache AND runs the
+      # embedding suites so their results are warm like everything else's.
+      # This also makes the warmer a daily green/red signal for main itself;
+      # --keep_going so one failure still warms everything else.
       - name: Warm the Bazel graph (build + test results + embedding externals)
         run: |
           ./bazel test --keep_going \
