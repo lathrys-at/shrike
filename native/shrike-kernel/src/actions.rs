@@ -8,7 +8,7 @@
 //! typed signature (FastMCP's inputSchema source) + context assembly + the
 //! completion-log fragment.
 //!
-//! Actions are synchronous over `&CollectionCore`: the transitional harness
+//! Actions are synchronous over `&dyn Collection` (#389): the transitional harness
 //! invokes them on its collection worker thread through the shrike-py
 //! per-action bindings (the same serialization every collection op rides);
 //! the kernel's async layer (S3, #332) will drive the same bodies through
@@ -17,9 +17,9 @@
 
 use serde::de::DeserializeOwned;
 
-use shrike_collection::CollectionCore;
 use shrike_ffi::{NativeError, NativeResult};
 use shrike_schemas::{CollectionInfo, ListNotesResponse};
+use shrike_store_api::Collection;
 
 /// The actions this module has re-homed (the registry seam: the Python
 /// binding asserts its forwarding list against this, so the two sides can't
@@ -55,7 +55,7 @@ fn validate<T: DeserializeOwned>(name: &str, json: &str) -> NativeResult<T> {
 /// Typed end-to-end (#391 phase 2): the core builds the canonical type, the
 /// action forwards it, and serialization happens once, at the host edge.
 pub fn collection_info(
-    core: &CollectionCore,
+    core: &dyn Collection,
     include: &[String],
     note_type_details: &[String],
 ) -> NativeResult<CollectionInfo> {
@@ -79,7 +79,7 @@ pub struct ListNotesParams {
 /// `list_notes` — filter/retrieve notes (filters ANDed; at least one given,
 /// enforced by the core as invalid input).
 pub fn list_notes(
-    core: &CollectionCore,
+    core: &dyn Collection,
     params: &ListNotesParams,
 ) -> NativeResult<ListNotesResponse> {
     core.list_notes(
@@ -97,7 +97,7 @@ pub fn list_notes(
 /// hatch, #97). A malformed expression is invalid input (isolation marks
 /// already stripped by the core's error decoding).
 pub fn collection_query(
-    core: &CollectionCore,
+    core: &dyn Collection,
     query: &str,
     with_fields: bool,
     limit: usize,
@@ -158,7 +158,7 @@ struct NeighborCandidate {
 /// calibration sample (#207) the host's dedup-stats recorder consumes.
 #[allow(clippy::too_many_arguments)]
 pub fn attach_neighbors(
-    core: &CollectionCore,
+    core: &dyn Collection,
     index: Option<&dyn VectorIndex>,
     derived: Option<&dyn DerivedStore>,
     texts: &[String],
@@ -387,6 +387,7 @@ pub fn attach_neighbors(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shrike_collection::CollectionCore;
 
     pub(super) fn temp_collection() -> (std::path::PathBuf, CollectionCore) {
         // Process id + a process-wide counter: parallel test threads can land
@@ -404,7 +405,7 @@ mod tests {
         (dir, core)
     }
 
-    pub(super) fn add_note(core: &CollectionCore, front: &str, back: &str) -> i64 {
+    pub(super) fn add_note(core: &dyn Collection, front: &str, back: &str) -> i64 {
         let req = serde_json::json!([
             {"note_type": "Basic", "deck": "D", "fields": {"Front": front, "Back": back}}
         ]);
@@ -676,7 +677,7 @@ fn in_scope(data: &Value, deck: Option<&str>, tags: &[String]) -> bool {
 /// ids not already hydrated; a missing/unreadable id is simply absent (the
 /// per-note skip the singleton path had).
 fn read_notes_batch(
-    core: &CollectionCore,
+    core: &dyn Collection,
     note_data: &NoteData,
     ids: &[i64],
 ) -> HashMap<i64, Value> {
@@ -702,7 +703,7 @@ fn read_notes_batch(
 
 #[allow(clippy::too_many_arguments)]
 fn rank_modality(
-    core: &CollectionCore,
+    core: &dyn Collection,
     hits_keys: &[i64],
     hits_distances: &[f32],
     note_data: &mut NoteData,
@@ -754,7 +755,7 @@ fn rank_modality(
 }
 
 fn collect_substring_candidates(
-    core: &CollectionCore,
+    core: &dyn Collection,
     derived: Option<&dyn DerivedStore>,
     text: &str,
     note_data: &mut NoteData,
@@ -866,7 +867,7 @@ fn collect_substring_candidates(
 type FuzzyEvidence = HashMap<i64, (String, String, Option<String>)>;
 
 fn collect_fuzzy(
-    core: &CollectionCore,
+    core: &dyn Collection,
     derived: Option<&dyn DerivedStore>,
     text: &str,
     note_data: &mut NoteData,
@@ -918,7 +919,7 @@ fn collect_fuzzy(
 /// The fused search assembly (see module-section comment). `vectors` carries
 /// one query vector per source when `args.semantic`.
 pub fn search_notes(
-    core: &CollectionCore,
+    core: &dyn Collection,
     index: Option<&dyn VectorIndex>,
     derived: Option<&dyn DerivedStore>,
     tag_keys: Option<&crate::tag_centroids::TagKeyMap>,
@@ -1168,7 +1169,7 @@ mod search_tests {
     use shrike_derived::DerivedEngine;
     use shrike_index::MultiModalIndex;
 
-    fn derived_for(core: &CollectionCore, dir: &std::path::Path) -> DerivedEngine {
+    fn derived_for(core: &dyn Collection, dir: &std::path::Path) -> DerivedEngine {
         let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
         let ids = core.find_notes("deck:*").unwrap();
         let rows = core.derived_field_rows(&ids).unwrap();
@@ -1448,7 +1449,7 @@ mod neighbor_tests {
     use shrike_derived::DerivedEngine;
     use shrike_index::MultiModalIndex;
 
-    fn derived_for(core: &CollectionCore, dir: &std::path::Path) -> DerivedEngine {
+    fn derived_for(core: &dyn Collection, dir: &std::path::Path) -> DerivedEngine {
         let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
         let ids = core.find_notes("deck:*").unwrap();
         let rows = core.derived_field_rows(&ids).unwrap();

@@ -106,31 +106,7 @@ pub fn media_name_from_url(url: &str) -> Option<String> {
         .filter(|n| !n.is_empty())
 }
 
-/// One store item after the kernel's off-actor prepare (#391 re-home): byte
-/// sources arrive fetched/decoded; `path` items pass through whole (their
-/// gates are collection policy and run under the write); a failed prepare
-/// carries its per-item error.
-pub struct PreparedMedia {
-    pub index: i64,
-    /// The caller's `filename`, echoed on errors.
-    pub filename: Option<String>,
-    pub source: PreparedMediaSource,
-}
-
-pub enum PreparedMediaSource {
-    /// Decoded base64 or a completed download; `name` already folds the
-    /// URL-derived fallback.
-    Bytes {
-        name: String,
-        data: Vec<u8>,
-        content_type: Option<String>,
-    },
-    /// A server-local path item, gated under the write.
-    Path { path: String },
-    /// The prepare failed (bad base64, refused/failed download, invalid
-    /// item); stored nothing.
-    Failed { error: String },
-}
+pub use shrike_store_api::{PreparedMedia, PreparedMediaSource};
 
 impl CollectionCore {
     /// The shared write tail of every store path — the full `_write_one_media`

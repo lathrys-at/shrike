@@ -38,11 +38,12 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use tracing::Instrument;
 
-use shrike_collection::{CollectionCore, CreateOutcome, DuplicatePolicy};
+use shrike_collection::CollectionCore;
 use shrike_derived::DerivedEngine;
 use shrike_ffi::{NativeError, NativeResult};
 use shrike_index::MultiModalIndex;
 use shrike_store_api::DerivedStore;
+use shrike_store_api::{Collection, CreateOutcome, DuplicatePolicy};
 
 pub mod runtime;
 pub use runtime::{block_on, init_runtime, spawn_op};
@@ -70,7 +71,7 @@ pub use shrike_engine_api::{
 /// paths Shrike never calls (pinned in shrike-collection), so no
 /// nested-runtime hazard exists on our call paths.
 pub struct SerializedCollection {
-    core: Arc<CollectionCore>,
+    core: Arc<dyn Collection>,
     /// `None` after [`SerializedCollection::shutdown`] — dropping the sender
     /// is what ends the actor loop.
     jobs: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Job>>>,
@@ -126,13 +127,13 @@ impl SerializedCollection {
     /// BUSY tier from `ensure_open`).
     pub async fn run<T: Send + 'static>(
         &self,
-        job: impl FnOnce(&CollectionCore) -> T + Send + 'static,
+        job: impl FnOnce(&dyn Collection) -> T + Send + 'static,
     ) -> NativeResult<T> {
         let core = Arc::clone(&self.core);
         let (tx, rx) = oneshot::channel();
         self.sender()?
             .send(Box::new(move || {
-                let _ = tx.send(core.ensure_open().map(|_| job(&core)));
+                let _ = tx.send(core.ensure_open().map(|_| job(&*core)));
             }))
             .map_err(|_| NativeError::internal("the collection actor is gone"))?;
         rx.await
@@ -173,7 +174,7 @@ impl SerializedCollection {
 
     /// The shared core, for a harness that runs its own (executor-disciplined)
     /// direct ops over the same collection the kernel owns.
-    pub fn core_arc(&self) -> Arc<CollectionCore> {
+    pub fn core_arc(&self) -> Arc<dyn Collection> {
         Arc::clone(&self.core)
     }
 }

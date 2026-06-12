@@ -55,8 +55,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// read at 100k notes.
 type NoteFieldRow = (i64, std::sync::Arc<Vec<String>>, Vec<String>);
 
-/// The binding-facing field-map row: owned names (the pyo3 wire shape).
-pub type OwnedFieldRow = (i64, Vec<String>, Vec<String>);
+pub use shrike_store_api::OwnedFieldRow;
 
 pub(crate) fn ids_sql_list(ids: &[i64]) -> String {
     ids.iter()

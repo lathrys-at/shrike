@@ -25,39 +25,17 @@ mod note_types;
 mod read;
 mod write;
 
-pub use adapter::{FieldsState, ServiceAdapter, ServiceNote};
+pub use adapter::{FieldsState, ServiceAdapter};
 pub use embed_text::{extract_image_refs, EMBED_TEXT_VERSION};
-pub use media::{media_name_from_url, PreparedMedia, PreparedMediaSource};
+pub use media::media_name_from_url;
 use shrike_ffi::{NativeError, NativeResult};
 
-/// What `create_note` did about a first-field duplicate (mirrors the Python
-/// upsert's `on_duplicate` policy surface).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DuplicatePolicy {
-    Error,
-    Skip,
-    Allow,
-}
-
-impl DuplicatePolicy {
-    pub fn parse(s: &str) -> NativeResult<Self> {
-        match s {
-            "error" => Ok(Self::Error),
-            "skip" => Ok(Self::Skip),
-            "allow" => Ok(Self::Allow),
-            other => Err(NativeError::invalid_input(format!(
-                "on_duplicate must be error/skip/allow (got {other:?})"
-            ))),
-        }
-    }
-}
-
-/// The per-note outcome of `create_note` (the upsert result union's spine).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CreateOutcome {
-    Created(i64),
-    SkippedDuplicate,
-}
+// Canonical homes moved to the store contract (#389); re-exported so the
+// pre-trait import paths keep working.
+pub use shrike_store_api::{
+    Collection, CreateOutcome, DuplicatePolicy, OwnedFieldRow, PreparedMedia, PreparedMediaSource,
+    ServiceNote,
+};
 
 /// Shrike's collection core, slice-1 vertical. One instance owns one open
 /// collection (instance-per-collection, no global state), mirroring the
@@ -275,6 +253,333 @@ impl CollectionCore {
             .into_iter()
             .filter_map(|r| Some((r.first()?.as_i64()?, r.get(1)?.as_i64()?)))
             .collect())
+    }
+}
+
+/// The store contract (#389): every method forwards to the inherent impl,
+/// so the concrete core keeps its full API while the kernel and the host
+/// bindings consume `dyn Collection`.
+#[allow(clippy::use_self)]
+mod contract {
+    use super::{CollectionCore, CreateOutcome, DuplicatePolicy, NativeResult};
+    use crate::{OwnedFieldRow, PreparedMedia, ServiceNote};
+    use serde_json::Value;
+    use shrike_schemas::{
+        CollectionCheckResponse, CollectionInfo, CollectionPruneResponse, DeckInput,
+        DeleteDecksResponse, DeleteMediaResponse, DeleteNoteTypeResult, FieldMetadataInput,
+        FieldOp, FindReplaceNoteTypesResponse, ListMediaResponse, ListNotesResponse,
+        MediaFetchResult, MigrateNoteTypeResponse, NoteInput, NoteTypeInput, NoteTypeResult,
+        RenameTagResponse, StoreMediaItem, StoreMediaResult, TemplateOp, UpdateNoteTagsResponse,
+        UpdateNoteTypeFieldMetadataResponse, UpdateNoteTypeFieldsResponse,
+        UpdateNoteTypeTemplatesResponse, UpsertDeckResult, UpsertNoteResult,
+    };
+    use std::collections::BTreeMap;
+
+    impl shrike_store_api::Collection for CollectionCore {
+        fn close(&self) -> NativeResult<()> {
+            Self::close(self)
+        }
+        fn release(&self) -> NativeResult<()> {
+            Self::release(self)
+        }
+        fn ensure_open(&self) -> NativeResult<bool> {
+            Self::ensure_open(self)
+        }
+        fn reopen(&self) -> NativeResult<()> {
+            Self::reopen(self)
+        }
+        fn col_mod(&self) -> NativeResult<i64> {
+            Self::col_mod(self)
+        }
+        fn find_notes(&self, search: &str) -> NativeResult<Vec<i64>> {
+            Self::find_notes(self, search)
+        }
+        fn notetype_id(&self, name: &str) -> NativeResult<i64> {
+            Self::notetype_id(self, name)
+        }
+        fn get_note(&self, note_id: i64) -> NativeResult<ServiceNote> {
+            Self::get_note(self, note_id)
+        }
+        fn cards_of_note(&self, note_id: i64) -> NativeResult<Vec<i64>> {
+            Self::cards_of_note(self, note_id)
+        }
+        fn card_ords_of_note(&self, note_id: i64) -> NativeResult<Vec<(i64, i64)>> {
+            Self::card_ords_of_note(self, note_id)
+        }
+        fn note_count(&self) -> NativeResult<usize> {
+            Self::note_count(self)
+        }
+        fn note_texts(&self, note_ids: &[i64]) -> NativeResult<Vec<String>> {
+            Self::note_texts(self, note_ids)
+        }
+        fn note_embed_inputs(
+            &self,
+            note_ids: &[i64],
+        ) -> NativeResult<Vec<(i64, String, Vec<String>)>> {
+            Self::note_embed_inputs(self, note_ids)
+        }
+        fn derived_field_rows(
+            &self,
+            note_ids: &[i64],
+        ) -> NativeResult<Vec<(i64, String, String, String)>> {
+            Self::derived_field_rows(self, note_ids)
+        }
+        fn note_image_refs(&self) -> NativeResult<Vec<(i64, Vec<String>)>> {
+            Self::note_image_refs(self)
+        }
+        fn note_tag_rows(&self) -> NativeResult<Vec<(i64, Vec<String>)>> {
+            Self::note_tag_rows(self)
+        }
+        fn any_tagged(&self, note_ids: &[i64]) -> NativeResult<bool> {
+            Self::any_tagged(self, note_ids)
+        }
+        fn note_field_map(&self, note_ids: &[i64]) -> NativeResult<Vec<OwnedFieldRow>> {
+            Self::note_field_map(self, note_ids)
+        }
+        fn normalize_text(&self, value: &str) -> NativeResult<String> {
+            Self::normalize_text(self, value)
+        }
+        fn resolve_deck_ref(&self, reference: &str) -> NativeResult<Option<String>> {
+            Self::resolve_deck_ref(self, reference)
+        }
+        fn query(
+            &self,
+            search: &str,
+            with_fields: bool,
+            limit: usize,
+        ) -> NativeResult<ListNotesResponse> {
+            Self::query(self, search, with_fields, limit)
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn list_notes(
+            &self,
+            ids: Option<&[i64]>,
+            deck: Option<&str>,
+            tags: Option<&[String]>,
+            note_type: Option<&str>,
+            modified_since: Option<i64>,
+            with_fields: bool,
+            limit: usize,
+        ) -> NativeResult<ListNotesResponse> {
+            Self::list_notes(
+                self,
+                ids,
+                deck,
+                tags,
+                note_type,
+                modified_since,
+                with_fields,
+                limit,
+            )
+        }
+        fn note_dicts(&self, note_ids: &[i64], with_fields: bool) -> NativeResult<Vec<Value>> {
+            Self::note_dicts(self, note_ids, with_fields)
+        }
+        fn collection_info(
+            &self,
+            sections: &[String],
+            detail_names: &[String],
+        ) -> NativeResult<CollectionInfo> {
+            Self::collection_info(self, sections, detail_names)
+        }
+        fn create_note(
+            &self,
+            notetype_id: i64,
+            deck_id: i64,
+            fields: &[String],
+            tags: &[String],
+            policy: DuplicatePolicy,
+        ) -> NativeResult<CreateOutcome> {
+            Self::create_note(self, notetype_id, deck_id, fields, tags, policy)
+        }
+        fn update_note(
+            &self,
+            note_id: i64,
+            fields: &[String],
+            tags: Option<&[String]>,
+        ) -> NativeResult<()> {
+            Self::update_note(self, note_id, fields, tags)
+        }
+        fn delete_notes(&self, note_ids: &[i64]) -> NativeResult<usize> {
+            Self::delete_notes(self, note_ids)
+        }
+        fn upsert_notes(
+            &self,
+            notes: &[NoteInput],
+            policy: DuplicatePolicy,
+            dry_run: bool,
+        ) -> NativeResult<Vec<UpsertNoteResult>> {
+            Self::upsert_notes(self, notes, policy, dry_run)
+        }
+        fn find_replace_notes(
+            &self,
+            note_ids: &[i64],
+            search: &str,
+            replacement: &str,
+            regex: bool,
+            match_case: bool,
+            field_name: Option<&str>,
+        ) -> NativeResult<String> {
+            Self::find_replace_notes(
+                self,
+                note_ids,
+                search,
+                replacement,
+                regex,
+                match_case,
+                field_name,
+            )
+        }
+        fn update_note_tags(
+            &self,
+            note_ids: &[i64],
+            set_tags: Option<&[String]>,
+            add: &[String],
+            remove: &[String],
+        ) -> NativeResult<UpdateNoteTagsResponse> {
+            Self::update_note_tags(self, note_ids, set_tags, add, remove)
+        }
+        fn rename_tag(
+            &self,
+            old: &str,
+            new: &str,
+            note_ids: &[i64],
+        ) -> NativeResult<RenameTagResponse> {
+            Self::rename_tag(self, old, new, note_ids)
+        }
+        fn upsert_decks(&self, decks: &[DeckInput]) -> NativeResult<Vec<UpsertDeckResult>> {
+            Self::upsert_decks(self, decks)
+        }
+        fn delete_decks(&self, refs: &[String]) -> NativeResult<DeleteDecksResponse> {
+            Self::delete_decks(self, refs)
+        }
+        fn upsert_note_types(
+            &self,
+            note_types: &[NoteTypeInput],
+        ) -> NativeResult<Vec<NoteTypeResult>> {
+            Self::upsert_note_types(self, note_types)
+        }
+        fn update_note_type_fields(
+            &self,
+            note_type_name: &str,
+            operations: &[FieldOp],
+        ) -> NativeResult<UpdateNoteTypeFieldsResponse> {
+            Self::update_note_type_fields(self, note_type_name, operations)
+        }
+        fn update_note_type_templates(
+            &self,
+            note_type_name: &str,
+            operations: &[TemplateOp],
+        ) -> NativeResult<UpdateNoteTypeTemplatesResponse> {
+            Self::update_note_type_templates(self, note_type_name, operations)
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn find_and_replace_note_types(
+            &self,
+            note_type_name: &str,
+            search: &str,
+            replacement: &str,
+            regex: bool,
+            match_case: bool,
+            front: bool,
+            back: bool,
+            css: bool,
+        ) -> NativeResult<FindReplaceNoteTypesResponse> {
+            Self::find_and_replace_note_types(
+                self,
+                note_type_name,
+                search,
+                replacement,
+                regex,
+                match_case,
+                front,
+                back,
+                css,
+            )
+        }
+        fn update_note_type_field_metadata(
+            &self,
+            note_type_name: &str,
+            updates: &[FieldMetadataInput],
+        ) -> NativeResult<UpdateNoteTypeFieldMetadataResponse> {
+            Self::update_note_type_field_metadata(self, note_type_name, updates)
+        }
+        fn migrate_note_type(
+            &self,
+            note_ids: &[i64],
+            new_note_type: &str,
+            field_map: &BTreeMap<String, String>,
+            template_map: &BTreeMap<String, String>,
+            dry_run: bool,
+        ) -> NativeResult<MigrateNoteTypeResponse> {
+            Self::migrate_note_type(
+                self,
+                note_ids,
+                new_note_type,
+                field_map,
+                template_map,
+                dry_run,
+            )
+        }
+        fn delete_note_types(&self, ids: &[i64]) -> NativeResult<Vec<DeleteNoteTypeResult>> {
+            Self::delete_note_types(self, ids)
+        }
+        fn store_media_bytes(
+            &self,
+            filename: Option<&str>,
+            data: &[u8],
+            content_type: Option<&str>,
+        ) -> NativeResult<StoreMediaResult> {
+            Self::store_media_bytes(self, filename, data, content_type)
+        }
+        fn store_media_items(
+            &self,
+            items: &[StoreMediaItem],
+            allow_private_fetch: bool,
+            path_roots: &[String],
+        ) -> NativeResult<Vec<StoreMediaResult>> {
+            Self::store_media_items(self, items, allow_private_fetch, path_roots)
+        }
+        fn store_prepared_media(
+            &self,
+            prepared: &[PreparedMedia],
+            path_roots: &[String],
+        ) -> NativeResult<Vec<StoreMediaResult>> {
+            Self::store_prepared_media(self, prepared, path_roots)
+        }
+        fn fetch_media(&self, filenames: &[String]) -> NativeResult<Vec<MediaFetchResult>> {
+            Self::fetch_media(self, filenames)
+        }
+        fn list_media(
+            &self,
+            pattern: Option<&str>,
+            limit: Option<usize>,
+        ) -> NativeResult<ListMediaResponse> {
+            Self::list_media(self, pattern, limit)
+        }
+        fn delete_media(&self, filenames: &[String]) -> NativeResult<DeleteMediaResponse> {
+            Self::delete_media(self, filenames)
+        }
+        fn media_check(&self) -> NativeResult<CollectionCheckResponse> {
+            Self::media_check(self)
+        }
+        fn prune(
+            &self,
+            unused_tags: bool,
+            empty_notes: bool,
+            empty_cards: bool,
+            unused_media: bool,
+            dry_run: bool,
+        ) -> NativeResult<(CollectionPruneResponse, Vec<i64>)> {
+            Self::prune(
+                self,
+                unused_tags,
+                empty_notes,
+                empty_cards,
+                unused_media,
+                dry_run,
+            )
+        }
     }
 }
 

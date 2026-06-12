@@ -13,7 +13,8 @@
 //! tuples; every collection op runs under `py.detach` (GIL released).
 
 use pyo3::prelude::*;
-use shrike_collection::{CollectionCore as Core, CreateOutcome, DuplicatePolicy};
+use shrike_collection::CollectionCore as ConcreteCore;
+use shrike_store_api::{Collection, CreateOutcome, DuplicatePolicy};
 
 use crate::to_py_err;
 
@@ -26,18 +27,18 @@ type FieldMapRow = (i64, Vec<String>, Vec<String>);
 pub(crate) struct CollectionCore {
     /// `Arc`-shared since #332 (S3d): the kernel and the harness's direct ops
     /// hold ONE open collection (serialization is the executor's discipline).
-    inner: std::sync::Arc<Core>,
+    inner: std::sync::Arc<dyn Collection>,
 }
 
 impl CollectionCore {
     /// The wrapped core, for the per-action bindings (#331) that compose
     /// kernel action bodies over the live handle.
-    pub(crate) fn core_ref(&self) -> &Core {
-        &self.inner
+    pub(crate) fn core_ref(&self) -> &dyn Collection {
+        &*self.inner
     }
 
     /// A harness handle over an existing (kernel-owned) core.
-    pub(crate) fn from_arc(inner: std::sync::Arc<Core>) -> Self {
+    pub(crate) fn from_arc(inner: std::sync::Arc<dyn Collection>) -> Self {
         Self { inner }
     }
 }
@@ -48,7 +49,7 @@ impl CollectionCore {
     #[new]
     fn new(py: Python<'_>, collection_path: String) -> PyResult<Self> {
         let inner = py
-            .detach(move || Core::open(&collection_path))
+            .detach(move || ConcreteCore::open(&collection_path))
             .map_err(to_py_err)?;
         Ok(Self {
             inner: std::sync::Arc::new(inner),

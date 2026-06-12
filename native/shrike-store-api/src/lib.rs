@@ -16,8 +16,15 @@
 //!   an impl crate (the dependency points the other way), so the row/stat
 //!   aliases are canonical here and re-exported by the impls.
 //!
-//! This slice (#389 PR A) carries [`VectorIndex`] and [`DerivedStore`]; the
-//! `Collection` trait follows now that its surface is typed (#391).
+//! [`VectorIndex`] and [`DerivedStore`] landed first (PR A); [`Collection`]
+//! followed once its surface was typed (#391).
+
+mod collection;
+
+pub use collection::{
+    Collection, CreateOutcome, DuplicatePolicy, OwnedFieldRow, PreparedMedia, PreparedMediaSource,
+    ServiceNote,
+};
 
 use shrike_ffi::NativeResult;
 use std::collections::BTreeMap;

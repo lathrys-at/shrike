@@ -5017,6 +5017,7 @@ dependencies = [
  "serde_json",
  "shrike-ffi",
  "shrike-schemas",
+ "shrike-store-api",
  "tokio",
  "ureq",
  "url",
@@ -5188,7 +5189,9 @@ dependencies = [
 name = "shrike-store-api"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "shrike-ffi",
+ "shrike-schemas",
 ]
 
 [[package]]

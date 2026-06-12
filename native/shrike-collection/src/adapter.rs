@@ -124,14 +124,7 @@ impl FieldsState {
     }
 }
 
-/// A note as the service layer sees it (the slice the vertical ops need).
-#[derive(Debug, Clone)]
-pub struct ServiceNote {
-    pub id: i64,
-    pub notetype_id: i64,
-    pub fields: Vec<String>,
-    pub tags: Vec<String>,
-}
+pub use shrike_store_api::ServiceNote;
 
 fn proto_to_note(n: anki_proto::notes::Note) -> ServiceNote {
     ServiceNote {

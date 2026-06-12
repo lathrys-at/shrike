@@ -13,5 +13,7 @@ rust_library(
     edition = "2021",
     deps = [
         "//native/shrike-ffi:shrike_ffi",
+        "//native/shrike-schemas:shrike_schemas",
+        "@crates//:serde_json",
     ],
 )
