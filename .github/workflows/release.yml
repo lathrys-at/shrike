@@ -31,10 +31,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # full history + tags so hatch-vcs can derive the version at install
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -59,10 +59,10 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # tags so the Bazel version stamp (git describe) resolves
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"  # for `twine check` only; Bazel uses its own toolchain
       - name: Build the wheel and sdist with Bazel
@@ -94,7 +94,7 @@ jobs:
         run: |
           ./bazel build //skills:skill --stamp
           cp -f "$(./bazel cquery --output=files //skills:skill)" dist/anki-cards.skill
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/*
@@ -107,8 +107,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4  # for CHANGELOG.md at the tagged commit
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6  # for CHANGELOG.md at the tagged commit
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist
@@ -161,7 +161,7 @@ jobs:
     permissions:
       id-token: write  # mint the OIDC token PyPI trusted publishing verifies
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist
