@@ -151,12 +151,13 @@ impl DerivedEngine {
         Ok(())
     }
 
+    /// One DDL string for the FTS5 table — `create_tables` and the rebuild's
+    /// drop-and-recreate reset (#445) must stay byte-identical.
+    const IDX_DDL: &'static str =
+        "CREATE VIRTUAL TABLE IF NOT EXISTS idx USING fts5(txt, tokenize='trigram')";
+
     fn create_tables(conn: &Connection) -> NativeResult<()> {
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS idx USING fts5(txt, tokenize='trigram')",
-            [],
-        )
-        .map_err(db_err)?;
+        conn.execute(Self::IDX_DDL, []).map_err(db_err)?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS rowmap(\
              rowid INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, \
@@ -323,6 +324,15 @@ impl DerivedEngine {
         source: &str,
         refs_text: &[(String, String)],
     ) -> NativeResult<()> {
+        // prepare_cached: the two insert statements parse once per
+        // connection, not once per row (#445 — a rebuild paid ~2 prepares
+        // per field row; the cache also serves every later ingest).
+        let mut ins_idx = conn
+            .prepare_cached("INSERT INTO idx(txt) VALUES(?1)")
+            .map_err(db_err)?;
+        let mut ins_map = conn
+            .prepare_cached("INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?1,?2,?3,?4)")
+            .map_err(db_err)?;
         for (reference, text) in refs_text {
             if text.trim().is_empty() {
                 continue;
@@ -330,14 +340,11 @@ impl DerivedEngine {
             // The idx→rowmap pairing rides last_insert_rowid() on THIS
             // connection — sound only under the engine's single mutexed
             // connection (the module-docs invariant; verified at open).
-            conn.execute("INSERT INTO idx(txt) VALUES(?1)", [text])
-                .map_err(db_err)?;
+            ins_idx.execute([text]).map_err(db_err)?;
             let rowid = conn.last_insert_rowid();
-            conn.execute(
-                "INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?1,?2,?3,?4)",
-                rusqlite::params![rowid, note_id, source, reference],
-            )
-            .map_err(db_err)?;
+            ins_map
+                .execute(rusqlite::params![rowid, note_id, source, reference])
+                .map_err(db_err)?;
         }
         Ok(())
     }
@@ -442,25 +449,54 @@ impl DerivedEngine {
     pub fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
-        tx.execute(
-            "DELETE FROM idx WHERE rowid IN (SELECT rowid FROM rowmap WHERE source = 'field')",
-            [],
-        )
-        .map_err(db_err)?;
-        tx.execute("DELETE FROM rowmap WHERE source = 'field'", [])
-            .map_err(db_err)?;
-        for (note_id, source, reference, text) in rows {
-            if text.trim().is_empty() {
-                continue;
-            }
-            tx.execute("INSERT INTO idx(txt) VALUES(?1)", [text])
-                .map_err(db_err)?;
-            let rowid = tx.last_insert_rowid();
-            tx.execute(
-                "INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?1,?2,?3,?4)",
-                rusqlite::params![rowid, note_id, source, reference],
+        // FTS5's per-row delete writes a tombstone per token list — on a
+        // rebuild that's a second insert-sized cost. When ONLY field rows
+        // exist (no recognition rows to preserve — the common case), drop
+        // and recreate the table instead: measured 40× faster than even a
+        // whole-table DELETE at 50k rows, and FTS5's 'delete-all' shortcut
+        // is unavailable on a content-ful table (#445). DDL is transactional
+        // in SQLite, and the recreate reuses the schema's own DDL string.
+        let has_other: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM rowmap WHERE source != 'field')",
+                [],
+                |r| r.get(0),
             )
             .map_err(db_err)?;
+        if has_other {
+            tx.execute(
+                "DELETE FROM idx WHERE rowid IN (SELECT rowid FROM rowmap WHERE source = 'field')",
+                [],
+            )
+            .map_err(db_err)?;
+            tx.execute("DELETE FROM rowmap WHERE source = 'field'", [])
+                .map_err(db_err)?;
+        } else {
+            tx.execute("DROP TABLE idx", []).map_err(db_err)?;
+            tx.execute(Self::IDX_DDL, []).map_err(db_err)?;
+            tx.execute("DELETE FROM rowmap", []).map_err(db_err)?;
+        }
+        {
+            // Parse the two insert statements once, not once per row (#445:
+            // ~2 prepares × every field row of the collection per rebuild).
+            let mut ins_idx = tx
+                .prepare_cached("INSERT INTO idx(txt) VALUES(?1)")
+                .map_err(db_err)?;
+            let mut ins_map = tx
+                .prepare_cached(
+                    "INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?1,?2,?3,?4)",
+                )
+                .map_err(db_err)?;
+            for (note_id, source, reference, text) in rows {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                ins_idx.execute([text]).map_err(db_err)?;
+                let rowid = tx.last_insert_rowid();
+                ins_map
+                    .execute(rusqlite::params![rowid, note_id, source, reference])
+                    .map_err(db_err)?;
+            }
         }
         // Prune recognition rows (and their segments, and below-gate markers)
         // for notes no longer in the collection: the build rows are the
@@ -941,6 +977,36 @@ mod tests {
 
         e.remove(&[1], None).unwrap();
         assert_eq!(e.count().unwrap(), 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn rebuild_over_field_only_rows_resets_and_reindexes() {
+        // #445: with no recognition rows to preserve, the rebuild swaps the
+        // row-by-row FTS5 delete for a drop-and-recreate. A second build
+        // over an already-populated store must leave exactly the new rows
+        // searchable (the rowid↔rowmap pairing is rebuilt from scratch).
+        let (e, dir) = store();
+        e.build(
+            &[
+                (1, "field".into(), "F".into(), "alpha alpha".into()),
+                (2, "field".into(), "F".into(), "beta beta".into()),
+            ],
+            1,
+        )
+        .unwrap();
+        assert_eq!(e.count().unwrap(), 2);
+        e.build(&[(2, "field".into(), "F".into(), "gamma gamma".into())], 2)
+            .unwrap();
+        assert_eq!(e.count().unwrap(), 1);
+        assert!(e
+            .match_rows("\"alpha\"", 10, false, None)
+            .unwrap()
+            .is_empty());
+        let hits = e.match_rows("\"gamma\"", 10, false, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, 2);
+        assert_eq!(e.get_col_mod(), Some(2));
         std::fs::remove_dir_all(dir).ok();
     }
 
