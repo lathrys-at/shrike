@@ -24,6 +24,7 @@
 //! transitional Python schedulers from #275.
 
 pub mod actions;
+pub mod fusion;
 pub mod index_orchestrator;
 pub mod recognize;
 pub mod tag_centroids;
@@ -951,8 +952,7 @@ impl Kernel {
             weights.insert("fuzzy".to_string(), 0.5);
             let mut priority = std::collections::HashSet::new();
             priority.insert("exact".to_string());
-            let fused =
-                shrike_compute::rrf_fuse(&rankings, &weights, shrike_compute::RRF_K, &priority);
+            let fused = fusion::rrf_fuse(&rankings, &weights, fusion::RRF_K, &priority);
             Ok(fused
                 .into_iter()
                 .take(top_k)

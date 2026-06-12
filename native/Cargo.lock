@@ -5295,7 +5295,6 @@ dependencies = [
  "serde",
  "serde_json",
  "shrike-collection",
- "shrike-compute",
  "shrike-derived",
  "shrike-engine-api",
  "shrike-ffi",

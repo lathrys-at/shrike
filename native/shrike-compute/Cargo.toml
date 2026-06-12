@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "Fused search/upsert composition: RRF + embed→index paths (#274)."
+description = "Fused embed→index paths for the standalone facade (#274; rrf_fuse moved to the kernel, #380)."
 
 [lib]
 name = "shrike_compute"
