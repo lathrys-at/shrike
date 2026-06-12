@@ -925,8 +925,9 @@ manager at all.
 **The #340 cross-cdylib answer:** engine crates link into the single
 binding cdylib via cargo features — never trait objects across `.so`
 boundaries (no stable Rust ABI; one `shrike_native` build carries the
-engines its features select, and the cabi surface gates engine
-registration the same way, `--features engine-onnx`).
+engines its features select). *(The C-ABI surface that briefly gated
+engine registration the same way was retired with the tokio pivot,
+#374 — see that entry.)*
 
 **Python facades stay, as assembly.** `OnnxBackend`/`ClipBackend`/
 `LlamaServerBackend` keep construction-time work (file/provider resolution,

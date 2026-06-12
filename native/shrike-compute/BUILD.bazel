@@ -9,7 +9,6 @@ exports_files(["Cargo.toml"])
 rust_library(
     name = "shrike_compute",
     srcs = glob(["src/**/*.rs"]),
-    crate_features = ["fused"],  # the full build; the minimal core (#338) omits it
     edition = "2021",
     deps = [
         "//native/shrike-embed:shrike_embed",
@@ -22,15 +21,4 @@ rust_test(
     name = "shrike_compute_test",
     size = "small",
     crate = ":shrike_compute",
-)
-
-# The minimal core profile (#338): no fused feature → no shrike-embed/ort.
-rust_library(
-    name = "shrike_compute_minimal",
-    srcs = glob(["src/**/*.rs"]),
-    crate_name = "shrike_compute",
-    edition = "2021",
-    deps = [
-        "//native/shrike-ffi:shrike_ffi",
-    ],
 )

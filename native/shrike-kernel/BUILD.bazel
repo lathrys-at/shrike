@@ -11,30 +11,24 @@ exports_files(["Cargo.toml"])
 # shrike-engine-api traits and composes whatever engines the host attaches.
 # NO pyo3 in this dep tree (the layering check + the no-CPython smoke prove
 # both rules).
-#
-# Two targets remain ONLY because shrike-compute still has a fused/minimal
-# split and one binary must link a single compute instance: the binding
-# links the fused compute, the C host the minimal one. The kernel sources
-# and features are identical.
-_KERNEL_DEPS_COMMON = [
-    "//native/shrike-collection:shrike_collection",
-    "//native/shrike-derived:shrike_derived",
-    "//native/shrike-engine-api:shrike_engine_api",
-    "//native/shrike-ffi:shrike_ffi",
-    "//native/shrike-index:shrike_index",
-    "//native/shrike-schemas:shrike_schemas",
-    "@crates//:blake2",
-    "@crates//:futures",
-    "@crates//:serde",
-    "@crates//:serde_json",
-    "@crates//:tracing",
-]
-
 rust_library(
     name = "shrike_kernel",
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
-    deps = _KERNEL_DEPS_COMMON + ["//native/shrike-compute:shrike_compute"],
+    deps = [
+        "//native/shrike-collection:shrike_collection",
+        "//native/shrike-compute:shrike_compute",
+        "//native/shrike-derived:shrike_derived",
+        "//native/shrike-engine-api:shrike_engine_api",
+        "//native/shrike-ffi:shrike_ffi",
+        "//native/shrike-index:shrike_index",
+        "//native/shrike-schemas:shrike_schemas",
+        "@crates//:blake2",
+        "@crates//:futures",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:tracing",
+    ],
 )
 
 # The #279 no-CPython acceptance smoke: links the kernel without Python and
@@ -43,13 +37,4 @@ rust_test(
     name = "shrike_kernel_test",
     size = "medium",
     crate = ":shrike_kernel",
-)
-
-# The C-ABI build (//native/shrike-cabi): same kernel, minimal compute.
-rust_library(
-    name = "shrike_kernel_minimal",
-    srcs = glob(["src/**/*.rs"]),
-    crate_name = "shrike_kernel",
-    edition = "2021",
-    deps = _KERNEL_DEPS_COMMON + ["//native/shrike-compute:shrike_compute_minimal"],
 )
