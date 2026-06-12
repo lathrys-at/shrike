@@ -5,7 +5,7 @@ name: Coverage
 #
 #   - pull_request (rc-labelled only): a release candidate carries a fresh coverage
 #     report. The job is skipped on every non-rc PR, so this costs ~nothing there.
-#   - schedule (daily on main): an ongoing record as work lands between releases.
+#   - schedule (Mon/Wed/Fri on main): an ongoing record as work lands between releases.
 #     These runs (and manual ones) ALSO publish the README badge to the `badges` branch.
 #   - workflow_dispatch: a one-off run whenever you want the current number / to (re)seed
 #     the badge.
@@ -18,8 +18,10 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, labeled]
   schedule:
-    # Mon / Wed / Fri 06:00 UTC — daily between releases.
-    - cron: "0 14 * * *" # daily, 14:00 UTC = 7am PDT (6am PST in winter)
+    # Mon / Wed / Fri — an ongoing record between releases. 3x/week, not daily:
+    # since the native cutover each run also carries a Rust build of the
+    # extension, and the number doesn't move fast enough to justify 7 runs/week.
+    - cron: "0 14 * * 1,3,5" # 14:00 UTC = 7am PDT (6am PST in winter)
   workflow_dispatch:
 
 # Cancel a PR's in-flight coverage run on a new push (same scoping as test.yml);
@@ -40,18 +42,43 @@ jobs:
       pct: ${{ steps.fields.outputs.pct }}
       color: ${{ steps.fields.outputs.color }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0 # full history + tags so hatch-vcs can derive the version at install
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
+      # Exact tag: setup-uv v8+ publishes no moving major tag (immutable
+      # releases) — `@v8` does not resolve, so pin the full version.
+      - uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
           cache-dependency-glob: pyproject.toml
       - name: Install dependencies
         run: uv pip install --system -e ".[dev]"
+      # The native extension (#400): since the cutover `shrike.collection` does
+      # `import shrike_native`, which a plain pip install doesn't build — without
+      # this step every run died at test collection (ModuleNotFoundError), so the
+      # whole lane was a 17-second no-op. Same rust-cache pattern as the lint
+      # lane, under its own shared-key (a debug `cargo build`, not clippy's
+      # check artifacts): scheduled runs execute on main, so each save lands in
+      # the default-branch cache scope — the schedule self-seeds the cache the
+      # rare rc-PR run restores from, no warm-cache.yml entry needed.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          shared-key: rust-coverage
+          cache-on-failure: true
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
+      # DESCRIPTORS_BIN: same reason as the lint lane — rust-cache prunes the
+      # shared target dir the anki build scripts would otherwise hand the
+      # descriptor set through; the checked-in pin keeps the build hermetic.
+      - name: Build native extension
+        env:
+          DESCRIPTORS_BIN: ${{ github.workspace }}/native/third_party/anki/anki_descriptors.bin
+        run: scripts/build-native.sh
       - name: Enable subprocess coverage
         # The integration suite runs the server as a `python -m shrike.server`
         # subprocess; this .pth (guarded on COVERAGE_PROCESS_START) makes each
@@ -98,7 +125,7 @@ jobs:
       - name: Build HTML report
         run: coverage html
       - name: Upload HTML report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-html
           path: htmlcov/
