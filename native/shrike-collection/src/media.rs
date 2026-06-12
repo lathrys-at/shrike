@@ -83,14 +83,26 @@ fn mime_extension(content_type: &str) -> Option<&'static str> {
     })
 }
 
+/// The byte-source size cap — caller-supplied/downloaded bytes only; a
+/// server-local `path` inside an operator-configured root is deliberately
+/// uncapped.
+fn check_media_size(len: usize) -> NativeResult<()> {
+    if len > crate::media_fetch::MEDIA_MAX_BYTES {
+        return Err(shrike_ffi::NativeError::invalid_input(format!(
+            "file exceeds the {}-byte limit",
+            crate::media_fetch::MEDIA_MAX_BYTES
+        )));
+    }
+    Ok(())
+}
+
 impl CollectionCore {
     /// The shared write tail of every store path — the full `_write_one_media`
     /// semantics: extension derived from `content_type` when the name lacks
     /// one, basename-sanitized, Anki collision handling, `deduped` = identical
     /// content already existed (the caller must use the RETURNED filename).
-    /// `index` echoes the caller's batch position. The size cap stays with
-    /// the byte sources (caller-supplied/downloaded bytes) — a server-local
-    /// `path` inside an operator-configured root is deliberately uncapped.
+    /// `index` echoes the caller's batch position. The size cap lives with
+    /// the byte sources ([`check_media_size`]), not here.
     fn write_media_bytes(
         &self,
         index: i64,
@@ -137,7 +149,13 @@ impl CollectionCore {
         data: &[u8],
         content_type: Option<&str>,
     ) -> NativeResult<StoreMediaResult> {
-        self.write_media_bytes(0, filename.unwrap_or_default().to_string(), data, content_type)
+        check_media_size(data.len())?;
+        self.write_media_bytes(
+            0,
+            filename.unwrap_or_default().to_string(),
+            data,
+            content_type,
+        )
     }
 
     /// `store_media` (#70): the full batch — each item one of `data` (base64),
@@ -222,18 +240,15 @@ impl CollectionCore {
             ));
         };
 
-        let name = item
-            .filename
-            .clone()
-            .or(derived_name)
-            .unwrap_or_default();
+        check_media_size(raw.len())?;
+        let name = item.filename.clone().or(derived_name).unwrap_or_default();
         self.write_media_bytes(index, name, &raw, content_type.as_deref())
     }
 
     /// Resolve filenames to where their bytes live — never the bytes
-    /// (`_fetch_media`; the host layer adds the serving `url`).
-    pub fn fetch_media(&self, filenames: &[String]) -> NativeResult<String> {
-        let mut results: Vec<Value> = Vec::new();
+    /// (`_fetch_media`; the host layer fills the serving `url`).
+    pub fn fetch_media(&self, filenames: &[String]) -> NativeResult<Vec<MediaFetchResult>> {
+        let mut results: Vec<MediaFetchResult> = Vec::new();
         for fn_ in filenames {
             let safe = safe_media_name(fn_);
             let path = if safe.is_empty() {
@@ -245,23 +260,29 @@ impl CollectionCore {
                     .filter(|m| m.is_file())
                     .map(|m| (p, m.len()))
             };
-            match path {
-                None => results.push(json!({"status": "missing", "filename": fn_})),
-                Some((p, size)) => results.push(json!({
-                    "status": "found",
-                    "filename": safe,
-                    "path": p.to_string_lossy(),
-                    "mime": guess_mime(&safe),
-                    "size_bytes": size,
-                })),
-            }
+            results.push(match path {
+                None => MediaFetchResult::Missing {
+                    filename: fn_.clone(),
+                },
+                Some((p, size)) => MediaFetchResult::Found {
+                    path: p.to_string_lossy().to_string(),
+                    url: None,
+                    mime: guess_mime(&safe).map(str::to_string),
+                    size_bytes: size as i64,
+                    filename: safe,
+                },
+            });
         }
-        Ok(json!(results).to_string())
+        Ok(results)
     }
 
     /// List media files (sorted, optional glob `pattern`, optional limit) —
-    /// `_list_media`.
-    pub fn list_media(&self, pattern: Option<&str>, limit: Option<usize>) -> NativeResult<String> {
+    /// `_list_media`. The host layer fills each file's serving `url`.
+    pub fn list_media(
+        &self,
+        pattern: Option<&str>,
+        limit: Option<usize>,
+    ) -> NativeResult<ListMediaResponse> {
         let mut entries: Vec<(String, u64)> = Vec::new();
         if let Ok(read_dir) = std::fs::read_dir(&self.media_dir) {
             for entry in read_dir.flatten() {
@@ -283,20 +304,27 @@ impl CollectionCore {
         if let Some(limit) = limit {
             entries.truncate(limit);
         }
-        let files: Vec<Value> = entries
+        let files: Vec<MediaFileInfo> = entries
             .into_iter()
-            .map(|(name, size)| {
-                json!({"filename": name, "mime": guess_mime(&name), "size_bytes": size})
+            .map(|(name, size)| MediaFileInfo {
+                url: None,
+                mime: guess_mime(&name).map(str::to_string),
+                size_bytes: size as i64,
+                filename: name,
             })
             .collect();
-        Ok(json!({"media_dir": self.media_dir, "count": count, "files": files}).to_string())
+        Ok(ListMediaResponse {
+            media_dir: self.media_dir.clone(),
+            count: count as i64,
+            files,
+        })
     }
 
     /// Move existing media files to Anki's recoverable trash (`_delete_media`;
     /// result lists echo the caller's references).
-    pub fn delete_media(&self, filenames: &[String]) -> NativeResult<String> {
-        let mut deleted: Vec<&str> = Vec::new();
-        let mut not_found: Vec<&str> = Vec::new();
+    pub fn delete_media(&self, filenames: &[String]) -> NativeResult<DeleteMediaResponse> {
+        let mut deleted: Vec<String> = Vec::new();
+        let mut not_found: Vec<String> = Vec::new();
         let mut to_trash: Vec<String> = Vec::new();
         for fn_ in filenames {
             let safe = safe_media_name(fn_);
@@ -304,28 +332,27 @@ impl CollectionCore {
                 !safe.is_empty() && std::path::Path::new(&self.media_dir).join(&safe).is_file();
             if exists {
                 to_trash.push(safe);
-                deleted.push(fn_);
+                deleted.push(fn_.clone());
             } else {
-                not_found.push(fn_);
+                not_found.push(fn_.clone());
             }
         }
         if !to_trash.is_empty() {
             self.adapter.trash_media_files(&to_trash)?;
         }
-        Ok(json!({"deleted": deleted, "not_found": not_found}).to_string())
+        Ok(DeleteMediaResponse { deleted, not_found })
     }
 
     /// Read-only media diagnostics (`_media_check`).
-    pub fn media_check(&self) -> NativeResult<String> {
+    pub fn media_check(&self) -> NativeResult<CollectionCheckResponse> {
         let report = self.adapter.check_media()?;
-        Ok(json!({
-            "media_dir": self.media_dir,
-            "unused": report.unused,
-            "missing": report.missing,
-            "missing_media_notes": report.missing_media_notes,
-            "have_trash": report.have_trash,
+        Ok(CollectionCheckResponse {
+            media_dir: self.media_dir.clone(),
+            unused: report.unused,
+            missing: report.missing,
+            missing_media_notes: report.missing_media_notes,
+            have_trash: report.have_trash,
         })
-        .to_string())
     }
 
     /// `_find_empty_notes`: ids whose every field is blank (no text AND no
@@ -379,8 +406,8 @@ impl CollectionCore {
     }
 
     /// `_prune` (#89): the four cleanups, preview-by-default at the tool
-    /// layer. Returns the result JSON; the removed-note-id list rides inside
-    /// (`removed_note_ids`) for the host's index maintenance.
+    /// layer. Returns the typed response plus the removed-note-id list out of
+    /// band (kernel-internal — the host's index maintenance, never the wire).
     pub fn prune(
         &self,
         unused_tags: bool,
@@ -388,9 +415,14 @@ impl CollectionCore {
         empty_cards: bool,
         unused_media: bool,
         dry_run: bool,
-    ) -> NativeResult<String> {
-        let mut result = serde_json::Map::new();
-        result.insert("dry_run".to_string(), json!(dry_run));
+    ) -> NativeResult<(CollectionPruneResponse, Vec<i64>)> {
+        let mut response = CollectionPruneResponse {
+            dry_run,
+            unused_tags: None,
+            empty_notes: None,
+            empty_cards: None,
+            unused_media: None,
+        };
         let mut removed_note_ids: Vec<i64> = Vec::new();
 
         let mut empty_note_ids: Vec<i64> = Vec::new();
@@ -399,11 +431,10 @@ impl CollectionCore {
             if !dry_run && !empty_note_ids.is_empty() {
                 self.adapter.remove_notes(&empty_note_ids)?;
             }
-            result.insert(
-                "empty_notes".to_string(),
-                json!({"removed": empty_note_ids}),
-            );
             removed_note_ids.extend(&empty_note_ids);
+            response.empty_notes = Some(PruneEmptyNotes {
+                removed: empty_note_ids.clone(),
+            });
         }
 
         if empty_cards {
@@ -427,11 +458,11 @@ impl CollectionCore {
             } else if !card_ids.is_empty() {
                 self.adapter.remove_cards(&card_ids)?;
             }
-            result.insert(
-                "empty_cards".to_string(),
-                json!({"cards_removed": card_ids.len(), "notes_deleted": notes_deleted}),
-            );
             removed_note_ids.extend(&notes_deleted);
+            response.empty_cards = Some(PruneEmptyCards {
+                cards_removed: card_ids.len() as i64,
+                notes_deleted,
+            });
         }
 
         if unused_tags {
@@ -439,10 +470,10 @@ impl CollectionCore {
             if !dry_run && !names.is_empty() {
                 self.adapter.clear_unused_tags()?;
             }
-            result.insert(
-                "unused_tags".to_string(),
-                json!({"removed": names.len(), "tags": names}),
-            );
+            response.unused_tags = Some(PruneUnusedTags {
+                removed: names.len() as i64,
+                tags: names,
+            });
         }
 
         if unused_media {
@@ -451,14 +482,13 @@ impl CollectionCore {
             if !dry_run && !media_files.is_empty() {
                 self.adapter.trash_media_files(&media_files)?;
             }
-            result.insert(
-                "unused_media".to_string(),
-                json!({"removed": media_files.len(), "files": media_files}),
-            );
+            response.unused_media = Some(PruneUnusedMedia {
+                removed: media_files.len() as i64,
+                files: media_files,
+            });
         }
 
-        result.insert("removed_note_ids".to_string(), json!(removed_note_ids));
-        Ok(Value::Object(result).to_string())
+        Ok((response, removed_note_ids))
     }
 }
 

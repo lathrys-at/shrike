@@ -43,17 +43,14 @@ def _prune(wrapper, **kw):
     kw.setdefault("dry_run", True)
 
     def run(c):
-        result = json.loads(
-            c.prune(
-                kw["unused_tags"],
-                kw["empty_notes"],
-                kw["empty_cards"],
-                kw["unused_media"],
-                kw["dry_run"],
-            )
+        result_json, removed = c.prune(
+            kw["unused_tags"],
+            kw["empty_notes"],
+            kw["empty_cards"],
+            kw["unused_media"],
+            kw["dry_run"],
         )
-        removed = result.pop("removed_note_ids")
-        return result, removed
+        return json.loads(result_json), removed
 
     return wrapper.run_sync(run)
 

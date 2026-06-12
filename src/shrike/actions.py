@@ -1623,9 +1623,11 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             unused_media=unused_media,
             dry_run=dry_run,
         )
+        # `or {}`: an unselected cleanup arrives as an explicit null on the
+        # typed wire (#391), so a key-missing default alone never fires.
         note_outcome(
             f"{'previewed' if dry_run else 'applied'}: {len(removed_note_ids)} note(s) removed, "
-            f"tags={result.get('unused_tags', {}).get('removed', '-')}"
+            f"tags={(result.get('unused_tags') or {}).get('removed', '-')}"
         )
 
         if not dry_run:
@@ -1635,7 +1637,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             try:
                 if removed_note_ids:
                     await kernel.forget_notes(removed_note_ids)
-                elif result.get("unused_tags", {}).get("removed"):
+                elif (result.get("unused_tags") or {}).get("removed"):
                     await kernel.metadata_changed()
             except Exception:
                 logger.warning("Failed to update index after prune", exc_info=True)

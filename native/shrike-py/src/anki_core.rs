@@ -286,14 +286,19 @@ impl CollectionCore {
         py.detach(|| {
             self.inner
                 .store_media_bytes(filename.as_deref(), &data, content_type.as_deref())
+                .and_then(|r| crate::kernel_actions::wire(&r))
         })
         .map_err(to_py_err)
     }
 
     /// Locate media files (never bytes): per-item found/missing JSON.
     fn fetch_media(&self, py: Python<'_>, filenames: Vec<String>) -> PyResult<String> {
-        py.detach(|| self.inner.fetch_media(&filenames))
-            .map_err(to_py_err)
+        py.detach(|| {
+            self.inner
+                .fetch_media(&filenames)
+                .and_then(|r| crate::kernel_actions::wire(&r))
+        })
+        .map_err(to_py_err)
     }
 
     /// List media filenames (sorted; optional glob pattern + limit), JSON.
@@ -304,23 +309,37 @@ impl CollectionCore {
         pattern: Option<String>,
         limit: Option<usize>,
     ) -> PyResult<String> {
-        py.detach(|| self.inner.list_media(pattern.as_deref(), limit))
-            .map_err(to_py_err)
+        py.detach(|| {
+            self.inner
+                .list_media(pattern.as_deref(), limit)
+                .and_then(|r| crate::kernel_actions::wire(&r))
+        })
+        .map_err(to_py_err)
     }
 
     /// Move media files to Anki's recoverable trash (JSON result echoes refs).
     fn delete_media(&self, py: Python<'_>, filenames: Vec<String>) -> PyResult<String> {
-        py.detach(|| self.inner.delete_media(&filenames))
-            .map_err(to_py_err)
+        py.detach(|| {
+            self.inner
+                .delete_media(&filenames)
+                .and_then(|r| crate::kernel_actions::wire(&r))
+        })
+        .map_err(to_py_err)
     }
 
     /// Read-only media diagnostics (unused/missing/missing-notes/trash), JSON.
     fn media_check(&self, py: Python<'_>) -> PyResult<String> {
-        py.detach(|| self.inner.media_check()).map_err(to_py_err)
+        py.detach(|| {
+            self.inner
+                .media_check()
+                .and_then(|r| crate::kernel_actions::wire(&r))
+        })
+        .map_err(to_py_err)
     }
 
-    /// The #89 prune: four cleanups, dry-run previews; `removed_note_ids`
-    /// rides in the JSON for the host's index maintenance.
+    /// The #89 prune: four cleanups, dry-run previews. Returns the response
+    /// JSON plus `removed_note_ids` out of band (kernel-internal — the host's
+    /// index maintenance, never the wire).
     #[pyo3(signature = (unused_tags=true, empty_notes=true, empty_cards=true, unused_media=true, dry_run=true))]
     fn prune(
         &self,
@@ -330,10 +349,12 @@ impl CollectionCore {
         empty_cards: bool,
         unused_media: bool,
         dry_run: bool,
-    ) -> PyResult<String> {
+    ) -> PyResult<(String, Vec<i64>)> {
         py.detach(|| {
-            self.inner
-                .prune(unused_tags, empty_notes, empty_cards, unused_media, dry_run)
+            let (response, removed_note_ids) =
+                self.inner
+                    .prune(unused_tags, empty_notes, empty_cards, unused_media, dry_run)?;
+            Ok((crate::kernel_actions::wire(&response)?, removed_note_ids))
         })
         .map_err(to_py_err)
     }
@@ -352,11 +373,19 @@ impl CollectionCore {
         path_roots: Option<Vec<String>>,
     ) -> PyResult<String> {
         py.detach(|| {
-            self.inner.store_media_items(
-                &items_json,
-                allow_private_fetch,
-                path_roots.as_deref().unwrap_or(&[]),
-            )
+            let items: Vec<shrike_schemas::StoreMediaItem> = serde_json::from_str(&items_json)
+                .map_err(|e| {
+                    shrike_ffi::NativeError::invalid_input(format!(
+                        "items must be a JSON list: {e}"
+                    ))
+                })?;
+            self.inner
+                .store_media_items(
+                    &items,
+                    allow_private_fetch,
+                    path_roots.as_deref().unwrap_or(&[]),
+                )
+                .and_then(|r| crate::kernel_actions::wire(&r))
         })
         .map_err(to_py_err)
     }

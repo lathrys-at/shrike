@@ -758,11 +758,12 @@ class CollectionWrapper:
         dry_run: bool,
     ) -> tuple[dict[str, Any], list[int]]:
         def _prune(c: CollectionCore) -> tuple[dict[str, Any], list[int]]:
-            result = json.loads(
-                c.prune(unused_tags, empty_notes, empty_cards, unused_media, dry_run)
+            # The binding hands removed_note_ids out of band (kernel-internal,
+            # never part of the response wire).
+            result_json, removed = c.prune(
+                unused_tags, empty_notes, empty_cards, unused_media, dry_run
             )
-            removed: list[int] = result.pop("removed_note_ids")
-            return result, removed
+            return json.loads(result_json), removed
 
         return await self.run(_prune)
 
