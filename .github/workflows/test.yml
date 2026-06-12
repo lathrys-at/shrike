@@ -200,12 +200,6 @@ jobs:
         run: |
           cd native
           cargo clippy --workspace --all-targets -- -D warnings
-          # The minimal-core profile (#338): the kernel/compute crates must
-          # keep compiling with the heavy capabilities (ort/ONNX) gated off.
-          cargo clippy -p shrike-compute --no-default-features --all-targets -- -D warnings
-          # The feature-gated cabi engine registration (#342 P5): default cabi
-          # builds engine-free; this keeps the gated surface compiling.
-          cargo clippy -p shrike-cabi --features engine-onnx --all-targets -- -D warnings
 
   # The authoritative test lane: the unit + non-embedding integration suites run
   # under Bazel (`//... -//native/...` = the unit/integration aggregates + the

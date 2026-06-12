@@ -51,8 +51,6 @@ CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP, server.py = the
                                                       └──▶ RecognizeService slot ◀── shrike-recognize-apple (Vision OCR)
 ```
 
-Embedded hosts skip Python entirely: `native/shrike-cabi` is the manual
-C-ABI surface (#333) over the minimal kernel profile (#338, no ort).
 
 ## Project layout
 
@@ -136,8 +134,7 @@ native/                           # the Rust workspace (the compute core)
 ├── shrike-compute/               # rrf_fuse + fused embed→index paths
 ├── shrike-schemas/               # serde+schemars wire types (CANONICAL; schemas.py binds)
 ├── shrike-ffi/                   # the shared error taxonomy
-├── shrike-py/                    # the pyo3 binding (the ONLY pyo3 crate) + shrike_native package
-└── shrike-cabi/                  # the manual C-ABI surface (#333) + embedded C smoke host
+└── shrike-py/                    # the pyo3 binding (the ONLY pyo3 crate) + shrike_native package
 docs/
 └── mcp-tools.md                  # Tool documentation (human-readable; machine schema is served
                                   # live by the server and defined in shrike/schemas.py)
@@ -174,7 +171,6 @@ gate for a native change:
 
 ```bash
 (cd native && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings)
-(cd native && cargo clippy -p shrike-compute --no-default-features --all-targets -- -D warnings)
 (cd native && cargo test --workspace)
 scripts/build-native.sh && pytest tests/unit tests/native -q
 ./bazel test //...      # the authoritative CI lane: all crate tests + layering check + py suites
