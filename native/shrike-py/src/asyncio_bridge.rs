@@ -63,6 +63,15 @@ struct LoopWake {
 
 impl Wake for LoopWake {
     fn wake(self: Arc<Self>) {
+        // Interpreter exiting ⇒ drop the wake (#435): nobody can await the
+        // result once the loops are gone, and attaching from this foreign
+        // thread concurrent with Py_Finalize aborts the process. The permit
+        // also covers the window where `call_soon_threadsafe` releases the
+        // GIL mid-call (its self-pipe write) — the atexit drain waits for
+        // this wake to finish before finalization proper begins.
+        let Some(_permit) = crate::finalize_gate::permit() else {
+            return;
+        };
         Python::attach(|py| {
             // Callback gone ⇒ the asyncio future died with its loop and
             // nobody can observe the result — the wake has nowhere to land.

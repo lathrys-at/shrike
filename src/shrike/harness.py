@@ -20,7 +20,7 @@ from typing import Any
 
 import shrike_native
 
-from shrike.collection import CollectionWrapper, collect_derived_rows
+from shrike.collection import CollectionWrapper
 from shrike.derived import DerivedTextStore
 from shrike.embedding import EmbeddingRuntime
 from shrike.embedding_base import EmbedderBackend
@@ -127,7 +127,10 @@ class KernelIndexView:
         backend = self._runtime.backend
         if backend is None or not texts:
             return None
-        # LRU per (backend identity, query) — loop-confined, no lock needed.
+        # LRU per (backend identity, query). Accessed from to_thread workers
+        # since #445 (no longer loop-confined): safe under the GIL — each dict
+        # op is atomic, and a race costs at worst a redundant embed or an
+        # off-by-one eviction, never corruption.
         base = id(backend)
         out: list[list[float] | None] = [None] * len(texts)
         missing: list[str] = []
@@ -292,15 +295,31 @@ class Harness:
             logger.info("Collection changed while idle; index reconciled")
 
     async def _maybe_build_derived(self) -> None:
-        """Cheap col_mod probe; full text read only on real drift."""
+        """Cheap col_mod probe; the rebuild itself is fire-and-forget — boot
+        and /reload must not block on the FTS5 build (#451 review: the old
+        thread path never did; the store reports BUILDING and searches fall
+        back until ready). The claim in _rebuild_derived dedupes double-fires."""
         col_mod = await self.wrapper.col_mod()
         if self.derived.check_drift(col_mod):
-            await self._rebuild_derived()
+            task = asyncio.ensure_future(self._rebuild_derived())
+            task.add_done_callback(_log_task_failure)
 
     async def _rebuild_derived(self) -> None:
-        rows, dmod = await self.wrapper.run(collect_derived_rows)
-        self.derived.build_in_background(rows, dmod)
-        logger.info("Derived-text store drift; building in background (%d rows)", len(rows))
+        # Kernel-side rebuild (#445): the field rows used to round-trip the
+        # whole collection Rust→Python→Rust (~150-250MB transient at 100k
+        # notes). The kernel op collects + builds crate-side; the store here
+        # only drives the status state machine around the await.
+        if not self.derived.claim_external_build():
+            return
+        col_mod: int | None = None
+        try:
+            rows, col_mod = await self.kernel.rebuild_derived()
+            logger.info("Derived-text store rebuilt kernel-side (%d rows)", rows)
+        except Exception:
+            col_mod = None
+            logger.exception("Kernel-side derived rebuild failed")
+        finally:
+            self.derived.settle_external_build(col_mod)
 
     # -- status ------------------------------------------------------------------
 

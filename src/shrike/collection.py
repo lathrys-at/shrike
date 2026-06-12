@@ -157,12 +157,6 @@ def collect_embed_inputs(core: CollectionCore) -> tuple[list[NoteEmbedInput], in
     return inputs, core.col_mod()
 
 
-def collect_derived_rows(core: CollectionCore) -> tuple[list[tuple[int, str, str, str]], int]:
-    """Every note's ``(note_id, "field", field_name, raw_value)`` rows + the mod stamp."""
-    note_ids = core.find_notes("deck:*")
-    return core.derived_field_rows(note_ids), core.col_mod()
-
-
 class CollectionWrapper:
     """Serializes every access to the native collection core.
 
@@ -485,6 +479,22 @@ class CollectionWrapper:
             return notes[0]  # type: ignore[no-any-return]
 
         return await self.run(_one)
+
+    async def notes_by_id(self, nids: list[int], fields_mode: str) -> dict[int, dict[str, Any]]:
+        """Batch ``note_to_dict`` (#445): ONE collection job for the whole id
+        set — the neighbor assembly previously did one job per candidate (up
+        to ~500 sequential actor round trips per upsert batch). Missing ids
+        are simply absent from the map."""
+        if not nids:
+            return {}
+
+        def _many(core: CollectionCore) -> dict[int, dict[str, Any]]:
+            listed = json.loads(
+                core.list_notes(ids=nids, with_fields=fields_mode == "full", limit=len(nids))
+            )
+            return {n["id"]: n for n in listed["notes"]}
+
+        return await self.run(_many)
 
     async def search_substring(
         self,

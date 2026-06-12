@@ -1,6 +1,7 @@
 //! Reciprocal Rank Fusion — the kernel's fusion stage (#274, moved here in
-//! #380 so the kernel stops naming shrike-compute, whose other half drags the
-//! whole ort engine stack into the link).
+//! #380 so the kernel stopped naming shrike-compute, whose other half dragged
+//! the whole ort engine stack into the link; the crate itself dissolved in
+//! #443).
 //!
 //! [`rrf_fuse`] is a byte-faithful port of `shrike/search_fusion.py` (the
 //! frozen reference spec): same canonical sorted-signal accumulation order

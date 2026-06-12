@@ -5022,15 +5022,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "shrike-compute"
-version = "0.0.0"
-dependencies = [
- "shrike-embed",
- "shrike-ffi",
- "shrike-index",
-]
-
-[[package]]
 name = "shrike-derived"
 version = "0.0.0"
 dependencies = [
@@ -5150,7 +5141,6 @@ dependencies = [
  "pyo3-log",
  "serde_json",
  "shrike-collection",
- "shrike-compute",
  "shrike-derived",
  "shrike-embed",
  "shrike-embed-remote",

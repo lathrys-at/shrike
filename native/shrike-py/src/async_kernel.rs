@@ -368,6 +368,11 @@ impl AsyncKernel {
     }
 
     /// The boot/reload drift path (awaitable; drive as a background task).
+    fn rebuild_derived<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move { kernel.rebuild_derived().await })
+    }
+
     fn reindex_if_needed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
         kernel_op(py, async move { kernel.reindex_if_needed().await })
@@ -419,7 +424,16 @@ impl AsyncKernel {
         crate::asyncio_bridge::pyresult_future_into_py(py, async move {
             kernel
                 .collection()
-                .run(move |_core| Python::attach(|py| job.call0(py)))
+                .run(move |_core| {
+                    // The job's attach window rides the finalization gate
+                    // (#435); the refusal is lazy (no Python touched here).
+                    let Some(_permit) = crate::finalize_gate::permit() else {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            "interpreter is exiting; harness job not run",
+                        ));
+                    };
+                    Python::attach(|py| job.call0(py))
+                })
                 .await
                 .map_err(crate::to_py_err)?
         })

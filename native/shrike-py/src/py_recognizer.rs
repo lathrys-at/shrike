@@ -56,8 +56,18 @@ impl Recognizer for PyRecognizerHandle {
         // contract); native engines are where the mime hint pays off. The
         // blocking backend call rides the runtime's blocking pool (#374 C).
         let items: Vec<Vec<u8>> = items.into_iter().map(|m| m.bytes).collect();
-        let backend = Python::attach(|py| self.backend.clone_ref(py));
+        // Both attach windows ride the finalization gate (#435), exactly like
+        // PyEmbedderHandle::dispatch.
+        let backend = {
+            let Some(_permit) = crate::finalize_gate::permit() else {
+                return Box::pin(std::future::ready(Err(crate::py_embedder::shutting_down())));
+            };
+            Python::attach(|py| self.backend.clone_ref(py))
+        };
         let handle = tokio::task::spawn_blocking(move || -> RecResult {
+            let Some(_permit) = crate::finalize_gate::permit() else {
+                return Err(crate::py_embedder::shutting_down());
+            };
             Python::attach(|py| {
                 let raw = backend
                     .bind(py)

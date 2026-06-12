@@ -264,3 +264,25 @@ class TestStatus:
         assert st["size"] == 4
         assert st["col_mod"] == 100
         assert "path" in st
+
+
+class TestExternalBuildHooks:
+    """#451: the kernel-side rebuild drives the store's state machine through
+    claim/settle — same BUILDING dedupe as the retired thread path, ERROR on a
+    failed build, READY + watermark on success."""
+
+    def test_claim_dedupes_and_settle_ready(self, store):
+        assert store.claim_external_build() is True
+        # A second drift trigger while one build is in flight is a no-op.
+        assert store.claim_external_build() is False
+        store.settle_external_build(1234)
+        assert store.status()["state"] == "ready"
+        assert store.check_drift(1234) is False
+        # Claimable again after settling.
+        assert store.claim_external_build() is True
+        store.settle_external_build(1234)
+
+    def test_settle_none_records_error(self, store):
+        assert store.claim_external_build() is True
+        store.settle_external_build(None)
+        assert store.status()["state"] == "error"

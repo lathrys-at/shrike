@@ -13,6 +13,7 @@ __all__ = [
     "version",
     "bridge_live_poll_callbacks",
     "bridge_parked_forever",
+    "finalize_gate_close",
     "build_info",
     "parallel_sum",
     "checked_div",
@@ -21,8 +22,6 @@ __all__ = [
     "rrf_fuse",
     "schema_catalog",
     "schema_roundtrip",
-    "fused_search_text",
-    "fused_add_text",
     "derived_fts5_probe",
     "derived_sqlite_bundled",
     "OnnxTextEmbedder",
@@ -48,6 +47,7 @@ BATCH_PROBE_TEXTS: list[str]
 def version() -> str: ...
 def bridge_live_poll_callbacks() -> int: ...
 def bridge_parked_forever() -> object: ...
+def finalize_gate_close() -> None: ...
 
 INDEX_SAVE_DELAY_DEFAULT: float
 INDEX_SAVE_THRESHOLD_DEFAULT: int
@@ -103,21 +103,6 @@ def rrf_fuse(
     k: int = 60,
     priority_signals: list[str] = ...,
 ) -> list[tuple[int, float, list[tuple[str, int]]]]: ...
-def fused_search_text(
-    embedder: OnnxTextEmbedder,
-    engine: NativeIndexEngine,
-    texts: list[str],
-    k: int,
-    modalities: list[str] | None = None,
-) -> list[dict[str, tuple[list[int], list[float]]]]: ...
-def fused_add_text(
-    embedder: OnnxTextEmbedder,
-    engine: NativeIndexEngine,
-    modality: str,
-    keys: list[int],
-    texts: list[str],
-    chunk: int,
-) -> int: ...
 
 @final
 class OnnxTextEmbedder:
@@ -313,6 +298,7 @@ class AsyncKernel:
     def reindex_notes(self, note_ids: list[int]) -> Future[None]: ...
     def rebuild_index(self) -> Future[int]: ...
     def reindex_if_needed(self) -> Future[bool]: ...
+    def rebuild_derived(self) -> Future[tuple[int, int]]: ...
     def col_mod(self) -> Future[int]: ...
     def index_status_json(self) -> str: ...
     def save_index(self) -> None: ...
