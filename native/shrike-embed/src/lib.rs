@@ -85,6 +85,10 @@ struct GraphInputs {
 }
 
 pub struct TextEmbedder {
+    /// Locked because ort 2.0.0-rc.12's run entrypoints all take `&mut self`
+    /// (`Session::run<'s, …>(&'s mut self, …) -> Result<SessionOutputs<'s>>`,
+    /// likewise `run_with_options`/`run_binding`/`run_async`) — re-checked for
+    /// #384; drop the lock if a future ort makes `run` take `&self`.
     session: Mutex<ort::session::Session>,
     tokenizer: Tokenizer,
     inputs: GraphInputs,
@@ -99,11 +103,16 @@ fn map_provider(name: &str) -> Option<ort::ep::ExecutionProviderDispatch> {
     use ort::ep;
     // onnxruntime-python provider names → ort EPs (the names the facade passes
     // are already resolved against onnxruntime.get_available_providers()).
+    // The GPU EPs are feature-gated (#384, default-on): a slim build with the
+    // feature off degrades that name to None → CPU, which is always last.
     match name {
         "CPUExecutionProvider" => Some(ep::CPU::default().build()),
         "CoreMLExecutionProvider" => Some(ep::CoreML::default().build()),
+        #[cfg(feature = "cuda")]
         "CUDAExecutionProvider" => Some(ep::CUDA::default().build()),
+        #[cfg(feature = "tensorrt")]
         "TensorrtExecutionProvider" => Some(ep::TensorRT::default().build()),
+        #[cfg(feature = "directml")]
         "DmlExecutionProvider" => Some(ep::DirectML::default().build()),
         _ => None,
     }
@@ -346,20 +355,9 @@ impl TextEmbedder {
                     spec: InputSpec,
                     data: &[i64]|
          -> NativeResult<()> {
-            if !spec.wanted {
-                return Ok(());
+            if spec.wanted {
+                feed.push((name.to_string(), int_tensor(batch, seq, data, spec.int32)?));
             }
-            let value: ort::value::DynValue = if spec.int32 {
-                let v32: Vec<i32> = data.iter().map(|&v| v as i32).collect();
-                ort::value::Tensor::from_array(([batch, seq], v32))
-                    .map_err(|e| NativeError::internal(format!("tensor {name}: {e}")))?
-                    .into_dyn()
-            } else {
-                ort::value::Tensor::from_array(([batch, seq], data.to_vec()))
-                    .map_err(|e| NativeError::internal(format!("tensor {name}: {e}")))?
-                    .into_dyn()
-            };
-            feed.push((name.to_string(), value));
             Ok(())
         };
         push(&mut feed, "input_ids", self.inputs.input_ids, &ids)?;
@@ -380,22 +378,23 @@ impl TextEmbedder {
             .run(feed)
             .map_err(|e| NativeError::invalid_input(format!("onnx run failed: {e}")))?;
         // The first output, by position — mirroring the Python backend's
-        // `session.run(None, feed)[0]`.
-        let array: ArrayD<f32> = outputs[0]
+        // `session.run(None, feed)[0]`. Pooling reads the borrowed view
+        // directly: no owned copy of the full [B,S,H] token tensor (#384).
+        let array = outputs[0]
             .try_extract_array::<f32>()
-            .map_err(|e| NativeError::internal(format!("output extract: {e}")))?
-            .to_owned();
+            .map_err(|e| NativeError::internal(format!("output extract: {e}")))?;
 
         let vectors: Array2<f32> = match array.ndim() {
             3 => {
                 let tokens = array
                     .into_dimensionality::<Ix3>()
                     .map_err(|e| NativeError::internal(format!("rank-3 view: {e}")))?;
-                pool(&tokens, &mask_arr, self.pooling)
+                pool(tokens, &mask_arr, self.pooling)
             }
             2 => array
                 .into_dimensionality::<ndarray::Ix2>()
-                .map_err(|e| NativeError::internal(format!("rank-2 view: {e}")))?,
+                .map_err(|e| NativeError::internal(format!("rank-2 view: {e}")))?
+                .to_owned(),
             n => {
                 return Err(NativeError::invalid_input(format!(
                     "ONNX model first output has rank {n}; expected 2 (pooled) or 3 (tokens)"
@@ -430,7 +429,7 @@ impl shrike_engine_api::EmbedText for TextEmbedder {
 
 /// Reduce token embeddings [B,S,H] to sentence vectors [B,H] (mirrors
 /// `OnnxBackend._pool`).
-fn pool(token_emb: &ndarray::Array3<f32>, mask: &Array2<i64>, pooling: Pooling) -> Array2<f32> {
+fn pool(token_emb: ndarray::ArrayView3<f32>, mask: &Array2<i64>, pooling: Pooling) -> Array2<f32> {
     let (b, s, h) = token_emb.dim();
     match pooling {
         Pooling::Cls => token_emb.slice(s![.., 0, ..]).to_owned(),
@@ -438,6 +437,10 @@ fn pool(token_emb: &ndarray::Array3<f32>, mask: &Array2<i64>, pooling: Pooling) 
             let mut out = Array2::<f32>::zeros((b, h));
             for i in 0..b {
                 let len: i64 = mask.row(i).sum();
+                // The clamp is also the all-padding guard (the counterpart of
+                // the mean arm's max(1e-9)): a zero mask row gives len-1 = -1,
+                // clamped to token 0 — a deterministic (if meaningless) vector
+                // for a degenerate row, never an out-of-bounds index.
                 let idx = (len - 1).clamp(0, s as i64 - 1) as usize;
                 out.row_mut(i).assign(&token_emb.slice(s![i, idx, ..]));
             }
@@ -487,7 +490,7 @@ mod tests {
         // [1, 2 tokens, 2 dims]; second token is padding → mean == first token.
         let emb = array![[[1.0f32, 3.0], [100.0, 100.0]]];
         let mask = array![[1i64, 0]];
-        let out = pool(&emb, &mask, Pooling::Mean);
+        let out = pool(emb.view(), &mask, Pooling::Mean);
         assert_eq!(out, array![[1.0f32, 3.0]]);
     }
 
@@ -495,8 +498,18 @@ mod tests {
     fn last_pooling_takes_last_real_token() {
         let emb = array![[[1.0f32, 1.0], [2.0, 2.0], [9.0, 9.0]]];
         let mask = array![[1i64, 1, 0]];
-        let out = pool(&emb, &mask, Pooling::Last);
+        let out = pool(emb.view(), &mask, Pooling::Last);
         assert_eq!(out, array![[2.0f32, 2.0]]);
+    }
+
+    #[test]
+    fn last_pooling_all_padding_row_clamps_to_first_token() {
+        // A zero mask row (degenerate, but reachable) clamps to token 0 —
+        // pinned so the guard in the Last arm doesn't regress to a panic.
+        let emb = array![[[7.0f32, 8.0], [9.0, 9.0]]];
+        let mask = array![[0i64, 0]];
+        let out = pool(emb.view(), &mask, Pooling::Last);
+        assert_eq!(out, array![[7.0f32, 8.0]]);
     }
 
     #[test]
