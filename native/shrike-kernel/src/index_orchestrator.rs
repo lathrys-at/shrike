@@ -138,6 +138,10 @@ pub struct IndexOrchestrator {
     pub(crate) dir: PathBuf,
     engine: Arc<MultiModalIndex>,
     shared: Mutex<Shared>,
+    /// Serializes SAVERS only (#445): `save` snapshots `shared` briefly and
+    /// writes files OUTSIDE that lock, so two concurrent saves would race the
+    /// deterministic tmp paths without this. Ops/status never take it.
+    save_guard: Mutex<()>,
 }
 
 impl IndexOrchestrator {
@@ -214,6 +218,7 @@ impl IndexOrchestrator {
             dir,
             engine,
             shared: Mutex::new(shared),
+            save_guard: Mutex::new(()),
         }
     }
 
@@ -337,9 +342,40 @@ impl IndexOrchestrator {
     /// meta is the commit point, so it must never describe vectors or hashes
     /// that aren't already durably on disk (#381).
     pub fn save(&self) -> NativeResult<()> {
-        let shared = self.shared.lock().expect("orchestrator poisoned");
+        // Savers serialize against each other; everything else stays free.
+        let _saving = self.save_guard.lock().expect("save guard poisoned");
         let Some(ndim) = self.engine.ndim() else {
             return Ok(()); // nothing built — nothing to persist
+        };
+        // SNAPSHOT under the shared lock, WRITE outside it (#445): the old
+        // shape held `shared` across the multi-hundred-MB engine file write,
+        // so every op tail's watermark update and every /status blocked for
+        // the whole flush. The snapshot is cheap (clones of small fields +
+        // the hash map stringify); the writes below run lock-free. Ordering
+        // invariant (#381) holds: meta is the commit point and describes the
+        // snapshot, which is ≤ the engine state written after it — a
+        // too-old meta only costs an extra reconcile on load, never lies.
+        let (hashes_json, meta) = {
+            let shared = self.shared.lock().expect("orchestrator poisoned");
+            let hashes_json = match &shared.note_hashes {
+                Some(hashes) => {
+                    let as_strings: BTreeMap<String, &String> =
+                        hashes.iter().map(|(k, v)| (k.to_string(), v)).collect();
+                    Some(
+                        serde_json::to_string(&as_strings)
+                            .map_err(|e| NativeError::internal(format!("hashes encode: {e}")))?,
+                    )
+                }
+                None => None,
+            };
+            let meta = IndexMeta {
+                ndim: ndim as i64,
+                col_mod: shared.col_mod,
+                model_id: shared.model_id.clone(),
+                schema: shared.schema,
+                activation: shared.activation.clone(),
+            };
+            (hashes_json, meta)
         };
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| NativeError::internal(format!("index dir: {e}")))?;
@@ -350,21 +386,39 @@ impl IndexOrchestrator {
         self.engine
             .save(dir_str)
             .map_err(|e| NativeError::internal(format!("engine save: {e}")))?;
-        if let Some(hashes) = &shared.note_hashes {
-            let as_strings: BTreeMap<String, &String> =
-                hashes.iter().map(|(k, v)| (k.to_string(), v)).collect();
-            let hashes_json = serde_json::to_string(&as_strings)
-                .map_err(|e| NativeError::internal(format!("hashes encode: {e}")))?;
+        if let Some(hashes_json) = hashes_json {
             write_atomic(&self.dir.join("index.hashes.json"), &hashes_json)
                 .map_err(|e| NativeError::internal(format!("hashes write: {e}")))?;
         }
-        let meta = IndexMeta {
-            ndim: ndim as i64,
-            col_mod: shared.col_mod,
-            model_id: shared.model_id.clone(),
-            schema: shared.schema,
-            activation: shared.activation.clone(),
+        let meta_json = serde_json::to_string(&meta)
+            .map_err(|e| NativeError::internal(format!("meta encode: {e}")))?;
+        write_atomic(&self.dir.join("index.meta.json"), &meta_json)
+            .map_err(|e| NativeError::internal(format!("meta write: {e}")))?;
+        Ok(())
+    }
+
+    /// Persist ONLY the meta sidecar (#445): the watermark-only reconcile
+    /// path (a metadata-level col.mod bump — tags/decks/templates) changes no
+    /// vector and no hash, but previously rewrote the full engine files to
+    /// persist one i64. The vectors/hashes on disk are unchanged by
+    /// definition on this path, so meta stays truthful.
+    pub fn save_meta_only(&self) -> NativeResult<()> {
+        let _saving = self.save_guard.lock().expect("save guard poisoned");
+        let Some(ndim) = self.engine.ndim() else {
+            return Ok(());
         };
+        let meta = {
+            let shared = self.shared.lock().expect("orchestrator poisoned");
+            IndexMeta {
+                ndim: ndim as i64,
+                col_mod: shared.col_mod,
+                model_id: shared.model_id.clone(),
+                schema: shared.schema,
+                activation: shared.activation.clone(),
+            }
+        };
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| NativeError::internal(format!("index dir: {e}")))?;
         let meta_json = serde_json::to_string(&meta)
             .map_err(|e| NativeError::internal(format!("meta encode: {e}")))?;
         write_atomic(&self.dir.join("index.meta.json"), &meta_json)
@@ -415,14 +469,18 @@ impl DebouncedSaver {
         }
         if pending.changes >= self.threshold {
             drop(pending);
-            self.flush();
+            // Off the op tail (#445): the 100th upsert's caller previously
+            // ate the entire multi-second file write inline.
+            self.flush_background();
             return;
         }
         let this = Arc::clone(self);
         let delay = self.delay;
         let task = crate::runtime::handle().spawn(async move {
             tokio::time::sleep(delay).await;
-            this.flush();
+            // Blocking fs work belongs on the blocking pool, not a runtime
+            // worker (#445).
+            this.flush_background();
         });
         pending.armed = Some(task.abort_handle());
     }
@@ -432,19 +490,39 @@ impl DebouncedSaver {
         self.pending.lock().expect("saver poisoned").changes
     }
 
-    pub fn flush(&self) {
-        {
-            let mut pending = self.pending.lock().expect("saver poisoned");
-            if let Some(armed) = pending.armed.take() {
-                // Possibly our own handle (the timer task flushing) — an
-                // abort after the sleep is a no-op.
-                armed.abort();
-            }
-            pending.changes = 0;
+    /// Disarm the timer and zero the counter — synchronously, so
+    /// `pending_changes` means "changes not yet handed to a flush" regardless
+    /// of where the file write runs.
+    fn reset_pending(&self) {
+        let mut pending = self.pending.lock().expect("saver poisoned");
+        if let Some(armed) = pending.armed.take() {
+            // Possibly our own handle (the timer task flushing) — an
+            // abort after the sleep is a no-op.
+            armed.abort();
         }
+        pending.changes = 0;
+    }
+
+    pub fn flush(&self) {
+        self.reset_pending();
         if let Err(e) = self.orchestrator.save() {
             tracing::warn!(error = ?e, "debounced index save failed");
         }
+    }
+
+    /// `flush`, but the file write rides the blocking pool — the timer and
+    /// burst-threshold paths use this so neither a tokio worker nor an op
+    /// tail carries the multi-second write (#445). The counter resets
+    /// synchronously (same contract as `flush`); shutdown keeps the
+    /// synchronous `flush` so close() returns only after the write lands.
+    fn flush_background(self: &Arc<Self>) {
+        self.reset_pending();
+        let this = Arc::clone(self);
+        crate::runtime::handle().spawn_blocking(move || {
+            if let Err(e) = this.orchestrator.save() {
+                tracing::warn!(error = ?e, "debounced index save failed");
+            }
+        });
     }
 }
 
@@ -892,7 +970,7 @@ impl IndexOrchestrator {
             let mut shared = self.shared.lock().expect("orchestrator poisoned");
             shared.col_mod = Some(col_mod);
             drop(shared);
-            self.save()?;
+            self.save_meta_only()?;
             return Ok(());
         }
         {
