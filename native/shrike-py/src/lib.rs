@@ -371,16 +371,18 @@ impl RemoteEmbedder {
 impl RemoteEmbedder {
     #[new]
     #[pyo3(signature = (base_url, *, api_key=None, model=None))]
-    fn new(base_url: String, api_key: Option<String>, model: Option<String>) -> Self {
-        Self {
-            inner: std::sync::Arc::new(shrike_embed_remote::RemoteEmbedder::new(
-                shrike_embed_remote::RemoteEmbedderConfig {
-                    base_url,
-                    api_key,
-                    model,
-                },
-            )),
-        }
+    fn new(base_url: String, api_key: Option<String>, model: Option<String>) -> PyResult<Self> {
+        // Construction validates the API key (header-injection guard, #383).
+        let engine =
+            shrike_embed_remote::RemoteEmbedder::new(shrike_embed_remote::RemoteEmbedderConfig {
+                base_url,
+                api_key,
+                model,
+            })
+            .map_err(to_py_err)?;
+        Ok(Self {
+            inner: std::sync::Arc::new(engine),
+        })
     }
 
     /// Embed one chunk of texts as a single request (one vector per input).
@@ -854,6 +856,13 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_embedder::native_embedder_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;
+    // Bridge lifecycle test seams (#387): the leak tripwire counter + a
+    // waker-retaining pending future to park on it.
+    m.add_function(wrap_pyfunction!(
+        asyncio_bridge::bridge_live_poll_callbacks,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(asyncio_bridge::bridge_parked_forever, m)?)?;
     m.add_function(wrap_pyfunction!(rrf_fuse, m)?)?;
     m.add_function(wrap_pyfunction!(schema_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(schema_roundtrip, m)?)?;
