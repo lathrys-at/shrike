@@ -417,7 +417,7 @@ mod contract {
             regex: bool,
             match_case: bool,
             field_name: Option<&str>,
-        ) -> NativeResult<String> {
+        ) -> NativeResult<(usize, Vec<i64>)> {
             Self::find_replace_notes(
                 self,
                 note_ids,
@@ -1546,14 +1546,11 @@ mod tests {
         assert_eq!(del.not_found, vec!["Ghost"]);
 
         // find_replace_notes: literal apply + changed-id diff.
-        let fr: serde_json::Value = serde_json::from_str(
-            &core
-                .find_replace_notes(&[nid], "alpha", "omega", false, true, None)
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(fr["notes_changed"], 1);
-        assert_eq!(fr["changed_ids"][0], nid);
+        let (notes_changed, changed_ids) = core
+            .find_replace_notes(&[nid], "alpha", "omega", false, true, None)
+            .unwrap();
+        assert_eq!(notes_changed, 1);
+        assert_eq!(changed_ids, vec![nid]);
         assert_eq!(core.get_note(nid).unwrap().fields[0], "omega");
 
         // delete_note_types: in-use error / not_found; (no unused stock type

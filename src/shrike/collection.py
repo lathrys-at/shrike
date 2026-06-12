@@ -658,14 +658,14 @@ class CollectionWrapper:
                     "changed_ids": [],
                 }
 
-            applied = json.loads(
-                c.find_replace_notes(candidates, search, replacement, regex, match_case, field)
+            notes_changed, changed_ids = c.find_replace_notes(
+                candidates, search, replacement, regex, match_case, field
             )
             return {
-                "notes_changed": applied["notes_changed"],
+                "notes_changed": notes_changed,
                 "dry_run": False,
                 "samples": samples,
-                "changed_ids": applied["changed_ids"],
+                "changed_ids": changed_ids,
             }
 
         return await self.run(_replace)

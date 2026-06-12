@@ -185,9 +185,9 @@ pub trait Collection: Send + Sync {
         policy: DuplicatePolicy,
         dry_run: bool,
     ) -> NativeResult<Vec<UpsertNoteResult>>;
-    /// Anki-grammar find/replace over a note set; returns the apply JSON
-    /// (`{"notes_changed", "changed_ids"}`) — the one surface #391 left
-    /// stringly, mirrored as-is (typing it is a contract-neutral follow-up).
+    /// Anki-grammar find/replace over a note set: the anki-reported change
+    /// count plus the diffed changed-id set (kernel-internal maintenance
+    /// data — the reindex tail — never the wire).
     #[allow(clippy::too_many_arguments)]
     fn find_replace_notes(
         &self,
@@ -197,7 +197,7 @@ pub trait Collection: Send + Sync {
         regex: bool,
         match_case: bool,
         field_name: Option<&str>,
-    ) -> NativeResult<String>;
+    ) -> NativeResult<(usize, Vec<i64>)>;
 
     // ── tags + decks ─────────────────────────────────────────────────────
     fn update_note_tags(

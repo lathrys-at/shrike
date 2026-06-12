@@ -125,12 +125,13 @@ def test_cross_core_write_parity(tmp_path, native_core):
     native_del = json.loads(native_core.delete_decks(["Empty::Leaf", "Default", "Ghost"]))
     assert native_del == pip["delete_decks"]
 
-    # find_replace: same changed count; changed_ids echo the native note.
-    native_fr = json.loads(
-        native_core.find_replace_notes([nid], "alpha", "omega", False, True, None)
+    # find_replace: same changed count; changed_ids echo the native note
+    # (a typed tuple since #513 — the id set never rides a wire).
+    notes_changed, changed_ids = native_core.find_replace_notes(
+        [nid], "alpha", "omega", False, True, None
     )
-    assert native_fr["notes_changed"] == pip["replace"]["notes_changed"] == 1
-    assert native_fr["changed_ids"] == [nid]
+    assert notes_changed == pip["replace"]["notes_changed"] == 1
+    assert changed_ids == [nid]
     assert native_core.get_note(nid)[2][0] == "omega"
 
 

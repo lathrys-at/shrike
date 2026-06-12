@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use shrike_ffi::{NativeError, NativeResult};
 
 use shrike_schemas::{
@@ -527,7 +527,7 @@ impl CollectionCore {
         regex: bool,
         match_case: bool,
         field_name: Option<&str>,
-    ) -> NativeResult<String> {
+    ) -> NativeResult<(usize, Vec<i64>)> {
         let flds_sql = format!(
             "select id, flds from notes where id in ({})",
             ids_csv(note_ids)
@@ -552,7 +552,7 @@ impl CollectionCore {
             .filter(|nid| after.get(nid) != before.get(nid))
             .copied()
             .collect();
-        Ok(json!({"notes_changed": count, "changed_ids": changed_ids}).to_string())
+        Ok((count, changed_ids))
     }
 
     /// Delete note types by id — only if unused. Typed per-item results

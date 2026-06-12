@@ -271,7 +271,9 @@ impl CollectionCore {
         .map_err(to_py_err)
     }
 
-    /// Anki's find_and_replace over a note set + changed-id diff (JSON out).
+    /// Anki's find_and_replace over a note set + changed-id diff —
+    /// `(notes_changed, changed_ids)`; the id set is host-side maintenance
+    /// input (the reindex tail), never the response wire.
     #[pyo3(signature = (note_ids, search, replacement, regex=false, match_case=true, field=None))]
     #[allow(clippy::too_many_arguments)]
     fn find_replace_notes(
@@ -283,7 +285,7 @@ impl CollectionCore {
         regex: bool,
         match_case: bool,
         field: Option<String>,
-    ) -> PyResult<String> {
+    ) -> PyResult<(usize, Vec<i64>)> {
         py.detach(|| {
             self.inner.find_replace_notes(
                 &note_ids,
