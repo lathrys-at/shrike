@@ -1217,7 +1217,8 @@ impl Kernel {
     // ── tag + deck ops (#391 re-home, long-tail group 2) ────────────────────
     // Tags and deck names are not embedding text: each op is one collection
     // job plus the best-effort metadata watermark tail when anything changed
-    // (the host's old _bump_col_mod_after_metadata_change, re-homed).
+    // (mirroring the host's _bump_col_mod_after_metadata_change, whose
+    // remaining callers retire with the note-type re-home).
 
     /// The shared metadata tail: advance the watermarks so a vectors-
     /// unchanged col_mod bump doesn't read as drift on next boot. Best-effort
@@ -1699,6 +1700,92 @@ mod no_cpython_smoke {
             assert!(!applied.dry_run);
             assert_eq!(applied.empty_notes.unwrap().removed, vec![nid]);
             assert!(!kernel.index().engine().contains(nid));
+            assert!(!kernel.reindex_if_needed().await.unwrap());
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
+    fn tag_deck_ops_carry_the_metadata_tail() {
+        // The #391 group-2 tail at its home: a real change advances the
+        // index watermark to the new col_mod (no drift on the next check);
+        // a no-op batch leaves the watermark EXACTLY where it was — the
+        // `changed` guard skips the tail, not merely "no drift afterwards"
+        // (the host-side spies this replaces asserted the skip directly).
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+            let CreateOutcome::Created(nid) = kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["front".into(), "back".into()],
+                    vec!["t".into()],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("create failed")
+            };
+
+            let watermark = |k: &Kernel| k.index().status().col_mod;
+            let before = watermark(&kernel);
+
+            // No-op: a non-existent note modifies nothing → the tail is
+            // skipped and the watermark doesn't move at all.
+            let miss = kernel
+                .update_note_tags(vec![999_999], None, vec!["x".into()], Vec::new())
+                .await
+                .unwrap();
+            assert_eq!(miss.notes_modified, 0);
+            assert_eq!(watermark(&kernel), before);
+
+            // All-error deck batch: same skip.
+            let errs = kernel
+                .upsert_decks(vec![shrike_schemas::DeckInput {
+                    id: Some(999_999),
+                    name: "X".into(),
+                }])
+                .await
+                .unwrap();
+            assert!(matches!(
+                errs[0],
+                shrike_schemas::UpsertDeckResult::Error { .. }
+            ));
+            assert_eq!(watermark(&kernel), before);
+
+            // A real tag edit: the tail advances the watermark to the new
+            // col_mod, so the bump never reads as drift.
+            let hit = kernel
+                .update_note_tags(vec![nid], None, vec!["fresh".into()], Vec::new())
+                .await
+                .unwrap();
+            assert_eq!(hit.notes_modified, 1);
+            assert_eq!(watermark(&kernel), Some(kernel.col_mod().await.unwrap()));
+            assert!(!kernel.reindex_if_needed().await.unwrap());
+
+            // Deck create + empty-delete: both tails fire.
+            kernel
+                .upsert_decks(vec![shrike_schemas::DeckInput {
+                    id: None,
+                    name: "Temp".into(),
+                }])
+                .await
+                .unwrap();
+            let del = kernel.delete_decks(vec!["Temp".into()]).await.unwrap();
+            assert_eq!(del.deleted, vec!["Temp"]);
+            assert_eq!(watermark(&kernel), Some(kernel.col_mod().await.unwrap()));
             assert!(!kernel.reindex_if_needed().await.unwrap());
 
             kernel.close().await.unwrap();
