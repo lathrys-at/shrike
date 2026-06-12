@@ -1,88 +1,89 @@
-"""Tool-layer find_replace_notes (#85): validation + re-embed of changed notes."""
+"""Tool-layer find_replace_notes (#85): validation + re-embed of changed notes.
+
+Kernel-harness port (#355): an applied replace routes the changed set through
+kernel.reindex_notes (re-embed + re-ingest); the re-embed is observable as a
+fresh embed call carrying the edited text.
+"""
 
 from __future__ import annotations
-
-import asyncio
-from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
-from shrike.index import IndexSaver, IndexState, VectorIndex
 from shrike.tools import register_tools
-from tests.unit.conftest import make_notes
-
-
-def _call(mcp: FastMCP, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
-    _, structured = asyncio.run(mcp.call_tool(name, args or {}))
-    return structured
-
-
-def _seed(wrapper, deck: str, front: str) -> int:
-    note = {"deck": deck, "note_type": "Basic", "fields": {"Front": front, "Back": "x"}}
-    return make_notes(wrapper, [note])[0]["id"]
+from tests.unit.conftest import EmbedRecorder
 
 
 @pytest.fixture()
-def mock_index():
-    idx = MagicMock(spec=VectorIndex)
-    idx.state = IndexState.READY
-    idx.available = True
-    idx.col_mod = 0
-    return idx
+def backend():
+    return EmbedRecorder()
 
 
 @pytest.fixture()
-def mock_saver():
-    return MagicMock(spec=IndexSaver)
+def kproxy(kharness, backend):
+    kharness.attach_embedder(backend)
+    proxy = kharness.proxy()
+    proxy.spy("reindex_notes")
+    return proxy
 
 
 @pytest.fixture()
-def mcp_app(wrapper, mock_index, mock_saver):
+def mcp_app(kharness, kproxy):
     mcp = FastMCP("test")
-    register_tools(mcp, wrapper, index=mock_index, saver=mock_saver)
+    register_tools(mcp, kharness.wrapper, kernel=kproxy)
     return mcp
 
 
 class TestValidation:
-    def test_requires_scope(self, mcp_app):
+    def test_requires_scope(self, kharness, mcp_app):
         with pytest.raises(ToolError, match="scope"):
-            _call(mcp_app, "find_replace_notes", {"search": "a", "replace": "b"})
+            kharness.call_tool(mcp_app, "find_replace_notes", {"search": "a", "replace": "b"})
 
-    def test_empty_search_rejected(self, mcp_app):
+    def test_empty_search_rejected(self, kharness, mcp_app):
         with pytest.raises(ToolError):
-            _call(mcp_app, "find_replace_notes", {"search": "", "replace": "b", "deck": "Bio"})
+            kharness.call_tool(
+                mcp_app, "find_replace_notes", {"search": "", "replace": "b", "deck": "Bio"}
+            )
 
 
 class TestReembed:
-    def test_apply_reembeds_changed_notes(self, wrapper, mock_index, mock_saver, mcp_app):
-        nid = _seed(wrapper, "Bio", "teh cell")
-        _seed(wrapper, "Bio", "no match here")
-        args = {"search": "teh", "replace": "the", "deck": "Bio"}
-        result = _call(mcp_app, "find_replace_notes", args)
+    def test_apply_reembeds_changed_notes(self, kharness, backend, kproxy, mcp_app):
+        kharness.seed_note("teh cell", deck="Bio")
+        kharness.seed_note("no match here", deck="Bio")
+        embeds_before = len(backend.calls)
+        result = kharness.call_tool(
+            mcp_app, "find_replace_notes", {"search": "teh", "replace": "the", "deck": "Bio"}
+        )
         assert result["notes_changed"] == 1
-        mock_index.add.assert_called_once()
-        assert [i.note_id for i in mock_index.add.call_args[0][0]] == [nid]  # only the changed note
-        assert mock_index.col_mod == wrapper.run_sync(lambda c: c.col_mod())
-        mock_saver.request_save.assert_called_once()
+        assert kproxy.calls["reindex_notes"] == 1
+        # Exactly the changed note re-embedded, with its edited text.
+        new_calls = backend.calls[embeds_before:]
+        assert len(new_calls) == 1
+        assert len(new_calls[0]) == 1
+        assert "the cell" in new_calls[0][0]
+        assert kharness.index_status()["col_mod"] == kharness.col_mod()
+        assert kharness.reindex_if_needed() is False
 
-    def test_dry_run_does_not_touch_index(self, wrapper, mock_index, mock_saver, mcp_app):
-        _seed(wrapper, "Bio", "teh cell")
-        result = _call(
+    def test_dry_run_does_not_touch_index(self, kharness, backend, kproxy, mcp_app):
+        kharness.seed_note("teh cell", deck="Bio")
+        embeds_before = len(backend.calls)
+        result = kharness.call_tool(
             mcp_app,
             "find_replace_notes",
             {"search": "teh", "replace": "the", "deck": "Bio", "dry_run": True},
         )
         assert result["dry_run"] is True
         assert result["notes_changed"] == 1
-        mock_index.add.assert_not_called()
-        mock_saver.request_save.assert_not_called()
+        assert kproxy.calls["reindex_notes"] == 0
+        assert len(backend.calls) == embeds_before
 
-    def test_no_match_no_reembed(self, wrapper, mock_index, mock_saver, mcp_app):
-        _seed(wrapper, "Bio", "nothing")
-        args = {"search": "zzz", "replace": "x", "deck": "Bio"}
-        result = _call(mcp_app, "find_replace_notes", args)
+    def test_no_match_no_reembed(self, kharness, backend, kproxy, mcp_app):
+        kharness.seed_note("nothing", deck="Bio")
+        embeds_before = len(backend.calls)
+        result = kharness.call_tool(
+            mcp_app, "find_replace_notes", {"search": "zzz", "replace": "x", "deck": "Bio"}
+        )
         assert result["notes_changed"] == 0
-        mock_index.add.assert_not_called()
+        assert kproxy.calls["reindex_notes"] == 0
+        assert len(backend.calls) == embeds_before

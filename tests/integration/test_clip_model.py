@@ -10,7 +10,9 @@ image-by-text quality was measured in the Phase-3a eval, #193.)
 
 from __future__ import annotations
 
+import asyncio
 import colorsys
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -33,12 +35,6 @@ _UNRELATED = ["a photograph of a cat", "a circuit diagram schematic", "a page of
 
 
 @requires_clip
-def _make(w, notes):
-    import json
-
-    return w.run_sync(lambda c: json.loads(c.upsert_notes(json.dumps(notes), "allow", False)))
-
-
 class TestClipModel:
     # One started backend for the whole class: every test here exercises the *same*
     # default quantized graphs read-only (embed/health/_safe_batch), so a per-test
@@ -88,11 +84,12 @@ class TestClipModel:
 
 @requires_clip
 class TestClipImageIndex:
-    """End-to-end per-modality index (#162 Phase 3c → search #201a): a text query retrieves a note
-    by its image, and the per-modality image ranker surfaces it at rank-1 across the gap."""
+    """End-to-end per-modality index (#162 Phase 3c → search #201a), over the kernel since the
+    #355 facade retirement: a text query retrieves a note by its image, and the per-modality
+    image ranker surfaces it at rank-1 across the gap."""
 
     # Class-scoped started backend (same rationale as TestClipModel, #215): load the ~147 MB CLIP
-    # once for the class. Each test builds its own (cheap) collection + index against it.
+    # once for the class. Each test opens its own (cheap) kernel + collection against it.
     @pytest.fixture(scope="class")
     def be(self, clip_model: Path) -> Iterator[ClipBackend]:
         backend = ClipBackend(model=str(clip_model))
@@ -101,187 +98,157 @@ class TestClipImageIndex:
         backend.stop()
 
     @staticmethod
-    def _collection(tmp_path: Path):
-        import os
+    async def _open_kernel(tmp_path: Path, be: ClipBackend):
+        """A real AsyncKernel over a fresh collection, with the CLIP backend attached the way
+        the server does it (native_embedder + the media-dir resolver pair)."""
+        import shrike_native
 
-        from PIL import Image
-
-        from shrike.collection import CollectionWrapper
-
-        w = CollectionWrapper(str(tmp_path / "c.anki2"))
-        os.makedirs(w.media_dir, exist_ok=True)
-        Image.new("RGB", (128, 128), (220, 30, 30)).save(os.path.join(w.media_dir, "red.png"))
-        # The note's TEXT never names a colour; its meaning lives in the image.
-        red = _make(
-            w,
-            [
-                {
-                    "deck": "Test",
-                    "note_type": "Basic",
-                    "fields": {"Front": 'study card <img src="red.png">', "Back": "."},
-                }
-            ],
-        )[0]["id"]
-        other = _make(
-            w,
-            [
-                {
-                    "deck": "Test",
-                    "note_type": "Basic",
-                    "fields": {"Front": "ancient rome", "Back": "."},
-                }
-            ],
-        )[0]["id"]
-        return w, red, other
-
-    def _index(self, be: ClipBackend, tmp_path: Path, w):
-        from shrike.index import VectorIndex
         from shrike.server import _make_image_resolver
 
-        idx = VectorIndex(tmp_path / "index", backend=be)
-        idx.set_image_resolver(*_make_image_resolver(w.media_dir))
-        return idx
-
-    def test_image_note_rank_one_via_image_ranker(self, be: ClipBackend, tmp_path: Path) -> None:
-
-        w, red, other = self._collection(tmp_path)
-        try:
-            idx = self._index(be, tmp_path, w)
-            from shrike.embedding_base import NoteEmbedInput
-
-            inputs = w.run_sync(
-                lambda c: [
-                    NoteEmbedInput(note_id=n, text=t, image_names=imgs)
-                    for n, t, imgs in c.note_embed_inputs([red, other])
-                ]
-            )
-            idx.rebuild(inputs, col_mod=1, model_id=be.model_fingerprint())
-            # red: text + image = 2 vectors (image in its own sub-index); other: text = 1.
-            assert idx.size == 3
-            assert len(idx._indexes["image"]) == 1  # exactly the red note's image vector
-
-            # Per-modality retrieval (#201a): the image ranking is a separate signal, so the
-            # image-bearing note surfaces at rank-1 *in that ranking* regardless of CLIP's modality
-            # gap (text-text cos ~0.72 vs text-image ~0.32) — which a single deduped cosine ranking
-            # could not deliver (the red note's own TEXT is "study card", naming no colour).
-            matching = idx.search_by_modality(["a solid red colour image"], top_k=2)[0]
-            assert matching["image"][0]["note_id"] == red
-
-            # And it retrieves by image *content*: the red note's image vector is nearer the
-            # matching colour query than an unrelated-concept query (the robust colour-vs-unrelated
-            # regime — colour-vs-colour is ~0.05 and flips across int8 builds, so it's avoided).
-            unrelated = idx.search_by_modality(["a circuit diagram schematic"], top_k=2)[0]
-            assert matching["image"][0]["distance"] < unrelated["image"][0]["distance"]
-        finally:
-            w.close()
-
-    def test_reconcile_reembeds_when_image_removed(self, be: ClipBackend, tmp_path: Path) -> None:
-        from shrike.index import NoteEmbedInput
-
-        w, red, other = self._collection(tmp_path)
-        try:
-            idx = self._index(be, tmp_path, w)
-            mid = be.model_fingerprint()
-            from shrike.embedding_base import NoteEmbedInput
-
-            inputs = w.run_sync(
-                lambda c: [
-                    NoteEmbedInput(note_id=n, text=t, image_names=imgs)
-                    for n, t, imgs in c.note_embed_inputs([red, other])
-                ]
-            )
-            idx.rebuild(inputs, col_mod=1, model_id=mid)
-            assert idx.size == 3
-            # The red note loses its image (its embedding fingerprint changes) → reconcile drops
-            # the image vector for exactly that note; the unrelated note is untouched.
-            idx.reconcile(
-                [NoteEmbedInput(red, "study card", []), NoteEmbedInput(other, "ancient rome", [])],
-                col_mod=2,
-                model_id=mid,
-            )
-            assert idx.size == 2  # red: text only now ; rome: text
-        finally:
-            w.close()
+        collection = str(tmp_path / "c.anki2")
+        media_dir = collection[: -len(".anki2")] + ".media"
+        os.makedirs(media_dir, exist_ok=True)
+        kernel = await shrike_native.async_kernel_open(collection, str(tmp_path / "cache"))
+        read, exists = _make_image_resolver(media_dir)
+        kernel.attach_embedder(be.native_embedder(), read, exists)
+        await kernel.reindex_if_needed()  # materialize the (empty) index
+        return kernel, media_dir
 
     @staticmethod
-    def _colour_collection(tmp_path: Path, n: int):
-        """A collection of ``n`` cards, each a distinct solid-colour image with colour-neutral text
-        (card 0 is red). Enough cards to calibrate the activation gate on the real model."""
-        import os
+    async def _seed(kernel, notes: list[dict]) -> list[int]:
+        import json
 
+        results = json.loads(await kernel.upsert_notes_json(json.dumps(notes), "allow", False))
+        assert all(r["status"] in ("created", "updated") for r in results), results
+        return [r["id"] for r in results]
+
+    @staticmethod
+    def _note(front: str) -> dict:
+        return {"deck": "Test", "note_type": "Basic", "fields": {"Front": front, "Back": "."}}
+
+    @staticmethod
+    def _best_image(engine, be: ClipBackend, query: str, k: int = 2):
+        """(ids, distances) of the image-modality ranking for a text query."""
+        ranking = engine.search_by_modality(be.embed_texts([query]), k)[0]
+        return ranking["image"]
+
+    def test_image_note_rank_one_via_image_ranker(self, be: ClipBackend, tmp_path: Path) -> None:
         from PIL import Image
 
-        from shrike.collection import CollectionWrapper
+        async def flow():
+            kernel, media_dir = await self._open_kernel(tmp_path, be)
+            Image.new("RGB", (128, 128), (220, 30, 30)).save(os.path.join(media_dir, "red.png"))
+            # The note's TEXT never names a colour; its meaning lives in the image.
+            red, other = await self._seed(
+                kernel,
+                [self._note('study card <img src="red.png">'), self._note("ancient rome")],
+            )
+            engine = kernel.engine_handle()
+            # red: text + image = 2 vectors (image in its own sub-index); other: text = 1.
+            assert engine.size() == 3
+            assert engine.modality_keys("image") == [red]
 
-        w = CollectionWrapper(str(tmp_path / "c.anki2"))
-        os.makedirs(w.media_dir, exist_ok=True)
-        ids: list[int] = []
-        for i in range(n):
-            r, g, b = colorsys.hsv_to_rgb(i / n, 0.85, 0.9)  # hue 0 (card 0) is red
-            rgb = (int(r * 255), int(g * 255), int(b * 255))
-            fn = f"c{i}.png"
-            Image.new("RGB", (96, 96), rgb).save(os.path.join(w.media_dir, fn))
-            note = {
-                "deck": "Test",
-                "note_type": "Basic",
-                "fields": {"Front": f'study card number {i} <img src="{fn}">', "Back": "."},
-            }
-            nid = _make(w, [note])[0]["id"]
-            ids.append(nid)
-        return w, ids
+            # Per-modality retrieval (#201a): the image ranking is a separate signal, so the
+            # image-bearing note surfaces at rank-1 *in that ranking* regardless of CLIP's
+            # modality gap (text-text cos ~0.72 vs text-image ~0.32) — which a single deduped
+            # cosine ranking could not deliver (the red note's own TEXT names no colour).
+            ids, matching = self._best_image(engine, be, "a solid red colour image")
+            assert ids[0] == red
+
+            # And it retrieves by image *content*: the red note's image vector is nearer the
+            # matching colour query than an unrelated-concept query (the robust
+            # colour-vs-unrelated regime — colour-vs-colour is ~0.05 and flips across int8
+            # builds, so it's avoided).
+            _, unrelated = self._best_image(engine, be, "a circuit diagram schematic")
+            assert matching[0] < unrelated[0]
+            await kernel.close()
+
+        asyncio.run(flow())
+
+    def test_update_drops_removed_image_vector(self, be: ClipBackend, tmp_path: Path) -> None:
+        from PIL import Image
+
+        async def flow():
+            kernel, media_dir = await self._open_kernel(tmp_path, be)
+            Image.new("RGB", (128, 128), (220, 30, 30)).save(os.path.join(media_dir, "red.png"))
+            red, other = await self._seed(
+                kernel,
+                [self._note('study card <img src="red.png">'), self._note("ancient rome")],
+            )
+            engine = kernel.engine_handle()
+            assert engine.size() == 3
+            # The red note loses its image (its embedding fingerprint changes) → the kernel's
+            # maintenance drops the image vector for exactly that note; the other is untouched.
+            import json
+
+            await kernel.upsert_notes_json(
+                json.dumps([{"id": red, "fields": {"Front": "study card"}}]), "allow", False
+            )
+            assert engine.size() == 2  # red: text only now ; rome: text
+            assert engine.modality_keys("image") == []
+            await kernel.close()
+
+        asyncio.run(flow())
 
     def test_activation_gate_calibrates_and_passes_genuine_match(
         self, be: ClipBackend, tmp_path: Path
     ) -> None:
+        import json
 
-        # A ≥CALIB_MIN colour collection so calibration produces image stats on the real CLIP model.
-        w, ids = self._colour_collection(tmp_path, CALIB_MIN + 2)
-        try:
-            idx = self._index(be, tmp_path, w)
-            from shrike.embedding_base import NoteEmbedInput
+        from PIL import Image
 
-            inputs = w.run_sync(
-                lambda c: [
-                    NoteEmbedInput(note_id=n, text=t, image_names=imgs)
-                    for n, t, imgs in c.note_embed_inputs(ids)
-                ]
-            )
-            idx.rebuild(inputs, col_mod=1, model_id=be.model_fingerprint())
+        async def flow():
+            kernel, media_dir = await self._open_kernel(tmp_path, be)
+            # A ≥CALIB_MIN colour collection so calibration produces image stats on the real
+            # CLIP model: each card a distinct solid-colour image with colour-neutral text
+            # (card 0 is red).
+            n = CALIB_MIN + 2
+            notes = []
+            for i in range(n):
+                r, g, b = colorsys.hsv_to_rgb(i / n, 0.85, 0.9)  # hue 0 (card 0) is red
+                rgb = (int(r * 255), int(g * 255), int(b * 255))
+                fn = f"c{i}.png"
+                Image.new("RGB", (96, 96), rgb).save(os.path.join(media_dir, fn))
+                notes.append(self._note(f'study card number {i} <img src="{fn}">'))
+            await self._seed(kernel, notes)
+            await kernel.rebuild_index()  # full rebuild calibrates the gate (#201b)
 
-            # Offline calibration (#201b) ran on the real model and produced image-modality stats.
-            stats = idx.activation_stats
+            # Offline calibration (#201b) ran on the real model and produced image stats.
+            stats = json.loads(kernel.index_status_json())["activation"]
             assert stats["image"]["n"] >= CALIB_MIN
             assert stats["image"]["std"] > 0.0
             floor = activation_floor(stats["image"], ACTIVATION_MARGIN)
             assert floor is not None
 
-            def _best_image_sim(query: str) -> float:
-                ranking = idx.search_by_modality([query], top_k=1)[0]["image"]
-                return 1.0 - ranking[0]["distance"]
+            engine = kernel.engine_handle()
 
-            # A genuine colour-content query clears the floor → its image card passes the gate (the
-            # gate must not suppress real matches), and it's distinctly stronger than an off-topic
-            # query — which falls toward/below the floor and is gated out (the deterministic drop is
-            # unit-tested in test_tools_search.py; colour-vs-unrelated is the robust ~0.09 regime).
-            red_best = _best_image_sim("a solid red colour image")
-            noise_best = _best_image_sim("a circuit diagram schematic")
+            def best_sim(query: str) -> float:
+                _, dists = self._best_image(engine, be, query, k=1)
+                return 1.0 - dists[0]
+
+            # A genuine colour-content query clears the floor → its image card passes the gate
+            # (the gate must not suppress real matches), and it's distinctly stronger than an
+            # off-topic query — which falls toward/below the floor and is gated out (the
+            # deterministic drop is unit-tested in test_tools_search.py; colour-vs-unrelated is
+            # the robust ~0.09 regime).
+            red_best = best_sim("a solid red colour image")
+            noise_best = best_sim("a circuit diagram schematic")
             assert red_best > floor
             assert red_best > noise_best
-        finally:
-            w.close()
+            await kernel.close()
+
+        asyncio.run(flow())
 
     def test_missing_media_file_skipped(self, be: ClipBackend, tmp_path: Path) -> None:
-        from shrike.index import NoteEmbedInput
-
-        w, red, other = self._collection(tmp_path)
-        try:
-            idx = self._index(be, tmp_path, w)
-            # Reference a file that isn't in the media dir → skipped, text still indexed, no crash.
-            idx.rebuild(
-                [NoteEmbedInput(red, "study card", ["does-not-exist.png"])],
-                col_mod=1,
-                model_id=be.model_fingerprint(),
+        async def flow():
+            kernel, _media_dir = await self._open_kernel(tmp_path, be)
+            # Reference a file that isn't in the media dir → skipped, text still indexed.
+            (red,) = await self._seed(
+                kernel, [self._note('study card <img src="does-not-exist.png">')]
             )
-            assert idx.size == 1
-        finally:
-            w.close()
+            engine = kernel.engine_handle()
+            assert engine.size() == 1
+            assert engine.contains(red)
+            await kernel.close()
+
+        asyncio.run(flow())

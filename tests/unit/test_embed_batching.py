@@ -120,9 +120,11 @@ def test_probe_texts_are_spiked() -> None:
 
 
 def test_probe_ceiling_covers_index_chunk() -> None:
-    # The probe-set size is the batch ceiling, and the index hands embed_texts chunks of up to
-    # BATCH_SIZE. If the set were smaller, a probe-safe model would be capped below the chunk —
-    # never incorrect, but a silent throughput regression. Pin the "probe at the size we use".
-    from shrike.index import BATCH_SIZE
+    # The probe-set size is the batch ceiling, and the kernel hands embed calls chunks of up
+    # to its BATCH_SIZE (shrike_kernel::index_orchestrator::BATCH_SIZE, mirrored here — the
+    # facade-era shrike.index.BATCH_SIZE retired with #355). If the set were smaller, a
+    # probe-safe model would be capped below the chunk — never incorrect, but a silent
+    # throughput regression. Pin the "probe at the size we use".
+    kernel_embed_chunk = 64
 
-    assert len(BATCH_PROBE_TEXTS) >= BATCH_SIZE
+    assert len(BATCH_PROBE_TEXTS) >= kernel_embed_chunk

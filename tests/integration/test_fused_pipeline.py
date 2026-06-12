@@ -1,9 +1,11 @@
 """The fused native pipeline end to end (#274).
 
-Two layers: a direct VectorIndex parity check — the fused embed→add/search
-calls (vectors never crossing the FFI) return the same results as the per-side
-native paths — and a fully-native server (native onnx backend + native index +
-native compute) exercising upsert→index→search over the wire.
+Two layers: a direct parity check on the raw native handles — the fused
+embed→add/search calls (vectors never crossing the FFI) return the same
+results as the per-side native paths — and a fully-native server (native onnx
+backend + native index + native compute) exercising upsert→index→search over
+the wire. (The facade-shaped variant retired with #355; shrike-compute's
+fused_* survive as the standalone embed→index composition.)
 """
 
 from __future__ import annotations
@@ -27,38 +29,44 @@ pytestmark = [pytest.mark.integration, pytest.mark.embedding]
 @requires_onnxruntime
 @requires_shrike_native
 class TestFusedIndexParity:
-    def test_fused_add_and_search_match_unfused(
-        self, tmp_path: Path, onnx_model: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_fused_add_and_search_match_unfused(self, onnx_model: Path) -> None:
+        import shrike_native
+
         from shrike.embedding_onnx import OnnxBackend
-        from shrike.index import NoteEmbedInput, VectorIndex
 
         texts = {
             1: "the mitochondria is the powerhouse of the cell",
             2: "momentum is mass times velocity",
             3: "a derivative is the instantaneous rate of change",
         }
-        inputs = [NoteEmbedInput(nid, t) for nid, t in texts.items()]
+        ids = list(texts)
+        bodies = list(texts.values())
 
         backend = OnnxBackend(model=str(onnx_model))
         backend.start()
         try:
-            fused_idx = VectorIndex(tmp_path / "fused", backend=backend)
-            assert fused_idx._fused_text_handles() is not None  # the fused path is live
-            fused_idx.rebuild(inputs, col_mod=1, model_id="m")
+            native = backend._native_engine  # the shrike_native.OnnxTextEmbedder handle
+            assert native is not None
 
-            # Same backend + engine, fused composition forced off: the per-side
-            # paths (vectors crossing the FFI) must produce the identical index.
-            plain_idx = VectorIndex(tmp_path / "plain", backend=backend)
-            monkeypatch.setattr(plain_idx, "_fused_text_handles", lambda: None)
-            plain_idx.rebuild(inputs, col_mod=1, model_id="m")
+            # Fused: embed→add composes inside one GIL-released native call.
+            fused_engine = shrike_native.NativeIndexEngine(["text", "image"])
+            chunk = backend._effective_batch(len(bodies))
+            shrike_native.fused_add_text(native, fused_engine, "text", ids, bodies, chunk)
+
+            # Per-side: the vectors cross the FFI — must build the identical index.
+            plain_engine = shrike_native.NativeIndexEngine(["text", "image"])
+            plain_engine.add("text", ids, backend.embed_texts(bodies))
 
             for query in ("rate of change calculus", "physics of motion"):
-                fused_hits = fused_idx.search([query], top_k=3)[0]
-                plain_hits = plain_idx.search([query], top_k=3)[0]
-                assert [h["note_id"] for h in fused_hits] == [h["note_id"] for h in plain_hits]
-                for f, p in zip(fused_hits, plain_hits, strict=True):
-                    assert f["distance"] == pytest.approx(p["distance"], abs=1e-5)
+                fused_ids, fused_dists = shrike_native.fused_search_text(
+                    native, fused_engine, [query], 3, ["text"]
+                )[0]["text"]
+                plain_ids, plain_dists = plain_engine.search_by_modality(
+                    backend.embed_texts([query]), 3, ["text"]
+                )[0]["text"]
+                assert list(fused_ids) == list(plain_ids)
+                for f, p in zip(fused_dists, plain_dists, strict=True):
+                    assert f == pytest.approx(p, abs=1e-5)
         finally:
             backend.stop()
 

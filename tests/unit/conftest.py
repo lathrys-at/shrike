@@ -77,6 +77,28 @@ def kernel_loop():
     loop.close()
 
 
+class EmbedRecorder:
+    """A minimal kernel-slot backend that records every embed call.
+
+    Embeds everything to [0, 1] (orthogonal to the [1, 0] the search tests use
+    as the query vector). The ``calls`` log is how the metadata-bump tests
+    assert "no re-embed" — vectors untouched means no new embed call.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return [[0.0, 1.0] for _ in texts]
+
+    def model_fingerprint(self) -> str:
+        return "unit:recorder:v1"
+
+    def embedding_dim(self) -> int:
+        return 2
+
+
 class KernelProxy:
     """A delegating AsyncKernel stand-in for failure injection / spying.
 
@@ -176,9 +198,7 @@ class KernelHarness:
         so the index materializes and reads ``ready``."""
 
         async def _go() -> None:
-            self.kernel.attach_embedder(
-                self._native.PyEmbedder.capture(backend), read, exists
-            )
+            self.kernel.attach_embedder(self._native.PyEmbedder.capture(backend), read, exists)
             if reindex:
                 await self.kernel.reindex_if_needed()
 
