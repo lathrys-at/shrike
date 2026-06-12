@@ -30,6 +30,51 @@ use crate::literals::{LiteralFalse, LiteralTrue, ReloadedLiteral};
 /// `schemas.COLLECTION_BUSY_CODE`.
 pub const COLLECTION_BUSY_CODE: &str = "collection_busy";
 
+/// A typed response as the kernel↔host *internal* wire `Value` (#391 phase 2).
+///
+/// The host boundary historically emitted hand-built `serde_json::Value`
+/// trees, whose byte contract differs from the Pydantic wire these types
+/// mirror: keys are **sorted** (`serde_json::Map` is a BTreeMap here — no
+/// `preserve_order`), output is compact, and a `None` option is **omitted**,
+/// never an explicit `null` (meta-mode notes carry no `content` key,
+/// `collection_info` carries only the requested sections). Direct struct
+/// serialization would emit declaration-order keys and explicit nulls, so the
+/// binding serializes through this instead — `to_value` then a recursive
+/// null-prune — keeping the bytes Python receives identical to the
+/// hand-built originals.
+///
+/// Only sound for response types whose internal wire never carries a
+/// *meaningful* explicit `null` — true of the read surface
+/// ([`ListNotesResponse`], [`CollectionInfo`]), asserted by the byte-pin
+/// tests in `shrike-collection`.
+pub fn to_wire_value<T: Serialize>(value: &T) -> Result<serde_json::Value, serde_json::Error> {
+    let mut v = serde_json::to_value(value)?;
+    prune_nulls(&mut v);
+    Ok(v)
+}
+
+/// [`to_wire_value`] serialized to the compact internal-wire JSON string.
+pub fn to_wire_json<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
+    Ok(to_wire_value(value)?.to_string())
+}
+
+fn prune_nulls(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            map.retain(|_, x| !x.is_null());
+            for x in map.values_mut() {
+                prune_nulls(x);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for x in arr.iter_mut() {
+                prune_nulls(x);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn default_limit() -> i64 {
     50
 }
@@ -1253,6 +1298,49 @@ mod tests {
             ..Default::default()
         };
         assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn wire_json_sorts_keys_and_omits_none() {
+        // The internal-wire contract (#391 phase 2): compact, key-sorted,
+        // None options absent — the hand-built `json!` byte shape, distinct
+        // from the Pydantic wire's explicit nulls (the test above).
+        let meta = Note {
+            id: 1,
+            note_type: "Basic".into(),
+            deck: "D".into(),
+            tags: vec!["a".into()],
+            modified: "2026-01-01".into(),
+            content: None,
+        };
+        assert_eq!(
+            to_wire_json(&meta).unwrap(),
+            r#"{"deck":"D","id":1,"modified":"2026-01-01","note_type":"Basic","tags":["a"]}"#
+        );
+        let full = Note {
+            content: Some([("Front".to_owned(), "Q".to_owned())].into_iter().collect()),
+            ..meta
+        };
+        assert_eq!(
+            to_wire_json(&full).unwrap(),
+            r#"{"content":{"Front":"Q"},"deck":"D","id":1,"modified":"2026-01-01","note_type":"Basic","tags":["a"]}"#
+        );
+        // Nested omission: an unrequested collection_info section never
+        // appears as a key, and the prune recurses through arrays.
+        let info = CollectionInfo {
+            note_types: Some(vec![NoteTypeInfo {
+                name: "Basic".into(),
+                id: 7,
+                fields: vec!["Front".into()],
+                r#type: "standard".into(),
+                detail: None,
+            }]),
+            ..Default::default()
+        };
+        assert_eq!(
+            to_wire_json(&info).unwrap(),
+            r#"{"note_types":[{"fields":["Front"],"id":7,"name":"Basic","type":"standard"}]}"#
+        );
     }
 
     #[test]
