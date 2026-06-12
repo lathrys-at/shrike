@@ -110,7 +110,9 @@ jobs:
       - name: Compute badge fields
         id: fields
         run: |
-          coverage json -q  # writes coverage.json
+          # --fail-under=0 like the report step: `coverage json` otherwise
+          # enforces pyproject's fail_under and gates the run (#418).
+          coverage json -q --fail-under=0  # writes coverage.json
           PCT=$(python -c "import json; print(json.load(open('coverage.json'))['totals']['percent_covered_display'])")
           if   [ "$PCT" -ge 90 ]; then COLOR=brightgreen
           elif [ "$PCT" -ge 80 ]; then COLOR=green

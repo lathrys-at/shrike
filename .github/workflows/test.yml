@@ -84,7 +84,10 @@ jobs:
               - '.github/workflows/test.yml'
             bazel:
               # Anything the Bazel graph builds/tests from, plus the bootstrap.
+              # `tests/**` matters (#418): without it a tests-only PR skipped this
+              # job entirely — lint ran, no test suite did.
               - 'src/**'
+              - 'tests/**'
               - 'bin/**'
               - 'tools/**'
               - 'native/**'
@@ -221,14 +224,24 @@ jobs:
   # The authoritative test lane: the unit + non-embedding integration suites run
   # under Bazel (`//... -//native/...` = the unit/integration aggregates + the
   # import spike + the library smoke; the wheel/sdist are `manual`, the embedding
-  # target is `manual` + runs in its own lane below). This replaces the old pip
+  # targets are `manual` + run as a gated step below). This replaces the old pip
   # pytest lane — `bazel test` caches unchanged results, so a re-push only re-runs
   # what changed. The committed ./bazel launcher bootstraps bazelisk + Bazel; no
   # setup-python (the toolchain is hermetic).
+  #
+  # The embedding suite lives HERE, not in its own job (#418): loading/analysis
+  # of the graph (~33k configured targets, the crate universe) costs ~60s cold
+  # and the disk cache can't help it — but a second invocation on the same warm
+  # Bazel server pays ~15s incremental (measured on the native-seam step). A
+  # dedicated embedding runner re-paid the full cold tax plus its own checkout
+  # and cache restore/save every PR; as a step it rides all of that for free.
   bazel:
     name: Bazel test (linux)
     needs: changes
-    if: needs.changes.outputs.bazel == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
+    # Either trigger opens the job; per-step `if`s pick the work. The filters
+    # overlap but neither contains the other (e.g. pyproject.toml is
+    # embedding-only; bin/** is bazel-only).
+    if: needs.changes.outputs.bazel == 'true' || needs.changes.outputs.embedding == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -262,6 +275,7 @@ jobs:
       # source/unit-test PR never pays the Rust toolchain + crate-universe
       # cold-start.
       - name: Bazel test (Python graph)
+        if: needs.changes.outputs.bazel == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
         run: |
           ./bazel test \
             --disk_cache="$HOME/.cache/shrike/bazel-disk" \
@@ -276,41 +290,20 @@ jobs:
             --disk_cache="$HOME/.cache/shrike/bazel-disk" \
             --repository_cache="$HOME/.cache/shrike/bazel-repo" \
             -- //native/...
-
-  # Embedding tests under Bazel (#262). Runs the `manual` //tests/integration:embedding
-  # aggregate — llama-server + the GGUF/ONNX/CLIP models are pinned, checksummed
-  # Bazel externals (#244 Phase 2c), fetched into the repository cache instead of
-  # cold-downloaded from HuggingFace at test time (no more #83/#93 429 flake, and
-  # no llama-server install step). Restores main's warmed Bazel cache (warm-cache.yml
-  # fetches the embedding externals there), so a PR run doesn't re-fetch them.
-  embedding:
-    name: Bazel embedding tests (linux)
-    needs: changes
-    if: needs.changes.outputs.embedding == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Cache Bazel toolchains + repo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cache/shrike/bazelisk
-            ~/.cache/shrike/bazelisk-home
-            ~/.cache/shrike/bazel-repo
-          key: bazel-repo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
-          restore-keys: bazel-repo-${{ runner.os }}-${{ runner.arch }}-
-      - name: Cache Bazel action results
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/shrike/bazel-disk
-          key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
-          restore-keys: bazel-disk-${{ runner.os }}-${{ runner.arch }}-
+      # Embedding tests (#262), as a step on the warm server (#418). The two
+      # `manual` halves (split along backend lines so Bazel runs them
+      # concurrently — the suite is serial within a target by design,
+      # model-load-bound) — llama-server + the GGUF/ONNX/CLIP models are pinned,
+      # checksummed Bazel externals (#244 Phase 2c), fetched into the repository
+      # cache instead of cold-downloaded from HuggingFace at test time (no more
+      # #83/#93 429 flake). warm-cache.yml seeds them into main's cache scope.
       - name: Bazel test (embedding)
+        if: needs.changes.outputs.embedding == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
         run: |
           ./bazel test \
             --disk_cache="$HOME/.cache/shrike/bazel-disk" \
             --repository_cache="$HOME/.cache/shrike/bazel-repo" \
-            //tests/integration:embedding
+            -- //tests/integration:embedding_core //tests/integration:embedding_backends
 
   # macOS + ARM are expensive (macOS bills at 10x), so they NEVER run on plain
   # PRs or on merges to main — only when a PR carries the `rc` (release
@@ -348,14 +341,14 @@ jobs:
           path: ~/.cache/shrike/bazel-disk
           key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: bazel-disk-${{ runner.os }}-${{ runner.arch }}-
-      # Full //... (incl. the Rust/PyO3 seam) plus the manual embedding target —
+      # Full //... (incl. the Rust/PyO3 seam) plus the manual embedding targets —
       # this lane is the cross-platform proof.
       - name: Bazel test
         run: |
           ./bazel test \
             --disk_cache="$HOME/.cache/shrike/bazel-disk" \
             --repository_cache="$HOME/.cache/shrike/bazel-repo" \
-            -- //... //tests/integration:embedding
+            -- //... //tests/integration:embedding_core //tests/integration:embedding_backends
 
   # Single required status check. Always runs, and passes iff every gated job
   # either succeeded or was legitimately skipped (its paths didn't change / not
@@ -366,7 +359,9 @@ jobs:
     if: ${{ always() }}
     # Coverage is intentionally NOT aggregated here — it lives in its own workflow
     # (coverage.yml) and only ever reports, never gates, so it must not block the merge.
-    needs: [changes, lint, bazel, embedding, cross-platform]
+    # (The embedding suite is a step inside `bazel` since #418, so its result is
+    # covered by that job's.)
+    needs: [changes, lint, bazel, cross-platform]
     runs-on: ubuntu-latest
     steps:
       # Gate: CI must be opted in via the `ci` (or `rc`) label. Without it the
@@ -387,7 +382,6 @@ jobs:
           for r in \
             "lint=${{ needs.lint.result }}" \
             "bazel=${{ needs.bazel.result }}" \
-            "embedding=${{ needs.embedding.result }}" \
             "cross-platform=${{ needs.cross-platform.result }}"; do
             case "${r#*=}" in
               success|skipped) echo "ok: $r" ;;
