@@ -482,7 +482,13 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         )
         processes.append(proc)
 
-        timeout = 30.0 if embedding_model else 10.0
+        # An embedding server's boot includes the llama-server spawn + model
+        # load, which on a cold/slow CI runner has blown a 30s ceiling twice
+        # in one day (PRs #459/#472, with warm caches) — give it the same
+        # generous deadline the collection_server availability poll uses
+        # (#444). Costs nothing when boots are fast; the no-embedding case
+        # stays tight.
+        timeout = 120.0 if embedding_model else 10.0
         try:
             _wait_for_server(url, timeout=timeout)
         except TimeoutError:
