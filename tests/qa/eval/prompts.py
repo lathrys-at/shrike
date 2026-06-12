@@ -12,10 +12,17 @@ and the eval reproducible.
 
 from __future__ import annotations
 
-SKILL_PATH = "/Users/lupine/Development/shrike/skills/anki-cards/SKILL.md"
-SHRIKE_BIN = "/Users/lupine/Development/shrike/.venv/bin/shrike"
+from pathlib import Path
 
-CLI_REFERENCE = "/Users/lupine/Development/shrike/docs/cli-reference.md"
+# Paths derive from the repo root so the eval runs from any checkout; the prompt
+# *wording* below stays fixed (that's what makes runs comparable), the absolute
+# prefix is just where this clone happens to live.
+_ROOT = Path(__file__).resolve().parents[3]  # tests/qa/eval -> repo root
+
+SKILL_PATH = str(_ROOT / "skills" / "anki-cards" / "SKILL.md")
+SHRIKE_BIN = str(_ROOT / ".venv" / "bin" / "shrike")
+
+CLI_REFERENCE = str(_ROOT / "docs" / "cli-reference.md")
 
 _CLI_BLURB = f"""\
 You interact with the user's Anki collection through the Shrike CLI. A Shrike
