@@ -778,13 +778,13 @@ class CollectionWrapper:
     ) -> list[dict[str, Any]]:
         """Store a batch of media files; one bad item never sinks the batch.
 
-        Each item is prepared **off the worker thread** and **concurrently**
-        (``asyncio.gather`` over ``to_thread`` of the NATIVE fetch/decode):
-        URL items download in parallel through the SSRF-guarded native fetch
-        and base64 items decode with the cap on the encoded length. The
-        prepared bytes are then written on the worker thread; server-local
-        ``path`` items go through the native store whole (its containment
-        gates are authoritative).
+        The STANDALONE wrapper path (tests; the server's store_media action
+        rides the kernel's re-homed op, which owns the concurrent prepare on
+        its blocking pool — #391). Each item is prepared off the worker
+        thread and concurrently (``asyncio.gather`` over ``to_thread`` of the
+        NATIVE fetch/decode); the prepared bytes are then written on the
+        worker thread; server-local ``path`` items go through the native
+        store whole (its containment gates are authoritative).
         """
         roots = server_path_roots or []
 

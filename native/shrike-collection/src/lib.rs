@@ -27,6 +27,7 @@ mod write;
 
 pub use adapter::{FieldsState, ServiceAdapter, ServiceNote};
 pub use embed_text::{extract_image_refs, EMBED_TEXT_VERSION};
+pub use media::{media_name_from_url, PreparedMedia, PreparedMediaSource};
 use shrike_ffi::{NativeError, NativeResult};
 
 /// What `create_note` did about a first-field duplicate (mirrors the Python
