@@ -69,7 +69,7 @@ def test_fingerprint_is_stable_and_versioned():
     backend = make_recognizer("apple")
     fp = backend.model_fingerprint()
     assert fp is not None
-    assert fp.startswith("apple-vision:")
+    assert fp.startswith("apple-vision-swift:")
     assert fp == backend.model_fingerprint()  # stable
 
 

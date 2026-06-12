@@ -882,8 +882,9 @@ segment — `TagCentroidConfig`, the curation surface #179 calls for.
 **The kernel composes engines it is *given* — it never names one.** Since the
 migration (P1–P5, PRs #368–#373) the contracts live in `shrike-engine-api` (a
 leaf: shrike-ffi + futures + serde), and every concrete engine is its own
-crate: `shrike-embed` (ort text + CLIP), `shrike-recognize-apple` (Vision,
-objc2), `shrike-embed-remote` (any OpenAI-compatible endpoint). Hosts —
+crate: `shrike-embed` (ort text + CLIP), `shrike-recognize-apple` (Vision;
+Swift glue behind Rust since #398 — Apple's new Vision API is Swift-only),
+`shrike-embed-remote` (any OpenAI-compatible endpoint). Hosts —
 the Python server, the C-ABI surface, future Swift/Kotlin apps — construct
 engines from config and attach them to the kernel's named slots. The
 layering check enforces it structurally: `shrike-kernel` may depend on no

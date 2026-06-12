@@ -1,90 +1,87 @@
-//! The macOS implementation: objc2-vision bindings, 1:1 with the retired
-//! pyobjc backend's semantics. Vision/Foundation objects are `!Send` and
-//! created per call inside an autorelease pool (temporaries — observation
-//! arrays, strings — are reclaimed per image, not at thread exit, which
-//! matters on a long-lived sweep's pool thread).
+//! The macOS implementation: a thin `extern "C"` shim over the Swift glue
+//! (`swift/Recognize.swift`), which drives Apple's Swift-only
+//! `RecognizeTextRequest` (macOS 15+). One C call per image, one JSON
+//! `Recognition` back — `serde` parses it straight into the engine-api
+//! types. Strings allocated in Swift are freed in Swift
+//! (`shrike_av_free_string`); the guard type makes that structural.
 
-use objc2::rc::autoreleasepool;
-use objc2::AnyThread;
-use objc2_foundation::{NSArray, NSData, NSDictionary, NSProcessInfo};
-use objc2_vision::{
-    VNImageRequestHandler, VNRecognizeTextRequest, VNRequest, VNRequestTextRecognitionLevel,
-};
+use std::ffi::{c_char, CStr};
 
-use shrike_engine_api::{Recognition, Segment};
+use shrike_engine_api::Recognition;
 use shrike_ffi::NativeResult;
 
-use crate::{empty_recognition, round4};
+use crate::empty_recognition;
 
-/// `apple-vision:rev{N}:macos{X.Y[.Z]}` — byte-compatible with the Python
-/// backend (`platform.mac_ver()` elides a zero patch), so the swap to the
-/// native engine never invalidates existing derived text.
-pub(crate) fn fingerprint() -> NativeResult<String> {
-    let revision = objc2_vision::VNRecognizeTextRequestRevision3;
-    let v = NSProcessInfo::processInfo().operatingSystemVersion();
-    let macos = if v.patchVersion == 0 {
-        format!("{}.{}", v.majorVersion, v.minorVersion)
-    } else {
-        format!("{}.{}.{}", v.majorVersion, v.minorVersion, v.patchVersion)
-    };
-    Ok(format!("apple-vision:rev{revision}:macos{macos}"))
+extern "C" {
+    fn shrike_av_recognize_one(ptr: *const u8, len: usize) -> *mut c_char;
+    fn shrike_av_fingerprint() -> *mut c_char;
+    fn shrike_av_free_string(ptr: *mut c_char);
 }
 
-/// One image through one accurate-level, language-corrected
-/// `VNRecognizeTextRequest` (the request revision stays Vision's default,
-/// like the Python backend). A failed request logs and yields the empty
-/// recognition — per-item failures never sink a batch.
+/// A Swift-allocated C string, freed on the Swift side's allocator when
+/// dropped — never `libc::free` across the boundary.
+struct SwiftString(*mut c_char);
+
+impl SwiftString {
+    /// Wrap a returned pointer; `None` for null (the Swift side's
+    /// "unavailable" sentinel).
+    fn wrap(ptr: *mut c_char) -> Option<Self> {
+        (!ptr.is_null()).then_some(Self(ptr))
+    }
+
+    fn as_str(&self) -> &str {
+        // The Swift side only ever emits UTF-8; a torn string degrades to
+        // empty rather than panicking mid-batch.
+        unsafe { CStr::from_ptr(self.0) }.to_str().unwrap_or("")
+    }
+}
+
+impl Drop for SwiftString {
+    fn drop(&mut self) {
+        unsafe { shrike_av_free_string(self.0) }
+    }
+}
+
+/// The wire shape from Swift: a `Recognition` plus an optional `error`
+/// (a failed request — logged here, the empty recognition flows on).
+#[derive(serde::Deserialize)]
+struct Wire {
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(flatten)]
+    recognition: Recognition,
+}
+
+/// `apple-vision-swift:{revision}:macos{X.Y.Z}` — the hard cut from the
+/// objc2 engine's `apple-vision:rev{N}` lineage (#398): the new API rides a
+/// newer text model, so the changed identity deliberately re-derives all
+/// OCR rows once. Below macOS 15 (the API floor) the Swift side returns
+/// null and construction fails `unavailable`, like the off-macOS stub.
+pub(crate) fn fingerprint() -> NativeResult<String> {
+    let raw = unsafe { shrike_av_fingerprint() };
+    match SwiftString::wrap(raw) {
+        Some(s) => Ok(s.as_str().to_owned()),
+        None => Err(crate::unavailable()),
+    }
+}
+
+/// One image through the Swift glue. A failed request logs and yields the
+/// empty recognition — per-item failures never sink a batch.
 pub(crate) fn recognize_one(bytes: &[u8]) -> Recognition {
-    autoreleasepool(|_pool| {
-        let data = NSData::with_bytes(bytes);
-        let handler = VNImageRequestHandler::initWithData_options(
-            VNImageRequestHandler::alloc(),
-            &data,
-            &NSDictionary::new(),
-        );
-        let request = unsafe { VNRecognizeTextRequest::init(VNRecognizeTextRequest::alloc()) };
-        request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
-        request.setUsesLanguageCorrection(true);
-
-        let requests: [&VNRequest; 1] = [request.as_ref()];
-        let array = NSArray::from_slice(&requests);
-        if let Err(e) = handler.performRequests_error(&array) {
-            tracing::warn!("Vision request failed: {e}");
-            return empty_recognition();
+    let raw = unsafe { shrike_av_recognize_one(bytes.as_ptr(), bytes.len()) };
+    let Some(json) = SwiftString::wrap(raw) else {
+        return empty_recognition();
+    };
+    match serde_json::from_str::<Wire>(json.as_str()) {
+        Ok(wire) => {
+            if let Some(error) = wire.error {
+                tracing::warn!("Vision request failed: {error}");
+            }
+            wire.recognition
         }
-
-        let mut lines: Vec<String> = Vec::new();
-        let mut segments: Vec<Segment> = Vec::new();
-        let observations = request.results();
-        for observation in observations.iter().flatten() {
-            let candidates = observation.topCandidates(1);
-            let Some(candidate) = candidates.firstObject() else {
-                continue;
-            };
-            let text = candidate.string().to_string();
-            // VNConfidence is f32; widen exactly as Python's float() does.
-            let confidence = candidate.confidence() as f64;
-            let bbox = unsafe { observation.boundingBox() };
-            // Vision: normalized, origin bottom-left → top-left [x, y, w, h].
-            let x = bbox.origin.x;
-            let w = bbox.size.width;
-            let h = bbox.size.height;
-            let y = 1.0 - bbox.origin.y - h;
-            lines.push(text.clone());
-            segments.push(Segment {
-                text,
-                confidence,
-                bbox: Some([round4(x), round4(y), round4(w), round4(h)]),
-            });
+        Err(e) => {
+            tracing::warn!("Vision glue returned unparseable JSON: {e}");
+            empty_recognition()
         }
-        if lines.is_empty() {
-            return empty_recognition();
-        }
-        let overall = segments.iter().map(|s| s.confidence).sum::<f64>() / segments.len() as f64;
-        Recognition {
-            text: lines.join("\n"),
-            confidence: overall,
-            segments,
-        }
-    })
+    }
 }

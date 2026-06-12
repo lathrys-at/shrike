@@ -239,7 +239,7 @@ class TestRecognition:
             )
 
             backend = make_recognizer("apple")
-            assert backend.model_fingerprint().startswith("apple-vision:")
+            assert backend.model_fingerprint().startswith("apple-vision-swift:")
             harness.attach_recognizer(backend)
             report = await harness.recognition_sweep(batch_size=4)
             assert report["total_stored"] == 1

@@ -140,7 +140,8 @@ native/                           # the Rust workspace (the compute core)
 ├── shrike-embed/                 # ort/tokenizers text + CLIP engines (implement the contract in-crate)
 ├── shrike-embed-remote/          # EmbedText over any OpenAI-compatible endpoint (ureq; llama/cloud/tailnet)
 ├── shrike-llama-server/          # llama-server lifecycle ONLY (spawn/health/reap/stop) — not an engine
-├── shrike-recognize-apple/       # Apple Vision OCR engine (objc2; off-macOS unavailable stub)
+├── shrike-recognize-apple/       # Apple Vision OCR engine (Swift glue behind Rust, #398;
+│                                 #   off-macOS unavailable stub; building needs Xcode)
 ├── shrike-compute/               # rrf_fuse + fused embed→index paths
 ├── shrike-schemas/               # serde+schemars wire types (CANONICAL; schemas.py binds)
 ├── shrike-ffi/                   # the shared error taxonomy
@@ -451,9 +452,15 @@ The embedding service can be cycled independently of the Shrike server. `Embeddi
 sibling of the embed slot): an OCR engine the harness attaches at assembly turns
 note media into searchable text. Off by default; `--ocr-backend apple` (config
 `recognition.ocr`, env `SHRIKE_OCR_BACKEND`) selects macOS Vision — native since
-#342 P3 (`shrike-recognize-apple`, objc2; no extra to install, no model download —
-Vision ships with the OS). Off-macOS the backend degrades the recognition state
-to `error` without disturbing boot. The Python contract is `RecognizerBackend` (`recognition.py`): a *blocking*
+#342 P3, and since #398 the platform glue is **Swift bolted behind Rust**
+(`swift/Recognize.swift` exports a 3-function C ABI driving Apple's Swift-only
+`RecognizeTextRequest` API, macOS 15+; nothing extra to install at runtime —
+Vision and the Swift runtime ship with the OS, but **building on macOS needs
+full Xcode**, whose swiftc build.rs/the bazel genrule invoke via xcrun). The
+fingerprint took a hard cut to `apple-vision-swift:{revision}:macos{X.Y.Z}`
+(the new API rides a newer text model — all OCR rows re-derive once).
+Off-macOS the backend degrades the recognition state to `error` without
+disturbing boot. The Python contract is `RecognizerBackend` (`recognition.py`): a *blocking*
 `recognize(items: list[bytes]) -> list[tuple[str, float, str]]` — (text,
 confidence, segments-JSON) — plus `model_fingerprint()`; `PyRecognizer.capture`
 bridges it to the kernel (the custom/test seam; blocking calls ride the kernel
