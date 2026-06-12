@@ -202,7 +202,9 @@ pub struct NoteSpec {
 /// watermarks current, and the debounced saver (tokio::time, #374 B2)
 /// bounds what a crash can discard.
 pub struct Kernel {
-    collection: SerializedCollection,
+    /// Arc so the tag refresher's background task can read through the
+    /// actor without holding the kernel itself (#445).
+    collection: Arc<SerializedCollection>,
     orchestrator: Arc<index_orchestrator::IndexOrchestrator>,
     saver: Arc<index_orchestrator::DebouncedSaver>,
     derived: Arc<DerivedEngine>,
@@ -210,14 +212,16 @@ pub struct Kernel {
     /// swappable at runtime — the harness attaches on embedding start,
     /// detaches on stop, and a model swap is detach + attach. Ops that need
     /// embedding degrade (lexical-only search, unindexed-but-created upserts)
-    /// when the slot is empty, mirroring the Python host's gating.
-    embed: RwLock<Option<Arc<EmbedService>>>,
+    /// when the slot is empty, mirroring the Python host's gating. Arc so
+    /// the tag refresher shares the gate (#445).
+    embed: Arc<RwLock<Option<Arc<EmbedService>>>>,
     /// Tag-centroid state (#178/#179): the live key→tag map for the engine's
-    /// `tag.text` space + the hygiene knobs. Centroids recompute at the tail
-    /// of every index-changing op (a pure function of in-engine text vectors
-    /// + membership, so no extra watermark).
+    /// `tag.text` space + the hygiene knobs. Centroids refresh in the
+    /// background after membership-relevant index ops, coalesced under
+    /// write bursts (#445); boot/rebuild paths refresh synchronously.
     tag_keys: Arc<tag_centroids::TagKeyMap>,
     tag_config: tag_centroids::TagCentroidConfig,
+    tag_refresh: Arc<tag_centroids::TagRefresher>,
     /// The recognition service (#228/#342, the second registry slot):
     /// OCR/ASR engines the harness attaches at runtime, exactly like the
     /// embed slot — the kernel runs the pipeline over whatever is registered
@@ -294,7 +298,7 @@ impl Kernel {
     ) -> NativeResult<Self> {
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
-        let collection = SerializedCollection::open(collection_path.to_string()).await?;
+        let collection = Arc::new(SerializedCollection::open(collection_path.to_string()).await?);
         let engine = Arc::new(MultiModalIndex::new(
             NOTE_MODALITIES
                 .iter()
@@ -315,14 +319,26 @@ impl Kernel {
             DerivedEngine::SCHEMA_VERSION,
         )?);
         tracing::debug!(collection = collection_path, "kernel opened");
+        let embed: Arc<RwLock<Option<Arc<EmbedService>>>> = Arc::new(RwLock::new(None));
+        let tag_keys = Arc::new(tag_centroids::TagKeyMap::default());
+        let tag_config = tag_centroids::TagCentroidConfig::default();
+        let tag_refresh = tag_centroids::TagRefresher::new(
+            Arc::clone(&collection),
+            orchestrator.engine_arc(),
+            Arc::clone(&tag_keys),
+            tag_config.clone(),
+            Arc::clone(&saver),
+            Arc::clone(&embed),
+        );
         Ok(Self {
             collection,
             orchestrator,
             saver,
             derived,
-            embed: RwLock::new(None),
-            tag_keys: Arc::new(tag_centroids::TagKeyMap::default()),
-            tag_config: tag_centroids::TagCentroidConfig::default(),
+            embed,
+            tag_keys,
+            tag_config,
+            tag_refresh,
             recognize: RwLock::new(None),
             recognition_gate: recognize::RecognitionGate::default(),
         })
@@ -757,12 +773,13 @@ impl Kernel {
             return Ok(());
         }
         let ids = written.to_vec();
-        let (raw_inputs, rows) = self
+        let (raw_inputs, rows, tagged) = self
             .collection
             .run(move |core| -> NativeResult<_> {
                 let inputs = core.note_embed_inputs(&ids)?;
                 let rows = core.derived_field_rows(&ids)?;
-                Ok((inputs, rows))
+                let tagged = core.any_tagged(&ids)?;
+                Ok((inputs, rows, tagged))
             })
             .await??;
         let svc = self.embed_service();
@@ -784,8 +801,13 @@ impl Kernel {
             .collect();
         self.derived.ingest_many(&batch, FIELD_SOURCE)?;
         self.advance_watermarks(svc.is_some()).await?;
-        // Tag centroids derive from the text vectors just written (#179).
-        self.refresh_tags_best_effort().await;
+        // Tag centroids derive from the text vectors just written (#179) —
+        // refreshed off the op tail, and only when the op could have changed
+        // membership: a written note carries tags now, or was a member
+        // before (an update that removed them) (#445).
+        if tagged || self.tag_keys.any_member_of(written) {
+            self.tag_refresh.request();
+        }
         Ok(())
     }
 
@@ -930,7 +952,12 @@ impl Kernel {
         self.derived.remove(note_ids, None)?;
         self.advance_watermarks(self.embed_service().is_some())
             .await?;
-        self.refresh_tags_best_effort().await;
+        // A deletion changes membership only if a deleted note was IN it —
+        // the in-memory probe alone decides (the rows are already gone), and
+        // the refresh runs off the op tail (#445).
+        if self.tag_keys.any_member_of(note_ids) {
+            self.tag_refresh.request();
+        }
         Ok(())
     }
 
@@ -1040,6 +1067,9 @@ impl Kernel {
     /// close; idempotent (`SerializedCollection::close` treats a drained
     /// actor as already-closed, #382).
     pub async fn close(&self) -> NativeResult<()> {
+        // A sleeping coalesced tag refresh has nothing to read once the
+        // actor drains — abort it first (#445).
+        self.tag_refresh.shutdown();
         let result = self.collection.close().await;
         self.collection.shutdown().await;
         result
@@ -1105,6 +1135,19 @@ mod no_cpython_smoke {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The op-tail tag refresh is a coalesced background task since #445 —
+    /// poll until the tag state reaches the expected shape (an isolated
+    /// op's first fire runs immediately, so this resolves in milliseconds).
+    async fn wait_for_tags(kernel: &Kernel, pred: impl Fn(&tag_centroids::TagKeyMap) -> bool) {
+        for _ in 0..500 {
+            if pred(kernel.tag_keys()) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("tag state never reached the expected shape");
     }
 
     /// Compile-time pin: every kernel future is Send, so a harness may spawn
@@ -1312,8 +1355,8 @@ mod no_cpython_smoke {
                 .await
                 .unwrap();
 
+            wait_for_tags(&kernel, |k| !k.is_empty()).await;
             let keys = kernel.tag_keys();
-            assert!(!keys.is_empty(), "centroids built on the upsert tail");
             let cell_key = tag_centroids::tag_key("bio::cell");
             assert_eq!(keys.lookup(cell_key).as_deref(), Some("bio::cell"));
             assert_eq!(
@@ -1327,6 +1370,13 @@ mod no_cpython_smoke {
             // A note search never surfaces a tag key.
             let hits = kernel.search("note number", 20).await.unwrap();
             assert!(hits.iter().all(|h| keys.lookup(h.note_id).is_none()));
+
+            // Deleting a member triggers the refresh through the delete
+            // tail's membership probe (#445): bio::cell falls below
+            // min_members and its centroid retires.
+            let victim = keys.members(cell_key)[0];
+            kernel.delete_notes(vec![victim]).await.unwrap();
+            wait_for_tags(&kernel, |k| k.lookup(cell_key).is_none()).await;
 
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
@@ -1380,9 +1430,8 @@ mod no_cpython_smoke {
             .unwrap();
             let mnemonic_id = results[2]["id"].as_i64().unwrap();
 
-            assert!(!kernel.tag_keys().is_empty(), "centroid state built");
             let key = tag_centroids::tag_key("krebs");
-            assert_eq!(kernel.tag_keys().members(key).len(), 3);
+            wait_for_tags(&kernel, |k| k.members(key).len() == 3).await;
             let hits = kernel.search("krebs cycle citric acid", 9).await.unwrap();
             let with_tag: Vec<&KernelHit> = hits
                 .iter()

@@ -187,6 +187,25 @@ impl CollectionCore {
         Ok(out)
     }
 
+    /// Whether ANY of `note_ids` currently carries a tag — the SQL half of
+    /// the tag-centroid relevance probe (#445): one scoped aggregate lets an
+    /// untagged write op skip the O(tagged-notes) recompute entirely.
+    pub fn any_tagged(&self, note_ids: &[i64]) -> NativeResult<bool> {
+        if note_ids.is_empty() {
+            return Ok(false);
+        }
+        let sql = format!(
+            "select exists(select 1 from notes where tags != '' and id in ({}))",
+            ids_sql_list(note_ids)
+        );
+        let rows = self.adapter.db_rows(&sql)?;
+        rows.first()
+            .and_then(|r| r.first())
+            .and_then(Value::as_i64)
+            .map(|n| n != 0)
+            .ok_or_else(|| NativeError::internal("unexpected exists row shape".to_string()))
+    }
+
     /// Total note count via one SQL aggregate (#445): the tag-centroid
     /// refresh previously ran `find_notes("")` — materializing every note id
     /// through a protobuf SearchResponse — just to take `.len()`.
