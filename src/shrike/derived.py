@@ -346,6 +346,30 @@ class DerivedTextStore:
             logger.exception("Derived-text store build failed")
             raise
 
+    def claim_external_build(self) -> bool:
+        """Claim BUILDING for a build that runs OUTSIDE this store (#445: the
+        kernel's `rebuild_derived` op builds against its own engine on the
+        same shrike.db; the rows never enter Python). Same dedupe rule as
+        `build_in_background`: a second drift trigger while one is in flight
+        is a no-op. Returns False when unavailable or already building."""
+        if not self._available:
+            return False
+        with self._state_lock:
+            if self._state == IndexState.BUILDING:
+                return False
+            self._state = IndexState.BUILDING
+        return True
+
+    def settle_external_build(self, col_mod: int | None) -> None:
+        """Record an external build's outcome: READY + the watermark on
+        success (``col_mod``), ERROR on ``None``."""
+        with self._state_lock:
+            if col_mod is None:
+                self._state = IndexState.ERROR
+            else:
+                self._col_mod = col_mod
+                self._state = IndexState.READY
+
     def build_in_background(self, rows: Iterable[tuple[int, str, str, str]], col_mod: int) -> None:
         """Run :meth:`build` on a daemon thread (``rows`` are materialized first — they cross)."""
         if not self._available:

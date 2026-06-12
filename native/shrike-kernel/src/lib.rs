@@ -563,6 +563,33 @@ impl Kernel {
     /// `remaining > 0` and the batch made progress (`recognized > 0`), so
     /// one call never occupies the executor for long and a permanently
     /// unreadable window can't spin the driver.
+    /// Full derived-text (FTS5) rebuild, entirely kernel-side (#445): one
+    /// collection job collects the field rows, the build runs on the blocking
+    /// pool against the kernel's own engine — the rows never cross the FFI.
+    /// (The Python path round-tripped the whole collection's text
+    /// Rust→Python→Rust: ~150-250MB transient at 100k notes, on every drifted
+    /// boot, /reload, and cooperative re-acquire.) Returns
+    /// `(row_count, col_mod)` — the col_mod is the BUILD's own snapshot (read
+    /// in the same collection job as the rows), so the host's watermark can't
+    /// mask a write that landed mid-build.
+    pub async fn rebuild_derived(&self) -> NativeResult<(usize, i64)> {
+        let (rows, dmod) = self
+            .collection
+            .run(|core| -> NativeResult<_> {
+                let ids = core.find_notes("")?;
+                let rows = core.derived_field_rows(&ids)?;
+                let dmod = core.col_mod()?;
+                Ok((rows, dmod))
+            })
+            .await??;
+        let n = rows.len();
+        let derived = Arc::clone(&self.derived);
+        tokio::task::spawn_blocking(move || derived.build(&rows, dmod))
+            .await
+            .map_err(|e| NativeError::internal(format!("derived build task: {e}")))??;
+        Ok((n, dmod))
+    }
+
     pub async fn recognize_pending(&self, max_items: usize) -> NativeResult<serde_json::Value> {
         let Some(svc) = self.recognize_service() else {
             return Ok(serde_json::json!({"status": "unavailable"}));

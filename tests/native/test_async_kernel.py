@@ -53,6 +53,41 @@ async def _open(tmp_path, backend):
     return kernel
 
 
+class TestRebuildDerived:
+    """#445 checkpoint 3: the FTS5 rebuild runs kernel-side — rows never
+    cross the FFI; the op returns (row_count, the build's col_mod snapshot)."""
+
+    def test_rebuild_derived_builds_and_returns_snapshot(self, tmp_path) -> None:
+        async def flow():
+            kernel = await shrike_native.async_kernel_open(
+                str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
+            )
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            await kernel.upsert_notes(
+                [
+                    (basic, 1, ["the krebs cycle", "citric acid"], []),
+                    (basic, 1, ["unrelated front", "unrelated back"], []),
+                ],
+                "allow",
+            )
+            rows, dmod = await kernel.rebuild_derived()
+            assert rows == 4  # 2 notes x 2 non-empty fields
+            assert dmod == core.col_mod()
+            await kernel.close()
+            # The build landed in the sidecar: a fresh engine on the same
+            # shrike.db sees the rows (and the stamped watermark).
+            engine = shrike_native.DerivedTextEngine(str(tmp_path / "cache" / "shrike.db"), 2)
+            try:
+                assert engine.get_col_mod() == dmod
+                hits = engine.search_substring("krebs", 10)
+                assert hits, "the rebuilt FTS5 store must match the seeded text"
+            finally:
+                engine.close()
+
+        asyncio.run(flow())
+
+
 class TestSaverTuning:
     """#355 item 2: the --index-save-* tuning reaches the kernel's saver."""
 

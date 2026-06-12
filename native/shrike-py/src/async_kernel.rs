@@ -368,6 +368,11 @@ impl AsyncKernel {
     }
 
     /// The boot/reload drift path (awaitable; drive as a background task).
+    fn rebuild_derived<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move { kernel.rebuild_derived().await })
+    }
+
     fn reindex_if_needed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
         kernel_op(py, async move { kernel.reindex_if_needed().await })

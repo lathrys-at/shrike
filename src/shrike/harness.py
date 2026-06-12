@@ -20,7 +20,7 @@ from typing import Any
 
 import shrike_native
 
-from shrike.collection import CollectionWrapper, collect_derived_rows
+from shrike.collection import CollectionWrapper
 from shrike.derived import DerivedTextStore
 from shrike.embedding import EmbeddingRuntime
 from shrike.embedding_base import EmbedderBackend
@@ -301,9 +301,21 @@ class Harness:
             await self._rebuild_derived()
 
     async def _rebuild_derived(self) -> None:
-        rows, dmod = await self.wrapper.run(collect_derived_rows)
-        self.derived.build_in_background(rows, dmod)
-        logger.info("Derived-text store drift; building in background (%d rows)", len(rows))
+        # Kernel-side rebuild (#445): the field rows used to round-trip the
+        # whole collection Rust→Python→Rust (~150-250MB transient at 100k
+        # notes). The kernel op collects + builds crate-side; the store here
+        # only drives the status state machine around the await.
+        if not self.derived.claim_external_build():
+            return
+        col_mod: int | None = None
+        try:
+            rows, col_mod = await self.kernel.rebuild_derived()
+            logger.info("Derived-text store rebuilt kernel-side (%d rows)", rows)
+        except Exception:
+            col_mod = None
+            logger.exception("Kernel-side derived rebuild failed")
+        finally:
+            self.derived.settle_external_build(col_mod)
 
     # -- status ------------------------------------------------------------------
 

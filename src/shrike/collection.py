@@ -157,11 +157,6 @@ def collect_embed_inputs(core: CollectionCore) -> tuple[list[NoteEmbedInput], in
     return inputs, core.col_mod()
 
 
-def collect_derived_rows(core: CollectionCore) -> tuple[list[tuple[int, str, str, str]], int]:
-    """Every note's ``(note_id, "field", field_name, raw_value)`` rows + the mod stamp."""
-    note_ids = core.find_notes("deck:*")
-    return core.derived_field_rows(note_ids), core.col_mod()
-
 
 class CollectionWrapper:
     """Serializes every access to the native collection core.
