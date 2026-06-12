@@ -51,7 +51,6 @@ CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP, server.py = the
                                                       └──▶ RecognizeService slot ◀── shrike-recognize-apple (Vision OCR)
 ```
 
-
 ## Project layout
 
 ```
@@ -111,7 +110,7 @@ tests/
 │   ├── test_collection_concurrency.py  # single-worker-thread serialization
 │   └── test_media.py            # media store/fetch/list/delete, SSRF guard, prune unused_media (mocked URL fetch)
 ├── native/                       # the native extension + kernel bindings (asyncio bridge,
-│                                 #   AsyncKernel, KernelIndex, Harness assembly, C-ABI parity)
+│                                 #   AsyncKernel, KernelIndex, Harness assembly)
 └── integration/                  # real server subprocess + HTTP transport
     ├── conftest.py               # shared session server + per-test collection reset; mcp/runner; isolated_server
     ├── test_tools.py
