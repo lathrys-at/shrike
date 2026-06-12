@@ -872,6 +872,19 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // The native image-prep pipeline version — folded into the clip-rs
     // fingerprint by the facade (a pixel-math change must invalidate vectors).
     m.add("IMAGE_PREP_VERSION_RS", shrike_embed::IMAGE_PREP_VERSION_RS)?;
+    // The kernel saver's built-in flush tuning (#355 item 2) — the host's
+    // --index-save-* help text names the defaults it would override.
+    #[cfg(feature = "anki-core")]
+    {
+        m.add(
+            "INDEX_SAVE_DELAY_DEFAULT",
+            shrike_kernel::index_orchestrator::DEFAULT_SAVE_DELAY,
+        )?;
+        m.add(
+            "INDEX_SAVE_THRESHOLD_DEFAULT",
+            shrike_kernel::index_orchestrator::DEFAULT_SAVE_THRESHOLD,
+        )?;
+    }
     // The batch-safety probe surface (#342 P4): the spiked set + tolerance,
     // for tests that pin sensitivity/ceiling against the same texts the
     // native probe embeds.

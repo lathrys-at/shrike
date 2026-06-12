@@ -12,6 +12,8 @@ from shrike_native._native import async_collection_open as async_collection_open
 from shrike_native._native import async_kernel_open as async_kernel_open
 from shrike_native._native import decode_media_b64 as decode_media_b64
 from shrike_native._native import rehomed_actions as rehomed_actions
+from shrike_native._native import INDEX_SAVE_DELAY_DEFAULT as INDEX_SAVE_DELAY_DEFAULT
+from shrike_native._native import INDEX_SAVE_THRESHOLD_DEFAULT as INDEX_SAVE_THRESHOLD_DEFAULT
 from shrike_native._native import fetch_media_url as fetch_media_url
 from shrike_native._native import (
     AppleVisionRecognizer,

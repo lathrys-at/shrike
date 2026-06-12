@@ -53,6 +53,36 @@ async def _open(tmp_path, backend):
     return kernel
 
 
+class TestSaverTuning:
+    """#355 item 2: the --index-save-* tuning reaches the kernel's saver."""
+
+    def test_save_threshold_flushes_immediately(self, tmp_path) -> None:
+        # threshold=1: the first indexed change forces a flush, so the index
+        # lands on disk without an explicit save_index() or close().
+        async def flow():
+            backend = _Backend()
+            kernel = await shrike_native.async_kernel_open(
+                str(tmp_path / "collection.anki2"),
+                str(tmp_path / "cache"),
+                save_threshold=1,
+            )
+            kernel.attach_embedder(shrike_native.PyEmbedder.capture(backend))
+            assert await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            await kernel.upsert_notes([(basic, 1, ["flush me", "now"], [])], "allow")
+            # The threshold flush is async (a spawned save) — poll briefly.
+            index_file = tmp_path / "cache" / "index.usearch"
+            for _ in range(100):
+                if index_file.exists():
+                    break
+                await asyncio.sleep(0.05)
+            assert index_file.exists(), "threshold=1 must flush without an explicit save"
+            await kernel.close()
+
+        asyncio.run(flow())
+
+
 class TestAsyncKernel:
     def test_upsert_search_delete_flow(self, tmp_path) -> None:
         async def flow():
