@@ -100,6 +100,228 @@ pub fn collection_query(
     validate("ListNotesResponse", &raw)
 }
 
+// ── upsert dedup neighbors (#391 phase 1, re-homed from actions.py) ─────────
+
+/// Dedup lexical-overlap cheapness gate (#206): the trigram OR-query grows
+/// with text length, so texts are char-truncated before the fuzzy lookup and
+/// the verify — plenty for near-verbatim detection, bounded for the
+/// high-volume dedup path.
+pub const DEDUP_LEXICAL_QUERY_CHARS: usize = 200;
+
+/// The propose-verify floor (#206): the trigram index PROPOSES candidates
+/// (recall — any shared trigrams), then whole-text similarity VERIFIES
+/// near-verbatim before a candidate becomes a neighbor (precision — a shared
+/// question stem is real overlap but not a near-duplicate).
+pub const DEDUP_LEXICAL_MIN_RATIO: f64 = 0.6;
+
+/// First `n` CHARS of `s` (Python's `s[:n]` — code points, never mid-char).
+fn truncate_chars(s: &str, n: usize) -> &str {
+    match s.char_indices().nth(n) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
+/// The lexical verifier (#206): whole-text similarity over the candidate's
+/// embedding text vs the (pre-stripped/lowered/truncated) draft — cheap
+/// (runs on at most the few proposed candidates) and exactly the
+/// near-verbatim question. An unreadable candidate verifies false.
+fn near_verbatim(core: &CollectionCore, neighbor_id: i64, draft: &str) -> bool {
+    let Ok(texts) = core.note_texts(&[neighbor_id]) else {
+        return false;
+    };
+    let candidate = texts
+        .first()
+        .map(|t| t.trim().to_lowercase())
+        .unwrap_or_default();
+    if candidate.is_empty() {
+        return false;
+    }
+    let candidate = truncate_chars(&candidate, DEDUP_LEXICAL_QUERY_CHARS);
+    crate::textsim::sequence_ratio(draft, candidate) >= DEDUP_LEXICAL_MIN_RATIO
+}
+
+struct NeighborCandidate {
+    id: i64,
+    score: Option<f64>,
+    provenance: Vec<(String, i64)>,
+}
+
+/// Attach near-duplicate candidates to each upsert draft (#204; the policy
+/// re-homed in #391 phase 1 — byte-faithful to the retired Python).
+///
+/// Two complementary signals per draft (#206): the semantic match catches
+/// paraphrase dupes (cosine-thresholded, `vectors` host-embedded like the
+/// search action's), and the trigram lexical-overlap propose-verify catches
+/// near-verbatim restatements the embedding threshold misses — each hit
+/// carrying `{signal, rank}` provenance (#208). `best` per draft is the
+/// calibration sample (#207) the host's dedup-stats recorder consumes.
+#[allow(clippy::too_many_arguments)]
+pub fn attach_neighbors(
+    core: &CollectionCore,
+    index: Option<&MultiModalIndex>,
+    derived: Option<&DerivedEngine>,
+    texts: &[String],
+    vectors: &[Vec<f32>],
+    exclude: &[i64],
+    top_k: usize,
+    threshold: f64,
+) -> NativeResult<Vec<shrike_schemas::UpsertNeighbors>> {
+    let exclude_set: HashSet<i64> = exclude.iter().copied().collect();
+
+    // Semantic pass: one batched per-modality search over the text space
+    // (neighbors are text-space candidates, mirroring the host's view).
+    let sem: Vec<ModalityHits> = match index {
+        Some(engine) if !vectors.is_empty() => {
+            let spaces = vec!["text".to_string()];
+            engine.search_by_modality(vectors, top_k + exclude_set.len(), Some(&spaces))?
+        }
+        _ => vec![ModalityHits::new(); texts.len()],
+    };
+    if sem.len() != texts.len() {
+        return Err(NativeError::internal(format!(
+            "attach_neighbors: {} rankings for {} drafts",
+            sem.len(),
+            texts.len()
+        )));
+    }
+
+    let mut out: Vec<shrike_schemas::UpsertNeighbors> = Vec::with_capacity(texts.len());
+    for (text, per_query) in texts.iter().zip(sem.iter()) {
+        // Insertion-ordered candidates: the final sort is stable, so ties
+        // keep discovery order exactly like the Python dict did.
+        let mut candidates: Vec<NeighborCandidate> = Vec::new();
+
+        if let Some((ids, dists)) = per_query.get("text") {
+            let mut sem_rank: i64 = 0;
+            for (nid, dist) in ids.iter().zip(dists.iter()) {
+                let score = round3(1.0 - *dist as f64);
+                if score < threshold {
+                    break; // distance-ascending: nothing further clears it
+                }
+                if exclude_set.contains(nid) {
+                    continue;
+                }
+                sem_rank += 1;
+                candidates.push(NeighborCandidate {
+                    id: *nid,
+                    score: Some(score),
+                    provenance: vec![("text".to_string(), sem_rank)],
+                });
+                if sem_rank >= top_k as i64 {
+                    break;
+                }
+            }
+        }
+
+        // Lexical overlap (#206): near-verbatim dupes the cosine gate
+        // missed. Propose-verify; no cosine to report → score stays None.
+        if let Some(d) = derived {
+            if !text.trim().is_empty() {
+                let draft_verify =
+                    truncate_chars(&text.trim().to_lowercase(), DEDUP_LEXICAL_QUERY_CHARS)
+                        .to_string();
+                let rows = match d.search_fuzzy(
+                    truncate_chars(text, DEDUP_LEXICAL_QUERY_CHARS),
+                    (top_k + exclude_set.len()) as i64,
+                    None,
+                ) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        tracing::debug!(error = ?e, "dedup lexical overlap unavailable");
+                        Vec::new()
+                    }
+                };
+                let mut fuzzy_rank: i64 = 0;
+                for (fid, ..) in rows {
+                    if exclude_set.contains(&fid) {
+                        continue;
+                    }
+                    let existing = candidates.iter_mut().find(|c| c.id == fid);
+                    if existing.is_none() && !near_verbatim(core, fid, &draft_verify) {
+                        continue; // proposed but not verified — overlap, not a dupe
+                    }
+                    fuzzy_rank += 1;
+                    match existing {
+                        Some(entry) => entry.provenance.push(("fuzzy".to_string(), fuzzy_rank)),
+                        None => candidates.push(NeighborCandidate {
+                            id: fid,
+                            score: None,
+                            provenance: vec![("fuzzy".to_string(), fuzzy_rank)],
+                        }),
+                    }
+                    if fuzzy_rank >= top_k as i64 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // The calibration sample (#207): the draft's best SEMANTIC match, or
+        // a no-match tick — dedup's own traffic, never the #201 calibration.
+        let best = candidates
+            .iter()
+            .filter_map(|c| c.score)
+            .fold(None, |acc: Option<f64>, s| {
+                Some(acc.map_or(s, |a| if s > a { s } else { a }))
+            });
+
+        // Semantically-scored candidates first (descending score),
+        // lexical-only after (by their first-signal rank); stable.
+        candidates.sort_by(|x, y| {
+            let kx = -(x.score.unwrap_or(-1.0));
+            let ky = -(y.score.unwrap_or(-1.0));
+            kx.total_cmp(&ky)
+                .then(x.provenance[0].1.cmp(&y.provenance[0].1))
+        });
+
+        // Metadata per surviving candidate (skip-unreadable, cap at top_k).
+        let mut neighbors: Vec<shrike_schemas::Neighbor> = Vec::new();
+        for cand in candidates {
+            if neighbors.len() >= top_k {
+                break;
+            }
+            let Some(meta) = read_note_meta(core, cand.id) else {
+                continue;
+            };
+            let tags: Vec<String> = meta
+                .get("tags")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            neighbors.push(shrike_schemas::Neighbor {
+                id: cand.id,
+                score: cand.score,
+                tags,
+                provenance: cand
+                    .provenance
+                    .into_iter()
+                    .map(|(signal, rank)| shrike_schemas::SignalContribution { signal, rank })
+                    .collect(),
+            });
+        }
+        out.push(shrike_schemas::UpsertNeighbors { neighbors, best });
+    }
+    Ok(out)
+}
+
+/// Meta-only note read (tags; no field bodies) for the neighbor payload.
+fn read_note_meta(core: &CollectionCore, nid: i64) -> Option<Value> {
+    match core.note_dicts(&[nid], false) {
+        Ok(mut v) if !v.is_empty() => Some(v.remove(0)),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::debug!(nid, error = ?e, "neighbor lookup: skipping unreadable note");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1087,5 +1309,139 @@ mod search_tests {
         assert!(snippet.contains("NEEDLE"));
         assert!(substring_info(Some(&content), "absent").is_null());
         assert!(substring_info(None, "x").is_null());
+    }
+}
+
+#[cfg(test)]
+mod neighbor_tests {
+    use super::*;
+    use crate::actions::tests::{add_note, temp_collection};
+
+    fn derived_for(core: &CollectionCore, dir: &std::path::Path) -> DerivedEngine {
+        let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+        let ids = core.find_notes("deck:*").unwrap();
+        let rows = core.derived_field_rows(&ids).unwrap();
+        e.build(&rows, 1).unwrap();
+        e
+    }
+
+    /// Unit vector at exact cosine `1 - d` against the `[1, 0]` query.
+    fn at_distance(d: f32) -> Vec<f32> {
+        let sim = 1.0 - d;
+        vec![sim, (1.0 - sim * sim).max(0.0).sqrt()]
+    }
+
+    #[test]
+    fn semantic_and_lexical_signals_merge_with_provenance() {
+        let (dir, core) = temp_collection();
+        // A paraphrase dupe (semantic), a near-verbatim restatement (lexical),
+        // and an unrelated note sharing a question stem (proposed, must be
+        // verified OUT).
+        let paraphrase = add_note(&core, "mitochondria are the cell's power plants", "energy");
+        let verbatim = add_note(&core, "what is the powerhouse of the cell", "atp");
+        let stem_only = add_note(&core, "what is the capital of france", "paris");
+        let derived = derived_for(&core, &dir);
+
+        let index = MultiModalIndex::new(vec!["text".to_owned()]).unwrap();
+        index
+            .add("text", &[paraphrase], &[at_distance(0.2)])
+            .unwrap();
+        index
+            .add("text", &[verbatim], &[at_distance(0.9)]) // below the gate
+            .unwrap();
+        index
+            .add("text", &[stem_only], &[at_distance(0.95)])
+            .unwrap();
+
+        let draft = "what is the powerhouse of the cell?".to_string();
+        let out = attach_neighbors(
+            &core,
+            Some(&index),
+            Some(&derived),
+            &[draft],
+            &[vec![1.0, 0.0]],
+            &[],
+            5,
+            0.6,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        let entry = &out[0];
+
+        // The paraphrase arrives semantically (cosine 0.8 ≥ 0.6) with text
+        // provenance; the verbatim restatement arrives lexically (score None,
+        // fuzzy provenance) despite its weak cosine; the shared stem is
+        // proposed by trigrams but verified out.
+        let ids: Vec<i64> = entry.neighbors.iter().map(|n| n.id).collect();
+        assert!(ids.contains(&paraphrase), "semantic dupe attached: {ids:?}");
+        assert!(ids.contains(&verbatim), "lexical dupe attached: {ids:?}");
+        assert!(
+            !ids.contains(&stem_only),
+            "stem overlap verified out: {ids:?}"
+        );
+
+        let sem = entry.neighbors.iter().find(|n| n.id == paraphrase).unwrap();
+        assert_eq!(sem.score, Some(0.8));
+        assert_eq!(sem.provenance[0].signal, "text");
+        let lex = entry.neighbors.iter().find(|n| n.id == verbatim).unwrap();
+        assert_eq!(lex.score, None);
+        assert_eq!(lex.provenance[0].signal, "fuzzy");
+
+        // Scored candidates order before lexical-only ones.
+        assert!(
+            ids.iter().position(|&i| i == paraphrase) < ids.iter().position(|&i| i == verbatim)
+        );
+        // The calibration sample is the best semantic cosine.
+        assert_eq!(entry.best, Some(0.8));
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn exclusion_and_no_match_sample() {
+        let (dir, core) = temp_collection();
+        let just_written = add_note(&core, "exactly this draft text", "b");
+        let derived = derived_for(&core, &dir);
+        let index = MultiModalIndex::new(vec!["text".to_owned()]).unwrap();
+        index
+            .add("text", &[just_written], &[at_distance(0.05)])
+            .unwrap();
+
+        // The just-written note is excluded from BOTH signals; with nothing
+        // else in range the draft records a no-match tick (best = None).
+        let out = attach_neighbors(
+            &core,
+            Some(&index),
+            Some(&derived),
+            &["exactly this draft text".to_string()],
+            &[vec![1.0, 0.0]],
+            &[just_written],
+            5,
+            0.6,
+        )
+        .unwrap();
+        assert!(out[0].neighbors.is_empty());
+        assert_eq!(out[0].best, None);
+
+        // A second draft sees it both ways: semantic + fuzzy provenance on
+        // ONE candidate (the merge path).
+        let out = attach_neighbors(
+            &core,
+            Some(&index),
+            Some(&derived),
+            &["exactly this draft text".to_string()],
+            &[vec![1.0, 0.0]],
+            &[],
+            5,
+            0.6,
+        )
+        .unwrap();
+        let n = &out[0].neighbors[0];
+        assert_eq!(n.id, just_written);
+        assert_eq!(n.score, Some(0.95));
+        let signals: Vec<&str> = n.provenance.iter().map(|c| c.signal.as_str()).collect();
+        assert_eq!(signals, vec!["text", "fuzzy"]);
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
     }
 }
