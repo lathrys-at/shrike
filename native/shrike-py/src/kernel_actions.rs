@@ -74,6 +74,36 @@ pub(crate) fn action_collection_query(
         .map_err(to_py_err)
 }
 
+/// `attach_neighbors` (#391 phase 1): the upsert dedup policy in the kernel.
+/// One call per upsert batch — texts + host-embedded query vectors in (the
+/// search action's seam), typed per-draft neighbors + the calibration sample
+/// out. Runs on the collection actor like every collection-reading action.
+#[pyfunction]
+#[pyo3(signature = (core, index_engine, derived_engine, texts, vectors, exclude, top_k, threshold))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn action_attach_neighbors(
+    py: Python<'_>,
+    core: PyRef<'_, CollectionCore>,
+    index_engine: Option<PyRef<'_, crate::NativeIndexEngine>>,
+    derived_engine: Option<PyRef<'_, crate::DerivedTextEngine>>,
+    texts: Vec<String>,
+    vectors: Vec<Vec<f32>>,
+    exclude: Vec<i64>,
+    top_k: usize,
+    threshold: f64,
+) -> PyResult<String> {
+    let inner = core.core_ref();
+    let index = index_engine.as_ref().map(|e| &*e.inner);
+    let derived = derived_engine.as_ref().map(|e| &e.inner);
+    py.detach(|| {
+        let out = shrike_kernel::actions::attach_neighbors(
+            inner, index, derived, &texts, &vectors, &exclude, top_k, threshold,
+        )?;
+        serde_json::to_string(&out).map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
+    })
+    .map_err(to_py_err)
+}
+
 /// `search_notes` (#331): the whole fused-search assembly in the kernel. The
 /// harness passes the live engine handles, one query vector per source when
 /// semantic ranking is on, and the orchestrator state (image floor, index

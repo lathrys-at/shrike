@@ -38,6 +38,7 @@ from shrike_native._native import INDEX_SAVE_THRESHOLD_DEFAULT as INDEX_SAVE_THR
 from shrike_native._native import AsyncCollection as AsyncCollection
 from shrike_native._native import AsyncKernel as AsyncKernel
 from shrike_native._native import CollectionCore as CollectionCore
+from shrike_native._native import action_attach_neighbors as action_attach_neighbors
 from shrike_native._native import action_collection_info as action_collection_info
 from shrike_native._native import action_collection_query as action_collection_query
 from shrike_native._native import action_list_notes as action_list_notes

@@ -65,6 +65,7 @@ from shrike.schemas import (
     UpdateNoteTypeFieldsResponse,
     UpdateNoteTypeTemplatesResponse,
     UpsertDecksResponse,
+    UpsertNeighbors,
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
 )
@@ -106,17 +107,9 @@ MIN_SEMANTIC_QUERY_CHARS = 3
 # different population, structurally separate).
 DEDUP_NEIGHBOR_THRESHOLD = 0.6
 
-# Lexical-overlap cheapness gate (#206): the trigram OR-query grows with text
-# length, so the draft text is truncated before the fuzzy lookup — plenty for
-# near-verbatim detection, bounded for the high-volume dedup path.
-DEDUP_LEXICAL_QUERY_CHARS = 200
-
-# The lexical signal is propose-verify: the trigram index PROPOSES candidates
-# (recall — any shared trigrams), then a cheap whole-text similarity check
-# VERIFIES near-verbatim before a candidate becomes a neighbor (precision —
-# a shared question stem like "What is the capital of…" is real trigram
-# overlap but not a near-duplicate, and dedup is a precision answer).
-DEDUP_LEXICAL_MIN_RATIO = 0.6
+# The lexical-overlap policy (#206) — truncation chars, propose-verify ratio
+# floor, and the difflib-faithful similarity itself — lives kernel-side since
+# #391: shrike_kernel::actions (DEDUP_LEXICAL_*) + shrike_kernel::textsim.
 
 # Intra-modal activation gate (#201b). A non-text modality's ranking is fed to the fusion only when
 # its best match for the query exceeds `mean + ACTIVATION_MARGIN·std` of that modality's calibrated
@@ -864,25 +857,6 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
 
         return UpsertNotesResponse.model_validate({"results": results, "dry_run": dry_run})
 
-    async def _near_verbatim(neighbor_id: int, draft_text: str) -> bool:
-        """The lexical verifier (#206): whole-text similarity over the
-        candidate's embedding text vs the draft — cheap (runs on at most the
-        few proposed candidates) and exactly the near-verbatim question."""
-        import difflib
-
-        try:
-            texts = await wrapper.run(lambda c: c.note_texts([neighbor_id]))
-        except Exception:
-            return False
-        candidate = (texts[0] if texts else "").strip().lower()
-        if not candidate:
-            return False
-        draft = draft_text.strip().lower()
-        ratio = difflib.SequenceMatcher(
-            None, draft[:DEDUP_LEXICAL_QUERY_CHARS], candidate[:DEDUP_LEXICAL_QUERY_CHARS]
-        ).ratio()
-        return ratio >= DEDUP_LEXICAL_MIN_RATIO
-
     async def _attach_neighbors(
         results: list[dict[str, Any]],
         changed_ids: list[int],
@@ -892,123 +866,52 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
     ) -> bool:
         """Attach near-duplicate candidates to each upsert result (#204).
 
-        Two complementary signals per note (#206): the semantic match catches
-        paraphrase dupes (cosine-thresholded), and a trigram lexical-overlap
-        check catches near-verbatim restatements that score marginally on
-        embeddings — each hit carrying `{signal, rank}` provenance (#208).
-        Returns True if the neighbor search completed (each created/updated
-        result now carries a `neighbors` list, possibly empty), False if it
-        failed — in which case the caller should signal a retry.
+        The policy lives kernel-side since #391 (``actions::attach_neighbors``
+        — semantic + lexical propose-verify signals with ``{signal, rank}``
+        provenance, #206/#208); this binding embeds the drafts (the host's
+        query-embed seam, LRU-cached), runs the action as one collection job,
+        and feeds the calibration recorder (#207) from the returned ``best``
+        samples. Returns True when the neighbor search completed (each
+        created/updated result now carries a ``neighbors`` list, possibly
+        empty), False on failure — the caller then signals a retry.
         """
         assert index is not None
         try:
-            exclude_set = set(changed_ids)
-            # Off the event loop (#445): this embeds the whole changed-note
-            # batch (up to 100 texts) — inline it froze the loop for the
-            # duration of the embed + HNSW pass.
-            raw_results = await asyncio.to_thread(index.search, texts, top_k + len(exclude_set))
-
-            id_to_neighbors: dict[int, list[dict[str, Any]]] = {}
-            ordered_by_note: dict[int, list[tuple[int, dict[str, Any]]]] = {}
-            for nid, text, matches in zip(changed_ids, texts, raw_results, strict=True):
-                # Semantic candidates: paraphrase dupes (rank = the note's
-                # position in this draft's own cosine ranking).
-                candidates: dict[int, dict[str, Any]] = {}
-                sem_rank = 0
-                for m in matches:
-                    score = round(1.0 - m["distance"], 3)
-                    if score < threshold:
-                        break
-                    neighbor_id = m["note_id"]
-                    if neighbor_id in exclude_set:
-                        continue
-                    sem_rank += 1
-                    candidates[neighbor_id] = {
-                        "score": score,
-                        "provenance": [{"signal": "text", "rank": sem_rank}],
-                    }
-                    if sem_rank >= top_k:
-                        break
-
-                # Lexical overlap (#206): near-verbatim dupes the cosine gate
-                # missed. Propose-verify: the trigram index proposes, then a
-                # whole-text similarity check confirms near-verbatim (a shared
-                # question stem is overlap, not a dupe). No cosine to report →
-                # score stays None.
-                if derived is not None and derived.available and text.strip():
-                    fuzzy_rank = 0
-                    try:
-                        fuzzy_rows = derived.search_fuzzy(
-                            text[:DEDUP_LEXICAL_QUERY_CHARS], top_k=top_k + len(exclude_set)
-                        )
-                    except Exception:
-                        logger.debug("dedup lexical overlap unavailable", exc_info=True)
-                        fuzzy_rows = []
-                    for fid, _match in fuzzy_rows:
-                        if fid in exclude_set:
-                            continue
-                        if fid not in candidates and not await _near_verbatim(fid, text):
-                            continue  # proposed but not verified — overlap, not a dupe
-                        fuzzy_rank += 1
-                        entry = candidates.get(fid)
-                        if entry is None:
-                            candidates[fid] = {
-                                "score": None,
-                                "provenance": [{"signal": "fuzzy", "rank": fuzzy_rank}],
-                            }
-                        else:
-                            entry["provenance"].append({"signal": "fuzzy", "rank": fuzzy_rank})
-                        if fuzzy_rank >= top_k:
-                            break
-
-                # The calibration sample (#207): the draft's best SEMANTIC
-                # match, or a no-match tick — fed from dedup's own traffic,
-                # never into the #201 search-gate calibration.
-                if dedup_stats is not None:
-                    best = max(
-                        (c["score"] for c in candidates.values() if c["score"] is not None),
-                        default=None,
-                    )
-                    dedup_stats.record(best)
-
-                # Semantically-scored candidates first (descending score),
-                # lexical-only after (by their fuzzy rank); cap at top_k.
-                ordered = sorted(
-                    candidates.items(),
-                    key=lambda kv: (
-                        -(kv[1]["score"] if kv[1]["score"] is not None else -1.0),
-                        kv[1]["provenance"][0]["rank"],
-                    ),
-                )
-                ordered_by_note[nid] = ordered
-
-            # ONE batched metadata read for every candidate across the batch
-            # (#445 — this was one kernel job per neighbor, up to ~500
-            # sequential actor round trips per upsert call). An id missing
-            # from the map is the old "unreadable note" skip.
-            all_candidates = sorted(
-                {cid for ordered in ordered_by_note.values() for cid, _ in ordered}
+            # Off the event loop (#445): embedding the changed-note batch
+            # inline froze the loop for the duration of the embed.
+            vectors = await asyncio.to_thread(index.embed_queries, texts)
+            if vectors is None:
+                return False  # backend vanished mid-call — retryable
+            index_handle = index.engine
+            derived_handle = (
+                derived._engine._rust
+                if derived is not None and derived.available and derived._engine is not None
+                else None
             )
-            meta_by_id = await wrapper.notes_by_id(all_candidates, "meta")
-            for nid, ordered in ordered_by_note.items():
-                neighbors: list[dict[str, Any]] = []
-                for neighbor_id, info in ordered:
-                    note_data = meta_by_id.get(neighbor_id)
-                    if note_data is None:
-                        logger.debug("neighbor lookup: skipping unreadable note %s", neighbor_id)
-                        continue
-                    neighbors.append(
-                        {
-                            "id": neighbor_id,
-                            "score": info["score"],
-                            "tags": note_data.get("tags", []),
-                            "provenance": info["provenance"],
-                        }
-                    )
-                    if len(neighbors) >= top_k:
-                        break
-                id_to_neighbors[nid] = neighbors
-
+            exclude = sorted(set(changed_ids))
+            raw = await wrapper.run(
+                lambda c: shrike_native.action_attach_neighbors(
+                    c,
+                    index_handle,
+                    derived_handle,
+                    texts,
+                    vectors,
+                    exclude,
+                    top_k,
+                    threshold,
+                )
+            )
+            per_draft = TypeAdapter(list[UpsertNeighbors]).validate_json(raw)
+            if len(per_draft) != len(changed_ids):
+                raise ValueError(
+                    f"attach_neighbors returned {len(per_draft)} entries "
+                    f"for {len(changed_ids)} drafts"
+                )
+            id_to_neighbors: dict[int, list[dict[str, Any]]] = {}
+            for nid, entry in zip(changed_ids, per_draft, strict=True):
+                if dedup_stats is not None:
+                    dedup_stats.record(entry.best)
+                id_to_neighbors[nid] = [n.model_dump() for n in entry.neighbors]
             for r in results:
                 if r.get("status") in ("created", "updated") and r.get("id") in id_to_neighbors:
                     r["neighbors"] = id_to_neighbors[r["id"]]

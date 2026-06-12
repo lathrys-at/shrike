@@ -28,6 +28,7 @@ pub mod fusion;
 pub mod index_orchestrator;
 pub mod recognize;
 pub mod tag_centroids;
+pub mod textsim;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};

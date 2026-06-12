@@ -53,6 +53,7 @@ with contextlib.suppress(ImportError):
         AsyncCollection,  # noqa: F401
         AsyncKernel,  # noqa: F401
         CollectionCore,  # noqa: F401
+        action_attach_neighbors,  # noqa: F401
         action_collection_info,  # noqa: F401
         action_collection_query,  # noqa: F401
         action_list_notes,  # noqa: F401

@@ -160,6 +160,18 @@ pub struct Neighbor {
     pub provenance: Vec<SignalContribution>,
 }
 
+/// One draft note's dedup outcome (#391 phase 1): the attached neighbor
+/// candidates plus the calibration sample (`best` semantic cosine, None on
+/// no-match) the host's dedup-stats recorder consumes. The internal wire of
+/// the kernel's attach-neighbors action.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct UpsertNeighbors {
+    #[serde(default)]
+    pub neighbors: Vec<Neighbor>,
+    #[serde(default)]
+    pub best: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct TemplateInfo {
     pub name: String,
@@ -1068,6 +1080,7 @@ catalog![
     ("SignalContribution", SignalContribution),
     ("SearchMatch", SearchMatch),
     ("Neighbor", Neighbor),
+    ("UpsertNeighbors", UpsertNeighbors),
     ("TemplateInfo", TemplateInfo),
     ("FieldDetail", FieldDetail),
     ("NoteTypeDetail", NoteTypeDetail),
