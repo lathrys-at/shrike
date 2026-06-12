@@ -1050,4 +1050,199 @@ mod tests {
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
+    /// #394 (interim gate): every hand-transcribed `(service, method)` index
+    /// in adapter.rs must be EXERCISED against a real collection — a bumped
+    /// anki whose dispatcher reordered would shift indices silently if any
+    /// constant escaped its tripwire. The test self-scans the constants from
+    /// the source (the SVC_ pin's pattern), drives the whole public surface
+    /// once, and asserts the dispatch recorder saw every pair. Build-time
+    /// derivation from anki's descriptors remains the preferred end-state.
+    #[test]
+    fn every_method_constant_is_dispatched_by_the_surface() {
+        // Parse `const NAME: u32 = N;` declarations out of adapter.rs.
+        let src = include_str!("adapter.rs");
+        let mut svc: std::collections::BTreeMap<&str, u32> = Default::default();
+        let mut methods: Vec<(String, u32)> = Vec::new();
+        for line in src.lines() {
+            let Some(rest) = line.trim().strip_prefix("const ") else {
+                continue;
+            };
+            let Some((name, value)) = rest.split_once(": u32 = ") else {
+                continue;
+            };
+            let Ok(value) = value.trim_end_matches(';').parse::<u32>() else {
+                continue;
+            };
+            if let Some(s) = name.strip_prefix("SVC_") {
+                svc.insert(Box::leak(s.to_string().into_boxed_str()), value);
+            } else {
+                methods.push((name.to_string(), value));
+            }
+        }
+        assert!(svc.len() >= 9, "service constants parsed: {svc:?}");
+        assert!(
+            methods.len() >= 30,
+            "method constants parsed: {}",
+            methods.len()
+        );
+        // Longest-prefix service resolution (CARD_RENDERING before CARDS).
+        let mut prefixes: Vec<(&str, u32)> = svc.iter().map(|(k, v)| (*k, *v)).collect();
+        prefixes.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
+        let expected: Vec<(String, u32, u32)> = methods
+            .iter()
+            .map(|(name, m)| {
+                let (_, s) = prefixes
+                    .iter()
+                    .find(|(p, _)| name.starts_with(&format!("{p}_")))
+                    .unwrap_or_else(|| panic!("no service prefix for {name}"));
+                (name.clone(), *s, *m)
+            })
+            .collect();
+
+        // Drive the whole public surface once.
+        let (core, dir) = temp_core();
+        let created = core
+            .upsert_notes(
+                r#"[{"note_type":"Basic","deck":"Drive","fields":{"Front":"alpha <b>one</b>","Back":"a"}},
+                    {"note_type":"Basic","deck":"Drive","fields":{"Front":"beta two","Back":"b"}}]"#,
+                "error",
+                false,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&created).unwrap();
+        let id_a = parsed[0]["id"].as_i64().unwrap();
+        let id_b = parsed[1]["id"].as_i64().unwrap();
+        // Duplicate-checked create (fields_check) + an update (deck move →
+        // set_card_deck) + a plain field update.
+        core.upsert_notes(
+            r#"[{"note_type":"Basic","deck":"Drive","fields":{"Front":"alpha <b>one</b>","Back":"dupe"}}]"#,
+            "skip",
+            false,
+        )
+        .unwrap();
+        core.upsert_notes(
+            &format!(
+                r#"[{{"id":{id_a},"deck":"Drive::Moved","fields":{{"Front":"alpha edited","Back":"a"}},"tags":["keep"]}}]"#
+            ),
+            "allow",
+            false,
+        )
+        .unwrap();
+        core.get_note(id_a).unwrap();
+        core.cards_of_note(id_a).unwrap();
+        core.note_texts(&[id_a]).unwrap();
+        core.find_notes("deck:Drive*").unwrap();
+        core.find_replace_notes(&[id_a], "edited", "patched", false, true, None)
+            .unwrap();
+        core.update_note_tags(&[id_a], None, &["fresh".into()], &[])
+            .unwrap();
+        core.update_note_tags(&[id_a], None, &[], &["fresh".into()])
+            .unwrap();
+        core.rename_tag("keep", "kept", &[]).unwrap();
+        core.collection_info(&["all".into()], &["Basic".into()])
+            .unwrap();
+
+        // Decks: create, rename, delete-empty (and id-by-name resolution).
+        core.upsert_decks(r#"[{"name":"Spare"}]"#).unwrap();
+        let decks: serde_json::Value =
+            serde_json::from_str(&core.upsert_decks(r#"[{"name":"Spare2"}]"#).unwrap()).unwrap();
+        let spare2 = decks[0]["id"].as_i64().unwrap();
+        core.upsert_decks(&format!(r#"[{{"id":{spare2},"name":"Spare3"}}]"#))
+            .unwrap();
+        core.delete_decks(&["Spare3".to_string()]).unwrap();
+
+        // Note types: stock create, positional update, identity ops, template
+        // text rewrite, field metadata, migration, delete-unused.
+        core.upsert_note_types(
+            r#"[{"name":"DriveType","fields":["F","B"],"templates":[{"name":"Card 1","front":"{{F}}","back":"{{B}}"}],"css":".card{}"}]"#,
+        )
+        .unwrap();
+        core.update_note_type_fields("DriveType", r#"[{"op":"add","name":"C"}]"#)
+            .unwrap();
+        core.update_note_type_templates(
+            "DriveType",
+            r#"[{"op":"rename","name":"Card 1","new_name":"Card One"}]"#,
+        )
+        .unwrap();
+        core.find_and_replace_note_types(
+            "DriveType",
+            ".card",
+            ".kard",
+            false,
+            true,
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+        core.update_note_type_field_metadata(
+            "DriveType",
+            r#"[{"name":"F","description":"front"}]"#,
+        )
+        .unwrap();
+        core.migrate_note_type(
+            &[id_b],
+            "DriveType",
+            r#"{"Front":"F","Back":"B"}"#,
+            "",
+            false,
+        )
+        .unwrap();
+        // An empty CARD must BECOME empty (Anki never creates one): add a
+        // template on C, give the migrated note a C value (the card
+        // generates), then clear it — the existing card now renders empty
+        // and the prune's sweep genuinely dispatches CARDS_REMOVE_CARDS.
+        core.update_note_type_templates(
+            "DriveType",
+            r#"[{"op":"add","name":"Empty","front":"{{C}}","back":"x"}]"#,
+        )
+        .unwrap();
+        core.upsert_notes(
+            &format!(r#"[{{"id":{id_b},"fields":{{"F":"beta two","B":"b","C":"temp"}}}}]"#),
+            "allow",
+            false,
+        )
+        .unwrap();
+        core.upsert_notes(
+            &format!(r#"[{{"id":{id_b},"fields":{{"F":"beta two","B":"b","C":""}}}}]"#),
+            "allow",
+            false,
+        )
+        .unwrap();
+        core.upsert_note_types(
+            r#"[{"name":"Unused","fields":["X"],"templates":[{"name":"Card 1","front":"{{X}}","back":"{{X}}"}],"css":""}]"#,
+        )
+        .unwrap();
+        let unused_id = core.notetype_id("Unused").unwrap();
+        core.delete_note_types(&[unused_id]).unwrap();
+
+        // Media: store, list, fetch, check, trash; then the prune sweep
+        // (unused tags + empty notes/cards + unused media → get_empty_cards,
+        // remove_cards, clear_unused_tags, trash_files).
+        core.store_media_bytes(Some("drive.png"), b"drive bytes", None)
+            .unwrap();
+        core.list_media(None, None).unwrap();
+        core.fetch_media(&["drive.png".to_string()]).unwrap();
+        core.media_check().unwrap();
+        core.delete_media(&["drive.png".to_string()]).unwrap();
+        core.prune(true, true, true, true, false).unwrap();
+
+        core.delete_notes(&[id_a]).unwrap();
+        core.close().unwrap();
+
+        let seen = adapter::DISPATCHED_METHODS
+            .lock()
+            .expect("dispatch recorder poisoned")
+            .clone();
+        let missing: Vec<&str> = expected
+            .iter()
+            .filter(|(_, s, m)| !seen.contains(&(*s, *m)))
+            .map(|(name, ..)| name.as_str())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "method constants never dispatched by the public surface: {missing:?}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
 }
