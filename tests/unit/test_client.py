@@ -111,6 +111,7 @@ class TestCustomEndpoints:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
         status = {
             "running": True,
+            "wire_protocol_version": 1,
             "pid": 1,
             "url": "u",
             "collection": "c",

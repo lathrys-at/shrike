@@ -62,6 +62,7 @@ def run(tmp_path, fake):
 
 def _server(index, embedding=None):
     return ServerStatus(
+        wire_protocol_version=1,
         pid=1,
         url="http://127.0.0.1:8372/mcp",
         collection="/c.anki2",

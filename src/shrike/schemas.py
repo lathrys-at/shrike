@@ -1021,9 +1021,8 @@ class ServerStatus(BaseModel):
 
     running: Literal[True] = True
     # The action exchange's protocol version (#392) — a future remote client
-    # checks this before speaking. Defaulted to 1: a server too old to report
-    # the field IS version 1.
-    wire_protocol_version: int = 1
+    # checks this before speaking.
+    wire_protocol_version: int
     pid: int
     url: str
     collection: str

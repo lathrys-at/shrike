@@ -944,9 +944,7 @@ pub struct DedupStats {
 pub struct ServerStatus {
     #[serde(default)]
     pub running: LiteralTrue,
-    /// The action exchange's protocol version (#392); absent = 1 (a server
-    /// too old to report the field IS version 1).
-    #[serde(default = "default_wire_protocol_version")]
+    /// The action exchange's protocol version (#392).
     pub wire_protocol_version: u32,
     pub pid: i64,
     pub url: String,
@@ -1094,10 +1092,6 @@ macro_rules! catalog {
 /// The Python mirror (`shrike.schemas.WIRE_PROTOCOL_VERSION`) is pinned
 /// equal by the schema contract test.
 pub const WIRE_PROTOCOL_VERSION: u32 = 1;
-
-fn default_wire_protocol_version() -> u32 {
-    WIRE_PROTOCOL_VERSION
-}
 
 catalog![
     ("TemplateInput", TemplateInput),

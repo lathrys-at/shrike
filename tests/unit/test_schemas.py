@@ -122,6 +122,7 @@ def test_server_status_models_the_responsive_payload() -> None:
     status = ServerStatus.model_validate(
         {
             "running": True,
+            "wire_protocol_version": 1,
             "pid": 123,
             "url": "http://127.0.0.1:8372/mcp",
             "collection": "/c.anki2",

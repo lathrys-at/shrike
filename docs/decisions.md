@@ -1014,8 +1014,8 @@ equal by the schema contract test) is the backstop**, bumped only when the
 exchange fabric itself breaks — envelope semantics, the error taxonomy, FFI
 conventions — never for per-action evolution. A future remote handshake
 refuses on mismatch; `GET /status` reports it today (`wire_protocol_version`,
-defaulted to 1 in `ServerStatus` since a server too old to report the field
-is version 1).
+a required `ServerStatus` field — the project predates external users, so
+there is no older payload to tolerate).
 
 The MCP tool surface rides the same discipline for the same reason from the
 other side: external clients can't be handshaken (tools are discovered via

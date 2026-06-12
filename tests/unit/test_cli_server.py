@@ -43,6 +43,7 @@ def run(tmp_path):
 
 def _server(index=None, embedding=None, *, log_dir="/logs"):
     return ServerStatus(
+        wire_protocol_version=1,
         pid=4242,
         url="http://127.0.0.1:8372/mcp",
         collection="/c.anki2",
