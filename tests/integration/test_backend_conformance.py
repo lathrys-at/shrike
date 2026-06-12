@@ -173,6 +173,19 @@ class TestParity:
         vecs = _embed(backend, PARITY_TEXTS)
         fingerprint = backend.model_fingerprint()
 
+        if case.parity_ref is None and not case.restart_parity:
+            # Single-instance form (#441): no second instantiation — embed the
+            # corpus again on the SAME instance and re-read the fingerprint.
+            # Covers determinism within the runtime; the cross-instance form is
+            # tautological for these cases (see BackendCase.restart_parity).
+            again = _embed(backend, PARITY_TEXTS)
+            if case.restart_exact:
+                assert np.array_equal(vecs, again)
+            else:
+                np.testing.assert_allclose(vecs, again, atol=_APPROX_ATOL)
+            assert backend.model_fingerprint() == fingerprint
+            return
+
         ref_factory = case.parity_ref or case.make
         reference = ref_factory(request)
         reference.start()

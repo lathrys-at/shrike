@@ -76,10 +76,8 @@ _EMBEDDING_BACKENDS = [
     "test_backend_conformance.py",
     "test_backends.py",
     "test_clip_model.py",
-    "test_clip_native.py",
     "test_fused_pipeline.py",
     "test_onnx_models.py",
-    "test_onnx_native.py",
 ]
 
 # Non-embedding integration: one aggregate target, `-n auto` (xdist), mirroring the

@@ -6,177 +6,22 @@ Tests exercise the full pipeline: embedding, indexing, search, neighbors.
 
 from __future__ import annotations
 
-import time
-from typing import Any
-
 import httpx
 import pytest
 
-from tests.integration.conftest import CLIRunner, MCPClient, ServerInfo, requires_llama_server
+from tests.integration.conftest import (
+    CLIRunner,
+    MCPClient,
+    ServerInfo,
+    requires_llama_server,
+    wait_for_index_ready,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedding, requires_llama_server]
 
 # ---------------------------------------------------------------------------
 # Test collection: 50 notes across 10 concepts, 5 per concept
 # ---------------------------------------------------------------------------
-
-CONCEPTS: list[dict[str, Any]] = [
-    {
-        "deck": "Biology",
-        "tag": "cell-biology",
-        "cards": [
-            ("What is a mitochondrion?", "An organelle that produces ATP"),
-            ("What is the inner mitochondrial membrane?", "Site of electron transport"),
-            ("What is ATP synthase?", "Enzyme that synthesizes ATP using proton gradient"),
-            ("What is the citric acid cycle?", "A metabolic pathway in the matrix"),
-            ("What is oxidative phosphorylation?", "ATP production via electron transport"),
-        ],
-    },
-    {
-        "deck": "Biology",
-        "tag": "genetics",
-        "cards": [
-            ("What is DNA?", "A double-stranded molecule encoding genetic information"),
-            ("What is RNA polymerase?", "The enzyme that transcribes DNA into RNA"),
-            ("What is a codon?", "A three-nucleotide sequence coding for an amino acid"),
-            ("What is mRNA?", "Messenger RNA carries genetic code from DNA to ribosomes"),
-            ("What is translation?", "The process of synthesizing protein from mRNA"),
-        ],
-    },
-    {
-        "deck": "Biology",
-        "tag": "evolution",
-        "cards": [
-            ("What is natural selection?", "Differential survival and reproduction of organisms"),
-            ("What is genetic drift?", "Random changes in allele frequency in a population"),
-            ("What is speciation?", "The formation of new and distinct species"),
-            ("What is fitness?", "An organism's ability to survive and reproduce"),
-            ("What is adaptation?", "A trait that increases fitness in a given environment"),
-        ],
-    },
-    {
-        "deck": "Chemistry",
-        "tag": "organic",
-        "cards": [
-            ("What is a covalent bond?", "A chemical bond formed by sharing electron pairs"),
-            ("What is an alkane?", "A saturated hydrocarbon with single bonds only"),
-            ("What is a functional group?", "An atom or group giving a molecule its properties"),
-            ("What is isomerism?", "Molecules with same formula but different structures"),
-            ("What is chirality?", "A molecule that is non-superimposable on its mirror image"),
-        ],
-    },
-    {
-        "deck": "Chemistry",
-        "tag": "thermodynamics",
-        "cards": [
-            ("What is enthalpy?", "The total heat content of a system at constant pressure"),
-            ("What is entropy?", "A measure of disorder or randomness in a system"),
-            ("What is Gibbs free energy?", "Energy available to do useful work: G = H - TS"),
-            ("What is an exothermic reaction?", "A reaction that releases heat to surroundings"),
-            ("What is equilibrium?", "When forward and reverse reaction rates are equal"),
-        ],
-    },
-    {
-        "deck": "Physics",
-        "tag": "mechanics",
-        "cards": [
-            ("What is Newton's first law?", "An object at rest stays at rest unless acted on"),
-            ("What is momentum?", "The product of an object's mass and velocity"),
-            ("What is kinetic energy?", "Energy of motion: KE = 0.5 * m * v^2"),
-            ("What is friction?", "A force opposing the relative motion of surfaces"),
-            ("What is acceleration?", "The rate of change of velocity over time"),
-        ],
-    },
-    {
-        "deck": "Physics",
-        "tag": "electromagnetism",
-        "cards": [
-            ("What is Coulomb's law?", "Force between charges is proportional to q1*q2/r^2"),
-            ("What is an electric field?", "A region where a charge experiences a force"),
-            ("What is magnetic flux?", "The total magnetic field passing through a surface"),
-            ("What is Faraday's law?", "A changing magnetic flux induces an electromotive force"),
-            ("What is capacitance?", "The ability to store electric charge: C = Q/V"),
-        ],
-    },
-    {
-        "deck": "Mathematics",
-        "tag": "calculus",
-        "cards": [
-            ("What is a derivative?", "The instantaneous rate of change of a function"),
-            ("What is an integral?", "The accumulation of quantities over an interval"),
-            ("What is the chain rule?", "d/dx[f(g(x))] = f'(g(x)) * g'(x)"),
-            ("What is a limit?", "The value a function approaches as input approaches a point"),
-            ("What is the fundamental theorem?", "Integration and differentiation are inverses"),
-        ],
-    },
-    {
-        "deck": "Mathematics",
-        "tag": "linear-algebra",
-        "cards": [
-            ("What is a matrix?", "A rectangular array of numbers arranged in rows and columns"),
-            ("What is an eigenvalue?", "A scalar lambda where Av = lambda*v for some vector v"),
-            ("What is a determinant?", "A scalar value computed from a square matrix"),
-            ("What is linear independence?", "No vector is a combination of others"),
-            ("What is a vector space?", "A set closed under addition and scaling"),
-        ],
-    },
-    {
-        "deck": "Computer Science",
-        "tag": "algorithms",
-        "cards": [
-            ("What is Big-O notation?", "Describes the upper bound of an algorithm's growth rate"),
-            ("What is a binary search?", "Searching a sorted array by halving the range"),
-            ("What is a hash table?", "A structure mapping keys to values via hashing"),
-            ("What is recursion?", "A function that calls itself to solve subproblems"),
-            ("What is dynamic programming?", "Solving overlapping subproblems"),
-        ],
-    },
-]
-
-
-@pytest.fixture(scope="module")
-def collection_server(server_factory, embedding_model):
-    """Server with embedding + a pre-populated 50-note collection.
-
-    Module-scoped so all test classes share one server and one llama-server
-    process. Tests that create notes must clean up after themselves.
-    """
-    srv = server_factory("semantic", embedding_model=str(embedding_model))
-
-    status_url = srv.url.rsplit("/", 1)[0] + "/status"
-    resp = httpx.get(status_url, timeout=5.0)
-    status = resp.json()
-    if not status.get("embedding", {}).get("available"):
-        pytest.skip("Embedding service not available")
-
-    mcp = MCPClient(srv.url)
-    all_notes = []
-    for concept in CONCEPTS:
-        for front, back in concept["cards"]:
-            all_notes.append(
-                {
-                    "deck": concept["deck"],
-                    "note_type": "Basic",
-                    "fields": {"Front": front, "Back": back},
-                    "tags": [concept["tag"]],
-                }
-            )
-    result = mcp("upsert_notes", {"notes": all_notes})
-    created = sum(1 for r in result["results"] if r["status"] == "created")
-    assert created == 50, f"Expected 50 notes created, got {created}"
-
-    # Build the index here so the fixture is self-sufficient: this server boots
-    # against an empty collection, and an empty-at-boot server does NOT index
-    # notes added by incremental upsert (#148 — the upsert path is gated on
-    # index.available, which is False until the index is materialized). Without
-    # this, the index only gets built as a side effect of TestIndexBuild running
-    # first, so a single TestSearchNotes test run in isolation (-k) would hang the
-    # full _wait_for_index_ready timeout. Remove this explicit rebuild once #148
-    # lands (incremental upsert will materialize the index on its own).
-    httpx.post(f"{_base_url(srv)}/index/rebuild", timeout=30.0)
-    _wait_for_index_ready(srv)
-
-    return srv
 
 
 @pytest.fixture(scope="module")
@@ -208,17 +53,7 @@ def _base_url(server: ServerInfo) -> str:
     return server.url.rsplit("/", 1)[0]
 
 
-def _wait_for_index_ready(server: ServerInfo, timeout: float = 60.0) -> dict:
-    """Poll /status until the index is ready."""
-    base = _base_url(server)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        resp = httpx.get(f"{base}/status", timeout=5.0)
-        idx = resp.json().get("index", {})
-        if idx.get("state") == "ready" and idx.get("size", 0) > 0:
-            return idx
-        time.sleep(0.05)
-    raise TimeoutError("Index did not become ready")
+_wait_for_index_ready = wait_for_index_ready
 
 
 # ---------------------------------------------------------------------------
@@ -229,33 +64,29 @@ def _wait_for_index_ready(server: ServerInfo, timeout: float = 60.0) -> dict:
 class TestIndexBuild:
     """Build the index and verify it completes."""
 
-    def test_rebuild_endpoint(self, collection_server):
+    def test_rebuild_endpoint_and_becomes_ready(self, collection_server):
+        # Trigger + wait as ONE test: a test that starts a rebuild must wait it
+        # out before returning, or the running rebuild leaks into whichever test
+        # samples /status next (#441 — the 'building' != 'ready' CI flake).
         base = _base_url(collection_server)
         resp = httpx.post(f"{base}/index/rebuild", timeout=30.0)
         assert resp.status_code == 200
         body = resp.json()
         assert body.get("status") in ("started", "already_building", "complete")
-
-    def test_index_becomes_ready(self, collection_server):
         idx = _wait_for_index_ready(collection_server)
         assert idx["size"] >= 50
+        assert idx["available"] is True
 
-    def test_status_endpoint_includes_index(self, collection_server):
+    def test_status_endpoint_index_and_embedding_blocks(self, collection_server):
+        # One settled /status response; both blocks are properties of it.
+        _wait_for_index_ready(collection_server)
         base = _base_url(collection_server)
-        resp = httpx.get(f"{base}/status", timeout=5.0)
-        body = resp.json()
-        assert "index" in body
+        body = httpx.get(f"{base}/status", timeout=5.0).json()
         idx = body["index"]
         assert idx["state"] == "ready"
         assert idx["size"] >= 50
         assert idx["ndim"] is not None
         assert idx["ndim"] > 0
-
-    def test_status_endpoint_includes_embedding(self, collection_server):
-        base = _base_url(collection_server)
-        resp = httpx.get(f"{base}/status", timeout=5.0)
-        body = resp.json()
-        assert "embedding" in body
         assert body["embedding"]["available"] is True
 
     def test_save_endpoint(self, collection_server):
@@ -266,8 +97,8 @@ class TestIndexBuild:
         body = resp.json()
         assert body["status"] == "saved"
         assert body["size"] >= 50
-        # Built at boot, no edits since, so nothing was pending to flush.
-        assert body["pending"] == 0
+        # NOTE: no `pending == 0` assert — whether a flush was pending depends
+        # on which mutating tests ran before this one on the shared server.
 
 
 # ---------------------------------------------------------------------------
@@ -523,8 +354,8 @@ class TestDeleteIndexUpdate:
         )
         note_id = created["results"][0]["id"]
 
-        before = semantic_mcp("search_notes", {"ids": [note_id], "top_k": 1})
-        assert len(before["results"][0]["matches"]) >= 0
+        before = semantic_mcp("search_notes", {"queries": ["unique xyzzy placeholder"], "top_k": 5})
+        assert note_id in [m["id"] for m in before["results"][0]["matches"]]
 
         semantic_mcp("delete_notes", {"ids": [note_id]})
 
@@ -533,70 +364,13 @@ class TestDeleteIndexUpdate:
         assert note_id not in after_ids
 
 
-# ---------------------------------------------------------------------------
-# Empty-at-boot indexing (#148)
-# ---------------------------------------------------------------------------
-
-
-class TestEmptyBootIndexing:
-    """A server booted against an empty collection should still index notes
-    added later in the same session (#148)."""
-
-    def test_upsert_into_empty_boot_collection_is_indexed(
-        self, server_factory, embedding_model
-    ) -> None:
-        # A dedicated server with its own empty collection (not the shared,
-        # rebuilt collection_server). An empty collection's index is trivially
-        # complete, so boot materializes an empty, ready index (#148).
-        srv = server_factory("empty-boot-index", embedding_model=str(embedding_model))
-        base = _base_url(srv)
-
-        # The embedding service must be up before we upsert; otherwise a skip
-        # would be for the wrong reason (no embedder) rather than the bug.
-        deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline:
-            if httpx.get(f"{base}/status", timeout=5.0).json()["embedding"]["available"]:
-                break
-            time.sleep(0.05)
-        else:
-            pytest.skip("embedding service did not become available")
-
-        mcp = MCPClient(srv.url)
-        result = mcp(
-            "upsert_notes",
-            {
-                "notes": [
-                    {
-                        "deck": "Bio",
-                        "note_type": "Basic",
-                        "fields": {
-                            "Front": "What is a ribosome?",
-                            "Back": "The cellular machine that synthesizes proteins",
-                        },
-                        "tags": ["cell-biology"],
-                    }
-                ]
-            },
-        )
-        assert result["results"][0]["status"] == "created"
-
-        # No explicit /index/rebuild: boot materialized an empty, ready index, so
-        # `index.available` is True and the incremental upsert path indexed the
-        # note (index.add() is self-sufficient — _ensure_index() sizes the USearch
-        # index from the embedding dimension).
-        idx = httpx.get(f"{base}/status", timeout=5.0).json()["index"]
-        assert idx["available"] is True
-        assert idx["size"] >= 1
-
-        # And the note is actually semantically searchable in the same session.
-        # threshold=0 so the assertion doesn't hinge on the small quantized test
-        # model clearing the default 0.5 cutoff (see test_similar_concepts_rank_higher).
-        search = mcp(
-            "search_notes",
-            {"queries": ["protein synthesis organelle"], "top_k": 5, "threshold": 0.0},
-        )
-        matches = search["results"][0]["matches"]
-        assert any("cell-biology" in m.get("tags", []) for m in matches)
+# NOTE: the old TestEmptyBootIndexing (its own server boot, ~5-8s) was deleted
+# in the #441 audit: the shared collection_server fixture IS that contract at
+# 50-note scale — it boots against an empty collection with NO explicit rebuild
+# (#148 materializes an empty ready index at boot), seeds via incremental
+# upserts, and waits for size >= 50; every search test then proves
+# searchability. test_rebuild_endpoint_and_becomes_ready asserts
+# `available is True` explicitly.
 
 
 # ---------------------------------------------------------------------------
@@ -607,37 +381,31 @@ class TestEmptyBootIndexing:
 class TestIndexCLI:
     """Test shrike index rebuild and shrike index status via CLI."""
 
-    def test_index_status_json(self, semantic_runner, collection_server):
+    def test_index_status_json_and_pretty(self, semantic_runner, collection_server):
+        # Same response, two renderings — one settled index, two invocations.
         _wait_for_index_ready(collection_server)
         data = semantic_runner.json(["index", "status"])
         assert data["state"] == "ready"
         assert data["size"] >= 50
         assert data["ndim"] is not None
-
-    def test_index_status_pretty(self, semantic_runner, collection_server):
-        _wait_for_index_ready(collection_server)
         result = semantic_runner.invoke(["index", "status"])
         assert result.exit_code == 0
         assert "Index:" in result.output
         assert "ready" in result.output.lower()
 
     def test_index_rebuild_background(self, semantic_runner, collection_server):
-        result = semantic_runner.invoke(["index", "rebuild", "--background"])
-        assert result.exit_code == 0
-        _wait_for_index_ready(collection_server)
-
-    def test_index_rebuild_json(self, semantic_runner, collection_server):
+        # ONE rebuild via the CLI, json mode (the richer assertion), waited out
+        # before returning (#441 — rebuild leaks were the CI race). The pretty
+        # variant added only exit-code/format checks, covered by status above.
         data = semantic_runner.json(["index", "rebuild", "--background"])
         assert "status" in data or "total" in data
+        _wait_for_index_ready(collection_server)
 
-    def test_index_save_json(self, semantic_runner, collection_server):
+    def test_index_save_json_and_pretty(self, semantic_runner, collection_server):
         _wait_for_index_ready(collection_server)
         data = semantic_runner.json(["index", "save"])
         assert data["status"] == "saved"
         assert data["size"] >= 50
-
-    def test_index_save_pretty(self, semantic_runner, collection_server):
-        _wait_for_index_ready(collection_server)
         result = semantic_runner.invoke(["index", "save"])
         assert result.exit_code == 0
         assert "saved" in result.output.lower()
@@ -646,12 +414,10 @@ class TestIndexCLI:
 class TestEmbeddingCLI:
     """Test shrike embedding status via CLI."""
 
-    def test_embedding_status_json(self, semantic_runner):
+    def test_embedding_status_json_and_pretty(self, semantic_runner):
         data = semantic_runner.json(["embedding", "status"])
         assert data["available"] is True
         assert "url" in data
-
-    def test_embedding_status_pretty(self, semantic_runner):
         result = semantic_runner.invoke(["embedding", "status"])
         assert result.exit_code == 0
         assert "Embedding:" in result.output
@@ -697,31 +463,29 @@ class TestNoteSearchCLI:
 
 
 class TestServerStatusWithIndex:
-    """Verify shrike server status shows index and embedding info."""
+    """Verify shrike server status shows index and embedding info.
 
-    def test_server_status_shows_index(self, semantic_runner, collection_server):
+    Index and embedding blocks are properties of the SAME response — one
+    pretty invocation and one json invocation assert both (#441)."""
+
+    def test_server_status_pretty_shows_index_and_embedding(
+        self, semantic_runner, collection_server
+    ):
         _wait_for_index_ready(collection_server)
         result = semantic_runner.invoke(["server", "status"])
         assert result.exit_code == 0
         assert "Index:" in result.output
         assert "ready" in result.output.lower()
-
-    def test_server_status_shows_embedding(self, semantic_runner):
-        result = semantic_runner.invoke(["server", "status"])
-        assert result.exit_code == 0
         assert "Embedding:" in result.output
         assert "available" in result.output.lower()
 
-    def test_server_status_json_includes_index(self, semantic_runner, collection_server):
+    def test_server_status_json_includes_index_and_embedding(
+        self, semantic_runner, collection_server
+    ):
         _wait_for_index_ready(collection_server)
         data = semantic_runner.json(["server", "status"])
-        assert "index" in data
         assert data["index"]["state"] == "ready"
         assert data["index"]["size"] >= 50
-
-    def test_server_status_json_includes_embedding(self, semantic_runner):
-        data = semantic_runner.json(["server", "status"])
-        assert "embedding" in data
         assert data["embedding"]["available"] is True
 
 
@@ -731,13 +495,48 @@ class TestServerStatusWithIndex:
 
 
 class TestEmbeddingLifecycle:
-    """Stop and start the embedding service while the server keeps running."""
+    """The full embedding lifecycle as ONE woven flow on ONE server (#441).
+
+    Replaces the old TestEmbeddingLifecycle + TestNoEmbeddingBoot pair (two
+    dedicated servers, four llama-server boots) with one server booted
+    `--no-embedding` and two llama boots. The flow is a single ordered test:
+    every step's contract depends on the state the previous step left, which
+    is exactly why they were flaky as separate tests and cheap as one.
+    """
 
     @pytest.fixture(scope="class")
     def lifecycle_server(self, server_factory, embedding_model) -> ServerInfo:
-        """A dedicated embedding-enabled server (mutated by these tests)."""
-        srv = server_factory("emb-lifecycle", embedding_model=str(embedding_model))
-        mcp = MCPClient(srv.url)
+        """Booted with --no-embedding though a model IS configured — the cold
+        no-auto-start contract is the fixture's own first state."""
+        return server_factory(
+            "emb-lifecycle",
+            embedding_model=str(embedding_model),
+            extra_args=["--no-embedding"],
+        )
+
+    def test_full_lifecycle_flow(
+        self,
+        lifecycle_server: ServerInfo,
+        embedding_model,
+        tmp_path_factory: pytest.TempPathFactory,
+    ) -> None:
+        base = _base_url(lifecycle_server)
+        mcp = MCPClient(lifecycle_server.url)
+
+        # (a) Cold: --no-embedding suppressed auto-start despite the configured
+        # model (the old TestNoEmbeddingBoot contract).
+        status = httpx.get(f"{base}/status", timeout=5.0).json()
+        assert status["embedding"]["available"] is False
+        assert status["index"]["state"] == "unavailable"
+
+        # (b) Empty-body start uses the boot-configured model (llama boot #1).
+        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
+        assert resp.json()["status"] == "started"
+        status = httpx.get(f"{base}/status", timeout=5.0).json()
+        assert status["embedding"]["available"] is True
+
+        # (c) Seed two notes; the empty-at-boot index materialized at start, so
+        # incremental upserts index them (#148) — searchable.
         mcp(
             "upsert_notes",
             {
@@ -763,72 +562,28 @@ class TestEmbeddingLifecycle:
                 ]
             },
         )
-        # No explicit rebuild needed: an empty-at-boot server materializes a
-        # ready index at boot (#148), so the upserts above index incrementally.
-        _wait_for_index_ready(srv)
-        return srv
-
-    def test_stop_then_start_cycle(self, lifecycle_server: ServerInfo) -> None:
-        base = _base_url(lifecycle_server)
-        mcp = MCPClient(lifecycle_server.url)
-
-        # Searchable to begin with.
+        _wait_for_index_ready(lifecycle_server)
         before = mcp("search_notes", {"queries": ["mitochondria ATP energy"], "top_k": 5})
         assert before["results"][0]["matches"]
 
-        # Stop: embedding unavailable, index marked unavailable, search degrades.
+        # (d) Stop: embedding unavailable, index unavailable, search degrades to
+        # the exact tier (no index needed; "ATP" is literal in the seeds).
         resp = httpx.post(f"{base}/embedding/stop", timeout=30.0)
         assert resp.json()["status"] == "stopped"
         status = httpx.get(f"{base}/status", timeout=5.0).json()
         assert status["embedding"]["available"] is False
         assert status["index"]["state"] == "unavailable"
-
-        # Semantic ranking is gone, but exact substring matching needs no index
-        # and still works ("ATP" appears literally in the seeded notes).
         degraded = mcp("search_notes", {"queries": ["ATP"], "top_k": 5})
         matches = degraded["results"][0]["matches"]
         assert matches
         assert all(m["score"] is None for m in matches)
         assert matches[0]["substring"]["matched_fields"]
         assert "not running" in degraded["message"].lower()
-
         # Stopping again is a no-op.
         assert httpx.post(f"{base}/embedding/stop", timeout=10.0).json()["status"] == "not_running"
 
-        # Start again (server reuses its own configured model — empty body).
-        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
-        assert resp.json()["status"] == "started"
-        _wait_for_index_ready(lifecycle_server)
-
-        after = mcp("search_notes", {"queries": ["mitochondria ATP energy"], "top_k": 5})
-        assert after["results"][0]["matches"]
-
-    def test_start_when_running_is_idempotent(self, lifecycle_server: ServerInfo) -> None:
-        base = _base_url(lifecycle_server)
-        httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
-        _wait_for_index_ready(lifecycle_server)
-        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=30.0)
-        assert resp.json()["status"] == "already_running"
-
-    def test_status_exposes_meta_model_id(self, lifecycle_server: ServerInfo) -> None:
-        base = _base_url(lifecycle_server)
-        httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
-        _wait_for_index_ready(lifecycle_server)
-        idx = httpx.get(f"{base}/status", timeout=5.0).json()["index"]
-        # Proves the fingerprint came from llama-server's /v1/models meta block,
-        # not the file-size fallback.
-        assert idx.get("model_id", "").startswith("meta:")
-
-    def test_cli_stop_and_start(
-        self,
-        lifecycle_server: ServerInfo,
-        embedding_model,
-        tmp_path_factory: pytest.TempPathFactory,
-    ) -> None:
-        base = _base_url(lifecycle_server)
-        httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
-        _wait_for_index_ready(lifecycle_server)
-
+        # (e) CLI start with explicit model + port (llama boot #2) — the CLI
+        # wiring half of the old test_cli_stop_and_start.
         cfg_dir = tmp_path_factory.mktemp("emb-lifecycle-cli")
         cfg = cfg_dir / "config.yml"
         cfg.write_text(
@@ -837,12 +592,6 @@ class TestEmbeddingLifecycle:
             f"logging:\n  dir: {lifecycle_server.log_dir}\n"
         )
         runner = CLIRunner(lifecycle_server.url, str(cfg))
-
-        stopped = runner.invoke(["embedding", "stop"])
-        assert stopped.exit_code == 0, stopped.output
-        assert "stopped" in stopped.output.lower()
-
-        # Pass explicit model + port so they match how this test server was launched.
         started = runner.invoke(
             [
                 "embedding",
@@ -856,34 +605,24 @@ class TestEmbeddingLifecycle:
         )
         assert started.exit_code == 0, started.output
         _wait_for_index_ready(lifecycle_server)
+        after = mcp("search_notes", {"queries": ["mitochondria ATP energy"], "top_k": 5})
+        assert after["results"][0]["matches"]
 
+        # (f) Idempotent start while running.
+        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=30.0)
+        assert resp.json()["status"] == "already_running"
 
-class TestNoEmbeddingBoot:
-    """A server can boot with embedding off though a model is configured."""
+        # (g) The fingerprint came from llama-server's /v1/models meta block,
+        # not the file-size fallback.
+        idx = httpx.get(f"{base}/status", timeout=5.0).json()["index"]
+        assert idx.get("model_id", "").startswith("meta:")
 
-    @pytest.fixture(scope="class")
-    def no_embedding_server(self, server_factory, embedding_model) -> ServerInfo:
-        return server_factory(
-            "no-embedding",
-            embedding_model=str(embedding_model),
-            extra_args=["--no-embedding"],
-        )
-
-    def test_boots_without_embedding(self, no_embedding_server: ServerInfo) -> None:
-        status = httpx.get(f"{_base_url(no_embedding_server)}/status", timeout=5.0).json()
-        assert status["embedding"]["available"] is False
-        assert status["index"]["state"] == "unavailable"
-
-    def test_start_uses_configured_model(self, no_embedding_server: ServerInfo) -> None:
-        base = _base_url(no_embedding_server)
-        # Empty body: the server starts with the model it was configured with at
-        # boot, even though --no-embedding skipped auto-start. The POST returns
-        # only once llama-server is healthy, so embedding is available right away
-        # (the collection is empty, so there's nothing to index).
-        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
-        assert resp.json()["status"] == "started"
+        # (h) CLI stop — the other half of the CLI wiring.
+        stopped = runner.invoke(["embedding", "stop"])
+        assert stopped.exit_code == 0, stopped.output
+        assert "stopped" in stopped.output.lower()
         status = httpx.get(f"{base}/status", timeout=5.0).json()
-        assert status["embedding"]["available"] is True
+        assert status["embedding"]["available"] is False
 
 
 class TestSearchQuality:

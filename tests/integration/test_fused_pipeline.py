@@ -2,8 +2,11 @@
 
 Two layers: a direct VectorIndex parity check — the fused embed→add/search
 calls (vectors never crossing the FFI) return the same results as the per-side
-native paths — and a fully-native server (native onnx backend + native index +
-native compute) exercising upsert→index→search over the wire.
+native paths — and ONE fully-native server (native onnx backend + native index
++ native compute) exercising upsert→index→search over the wire. The server
+boots via the retired ``onnx-rs`` alias, which IS the alias-normalization test
+(absorbed from test_onnx_native.py, #441 — the two files booted near-identical
+servers for the same seam).
 """
 
 from __future__ import annotations
@@ -69,11 +72,13 @@ class TestFullyNativeServer:
     @pytest.fixture(scope="class")
     def srv(self, server_factory, onnx_model) -> ServerInfo:
         # Index/derived/compute/backends are all native unconditionally since
-        # the #278 cutover — every server is native end to end.
+        # the #278 cutover — every server is native end to end. Booted via the
+        # retired `onnx-rs` kind (the accepted alias of `onnx`): the boot
+        # succeeding + status normalizing it is the alias contract.
         server = server_factory(
             "fully-native",
             embedding_model=str(onnx_model),
-            extra_args=["--embedding-backend", "onnx"],
+            extra_args=["--embedding-backend", "onnx-rs"],
         )
         base = server.url.rsplit("/", 1)[0]
         deadline = time.monotonic() + 60.0
@@ -82,6 +87,14 @@ class TestFullyNativeServer:
                 return server
             time.sleep(0.05)
         pytest.fail("fully-native embedding service did not become available")
+
+    def test_status_normalizes_alias_and_reports_providers(self, srv: ServerInfo) -> None:
+        # From test_onnx_native.py (#441): the onnx-rs alias normalizes to the
+        # canonical kind in /status, and the loaded ort providers surface.
+        base = srv.url.rsplit("/", 1)[0]
+        emb = httpx.get(f"{base}/status", timeout=5.0).json()["embedding"]
+        assert emb["backend"] == "onnx"
+        assert emb["active_providers"]
 
     def test_upsert_index_search_round_trip(self, srv: ServerInfo) -> None:
         base = srv.url.rsplit("/", 1)[0]
@@ -115,6 +128,10 @@ class TestFullyNativeServer:
             time.sleep(0.05)
         else:
             pytest.fail("index did not become ready")
+
+        # The native engine's fingerprint namespace shows up as the index
+        # model_id (from test_onnx_native.py, #441).
+        assert idx["model_id"].startswith("onnx-rs:")
 
         res = mcp(
             "search_notes",

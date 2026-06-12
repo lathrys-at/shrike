@@ -11,6 +11,7 @@ image-by-text quality was measured in the Phase-3a eval, #193.)
 from __future__ import annotations
 
 import colorsys
+import io
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -20,7 +21,7 @@ import pytest
 from shrike.embedding_clip import ClipBackend
 from shrike.index import CALIB_MIN, activation_floor
 from shrike.tools import ACTIVATION_MARGIN
-from tests.integration.conftest import requires_clip
+from tests.integration.conftest import requires_clip, requires_shrike_native
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedding]
 
@@ -32,25 +33,37 @@ _CLIP_DIM = 512
 _UNRELATED = ["a photograph of a cat", "a circuit diagram schematic", "a page of printed text"]
 
 
-@requires_clip
 def _make(w, notes):
     import json
 
     return w.run_sync(lambda c: json.loads(c.upsert_notes(json.dumps(notes), "allow", False)))
 
 
-class TestClipModel:
-    # One started backend for the whole class: every test here exercises the *same*
-    # default quantized graphs read-only (embed/health/_safe_batch), so a per-test
-    # ClipBackend.start() would reload the ~147 MB text+vision model 4× for no reason
-    # — the dominant cost in this lane. Class-scoped, torn down once.
-    @pytest.fixture(scope="class")
-    def be(self, clip_model: Path) -> Iterator[ClipBackend]:
-        backend = ClipBackend(model=str(clip_model))  # auto-discovers the quantized graphs
-        backend.start()
-        yield backend
-        backend.stop()
+# ONE started backend for the whole module (#441 — this file previously loaded
+# the ~147 MB text+vision model once per class, and test_clip_native.py loaded a
+# third identical copy): every consumer exercises the same default quantized
+# graphs read-only, and the target runs serially (xdist=None in BUILD.bazel).
+@pytest.fixture(scope="module")
+def be(clip_model: Path) -> Iterator[ClipBackend]:
+    backend = ClipBackend(model=str(clip_model))  # auto-discovers the quantized graphs
+    backend.start()
+    yield backend
+    backend.stop()
 
+
+def _png_bytes(color: tuple[int, int, int], size: tuple[int, int] = (256, 256)) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@requires_clip
+@requires_shrike_native
+class TestClipModel:
     def test_shared_space_retrieves_by_image(self, be: ClipBackend) -> None:
         from PIL import Image
 
@@ -87,18 +100,11 @@ class TestClipModel:
 
 
 @requires_clip
+@requires_shrike_native
 class TestClipImageIndex:
     """End-to-end per-modality index (#162 Phase 3c → search #201a): a text query retrieves a note
-    by its image, and the per-modality image ranker surfaces it at rank-1 across the gap."""
-
-    # Class-scoped started backend (same rationale as TestClipModel, #215): load the ~147 MB CLIP
-    # once for the class. Each test builds its own (cheap) collection + index against it.
-    @pytest.fixture(scope="class")
-    def be(self, clip_model: Path) -> Iterator[ClipBackend]:
-        backend = ClipBackend(model=str(clip_model))
-        backend.start()
-        yield backend
-        backend.stop()
+    by its image, and the per-modality image ranker surfaces it at rank-1 across the gap.
+    Uses the shared module backend; each test builds its own (cheap) collection + index."""
 
     @staticmethod
     def _collection(tmp_path: Path):
@@ -175,33 +181,9 @@ class TestClipImageIndex:
         finally:
             w.close()
 
-    def test_reconcile_reembeds_when_image_removed(self, be: ClipBackend, tmp_path: Path) -> None:
-        from shrike.index import NoteEmbedInput
-
-        w, red, other = self._collection(tmp_path)
-        try:
-            idx = self._index(be, tmp_path, w)
-            mid = be.model_fingerprint()
-            from shrike.embedding_base import NoteEmbedInput
-
-            inputs = w.run_sync(
-                lambda c: [
-                    NoteEmbedInput(note_id=n, text=t, image_names=imgs)
-                    for n, t, imgs in c.note_embed_inputs([red, other])
-                ]
-            )
-            idx.rebuild(inputs, col_mod=1, model_id=mid)
-            assert idx.size == 3
-            # The red note loses its image (its embedding fingerprint changes) → reconcile drops
-            # the image vector for exactly that note; the unrelated note is untouched.
-            idx.reconcile(
-                [NoteEmbedInput(red, "study card", []), NoteEmbedInput(other, "ancient rome", [])],
-                col_mod=2,
-                model_id=mid,
-            )
-            assert idx.size == 2  # red: text only now ; rome: text
-        finally:
-            w.close()
+    # NOTE (#441): reconcile-on-image-removal and missing-media-skip are pinned
+    # with mocks in tests/unit/test_index.py (the logic lives in VectorIndex and
+    # never reaches the model for the interesting branch) — not re-proven here.
 
     @staticmethod
     def _colour_collection(tmp_path: Path, n: int):
@@ -270,18 +252,74 @@ class TestClipImageIndex:
         finally:
             w.close()
 
-    def test_missing_media_file_skipped(self, be: ClipBackend, tmp_path: Path) -> None:
-        from shrike.index import NoteEmbedInput
 
-        w, red, other = self._collection(tmp_path)
-        try:
-            idx = self._index(be, tmp_path, w)
-            # Reference a file that isn't in the media dir → skipped, text still indexed, no crash.
-            idx.rebuild(
-                [NoteEmbedInput(red, "study card", ["does-not-exist.png"])],
-                col_mod=1,
-                model_id=be.model_fingerprint(),
+@requires_clip
+@requires_shrike_native
+class TestClipNativeSeam:
+    """The native CLIP engine's binding seams (absorbed from test_clip_native.py,
+    #441 — since the #278 cutover ClipBackend IS the native engine, so the
+    file split documented a distinction that no longer exists; its fingerprint
+    and retrieval tests duplicated conformance / TestClipModel)."""
+
+    def test_image_input_forms_agree(self, be, tmp_path: Path) -> None:
+        # bytes / path / PIL image all land on the same vector (the facade
+        # converts losslessly to bytes for the FFI).
+        from PIL import Image
+
+        data = _png_bytes((10, 200, 10))
+        path = tmp_path / "green.png"
+        path.write_bytes(data)
+        pil = Image.open(io.BytesIO(data))
+
+        v_bytes = np.array(be.embed_images([data])[0], dtype=np.float32)
+        v_path = np.array(be.embed_images([str(path)])[0], dtype=np.float32)
+        v_pil = np.array(be.embed_images([pil])[0], dtype=np.float32)
+        np.testing.assert_array_equal(v_bytes, v_path)
+        np.testing.assert_allclose(v_bytes, v_pil, atol=1e-5)
+
+    def test_kernel_native_attach_embeds_images(self, be, tmp_path: Path) -> None:
+        """#342 P2: the CLIP composition attaches native — ONE adapted engine
+        serves both kernel halves, and neither text nor image embeds re-enter
+        the facade (the counter pin)."""
+        import asyncio
+
+        import shrike_native
+
+        media = {"red.png": _png_bytes((200, 30, 30))}
+        calls = {"embed_texts": 0, "embed_images": 0}
+        originals = {name: getattr(be, name) for name in calls}
+        for name, orig in originals.items():
+
+            def counting(items, _orig=orig, _name=name):  # type: ignore[no-untyped-def]
+                calls[_name] += 1
+                return _orig(items)
+
+            setattr(be, name, counting)
+
+        async def flow() -> bool:
+            kernel = await shrike_native.async_kernel_open(
+                str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
             )
-            assert idx.size == 1
+            handle = be.native_embedder()
+            baseline = dict(calls)  # construction may probe; the hot path may not
+            kernel.attach_embedder(handle, media.get, lambda n: n in media)
+            await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            results = await kernel.upsert_notes(
+                [(basic, 1, ['a colour swatch <img src="red.png">', "back"], [])],
+                "error",
+            )
+            assert all(r[0] == "created" for r in results)
+            nid = results[0][1]
+            engine = kernel.engine_handle()
+            has_image = engine.modality_contains("image", nid)
+            await kernel.close()
+            assert calls == baseline, f"kernel embeds re-entered the facade: {calls}"
+            return has_image
+
+        try:
+            assert asyncio.run(flow())  # the image vector landed, natively
         finally:
-            w.close()
+            for name, orig in originals.items():
+                setattr(be, name, orig)
