@@ -15,7 +15,12 @@
 //! struct holds only its cached fingerprint, so it is naturally
 //! `Send + Sync`.
 //!
-//! Off macOS the crate compiles to the same API with a constructor returning
+//! Since #410 the crate also houses the ASR engine
+//! ([`AppleSpeechTranscriber`] — SpeechAnalyzer, macOS 26+): same Swift
+//! static lib, same C-ABI patterns, segments carrying time spans instead
+//! of boxes.
+//!
+//! Off macOS the crate compiles to the same API with constructors returning
 //! `NativeError::unavailable` — the workspace builds everywhere without
 //! platform surgery in the build graph (build.rs no-ops, no Swift toolchain
 //! needed).
@@ -24,11 +29,16 @@ use shrike_engine_api::{MediaItem, Recognition, RecognizeMedia};
 use shrike_ffi::{NativeError, NativeResult};
 
 #[cfg(target_os = "macos")]
+mod glue;
+#[cfg(target_os = "macos")]
 mod imp;
 #[cfg(not(target_os = "macos"))]
 mod imp_stub;
 #[cfg(not(target_os = "macos"))]
 use imp_stub as imp;
+
+mod speech;
+pub use speech::AppleSpeechTranscriber;
 
 /// The engine: stateless beyond its cached fingerprint (Vision objects are
 /// per-call), so one instance serves concurrent lanes.
@@ -84,10 +94,17 @@ pub(crate) fn empty_recognition() -> Recognition {
     }
 }
 
-// Keep the unavailable error construction in one place for the stub.
+// Keep the unavailable error constructions in one place for the stubs.
 #[allow(dead_code)]
 pub(crate) fn unavailable() -> NativeError {
     NativeError::unavailable("Apple Vision OCR is only available on macOS")
+}
+
+pub(crate) fn speech_unavailable() -> NativeError {
+    NativeError::unavailable(
+        "Apple SpeechAnalyzer ASR is only available on macOS 26+ (and a macOS 26 build SDK), \
+         for a supported locale",
+    )
 }
 
 #[cfg(test)]
@@ -149,7 +166,9 @@ mod tests {
             );
             assert!(r.confidence > 0.0 && r.confidence <= 1.0);
             let seg = r.segments.first().expect("segments retained");
-            let bbox = seg.bbox.expect("box present");
+            let Some(shrike_engine_api::Locator::Bbox(bbox)) = seg.locator else {
+                panic!("box present: {:?}", seg.locator);
+            };
             // Normalized, top-left origin: every coordinate in [0, 1].
             assert!(bbox.iter().all(|v| (0.0..=1.0).contains(v)), "{bbox:?}");
             // 4-dp rounding (the contract's precision).

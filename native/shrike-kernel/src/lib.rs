@@ -48,7 +48,7 @@ pub use runtime::{block_on, init_runtime, spawn_op};
 // The engine contract (#342): traits live in shrike-engine-api — the kernel
 // consumes them and re-exports for downstream paths; it names no engine.
 pub use shrike_engine_api::{
-    Embedder, ImageEmbedder, ImageResolver, MediaItem, Recognition, Recognizer, Segment,
+    Embedder, ImageEmbedder, ImageResolver, Locator, MediaItem, Recognition, Recognizer, Segment,
 };
 
 /// The collection as a task-actor (#374): every access is one job sent to a
@@ -205,7 +205,7 @@ pub struct Kernel {
     collection: SerializedCollection,
     orchestrator: Arc<index_orchestrator::IndexOrchestrator>,
     saver: Arc<index_orchestrator::DebouncedSaver>,
-    derived: DerivedEngine,
+    derived: Arc<DerivedEngine>,
     /// The attachable embedding service (#342's first registry slot):
     /// swappable at runtime — the harness attaches on embedding start,
     /// detaches on stop, and a model swap is detach + attach. Ops that need
@@ -216,7 +216,7 @@ pub struct Kernel {
     /// `tag.text` space + the hygiene knobs. Centroids recompute at the tail
     /// of every index-changing op (a pure function of in-engine text vectors
     /// + membership, so no extra watermark).
-    tag_keys: tag_centroids::TagKeyMap,
+    tag_keys: Arc<tag_centroids::TagKeyMap>,
     tag_config: tag_centroids::TagCentroidConfig,
     /// The recognition service (#228/#342, the second registry slot):
     /// OCR/ASR engines the harness attaches at runtime, exactly like the
@@ -258,7 +258,7 @@ impl EmbedService {
 /// to bytes (lazily, at embed time).
 pub type KernelImages = (Box<dyn ImageEmbedder>, Box<dyn ImageResolver>);
 
-const FIELD_SOURCE: &str = "field";
+pub(crate) const FIELD_SOURCE: &str = "field";
 
 /// The NOTE-item vector spaces (#178): every note search is scoped to these,
 /// so other entity kinds sharing the engine (per-(tag, modality) centroids in
@@ -296,10 +296,10 @@ impl Kernel {
             index_orchestrator::DEFAULT_SAVE_DELAY,
             index_orchestrator::DEFAULT_SAVE_THRESHOLD,
         );
-        let derived = DerivedEngine::open(
+        let derived = Arc::new(DerivedEngine::open(
             &format!("{}/shrike.db", cache_dir.trim_end_matches('/')),
             DerivedEngine::SCHEMA_VERSION,
-        )?;
+        )?);
         tracing::debug!(collection = collection_path, "kernel opened");
         Ok(Self {
             collection,
@@ -307,7 +307,7 @@ impl Kernel {
             saver,
             derived,
             embed: RwLock::new(None),
-            tag_keys: tag_centroids::TagKeyMap::default(),
+            tag_keys: Arc::new(tag_centroids::TagKeyMap::default()),
             tag_config: tag_centroids::TagCentroidConfig::default(),
             recognize: RwLock::new(None),
             recognition_gate: recognize::RecognitionGate::default(),
@@ -902,111 +902,68 @@ impl Kernel {
         Ok(removed)
     }
 
-    /// Fused search: the semantic ranking (embed → per-modality engine search)
-    /// and the lexical rankings (the derived store's substring + fuzzy) each
-    /// rank their own candidates; RRF blends them with the exact tier on top —
-    /// the same semantics as the Python host's search_notes spine.
+    /// Fused search with the kernel's default arguments — a thin delegate to
+    /// [`actions::search_notes`], the ONE fused-search spine (#388): no
+    /// scope, no threshold, no image floor, the canonical `fusion` weights.
+    /// The query embeds here when an embedder is attached; otherwise the
+    /// action degrades to the lexical signals. `score` carries the wire
+    /// contract's semantic similarity when present (the raw RRF magnitude is
+    /// deliberately not exposed, matching the host surface).
     pub async fn search(&self, query: &str, top_k: usize) -> NativeResult<Vec<KernelHit>> {
         let span = tracing::debug_span!("kernel.search", top_k);
         async move {
-            // The query embed and the lexical reads are independent, so the
-            // embed future is built (its compute scheduled by the host's
-            // adapter) BEFORE the sync derived-store reads run on the polling
-            // thread, and awaited after — the orchestrator's no-false-ordering
-            // rule applied to search. With no embedder attached, search
-            // degrades to the lexical signals.
+            // The embed future is built (its compute scheduled by the eager
+            // adapter) before the action's lexical reads run — the same
+            // overlap the host path gets by embedding before dispatch.
             let svc = self.embed_service();
-            let embed_fut = svc
-                .as_ref()
-                .map(|svc| svc.embedder.embed(vec![query.to_string()]));
-
-            // Lexical signals (substring authority + fuzzy), from the derived store.
-            let quoted = format!("\"{}\"", query.replace('"', "\"\""));
-            let exact: Vec<i64> = self
-                .derived
-                .match_rows(&quoted, top_k as i64, false, None)?
-                .into_iter()
-                .map(|(nid, ..)| nid)
-                .collect();
-
-            let grams: Vec<String> = {
-                let lower = query.to_lowercase();
-                let chars: Vec<char> = lower.chars().collect();
-                (0..chars.len().saturating_sub(2))
-                    .map(|i| chars[i..i + 3].iter().collect::<String>())
-                    .collect()
+            let (vectors, semantic) = match &svc {
+                Some(svc) => (svc.embedder.embed(vec![query.to_string()]).await?, true),
+                None => (Vec::new(), false),
             };
-            let fuzzy: Option<Vec<i64>> = if grams.len() >= 2 {
-                let expr = grams
-                    .iter()
-                    .map(|g| format!("\"{}\"", g.replace('"', "\"\"")))
-                    .collect::<Vec<_>>()
-                    .join(" OR ");
-                Some(
-                    self.derived
-                        .match_rows(&expr, (top_k * 4) as i64, false, None)?
+            let sources = vec![actions::SearchSource {
+                label: "query".to_string(),
+                text: query.to_string(),
+                is_query: true,
+            }];
+            let args = actions::SearchArgs {
+                top_k,
+                threshold: 0.0,
+                weights: BTreeMap::new(), // empty = the canonical fusion set
+                semantic,
+                index_size: self.orchestrator.engine().size(),
+                ..Default::default()
+            };
+            let engine = self.orchestrator.engine_arc();
+            let derived = Arc::clone(&self.derived);
+            let tag_keys = Arc::clone(&self.tag_keys);
+            let groups = self
+                .collection
+                .run(move |core| {
+                    actions::search_notes(
+                        core,
+                        Some(&engine),
+                        Some(&derived),
+                        Some(&tag_keys),
+                        &sources,
+                        &vectors,
+                        &args,
+                    )
+                })
+                .await??;
+            Ok(groups
+                .into_iter()
+                .next()
+                .map(|g| g.matches)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|m| KernelHit {
+                    note_id: m.note.id,
+                    score: m.score.unwrap_or(0.0),
+                    signals: m
+                        .provenance
                         .into_iter()
-                        .map(|(nid, ..)| nid)
+                        .map(|c| (c.signal, c.rank))
                         .collect(),
-                )
-            } else {
-                None
-            };
-
-            // Collect the semantic signal; assembly order stays the frozen
-            // #274 one (semantic modalities, tag, exact, fuzzy).
-            let mut rankings: Vec<(String, Vec<i64>)> = Vec::new();
-            if let Some(fut) = embed_fut {
-                let qvec = fut.await?;
-                let note_spaces: Vec<String> =
-                    NOTE_MODALITIES.iter().map(|m| m.to_string()).collect();
-                let semantic = self.orchestrator.engine().search_by_modality(
-                    &qvec,
-                    top_k,
-                    Some(&note_spaces),
-                )?;
-                if let Some(per_query) = semantic.first() {
-                    for (modality, (ids, _dists)) in per_query {
-                        rankings.push((modality.clone(), ids.clone()));
-                    }
-                }
-                // Tag-centroid signal (#179): conditionally present.
-                if let Some(qvec0) = qvec.first() {
-                    let tag_notes = tag_centroids::tag_ranking(
-                        self.orchestrator.engine(),
-                        &self.tag_keys,
-                        qvec0,
-                        tag_centroids::TAG_ACTIVATION,
-                        tag_centroids::TAG_TOP_TAGS,
-                        tag_centroids::TAG_RANK_CAP,
-                    );
-                    if !tag_notes.is_empty() {
-                        rankings.push(("tag".to_string(), tag_notes));
-                    }
-                }
-            }
-            rankings.push(("exact".to_string(), exact));
-            if let Some(fuzzy) = fuzzy {
-                rankings.push(("fuzzy".to_string(), fuzzy));
-            }
-
-            // Fuse (the frozen #274 semantics: weights, exact tier, determinism).
-            let mut weights = BTreeMap::new();
-            weights.insert("text".to_string(), 1.0);
-            weights.insert("image".to_string(), 1.0);
-            weights.insert("tag".to_string(), 1.0);
-            weights.insert("exact".to_string(), 1.0);
-            weights.insert("fuzzy".to_string(), 0.5);
-            let mut priority = std::collections::HashSet::new();
-            priority.insert("exact".to_string());
-            let fused = fusion::rrf_fuse(&rankings, &weights, fusion::RRF_K, &priority);
-            Ok(fused
-                .into_iter()
-                .take(top_k)
-                .map(|(note_id, score, signals)| KernelHit {
-                    note_id,
-                    score,
-                    signals,
                 })
                 .collect())
         }
@@ -1410,7 +1367,7 @@ mod no_cpython_smoke {
                             segments: vec![Segment {
                                 text,
                                 confidence: 0.95,
-                                bbox: Some([0.0, 0.0, 1.0, 0.1]),
+                                locator: Some(Locator::Bbox([0.0, 0.0, 1.0, 0.1])),
                             }],
                         }
                     })

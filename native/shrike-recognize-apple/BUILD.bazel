@@ -53,6 +53,14 @@ cc_library(
         "Vision",
         "-framework",
         "Foundation",
+        # The ASR half (#410): Speech (SpeechAnalyzer), AVFoundation
+        # (AVAudioFile), CoreMedia (CMTime ranges).
+        "-framework",
+        "Speech",
+        "-framework",
+        "AVFoundation",
+        "-framework",
+        "CoreMedia",
     ],
     target_compatible_with = ["@platforms//os:macos"],
     deps = [":swift_glue_import"],

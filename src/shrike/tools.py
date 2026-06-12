@@ -19,7 +19,6 @@ from mcp.server.fastmcp import FastMCP
 # contract's home name).
 from shrike.actions import (
     ACTIVATION_MARGIN,
-    SEARCH_WEIGHTS,
     ActionContext,
     ToolInputError,
     build_actions,
@@ -31,7 +30,6 @@ from shrike.mcp_adapter import _safe_tool, register_actions
 
 __all__ = [
     "ACTIVATION_MARGIN",
-    "SEARCH_WEIGHTS",
     "ToolInputError",
     "_safe_tool",
     "register_tools",

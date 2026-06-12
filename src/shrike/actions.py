@@ -83,17 +83,9 @@ def note_outcome(message: str) -> None:
     _call_outcome.set(message)
 
 
-# Per-signal RRF weights for search_notes' fusion (#180/#201). The semantic retriever is now
-# per-modality — `text` and `image` are separate rank-based signals (search_by_modality), so the
-# CLIP modality gap (image cosines sit a constant offset below text ones) is invisible to the
-# fusion. The `fuzzy` signal (#98) is the derived-text store's trigram/typo ranking; it's weighted
-# below the rest because it's the noisiest (a near-miss is weaker evidence than a literal or
-# semantic hit). Equal-ish today; the tuning harness + further signals (tag #179) will make these
-# config/`--search-*` knobs. The exact-match override (priority tier) is orthogonal to the weight.
-# `tag` is the high-precision tag-centroid signal (#179): an activated tag's
-# members enter the fusion as their own ranking — weighted like the semantic
-# signals (precision justifies parity; RRF's rank decay bounds flooding).
-SEARCH_WEIGHTS = {"text": 1.0, "image": 1.0, "tag": 1.0, "exact": 1.0, "fuzzy": 0.5}
+# The per-signal RRF weights live kernel-side now (#388): `shrike_kernel::fusion::search_weights`
+# is the single source of truth, applied when the host passes none. The action below passes no
+# weights; a future config/`--search-*` knob re-enters through the same parameter as an override.
 
 # The live-search min-query gate (#181): query strings shorter than this skip
 # the embedding-bearing tier even on tier="full" — single letters and typing
@@ -669,7 +661,6 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 exclude=sorted(exclude_set),
                 kernel=kernel,
                 image_floor=image_floor,
-                weights=SEARCH_WEIGHTS,
                 semantic=semantic_ok,
                 index_size=index.size if index is not None else 0,
             )

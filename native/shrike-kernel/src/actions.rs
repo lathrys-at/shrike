@@ -320,7 +320,9 @@ pub struct SearchArgs {
     pub exclude: Vec<i64>,
     /// The #201b activation floor for the image modality (None = no gating).
     pub image_floor: Option<f64>,
-    /// Per-signal RRF weights (the harness passes SEARCH_WEIGHTS).
+    /// Per-signal RRF weights. EMPTY means the canonical set
+    /// (`fusion::search_weights`) — the sentinel a future `--search-*`
+    /// override knob must preserve; a non-empty map is used verbatim.
     pub weights: std::collections::BTreeMap<String, f64>,
     /// Whether semantic ranking runs (index ready + backend up); `vectors`
     /// carries one query vector per source when true.
@@ -497,16 +499,30 @@ fn collect_substring_candidates(
     };
 
     let mut added = 0usize;
-    for (nid, _source, _ref, _snippet) in rows {
+    for (nid, source, reference, snippet) in rows {
         if exclude.contains(&nid) || note_data.contains(nid) {
             continue; // store may return a row per field
         }
-        let data = match read_note(core, nid) {
+        let mut data = match read_note(core, nid) {
             Some(d) => d,
             None => continue,
         };
         if !in_scope(&data, args.deck.as_deref(), &args.tags) {
             continue;
+        }
+        // A derived-source row is its own authority (#199/#388): FTS5
+        // matched the stored text's literal trigrams, and the field-content
+        // re-check below would wrongly reject a literal living only in an
+        // OCR/ASR row. Provenance carries the source + ref so the result can
+        // say where it hit; field rows stay with the substring_info
+        // authority over rendered content.
+        if source != crate::FIELD_SOURCE {
+            data["substring"] = json!({
+                "matched_fields": Vec::<String>::new(),
+                "snippet": snippet,
+                "source": source,
+                "ref": reference,
+            });
         }
         note_data.insert(nid, data);
         added += 1;
@@ -760,9 +776,16 @@ pub fn search_notes(
             ("exact".into(), exact_ids),
             ("fuzzy".into(), ranking_fuzzy),
         ];
-        let priority: HashSet<String> = std::iter::once("exact".to_owned()).collect();
-        let fused =
-            crate::fusion::rrf_fuse(&rankings, &args.weights, crate::fusion::RRF_K, &priority);
+        // Host-supplied weights override; empty means the kernel's canonical
+        // set (#388 — the one source of truth in `fusion`).
+        let weights = if args.weights.is_empty() {
+            crate::fusion::search_weights()
+        } else {
+            args.weights.clone()
+        };
+        let priority: HashSet<String> =
+            std::iter::once(crate::fusion::PRIORITY_SIGNAL.to_owned()).collect();
+        let fused = crate::fusion::rrf_fuse(&rankings, &weights, crate::fusion::RRF_K, &priority);
 
         // Provenance (#182): best (lowest) rank first, ties by signal name.
         let mut matches: Vec<Value> = Vec::new();

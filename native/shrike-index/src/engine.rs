@@ -444,62 +444,97 @@ impl MultiModalIndex {
     /// Per-(non-text-)modality best-match stats for the activation gate
     /// (#201b): sample stored text vectors as pseudo-queries (deterministic),
     /// search each non-text modality, record the best non-self match.
+    ///
+    /// Lock discipline (#395): the sample keys and their query vectors are
+    /// snapshotted under ONE short hold, then each search takes its own brief
+    /// hold — so a calibration over hundreds of samples never stalls the
+    /// whole index behind a single multi-hundred-millisecond lock. Fully
+    /// lock-free searching is deliberately NOT used: writers may interleave,
+    /// and the engine's safety model trusts usearch's `Sync` only for
+    /// read-vs-read — every usearch call stays under the mutex. The stats
+    /// are statistical, so an interleaved write skewing one sample is fine.
     pub fn calibrate_activation(
         &self,
         sample_size: usize,
         k: usize,
         min_count: usize,
     ) -> NativeResult<ActivationStats> {
-        let state = self.lock();
-        let Some(text_sub) = state.indexes.get(&self.text) else {
-            return Ok(Vec::new());
+        // Phase 1 — one short hold: pick the sample and copy out its query
+        // vectors; list the live non-text modalities.
+        let (queries, modalities) = {
+            let state = self.lock();
+            let Some(text_sub) = state.indexes.get(&self.text) else {
+                return Ok(Vec::new());
+            };
+            if text_sub.index.size() == 0 {
+                return Ok(Vec::new());
+            }
+            let modalities: Vec<String> = state
+                .indexes
+                .iter()
+                .filter(|(m, s)| *m != &self.text && s.index.size() > 0)
+                .map(|(m, _)| m.clone())
+                .collect();
+            if modalities.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            // Deterministic sample: a PARTIAL LCG Fisher-Yates over the
+            // sorted keys — only the first `sample_size` slots are drawn, so
+            // a large collection isn't fully shuffled to take 256 (#395).
+            // Stable across runs of this engine; deliberately NOT numpy's
+            // sampler — the stats are statistical, never byte-pinned.
+            let mut keys: Vec<i64> = text_sub.counts.keys().copied().collect();
+            let n = keys.len();
+            let take = sample_size.min(n);
+            let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
+            for i in 0..take {
+                rng = rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let j = i + ((rng >> 33) as usize % (n - i));
+                keys.swap(i, j);
+            }
+            keys.truncate(take);
+
+            let queries: Vec<(i64, Vec<f32>)> = keys
+                .iter()
+                .filter_map(|key| {
+                    Self::vectors_of(&text_sub.index, *key as u64)
+                        .and_then(|v| v.into_iter().next().map(|q| (*key, q)))
+                })
+                .collect();
+            (queries, modalities)
         };
-        if text_sub.index.size() == 0 {
-            return Ok(Vec::new());
-        }
-        let non_text: Vec<(&String, &Sub)> = state
-            .indexes
-            .iter()
-            .filter(|(m, s)| *m != &self.text && s.index.size() > 0)
-            .collect();
-        if non_text.is_empty() {
-            return Ok(Vec::new());
-        }
 
-        // Deterministic sample: an LCG Fisher-Yates over the sorted keys.
-        // Stable across runs of this engine; deliberately NOT numpy's sampler —
-        // the stats are statistical, never byte-pinned across engines.
-        let mut sample: Vec<i64> = text_sub.counts.keys().copied().collect();
-        let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
-        let n = sample.len();
-        for i in (1..n).rev() {
-            rng = rng
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let j = (rng >> 33) as usize % (i + 1);
-            sample.swap(i, j);
-        }
-        sample.truncate(sample_size);
-
+        // Phase 2 — one brief hold per search; writers interleave between
+        // samples instead of queueing behind the whole calibration.
         let mut stats: ActivationStats = Vec::new();
-        for (modality, sub) in non_text {
+        for modality in &modalities {
             let mut best_sims: Vec<f64> = Vec::new();
-            for key in &sample {
-                let Some(vectors) = Self::vectors_of(&text_sub.index, *key as u64) else {
-                    continue;
-                };
-                // k > 1 so a pseudo-query whose own image is the nearest hit
-                // still has a non-self hit to record.
-                let hits = sub
-                    .index
-                    .search(&vectors[0], k.min(sub.index.size()))
-                    .map_err(|e| NativeError::internal(format!("usearch search: {e}")))?;
-                for (hk, dist) in hits.keys.iter().zip(hits.distances.iter()) {
-                    if *hk as i64 == *key {
-                        continue; // exclude the pseudo-query's own note
+            for (key, qvec) in &queries {
+                let best = {
+                    let state = self.lock();
+                    let Some(sub) = state.indexes.get(modality) else {
+                        break; // modality vanished mid-run (clear/rebuild)
+                    };
+                    if sub.index.size() == 0 {
+                        break;
                     }
-                    best_sims.push(1.0 - *dist as f64);
-                    break; // nearest non-self hit = this query's best match
+                    // k > 1 so a pseudo-query whose own image is the nearest
+                    // hit still has a non-self hit to record.
+                    let hits = sub
+                        .index
+                        .search(qvec, k.min(sub.index.size()))
+                        .map_err(|e| NativeError::internal(format!("usearch search: {e}")))?;
+                    hits.keys
+                        .iter()
+                        .zip(hits.distances.iter())
+                        .find(|(hk, _)| **hk as i64 != *key)
+                        .map(|(_, dist)| 1.0 - *dist as f64)
+                };
+                if let Some(sim) = best {
+                    best_sims.push(sim);
                 }
             }
             if best_sims.len() >= min_count {

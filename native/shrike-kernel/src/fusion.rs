@@ -14,6 +14,28 @@ use std::collections::{BTreeMap, HashSet};
 /// Mirrors `shrike.search_fusion.RRF_K`.
 pub const RRF_K: i64 = 60;
 
+/// The signal whose literal hits tier above the rest (the one place RRF's
+/// blindness to magnitude is wrong — see `search_fusion.py`).
+pub const PRIORITY_SIGNAL: &str = "exact";
+
+/// The CANONICAL per-signal RRF weights for fused search (#388): `fuzzy`
+/// below the rest — a near-miss is weaker evidence than a literal or
+/// semantic hit. The single source of truth; the action defaults to these
+/// when the host passes none (the host parameter stays as an override
+/// seam for a future config knob).
+pub fn search_weights() -> BTreeMap<String, f64> {
+    [
+        ("text", 1.0),
+        ("image", 1.0),
+        ("tag", 1.0),
+        ("exact", 1.0),
+        ("fuzzy", 0.5),
+    ]
+    .into_iter()
+    .map(|(s, w)| (s.to_string(), w))
+    .collect()
+}
+
 /// One fused hit: `(note_id, score, [(signal, 1-based rank)...])`. The signal
 /// list is in canonical (sorted-signal) accumulation order, matching the
 /// insertion order of the Python implementation's `signals` dict.

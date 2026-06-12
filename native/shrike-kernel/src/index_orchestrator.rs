@@ -651,11 +651,30 @@ impl IndexOrchestrator {
     /// *resolvable* image when an image embedder + resolver are supplied.
     /// Maintains the per-note hashes (so the next reconcile sees these notes
     /// as current). Mirrors `VectorIndex.add`.
+    ///
+    /// Visibility (#395): replace is remove-then-add across separate engine
+    /// holds, NOT atomic — a concurrent search can transiently miss a note
+    /// mid-replace (or see its text vector before its image one). That is
+    /// inside the index's contract: a lag-tolerant derived cache whose
+    /// results may be stale, never wrong-note.
     pub async fn add(
         &self,
         inputs: &[EmbedInput],
         embedder: &dyn Embedder,
         images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+    ) -> NativeResult<usize> {
+        self.apply(inputs, embedder, images, true).await
+    }
+
+    /// The shared embed→engine pipeline behind [`Self::add`] (replace
+    /// semantics) and [`Self::rebuild`] (`replace = false`: the engine was
+    /// just cleared, so per-batch removes against an empty index are skipped).
+    async fn apply(
+        &self,
+        inputs: &[EmbedInput],
+        embedder: &dyn Embedder,
+        images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+        replace: bool,
     ) -> NativeResult<usize> {
         if inputs.is_empty() {
             return Ok(0);
@@ -723,8 +742,11 @@ impl IndexOrchestrator {
             }
 
             self.engine.ensure(TEXT, ndim)?;
-            // Replace semantics: drop a re-added note's existing vectors first.
-            let _ = self.engine.remove(&keys)?;
+            // Replace semantics: drop a re-added note's existing vectors
+            // first (skipped during rebuild — the index was just cleared).
+            if replace {
+                let _ = self.engine.remove(&keys)?;
+            }
             self.engine.add(TEXT, &keys, &vectors)?;
             if !ocr_keys.is_empty() {
                 self.engine.add(TEXT, &ocr_keys, &ocr_vectors)?;
@@ -810,8 +832,12 @@ impl IndexOrchestrator {
 
         let result: NativeResult<()> = async {
             let mut indexed = 0u64;
+            // The outer chunking exists to land build_progress between
+            // batches (each ≤ BATCH_SIZE slice is a single pass inside
+            // `apply`); `replace = false` skips the per-batch removes that
+            // would otherwise run against the just-cleared index (#395).
             for batch in inputs.chunks(BATCH_SIZE) {
-                self.add(batch, embedder, images).await?;
+                self.apply(batch, embedder, images, false).await?;
                 indexed += batch.len() as u64;
                 self.shared
                     .lock()

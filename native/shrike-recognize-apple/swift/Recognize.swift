@@ -26,17 +26,39 @@
 import Foundation
 import Vision
 
-/// The wire shape of one recognized line — mirrors the Rust `Segment`
-/// (`text`, `confidence`, `bbox: [x, y, w, h]` normalized top-left, 4 dp).
-private struct WireSegment: Encodable {
+/// Where a segment sits in its medium — mirrors the Rust `Locator` enum:
+/// one case, never two coupled optionals. Encodes flattened as the
+/// historical wire keys (`"bbox": [...]` / `"span": [...]`).
+enum WireLocator {
+    case bbox([Double])  // normalized top-left [x, y, w, h], OCR
+    case span([Double])  // [start_seconds, duration_seconds], ASR (#410)
+}
+
+/// The wire shape of one recognized segment — mirrors the Rust `Segment`:
+/// `text`, `confidence`, and the locator that fits the medium (or none,
+/// which stays off the wire entirely). All values 4 dp.
+struct WireSegment: Encodable {
     let text: String
     let confidence: Double
-    let bbox: [Double]
+    let locator: WireLocator?
+
+    private enum CodingKeys: String, CodingKey { case text, confidence, bbox, span }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(text, forKey: .text)
+        try c.encode(confidence, forKey: .confidence)
+        switch locator {
+        case .bbox(let box): try c.encode(box, forKey: .bbox)
+        case .span(let span): try c.encode(span, forKey: .span)
+        case nil: break
+        }
+    }
 }
 
 /// The wire shape of one image's result — mirrors the Rust `Recognition`,
 /// plus `error` (absent on success) for the Rust side to log.
-private struct WireRecognition: Encodable {
+struct WireRecognition: Encodable {
     var text: String = ""
     var confidence: Double = 0
     var segments: [WireSegment] = []
@@ -46,16 +68,16 @@ private struct WireRecognition: Encodable {
 /// Crosses the semaphore bridge: written by the detached task before
 /// `signal()`, read by the entry after `wait()` — the semaphore is the
 /// happens-before edge, so the unchecked Sendable is sound.
-private final class ResultBox: @unchecked Sendable {
+final class ResultBox: @unchecked Sendable {
     var json = "{\"text\":\"\",\"confidence\":0.0,\"segments\":[]}"
 }
 
 /// Round to 4 decimal places (the segments contract's box precision).
-private func round4(_ v: Double) -> Double {
+func round4(_ v: Double) -> Double {
     (v * 10_000).rounded() / 10_000
 }
 
-private func encode(_ wire: WireRecognition) -> String {
+func encode(_ wire: WireRecognition) -> String {
     guard let data = try? JSONEncoder().encode(wire),
         let json = String(data: data, encoding: .utf8)
     else {
@@ -96,7 +118,7 @@ private func recognize(_ data: Data) async -> WireRecognition {
             WireSegment(
                 text: candidate.string,
                 confidence: Double(candidate.confidence),
-                bbox: [round4(x), round4(y), round4(w), round4(h)]
+                locator: .bbox([round4(x), round4(y), round4(w), round4(h)])
             ))
     }
     if wire.segments.isEmpty {
