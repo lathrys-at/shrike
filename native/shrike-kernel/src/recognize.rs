@@ -134,4 +134,21 @@ mod tests {
         // Whitespace padding doesn't count as substance.
         assert!(!gate.vector_worthy(&format!("{}short{}", " ".repeat(30), " ".repeat(30))));
     }
+
+    #[test]
+    fn sweep_report_wire_shape() {
+        // The host's driver parses this wire — pin it at the type's home so
+        // a serde attribute change can't silently reshape it.
+        let to = |r: &SweepReport| serde_json::to_string(r).unwrap();
+        assert_eq!(to(&SweepReport::Unavailable), r#"{"status":"unavailable"}"#);
+        assert_eq!(to(&SweepReport::Idle), r#"{"status":"idle"}"#);
+        assert_eq!(
+            to(&SweepReport::Ran {
+                recognized: 2,
+                stored: 1,
+                remaining: 3
+            }),
+            r#"{"status":"ran","recognized":2,"stored":1,"remaining":3}"#
+        );
+    }
 }

@@ -1094,6 +1094,30 @@ mod op_tests {
     use futures::executor::block_on;
     use futures::future::BoxFuture;
 
+    #[test]
+    fn status_wire_shape() {
+        // The harness parses this wire — pin it at the type's home so a
+        // serde attribute change can't silently reshape it (keys present
+        // even when null; lowercase state labels).
+        let status = OrchestratorStatus {
+            state: OrchestratorState::Building,
+            size: 4,
+            ndim: None,
+            col_mod: Some(7),
+            model_id: None,
+            progress: BuildProgress {
+                indexed: 1,
+                total: 9,
+            },
+            error: None,
+            activation: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&status).unwrap(),
+            r#"{"state":"building","size":4,"ndim":null,"col_mod":7,"model_id":null,"progress":{"indexed":1,"total":9},"error":null,"activation":null}"#
+        );
+    }
+
     /// Deterministic 4-dim unit vectors from a text hash (no model needed).
     struct StubEmbedder;
     impl Embedder for StubEmbedder {
