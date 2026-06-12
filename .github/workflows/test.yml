@@ -100,10 +100,14 @@ jobs:
   lint:
     name: Lint & type check
     needs: changes
-    # `|| rc-label` forces this lane even on a docs-only diff the path filter
-    # would skip, so a release candidate runs the full suite at the PR level
-    # rather than first at the v* tag (#152).
-    if: needs.changes.outputs.code == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
+    # `|| native` (#437): the cargo fmt/clippy steps live in THIS job behind
+    # their own `native` step-gates — without it a native-only PR skipped the
+    # whole job and the step-gates never got evaluated, so Rust changes shipped
+    # unlinted (and the shrike_native Python shim with them). `|| rc-label`
+    # forces this lane even on a docs-only diff the path filter would skip, so
+    # a release candidate runs the full suite at the PR level rather than first
+    # at the v* tag (#152).
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.native == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -122,10 +126,14 @@ jobs:
           cache-dependency-glob: pyproject.toml
       - name: Install dependencies
         run: uv pip install --system -e ".[dev]"
+      # native/shrike-py/python is the extension's Python shim package (#437):
+      # outside src/, so it was in no ruff scope anywhere and lint debt
+      # accumulated invisibly. (Its .pyi stubs are additionally
+      # stubtest-validated under Bazel in the tests lane.)
       - name: Ruff check
-        run: ruff check src/shrike/ tests/
+        run: ruff check src/shrike/ tests/ native/shrike-py/python/
       - name: Ruff format check
-        run: ruff format --check src/shrike/ tests/
+        run: ruff format --check src/shrike/ tests/ native/shrike-py/python/
       - name: Mypy
         run: mypy src/shrike/
       # Rust lint (#304): the idiomatic gates for the native workspace —
