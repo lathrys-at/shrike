@@ -1,13 +1,21 @@
 //! Native derived-text engine (#281): the FTS5-trigram store under the
 //! `DerivedTextStore` facade, on rusqlite's **bundled** SQLite.
 //!
-//! Implements exactly the surface of `shrike.derived.SqliteDerivedEngine` —
-//! identical schema (`idx` FTS5 trigram + `rowmap` provenance + `meta`),
-//! identical SQL, the same `shrike.db` file (either engine opens a store the
-//! other wrote; on a schema-version mismatch the data is dropped and the next
-//! drift rebuilds, the derived-cache answer). The bundled SQLite always has
-//! FTS5 + the trigram tokenizer, which is this engine's user-facing win: the
-//! facade's availability probe stops being load-bearing.
+//! The ONE implementation of the sidecar (`idx` FTS5 trigram + `rowmap`
+//! provenance + `segments` + `meta` in `shrike.db`; the Python
+//! `SqliteDerivedEngine` it originally mirrored retired with the engine
+//! cutover). On a schema-version mismatch — or an `idx`↔`rowmap` pairing
+//! inconsistency found at open — the derived data is dropped and the next
+//! drift rebuilds: the derived-cache answer, no migrations. The bundled
+//! SQLite always has FTS5 + the trigram tokenizer, which is this engine's
+//! user-facing win: the facade's availability probe stops being load-bearing.
+//!
+//! **The single mutexed connection is a correctness invariant, not just
+//! thread-safety** (#396): `idx` is an FTS5 virtual table, so nothing at the
+//! schema level (no FK, no trigger) ties its rowids to `rowmap` — the pairing
+//! holds because every write rides this one connection's
+//! `last_insert_rowid()` under [`DerivedEngine::lock`]. A future move to a
+//! connection pool must make the coupling structural first.
 //!
 //! MATCH-expression building, trigram filtering, and the state machine stay
 //! facade-side; this crate is storage + queries only. Pure Rust — no pyo3.
@@ -63,7 +71,19 @@ impl DerivedEngine {
 
     pub fn open(path: &str, schema_version: i64) -> NativeResult<Self> {
         let conn = Connection::open(path).map_err(db_err)?;
-        conn.pragma_update(None, "journal_mode", "WAL")
+        // Plain rollback journaling + synchronous=NORMAL (#396). WAL was the
+        // original mode, but this store has exactly one connection (the
+        // engine mutex serializes everything), so WAL's concurrent-reader
+        // payoff never materializes — while its -wal/-shm sidecars complicate
+        // the one-file story the relay/sync design wants. DELETE keeps the
+        // store a single file between transactions; NORMAL may lose the last
+        // transaction on power loss (never integrity), which a rebuildable
+        // cache absorbs: the col_mod watermark lags, reads as drift, rebuilds.
+        // (Opening a previously-WAL file converts it back; WAL is the one
+        // persistent journal mode.)
+        conn.pragma_update(None, "journal_mode", "DELETE")
+            .map_err(db_err)?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(db_err)?;
 
         conn.execute(
@@ -80,16 +100,56 @@ impl DerivedEngine {
             .ok();
         if let Some(v) = version {
             if v != schema_version {
-                conn.execute("DROP TABLE IF EXISTS idx", [])
-                    .map_err(db_err)?;
-                conn.execute("DROP TABLE IF EXISTS rowmap", [])
-                    .map_err(db_err)?;
-                conn.execute("DROP TABLE IF EXISTS segments", [])
-                    .map_err(db_err)?;
-                conn.execute("DELETE FROM meta WHERE key='col_mod'", [])
-                    .map_err(db_err)?;
+                Self::reset_tables(&conn)?;
             }
         }
+        Self::create_tables(&conn)?;
+        // The idx↔rowmap pairing has no schema-level enforcement (see the
+        // module docs) — verify it at open and treat a mismatch exactly like
+        // corruption: drop the derived data so the next drift rebuild
+        // restores a consistent store (recognition rows re-derive via the
+        // pending sweep). A silent mismatch would serve provenance for the
+        // wrong notes.
+        let idx_rows: i64 = conn
+            .query_row("SELECT count(*) FROM idx", [], |r| r.get(0))
+            .map_err(db_err)?;
+        let map_rows: i64 = conn
+            .query_row("SELECT count(*) FROM rowmap", [], |r| r.get(0))
+            .map_err(db_err)?;
+        if idx_rows != map_rows {
+            tracing::warn!(
+                idx_rows,
+                map_rows,
+                "idx/rowmap desync — resetting derived data"
+            );
+            Self::reset_tables(&conn)?;
+            Self::create_tables(&conn)?;
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?1)",
+            [schema_version],
+        )
+        .map_err(db_err)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    /// Drop the derived tables + the col_mod watermark (schema bump or
+    /// integrity failure) — the next drift detection rebuilds from scratch.
+    fn reset_tables(conn: &Connection) -> NativeResult<()> {
+        for sql in [
+            "DROP TABLE IF EXISTS idx",
+            "DROP TABLE IF EXISTS rowmap",
+            "DROP TABLE IF EXISTS segments",
+            "DELETE FROM meta WHERE key='col_mod'",
+        ] {
+            conn.execute(sql, []).map_err(db_err)?;
+        }
+        Ok(())
+    }
+
+    fn create_tables(conn: &Connection) -> NativeResult<()> {
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS idx USING fts5(txt, tokenize='trigram')",
             [],
@@ -114,14 +174,7 @@ impl DerivedEngine {
             [],
         )
         .map_err(db_err)?;
-        conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?1)",
-            [schema_version],
-        )
-        .map_err(db_err)?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        Ok(())
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -146,69 +199,93 @@ impl DerivedEngine {
         Ok(())
     }
 
-    pub fn count(&self) -> i64 {
+    /// Indexed row count. Errors are surfaced (`unavailable`), never folded
+    /// to 0 — a locked/corrupt store must not read as an empty one (#396).
+    pub fn count(&self) -> NativeResult<i64> {
         let conn = self.lock();
         conn.query_row("SELECT count(*) FROM rowmap", [], |r| r.get(0))
-            .unwrap_or(0)
+            .map_err(db_err)
+    }
+
+    /// Above this, an id set is staged in a TEMP table instead of an inline
+    /// `IN (…)` list — SQLite's parser caps long expression lists, and a
+    /// collection-scale set would otherwise build a multi-megabyte statement.
+    const INLINE_ID_MAX: usize = 500;
+
+    /// Stage `ids` in a per-connection TEMP table (never touches the store
+    /// file) so membership rides `IN (SELECT id FROM {table})`. Dropped and
+    /// recreated each call, so a failed prior use can't leak state.
+    fn stage_id_set(conn: &Connection, table: &str, ids: &[i64]) -> NativeResult<()> {
+        conn.execute(&format!("DROP TABLE IF EXISTS temp.{table}"), [])
+            .map_err(db_err)?;
+        conn.execute(
+            &format!("CREATE TEMP TABLE {table}(id INTEGER PRIMARY KEY)"),
+            [],
+        )
+        .map_err(db_err)?;
+        for chunk in ids.chunks(Self::INLINE_ID_MAX) {
+            let marks = vec!["(?)"; chunk.len()].join(",");
+            conn.execute(
+                &format!("INSERT OR IGNORE INTO {table}(id) VALUES {marks}"),
+                rusqlite::params_from_iter(chunk.iter()),
+            )
+            .map_err(db_err)?;
+        }
+        Ok(())
+    }
+
+    /// The membership clause for `note_id` against `ids`: inline placeholders
+    /// below [`Self::INLINE_ID_MAX`] (returning the params to bind), a staged
+    /// TEMP-table subquery above it.
+    fn note_id_clause(
+        conn: &Connection,
+        column: &str,
+        ids: &[i64],
+    ) -> NativeResult<(String, Vec<i64>)> {
+        if ids.len() <= Self::INLINE_ID_MAX {
+            let marks = vec!["?"; ids.len()].join(",");
+            Ok((format!("{column} IN ({marks})"), ids.to_vec()))
+        } else {
+            Self::stage_id_set(conn, "shrike_id_set", ids)?;
+            Ok((
+                format!("{column} IN (SELECT id FROM temp.shrike_id_set)"),
+                Vec::new(),
+            ))
+        }
     }
 
     fn delete_rows(conn: &Connection, note_ids: &[i64], source: Option<&str>) -> NativeResult<()> {
         if note_ids.is_empty() {
             return Ok(());
         }
-        let marks = vec!["?"; note_ids.len()].join(",");
-        let mut clause = format!("note_id IN ({marks})");
-        if source.is_some() {
-            clause.push_str(" AND source=?");
-        }
-        let mut stmt = conn
-            .prepare(&format!("SELECT rowid FROM rowmap WHERE {clause}"))
-            .map_err(db_err)?;
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = note_ids
+        let (id_clause, id_params) = Self::note_id_clause(conn, "note_id", note_ids)?;
+        let clause = match source {
+            Some(_) => format!("{id_clause} AND source=?"),
+            None => id_clause,
+        };
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = id_params
             .iter()
             .map(|n| Box::new(*n) as Box<dyn rusqlite::ToSql>)
             .collect();
         if let Some(s) = source {
             params.push(Box::new(s.to_string()));
         }
-        let rowids: Vec<i64> = stmt
-            .query_map(
-                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
-                |r| r.get(0),
-            )
-            .map_err(db_err)?
-            .collect::<Result<_, _>>()
-            .map_err(db_err)?;
-        if rowids.is_empty() {
-            return Ok(());
-        }
-        let rmarks = vec!["?"; rowids.len()].join(",");
+        // idx rows go first, named through rowmap — the subquery reads the
+        // pairing this delete is about to drop.
         conn.execute(
-            &format!("DELETE FROM idx WHERE rowid IN ({rmarks})"),
-            rusqlite::params_from_iter(rowids.iter()),
+            &format!("DELETE FROM idx WHERE rowid IN (SELECT rowid FROM rowmap WHERE {clause})"),
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
         )
         .map_err(db_err)?;
         conn.execute(
-            &format!("DELETE FROM rowmap WHERE rowid IN ({rmarks})"),
-            rusqlite::params_from_iter(rowids.iter()),
+            &format!("DELETE FROM rowmap WHERE {clause}"),
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
         )
         .map_err(db_err)?;
         // Segments share the row keys: drop them with their rows.
-        let nmarks = vec!["?"; note_ids.len()].join(",");
-        let seg_clause = match source {
-            Some(_) => format!("note_id IN ({nmarks}) AND source = ?"),
-            None => format!("note_id IN ({nmarks})"),
-        };
-        let mut seg_params: Vec<Box<dyn rusqlite::ToSql>> = note_ids
-            .iter()
-            .map(|n| Box::new(*n) as Box<dyn rusqlite::ToSql>)
-            .collect();
-        if let Some(s) = source {
-            seg_params.push(Box::new(s.to_string()));
-        }
         conn.execute(
-            &format!("DELETE FROM segments WHERE {seg_clause}"),
-            rusqlite::params_from_iter(seg_params.iter().map(|p| p.as_ref())),
+            &format!("DELETE FROM segments WHERE {clause}"),
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
         )
         .map_err(db_err)?;
         Ok(())
@@ -224,6 +301,9 @@ impl DerivedEngine {
             if text.trim().is_empty() {
                 continue;
             }
+            // The idx→rowmap pairing rides last_insert_rowid() on THIS
+            // connection — sound only under the engine's single mutexed
+            // connection (the module-docs invariant; verified at open).
             conn.execute("INSERT INTO idx(txt) VALUES(?1)", [text])
                 .map_err(db_err)?;
             let rowid = conn.last_insert_rowid();
@@ -372,7 +452,9 @@ impl DerivedEngine {
     }
 
     /// All (note_id, ref) pairs for one source — the pending sweep's "what
-    /// has already been recognized" set (#228).
+    /// has already been recognized" set (#228). Deliberately a full-set read:
+    /// the sweep's pending diff needs the complete set, and the pairs are
+    /// small. Bounding belongs to the sweep's batching, not this query.
     pub fn refs_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String)>> {
         let conn = self.lock();
         let mut stmt = conn
@@ -388,6 +470,8 @@ impl DerivedEngine {
 
     /// All (note_id, ref, text) rows for one source — the embed-input
     /// composition reads recognized text back for vector minting (#199).
+    /// Deliberately a full-set read (the composition consumes the whole set);
+    /// volume is bounded by recognized-text size, not media size.
     pub fn texts_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String, String)>> {
         let conn = self.lock();
         let mut stmt = conn
@@ -421,16 +505,22 @@ impl DerivedEngine {
         let _enter = span.enter();
         let conn = self.lock();
         let txt_col = if with_text { "idx.txt" } else { "NULL" };
-        // Inline the id set as literals (i64s — no injection surface); SQLite's
-        // default SQL-length cap comfortably holds even very large decks.
+        // Small scopes inline as literals (i64s — no injection surface);
+        // large ones are staged in a TEMP table, since SQLite's parser caps
+        // long expression lists (#396).
         let scope_clause = match scope {
             Some(ids) if !ids.is_empty() => {
-                let csv = ids
-                    .iter()
-                    .map(|i| i.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!("AND m.note_id IN ({csv}) ")
+                if ids.len() <= Self::INLINE_ID_MAX {
+                    let csv = ids
+                        .iter()
+                        .map(|i| i.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("AND m.note_id IN ({csv}) ")
+                } else {
+                    Self::stage_id_set(&conn, "shrike_scope_ids", ids)?;
+                    "AND m.note_id IN (SELECT id FROM temp.shrike_scope_ids) ".to_string()
+                }
             }
             Some(_) => "AND 0 ".to_string(), // an empty scope matches nothing
             None => String::new(),
@@ -553,12 +643,12 @@ mod tests {
             100,
         )
         .unwrap();
-        assert_eq!(e.count(), 2);
+        assert_eq!(e.count().unwrap(), 2);
         assert_eq!(e.get_col_mod(), Some(100));
 
         e.ingest(1, "field", &[("Front".into(), "the chloroplast".into())])
             .unwrap();
-        assert_eq!(e.count(), 2);
+        assert_eq!(e.count().unwrap(), 2);
         let hits = e.match_rows("\"chloroplast\"", 10, false, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, 1);
@@ -566,7 +656,7 @@ mod tests {
         assert_eq!(hits[0].2, "Front");
 
         e.remove(&[1], None).unwrap();
-        assert_eq!(e.count(), 1);
+        assert_eq!(e.count().unwrap(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -682,7 +772,7 @@ mod tests {
         drop(e);
         let path = dir.join("shrike.db");
         let e2 = DerivedEngine::open(path.to_str().unwrap(), 2).unwrap();
-        assert_eq!(e2.count(), 0);
+        assert_eq!(e2.count().unwrap(), 0);
         assert_eq!(e2.get_col_mod(), None);
         std::fs::remove_dir_all(dir).ok();
     }
@@ -840,5 +930,125 @@ mod lexical_tests {
         let hits = e.search_fuzzy("mitochondira", 10, None).unwrap(); // transposition
         assert!(hits.iter().any(|(nid, ..)| *nid == 1));
         assert!(e.search_fuzzy("xy", 10, None).unwrap().is_empty()); // too short to rank
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    //! #396: open-time integrity, fallible count, journal-mode policy, and
+    //! the staged-id-set path for collection-scale scopes/deletes.
+
+    use super::*;
+
+    fn temp_db() -> (std::path::PathBuf, std::path::PathBuf) {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-hardening-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shrike.db");
+        (dir, path)
+    }
+
+    #[test]
+    fn open_resets_on_idx_rowmap_desync() {
+        let (dir, path) = temp_db();
+        {
+            let e = DerivedEngine::open(path.to_str().unwrap(), 1).unwrap();
+            e.build(
+                &[(1, "field".into(), "Front".into(), "consistent text".into())],
+                100,
+            )
+            .unwrap();
+            assert_eq!(e.count().unwrap(), 1);
+        }
+        // Desync the pairing out-of-band: an idx row with no rowmap partner.
+        {
+            let raw = Connection::open(&path).unwrap();
+            raw.execute("INSERT INTO idx(txt) VALUES('orphan text')", [])
+                .unwrap();
+        }
+        // Reopen: the integrity check treats the mismatch as corruption —
+        // empty store, col_mod watermark cleared so the next drift rebuilds.
+        let e = DerivedEngine::open(path.to_str().unwrap(), 1).unwrap();
+        assert_eq!(e.count().unwrap(), 0);
+        assert_eq!(e.get_col_mod(), None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn count_surfaces_a_broken_store_instead_of_zero() {
+        let (dir, path) = temp_db();
+        let e = DerivedEngine::open(path.to_str().unwrap(), 1).unwrap();
+        assert_eq!(e.count().unwrap(), 0);
+        // Break the store out-of-band; count must error, not read as empty.
+        {
+            let raw = Connection::open(&path).unwrap();
+            raw.execute("DROP TABLE rowmap", []).unwrap();
+        }
+        let err = e.count().unwrap_err();
+        assert_eq!(err.kind, shrike_ffi::ErrorKind::Unavailable);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn open_converts_a_wal_store_back_to_single_file() {
+        let (dir, path) = temp_db();
+        {
+            let raw = Connection::open(&path).unwrap();
+            raw.pragma_update(None, "journal_mode", "WAL").unwrap();
+        }
+        {
+            let _e = DerivedEngine::open(path.to_str().unwrap(), 1).unwrap();
+        }
+        // WAL is the one persistent journal mode — after open() the file is
+        // back on rollback journaling and a fresh connection sees it.
+        let raw = Connection::open(&path).unwrap();
+        let mode: String = raw
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "delete");
+        assert!(!path.with_extension("db-wal").exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn scope_and_delete_work_beyond_the_inline_cap() {
+        let (dir, path) = temp_db();
+        let e = DerivedEngine::open(path.to_str().unwrap(), 1).unwrap();
+        let n = (DerivedEngine::INLINE_ID_MAX + 100) as i64;
+        let rows: Vec<(i64, String, String, String)> = (1..=n)
+            .map(|i| {
+                (
+                    i,
+                    "field".into(),
+                    "Front".into(),
+                    format!("note body {i} shared"),
+                )
+            })
+            .collect();
+        e.build(&rows, 100).unwrap();
+        assert_eq!(e.count().unwrap(), n);
+
+        // A scope wider than the inline cap rides the staged TEMP table and
+        // still restricts correctly.
+        let scope: Vec<i64> = (1..=n).collect();
+        let hits = e.match_rows("\"shared\"", 10, false, Some(&scope)).unwrap();
+        assert!(!hits.is_empty());
+        let narrow = e.match_rows("\"shared\"", 10, false, Some(&[2])).unwrap();
+        assert_eq!(narrow.iter().map(|r| r.0).collect::<Vec<_>>(), vec![2]);
+
+        // A delete wider than the inline cap clears everything in one call.
+        e.remove(&scope, None).unwrap();
+        assert_eq!(e.count().unwrap(), 0);
+        // And the idx side went with the rowmap side (the pairing held).
+        let conn = e.lock();
+        let idx_left: i64 = conn
+            .query_row("SELECT count(*) FROM idx", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(idx_left, 0);
+        std::fs::remove_dir_all(dir).ok();
     }
 }

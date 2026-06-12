@@ -549,8 +549,8 @@ impl DerivedTextEngine {
         self.inner.set_col_mod(value).map_err(to_py_err)
     }
 
-    fn count(&self) -> i64 {
-        self.inner.count()
+    fn count(&self) -> PyResult<i64> {
+        self.inner.count().map_err(to_py_err)
     }
 
     fn ingest(
