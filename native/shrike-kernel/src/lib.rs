@@ -884,34 +884,32 @@ impl Kernel {
     /// `dry_run`, per-item results JSON — run as ONE collection job, then the
     /// kernel-internal index/derived maintenance over everything written.
     /// This is the op the MCP `upsert_notes` action rides (S3d-2).
-    pub async fn upsert_notes_json(
+    pub async fn upsert_notes_wire(
         &self,
-        notes_json: String,
-        on_duplicate: String,
+        notes: Vec<shrike_schemas::NoteInput>,
+        policy: DuplicatePolicy,
         dry_run: bool,
-    ) -> NativeResult<String> {
-        let span = tracing::debug_span!("kernel.upsert_notes_json", dry_run);
+    ) -> NativeResult<Vec<shrike_schemas::UpsertNoteResult>> {
+        let span = tracing::debug_span!("kernel.upsert_notes_wire", dry_run);
         async move {
-            let results_json = self
+            let results = self
                 .collection
-                .run(move |core| core.upsert_notes(&notes_json, &on_duplicate, dry_run))
+                .run(move |core| core.upsert_notes(&notes, policy, dry_run))
                 .await??;
             if !dry_run {
-                let results: Vec<serde_json::Value> = serde_json::from_str(&results_json)
-                    .map_err(|e| NativeError::internal(format!("upsert results: {e}")))?;
+                // Typed outcomes (#391): written ids come straight off the
+                // variants — the parse-own-output round-trip is gone.
                 let written: Vec<i64> = results
                     .iter()
-                    .filter(|r| {
-                        matches!(
-                            r.get("status").and_then(serde_json::Value::as_str),
-                            Some("created") | Some("updated")
-                        )
+                    .filter_map(|r| match r {
+                        shrike_schemas::UpsertNoteResult::Created { id, .. }
+                        | shrike_schemas::UpsertNoteResult::Updated { id, .. } => Some(*id),
+                        _ => None,
                     })
-                    .filter_map(|r| r.get("id").and_then(serde_json::Value::as_i64))
                     .collect();
                 self.index_written(&written).await?;
             }
-            Ok(results_json)
+            Ok(results)
         }
         .instrument(span)
         .await
@@ -1200,6 +1198,23 @@ mod no_cpython_smoke {
         }
     }
 
+    /// Test shim (#391): the wire-shaped upsert with the pre-typed-seam call
+    /// shape — JSON in, serialized results out.
+    async fn upsert_wire(
+        kernel: &Kernel,
+        notes_json: String,
+        on_duplicate: String,
+        dry_run: bool,
+    ) -> String {
+        let notes: Vec<shrike_schemas::NoteInput> = serde_json::from_str(&notes_json).unwrap();
+        let policy = DuplicatePolicy::parse(&on_duplicate).unwrap();
+        let results = kernel
+            .upsert_notes_wire(notes, policy, dry_run)
+            .await
+            .unwrap();
+        serde_json::to_string(&results).unwrap()
+    }
+
     fn temp_dir() -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1377,16 +1392,15 @@ mod no_cpython_smoke {
 
             // And the wire-shaped op too, straight after another release.
             kernel.release().await.unwrap();
-            let results = kernel
-                .upsert_notes_json(
-                    r#"[{"note_type": "Basic", "deck": "Default",
+            let results = upsert_wire(
+                &kernel,
+                r#"[{"note_type": "Basic", "deck": "Default",
                          "fields": {"Front": "second", "Back": "b"}}]"#
-                        .to_string(),
-                    "error".to_string(),
-                    false,
-                )
-                .await
-                .unwrap();
+                    .to_string(),
+                "error".to_string(),
+                false,
+            )
+            .await;
             assert!(results.contains("\"created\""), "got: {results}");
 
             kernel.close().await.unwrap();
@@ -1421,14 +1435,13 @@ mod no_cpython_smoke {
                     })
                 })
                 .collect();
-            kernel
-                .upsert_notes_json(
-                    serde_json::json!(notes).to_string(),
-                    "error".to_string(),
-                    false,
-                )
-                .await
-                .unwrap();
+            upsert_wire(
+                &kernel,
+                serde_json::json!(notes).to_string(),
+                "error".to_string(),
+                false,
+            )
+            .await;
 
             wait_for_tags(&kernel, |k| !k.is_empty()).await;
             let keys = kernel.tag_keys();
@@ -1510,14 +1523,13 @@ mod no_cpython_smoke {
                     "tags": []}));
             }
             let results: Vec<serde_json::Value> = serde_json::from_str(
-                &kernel
-                    .upsert_notes_json(
-                        serde_json::json!(notes).to_string(),
-                        "error".to_string(),
-                        false,
-                    )
-                    .await
-                    .unwrap(),
+                &upsert_wire(
+                    &kernel,
+                    serde_json::json!(notes).to_string(),
+                    "error".to_string(),
+                    false,
+                )
+                .await,
             )
             .unwrap();
             let mnemonic_id = results[2]["id"].as_i64().unwrap();
@@ -1624,14 +1636,13 @@ mod no_cpython_smoke {
                     "fields": {"Front": "zzz filler mnemonic", "Back": "b"}}),
             ];
             let results: Vec<serde_json::Value> = serde_json::from_str(
-                &kernel
-                    .upsert_notes_json(
-                        serde_json::json!(notes).to_string(),
-                        "error".to_string(),
-                        false,
-                    )
-                    .await
-                    .unwrap(),
+                &upsert_wire(
+                    &kernel,
+                    serde_json::json!(notes).to_string(),
+                    "error".to_string(),
+                    false,
+                )
+                .await,
             )
             .unwrap();
             let diagram_id = results[0]["id"].as_i64().unwrap();
@@ -1715,14 +1726,13 @@ mod no_cpython_smoke {
                 "fields": {"Front":
                     "Two diagrams <img src=\"good.png\"> <img src=\"flaky.png\">",
                     "Back": "b"}})];
-            kernel
-                .upsert_notes_json(
-                    serde_json::json!(notes).to_string(),
-                    "error".to_string(),
-                    false,
-                )
-                .await
-                .unwrap();
+            upsert_wire(
+                &kernel,
+                serde_json::json!(notes).to_string(),
+                "error".to_string(),
+                false,
+            )
+            .await;
 
             let mut media = std::collections::HashMap::new();
             media.insert("good.png".to_string(), b"readable diagram text".to_vec());
@@ -1802,14 +1812,13 @@ mod no_cpython_smoke {
                 "fields": {"Front":
                     "<img src=\"u1.png\"> <img src=\"u2.png\"> <img src=\"ok.png\">",
                     "Back": "b"}})];
-            kernel
-                .upsert_notes_json(
-                    serde_json::json!(notes).to_string(),
-                    "error".to_string(),
-                    false,
-                )
-                .await
-                .unwrap();
+            upsert_wire(
+                &kernel,
+                serde_json::json!(notes).to_string(),
+                "error".to_string(),
+                false,
+            )
+            .await;
 
             let mut media = std::collections::HashMap::new();
             media.insert("u1.png".to_string(), b"unreadable one".to_vec());
@@ -1914,14 +1923,13 @@ mod no_cpython_smoke {
             let notes = vec![serde_json::json!({"note_type": "Basic", "deck": "Default",
                 "fields": {"Front":
                     "<img src=\"tiny.png\"> <img src=\"good.png\">", "Back": "b"}})];
-            kernel
-                .upsert_notes_json(
-                    serde_json::json!(notes).to_string(),
-                    "error".to_string(),
-                    false,
-                )
-                .await
-                .unwrap();
+            upsert_wire(
+                &kernel,
+                serde_json::json!(notes).to_string(),
+                "error".to_string(),
+                false,
+            )
+            .await;
 
             let mut media = std::collections::HashMap::new();
             // "ok" is 2 trimmed chars < min_chars_lexical → GateOutcome::Drop.
@@ -1995,14 +2003,13 @@ mod no_cpython_smoke {
                 "fields": {"Front":
                     "<img src=\"t1.png\"> <img src=\"t2.png\"> <img src=\"t3.png\">",
                     "Back": "b"}})];
-            kernel
-                .upsert_notes_json(
-                    serde_json::json!(notes).to_string(),
-                    "error".to_string(),
-                    false,
-                )
-                .await
-                .unwrap();
+            upsert_wire(
+                &kernel,
+                serde_json::json!(notes).to_string(),
+                "error".to_string(),
+                false,
+            )
+            .await;
 
             let mut media = std::collections::HashMap::new();
             for name in ["t1.png", "t2.png", "t3.png"] {
