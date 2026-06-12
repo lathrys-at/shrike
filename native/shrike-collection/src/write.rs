@@ -9,7 +9,10 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{json, Value};
 use shrike_ffi::{NativeError, NativeResult};
 
-use shrike_schemas::{NoteInput, NoteValidationReason, SkipReason, UpsertAction, UpsertNoteResult};
+use shrike_schemas::{
+    DeleteNoteTypeResult, NoteInput, NoteValidationReason, SkipReason, UpsertAction,
+    UpsertNoteResult,
+};
 
 use crate::adapter::FieldsState;
 use crate::{CollectionCore, DuplicatePolicy};
@@ -525,14 +528,14 @@ impl CollectionCore {
         Ok(json!({"notes_changed": count, "changed_ids": changed_ids}).to_string())
     }
 
-    /// Delete note types by id — only if unused. Per-item results JSON,
-    /// shape-identical to `_delete_note_types`.
-    pub fn delete_note_types(&self, ids: &[i64]) -> NativeResult<String> {
+    /// Delete note types by id — only if unused. Typed per-item results
+    /// (`deleted`/`not_found`/`error`), same vocabulary as `_delete_note_types`.
+    pub fn delete_note_types(&self, ids: &[i64]) -> NativeResult<Vec<DeleteNoteTypeResult>> {
         let known: HashMap<i64, String> = self.adapter.notetype_names()?.into_iter().collect();
-        let mut results: Vec<Value> = Vec::new();
+        let mut results: Vec<DeleteNoteTypeResult> = Vec::new();
         for nt_id in ids {
             let Some(name) = known.get(nt_id) else {
-                results.push(json!({"id": nt_id, "status": "not_found"}));
+                results.push(DeleteNoteTypeResult::NotFound { id: *nt_id });
                 continue;
             };
             let use_count = self
@@ -543,17 +546,19 @@ impl CollectionCore {
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
             if use_count > 0 {
-                results.push(json!({
-                    "id": nt_id,
-                    "name": name,
-                    "status": "error",
-                    "error": format!("Cannot delete: {use_count} note(s) use this type"),
-                }));
+                results.push(DeleteNoteTypeResult::Error {
+                    id: *nt_id,
+                    name: name.clone(),
+                    error: format!("Cannot delete: {use_count} note(s) use this type"),
+                });
                 continue;
             }
             self.adapter.remove_notetype(*nt_id)?;
-            results.push(json!({"id": nt_id, "name": name, "status": "deleted"}));
+            results.push(DeleteNoteTypeResult::Deleted {
+                id: *nt_id,
+                name: name.clone(),
+            });
         }
-        Ok(json!({"results": results}).to_string())
+        Ok(results)
     }
 }

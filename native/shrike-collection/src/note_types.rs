@@ -8,11 +8,20 @@
 //! positional-vs-identity reconciliation (#76), the simulate-then-apply
 //! atomicity, and the result shapes are ported verbatim (the tests/native
 //! parity harness compares result dicts against the Python implementation).
+//!
+//! The public surface speaks shrike-schemas types both directions (#391);
+//! only the anki legacy-notetype dicts stay `serde_json::Value` — that's
+//! anki's own schema, not our wire.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{json, Value};
 use shrike_ffi::{NativeError, NativeResult};
+use shrike_schemas::{
+    FieldMetadataInput, FieldOp, FindReplaceNoteTypesResponse, MigrateNoteTypeResponse,
+    NoteTypeInput, NoteTypeResult, TemplateInput, TemplateOp, UpdateNoteTypeFieldMetadataResponse,
+    UpdateNoteTypeFieldsResponse, UpdateNoteTypeTemplatesResponse,
+};
 
 use crate::CollectionCore;
 
@@ -41,6 +50,72 @@ fn names_of(entries: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The shared identity-op view over [`FieldOp`]/[`TemplateOp`]: the
+/// simulate/apply internals do the same list surgery on anki's legacy entry
+/// dicts for both — only a template `add` carries formats.
+enum EntryOp<'a> {
+    Add {
+        name: &'a str,
+        front: Option<&'a str>,
+        back: Option<&'a str>,
+        position: Option<i64>,
+    },
+    Remove {
+        name: &'a str,
+    },
+    Rename {
+        name: &'a str,
+        new_name: &'a str,
+    },
+    Reposition {
+        name: &'a str,
+        position: i64,
+    },
+}
+
+impl<'a> From<&'a FieldOp> for EntryOp<'a> {
+    fn from(op: &'a FieldOp) -> Self {
+        match op {
+            FieldOp::Add { name, position } => EntryOp::Add {
+                name,
+                front: None,
+                back: None,
+                position: *position,
+            },
+            FieldOp::Remove { name } => EntryOp::Remove { name },
+            FieldOp::Rename { name, new_name } => EntryOp::Rename { name, new_name },
+            FieldOp::Reposition { name, position } => EntryOp::Reposition {
+                name,
+                position: *position,
+            },
+        }
+    }
+}
+
+impl<'a> From<&'a TemplateOp> for EntryOp<'a> {
+    fn from(op: &'a TemplateOp) -> Self {
+        match op {
+            TemplateOp::Add {
+                name,
+                front,
+                back,
+                position,
+            } => EntryOp::Add {
+                name,
+                front: Some(front),
+                back: Some(back),
+                position: *position,
+            },
+            TemplateOp::Remove { name } => EntryOp::Remove { name },
+            TemplateOp::Rename { name, new_name } => EntryOp::Rename { name, new_name },
+            TemplateOp::Reposition { name, position } => EntryOp::Reposition {
+                name,
+                position: *position,
+            },
+        }
+    }
 }
 
 impl CollectionCore {
@@ -74,45 +149,48 @@ impl CollectionCore {
     }
 
     /// `upsert_note_types`: create or update note-type definitions in bulk
-    /// (JSON in/out, per-item try/except, the position-keyed replace with the
-    /// #76 unsound-move rejection).
-    pub fn upsert_note_types(&self, note_types_json: &str) -> NativeResult<String> {
-        let inputs: Vec<Value> = serde_json::from_str(note_types_json)
-            .map_err(|e| invalid(format!("note_types must be a JSON list: {e}")))?;
+    /// (per-item try/except, the position-keyed replace with the #76
+    /// unsound-move rejection).
+    pub fn upsert_note_types(
+        &self,
+        note_types: &[NoteTypeInput],
+    ) -> NativeResult<Vec<NoteTypeResult>> {
         let mut results = Vec::new();
-        for (i, nt_input) in inputs.iter().enumerate() {
-            let result = if nt_input.get("id").is_some_and(|v| !v.is_null()) {
-                self.update_note_type(nt_input)
-            } else {
-                self.create_note_type(nt_input)
+        for (i, nt_input) in note_types.iter().enumerate() {
+            let result = match nt_input.id {
+                Some(nt_id) => self.update_note_type(nt_id, nt_input),
+                None => self.create_note_type(nt_input),
             };
             results.push(match result {
                 Ok(r) => r,
-                Err(e) => json!({"status": "error", "index": i, "error": e.message}),
+                Err(e) => NoteTypeResult::Error {
+                    index: i as i64,
+                    error: e.message,
+                },
             });
         }
-        Ok(json!(results).to_string())
+        Ok(results)
     }
 
-    fn create_note_type(&self, nt_input: &Value) -> NativeResult<Value> {
+    fn create_note_type(&self, nt_input: &NoteTypeInput) -> NativeResult<NoteTypeResult> {
         let name = nt_input
-            .get("name")
-            .and_then(Value::as_str)
+            .name
+            .as_deref()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| invalid("name is required for new note types"))?;
         let fields = nt_input
-            .get("fields")
-            .and_then(Value::as_array)
+            .fields
+            .as_deref()
             .filter(|a| !a.is_empty())
             .ok_or_else(|| invalid("fields is required for new note types"))?;
         let templates = nt_input
-            .get("templates")
-            .and_then(Value::as_array)
+            .templates
+            .as_deref()
             .filter(|a| !a.is_empty())
             .ok_or_else(|| invalid("templates is required for new note types"))?;
         let css = nt_input
-            .get("css")
-            .and_then(Value::as_str)
+            .css
+            .as_deref()
             .ok_or_else(|| invalid("css is required for new note types"))?;
 
         if self.notetype_id_opt(name)?.is_some() {
@@ -124,49 +202,44 @@ impl CollectionCore {
         let mut notetype = self.adapter.stock_notetype_legacy()?;
         notetype["name"] = json!(name);
         notetype["id"] = json!(0);
-        if nt_input.get("is_cloze").and_then(Value::as_bool) == Some(true) {
+        if nt_input.is_cloze == Some(true) {
             notetype["type"] = json!(MODEL_CLOZE);
         }
         notetype["css"] = json!(css);
 
         let mut flds = Vec::new();
         for field_name in fields {
-            let field_name = field_name
-                .as_str()
-                .ok_or_else(|| invalid("fields must be a list of names"))?;
             flds.push(self.new_field(field_name)?);
         }
         notetype["flds"] = json!(flds);
 
         let mut tmpls = Vec::new();
         for tmpl_input in templates {
-            let mut tmpl = self.new_template(
-                tmpl_input
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| invalid("template name is required"))?,
-            )?;
-            tmpl["qfmt"] = tmpl_input.get("front").cloned().unwrap_or(json!(""));
-            tmpl["afmt"] = tmpl_input.get("back").cloned().unwrap_or(json!(""));
+            let mut tmpl = self.new_template(&tmpl_input.name)?;
+            tmpl["qfmt"] = json!(tmpl_input.front);
+            tmpl["afmt"] = json!(tmpl_input.back);
             tmpls.push(tmpl);
         }
         notetype["tmpls"] = json!(tmpls);
 
         let id = self.adapter.add_notetype_legacy(&notetype)?;
-        Ok(json!({"status": "created", "id": id, "name": name}))
+        Ok(NoteTypeResult::Created {
+            id,
+            name: name.to_owned(),
+        })
     }
 
-    fn update_note_type(&self, nt_input: &Value) -> NativeResult<Value> {
-        let nt_id = nt_input
-            .get("id")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| invalid("id must be an integer"))?;
+    fn update_note_type(
+        &self,
+        nt_id: i64,
+        nt_input: &NoteTypeInput,
+    ) -> NativeResult<NoteTypeResult> {
         let mut notetype = self
             .adapter
             .notetype_legacy(nt_id)
             .map_err(|_| invalid(format!("Note type with ID {nt_id} not found")))?;
 
-        if let Some(is_cloze) = nt_input.get("is_cloze").and_then(Value::as_bool) {
+        if let Some(is_cloze) = nt_input.is_cloze {
             let current = notetype["type"].as_i64() == Some(MODEL_CLOZE);
             if is_cloze != current {
                 return Err(invalid(
@@ -174,28 +247,23 @@ impl CollectionCore {
                 ));
             }
         }
-        if let Some(name) = nt_input.get("name").and_then(Value::as_str) {
+        if let Some(name) = &nt_input.name {
             notetype["name"] = json!(name);
         }
-        if let Some(css) = nt_input.get("css").and_then(Value::as_str) {
+        if let Some(css) = &nt_input.css {
             notetype["css"] = json!(css);
         }
-        if let Some(fields) = nt_input.get("fields").and_then(Value::as_array) {
-            let names: Vec<String> = fields
-                .iter()
-                .map(|f| f.as_str().unwrap_or_default().to_string())
-                .collect();
-            self.set_fields_positional(&mut notetype, &names)?;
+        if let Some(fields) = &nt_input.fields {
+            self.set_fields_positional(&mut notetype, fields)?;
         }
-        if let Some(templates) = nt_input.get("templates").and_then(Value::as_array) {
+        if let Some(templates) = &nt_input.templates {
             self.set_templates_positional(&mut notetype, templates)?;
         }
         self.adapter.update_notetype_legacy(&notetype)?;
-        Ok(json!({
-            "status": "updated",
-            "id": nt_id,
-            "name": notetype["name"],
-        }))
+        Ok(NoteTypeResult::Updated {
+            id: nt_id,
+            name: notetype["name"].as_str().unwrap_or_default().to_owned(),
+        })
     }
 
     /// `_set_fields`: position-keyed whole-list replace, data-safe — reuse the
@@ -230,13 +298,10 @@ impl CollectionCore {
     fn set_templates_positional(
         &self,
         notetype: &mut Value,
-        templates: &[Value],
+        templates: &[TemplateInput],
     ) -> NativeResult<()> {
         let old_names = names_of(&notetype["tmpls"]);
-        let new_names: Vec<String> = templates
-            .iter()
-            .map(|t| t["name"].as_str().unwrap_or_default().to_string())
-            .collect();
+        let new_names: Vec<String> = templates.iter().map(|t| t.name.clone()).collect();
         reject_unsound_positional_replace(
             &old_names,
             &new_names,
@@ -250,11 +315,11 @@ impl CollectionCore {
             let mut tmpl = if i < old_tmpls.len() {
                 old_tmpls[i].clone()
             } else {
-                self.new_template(tmpl_input["name"].as_str().unwrap_or_default())?
+                self.new_template(&tmpl_input.name)?
             };
-            tmpl["name"] = tmpl_input["name"].clone();
-            tmpl["qfmt"] = tmpl_input.get("front").cloned().unwrap_or(json!(""));
-            tmpl["afmt"] = tmpl_input.get("back").cloned().unwrap_or(json!(""));
+            tmpl["name"] = json!(tmpl_input.name);
+            tmpl["qfmt"] = json!(tmpl_input.front);
+            tmpl["afmt"] = json!(tmpl_input.back);
             new.push(tmpl);
         }
         notetype["tmpls"] = json!(new);
@@ -266,91 +331,91 @@ impl CollectionCore {
     pub fn update_note_type_fields(
         &self,
         note_type_name: &str,
-        operations_json: &str,
-    ) -> NativeResult<String> {
-        let operations: Vec<Value> = serde_json::from_str(operations_json)
-            .map_err(|e| invalid(format!("operations must be a JSON list: {e}")))?;
+        operations: &[FieldOp],
+    ) -> NativeResult<UpdateNoteTypeFieldsResponse> {
         let mut notetype = self
             .notetype_legacy_by_name(note_type_name)?
             .ok_or_else(|| invalid(format!("Note type '{note_type_name}' not found")))?;
 
+        let ops: Vec<EntryOp<'_>> = operations.iter().map(EntryOp::from).collect();
         let mut sim = names_of(&notetype["flds"]);
-        for (i, op) in operations.iter().enumerate() {
+        for (i, op) in ops.iter().enumerate() {
             simulate_struct_op(&mut sim, op, i, "field")?;
         }
-        for op in &operations {
+        for op in &ops {
             self.apply_entry_op(&mut notetype, op, "flds")?;
         }
         self.adapter.update_notetype_legacy(&notetype)?;
-        let final_names = names_of(&notetype["flds"]);
-        Ok(json!({
-            "id": notetype["id"],
-            "name": note_type_name,
-            "fields": final_names,
+        Ok(UpdateNoteTypeFieldsResponse {
+            id: notetype["id"].as_i64().unwrap_or_default(),
+            name: note_type_name.to_owned(),
+            fields: names_of(&notetype["flds"]),
         })
-        .to_string())
     }
 
     /// `update_note_type_templates`: the by-identity template counterpart.
     pub fn update_note_type_templates(
         &self,
         note_type_name: &str,
-        operations_json: &str,
-    ) -> NativeResult<String> {
-        let operations: Vec<Value> = serde_json::from_str(operations_json)
-            .map_err(|e| invalid(format!("operations must be a JSON list: {e}")))?;
+        operations: &[TemplateOp],
+    ) -> NativeResult<UpdateNoteTypeTemplatesResponse> {
         let mut notetype = self
             .notetype_legacy_by_name(note_type_name)?
             .ok_or_else(|| invalid(format!("Note type '{note_type_name}' not found")))?;
 
+        let ops: Vec<EntryOp<'_>> = operations.iter().map(EntryOp::from).collect();
         let mut sim = names_of(&notetype["tmpls"]);
-        for (i, op) in operations.iter().enumerate() {
+        for (i, op) in ops.iter().enumerate() {
             simulate_struct_op(&mut sim, op, i, "template")?;
         }
-        for op in &operations {
+        for op in &ops {
             self.apply_entry_op(&mut notetype, op, "tmpls")?;
         }
         self.adapter.update_notetype_legacy(&notetype)?;
-        let final_names = names_of(&notetype["tmpls"]);
-        Ok(json!({
-            "id": notetype["id"],
-            "name": note_type_name,
-            "templates": final_names,
+        Ok(UpdateNoteTypeTemplatesResponse {
+            id: notetype["id"].as_i64().unwrap_or_default(),
+            name: note_type_name.to_owned(),
+            templates: names_of(&notetype["tmpls"]),
         })
-        .to_string())
     }
 
     /// Apply one validated op to the schema11 entry list (`flds`/`tmpls`).
     /// Mirrors pylib's primitives: every manipulation is pure list surgery
     /// with the existing entries' `ord` markers untouched — `update_dict`
     /// derives the data/card migration from them.
-    fn apply_entry_op(&self, notetype: &mut Value, op: &Value, key: &str) -> NativeResult<()> {
+    fn apply_entry_op(
+        &self,
+        notetype: &mut Value,
+        op: &EntryOp<'_>,
+        key: &str,
+    ) -> NativeResult<()> {
         let entries = notetype[key]
             .as_array_mut()
             .ok_or_else(|| NativeError::internal("notetype entries not a list"))?;
-        let kind = op["op"].as_str().unwrap_or_default();
-        let name = op["name"].as_str().unwrap_or_default();
-        let position = |sim_len: usize| -> usize {
-            op.get("position")
-                .and_then(Value::as_u64)
-                .map_or(sim_len, |p| p as usize)
-        };
-        match kind {
-            "add" => {
+        match *op {
+            EntryOp::Add {
+                name,
+                front,
+                back,
+                position,
+            } => {
                 let mut entry = if key == "flds" {
                     self.new_field(name)?
                 } else {
                     let mut tmpl = self.new_template(name)?;
-                    tmpl["qfmt"] = op.get("front").cloned().unwrap_or(json!(""));
-                    tmpl["afmt"] = op.get("back").cloned().unwrap_or(json!(""));
+                    tmpl["qfmt"] = json!(front.unwrap_or_default());
+                    tmpl["afmt"] = json!(back.unwrap_or_default());
                     tmpl
                 };
                 entry["name"] = json!(name);
                 let entries_len = entries.len();
-                let pos = position(entries_len).min(entries_len);
+                // Range-validated by the simulate pass; clamp defensively.
+                let pos = position
+                    .map_or(entries_len, |p| p as usize)
+                    .min(entries_len);
                 entries.insert(pos, entry);
             }
-            "remove" => {
+            EntryOp::Remove { name } => {
                 if let Some(idx) = entries
                     .iter()
                     .position(|e| e["name"].as_str() == Some(name))
@@ -358,26 +423,25 @@ impl CollectionCore {
                     entries.remove(idx);
                 }
             }
-            "rename" => {
+            EntryOp::Rename { name, new_name } => {
                 if let Some(entry) = entries
                     .iter_mut()
                     .find(|e| e["name"].as_str() == Some(name))
                 {
-                    entry["name"] = op["new_name"].clone();
+                    entry["name"] = json!(new_name);
                 }
             }
-            "reposition" => {
+            EntryOp::Reposition { name, position } => {
                 if let Some(idx) = entries
                     .iter()
                     .position(|e| e["name"].as_str() == Some(name))
                 {
                     let entry = entries.remove(idx);
                     let entries_len = entries.len();
-                    let pos = position(entries_len).min(entries_len);
+                    let pos = (position as usize).min(entries_len);
                     entries.insert(pos, entry);
                 }
             }
-            _ => return Err(invalid(format!("unknown op: {kind:?}"))),
         }
         Ok(())
     }
@@ -397,7 +461,7 @@ impl CollectionCore {
         front: bool,
         back: bool,
         css: bool,
-    ) -> NativeResult<String> {
+    ) -> NativeResult<FindReplaceNoteTypesResponse> {
         let mut notetype = self
             .notetype_legacy_by_name(note_type_name)?
             .ok_or_else(|| invalid(format!("Note type '{note_type_name}' not found")))?;
@@ -474,14 +538,13 @@ impl CollectionCore {
         if total > 0 {
             self.adapter.update_notetype_legacy(&notetype)?;
         }
-        Ok(json!({
-            "id": notetype["id"],
-            "name": note_type_name,
-            "replacements": total,
-            "templates_changed": templates_changed,
-            "css_changed": css_changed,
+        Ok(FindReplaceNoteTypesResponse {
+            id: notetype["id"].as_i64().unwrap_or_default(),
+            name: note_type_name.to_owned(),
+            replacements: total as i64,
+            templates_changed,
+            css_changed,
         })
-        .to_string())
     }
 
     /// `update_note_type_field_metadata`: per-field editor metadata
@@ -489,26 +552,21 @@ impl CollectionCore {
     pub fn update_note_type_field_metadata(
         &self,
         note_type_name: &str,
-        updates_json: &str,
-    ) -> NativeResult<String> {
-        let updates: Vec<Value> = serde_json::from_str(updates_json)
-            .map_err(|e| invalid(format!("updates must be a JSON list: {e}")))?;
+        updates: &[FieldMetadataInput],
+    ) -> NativeResult<UpdateNoteTypeFieldMetadataResponse> {
         let mut notetype = self
             .notetype_legacy_by_name(note_type_name)?
             .ok_or_else(|| invalid(format!("Note type '{note_type_name}' not found")))?;
 
         let names: HashSet<String> = names_of(&notetype["flds"]).into_iter().collect();
         for (i, up) in updates.iter().enumerate() {
-            let name = up["name"].as_str().unwrap_or_default();
+            let name = up.name.as_str();
             if !names.contains(name) {
                 return Err(invalid(format!(
                     "update {i}: field '{name}' not in note type '{note_type_name}'"
                 )));
             }
-            if up.get("font").is_none_or(Value::is_null)
-                && up.get("size").is_none_or(Value::is_null)
-                && up.get("description").is_none_or(Value::is_null)
-            {
+            if up.font.is_none() && up.size.is_none() && up.description.is_none() {
                 return Err(invalid(format!(
                     "update {i} (field '{name}'): set at least one of font, size, description"
                 )));
@@ -517,55 +575,44 @@ impl CollectionCore {
 
         let mut updated: Vec<String> = Vec::new();
         if let Some(flds) = notetype["flds"].as_array_mut() {
-            for up in &updates {
-                let name = up["name"].as_str().unwrap_or_default();
-                if let Some(field) = flds.iter_mut().find(|f| f["name"].as_str() == Some(name)) {
-                    if let Some(font) = up.get("font").filter(|v| !v.is_null()) {
-                        field["font"] = font.clone();
+            for up in updates {
+                if let Some(field) = flds
+                    .iter_mut()
+                    .find(|f| f["name"].as_str() == Some(up.name.as_str()))
+                {
+                    if let Some(font) = &up.font {
+                        field["font"] = json!(font);
                     }
-                    if let Some(size) = up.get("size").filter(|v| !v.is_null()) {
-                        field["size"] = size.clone();
+                    if let Some(size) = up.size {
+                        field["size"] = json!(size);
                     }
-                    if let Some(description) = up.get("description").filter(|v| !v.is_null()) {
-                        field["description"] = description.clone();
+                    if let Some(description) = &up.description {
+                        field["description"] = json!(description);
                     }
-                    updated.push(name.to_string());
+                    updated.push(up.name.clone());
                 }
             }
         }
         self.adapter.update_notetype_legacy(&notetype)?;
-        Ok(json!({
-            "id": notetype["id"],
-            "name": note_type_name,
-            "fields_updated": updated,
+        Ok(UpdateNoteTypeFieldMetadataResponse {
+            id: notetype["id"].as_i64().unwrap_or_default(),
+            name: note_type_name.to_owned(),
+            fields_updated: updated,
         })
-        .to_string())
     }
 
     /// `_migrate_note_type`: change notes' note type via name maps, with the
     /// drop/new-empty reporting and the same validations; on apply, the same
     /// `change_notetype` RPC (and the pylib-mirroring scm bump) as
-    /// `models.change`.
+    /// `models.change`. An empty `template_map` = map templates by ordinal.
     pub fn migrate_note_type(
         &self,
         note_ids: &[i64],
         new_note_type: &str,
-        field_map_json: &str,
-        template_map_json: &str,
+        field_map: &BTreeMap<String, String>,
+        template_map: &BTreeMap<String, String>,
         dry_run: bool,
-    ) -> NativeResult<String> {
-        let field_map: Vec<(String, String)> =
-            serde_json::from_str::<HashMap<String, String>>(field_map_json)
-                .map_err(|e| invalid(format!("field_map must be a JSON object: {e}")))?
-                .into_iter()
-                .collect();
-        let template_map: HashMap<String, String> = if template_map_json.is_empty() {
-            HashMap::new()
-        } else {
-            serde_json::from_str(template_map_json)
-                .map_err(|e| invalid(format!("template_map must be a JSON object: {e}")))?
-        };
-
+    ) -> NativeResult<MigrateNoteTypeResponse> {
         // One (id, mid) query (#445): the per-note get_note loop paid a full
         // note-proto RPC per note just to learn the shared source type and
         // validate existence.
@@ -630,7 +677,7 @@ impl CollectionCore {
         if field_map.is_empty() {
             return Err(invalid("field_map is required and must be non-empty"));
         }
-        for (old, new) in &field_map {
+        for (old, new) in field_map {
             if !src_lookup.contains_key(old.as_str()) {
                 return Err(invalid(format!(
                     "Source field '{old}' not in note type '{source_name}'"
@@ -642,7 +689,7 @@ impl CollectionCore {
                 )));
             }
         }
-        let targets: Vec<&String> = field_map.iter().map(|(_, v)| v).collect();
+        let targets: Vec<&String> = field_map.values().collect();
         let mut ambiguous: Vec<&str> = targets
             .iter()
             .filter(|t| targets.iter().filter(|u| u == t).count() > 1)
@@ -662,16 +709,18 @@ impl CollectionCore {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        let dropped_fields: Vec<&str> = src_fields
+        let dropped_fields: Vec<String> = src_fields
             .iter()
-            .map(|(n, _)| n.as_str())
-            .filter(|n| !mapped.contains_key(n))
+            .map(|(n, _)| n)
+            .filter(|n| !mapped.contains_key(n.as_str()))
+            .cloned()
             .collect();
         let mapped_targets: HashSet<&str> = mapped.values().copied().collect();
-        let new_empty_fields: Vec<&str> = tgt_fields
+        let new_empty_fields: Vec<String> = tgt_fields
             .iter()
-            .map(|(n, _)| n.as_str())
-            .filter(|n| !mapped_targets.contains(n))
+            .map(|(n, _)| n)
+            .filter(|n| !mapped_targets.contains(n.as_str()))
+            .cloned()
             .collect();
 
         // template map validation (optional).
@@ -683,7 +732,7 @@ impl CollectionCore {
                 src_tmpls.iter().map(|(n, o)| (n.as_str(), *o)).collect();
             let tgt_t: HashMap<&str, i64> =
                 tgt_tmpls.iter().map(|(n, o)| (n.as_str(), *o)).collect();
-            for (old, new) in &template_map {
+            for (old, new) in template_map {
                 if !src_t.contains_key(old.as_str()) {
                     return Err(invalid(format!(
                         "Source template '{old}' not in note type '{source_name}'"
@@ -703,17 +752,16 @@ impl CollectionCore {
             );
         }
 
-        let changed: Vec<i64> = note_ids.to_vec();
-        let result = json!({
-            "changed": changed,
-            "from_note_type": source_name,
-            "to_note_type": target["name"],
-            "dropped_fields": dropped_fields,
-            "new_empty_fields": new_empty_fields,
-            "dry_run": dry_run,
-        });
+        let response = MigrateNoteTypeResponse {
+            changed: note_ids.to_vec(),
+            from_note_type: source_name.clone(),
+            to_note_type: target["name"].as_str().unwrap_or_default().to_owned(),
+            dropped_fields,
+            new_empty_fields,
+            dry_run,
+        };
         if dry_run {
-            return Ok(result.to_string());
+            return Ok(response);
         }
 
         // pylib models.change: fmap {src_ord: tgt_ord|None} inverted into a
@@ -749,7 +797,7 @@ impl CollectionCore {
             .unwrap_or(0);
         self.adapter
             .change_notetype(&anki_proto::notetypes::ChangeNotetypeRequest {
-                note_ids: changed.clone(),
+                note_ids: response.changed.clone(),
                 new_fields,
                 new_templates,
                 old_notetype_id: source_id,
@@ -758,7 +806,7 @@ impl CollectionCore {
                 old_notetype_name: source_name,
                 is_cloze,
             })?;
-        Ok(result.to_string())
+        Ok(response)
     }
 }
 
@@ -854,32 +902,33 @@ fn reject_unsound_positional_replace(
 }
 
 /// `_simulate_struct_op` — validate one op against a simulated name list.
-fn simulate_struct_op(sim: &mut Vec<String>, op: &Value, i: usize, what: &str) -> NativeResult<()> {
-    let kind = op["op"].as_str().unwrap_or_default();
-    match kind {
-        "add" => {
-            let name = op["name"].as_str().unwrap_or_default().to_string();
-            if sim.contains(&name) {
+fn simulate_struct_op(
+    sim: &mut Vec<String>,
+    op: &EntryOp<'_>,
+    i: usize,
+    what: &str,
+) -> NativeResult<()> {
+    match *op {
+        EntryOp::Add { name, position, .. } => {
+            if sim.iter().any(|n| n == name) {
                 return Err(invalid(format!(
                     "op {i} (add): {what} '{name}' already exists"
                 )));
             }
-            match op.get("position").filter(|v| !v.is_null()) {
-                None => sim.push(name),
-                Some(p) => {
-                    let pos = p.as_i64().unwrap_or(-1);
+            match position {
+                None => sim.push(name.to_owned()),
+                Some(pos) => {
                     if pos < 0 || pos as usize > sim.len() {
                         return Err(invalid(format!(
                             "op {i} (add): position {pos} out of range 0..{}",
                             sim.len()
                         )));
                     }
-                    sim.insert(pos as usize, name);
+                    sim.insert(pos as usize, name.to_owned());
                 }
             }
         }
-        "remove" => {
-            let name = op["name"].as_str().unwrap_or_default();
+        EntryOp::Remove { name } => {
             let Some(idx) = sim.iter().position(|n| n == name) else {
                 return Err(invalid(format!(
                     "op {i} (remove): {what} '{name}' not found"
@@ -892,40 +941,33 @@ fn simulate_struct_op(sim: &mut Vec<String>, op: &Value, i: usize, what: &str) -
             }
             sim.remove(idx);
         }
-        "rename" => {
-            let name = op["name"].as_str().unwrap_or_default();
-            let new = op["new_name"].as_str().unwrap_or_default().to_string();
+        EntryOp::Rename { name, new_name } => {
             let Some(idx) = sim.iter().position(|n| n == name) else {
                 return Err(invalid(format!(
                     "op {i} (rename): {what} '{name}' not found"
                 )));
             };
-            if new != name && sim.contains(&new) {
+            if new_name != name && sim.iter().any(|n| n == new_name) {
                 return Err(invalid(format!(
-                    "op {i} (rename): {what} '{new}' already exists"
+                    "op {i} (rename): {what} '{new_name}' already exists"
                 )));
             }
-            sim[idx] = new;
+            sim[idx] = new_name.to_owned();
         }
-        "reposition" => {
-            let name = op["name"].as_str().unwrap_or_default().to_string();
-            let pos = op["position"].as_i64().unwrap_or(-1);
-            let Some(idx) = sim.iter().position(|n| *n == name) else {
+        EntryOp::Reposition { name, position } => {
+            let Some(idx) = sim.iter().position(|n| n == name) else {
                 return Err(invalid(format!(
                     "op {i} (reposition): {what} '{name}' not found"
                 )));
             };
-            if pos < 0 || pos as usize >= sim.len() {
+            if position < 0 || position as usize >= sim.len() {
                 return Err(invalid(format!(
-                    "op {i} (reposition): position {pos} out of range 0..{}",
+                    "op {i} (reposition): position {position} out of range 0..{}",
                     sim.len() - 1
                 )));
             }
             sim.remove(idx);
-            sim.insert(pos as usize, name);
-        }
-        other => {
-            return Err(invalid(format!("op {i}: unknown op {other:?}")));
+            sim.insert(position as usize, name.to_owned());
         }
     }
     Ok(())
