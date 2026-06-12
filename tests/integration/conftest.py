@@ -712,7 +712,7 @@ def _has_onnxruntime() -> bool:
 
 requires_onnxruntime = pytest.mark.skipif(
     not _has_onnxruntime(),
-    reason="onnxruntime not installed (pip install 'shrike[onnx]')",
+    reason="onnxruntime not installed (pip install onnxruntime)",
 )
 
 
@@ -724,7 +724,7 @@ def _has_clip() -> bool:
 
 requires_clip = pytest.mark.skipif(
     not _has_clip(),
-    reason="onnxruntime/pillow not installed (pip install 'shrike[clip]' + pillow)",
+    reason="onnxruntime/pillow not installed (pip install onnxruntime pillow)",
 )
 
 

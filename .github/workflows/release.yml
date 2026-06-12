@@ -4,8 +4,8 @@ name: Release
 # (they only run on `rc`-labelled PRs — see test.yml) run here unconditionally:
 # tagging a release is exactly the moment to pay for full coverage. On a `v*` tag
 # push we run the full integration suite on every platform, build the artifacts
-# with Bazel (Python sdist + wheel, the anki-cards.skill bundle, and SHA256SUMS),
-# and cut a GitHub Release with them attached.
+# with Bazel (the platform-tagged Python wheels + sdist, the anki-cards.skill
+# bundle, and SHA256SUMS), and cut a GitHub Release with them attached.
 #
 # Pre-release tags (`vX.Y.Z-rc.N`, `-alpha`, …) are marked as GitHub pre-releases.
 # Final releases are also published to PyPI via trusted publishing (the
@@ -46,13 +46,81 @@ jobs:
       - uses: ./.github/actions/bazel-save
         if: always()
 
-  # Build the release artifacts from the tagged commit, all via Bazel (#245): the
-  # Python wheel (//:wheel) + sdist (//:sdist) and the anki-cards.skill bundle
-  # (//skills:skill). Each is stamped from the tag (STABLE_VERSION via
-  # tools/workspace_status.sh, hence fetch-depth: 0). They go into the `dist`
-  # artifact for the release job to attach + checksum.
-  build:
-    name: Build sdist + wheel + skill
+  # The platform-tagged shrike-mcp wheels (#497): cp312-abi3 with the native
+  # extension inside, one per supported platform. The linux pair builds on
+  # ubuntu-22.04 deliberately — auditwheel grades the manylinux tag by the
+  # glibc symbols the extension links, so the oldest supported runner gives the
+  # widest-installing tag (manylinux_2_35 at most). macOS x86_64 rides the
+  # macos-15-intel runner (the last hosted Intel image; macos-13 retired
+  # 2025-12). Neither extra runner is warmed by warm-cache.yml (it only runs
+  # the test.yml matrix), so those two legs cold-compile the Rust workspace at
+  # tag time — accepted: it's release cadence, not the PR loop.
+  build-wheels:
+    name: Build wheel (${{ matrix.os }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-latest, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # tags so the Bazel version stamp (git describe) resolves
+      - uses: ./.github/actions/bazel-setup
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"  # for auditwheel/twine only; Bazel uses its own toolchain
+      - name: Build the platform wheel with Bazel
+        # The committed ./bazel wrapper fetches the pinned Bazel; the wrapper
+        # script stamps the tag-derived version in and renames to the real
+        # shrike_mcp-<version>-cp312-abi3-<platform>.whl filename under dist/.
+        run: tools/build-wheel.sh
+      - name: Repair the linux wheel to a manylinux tag (auditwheel)
+        # py_wheel emits plain linux_* platform tags, which PyPI rejects;
+        # auditwheel grades the extension's glibc usage, vendors any linked
+        # non-allowlisted libraries, and re-tags to the manylinux policy the
+        # wheel actually satisfies. (The ort runtime is dlopen'd from the
+        # onnxruntime wheel at runtime — load-dynamic — so it is never a
+        # link-time dependency to vendor.)
+        if: runner.os == 'Linux'
+        run: |
+          pip install auditwheel patchelf
+          built=(dist/*.whl)
+          auditwheel repair "${built[0]}" --wheel-dir dist/repaired
+          rm "${built[0]}"
+          mv dist/repaired/*.whl dist/
+          rmdir dist/repaired
+      - name: Validate metadata
+        run: |
+          pip install twine
+          twine check dist/*.whl
+      - name: Sanity-check built version matches the tag
+        # Defence-in-depth against a broken build producing a dev version (e.g. tags
+        # not fetched, so the Bazel version stamp falls back). Skipped for
+        # pre-releases: PEP 440 normalises the tag (v1.2.3-rc.1 -> 1.2.3rc1), so a
+        # literal tag↔filename match wouldn't hold.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "$version" != *-* ]]; then
+            if ! ls dist/shrike_mcp-"${version}"-*.whl >/dev/null 2>&1; then
+              echo "::error::built wheel doesn't match tag ${GITHUB_REF_NAME}: $(ls dist)"
+              exit 1
+            fi
+          fi
+      - uses: ./.github/actions/bazel-save
+        if: always()
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-wheel-${{ matrix.os }}
+          path: dist/*.whl
+
+  # The sdist + the anki-cards.skill bundle, all via Bazel (#245). Each is
+  # stamped from the tag (STABLE_VERSION via tools/workspace_status.sh, hence
+  # fetch-depth: 0). They go into a dist-* artifact for the release job to
+  # attach + checksum alongside the wheels.
+  build-sdist:
+    name: Build sdist + skill
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -65,22 +133,14 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"  # for `twine check` only; Bazel uses its own toolchain
-      - name: Build the wheel and sdist with Bazel
-        # The committed ./bazel wrapper fetches the pinned Bazel; the wrappers stamp
-        # the tag-derived version in and rename to the real
-        # shrike_mcp-<version>.{whl,tar.gz} filenames under dist/.
-        run: |
-          tools/build-wheel.sh
-          tools/build-sdist.sh
+      - name: Build the sdist with Bazel
+        run: tools/build-sdist.sh
       - name: Validate metadata
         run: |
           pip install twine
           twine check dist/*
       - name: Sanity-check built version matches the tag
-        # Defence-in-depth against a broken build producing a dev version (e.g. tags
-        # not fetched, so the Bazel version stamp falls back). Skipped for
-        # pre-releases: PEP 440 normalises the tag (v1.2.3-rc.1 -> 1.2.3rc1), so a
-        # literal tag↔filename match wouldn't hold.
+        # Same defence as the wheel jobs, against the sdist filename.
         run: |
           version="${GITHUB_REF_NAME#v}"
           if [[ "$version" != *-* ]]; then
@@ -98,7 +158,7 @@ jobs:
         if: always()
       - uses: actions/upload-artifact@v7
         with:
-          name: dist
+          name: dist-sdist
           path: dist/*
 
   # Create the GitHub Release and attach the artifacts. Notes come from the
@@ -106,13 +166,14 @@ jobs:
   # whose section is missing) fall back to auto-generated commit notes.
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build-wheels, build-sdist]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6  # for CHANGELOG.md at the tagged commit
       - uses: actions/download-artifact@v8
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist
       - name: Create release
         env:
@@ -155,7 +216,7 @@ jobs:
   # workflow file, and the `pypi` environment.
   publish-pypi:
     name: Publish to PyPI
-    needs: build
+    needs: [build-wheels, build-sdist]
     # Final releases only — a pre-release (rc) tag carries a SemVer hyphen.
     if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
@@ -165,10 +226,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist
       - name: Keep only the Python distributions
-        # The dist artifact also carries anki-cards.skill; PyPI must receive only
-        # the sdist + wheel.
+        # The dist artifacts also carry anki-cards.skill; PyPI must receive only
+        # the sdist + the platform wheels.
         run: find dist -maxdepth 1 -type f ! -name '*.whl' ! -name '*.tar.gz' -delete
       - uses: pypa/gh-action-pypi-publish@release/v1

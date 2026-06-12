@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Build the release wheel via Bazel and give it its real filename (#245).
+# Build the release wheel via Bazel and give it its real filename (#245/#497).
 #
 # py_wheel stamps the tag-derived version (STABLE_VERSION) into the wheel's
 # METADATA + .dist-info, but Bazel computes the output *filename* at analysis time
-# — before stamping — so it ships as `shrike_mcp-{STABLE_VERSION}-py3-none-any.whl`.
-# This copies it to the metadata's actual version. Used by release.yml and locally.
+# — before stamping — so it ships as `shrike_mcp-{STABLE_VERSION}-<tags>.whl`.
+# This copies it to the metadata's actual version, preserving the python/abi/platform
+# tags (cp312-abi3-<platform> since #497 — the wheel carries the native extension).
+# Used by release.yml and locally.
 #
 # Usage: tools/build-wheel.sh [OUT_DIR]   (default: dist/)
 set -euo pipefail
@@ -16,8 +18,11 @@ cd "$repo_root"
 ./bazel build //:wheel --stamp >&2
 built="$(./bazel cquery --output=files //:wheel 2>/dev/null)"
 version="$(unzip -p "$built" '*.dist-info/METADATA' | sed -n 's/^Version: //p' | head -1)"
+# The built name is shrike_mcp-{STABLE_VERSION}-<python>-<abi>-<platform>.whl;
+# keep everything after the placeholder.
+tags="$(basename "$built" | sed 's/^shrike_mcp-{STABLE_VERSION}-//')"
 
 mkdir -p "$out_dir"
-dest="$out_dir/shrike_mcp-${version}-py3-none-any.whl"
+dest="$out_dir/shrike_mcp-${version}-${tags}"
 cp -f "$built" "$dest"
 echo "$dest"

@@ -141,9 +141,9 @@ class ClipBackend:
             import onnxruntime as ort
         except ImportError as e:
             raise ImportError(
-                "The CLIP embedding backend needs the 'clip' optional dependency "
-                "(the onnxruntime wheel carries the shared runtime the native "
-                "engine loads). Install it with: pip install 'shrike[clip]'"
+                "The CLIP embedding backend needs the onnxruntime wheel (it carries "
+                "the shared runtime the native engine loads; a hard dependency of "
+                "shrike-mcp). Install it with: pip install onnxruntime"
             ) from e
 
         self._text_path, self._vis_path, tok_path, pp_path = self._resolve_files()

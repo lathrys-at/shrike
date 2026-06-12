@@ -57,7 +57,7 @@ non-Python hosts. Enforced by `//native:layering_check`.
 ```bash
 # Bazel (CI runs one `./bazel test //...` over the whole graph; this is its native slice):
 ./bazel test //native/...                  # crates, layering check, smoke, stubtest
-./bazel build //native/shrike-py:wheel     # the shrike-native platform wheel (manual tag)
+./bazel build //:wheel --stamp             # the platform-tagged shrike-mcp wheel (manual tag)
 
 # Plain cargo (fast inner loop; .cargo/config.toml carries the macOS link flags):
 cd native && cargo build && cargo test
@@ -83,16 +83,17 @@ Bazel crate graph to it.
 
 ## Packaging
 
-`//native/shrike-py:wheel` builds a `shrike-native` abi3 (cp312+) platform
-wheel carrying `_native.so`, the stubs, and `py.typed`. The main `shrike-mcp`
-wheel stays pure Python — but since the kernel inversion the server *requires*
-`shrike_native` (it is the kernel, not an accelerator), so how the native wheel
-is composed and shipped for releases is open work (#338/#340: feature gating
-and pip-extra symmetry). Linux wheels use plain `linux_*` tags for now —
-manylinux auditing comes with the native publishing story. ort linkage decision
-for #270: **load-dynamic against the pinned onnxruntime the Python backend
-already installs** (no `download-binaries`, no duplicated runtime, guaranteed
-version match for the parity bake).
+The release artifact is `//:wheel`: an abi3 (cp312+) **platform-tagged
+`shrike-mcp` wheel** that ships the Python package *and* the `shrike_native`
+package (`_native.so`, the stubs, `py.typed`) in one artifact — since the
+kernel inversion the server *requires* `shrike_native` (it is the kernel, not
+an accelerator), so there is no separate `shrike-native` distribution and no
+version-skew surface (#497; the plugin-extension-wheel idea stays recorded on
+#340). release.yml builds it per platform (macOS arm64/x86_64, linux
+x86_64/aarch64); the linux wheels are auditwheel-repaired to manylinux tags
+before publishing. ort linkage decision for #270: **load-dynamic against the
+pinned onnxruntime wheel shrike-mcp hard-depends on** (no `download-binaries`,
+no duplicated runtime, guaranteed version match for the parity bake).
 
 ## Licensing inventory
 

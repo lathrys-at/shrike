@@ -493,9 +493,9 @@ class EmbeddingRuntime:
     def _make_backend(self) -> EmbedderBackend:
         """Construct (but don't start) the backend for the configured kind.
 
-        The onnx/clip backends import their heavy deps lazily, so ``shrike[onnx]`` /
-        ``shrike[clip]`` stay optional — a missing dependency surfaces as ``ImportError``
-        only when that backend is actually selected.
+        The onnx/clip backends import onnxruntime lazily — it's a hard dependency
+        of the published wheel (#497), but an environment missing it still surfaces
+        a clean ``ImportError`` only when that backend is actually selected.
         """
         assert self._model is not None  # callers check before constructing
         if self._backend_kind == "onnx":

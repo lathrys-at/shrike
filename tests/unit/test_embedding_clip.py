@@ -128,11 +128,11 @@ class TestClipBackend:
     def test_modalities(self) -> None:
         assert ClipBackend(model="x").modalities == frozenset({TEXT, IMAGE})
 
-    def test_missing_dep_raises_with_clip_hint(self, tmp_path: Path) -> None:
+    def test_missing_dep_raises_with_install_hint(self, tmp_path: Path) -> None:
         be = ClipBackend(model=str(_model_dir(tmp_path)))
         with (
             patch.dict(sys.modules, {"onnxruntime": None}),
-            pytest.raises(ImportError, match="clip"),
+            pytest.raises(ImportError, match="pip install onnxruntime"),
         ):
             be.start()
 

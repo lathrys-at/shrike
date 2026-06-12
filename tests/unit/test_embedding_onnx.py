@@ -335,7 +335,7 @@ class TestLifecycleAndEmbed:
     ) -> None:
         be = OnnxBackend(model=str(_model_dir(tmp_path)))
         monkeypatch.setitem(sys.modules, "onnxruntime", None)  # import → ImportError
-        with pytest.raises(ImportError, match="onnx"):
+        with pytest.raises(ImportError, match="pip install onnxruntime"):
             be.start()
 
     # -- Health -------------------------------------------------------------------

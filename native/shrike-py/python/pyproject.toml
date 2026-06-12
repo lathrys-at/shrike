@@ -1,7 +1,8 @@
 # Dev-local packaging for the shrike_native extension package (#269).
 #
-# The CANONICAL release artifact is the Bazel py_wheel (//native/shrike-py:wheel,
-# abi3 platform wheel). This file exists so `scripts/build-native.sh` can
+# The CANONICAL release artifact is the Bazel py_wheel (//:wheel — the
+# platform-tagged shrike-mcp wheel ships shrike_native inside it since #497;
+# there is no published shrike-native dist). This file exists so `scripts/build-native.sh` can
 # `pip install -e` the package into a working venv after a cargo build drops
 # `_native.so` into the package dir — the pip-lane tests then exercise the
 # facades against the real extension without Bazel in the loop.

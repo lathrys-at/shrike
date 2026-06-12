@@ -1,6 +1,5 @@
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
-load("@rules_python//python:packaging.bzl", "py_wheel")
 load("@rules_rust//rust:defs.bzl", "rust_shared_library")
 load("@shrike_pip//:requirements.bzl", "requirement")
 
@@ -113,7 +112,8 @@ py_test(
     ],
 )
 
-# Platform config_settings for the wheel tag.
+# Platform config_settings for the //:wheel platform tag (#497 — the
+# platform-tagged shrike-mcp wheel selects over these).
 config_setting(
     name = "macos_arm64",
     constraint_values = [
@@ -146,6 +146,11 @@ config_setting(
     ],
 )
 
+# The shrike_native package payload for the release wheel: //:wheel (the
+# platform-tagged shrike-mcp wheel) names this filegroup in its deps, so the
+# extension ships INSIDE shrike-mcp (#497) — the standalone shrike-native
+# py_wheel that used to live here was retired with it (no separate dist, no
+# version-skew surface).
 filegroup(
     name = "wheel_files",
     srcs = [
@@ -155,32 +160,4 @@ filegroup(
         "python/shrike_native/py.typed",
         ":native_so",
     ],
-)
-
-# The shrike-native platform wheel (#269, extending the #245 py_wheel work).
-# abi3 (cp312/abi3): one wheel per platform works across CPython 3.12+. The
-# linux tags are the plain linux_* ones for now — manylinux auditing
-# (auditwheel) is deferred until PyPI publishing is wired up (#43); these
-# wheels install from GitHub releases / local builds where plain tags are
-# accepted. `manual` keeps the release artifact off the per-PR `//...` lane
-# (the #261/#263 finding); release tooling names it explicitly.
-py_wheel(
-    name = "wheel",
-    distribution = "shrike-native",
-    version = "{STABLE_VERSION}",
-    stamp = 1,
-    python_tag = "cp312",
-    abi = "abi3",
-    platform = select({
-        ":macos_arm64": "macosx_11_0_arm64",
-        ":macos_x86_64": "macosx_11_0_x86_64",
-        ":linux_x86_64": "linux_x86_64",
-        ":linux_arm64": "linux_aarch64",
-    }),
-    summary = "Shrike native compute extension (PyO3)",
-    license = "AGPL-3.0-or-later",
-    python_requires = ">=3.12",
-    tags = ["manual"],
-    strip_path_prefixes = ["native/shrike-py/python"],
-    deps = [":wheel_files"],
 )

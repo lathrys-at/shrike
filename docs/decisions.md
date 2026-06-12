@@ -282,9 +282,10 @@ real DistilRoBERTa run:
   we read `session.get_providers()` — what *actually* loaded — and warn if a requested provider
   was available but failed to initialise. `health()`/`server status` surface the effective
   provider, so "I asked for CUDA but it's running on CPU" is visible instead of a silent
-  performance cliff. Packaging mirrors how onnxruntime ships: `shrike[onnx]` is the base wheel
-  (CPU + CoreML on macOS); `shrike[onnx-gpu]` is `onnxruntime-gpu` (CUDA/TensorRT) and is
-  installed *instead of* `[onnx]` (the two wheels conflict); Windows DirectML is a manual
+  performance cliff. Packaging mirrors how onnxruntime ships: the base onnxruntime wheel
+  (CPU + CoreML on macOS) is a hard dependency since #497 (the old `onnx`/`clip` extras are
+  gone — see docs/distribution.md); the `gpu` extra is `onnxruntime-gpu` (CUDA/TensorRT) and is
+  installed *instead of* the base wheel (the two conflict); Windows DirectML is a manual
   `onnxruntime-directml`.
 - **The CLIP backend is a *dual* encoder behind the same seam (#162 Phase 3b).** Multimodal
   search (a text query retrieving a card by its image) needs image and text in *one* vector

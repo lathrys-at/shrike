@@ -60,17 +60,15 @@ Whichever you pick, search works the same, text-only models are fully supported,
 
 ### ONNX backend
 
-Install the extra, then put an ONNX embedding model in a directory: a `model.onnx` file and its `tokenizer.json`. Good small models live in the [all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2) repository, including quantized exports a few times smaller than the default; download the `.onnx` file you want, save it as `model.onnx`, and put `tokenizer.json` beside it.
+Everything this backend needs ships with the install. Put an ONNX embedding model in a directory: a `model.onnx` file and its `tokenizer.json`. Good small models live in the [all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2) repository, including quantized exports a few times smaller than the default; download the `.onnx` file you want, save it as `model.onnx`, and put `tokenizer.json` beside it.
 
 ```bash
-pip install 'shrike-mcp[onnx]'
-
 shrike server start --collection ~/path/to/collection.anki2 \
   --embedding-backend onnx \
   --embedding-model ~/models/all-MiniLM-L6-v2-onnx
 ```
 
-If you have an NVIDIA GPU, install `shrike-mcp[onnx-gpu]` instead of `[onnx]` (the two onnxruntime builds can't be installed together) and add `--embedding-onnx-provider CUDAExecutionProvider`. On a Mac the plain install already runs on the Apple GPU. Either way, `shrike server status` shows the provider that actually loaded, so you can confirm the accelerator is in use rather than a quiet fall back to the CPU. A floating-point model (rather than a small quantized one) is what makes a GPU worthwhile, since it can embed cards in larger batches.
+If you have an NVIDIA GPU, swap the bundled CPU runtime for the GPU build, then add `--embedding-onnx-provider CUDAExecutionProvider`. The two builds can't be installed together, so replace one with the other: `pip uninstall onnxruntime` followed by `pip install onnxruntime-gpu` (the `gpu` extra names the same package if you prefer to pin it through `shrike-mcp[gpu]`). On a Mac the plain install already runs on the Apple GPU. Either way, `shrike server status` shows the provider that actually loaded, so you can confirm the accelerator is in use rather than a quiet fall back to the CPU. A floating-point model (rather than a small quantized one) is what makes a GPU worthwhile, since it can embed cards in larger batches.
 
 ### llama-server backend
 
@@ -86,11 +84,9 @@ If `--llama-server` or `--embedding-model` isn't given on the command line or in
 
 ### CLIP backend (search images by content)
 
-Install the `clip` extra and point `--embedding-model` at a CLIP ONNX export — a directory holding `text_model.onnx`, `vision_model.onnx`, `tokenizer.json`, and `preprocessor_config.json` (the layout of [Xenova/clip-vit-base-patch32](https://huggingface.co/Xenova/clip-vit-base-patch32); a larger model like jina-clip-v2 searches noticeably better):
+Point `--embedding-model` at a CLIP ONNX export — a directory holding `text_model.onnx`, `vision_model.onnx`, `tokenizer.json`, and `preprocessor_config.json` (the layout of [Xenova/clip-vit-base-patch32](https://huggingface.co/Xenova/clip-vit-base-patch32); a larger model like jina-clip-v2 searches noticeably better). Nothing extra to install:
 
 ```bash
-pip install 'shrike-mcp[clip]'
-
 shrike server start --collection ~/path/to/collection.anki2 \
   --embedding-backend clip \
   --embedding-model ~/models/clip-vit-base-patch32

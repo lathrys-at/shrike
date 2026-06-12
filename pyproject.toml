@@ -41,6 +41,12 @@ dependencies = [
     "pyyaml>=6.0",
     "rich>=13.0",
     "numpy>=1.26",
+    # The dylib carrier for the native ort engine (`ort` with load-dynamic): the
+    # onnxruntime wheel ships the shared runtime that in-process text + CLIP
+    # embedding dlopens. A hard dependency since #497 (the old onnx/clip extras
+    # were deleted — see docs/distribution.md). The base wheel covers CPU (and
+    # CoreML on macOS, i.e. Apple GPU/ANE); the `gpu` extra swaps the carrier.
+    "onnxruntime>=1.17",
 ]
 
 [project.optional-dependencies]
@@ -49,26 +55,14 @@ dependencies = [
 socks = [
     "httpx[socks]>=0.27",
 ]
-# In-process ONNX embedding backend (--embedding-backend onnx). Optional — the
-# default llama-server backend doesn't need it. The onnxruntime wheel carries the
-# shared runtime the native (Rust ort) engine dlopens; tokenization runs crate-side
-# (the Rust tokenizers crate) since the #278 cutover, so no Python tokenizers dep.
-# The base wheel covers CPU (and CoreML on macOS, i.e. Apple GPU/ANE).
-onnx = [
-    "onnxruntime>=1.17",
-]
-# Same backend, CUDA/TensorRT build for NVIDIA GPUs (--embedding-onnx-provider
-# CUDAExecutionProvider). Install INSTEAD of `onnx`, not alongside: the onnxruntime
-# and onnxruntime-gpu wheels conflict (they provide the same package). Windows DirectML
-# is an analogous manual `pip install onnxruntime-directml`.
-onnx-gpu = [
+# CUDA/TensorRT onnxruntime build for NVIDIA GPUs (--embedding-onnx-provider
+# CUDAExecutionProvider). NOTE: pip cannot enforce it, but onnxruntime-gpu must be
+# installed INSTEAD of the base onnxruntime carrier — the two wheels conflict (they
+# provide the same package); `pip install shrike-mcp[gpu]` pulls both, so uninstall
+# onnxruntime afterwards (or install onnxruntime-gpu by hand). Windows DirectML is
+# an analogous manual `pip install onnxruntime-directml`.
+gpu = [
     "onnxruntime-gpu>=1.17",
-]
-# In-process CLIP backend (--embedding-backend clip) for image<->text search. Same
-# carrier as `onnx`: image decode/preprocessing and tokenization run crate-side
-# since the #278 cutover (no torch/torchvision, no Python pillow/tokenizers).
-clip = [
-    "onnxruntime>=1.17",
 ]
 # OCR via Apple's Vision framework (--ocr-backend apple, #228/#221) needs NO
 # extra since #342 P3: the engine is native (shrike-recognize-apple in the
@@ -132,8 +126,8 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 check_untyped_defs = true
 
-# The native extension is built by scripts/build-native.sh (or ships as the
-# shrike-native wheel). Where it IS installed its .pyi stubs apply (and
+# The native extension is built by scripts/build-native.sh (or ships inside the
+# platform-tagged shrike-mcp wheel). Where it IS installed its .pyi stubs apply (and
 # stubtest gates them); on a stub-less environment (CI's lint lane) mypy must
 # not fail on the import.
 [[tool.mypy.overrides]]

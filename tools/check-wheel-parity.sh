@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Parity gate (#245): the Bazel py_wheel must ship the same thing as the hatchling
-# wheel, so the release can cut over to Bazel without changing the published
-# artifact. Builds both and compares the substantive metadata (name, deps, extras,
-# project URLs, entry-point-bearing fields, long description) and the packaged source
-# files.
+# Parity gate (#245, reshaped by #497): the Bazel py_wheel is the release artifact;
+# the hatchling wheel is the dev-lane build (pip install -e). The Python payload and
+# metadata must stay equivalent so the dev lane exercises what ships. Builds both and
+# compares the substantive metadata (name, deps, extras, project URLs,
+# entry-point-bearing fields, long description) and the packaged `shrike/` source
+# files. The Bazel wheel ADDITIONALLY ships the `shrike_native/` package (#497 — the
+# platform-tagged wheel carries the extension); the gate asserts that payload is
+# present (incl. the compiled _native.so) and excludes it from the file comparison
+# (the hatchling wheel is pure Python by design; the dev venv gets shrike_native from
+# scripts/build-native.sh instead).
 #
 # It checks SEMANTIC equivalence, not byte-identity, because the two builders emit a
 # different wheel Metadata-Version (rules_python py_wheel = 2.1, hatchling = 2.4): the
@@ -46,8 +51,10 @@ def load(path):
     with zipfile.ZipFile(path) as z:
         meta_name = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
         msg = Parser().parsestr(z.read(meta_name).decode())
-        files = {n for n in z.namelist() if ".dist-info/" not in n} - IGNORE_FILES
-    return msg, files
+        names = {n for n in z.namelist() if ".dist-info/" not in n}
+        native = {n for n in names if n.startswith("shrike_native/")}
+        files = names - native - IGNORE_FILES
+    return msg, files, native
 
 
 def lic(meta):  # license value, across the 2.1 License / 2.4 License-Expression split
@@ -62,10 +69,16 @@ def compare(label, a, b):
     return True
 
 
-bazel_meta, bazel_files = load(sys.argv[1])
-hatch_meta, hatch_files = load(sys.argv[2])
+bazel_meta, bazel_files, bazel_native = load(sys.argv[1])
+hatch_meta, hatch_files, _ = load(sys.argv[2])
 
 ok = True
+# The release wheel must actually carry the extension (#497) — a pure-Python
+# shrike-mcp cannot run (the kernel is shrike_native).
+if "shrike_native/_native.so" not in bazel_native:
+    print(f"  MISMATCH native payload: bazel wheel lacks shrike_native/_native.so "
+          f"(found: {sorted(bazel_native)})")
+    ok = False
 for field in sorted((set(bazel_meta.keys()) | set(hatch_meta.keys())) - TOLERATE - REPORT_ONLY):
     a, b = bazel_meta.get_all(field, []), hatch_meta.get_all(field, [])
     ok &= compare(f"{field} (set)", set(a), set(b)) if field in SET_FIELDS else compare(field, a, b)

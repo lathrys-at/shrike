@@ -8,7 +8,7 @@ native engine (the ``ort`` crate + the Rust ``tokenizers`` crate, #270);
 crate-side. Native-only since the #278 cutover (the Python onnxruntime+numpy
 engine retired with it).
 
-The onnxruntime *wheel* (the optional ``shrike[onnx]`` extra) remains the
+The onnxruntime *wheel* (a hard dependency of shrike-mcp since #497) remains the
 runtime carrier: the native engine dlopens the wheel's shared library — the
 pinned, provider-complete onnxruntime build — so there is exactly one runtime
 on disk (#269's linkage decision), and the wheel's Python API is still used for
@@ -158,9 +158,9 @@ class OnnxBackend:
             import onnxruntime as ort
         except ImportError as e:
             raise ImportError(
-                "The ONNX embedding backend needs the 'onnx' optional dependency "
-                "(the onnxruntime wheel carries the shared runtime the native "
-                "engine loads). Install it with: pip install 'shrike[onnx]'"
+                "The ONNX embedding backend needs the onnxruntime wheel (it carries "
+                "the shared runtime the native engine loads; a hard dependency of "
+                "shrike-mcp). Install it with: pip install onnxruntime"
             ) from e
 
         onnx_path, tok_path = self._resolve_files()

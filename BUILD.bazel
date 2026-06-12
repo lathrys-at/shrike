@@ -30,20 +30,29 @@ py_test(
     deps = ["//src/shrike:shrike"],
 )
 
-# The release wheel (#245). Version is stamped from the git tag (STABLE_VERSION via
-# tools/workspace_status.sh) — the exact tag version on a clean release/rc tag,
-# replacing hatch-vcs as the artifact builder. strip_path_prefixes drops `src/` so
-# the wheel ships `shrike/...`. Metadata mirrors pyproject.toml (the source of
-# truth on the coexisting pip path); a parity gate diffs the two builds before the
-# release path cuts over to this one.
+# The release wheel (#245; platform-tagged since #497). Version is stamped from the
+# git tag (STABLE_VERSION via tools/workspace_status.sh) — the exact tag version on a
+# clean release/rc tag, replacing hatch-vcs as the artifact builder.
+# strip_path_prefixes drops `src/` and the extension package dir so the wheel ships
+# `shrike/...` AND `shrike_native/...` (the compiled _native.so + stubs + py.typed):
+# one artifact, no separate shrike-native dist, no version-skew surface. cp312-abi3 —
+# one wheel per platform covers CPython 3.12+. The linux tags are the plain linux_*
+# ones at build time; release.yml runs auditwheel repair to the manylinux tags PyPI
+# requires before publishing. Metadata mirrors pyproject.toml (the source of truth on
+# the coexisting dev pip path); tools/check-wheel-parity.sh keeps the two in lockstep.
 py_wheel(
     name = "wheel",
     distribution = "shrike-mcp",
     version = "{STABLE_VERSION}",
     stamp = 1,
-    python_tag = "py3",
-    abi = "none",
-    platform = "any",
+    python_tag = "cp312",
+    abi = "abi3",
+    platform = select({
+        "//native/shrike-py:macos_arm64": "macosx_11_0_arm64",
+        "//native/shrike-py:macos_x86_64": "macosx_11_0_x86_64",
+        "//native/shrike-py:linux_x86_64": "linux_x86_64",
+        "//native/shrike-py:linux_arm64": "linux_aarch64",
+    }),
     summary = "MCP server for Anki collection management",
     description_file = "README.md",
     description_content_type = "text/markdown",
@@ -64,6 +73,9 @@ py_wheel(
         "pyyaml>=6.0",
         "rich>=13.0",
         "numpy>=1.26",
+        # The dylib carrier for the native ort engine — hard dep since #497 (the
+        # onnx/clip extras are gone; the `gpu` extra swaps the carrier).
+        "onnxruntime>=1.17",
     ],
     # Mirrors pyproject's [project.optional-dependencies] exactly (incl. `dev`, which
     # hatchling emits as Provides-Extra) so the two wheels' metadata matches for the
@@ -71,14 +83,8 @@ py_wheel(
     # carries any (the SPDX `license` field is the source of truth — PEP 639).
     extra_requires = {
         "socks": ["httpx[socks]>=0.27"],
-        "onnx": [
-            "onnxruntime>=1.17",
-        ],
-        "onnx-gpu": [
+        "gpu": [
             "onnxruntime-gpu>=1.17",
-        ],
-        "clip": [
-            "onnxruntime>=1.17",
         ],
         "dev": [
             "anki>=25.0",
@@ -103,10 +109,16 @@ py_wheel(
     # artifact (and run `git describe` for it) on a shallow, tagless checkout —
     # release.yml and tools/build-wheel.sh name //:wheel explicitly.
     tags = ["manual"],
-    strip_path_prefixes = ["src"],
+    strip_path_prefixes = [
+        "src",
+        "native/shrike-py/python",
+    ],
     deps = [
         "//src/shrike:shrike",
         "//src/shrike:py_typed",
+        # The shrike_native package payload: __init__.py + .pyi stubs + py.typed +
+        # the compiled _native.so (py_wheel packages a filegroup's files directly).
+        "//native/shrike-py:wheel_files",
     ],
 )
 

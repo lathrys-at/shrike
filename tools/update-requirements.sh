@@ -5,8 +5,9 @@
 # against in MODULE.bazel.
 #
 # The lock is universal (cross-platform, marker-guarded) and hashed, and includes
-# the extras the Bazel test/build graph needs (dev tooling + the onnx/clip
-# embedding backends). onnx-gpu is excluded on purpose: it conflicts with onnx.
+# the extras the Bazel test/build graph needs (dev tooling; onnxruntime is a hard
+# dependency since #497). gpu is excluded on purpose: onnxruntime-gpu conflicts
+# with the base onnxruntime carrier.
 set -euo pipefail
 
 # Pin the resolver so the lock is reproducible regardless of the contributor's
@@ -22,8 +23,6 @@ uvx "uv@${UV_VERSION}" pip compile pyproject.toml \
   --universal \
   --generate-hashes \
   --extra dev \
-  --extra onnx \
-  --extra clip \
   --extra socks \
   -o requirements_lock.txt
 
