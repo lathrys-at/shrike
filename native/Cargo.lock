@@ -5040,6 +5040,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "shrike-describe-remote"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "shrike-engine-api",
+ "shrike-ffi",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "shrike-embed"
 version = "0.0.0"
 dependencies = [

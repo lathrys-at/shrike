@@ -1,0 +1,30 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//native:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# The remote VLM describe engine (#433): RecognizeMedia over any
+# OpenAI-compatible chat-completions endpoint with vision content parts,
+# ureq (synchronous, runtime-less). Knows nothing about subprocesses
+# (shrike-llama-server's chat_mode produces the local vision endpoint).
+rust_library(
+    name = "shrike_describe_remote",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        "//native/shrike-engine-api:shrike_engine_api",
+        "//native/shrike-ffi:shrike_ffi",
+        "@crates//:base64",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:tracing",
+        "@crates//:ureq",
+    ],
+)
+
+rust_test(
+    name = "shrike_describe_remote_test",
+    size = "small",
+    crate = ":shrike_describe_remote",
+)

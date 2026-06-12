@@ -40,10 +40,11 @@ pub const RESERVED_FLAGS: &[&str] = &[
     "--port",
     "--embeddings",
     "--embedding",
+    "--mmproj",
 ];
 /// Of the reserved flags, those that consume a following value token (so a
 /// rejected `--host 0.0.0.0` drops the value too, not just the flag).
-pub const RESERVED_VALUE_FLAGS: &[&str] = &["--model", "-m", "--host", "--port"];
+pub const RESERVED_VALUE_FLAGS: &[&str] = &["--model", "-m", "--host", "--port", "--mmproj"];
 
 pub struct LlamaServerConfig {
     /// Explicit binary override (`--llama-server`); beats env and PATH.
@@ -67,6 +68,11 @@ pub struct LlamaServerManager {
     cfg: LlamaServerConfig,
     child: Option<Child>,
     base_url: String,
+    /// Serve embeddings (the default) or chat — a describe/vision server
+    /// (#433) is a *chat* server and must not pass `--embeddings`.
+    embeddings: bool,
+    /// Multimodal projector (`--mmproj`) for a vision chat server.
+    mmproj: Option<String>,
     /// The observed child PID, shared with non-blocking observers: a host
     /// status path must NEVER contend with the lifecycle lock a 30s
     /// health-wait holds (the Python facade's `running` was a lock-free
@@ -164,8 +170,22 @@ impl LlamaServerManager {
             cfg,
             child: None,
             base_url,
+            embeddings: true,
+            mmproj: None,
             pid_cell: std::sync::Arc::default(),
         }
+    }
+
+    /// Reconfigure as a *chat* server (no `--embeddings`) with an optional
+    /// multimodal projector — the shape a remote-describe deployment runs
+    /// (#433): `llama-server -m model.gguf --mmproj proj.gguf`. A builder on
+    /// the manager (not a config field) so the existing exhaustive config
+    /// constructors stay valid. Vision models want a generous
+    /// `context_size` — image tokens are expensive.
+    pub fn chat_mode(mut self, mmproj: Option<String>) -> Self {
+        self.embeddings = false;
+        self.mmproj = mmproj;
+        self
     }
 
     /// The shared observed-PID cell (see the field docs): `Some` while a
@@ -270,8 +290,13 @@ impl LlamaServerManager {
             self.cfg.host.clone(),
             "--port".into(),
             self.cfg.port.to_string(),
-            "--embeddings".into(),
         ];
+        if self.embeddings {
+            cmd.push("--embeddings".into());
+        }
+        if let Some(mmproj) = &self.mmproj {
+            cmd.extend(["--mmproj".into(), mmproj.clone()]);
+        }
         if let Some(n) = self.cfg.context_size {
             cmd.extend(["--ctx-size".into(), n.to_string()]);
         }
@@ -580,6 +605,30 @@ mod tests {
                 "256",
             ]
         );
+    }
+
+    #[test]
+    fn chat_mode_drops_embeddings_and_emits_mmproj() {
+        let m = manager(&[]).chat_mode(Some("/models/proj.gguf".into()));
+        let cmd = m.build_command("/bin/llama-server");
+        assert!(!cmd.contains(&"--embeddings".to_string()), "{cmd:?}");
+        let i = cmd
+            .iter()
+            .position(|t| t == "--mmproj")
+            .expect("mmproj emitted");
+        assert_eq!(cmd[i + 1], "/models/proj.gguf");
+        // Default mode is unchanged: embeddings on, no projector.
+        let cmd = manager(&[]).build_command("/bin/llama-server");
+        assert!(cmd.contains(&"--embeddings".to_string()));
+        assert!(!cmd.contains(&"--mmproj".to_string()));
+    }
+
+    #[test]
+    fn mmproj_is_reserved_from_passthrough() {
+        // The typed chat_mode owns the flag — a passthrough --mmproj (and
+        // its value) is stripped like any reserved flag.
+        let m = manager(&["--mmproj /evil/proj.gguf --flash-attn"]);
+        assert_eq!(m.passthrough_tokens(false), vec!["--flash-attn"]);
     }
 
     #[test]
