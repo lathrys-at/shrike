@@ -32,8 +32,14 @@ mod async_kernel;
 mod asyncio_bridge;
 #[cfg(feature = "anki-core")]
 mod kernel_actions;
+// The engine containers/capture handles exist to be ATTACHED to a kernel;
+// a compute-only build (#404) keeps them constructible (the pyclasses are
+// part of the module surface) but never reads the attach-path members.
+#[cfg_attr(not(feature = "anki-core"), allow(dead_code))]
 mod native_embedder;
+#[cfg_attr(not(feature = "anki-core"), allow(dead_code))]
 mod py_embedder;
+#[cfg_attr(not(feature = "anki-core"), allow(dead_code))]
 mod py_recognizer;
 
 pyo3::create_exception!(
@@ -159,6 +165,7 @@ type MatchRow = (i64, String, String, Option<String>, Option<String>);
 /// Per-query, per-modality parallel rankings: {modality: (note_ids, distances)}.
 type ModalityRankings = Vec<std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>>;
 /// One fused hit: (note_id, score, [(signal, 1-based rank)...]).
+#[cfg(feature = "anki-core")]
 type FusedHit = (i64, f64, Vec<(String, i64)>);
 
 /// The native package version (the Cargo workspace version).
@@ -755,7 +762,8 @@ impl NativeIndexEngine {
 /// `search_fusion.py` spec. Same canonical accumulation order, same dedup, same
 /// `(tier, -score, note_id)` ordering; the Python parity property suite pins
 /// the two byte-for-byte. The one implementation lives in the kernel
-/// (`shrike_kernel::fusion`, #380).
+/// (`shrike_kernel::fusion`, #380), so anki-core builds only (#404).
+#[cfg(feature = "anki-core")]
 #[pyfunction]
 #[pyo3(signature = (rankings, weights, k=60, priority_signals=vec![]))]
 fn rrf_fuse(
@@ -853,8 +861,11 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<py_embedder::PyEmbedder>()?;
     m.add_class::<native_embedder::NativeEmbedder>()?;
-    m.add_function(wrap_pyfunction!(py_embedder::embedder_probe, m)?)?;
-    m.add_function(wrap_pyfunction!(native_embedder::native_embedder_probe, m)?)?;
+    #[cfg(feature = "anki-core")]
+    {
+        m.add_function(wrap_pyfunction!(py_embedder::embedder_probe, m)?)?;
+        m.add_function(wrap_pyfunction!(native_embedder::native_embedder_probe, m)?)?;
+    }
     m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;
     // Bridge lifecycle test seams (#387): the leak tripwire counter + a
@@ -864,6 +875,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(asyncio_bridge::bridge_parked_forever, m)?)?;
+    #[cfg(feature = "anki-core")]
     m.add_function(wrap_pyfunction!(rrf_fuse, m)?)?;
     m.add_function(wrap_pyfunction!(schema_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(schema_roundtrip, m)?)?;

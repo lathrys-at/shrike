@@ -38,9 +38,6 @@ from shrike_native._native import (
     RemoteEmbedder,
     Recognizer,
     parallel_sum,
-    embedder_probe,
-    native_embedder_probe,
-    rrf_fuse,
     schema_catalog,
     schema_roundtrip,
     version,
@@ -65,6 +62,9 @@ with contextlib.suppress(ImportError):
     from shrike_native._native import rehomed_actions  # noqa: F401
     from shrike_native._native import INDEX_SAVE_DELAY_DEFAULT  # noqa: F401
     from shrike_native._native import INDEX_SAVE_THRESHOLD_DEFAULT  # noqa: F401
+    from shrike_native._native import embedder_probe  # noqa: F401
+    from shrike_native._native import native_embedder_probe  # noqa: F401
+    from shrike_native._native import rrf_fuse  # noqa: F401
 
 __all__ = [
     "AppleVisionRecognizer",
@@ -94,9 +94,6 @@ __all__ = [
     "PyEmbedder",
     "RemoteEmbedder",
     "Recognizer",
-    "rrf_fuse",
-    "embedder_probe",
-    "native_embedder_probe",
     "parallel_sum",
     "schema_catalog",
     "schema_roundtrip",

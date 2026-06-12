@@ -17,8 +17,8 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use pyo3::prelude::*;
 
+use shrike_engine_api::{MediaItem, Recognition, Recognizer, Segment};
 use shrike_ffi::{NativeError, NativeResult};
-use shrike_kernel::{MediaItem, Recognition, Recognizer, Segment};
 
 type RecResult = NativeResult<Vec<Recognition>>;
 

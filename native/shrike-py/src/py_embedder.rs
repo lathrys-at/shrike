@@ -16,9 +16,8 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use pyo3::prelude::*;
 
+use shrike_engine_api::{Embedder, ImageEmbedder, ImageResolver, MediaItem};
 use shrike_ffi::{NativeError, NativeResult};
-use shrike_kernel::Embedder;
-use shrike_kernel::{ImageEmbedder, ImageResolver, MediaItem};
 
 type VecResult = NativeResult<Vec<Vec<f32>>>;
 
@@ -209,7 +208,9 @@ impl PyEmbedder {
 
 /// Test seam: drive one embed through the kernel's `Embedder` trait — proves
 /// the capture → blocking-pool → GIL-attach → completion chain before the
-/// orchestrator's embed-coupled ops consume it.
+/// orchestrator's embed-coupled ops consume it. Kernel-runtime-bound
+/// (`spawn_op`), so anki-core builds only (#404).
+#[cfg(feature = "anki-core")]
 #[pyfunction]
 pub(crate) fn embedder_probe<'py>(
     py: Python<'py>,

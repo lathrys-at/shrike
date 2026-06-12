@@ -177,6 +177,7 @@ impl PollCallback {
 /// Bridge a future that already speaks Python (`PyResult<Py<PyAny>>`) — the
 /// `run_job` shape, where the payload IS a Python value and a failure IS a
 /// Python exception to rethrow as-is (no NativeError mapping).
+#[cfg(feature = "anki-core")]
 pub(crate) fn pyresult_future_into_py<'py, F>(
     py: Python<'py>,
     fut: F,

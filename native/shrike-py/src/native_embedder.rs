@@ -105,7 +105,9 @@ impl NativeEmbedder {
 
 /// Test seam: one embed through the full native composition (edge spawn →
 /// blocking pool → engine chunk loop → completion), proving the assembly
-/// before the kernel's embed-coupled ops ride it.
+/// before the kernel's embed-coupled ops ride it. Kernel-runtime-bound
+/// (`spawn_op`), so anki-core builds only (#404).
+#[cfg(feature = "anki-core")]
 #[pyfunction]
 pub(crate) fn native_embedder_probe<'py>(
     py: Python<'py>,
