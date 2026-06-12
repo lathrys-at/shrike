@@ -50,6 +50,8 @@ pub trait VectorIndex: Send + Sync {
     /// Create/verify a modality's sub-index at `ndim` (idempotent; a
     /// dimension mismatch is an error).
     fn ensure(&self, modality: &str, ndim: usize) -> NativeResult<()>;
+    /// `clear`/`drop_modality` are infallible for the local in-memory impl;
+    /// widen to `NativeResult` when a fallible (remote) impl lands.
     fn clear(&self);
     fn drop_modality(&self, modality: &str);
     /// Load persisted state from `dir`; `candidates` bounds key discovery
@@ -124,7 +126,9 @@ pub trait DerivedStore: Send + Sync {
     fn mark_gated(&self, source: &str, pairs: &[(i64, String)]) -> NativeResult<()>;
     fn gated_refs_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String)>>;
     fn clear_gated(&self, source: &str) -> NativeResult<()>;
-    /// Per-segment recognition structure (#228), JSON per (note, ref).
+    /// Per-segment recognition structure (#228), JSON per (note, ref). The
+    /// read half has no production caller yet — seamed for #230 (occlusion),
+    /// which reads the boxes back.
     fn put_segments(
         &self,
         note_id: i64,

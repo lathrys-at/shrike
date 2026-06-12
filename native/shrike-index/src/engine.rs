@@ -30,8 +30,8 @@ use crate::new_index;
 /// Mirrors `shrike.index_engine.SEARCH_OVERFETCH`.
 const SEARCH_OVERFETCH: usize = 4;
 
-/// One modality's ranking for one query: parallel (note_ids, distances),
-/// best-first, deduped to distinct notes.
+// Canonical docs live in shrike-store-api (#389); re-exported here so the
+// pre-trait import paths keep working.
 pub use shrike_store_api::{ActivationStats, ModalityRanking};
 
 struct Sub {
