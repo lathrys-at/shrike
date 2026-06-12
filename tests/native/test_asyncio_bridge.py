@@ -98,6 +98,20 @@ class TestAsyncioBridge:
         assert len(_run(flow())) == 1
 
 
+def _settled_live_callbacks() -> int:
+    """The live-callback count after collecting any residue.
+
+    Earlier tests in the same process can leave callback↔future cycles
+    (e.g. a cancellation whose done callbacks never ran before its loop
+    closed) that OUR ``gc.collect()`` would otherwise sweep mid-assertion —
+    so both the baseline and the final count are read post-collection.
+    Cycles can chain, so collect a few passes.
+    """
+    for _ in range(3):
+        gc.collect()
+    return int(shrike_native.bridge_live_poll_callbacks())
+
+
 class TestBridgeLifecycle:
     """#387: the bridge releases its state however an op's observation ends.
 
@@ -110,7 +124,7 @@ class TestBridgeLifecycle:
     """
 
     def test_abandoned_loop_releases_bridge_state(self) -> None:
-        baseline = shrike_native.bridge_live_poll_callbacks()
+        baseline = _settled_live_callbacks()
         holder: list = []
 
         async def start() -> None:
@@ -127,11 +141,10 @@ class TestBridgeLifecycle:
         # future must release the callback — the waker's weak reference and
         # the GC-visible callback↔future cycle are exactly what #387 fixed.
         del holder[:], loop
-        gc.collect()
-        assert shrike_native.bridge_live_poll_callbacks() == baseline
+        assert _settled_live_callbacks() == baseline
 
     def test_cancellation_releases_bridge_state_promptly(self) -> None:
-        baseline = shrike_native.bridge_live_poll_callbacks()
+        baseline = _settled_live_callbacks()
 
         async def flow() -> None:
             fut = shrike_native.bridge_parked_forever()
@@ -145,11 +158,10 @@ class TestBridgeLifecycle:
                 await asyncio.sleep(0)
 
         asyncio.run(flow())
-        gc.collect()
-        assert shrike_native.bridge_live_poll_callbacks() == baseline
+        assert _settled_live_callbacks() == baseline
 
     def test_completion_releases_bridge_state(self, tmp_path) -> None:
-        baseline = shrike_native.bridge_live_poll_callbacks()
+        baseline = _settled_live_callbacks()
 
         async def flow() -> None:
             col = await shrike_native.async_collection_open(str(tmp_path / "c.anki2"))
@@ -157,8 +169,7 @@ class TestBridgeLifecycle:
             await col.close()
 
         asyncio.run(flow())
-        gc.collect()
-        assert shrike_native.bridge_live_poll_callbacks() == baseline
+        assert _settled_live_callbacks() == baseline
 
 
 class TestPyEmbedder:
