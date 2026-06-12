@@ -533,9 +533,7 @@ class TestRecognition:
             recognizer = _StubRecognizer()
 
             # exists raises → treated absent → nothing pending at all.
-            kernel.attach_recognizer(
-                shrike_native.Recognizer.capture(recognizer), raising, raising
-            )
+            kernel.attach_recognizer(shrike_native.Recognizer.capture(recognizer), raising, raising)
             report = json.loads(await kernel.recognize_pending(10))
             assert report["status"] == "idle"
             assert recognizer.calls == []
