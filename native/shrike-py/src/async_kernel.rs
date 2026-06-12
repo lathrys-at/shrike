@@ -296,11 +296,20 @@ impl AsyncKernel {
         on_duplicate: String,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
+        // The FFI still speaks JSON (the marshaling convention), parsed ONCE
+        // here into the typed seam (#391) and serialized once on the way out.
+        let notes: Vec<shrike_schemas::NoteInput> =
+            serde_json::from_str(&notes_json).map_err(|e| {
+                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                    "notes must be a JSON list: {e}"
+                )))
+            })?;
+        let policy = DuplicatePolicy::parse(&on_duplicate).map_err(crate::to_py_err)?;
         let kernel = Arc::clone(&self.inner);
         kernel_op(py, async move {
-            kernel
-                .upsert_notes_json(notes_json, on_duplicate, dry_run)
-                .await
+            let results = kernel.upsert_notes_wire(notes, policy, dry_run).await?;
+            serde_json::to_string(&results)
+                .map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
         })
     }
 

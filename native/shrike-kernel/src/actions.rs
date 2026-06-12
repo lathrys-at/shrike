@@ -408,8 +408,12 @@ mod tests {
         let req = serde_json::json!([
             {"note_type": "Basic", "deck": "D", "fields": {"Front": front, "Back": back}}
         ]);
-        let out = core.upsert_notes(&req.to_string(), "allow", false).unwrap();
-        let results: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let notes: Vec<shrike_schemas::NoteInput> = serde_json::from_value(req).unwrap();
+        let results = serde_json::to_value(
+            core.upsert_notes(&notes, shrike_collection::DuplicatePolicy::Allow, false)
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(results[0]["status"], "created", "{results}");
         results[0]["id"].as_i64().unwrap()
     }
@@ -1195,19 +1199,26 @@ mod search_tests {
         // recall inside the scope, zero leakage outside it, and the wildcard
         // `*text*` field scan is never consulted (the store served Some).
         let (dir, core) = temp_collection();
+        let scoped_notes: Vec<shrike_schemas::NoteInput> = serde_json::from_str(
+            r#"[
+              {"note_type": "Basic", "deck": "Scoped",
+               "fields": {"Front": "the krebs cycle in scope", "Back": "b"}},
+              {"note_type": "Basic", "deck": "Other",
+               "fields": {"Front": "the krebs cycle out of scope", "Back": "b"}}
+            ]"#,
+        )
+        .unwrap();
         let results: Vec<Value> = serde_json::from_str(
-            &core
-                .upsert_notes(
-                    r#"[
-                      {"note_type": "Basic", "deck": "Scoped",
-                       "fields": {"Front": "the krebs cycle in scope", "Back": "b"}},
-                      {"note_type": "Basic", "deck": "Other",
-                       "fields": {"Front": "the krebs cycle out of scope", "Back": "b"}}
-                    ]"#,
-                    "error",
-                    false,
-                )
-                .unwrap(),
+            &serde_json::to_string(
+                &core
+                    .upsert_notes(
+                        &scoped_notes,
+                        shrike_collection::DuplicatePolicy::Error,
+                        false,
+                    )
+                    .unwrap(),
+            )
+            .unwrap(),
         )
         .unwrap();
         let inside = results[0]["id"].as_i64().unwrap();
@@ -1372,10 +1383,13 @@ mod search_tests {
         let req = serde_json::json!([
             {"note_type": "Basic", "deck": "Other", "fields": {"Front": "beta", "Back": "x"}}
         ]);
-        let out = core.upsert_notes(&req.to_string(), "allow", false).unwrap();
-        let b = serde_json::from_str::<serde_json::Value>(&out).unwrap()[0]["id"]
-            .as_i64()
-            .unwrap();
+        let notes: Vec<shrike_schemas::NoteInput> = serde_json::from_value(req).unwrap();
+        let out = serde_json::to_value(
+            core.upsert_notes(&notes, shrike_collection::DuplicatePolicy::Allow, false)
+                .unwrap(),
+        )
+        .unwrap();
+        let b = out[0]["id"].as_i64().unwrap();
         let index = MultiModalIndex::new(vec!["text".to_owned()]).unwrap();
         index
             .add("text", &[a, b], &[vec![1.0, 0.0], vec![0.9, 0.1]])

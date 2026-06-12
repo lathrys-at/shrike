@@ -189,8 +189,19 @@ impl CollectionCore {
         on_duplicate: &str,
         dry_run: bool,
     ) -> PyResult<String> {
-        py.detach(|| self.inner.upsert_notes(&notes_json, on_duplicate, dry_run))
-            .map_err(to_py_err)
+        py.detach(|| -> shrike_ffi::NativeResult<String> {
+            let notes: Vec<shrike_schemas::NoteInput> =
+                serde_json::from_str(&notes_json).map_err(|e| {
+                    shrike_ffi::NativeError::invalid_input(format!(
+                        "notes must be a JSON list: {e}"
+                    ))
+                })?;
+            let policy = shrike_collection::DuplicatePolicy::parse(on_duplicate)?;
+            let results = self.inner.upsert_notes(&notes, policy, dry_run)?;
+            serde_json::to_string(&results)
+                .map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
+        })
+        .map_err(to_py_err)
     }
 
     /// Tags on a note set: `set_tags` replaces (exclusive with add/remove,
