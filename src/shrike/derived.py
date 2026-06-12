@@ -122,7 +122,10 @@ class NativeDerivedEngine:
         self._rust.set_col_mod(int(value))
 
     def count(self) -> int:
-        return int(self._rust.count())
+        try:
+            return int(self._rust.count())
+        except self._native_errors as e:
+            raise sqlite3.DatabaseError(str(e)) from e
 
     def ingest(self, note_id: int, source: str, refs_text: Mapping[str, str]) -> None:
         self._rust.ingest(int(note_id), source, list(refs_text.items()))
@@ -293,7 +296,14 @@ class DerivedTextStore:
         # `status()`/`GET /status` must not block the event loop waiting on it.
         if not self._available or self._engine is None or self._state == IndexState.BUILDING:
             return 0
-        return self._engine.count()
+        try:
+            return self._engine.count()
+        except sqlite3.Error as e:
+            # A store that can't even count is broken, not empty (#396) —
+            # surface it as the error state instead of a silent ready/0.
+            self._state = IndexState.ERROR
+            logger.warning("Derived-text store count failed: %s", e)
+            return 0
 
     # ── writes ───────────────────────────────────────────────────────────────────────────────────
 

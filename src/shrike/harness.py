@@ -453,6 +453,23 @@ class Harness:
                         batches,
                     )
                 return report
+            if int(report.get("recognized", 0)) == 0:
+                # No progress: nothing in this batch was drainable (an
+                # unreadable prefix of the pending order — skipped items stay
+                # pending, so the next batch would re-take the same window
+                # forever). Stop here; the next sweep trigger (boot, /reload,
+                # cooperative re-acquire) retries when the read may have
+                # healed. Keyed on recognized == 0, NOT stored == 0: a batch
+                # that recognized items but gated them all out did real work
+                # (the reads drained, recognition ran) and must not stop the
+                # sweep.
+                report["total_stored"] = total_stored
+                logger.warning(
+                    "Recognition sweep stopped on a no-progress batch "
+                    "(%d item(s) still pending, unreadable)",
+                    int(report.get("remaining", 0)),
+                )
+                return report
             if max_batches is not None and batches >= max_batches:
                 report["total_stored"] = total_stored
                 return report

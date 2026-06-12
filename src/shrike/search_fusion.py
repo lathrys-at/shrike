@@ -100,8 +100,8 @@ class SearchPipeline(Protocol):
     Today's Python composition (`rrf_fuse` above) is the **reference
     implementation** — the readable spec, what test doubles fake, and what the
     parity property suite compares the native implementation against. The
-    native pipeline (`shrike-compute`) is a second implementation of the same
-    contract, selected when the native extension is in play.
+    native pipeline (`shrike_kernel::fusion`) is a second implementation of
+    the same contract, selected when the native extension is in play.
     """
 
     def fuse(
@@ -131,7 +131,7 @@ class ReferenceSearchPipeline:
 
 
 class NativeSearchPipeline:
-    """The native fusion (#274): `shrike_compute::rrf_fuse` via shrike_native.
+    """The native fusion (#274): `shrike_kernel::fusion::rrf_fuse` via shrike_native.
 
     Same semantics by construction (the parity property suite is the drift
     alarm); GIL released for the fusion itself. Ordinary patchable Python.

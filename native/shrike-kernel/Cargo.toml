@@ -18,7 +18,6 @@ name = "shrike_kernel"
 # deployment composes (the layering check pins this structurally).
 [dependencies]
 shrike-collection = { path = "../shrike-collection" }
-shrike-compute = { path = "../shrike-compute" }
 shrike-derived = { path = "../shrike-derived" }
 shrike-engine-api = { path = "../shrike-engine-api" }
 shrike-ffi = { workspace = true }
