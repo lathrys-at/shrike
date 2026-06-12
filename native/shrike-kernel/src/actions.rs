@@ -126,21 +126,16 @@ fn truncate_chars(s: &str, n: usize) -> &str {
 }
 
 /// The lexical verifier (#206): whole-text similarity over the candidate's
-/// embedding text vs the (pre-stripped/lowered/truncated) draft — cheap
-/// (runs on at most the few proposed candidates) and exactly the
-/// near-verbatim question. An unreadable candidate verifies false.
-fn near_verbatim(core: &CollectionCore, neighbor_id: i64, draft: &str) -> bool {
-    let Ok(texts) = core.note_texts(&[neighbor_id]) else {
+/// PREFETCHED embedding text vs the (pre-stripped/lowered/truncated) draft —
+/// exactly the near-verbatim question. A candidate absent from the prefetch
+/// map (unreadable, deleted) verifies false, as the per-id read did.
+fn near_verbatim(verify_texts: &HashMap<i64, String>, neighbor_id: i64, draft: &str) -> bool {
+    let Some(candidate) = verify_texts.get(&neighbor_id) else {
         return false;
     };
-    let candidate = texts
-        .first()
-        .map(|t| t.trim().to_lowercase())
-        .unwrap_or_default();
     if candidate.is_empty() {
         return false;
     }
-    let candidate = truncate_chars(&candidate, DEDUP_LEXICAL_QUERY_CHARS);
     crate::textsim::sequence_ratio(draft, candidate) >= DEDUP_LEXICAL_MIN_RATIO
 }
 
@@ -189,8 +184,64 @@ pub fn attach_neighbors(
         )));
     }
 
-    let mut out: Vec<shrike_schemas::UpsertNeighbors> = Vec::with_capacity(texts.len());
-    for (text, per_query) in texts.iter().zip(sem.iter()) {
+    // Lexical proposals per draft, gathered up front (#445 follow-up): the
+    // per-(draft, proposal) verification needs each proposed candidate's
+    // embedding text, and the ratio itself is an in-memory comparison — so
+    // ONE batched note_texts over the proposal union replaces a per-proposal
+    // singleton read (which paid an SQL query + notetype lookup each).
+    let fuzzy_rows: Vec<Vec<i64>> = texts
+        .iter()
+        .map(|text| match derived {
+            Some(d) if !text.trim().is_empty() => {
+                match d.search_fuzzy(
+                    truncate_chars(text, DEDUP_LEXICAL_QUERY_CHARS),
+                    (top_k + exclude_set.len()) as i64,
+                    None,
+                ) {
+                    Ok(rows) => rows.into_iter().map(|(fid, ..)| fid).collect(),
+                    Err(e) => {
+                        tracing::debug!(error = ?e, "dedup lexical overlap unavailable");
+                        Vec::new()
+                    }
+                }
+            }
+            _ => Vec::new(),
+        })
+        .collect();
+    let verify_ids: Vec<i64> = fuzzy_rows
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|fid| !exclude_set.contains(fid))
+        .collect::<std::collections::BTreeSet<i64>>()
+        .into_iter()
+        .collect();
+    let verify_texts: HashMap<i64, String> = if verify_ids.is_empty() {
+        HashMap::new()
+    } else {
+        match core.note_texts(&verify_ids) {
+            Ok(rendered) => verify_ids
+                .iter()
+                .zip(rendered)
+                .map(|(id, t)| {
+                    let lowered = t.trim().to_lowercase();
+                    (
+                        *id,
+                        truncate_chars(&lowered, DEDUP_LEXICAL_QUERY_CHARS).to_string(),
+                    )
+                })
+                .collect(),
+            Err(e) => {
+                // Unreadable verifies false — the singleton read's behavior.
+                tracing::debug!(error = ?e, "dedup verify prefetch failed; proposals unverified");
+                HashMap::new()
+            }
+        }
+    };
+
+    // Per-draft candidate assembly (no collection reads in this loop).
+    let mut staged: Vec<(Vec<NeighborCandidate>, Option<f64>)> = Vec::with_capacity(texts.len());
+    for ((text, per_query), proposals) in texts.iter().zip(sem.iter()).zip(fuzzy_rows.iter()) {
         // Insertion-ordered candidates: the final sort is stable, so ties
         // keep discovery order exactly like the Python dict did.
         let mut candidates: Vec<NeighborCandidate> = Vec::new();
@@ -219,43 +270,30 @@ pub fn attach_neighbors(
 
         // Lexical overlap (#206): near-verbatim dupes the cosine gate
         // missed. Propose-verify; no cosine to report → score stays None.
-        if let Some(d) = derived {
-            if !text.trim().is_empty() {
-                let draft_verify =
-                    truncate_chars(&text.trim().to_lowercase(), DEDUP_LEXICAL_QUERY_CHARS)
-                        .to_string();
-                let rows = match d.search_fuzzy(
-                    truncate_chars(text, DEDUP_LEXICAL_QUERY_CHARS),
-                    (top_k + exclude_set.len()) as i64,
-                    None,
-                ) {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        tracing::debug!(error = ?e, "dedup lexical overlap unavailable");
-                        Vec::new()
-                    }
-                };
-                let mut fuzzy_rank: i64 = 0;
-                for (fid, ..) in rows {
-                    if exclude_set.contains(&fid) {
-                        continue;
-                    }
-                    let existing = candidates.iter_mut().find(|c| c.id == fid);
-                    if existing.is_none() && !near_verbatim(core, fid, &draft_verify) {
-                        continue; // proposed but not verified — overlap, not a dupe
-                    }
-                    fuzzy_rank += 1;
-                    match existing {
-                        Some(entry) => entry.provenance.push(("fuzzy".to_string(), fuzzy_rank)),
-                        None => candidates.push(NeighborCandidate {
-                            id: fid,
-                            score: None,
-                            provenance: vec![("fuzzy".to_string(), fuzzy_rank)],
-                        }),
-                    }
-                    if fuzzy_rank >= top_k as i64 {
-                        break;
-                    }
+        if !proposals.is_empty() {
+            let draft_verify =
+                truncate_chars(&text.trim().to_lowercase(), DEDUP_LEXICAL_QUERY_CHARS).to_string();
+            let mut fuzzy_rank: i64 = 0;
+            for fid in proposals {
+                let fid = *fid;
+                if exclude_set.contains(&fid) {
+                    continue;
+                }
+                let existing = candidates.iter_mut().find(|c| c.id == fid);
+                if existing.is_none() && !near_verbatim(&verify_texts, fid, &draft_verify) {
+                    continue; // proposed but not verified — overlap, not a dupe
+                }
+                fuzzy_rank += 1;
+                match existing {
+                    Some(entry) => entry.provenance.push(("fuzzy".to_string(), fuzzy_rank)),
+                    None => candidates.push(NeighborCandidate {
+                        id: fid,
+                        score: None,
+                        provenance: vec![("fuzzy".to_string(), fuzzy_rank)],
+                    }),
+                }
+                if fuzzy_rank >= top_k as i64 {
+                    break;
                 }
             }
         }
@@ -277,14 +315,45 @@ pub fn attach_neighbors(
             kx.total_cmp(&ky)
                 .then(x.provenance[0].1.cmp(&y.provenance[0].1))
         });
+        staged.push((candidates, best));
+    }
 
+    // ONE meta read for every candidate across the batch (#445 follow-up:
+    // the per-candidate note_dicts singleton paid two SQL queries plus a
+    // FULL deck_names enumeration each — the very N+1 #454 removed from the
+    // search action). A whole-batch failure skips all neighbors with a
+    // debug log, the same trade read_notes_batch makes; an id absent from
+    // the map is the per-note skip-unreadable the singleton path had.
+    let all_ids: Vec<i64> = staged
+        .iter()
+        .flat_map(|(cands, _)| cands.iter().map(|c| c.id))
+        .collect::<std::collections::BTreeSet<i64>>()
+        .into_iter()
+        .collect();
+    let meta_by_id: HashMap<i64, Value> = if all_ids.is_empty() {
+        HashMap::new()
+    } else {
+        match core.note_dicts(&all_ids, false) {
+            Ok(dicts) => dicts
+                .into_iter()
+                .filter_map(|d| d.get("id").and_then(Value::as_i64).map(|id| (id, d)))
+                .collect(),
+            Err(e) => {
+                tracing::debug!(error = ?e, "neighbor meta batch failed; neighbors skipped");
+                HashMap::new()
+            }
+        }
+    };
+
+    let mut out: Vec<shrike_schemas::UpsertNeighbors> = Vec::with_capacity(staged.len());
+    for (candidates, best) in staged {
         // Metadata per surviving candidate (skip-unreadable, cap at top_k).
         let mut neighbors: Vec<shrike_schemas::Neighbor> = Vec::new();
         for cand in candidates {
             if neighbors.len() >= top_k {
                 break;
             }
-            let Some(meta) = read_note_meta(core, cand.id) else {
+            let Some(meta) = meta_by_id.get(&cand.id) else {
                 continue;
             };
             let tags: Vec<String> = meta
@@ -311,18 +380,6 @@ pub fn attach_neighbors(
         out.push(shrike_schemas::UpsertNeighbors { neighbors, best });
     }
     Ok(out)
-}
-
-/// Meta-only note read (tags; no field bodies) for the neighbor payload.
-fn read_note_meta(core: &CollectionCore, nid: i64) -> Option<Value> {
-    match core.note_dicts(&[nid], false) {
-        Ok(mut v) if !v.is_empty() => Some(v.remove(0)),
-        Ok(_) => None,
-        Err(e) => {
-            tracing::debug!(nid, error = ?e, "neighbor lookup: skipping unreadable note");
-            None
-        }
-    }
 }
 
 #[cfg(test)]
