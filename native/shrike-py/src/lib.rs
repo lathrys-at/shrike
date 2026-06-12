@@ -212,18 +212,16 @@ fn build_info() -> String {
 /// never a silent no-op.
 #[pyfunction]
 fn build_features() -> Vec<&'static str> {
-    let mut features = Vec::new();
-    #[cfg(feature = "anki-core")]
-    features.push("anki-core");
-    #[cfg(feature = "engine-ort")]
-    features.push("engine-ort");
-    #[cfg(feature = "engine-remote")]
-    features.push("engine-remote");
-    #[cfg(feature = "engine-apple")]
-    features.push("engine-apple");
-    #[cfg(feature = "manage-llama")]
-    features.push("manage-llama");
-    features
+    [
+        (cfg!(feature = "anki-core"), "anki-core"),
+        (cfg!(feature = "engine-ort"), "engine-ort"),
+        (cfg!(feature = "engine-remote"), "engine-remote"),
+        (cfg!(feature = "engine-apple"), "engine-apple"),
+        (cfg!(feature = "manage-llama"), "manage-llama"),
+    ]
+    .into_iter()
+    .filter_map(|(compiled, name)| compiled.then_some(name))
+    .collect()
 }
 
 /// Conventions exemplar: a coarse, batched compute call with the GIL released.
