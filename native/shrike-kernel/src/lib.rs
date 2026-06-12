@@ -591,6 +591,39 @@ impl Kernel {
     /// in the same collection job as the rows), so the host's watermark can't
     /// mask a write that landed mid-build.
     pub async fn rebuild_derived(&self) -> NativeResult<(usize, i64)> {
+        // Commit-then-verify (#471): the collect runs in one actor job but
+        // the build commits OFF the actor, so concurrent jobs (an upsert's
+        // ingest, a sweep's OCR store for a new note) can land in the window
+        // — and the build's field-replace + dead-note prune would erase
+        // them. Every lossy interleave bumps col.mod (note writes do; OCR
+        // stores touch only existing notes, which the prune keeps), so
+        // re-reading col_mod after the commit and re-collecting on movement
+        // converges. After the cap the watermark stays at the last snapshot
+        // — visible drift, healed by the next rebuild plus the sweep
+        // re-pending any pruned OCR rows.
+        const REBUILD_ATTEMPTS: usize = 3;
+        let mut last = (0usize, 0i64);
+        for attempt in 1..=REBUILD_ATTEMPTS {
+            let (n, dmod, now) = self.rebuild_derived_once().await?;
+            last = (n, dmod);
+            if now == dmod {
+                return Ok(last);
+            }
+            tracing::debug!(
+                attempt,
+                "collection moved during derived build; re-collecting"
+            );
+        }
+        tracing::warn!(
+            "derived rebuild raced sustained writes; watermark left at the last snapshot"
+        );
+        Ok(last)
+    }
+
+    /// One collect → build → verify pass: returns the row count, the
+    /// snapshot `col_mod` the build committed under, and the post-commit
+    /// `col_mod` (equal means nothing interleaved).
+    async fn rebuild_derived_once(&self) -> NativeResult<(usize, i64, i64)> {
         let (rows, dmod) = self
             .collection
             .run(|core| -> NativeResult<_> {
@@ -605,7 +638,8 @@ impl Kernel {
         tokio::task::spawn_blocking(move || derived.build(&rows, dmod))
             .await
             .map_err(|e| NativeError::internal(format!("derived build task: {e}")))??;
-        Ok((n, dmod))
+        let now = self.collection.run(|core| core.col_mod()).await??;
+        Ok((n, dmod, now))
     }
 
     pub async fn recognize_pending(&self, max_items: usize) -> NativeResult<serde_json::Value> {
@@ -2127,5 +2161,93 @@ mod no_cpython_smoke {
         assert!(!hits.is_empty());
         kernel2.close().await.unwrap();
         std::fs::remove_dir_all(dir).ok();
+    }
+    /// #471: the derived rebuild's collect→commit window vs concurrent
+    /// writes. The first half DEMONSTRATES the hazard mechanically (a build
+    /// over a stale snapshot erases a newer note's derived rows — why the
+    /// verify exists); the second half pins that `rebuild_derived` converges
+    /// (post-commit col_mod equals the committed snapshot) and restores them.
+    #[test]
+    fn derived_rebuild_verifies_against_mid_build_writes() {
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+            kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["the krebs cycle".into(), "a".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap();
+            let (_, settled) = kernel.rebuild_derived().await.unwrap();
+            assert_eq!(kernel.col_mod().await.unwrap(), settled);
+
+            // Snapshot rows NOW (note A only), then land note B…
+            let stale = kernel
+                .collection
+                .run(|core| -> shrike_ffi::NativeResult<_> {
+                    let ids = core.find_notes("")?;
+                    let rows = core.derived_field_rows(&ids)?;
+                    let dmod = core.col_mod()?;
+                    Ok((rows, dmod))
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["oxaloacetate condenses".into(), "b".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap();
+            assert!(
+                !kernel
+                    .derived
+                    .search_substring("oxaloacetate", 5, None)
+                    .unwrap()
+                    .unwrap()
+                    .is_empty(),
+                "B's ingest landed"
+            );
+            // …and commit the stale build: B's rows are erased (the hazard).
+            kernel.derived.build(&stale.0, stale.1).unwrap();
+            assert!(
+                kernel
+                    .derived
+                    .search_substring("oxaloacetate", 5, None)
+                    .unwrap()
+                    .unwrap()
+                    .is_empty(),
+                "a stale-snapshot commit erases newer rows — the #471 hazard"
+            );
+
+            // The public op converges: verify catches movement, re-collects,
+            // and the final watermark equals the live col_mod.
+            let (_, dmod) = kernel.rebuild_derived().await.unwrap();
+            assert_eq!(kernel.col_mod().await.unwrap(), dmod);
+            assert!(
+                !kernel
+                    .derived
+                    .search_substring("oxaloacetate", 5, None)
+                    .unwrap()
+                    .unwrap()
+                    .is_empty(),
+                "the rebuild restored B's rows"
+            );
+            kernel.close().await.unwrap();
+        });
     }
 }

@@ -194,6 +194,9 @@ class Harness:
         self._media_exists = media_exists
         self.index_view = KernelIndexView(kernel, runtime)
         self.dedup_stats = DedupStatsRecorder()
+        # Background maintenance tasks (#471): tracked so close() drains them
+        # (no destroyed-pending teardown) and tests can settle deterministically.
+        self._bg_tasks: set[asyncio.Task[Any]] = set()
         # Recognition (#228/#221): the attached OCR/ASR backend kind + state,
         # and the background sweep task. None until start_recognition runs.
         self._recognition_kind: str | None = None
@@ -285,10 +288,8 @@ class Harness:
 
     def _spawn_reacquire_tasks(self, col_mod: int) -> None:
         if self.derived.check_drift(col_mod):
-            task = asyncio.ensure_future(self._rebuild_derived())
-            task.add_done_callback(_log_task_failure)
-        reindex = asyncio.ensure_future(self._drive_reindex())
-        reindex.add_done_callback(_log_task_failure)
+            self._spawn_bg(self._rebuild_derived())
+        self._spawn_bg(self._drive_reindex())
 
     async def _drive_reindex(self) -> None:
         if await self.kernel.reindex_if_needed():
@@ -301,8 +302,22 @@ class Harness:
         back until ready). The claim in _rebuild_derived dedupes double-fires."""
         col_mod = await self.wrapper.col_mod()
         if self.derived.check_drift(col_mod):
-            task = asyncio.ensure_future(self._rebuild_derived())
-            task.add_done_callback(_log_task_failure)
+            self._spawn_bg(self._rebuild_derived())
+
+    def _spawn_bg(self, coro: Any) -> asyncio.Task[Any]:
+        """Spawn tracked background maintenance (#471): logged on failure,
+        discarded from the set on completion, drained by close()."""
+        task: asyncio.Task[Any] = asyncio.ensure_future(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        task.add_done_callback(_log_task_failure)
+        return task
+
+    async def settle_background(self) -> None:
+        """Await in-flight background maintenance (drift rebuilds, reindex
+        drivers) — deterministic boots for tests and operational verbs."""
+        while self._bg_tasks:
+            await asyncio.gather(*list(self._bg_tasks), return_exceptions=True)
 
     async def _rebuild_derived(self) -> None:
         # Kernel-side rebuild (#445): the field rows used to round-trip the
@@ -387,8 +402,7 @@ class Harness:
         if total_notes == 0:
             await self.kernel.rebuild_index()
             return {"status": "complete", "size": 0}
-        task = asyncio.ensure_future(self.kernel.rebuild_index())
-        task.add_done_callback(_log_task_failure)
+        self._spawn_bg(self.kernel.rebuild_index())
         return {"status": "started", "total": total_notes}
 
     async def save_index(self) -> dict[str, Any]:
@@ -415,8 +429,7 @@ class Harness:
         except (ValueError, ImportError) as e:
             raise KernelConfigError(str(e)) from e
         self._attach(backend)
-        task = asyncio.ensure_future(self._drive_boot_reindex())
-        task.add_done_callback(_log_task_failure)
+        self._spawn_bg(self._drive_boot_reindex())
         return {
             "status": "started",
             "embedding": await asyncio.to_thread(self.runtime.health),
@@ -514,7 +527,10 @@ class Harness:
         self._recognition_kind = kind
         self._recognition_state = "ready"
         logger.info("Recognition backend attached: %s", kind)
-        self._recognition_task = asyncio.ensure_future(self._drive_recognition())
+        # Tracked (#471): the sweep joins the background drain — close()
+        # cancels-and-awaits it like every other maintenance task, so a
+        # mid-sweep teardown never leaves a destroyed-pending task.
+        self._recognition_task = self._spawn_bg(self._drive_recognition())
 
     async def _drive_recognition(self) -> None:
         """Background recognition: sweep to completion, off the request path.
@@ -562,7 +578,15 @@ class Harness:
         return {"status": "reloaded", "col_mod": col_mod, "rebuilding": rebuilding}
 
     async def close(self) -> None:
-        """Tear down: derived, embedding, then the kernel (flushes the index)."""
+        """Tear down: background tasks, derived, embedding, then the kernel
+        (flushes the index)."""
+        # Cancel-and-drain the tracked maintenance tasks (#471): a rebuild
+        # mid-flight detaches kernel-side (the op completes; detach never
+        # aborts), but the Python task must not be destroyed pending.
+        for task in list(self._bg_tasks):
+            task.cancel()
+        if self._bg_tasks:
+            await asyncio.gather(*list(self._bg_tasks), return_exceptions=True)
         self.derived.close()
         await asyncio.to_thread(self.runtime.stop)
         self.wrapper.close()
