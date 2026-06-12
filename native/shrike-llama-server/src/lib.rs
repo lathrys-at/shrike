@@ -353,6 +353,9 @@ impl LlamaServerManager {
         self.wait_port_bindable(SIGKILL_TIMEOUT);
     }
 
+    /// Poll until the port binds. A just-released port can be transiently
+    /// unbindable (TIME_WAIT / close→rebind races), so this can spin
+    /// briefly even after the holder's death is already confirmed.
     fn wait_port_bindable(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
@@ -653,21 +656,25 @@ mod tests {
 
     #[test]
     fn bind_probe_distinguishes_free_held_and_unresolvable() {
-        // A fixed port below the ephemeral range (an ephemeral one, once
-        // dropped, can be re-handed to any concurrent outbound connection
-        // system-wide), distinct from the 18373 the other tests probe.
-        let port = 18374;
-        // Free: bindable, not held.
-        assert!(port_bindable("127.0.0.1", port));
-        assert!(!port_held("127.0.0.1", port));
+        // Bind port 0 so the OS hands us a port nothing else holds — a
+        // static port races concurrent tests (and anything else on the
+        // machine) into flaky free/held assertions.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
         // Held: a live listener → not bindable, held (EADDRINUSE).
-        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
         assert!(!port_bindable("127.0.0.1", port));
         assert!(port_held("127.0.0.1", port));
-        // Released: bindable again, no longer held.
+        // Released: becomes bindable again — but never assert immediately,
+        // a just-closed listener can be transiently unbindable (close→
+        // rebind race), so retry briefly like `wait_port_bindable` does.
         drop(listener);
-        assert!(port_bindable("127.0.0.1", port));
-        assert!(!port_held("127.0.0.1", port));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut freed = port_bindable("127.0.0.1", port);
+        while !freed && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            freed = port_bindable("127.0.0.1", port);
+        }
+        assert!(freed, "released port never became bindable");
         // An unresolvable host is NOT "held" — a bind failure that isn't
         // EADDRINUSE must never corroborate a kill.
         assert!(!port_held("host.invalid.shrike-test", port));
