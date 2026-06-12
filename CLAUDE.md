@@ -220,11 +220,13 @@ By hand it's:
 SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
 echo 'import os; os.getenv("COVERAGE_PROCESS_START") and __import__("coverage").process_startup()' > "$SITE/coverage_subprocess.pth"
 export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
-coverage run --parallel-mode -m pytest tests/unit tests/integration -q -m "not embedding" -n auto
+coverage run --parallel-mode -m pytest tests/unit tests/integration tests/native -q -m "not embedding" -n auto
 coverage combine && coverage report      # exits non-zero below fail_under
 ```
 
-Both suites run in one combined `-n auto` invocation (xdist balances them, so
+All three suites (the native harness/binding suite included — its tests cover
+harness.py and the asyncio bridge, which the measured number was blind to, #421)
+run in one combined `-n auto` invocation (xdist balances them, so
 workers don't idle between phases — faster than two separate runs); `-m "not
 embedding"` drops the embedding-gated tests. `coverage.yml` and `scripts/coverage.sh`
 run this identical command, so the numbers are comparable.

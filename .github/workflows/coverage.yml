@@ -87,7 +87,7 @@ jobs:
       - name: Run unit + integration under coverage
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
-        run: coverage run --parallel-mode -m pytest tests/unit tests/integration -q -m "not embedding" -n auto
+        run: coverage run --parallel-mode -m pytest tests/unit tests/integration tests/native -q -m "not embedding" -n auto
       - name: Combine
         run: coverage combine
       # Surface the number in the run summary. `--fail-under=0` prints the table but

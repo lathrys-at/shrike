@@ -50,7 +50,7 @@ export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
 coverage erase
 # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) treats an EMPTY array as
 # unbound under `set -u`, so a bare "${pytest_args[@]}" aborts a no-arg run.
-coverage run --parallel-mode -m pytest tests/unit tests/integration \
+coverage run --parallel-mode -m pytest tests/unit tests/integration tests/native \
   -q -m "not embedding" -n auto ${pytest_args[@]+"${pytest_args[@]}"}
 coverage combine
 
