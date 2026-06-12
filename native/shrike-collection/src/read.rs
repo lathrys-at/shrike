@@ -42,7 +42,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// One note's `(note_id, field_names, field_values)`.
 type NoteFieldRow = (i64, Vec<String>, Vec<String>);
 
-fn ids_sql_list(ids: &[i64]) -> String {
+pub(crate) fn ids_sql_list(ids: &[i64]) -> String {
     ids.iter()
         .map(|i| i.to_string())
         .collect::<Vec<_>>()

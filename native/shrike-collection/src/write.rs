@@ -53,6 +53,17 @@ fn ids_csv(ids: &[i64]) -> String {
         .join(",")
 }
 
+/// Per-batch lookup memo (#445): one upsert batch repeatedly resolved the
+/// same notetype inventory per item — a full notetype-names list per created
+/// note, field-name + type-name lookups per updated note. Scoped to one
+/// `upsert_notes` call (this op never edits notetypes, so it can't go stale
+/// mid-batch).
+#[derive(Default)]
+struct UpsertMemo {
+    notetype_id_by_name: HashMap<String, Option<i64>>,
+    notetype_meta_by_id: HashMap<i64, (Vec<String>, String)>,
+}
+
 impl CollectionCore {
     /// The bulk upsert: each item is the wrapper's note-input dict (`id`?,
     /// `note_type`?, `deck`?, `fields` map, `tags`?), JSON in / per-item
@@ -72,11 +83,12 @@ impl CollectionCore {
             )));
         }
         let mut results: Vec<Value> = Vec::new();
+        let mut memo = UpsertMemo::default();
         for (index, note_input) in notes.iter().enumerate() {
             let result = if note_input.get("id").is_some_and(|v| !v.is_null()) {
-                self.update_note_named(note_input, index, dry_run)
+                self.update_note_named(note_input, index, dry_run, &mut memo)
             } else {
-                self.create_note_named(note_input, index, on_duplicate, dry_run)
+                self.create_note_named(note_input, index, on_duplicate, dry_run, &mut memo)
             };
             results.push(match result {
                 Ok(r) => r,
@@ -93,6 +105,7 @@ impl CollectionCore {
         index: usize,
         on_duplicate: &str,
         dry_run: bool,
+        memo: &mut UpsertMemo,
     ) -> NativeResult<Value> {
         let note_type_name = note_input
             .get("note_type")
@@ -110,7 +123,16 @@ impl CollectionCore {
             .filter(|m| !m.is_empty())
             .ok_or_else(|| NativeError::invalid_input("fields is required for new notes"))?;
 
-        let Some(notetype_id) = self.notetype_id_opt(note_type_name)? else {
+        let notetype_id = match memo.notetype_id_by_name.get(note_type_name) {
+            Some(v) => *v,
+            None => {
+                let v = self.notetype_id_opt(note_type_name)?;
+                memo.notetype_id_by_name
+                    .insert(note_type_name.to_string(), v);
+                v
+            }
+        };
+        let Some(notetype_id) = notetype_id else {
             return Ok(json!({
                 "status": "error",
                 "index": index,
@@ -129,7 +151,15 @@ impl CollectionCore {
         };
 
         let mut note = self.adapter.new_note(notetype_id)?;
-        let names = self.notetype_field_names(notetype_id)?;
+        let names = match memo.notetype_meta_by_id.get(&notetype_id) {
+            Some((names, _)) => names.clone(),
+            None => {
+                let names = self.notetype_field_names(notetype_id)?;
+                memo.notetype_meta_by_id
+                    .insert(notetype_id, (names.clone(), note_type_name.to_string()));
+                names
+            }
+        };
         for (field_name, value) in fields {
             let Some(pos) = names.iter().position(|n| n == field_name) else {
                 return Ok(json!({
@@ -199,6 +229,7 @@ impl CollectionCore {
         note_input: &Value,
         index: usize,
         dry_run: bool,
+        memo: &mut UpsertMemo,
     ) -> NativeResult<Value> {
         let nid = note_input
             .get("id")
@@ -209,8 +240,18 @@ impl CollectionCore {
             .get_note(nid)
             .map_err(|_| NativeError::invalid_input(format!("Note {nid} not found")))?;
 
-        let names = self.notetype_field_names(note.notetype_id)?;
-        let current_type = self.notetype_name(note.notetype_id)?;
+        let (names, current_type) = match memo.notetype_meta_by_id.get(&note.notetype_id) {
+            Some(meta) => meta.clone(),
+            None => {
+                let meta = (
+                    self.notetype_field_names(note.notetype_id)?,
+                    self.notetype_name(note.notetype_id)?,
+                );
+                memo.notetype_meta_by_id
+                    .insert(note.notetype_id, meta.clone());
+                meta
+            }
+        };
 
         if let Some(requested) = note_input.get("note_type").and_then(Value::as_str) {
             if requested != current_type {
@@ -296,11 +337,10 @@ impl CollectionCore {
 
         if !targets.is_empty() {
             if let Some(set_tags) = set_tags {
-                for nid in &targets {
-                    let mut note = self.adapter.get_note(*nid)?;
-                    note.tags = set_tags.to_vec();
-                    self.adapter.update_note(&note)?;
-                }
+                // One UpdateNotes call for the whole set (#445): the
+                // per-note get+update loop paid 3 RPCs and a journal
+                // commit per note at the 1000-note cap.
+                self.adapter.set_note_tags_bulk(&targets, set_tags)?;
             } else {
                 // Remove before add so a tag named in both ends up present.
                 if !remove.is_empty() {
