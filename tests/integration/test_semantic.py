@@ -6,6 +6,8 @@ Tests exercise the full pipeline: embedding, indexing, search, neighbors.
 
 from __future__ import annotations
 
+import time
+
 import httpx
 import pytest
 
@@ -654,12 +656,19 @@ class TestSearchQuality:
         )
         nid = r["results"][0]["id"]
         try:
-            result = semantic_mcp(
-                "search_notes",
-                {"queries": ["mitochondria ATP production"], "top_k": 10},
-            )
-            matches = result["results"][0]["matches"]
-            ids = [m["id"] for m in matches]
+            # The centroid refresh runs off the upsert tail since #445 —
+            # retry briefly until the new member's tag state lands.
+            deadline = time.monotonic() + 10
+            while True:
+                result = semantic_mcp(
+                    "search_notes",
+                    {"queries": ["mitochondria ATP production"], "top_k": 10},
+                )
+                matches = result["results"][0]["matches"]
+                ids = [m["id"] for m in matches]
+                if nid in ids or time.monotonic() > deadline:
+                    break
+                time.sleep(0.2)
             assert nid in ids, "the tag signal surfaces the off-topic member"
             # …but never ABOVE the directly-relevant notes: the top hit is
             # semantically (or literally) on-topic, not tag-boosted filler.

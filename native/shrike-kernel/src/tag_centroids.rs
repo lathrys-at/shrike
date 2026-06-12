@@ -20,7 +20,7 @@
 //! No separate watermark, no sidecar.
 
 use std::collections::BTreeMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use blake2::digest::consts::U8;
 use blake2::{Blake2b, Digest};
@@ -185,8 +185,144 @@ impl TagKeyMap {
         self.len() == 0
     }
 
+    /// Whether any of `ids` is currently a member of any tag — the in-memory
+    /// half of the op-tail relevance probe (#445): a delete (or an update
+    /// that removed tags) changes membership only if the note was IN it.
+    /// One pass over the member lists (~sub-ms even at 100k members).
+    pub fn any_member_of(&self, ids: &[i64]) -> bool {
+        if ids.is_empty() {
+            return false;
+        }
+        let set: std::collections::BTreeSet<i64> = ids.iter().copied().collect();
+        let state = self.inner.read().expect("tag keys poisoned");
+        state
+            .members
+            .values()
+            .flatten()
+            .any(|nid| set.contains(nid))
+    }
+
     fn replace(&self, names: BTreeMap<i64, String>, members: BTreeMap<i64, Vec<i64>>) {
         *self.inner.write().expect("tag keys poisoned") = TagState { names, members };
+    }
+}
+
+/// Coalescing background refresher (#445): write-op tails previously ran the
+/// full centroid recompute INLINE — O(tagged-notes) on every upsert/delete,
+/// serialized on the op. `request` returns immediately: the first request
+/// spawns a refresh right away (an isolated op's centroids land as fast as
+/// the inline call produced them, just off the tail), and requests arriving
+/// while one runs coalesce into ONE follow-up after `window` — so a burst of
+/// N ops costs a handful of recomputes, not N. A refresh is a pure function
+/// of current collection + engine state, so the coalesced run sees
+/// everything the skipped ones would have.
+pub struct TagRefresher {
+    collection: Arc<crate::SerializedCollection>,
+    engine: Arc<MultiModalIndex>,
+    keys: Arc<TagKeyMap>,
+    config: TagCentroidConfig,
+    saver: Arc<crate::index_orchestrator::DebouncedSaver>,
+    embed: Arc<std::sync::RwLock<Option<Arc<crate::EmbedService>>>>,
+    window: std::time::Duration,
+    state: std::sync::Mutex<RefreshState>,
+}
+
+#[derive(Default)]
+struct RefreshState {
+    running: bool,
+    dirty: bool,
+    /// The in-flight task — aborted on shutdown so a sleeping follow-up
+    /// never outlives the kernel's collection actor.
+    task: Option<tokio::task::AbortHandle>,
+}
+
+/// Pacing between coalesced follow-up refreshes under sustained write
+/// traffic (the first refresh of a quiet period runs immediately).
+pub const TAG_REFRESH_WINDOW: f64 = 2.0;
+
+impl TagRefresher {
+    pub fn new(
+        collection: Arc<crate::SerializedCollection>,
+        engine: Arc<MultiModalIndex>,
+        keys: Arc<TagKeyMap>,
+        config: TagCentroidConfig,
+        saver: Arc<crate::index_orchestrator::DebouncedSaver>,
+        embed: Arc<std::sync::RwLock<Option<Arc<crate::EmbedService>>>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            collection,
+            engine,
+            keys,
+            config,
+            saver,
+            embed,
+            window: std::time::Duration::from_secs_f64(TAG_REFRESH_WINDOW),
+            state: std::sync::Mutex::new(RefreshState::default()),
+        })
+    }
+
+    /// Note a membership-relevant change. Never blocks, never errors: the
+    /// refresh is best-effort by contract (the tag layer is
+    /// conditionally-present and must not fail the op it rides on).
+    pub fn request(self: &Arc<Self>) {
+        {
+            let mut st = self.state.lock().expect("tag refresher poisoned");
+            if st.running {
+                st.dirty = true;
+                return;
+            }
+            st.running = true;
+            st.dirty = false;
+        }
+        let this = Arc::clone(self);
+        let task = crate::runtime::handle().spawn(async move {
+            loop {
+                this.run_once().await;
+                {
+                    let mut st = this.state.lock().expect("tag refresher poisoned");
+                    if !st.dirty {
+                        st.running = false;
+                        st.task = None;
+                        break;
+                    }
+                    st.dirty = false;
+                }
+                tokio::time::sleep(this.window).await;
+            }
+        });
+        // The task may already have finished (and cleared itself); storing a
+        // finished handle is harmless — abort on a completed task is a no-op.
+        self.state.lock().expect("tag refresher poisoned").task = Some(task.abort_handle());
+    }
+
+    /// Abort any in-flight/scheduled refresh (kernel close): the collection
+    /// actor is about to drain, and a late follow-up has nothing to read.
+    pub fn shutdown(&self) {
+        let mut st = self.state.lock().expect("tag refresher poisoned");
+        st.dirty = false;
+        st.running = false;
+        if let Some(task) = st.task.take() {
+            task.abort();
+        }
+    }
+
+    async fn run_once(&self) {
+        if self.embed.read().expect("embed slot poisoned").is_none() {
+            return; // no embedder → no text vectors to mean over
+        }
+        let result: NativeResult<()> = async {
+            let (rows, total) = self
+                .collection
+                .run(|core| -> NativeResult<_> { Ok((core.note_tag_rows()?, core.note_count()?)) })
+                .await??;
+            recompute(&self.engine, &rows, total, &self.config, &self.keys)?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => self.saver.request_save(),
+            Err(e) => tracing::warn!(error = ?e, "tag centroid refresh failed"),
+        }
     }
 }
 
@@ -377,6 +513,19 @@ mod tests {
         assert_eq!(m["sci"], vec![1, 2]); // deduped roll-up
         assert_eq!(m["sci::phys"], vec![1, 2]);
         assert_eq!(m["sci::chem"], vec![1]);
+    }
+
+    #[test]
+    fn any_member_of_checks_current_membership() {
+        let keys = TagKeyMap::default();
+        assert!(!keys.any_member_of(&[1]), "empty state has no members");
+        keys.replace(
+            BTreeMap::from([(7, "t".to_string())]),
+            BTreeMap::from([(7, vec![1, 2, 3])]),
+        );
+        assert!(keys.any_member_of(&[3, 99]));
+        assert!(!keys.any_member_of(&[98, 99]));
+        assert!(!keys.any_member_of(&[]));
     }
 
     #[test]
