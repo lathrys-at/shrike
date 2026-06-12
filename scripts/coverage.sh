@@ -10,8 +10,16 @@
 #   scripts/coverage.sh -k upsert       # subset (the % will be lower — partial run)
 #   scripts/coverage.sh --html          # also write a browsable htmlcov/ report
 #
-# Run from the repo root inside your venv (the one with `pip install -e ".[dev]"`).
+# Run from the repo root inside your venv (the one with `pip install -e ".[dev]"`,
+# plus the native extension — see the guard below).
 set -euo pipefail
+
+# Since the native cutover the suite imports shrike_native, which pip alone
+# doesn't build — fail early with the fix instead of an ImportError wall (#400).
+if ! python -c 'import shrike_native' 2>/dev/null; then
+  echo "shrike_native is not importable — build it first: scripts/build-native.sh" >&2
+  exit 1
+fi
 
 want_html=0
 pytest_args=()

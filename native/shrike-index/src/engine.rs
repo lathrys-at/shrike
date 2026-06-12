@@ -76,6 +76,13 @@ fn file_name(text_modality: &str, modality: &str) -> String {
     }
 }
 
+/// `<path>.tmp` — the same-directory staging name for an atomic save.
+fn tmp_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".tmp");
+    PathBuf::from(name)
+}
+
 fn ensure_capacity(index: &Index, extra: usize) -> NativeResult<()> {
     let needed = index.size() + extra;
     if needed > index.capacity() {
@@ -212,6 +219,11 @@ impl MultiModalIndex {
 
     /// Persist every loaded sub-index under `dir`; delete a known modality's
     /// file when that modality is no longer loaded (no phantom reload).
+    ///
+    /// Each file lands atomically: usearch's `save` truncates in place, so it
+    /// writes a same-directory `.tmp` first and a rename replaces the
+    /// canonical file — a crash mid-save leaves the old file complete, never
+    /// a truncation (#381).
     pub fn save(&self, dir: &str) -> NativeResult<()> {
         let base = Path::new(dir);
         std::fs::create_dir_all(base)
@@ -219,15 +231,24 @@ impl MultiModalIndex {
         let state = self.lock();
         for (modality, sub) in &state.indexes {
             let file = base.join(file_name(&self.text, modality));
+            let tmp = tmp_path(&file);
             sub.index
-                .save(&file.to_string_lossy())
+                .save(&tmp.to_string_lossy())
                 .map_err(|e| NativeError::internal(format!("usearch save: {e}")))?;
+            std::fs::rename(&tmp, &file)
+                .map_err(|e| NativeError::internal(format!("usearch save rename: {e}")))?;
         }
         for modality in &self.modalities {
             if !state.indexes.contains_key(modality) {
                 let stale = base.join(file_name(&self.text, modality));
                 if stale.exists() {
-                    let _ = std::fs::remove_file(stale);
+                    let _ = std::fs::remove_file(&stale);
+                }
+                // A crashed save may have stranded a staging file — sweep it
+                // (best-effort; restore reads exact names and ignores it).
+                let tmp = tmp_path(&stale);
+                if tmp.exists() {
+                    let _ = std::fs::remove_file(&tmp);
                 }
             }
         }
@@ -576,8 +597,46 @@ mod tests {
         assert!(dir.join("index.image.usearch").exists());
         e.clear();
         e.add("text", &[1], &[unit(1, 8)]).unwrap();
+        // A crashed save's stranded staging file is swept with the stale file.
+        std::fs::write(dir.join("index.image.usearch.tmp"), b"stranded").unwrap();
         e.save(dirs).unwrap();
         assert!(!dir.join("index.image.usearch").exists());
+        assert!(!dir.join("index.image.usearch.tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_replaces_torn_files_atomically() {
+        let dir = std::env::temp_dir().join(format!("shrike-engine-atomic-{}", std::process::id()));
+        let dirs = dir.to_str().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = engine();
+        e.add("text", &[1], &[unit(1, 8)]).unwrap();
+        e.add("image", &[1], &[unit(2, 8)]).unwrap();
+        e.save(dirs).unwrap();
+        // A completed save leaves no staging files behind.
+        assert!(!dir.join("index.usearch.tmp").exists());
+        assert!(!dir.join("index.image.usearch.tmp").exists());
+
+        // Tear the canonical file (a truncate-in-place crash) and strand a
+        // staging file (a crashed atomic save) — the next save must replace
+        // both wholesale, not append or trip over them.
+        std::fs::write(dir.join("index.usearch"), b"torn").unwrap();
+        std::fs::write(dir.join("index.usearch.tmp"), b"stale").unwrap();
+        e.add("text", &[2], &[unit(3, 8)]).unwrap();
+        e.save(dirs).unwrap();
+        assert!(!dir.join("index.usearch.tmp").exists());
+        let fresh = engine();
+        assert!(fresh.restore(dirs, Some(&[1, 2])));
+        assert_eq!(fresh.size(), 3);
+        assert_eq!(fresh.keys(), vec![1, 2]);
+
+        // A stranded staging file alone never disturbs a restore (exact
+        // canonical names only — nothing globs `.tmp`).
+        std::fs::write(dir.join("index.usearch.tmp"), b"stale").unwrap();
+        let again = engine();
+        assert!(again.restore(dirs, Some(&[1, 2])));
+        assert_eq!(again.size(), 3);
         std::fs::remove_dir_all(&dir).ok();
     }
 

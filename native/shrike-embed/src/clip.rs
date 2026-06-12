@@ -41,6 +41,8 @@ pub struct ClipEmbedderConfig {
 }
 
 pub struct ClipEmbedder {
+    // Locked because ort 2.0.0-rc.12's run entrypoints all take `&mut self`
+    // (see the note on `TextEmbedder::session`).
     text_session: Mutex<ort::session::Session>,
     vision_session: Mutex<ort::session::Session>,
     tokenizer: Tokenizer,
@@ -190,40 +192,58 @@ impl ClipEmbedder {
         self.embed_image_chunk(&items)
     }
 
-    /// CLIP preprocessing → CHW f32: decode, resize shortest edge, center-crop,
-    /// rescale to [0,1], normalize per channel. Mirrors the Python `_preprocess`
-    /// (PIL), with the `image` crate's Catmull-Rom standing in for PIL bicubic.
+    /// CLIP preprocessing → CHW f32 (see [`preprocess`]).
     fn preprocess(&self, bytes: &[u8]) -> NativeResult<Vec<f32>> {
-        let img = image::load_from_memory(bytes)
-            .map_err(|e| NativeError::invalid_input(format!("image decode failed: {e}")))?
-            .to_rgb8();
-        let (w, h) = img.dimensions();
-        if w == 0 || h == 0 {
-            return Err(NativeError::invalid_input("empty image"));
-        }
-        let scale = self.resize as f64 / w.min(h) as f64;
-        let (nw, nh) = (
-            (w as f64 * scale).round().max(1.0) as u32,
-            (h as f64 * scale).round().max(1.0) as u32,
-        );
-        let resized = image::imageops::resize(&img, nw, nh, FilterType::CatmullRom);
-        let c = self.crop;
-        let left = (nw.saturating_sub(c)) / 2;
-        let top = (nh.saturating_sub(c)) / 2;
-        let cropped = image::imageops::crop_imm(&resized, left, top, c, c).to_image();
+        preprocess(bytes, self.resize, self.crop, &self.mean, &self.std)
+    }
+}
 
-        let c = c as usize;
-        let mut chw = vec![0.0f32; 3 * c * c];
-        for (y, row) in cropped.rows().enumerate() {
-            for (x, px) in row.enumerate() {
-                for ch in 0..3 {
-                    chw[ch * c * c + y * c + x] =
-                        (px.0[ch] as f32 / 255.0 - self.mean[ch]) / self.std[ch];
-                }
+/// Shortest-edge resize target: scale so min(w, h) == `resize`, the other edge
+/// rounded (round-half-away-from-zero, the f64 `round`), floored at 1.
+fn resize_dims(w: u32, h: u32, resize: u32) -> (u32, u32) {
+    let scale = resize as f64 / w.min(h) as f64;
+    (
+        (w as f64 * scale).round().max(1.0) as u32,
+        (h as f64 * scale).round().max(1.0) as u32,
+    )
+}
+
+/// CLIP preprocessing → CHW f32: decode, resize shortest edge, center-crop,
+/// rescale to [0,1], normalize per channel. Mirrors the Python `_preprocess`
+/// (PIL), with the `image` crate's Catmull-Rom standing in for PIL bicubic.
+/// A free function (not a method) so the golden tests cover it without
+/// loading sessions.
+fn preprocess(
+    bytes: &[u8],
+    resize: u32,
+    crop: u32,
+    mean: &[f32],
+    std: &[f32],
+) -> NativeResult<Vec<f32>> {
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| NativeError::invalid_input(format!("image decode failed: {e}")))?
+        .to_rgb8();
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return Err(NativeError::invalid_input("empty image"));
+    }
+    let (nw, nh) = resize_dims(w, h, resize);
+    let resized = image::imageops::resize(&img, nw, nh, FilterType::CatmullRom);
+    let c = crop;
+    let left = (nw.saturating_sub(c)) / 2;
+    let top = (nh.saturating_sub(c)) / 2;
+    let cropped = image::imageops::crop_imm(&resized, left, top, c, c).to_image();
+
+    let c = c as usize;
+    let mut chw = vec![0.0f32; 3 * c * c];
+    for (y, row) in cropped.rows().enumerate() {
+        for (x, px) in row.enumerate() {
+            for ch in 0..3 {
+                chw[ch * c * c + y * c + x] = (px.0[ch] as f32 / 255.0 - mean[ch]) / std[ch];
             }
         }
-        Ok(chw)
     }
+    Ok(chw)
 }
 
 /// The engine contract (#342, route 1): the dual encoder is one engine
@@ -244,5 +264,116 @@ impl shrike_engine_api::EmbedText for ClipEmbedder {
 impl shrike_engine_api::EmbedImages for ClipEmbedder {
     fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>> {
         ClipEmbedder::embed_image_chunk(self, images)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// In-memory PNG of an RGB image built per pixel — no fixture files.
+    fn png_bytes(w: u32, h: u32, px: impl Fn(u32, u32) -> [u8; 3]) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb(px(x, y)));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png)
+            .expect("png encode");
+        buf.into_inner()
+    }
+
+    // Identity-size resizes below stay pixel-exact: at scale 1 the Catmull-Rom
+    // kernel samples land on pixel centers (weight 1 at the knot, 0 at ±1/±2),
+    // so the golden values are deterministic; tolerances cover f32↔u8 rounding.
+    const TOL: f32 = 1e-3;
+
+    #[test]
+    fn solid_color_golden_chw_and_channel_normalization() {
+        // 4×4 solid (255, 128, 0), no resize (shortest edge == resize), no
+        // crop offset. Distinct per-channel mean/std prove the buffer is CHW
+        // (channel-major planes) and that mean/std index by channel.
+        let bytes = png_bytes(4, 4, |_, _| [255, 128, 0]);
+        let mean = [0.5f32, 0.25, 0.2];
+        let std = [0.5f32, 0.25, 0.1];
+        let chw = preprocess(&bytes, 4, 4, &mean, &std).unwrap();
+        assert_eq!(chw.len(), 3 * 4 * 4);
+        let expected = [
+            (255.0 / 255.0 - mean[0]) / std[0], // 1.0
+            (128.0 / 255.0 - mean[1]) / std[1], // ≈ 1.00784
+            (0.0 / 255.0 - mean[2]) / std[2],   // -2.0
+        ];
+        for ch in 0..3 {
+            for (i, v) in chw[ch * 16..(ch + 1) * 16].iter().enumerate() {
+                assert!(
+                    (v - expected[ch]).abs() < TOL,
+                    "channel {ch} index {i}: got {v}, want {}",
+                    expected[ch]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn center_crop_picks_middle_columns_of_wide_image() {
+        // 8×4, left half black, right half white; shortest edge 4 == resize →
+        // identity resize, crop 4 → left = (8-4)/2 = 2: columns 2..6, i.e.
+        // two black then two white columns.
+        let bytes = png_bytes(8, 4, |x, _| if x < 4 { [0, 0, 0] } else { [255, 255, 255] });
+        let chw = preprocess(&bytes, 4, 4, &[0.0; 3], &[1.0; 3]).unwrap();
+        for y in 0..4 {
+            for x in 0..4 {
+                let want = if x < 2 { 0.0 } else { 1.0 };
+                let got = chw[y * 4 + x]; // channel 0 plane
+                assert!(
+                    (got - want).abs() < TOL,
+                    "({x},{y}): got {got}, want {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn center_crop_picks_middle_rows_of_tall_image() {
+        // 4×8, top half black, bottom half white; crop top = (8-4)/2 = 2 →
+        // rows 2..6: two black then two white rows.
+        let bytes = png_bytes(4, 8, |_, y| if y < 4 { [0, 0, 0] } else { [255, 255, 255] });
+        let chw = preprocess(&bytes, 4, 4, &[0.0; 3], &[1.0; 3]).unwrap();
+        for y in 0..4 {
+            for x in 0..4 {
+                let want = if y < 2 { 0.0 } else { 1.0 };
+                let got = chw[y * 4 + x];
+                assert!(
+                    (got - want).abs() < TOL,
+                    "({x},{y}): got {got}, want {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn center_crop_floors_odd_offset() {
+        // 7×4, column x = x·30; crop 4 → left = (7-4)/2 = 1 (1.5 floored):
+        // cropped column x carries source column x+1.
+        let v = |x: u32| (x * 30) as u8;
+        let bytes = png_bytes(7, 4, |x, _| [v(x); 3]);
+        let chw = preprocess(&bytes, 4, 4, &[0.0; 3], &[1.0; 3]).unwrap();
+        for x in 0..4u32 {
+            let want = v(x + 1) as f32 / 255.0;
+            let got = chw[x as usize];
+            assert!(
+                (got - want).abs() < TOL,
+                "column {x}: got {got}, want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn resize_dims_shortest_edge_rounding() {
+        // Even scale: exact halving.
+        assert_eq!(resize_dims(8, 4, 2), (4, 2));
+        // Odd: 5 · (2/3) = 3.33… rounds to 3.
+        assert_eq!(resize_dims(5, 3, 2), (3, 2));
+        // Half rounds away from zero: 10 · (3/4) = 7.5 → 8.
+        assert_eq!(resize_dims(10, 4, 3), (8, 3));
+        // The shortest edge always lands exactly on `resize`.
+        assert_eq!(resize_dims(3, 2, 1), (2, 1));
     }
 }
