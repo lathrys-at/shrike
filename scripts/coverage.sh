@@ -48,8 +48,10 @@ export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
 # the measured number). The .pth fires for each xdist worker and each spawned
 # server, so `coverage combine` merges everything to one total.
 coverage erase
+# ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) treats an EMPTY array as
+# unbound under `set -u`, so a bare "${pytest_args[@]}" aborts a no-arg run.
 coverage run --parallel-mode -m pytest tests/unit tests/integration \
-  -q -m "not embedding" -n auto "${pytest_args[@]}"
+  -q -m "not embedding" -n auto ${pytest_args[@]+"${pytest_args[@]}"}
 coverage combine
 
 if [ "$want_html" -eq 1 ]; then
