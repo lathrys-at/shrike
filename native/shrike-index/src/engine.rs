@@ -698,4 +698,24 @@ mod tests {
         assert!(*count >= 30.0);
         assert!(*std >= 0.0);
     }
+
+    #[test]
+    fn calibration_survives_self_hit_heavy_samples() {
+        // #446: every note's image vector IS its text vector, so each
+        // pseudo-query's nearest image hit is its own note. At k=1 the
+        // self-hit exclusion then records nothing — the sample silently
+        // shrinks to zero and the gate disables. k=2 (the kernel's CALIB_K)
+        // must still calibrate the full sample.
+        let e = engine();
+        let keys: Vec<i64> = (1..=40).collect();
+        let vecs: Vec<Vec<f32>> = keys.iter().map(|k| unit(*k as u64, 8)).collect();
+        e.add("text", &keys, &vecs).unwrap();
+        e.add("image", &keys, &vecs).unwrap();
+        assert!(e.calibrate_activation(256, 1, 30).unwrap().is_empty());
+        let stats = e.calibrate_activation(256, 2, 30).unwrap();
+        assert_eq!(stats.len(), 1);
+        let (modality, count, _mean, _std) = &stats[0];
+        assert_eq!(modality, "image");
+        assert_eq!(*count, 40.0);
+    }
 }

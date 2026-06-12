@@ -609,6 +609,12 @@ use crate::{Embedder, ImageEmbedder, ImageResolver, MediaItem};
 /// Calibration parameters (mirror `index.CALIB_SAMPLE` / `CALIB_MIN`).
 pub const CALIB_SAMPLE: usize = 256;
 pub const CALIB_MIN: usize = 30;
+/// Per-sample search depth: must be ≥ 2 per the engine's contract — a
+/// pseudo-query whose own image is the nearest hit needs a non-self hit to
+/// record. At 1, self-hit-heavy collections (most notes carrying both text
+/// and an image) silently shrink the sample below `CALIB_MIN` and the
+/// activation gate disables exactly where it's needed (#446).
+pub const CALIB_K: usize = 2;
 /// Embed/add chunk size (mirrors `index.BATCH_SIZE`).
 pub const BATCH_SIZE: usize = 64;
 const TEXT: &str = "text";
@@ -937,7 +943,7 @@ impl IndexOrchestrator {
     pub fn calibrate_activation(&self) -> NativeResult<()> {
         let stats = self
             .engine
-            .calibrate_activation(CALIB_SAMPLE, 1, CALIB_MIN)?;
+            .calibrate_activation(CALIB_SAMPLE, CALIB_K, CALIB_MIN)?;
         let mut shared = self.shared.lock().expect("orchestrator poisoned");
         shared.activation = Some(
             stats
