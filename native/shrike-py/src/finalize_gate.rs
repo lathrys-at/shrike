@@ -68,7 +68,7 @@ impl Drop for Permit<'_> {
 }
 
 impl Gate {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             finalizing: AtomicBool::new(false),
             in_flight: AtomicUsize::new(0),
@@ -91,7 +91,7 @@ impl Gate {
     /// Close the gate (one-way) and wait — bounded — for in-flight attach
     /// windows to finish. Runs with the GIL *released* so the windows it
     /// waits on can complete.
-    fn close_and_drain(&self, deadline: Duration) {
+    pub(crate) fn close_and_drain(&self, deadline: Duration) {
         self.finalizing.store(true, Ordering::SeqCst);
         let until = Instant::now() + deadline;
         while self.in_flight.load(Ordering::SeqCst) > 0 && Instant::now() < until {
@@ -106,6 +106,13 @@ static GATE: Gate = Gate::new();
 /// `Python::attach` in this crate goes through here.
 pub(crate) fn permit() -> Option<Permit<'static>> {
     GATE.permit()
+}
+
+/// The process gate itself, for holders that need a *reference* rather than a
+/// one-shot claim (the gated `log::Log` wrapper, #450 — installed once,
+/// claims per record).
+pub(crate) fn process_gate() -> &'static Gate {
+    &GATE
 }
 
 /// The `atexit` hook: close the gate and drain before finalization begins.

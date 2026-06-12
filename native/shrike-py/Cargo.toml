@@ -52,6 +52,9 @@ shrike-schemas = { path = "../shrike-schemas" }
 # Feature unification applies `log-always` to every tracing emitter in this
 # build graph, so no compute crate needs its own bridge code.
 pyo3-log = "0.13"
+# Direct dep for the gate-aware Log wrapper around pyo3_log::Logger (#450):
+# install (set_boxed_logger/set_max_level) + the Log trait it implements.
+log = "0.4"
 tracing = { version = "0.1", features = ["log-always"] }
 tracing-error = "0.2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }

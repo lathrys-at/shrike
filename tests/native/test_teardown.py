@@ -15,8 +15,9 @@ waker thread is still inside its gilstate window — on CPython 3.12/Linux
 that aborted the process (`PyGILState_Release: thread state ... must be
 current when releasing`). The finalization gate (`finalize_gate.rs`, armed
 via atexit) drains those windows before finalization begins; these pins
-cover the quiesced exit, the ops-still-in-flight exit, and the gate's
-refusal path directly.
+cover the quiesced exit, the ops-still-in-flight exit, that same exit with
+the pyo3-log bridge installed (#450 — its `Python::attach` rides the gate
+too), and the gate's refusal path directly.
 """
 
 from __future__ import annotations
@@ -128,6 +129,41 @@ def test_exit_with_inflight_ops_is_clean(tmp_path) -> None:
             # Return immediately: the ops above are mid-flight on the kernel
             # runtime while asyncio.run tears the loop down and the
             # interpreter exits.
+
+        asyncio.run(main())
+        """,
+    )
+
+
+def test_exit_with_logging_bridge_and_inflight_ops_is_clean(tmp_path) -> None:
+    """The pyo3-log attach path under the gate (#450).
+
+    Every server process calls `init_logging()`, after which ANY native
+    `log`/`tracing` emission from a kernel-runtime thread attaches the GIL
+    inside pyo3-log — an attach window the #449 site-by-site pins never
+    exercised (none of the other teardown scripts install the bridge). Run
+    the in-flight-ops exit with the bridge installed, Python logging
+    configured, and native log levels wide open: late emissions racing
+    finalization must be dropped by the gated logger, never abort the exit.
+    """
+    _run_teardown_script(
+        tmp_path,
+        """
+        import logging
+        logging.basicConfig(level=logging.DEBUG)
+        shrike_native.init_logging()
+
+        async def main():
+            kernel = await open_kernel({collection!r}, {cache!r})
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            for i in range(4):
+                asyncio.ensure_future(kernel.upsert_notes(
+                    [(basic, 1, [f"late log {{i}}", "x"], [])], "allow"
+                ))
+                asyncio.ensure_future(kernel.search("late", 3))
+            # Return immediately: the ops above (and whatever they log) are
+            # mid-flight on the kernel runtime while the interpreter exits.
 
         asyncio.run(main())
         """,
