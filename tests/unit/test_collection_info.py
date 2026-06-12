@@ -14,10 +14,12 @@ class TestCollectionInfo:
 
     async def test_include_filters_sections(self, wrapper):
         info = await wrapper.get_collection_info(include=["decks"])
-        assert "decks" in info
-        assert "note_types" not in info
-        assert "tags" not in info
-        assert "stats" not in info
+        assert info["decks"] is not None
+        # Unrequested sections read as None — explicit nulls on the raw wire
+        # since the #391 to_wire retirement (.get() is the stable form).
+        assert info.get("note_types") is None
+        assert info.get("tags") is None
+        assert info.get("stats") is None
 
     async def test_default_note_types_present(self, wrapper):
         info = await wrapper.get_collection_info(include=["note_types"])
@@ -51,7 +53,8 @@ class TestCollectionInfo:
     async def test_note_type_details_omitted_by_default(self, wrapper):
         info = await wrapper.get_collection_info(include=["note_types"])
         basic = next(nt for nt in info["note_types"] if nt["name"] == "Basic")
-        assert "detail" not in basic
+        # No detail unless requested (explicit null on the raw wire, #391).
+        assert basic.get("detail") is None
 
     async def test_default_deck_present(self, wrapper):
         info = await wrapper.get_collection_info(include=["decks"])

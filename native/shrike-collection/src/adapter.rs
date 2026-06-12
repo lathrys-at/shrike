@@ -17,6 +17,22 @@ use anki::backend::{init_backend, Backend};
 use prost::Message;
 use shrike_ffi::{NativeError, NativeResult};
 
+// In test builds every dispatch is recorded, so the method-constant
+// coverage tripwire (#394) can assert each declared index is genuinely
+// exercised against a real collection — the interim gate until the
+// indices derive from anki's descriptors at build time.
+#[cfg(test)]
+pub(crate) static DISPATCHED_METHODS: std::sync::Mutex<std::collections::BTreeSet<(u32, u32)>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+#[cfg(test)]
+fn record_dispatch(service: u32, method: u32) {
+    DISPATCHED_METHODS
+        .lock()
+        .expect("dispatch recorder poisoned")
+        .insert((service, method));
+}
+
 // ── service indices (Backend dispatcher, tag 25.09.4) ───────────────────────
 const SVC_COLLECTION: u32 = 3;
 const SVC_CARDS: u32 = 5;
@@ -155,6 +171,8 @@ impl ServiceAdapter {
         request
             .encode(&mut buf)
             .map_err(|e| NativeError::internal(format!("encode request: {e}")))?;
+        #[cfg(test)]
+        record_dispatch(service, method);
         let out = self
             .backend
             .run_service_method(service, method, &buf)

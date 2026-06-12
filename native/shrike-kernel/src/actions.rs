@@ -534,6 +534,12 @@ fn escape_anki_text(text: &str) -> String {
 /// authority for exact-match evidence (mirrors `collection.substring_info`,
 /// code-point index math included: find runs over the lowered text, the
 /// snippet slices the original by those indices).
+///
+/// `Some(&Value::Null)` behaves exactly like `None` (the `Object` match arm
+/// is the only productive path): note dicts serialize with plain serde since
+/// the #391 to_wire retirement, so a meta-mode note carries an explicit
+/// `"content": null` and `data.get("content")` yields `Some(Null)`, not
+/// `None` — both mean "no content", and both return `Null` here.
 pub fn substring_info(content: Option<&Value>, text: &str) -> Value {
     let needle: Vec<char> = text.to_lowercase().chars().collect();
     let mut matched: Vec<&str> = Vec::new();
@@ -1427,6 +1433,9 @@ mod search_tests {
         assert!(snippet.contains("NEEDLE"));
         assert!(substring_info(Some(&content), "absent").is_null());
         assert!(substring_info(None, "x").is_null());
+        // An explicit-null content (a meta-mode note dict under plain serde,
+        // #391 to_wire retirement) is treated exactly like absent.
+        assert!(substring_info(Some(&serde_json::Value::Null), "x").is_null());
     }
 }
 

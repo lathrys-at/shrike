@@ -468,10 +468,9 @@ mod tests {
         assert_eq!(rows[0].2, "Front");
 
         // list_notes: tag filter, full fields, wire shape (typed since #391
-        // phase 2; asserted through the host-edge wire view).
-        let listed = shrike_schemas::to_wire_value(
-            &core
-                .list_notes(None, None, Some(&["bio".into()]), None, None, true, 50)
+        // phase 2; asserted through the host-edge wire view — plain serde).
+        let listed = serde_json::to_value(
+            core.list_notes(None, None, Some(&["bio".into()]), None, None, true, 50)
                 .unwrap(),
         )
         .unwrap();
@@ -488,16 +487,14 @@ mod tests {
         assert!(note["modified"].as_str().unwrap().ends_with("+00:00"));
 
         // deck reference forms: name, id, #id, unknown #id.
-        let by_id = shrike_schemas::to_wire_value(
-            &core
-                .list_notes(None, Some("1"), None, None, None, false, 50)
+        let by_id = serde_json::to_value(
+            core.list_notes(None, Some("1"), None, None, None, false, 50)
                 .unwrap(),
         )
         .unwrap();
         assert_eq!(by_id["total"], 1);
-        let unknown = shrike_schemas::to_wire_value(
-            &core
-                .list_notes(None, Some("#424242"), None, None, None, false, 50)
+        let unknown = serde_json::to_value(
+            core.list_notes(None, Some("#424242"), None, None, None, false, 50)
                 .unwrap(),
         )
         .unwrap();
@@ -510,9 +507,8 @@ mod tests {
         assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
 
         // collection_info: all sections, summary/stats/decks coherent.
-        let info = shrike_schemas::to_wire_value(
-            &core
-                .collection_info(&["all".to_string()], &["Basic".to_string()])
+        let info = serde_json::to_value(
+            core.collection_info(&["all".to_string()], &["Basic".to_string()])
                 .unwrap(),
         )
         .unwrap();
@@ -546,14 +542,13 @@ mod tests {
     }
 
     #[test]
-    fn read_wire_bytes_match_the_legacy_hand_built_wire() {
-        // #391 phase 2 byte pin: the typed read responses, serialized through
-        // the host-edge wire helper, must be byte-identical to the
-        // `serde_json::Value` trees the pre-seam code hand-built — compact,
-        // key-sorted (Value's map is a BTreeMap; no preserve_order), the
-        // `content` key ABSENT in meta mode (never an explicit null), and
-        // only the requested collection_info sections present. The oracles
-        // below reproduce the legacy `json!` assembly verbatim.
+    fn read_wire_is_plain_serde_with_explicit_nulls() {
+        // #391 phase 2 (the to_wire retirement): ONE wire convention — plain
+        // serde of the schema types, where an unset `Option` is an explicit
+        // `null`, never a pruned key (the Pydantic shape the schema contract
+        // test pins). Shape-level, deliberately not byte-level: every
+        // consumer revalidates through the Pydantic models, so the contract
+        // is "parses back into the schema type with the same content".
         let (core, dir) = temp_core();
         let basic = core.notetype_id("Basic").unwrap();
         let CreateOutcome::Created(nid) = core
@@ -569,76 +564,39 @@ mod tests {
             panic!("create failed")
         };
 
-        // Full mode.
-        let full = core
-            .list_notes(Some(&[nid]), None, None, None, None, true, 50)
-            .unwrap();
-        let n = &full.notes[0];
-        let legacy = serde_json::json!({
-            "notes": [{
-                "id": n.id,
-                "note_type": "Basic",
-                "deck": "Default",
-                "tags": ["t1"],
-                "modified": n.modified.clone(),
-                "content": {"Front": "alpha", "Back": "beta"},
-            }],
-            "total": 1,
-            "limit": 50,
-        })
-        .to_string();
-        assert_eq!(shrike_schemas::to_wire_json(&full).unwrap(), legacy);
-
-        // Meta mode: no "content" key at all.
+        // Meta mode: `content` is an explicit null on the wire, and the
+        // payload round-trips losslessly into the schema type.
         let meta = core
             .list_notes(Some(&[nid]), None, None, None, None, false, 50)
             .unwrap();
-        let wire = shrike_schemas::to_wire_json(&meta).unwrap();
-        let legacy = serde_json::json!({
-            "notes": [{
-                "id": n.id,
-                "note_type": "Basic",
-                "deck": "Default",
-                "tags": ["t1"],
-                "modified": n.modified.clone(),
-            }],
-            "total": 1,
-            "limit": 50,
-        })
-        .to_string();
-        assert_eq!(wire, legacy);
-        assert!(!wire.contains("content"));
+        let wire = serde_json::to_string(&meta).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(value["notes"][0]["content"], serde_json::Value::Null);
+        let back: shrike_schemas::ListNotesResponse = serde_json::from_str(&wire).unwrap();
+        assert!(back.notes[0].content.is_none());
+        assert_eq!(back.notes[0].id, nid);
+        assert_eq!(back.total, 1);
 
-        // `query` rides the same serialization (the shared response shape).
+        // `query` rides the same response shape.
         let queried = core.query("tag:t1", false, 10).unwrap();
-        assert_eq!(
-            shrike_schemas::to_wire_json(&queried).unwrap(),
-            legacy.replace("\"limit\":50", "\"limit\":10")
-        );
+        let qvalue = serde_json::to_value(&queried).unwrap();
+        assert_eq!(qvalue["notes"][0]["content"], serde_json::Value::Null);
+        assert_eq!(qvalue["limit"], 10);
 
-        // collection_info: a section subset — unrequested sections absent.
+        // collection_info: an unrequested section is an explicit null, a
+        // requested one an object — and the payload validates back.
         let info = core
             .collection_info(&["summary".into(), "decks".into()], &[])
             .unwrap();
-        let s = info.summary.as_ref().unwrap();
-        let legacy = serde_json::json!({
-            "summary": {
-                "path": s.path.clone(),
-                "created": s.created.clone(),
-                "modified": s.modified.clone(),
-                "notes": 1,
-                "cards": 1,
-                "decks": 1,
-                "note_types": s.note_types,
-                "tags": 1,
-                "due_today": s.due_today,
-            },
-            "decks": [{"name": "Default", "id": 1, "note_count": 1}],
-        })
-        .to_string();
-        let wire = shrike_schemas::to_wire_json(&info).unwrap();
-        assert_eq!(wire, legacy);
-        assert!(!wire.contains("stats") && !wire.contains("null"));
+        let wire = serde_json::to_string(&info).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert!(value["summary"].is_object());
+        assert!(value["decks"].is_array());
+        assert_eq!(value["stats"], serde_json::Value::Null);
+        assert_eq!(value["note_types"], serde_json::Value::Null);
+        let back: shrike_schemas::CollectionInfo = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back.summary.as_ref().unwrap().notes, 1);
+        assert!(back.stats.is_none());
 
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
@@ -779,9 +737,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fr2["replacements"], 1);
-        let info = shrike_schemas::to_wire_value(
-            &core
-                .collection_info(&["note_types".to_string()], &["Custom".to_string()])
+        let info = serde_json::to_value(
+            core.collection_info(&["note_types".to_string()], &["Custom".to_string()])
                 .unwrap(),
         )
         .unwrap();
@@ -1148,6 +1105,207 @@ mod tests {
         let err = core.find_notes("added:notanumber").unwrap_err();
         assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
         core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+    /// #394 (interim gate): every hand-transcribed `(service, method)` index
+    /// in adapter.rs must be EXERCISED against a real collection — a bumped
+    /// anki whose dispatcher reordered would shift indices silently if any
+    /// constant escaped its tripwire. The test self-scans the constants from
+    /// the source (the SVC_ pin's pattern), drives the whole public surface
+    /// once, and asserts the dispatch recorder saw every pair. Build-time
+    /// derivation from anki's descriptors remains the preferred end-state.
+    ///
+    /// The recorder fires at dispatch (before the call returns): this gate is
+    /// REACHABILITY; the sibling round-trip tests validate responses. Note
+    /// the parser treats every bare `const X: u32` in adapter.rs as a method
+    /// index (SVC_-prefixed ones as services) — an unrelated u32 const there
+    /// panics this test loudly rather than passing falsely.
+    #[test]
+    fn every_method_constant_is_dispatched_by_the_surface() {
+        // Parse `const NAME: u32 = N;` declarations out of adapter.rs.
+        let src = include_str!("adapter.rs");
+        let mut svc: std::collections::BTreeMap<&str, u32> = Default::default();
+        let mut methods: Vec<(String, u32)> = Vec::new();
+        for line in src.lines() {
+            let Some(rest) = line.trim().strip_prefix("const ") else {
+                continue;
+            };
+            let Some((name, value)) = rest.split_once(": u32 = ") else {
+                continue;
+            };
+            let Ok(value) = value.trim_end_matches(';').parse::<u32>() else {
+                continue;
+            };
+            if let Some(s) = name.strip_prefix("SVC_") {
+                svc.insert(Box::leak(s.to_string().into_boxed_str()), value);
+            } else {
+                methods.push((name.to_string(), value));
+            }
+        }
+        assert!(svc.len() >= 9, "service constants parsed: {svc:?}");
+        assert!(
+            methods.len() >= 30,
+            "method constants parsed: {}",
+            methods.len()
+        );
+        // Longest-prefix service resolution (CARD_RENDERING before CARDS).
+        let mut prefixes: Vec<(&str, u32)> = svc.iter().map(|(k, v)| (*k, *v)).collect();
+        prefixes.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
+        let expected: Vec<(String, u32, u32)> = methods
+            .iter()
+            .map(|(name, m)| {
+                let (_, s) = prefixes
+                    .iter()
+                    .find(|(p, _)| name.starts_with(&format!("{p}_")))
+                    .unwrap_or_else(|| panic!("no service prefix for {name}"));
+                (name.clone(), *s, *m)
+            })
+            .collect();
+
+        // Drive the whole public surface once.
+        let (core, dir) = temp_core();
+        let created = core
+            .upsert_notes(
+                r#"[{"note_type":"Basic","deck":"Drive","fields":{"Front":"alpha <b>one</b>","Back":"a"}},
+                    {"note_type":"Basic","deck":"Drive","fields":{"Front":"beta two","Back":"b"}}]"#,
+                "error",
+                false,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&created).unwrap();
+        let id_a = parsed[0]["id"].as_i64().unwrap();
+        let id_b = parsed[1]["id"].as_i64().unwrap();
+        // Duplicate-checked create (fields_check) + an update (deck move →
+        // set_card_deck) + a plain field update.
+        core.upsert_notes(
+            r#"[{"note_type":"Basic","deck":"Drive","fields":{"Front":"alpha <b>one</b>","Back":"dupe"}}]"#,
+            "skip",
+            false,
+        )
+        .unwrap();
+        core.upsert_notes(
+            &format!(
+                r#"[{{"id":{id_a},"deck":"Drive::Moved","fields":{{"Front":"alpha edited","Back":"a"}},"tags":["keep"]}}]"#
+            ),
+            "allow",
+            false,
+        )
+        .unwrap();
+        core.get_note(id_a).unwrap();
+        core.cards_of_note(id_a).unwrap();
+        core.note_texts(&[id_a]).unwrap();
+        core.find_notes("deck:Drive*").unwrap();
+        core.find_replace_notes(&[id_a], "edited", "patched", false, true, None)
+            .unwrap();
+        core.update_note_tags(&[id_a], None, &["fresh".into()], &[])
+            .unwrap();
+        core.update_note_tags(&[id_a], None, &[], &["fresh".into()])
+            .unwrap();
+        core.rename_tag("keep", "kept", &[]).unwrap();
+        core.collection_info(&["all".into()], &["Basic".into()])
+            .unwrap();
+
+        // Decks: create, rename, delete-empty (and id-by-name resolution).
+        core.upsert_decks(r#"[{"name":"Spare"}]"#).unwrap();
+        let decks: serde_json::Value =
+            serde_json::from_str(&core.upsert_decks(r#"[{"name":"Spare2"}]"#).unwrap()).unwrap();
+        let spare2 = decks[0]["id"].as_i64().unwrap();
+        core.upsert_decks(&format!(r#"[{{"id":{spare2},"name":"Spare3"}}]"#))
+            .unwrap();
+        core.delete_decks(&["Spare3".to_string()]).unwrap();
+
+        // Note types: stock create, positional update, identity ops, template
+        // text rewrite, field metadata, migration, delete-unused.
+        core.upsert_note_types(
+            r#"[{"name":"DriveType","fields":["F","B"],"templates":[{"name":"Card 1","front":"{{F}}","back":"{{B}}"}],"css":".card{}"}]"#,
+        )
+        .unwrap();
+        core.update_note_type_fields("DriveType", r#"[{"op":"add","name":"C"}]"#)
+            .unwrap();
+        core.update_note_type_templates(
+            "DriveType",
+            r#"[{"op":"rename","name":"Card 1","new_name":"Card One"}]"#,
+        )
+        .unwrap();
+        core.find_and_replace_note_types(
+            "DriveType",
+            ".card",
+            ".kard",
+            false,
+            true,
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+        core.update_note_type_field_metadata(
+            "DriveType",
+            r#"[{"name":"F","description":"front"}]"#,
+        )
+        .unwrap();
+        core.migrate_note_type(
+            &[id_b],
+            "DriveType",
+            r#"{"Front":"F","Back":"B"}"#,
+            "",
+            false,
+        )
+        .unwrap();
+        // An empty CARD must BECOME empty (Anki never creates one): add a
+        // template on C, give the migrated note a C value (the card
+        // generates), then clear it — the existing card now renders empty
+        // and the prune's sweep genuinely dispatches CARDS_REMOVE_CARDS.
+        core.update_note_type_templates(
+            "DriveType",
+            r#"[{"op":"add","name":"Empty","front":"{{C}}","back":"x"}]"#,
+        )
+        .unwrap();
+        core.upsert_notes(
+            &format!(r#"[{{"id":{id_b},"fields":{{"F":"beta two","B":"b","C":"temp"}}}}]"#),
+            "allow",
+            false,
+        )
+        .unwrap();
+        core.upsert_notes(
+            &format!(r#"[{{"id":{id_b},"fields":{{"F":"beta two","B":"b","C":""}}}}]"#),
+            "allow",
+            false,
+        )
+        .unwrap();
+        core.upsert_note_types(
+            r#"[{"name":"Unused","fields":["X"],"templates":[{"name":"Card 1","front":"{{X}}","back":"{{X}}"}],"css":""}]"#,
+        )
+        .unwrap();
+        let unused_id = core.notetype_id("Unused").unwrap();
+        core.delete_note_types(&[unused_id]).unwrap();
+
+        // Media: store, list, fetch, check, trash; then the prune sweep
+        // (unused tags + empty notes/cards + unused media → get_empty_cards,
+        // remove_cards, clear_unused_tags, trash_files).
+        core.store_media_bytes(Some("drive.png"), b"drive bytes", None)
+            .unwrap();
+        core.list_media(None, None).unwrap();
+        core.fetch_media(&["drive.png".to_string()]).unwrap();
+        core.media_check().unwrap();
+        core.delete_media(&["drive.png".to_string()]).unwrap();
+        core.prune(true, true, true, true, false).unwrap();
+
+        core.delete_notes(&[id_a]).unwrap();
+        core.close().unwrap();
+
+        let seen = adapter::DISPATCHED_METHODS
+            .lock()
+            .expect("dispatch recorder poisoned")
+            .clone();
+        let missing: Vec<&str> = expected
+            .iter()
+            .filter(|(_, s, m)| !seen.contains(&(*s, *m)))
+            .map(|(name, ..)| name.as_str())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "method constants never dispatched by the public surface: {missing:?}"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 }

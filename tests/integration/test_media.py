@@ -1,8 +1,15 @@
 """Media integration tests — store/fetch/list/delete + collection check/prune.
 
 Media is collection-wide and *not* covered by the shared-collection reset
-tracker, so these use the dedicated `isolated_*` fixtures (a fresh, un-reset
-collection per test) rather than the shared server.
+tracker, so these run against a dedicated, un-reset collection — but they
+don't need isolation from EACH OTHER (#477): one MODULE-scoped server
+replaces the ~12 per-test boots that dominated this file's runtime. Every
+test uses its own filenames and pattern-scoped assertions, so shared media
+state never leaks into an assert (the prune test trashes whatever unused
+media earlier tests left — by design, nothing reads another test's files).
+Under xdist each worker gets its own module server, so cross-worker
+interference is structural, not conventional. Only the tests needing
+special startup args (`server_factory`) keep dedicated boots.
 """
 
 from __future__ import annotations
@@ -12,20 +19,39 @@ import base64
 import httpx
 import pytest
 
+from tests.integration.conftest import CLIRunner, MCPClient, ServerInfo, _write_cli_config
+
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(scope="module")
+def media_server(server_factory) -> ServerInfo:
+    """One dedicated, un-reset collection shared by the whole module."""
+    return server_factory("media-module")
+
+
+@pytest.fixture(scope="module")
+def media_mcp(media_server: ServerInfo) -> MCPClient:
+    return MCPClient(media_server.url)
+
+
+@pytest.fixture(scope="module")
+def media_runner(media_server: ServerInfo, tmp_path_factory: pytest.TempPathFactory) -> CLIRunner:
+    return CLIRunner(media_server.url, str(_write_cli_config(media_server, tmp_path_factory)))
+
 
 RAW = b"\x89PNG\r\n\x1a\n-fake-image-bytes"
 PNG = base64.b64encode(RAW).decode("ascii")
 
 
 class TestMediaTools:
-    def test_store_then_fetch_url_serves_bytes(self, isolated_mcp):
-        stored = isolated_mcp("store_media", {"items": [{"data": PNG, "filename": "cell.png"}]})
+    def test_store_then_fetch_url_serves_bytes(self, media_mcp):
+        stored = media_mcp("store_media", {"items": [{"data": PNG, "filename": "cell.png"}]})
         assert stored["results"][0]["status"] == "stored"
         assert stored["results"][0]["filename"] == "cell.png"
 
         # fetch never returns bytes — it reports `found` with a url to GET them.
-        fetched = isolated_mcp("fetch_media", {"filenames": ["cell.png"]})
+        fetched = media_mcp("fetch_media", {"filenames": ["cell.png"]})
         result = fetched["results"][0]
         assert result["status"] == "found"
         assert "data" not in result
@@ -37,18 +63,18 @@ class TestMediaTools:
         assert resp.status_code == 200
         assert resp.content == RAW
 
-    def test_client_read_media_downloads_bytes(self, isolated_server):
+    def test_client_read_media_downloads_bytes(self, media_server):
         from shrike.client import ShrikeClient
 
-        with ShrikeClient(isolated_server.url, autostart=False) as client:
+        with ShrikeClient(media_server.url, autostart=False) as client:
             client.store_media([{"data": PNG, "filename": "cell.png"}])
             assert client.read_media("cell.png") == RAW
 
-    def test_media_endpoint_404s_for_missing(self, isolated_server):
-        base = isolated_server.url.rsplit("/", 1)[0]
+    def test_media_endpoint_404s_for_missing(self, media_server):
+        base = media_server.url.rsplit("/", 1)[0]
         assert httpx.get(f"{base}/media/does-not-exist.png").status_code == 404
 
-    def test_media_endpoint_cannot_escape_media_dir(self, isolated_server):
+    def test_media_endpoint_cannot_escape_media_dir(self, media_server):
         # Plant a secret one level above the media dir; a traversal request must
         # not reach it. Percent-encoded so httpx doesn't normalize `..` away
         # client-side (it would never hit the route), so this exercises the
@@ -56,8 +82,8 @@ class TestMediaTools:
         # which a plain not-found would also give.
         import os
 
-        base = isolated_server.url.rsplit("/", 1)[0]
-        media_dir = os.path.splitext(isolated_server.collection_path)[0] + ".media"
+        base = media_server.url.rsplit("/", 1)[0]
+        media_dir = os.path.splitext(media_server.collection_path)[0] + ".media"
         secret = os.path.join(os.path.dirname(media_dir), "escape_target.txt")
         with open(secret, "w") as fh:
             fh.write("TOP-SECRET-OUTSIDE-MEDIA")
@@ -66,55 +92,55 @@ class TestMediaTools:
         assert resp.status_code == 404
         assert "TOP-SECRET-OUTSIDE-MEDIA" not in resp.text
 
-    def test_store_bad_base64_is_per_item_error(self, isolated_mcp):
-        out = isolated_mcp(
+    def test_store_bad_base64_is_per_item_error(self, media_mcp):
+        out = media_mcp(
             "store_media",
             {"items": [{"data": PNG, "filename": "ok.png"}, {"data": "!!", "filename": "bad.png"}]},
         )
         assert [r["status"] for r in out["results"]] == ["stored", "error"]
 
-    def test_list_and_glob(self, isolated_mcp):
-        isolated_mcp(
+    def test_list_and_glob(self, media_mcp):
+        media_mcp(
             "store_media",
             {"items": [{"data": PNG, "filename": "a.png"}, {"data": PNG, "filename": "b.jpg"}]},
         )
-        listing = isolated_mcp("list_media", {})
+        listing = media_mcp("list_media", {})
         assert listing["media_dir"]
         assert listing["count"] >= 2
-        pngs = isolated_mcp("list_media", {"pattern": "*.png"})
+        pngs = media_mcp("list_media", {"pattern": "*.png"})
         assert "a.png" in [f["filename"] for f in pngs["files"]]
         assert "b.jpg" not in [f["filename"] for f in pngs["files"]]
 
-    def test_delete(self, isolated_mcp):
-        isolated_mcp("store_media", {"items": [{"data": PNG, "filename": "gone.png"}]})
-        out = isolated_mcp("delete_media", {"filenames": ["gone.png", "never.png"]})
+    def test_delete(self, media_mcp):
+        media_mcp("store_media", {"items": [{"data": PNG, "filename": "gone.png"}]})
+        out = media_mcp("delete_media", {"filenames": ["gone.png", "never.png"]})
         assert out["deleted"] == ["gone.png"]
         assert out["not_found"] == ["never.png"]
-        assert isolated_mcp("list_media", {"pattern": "gone.png"})["count"] == 0
+        assert media_mcp("list_media", {"pattern": "gone.png"})["count"] == 0
 
-    def test_check_then_prune_unused(self, isolated_mcp):
-        isolated_mcp("store_media", {"items": [{"data": PNG, "filename": "orphan.png"}]})
-        check = isolated_mcp("collection_check", {})
+    def test_check_then_prune_unused(self, media_mcp):
+        media_mcp("store_media", {"items": [{"data": PNG, "filename": "orphan.png"}]})
+        check = media_mcp("collection_check", {})
         assert "orphan.png" in check["unused"]
 
-        preview = isolated_mcp("collection_prune", {"unused_media": True, "dry_run": True})
+        preview = media_mcp("collection_prune", {"unused_media": True, "dry_run": True})
         assert "orphan.png" in preview["unused_media"]["files"]
-        assert isolated_mcp("list_media", {"pattern": "orphan.png"})["count"] == 1
+        assert media_mcp("list_media", {"pattern": "orphan.png"})["count"] == 1
 
-        applied = isolated_mcp("collection_prune", {"unused_media": True, "dry_run": False})
+        applied = media_mcp("collection_prune", {"unused_media": True, "dry_run": False})
         assert applied["unused_media"]["removed"] >= 1
-        assert isolated_mcp("list_media", {"pattern": "orphan.png"})["count"] == 0
+        assert media_mcp("list_media", {"pattern": "orphan.png"})["count"] == 0
 
 
 class TestServerLocalPath:
     """store_media `path` source (#164/#170): off by default; enabled only by an
     explicit --media-path-root on a purely-local daemon, and confined to that root."""
 
-    def test_path_off_by_default(self, isolated_mcp, tmp_path):
-        # The isolated server is purely-local but sets NO --media-path-root → off.
+    def test_path_off_by_default(self, media_mcp, tmp_path):
+        # The module server is purely-local but sets NO --media-path-root → off.
         src = tmp_path / "local.png"
         src.write_bytes(RAW)
-        out = isolated_mcp("store_media", {"items": [{"path": str(src)}]})
+        out = media_mcp("store_media", {"items": [{"path": str(src)}]})
         assert out["results"][0]["status"] == "error"
         assert "not enabled" in out["results"][0]["error"]
 
@@ -199,41 +225,41 @@ class TestServerLocalPath:
 
 
 class TestMediaCLI:
-    def test_store_list_fetch_delete(self, isolated_runner, tmp_path):
+    def test_store_list_fetch_delete(self, media_runner, tmp_path):
         src = tmp_path / "pic.png"
         src.write_bytes(b"\x89PNG\r\n\x1a\nhello-cli")
 
-        store = isolated_runner.invoke(["media", "store", str(src)])
+        store = media_runner.invoke(["media", "store", str(src)])
         assert store.exit_code == 0, store.output
         assert "Stored" in store.output and "pic.png" in store.output
 
-        listing = isolated_runner.json(["media", "list"])
+        listing = media_runner.json(["media", "list"])
         assert "pic.png" in [f["filename"] for f in listing["files"]]
 
         dest = tmp_path / "out.png"
-        fetch = isolated_runner.invoke(["media", "fetch", "pic.png", "-o", str(dest)])
+        fetch = media_runner.invoke(["media", "fetch", "pic.png", "-o", str(dest)])
         assert fetch.exit_code == 0, fetch.output
         assert dest.read_bytes() == b"\x89PNG\r\n\x1a\nhello-cli"
 
-        delete = isolated_runner.invoke(["media", "delete", "pic.png", "--yes"])
+        delete = media_runner.invoke(["media", "delete", "pic.png", "--yes"])
         assert delete.exit_code == 0, delete.output
-        assert isolated_runner.json(["media", "list", "pic.png"])["count"] == 0
+        assert media_runner.json(["media", "list", "pic.png"])["count"] == 0
 
-    def test_collection_check_reports_unused(self, isolated_runner, tmp_path):
+    def test_collection_check_reports_unused(self, media_runner, tmp_path):
         src = tmp_path / "orphan.png"
         src.write_bytes(b"\x89PNG\r\n\x1a\norphan")
-        isolated_runner.invoke(["media", "store", str(src)])
+        media_runner.invoke(["media", "store", str(src)])
 
-        data = isolated_runner.json(["collection", "check"])
+        data = media_runner.json(["collection", "check"])
         assert "orphan.png" in data["unused"]
 
-    def test_store_server_path_disabled_by_default(self, isolated_runner, tmp_path):
+    def test_store_server_path_disabled_by_default(self, media_runner, tmp_path):
         # The CLI sends a {path} item; the default daemon has no --media-path-root,
         # so the server refuses it (off by default, #170). Exercises the CLI
         # plumbing + the default-off behavior end-to-end.
         src = tmp_path / "on-server.png"
         src.write_bytes(b"\x89PNG\r\n\x1a\nserver-side")
-        result = isolated_runner.invoke(["media", "store", "--server-path", str(src)])
+        result = media_runner.invoke(["media", "store", "--server-path", str(src)])
         assert result.exit_code == 1
         assert "not enabled" in result.output
 
