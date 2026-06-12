@@ -7,11 +7,13 @@ when #199 lands; never VLM image-describe, which stays embedding-only) and ``ref
 or media filename. So a match's provenance can say *where* it hit, and new derived sources slot in
 without reshaping the store.
 
-It is a **derived cache** like ``VectorIndex``: rebuildable from the collection, ``col_mod`` drift
-detection, incremental on upsert/delete. It lives in our cache dir, deliberately **not** as tables
-in Anki's ``collection.anki2`` — derived/rebuildable data must not ride Anki's sync or trip its
-schema checks (see ``docs/decisions.md``). Persistence is inherent to the SQLite file, so there is
-no debounced saver (unlike the vector index): writes are transactional and durable.
+It is a **derived cache** like the kernel's vector index: rebuildable from the
+collection, ``col_mod`` drift detection, incremental on upsert/delete. It lives
+in our cache dir, deliberately **not** as tables in Anki's ``collection.anki2``
+— derived/rebuildable data must not ride Anki's sync or trip its schema checks
+(see ``docs/decisions.md``). Persistence is inherent to the SQLite file, so
+there is no debounced saver (unlike the vector index): writes are transactional
+and durable.
 
 Engine split (#281, mirroring the index's #267/#273): the SQL layer lives behind a small engine —
 the native ``shrike-derived`` crate (rusqlite), unconditional since the #278 cutover. The facade

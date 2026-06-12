@@ -70,7 +70,7 @@ class DedupStatsRecorder:
 
 
 class KernelIndexView:
-    """The search-facing slice of the old ``VectorIndex``, live over the kernel.
+    """The search-facing index view, live over the kernel.
 
     The actions' search path needs: availability/state/progress, the engine
     handle, query embedding (host-side, via the runtime's backend), and the

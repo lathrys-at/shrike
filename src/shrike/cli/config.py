@@ -19,7 +19,7 @@ DEFAULT_CONFIG_PATH = config_file()
 DEFAULT_CONFIG: dict[str, Any] = {
     "collection": None,
     # Vector-index cache location and flush tuning. ``None`` means "let the
-    # server pick" — the platform cache dir, and the IndexSaver defaults
+    # server pick" — the platform cache dir, and the kernel saver defaults
     # (60s idle / 100-change burst). Kept None here so config.py needn't import
     # the heavy index module just to know the numbers.
     "cache_dir": None,
