@@ -23,6 +23,7 @@ fn main() {
     // doesn't glob — every Swift source is named).
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=swift/Recognize.swift");
+    println!("cargo:rerun-if-changed=swift/Transcribe.swift");
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
@@ -65,6 +66,7 @@ fn build_swift() {
             "-target",
             &format!("{arch}-apple-macos{deployment}"),
             "swift/Recognize.swift",
+            "swift/Transcribe.swift",
             "-o",
             &lib,
         ])
@@ -80,6 +82,11 @@ fn build_swift() {
     println!("cargo:rustc-link-search=native={sdk}/usr/lib/swift");
     println!("cargo:rustc-link-lib=framework=Vision");
     println!("cargo:rustc-link-lib=framework=Foundation");
+    // The ASR half (#410): Speech (SpeechAnalyzer), AVFoundation
+    // (AVAudioFile), CoreMedia (CMTime ranges).
+    println!("cargo:rustc-link-lib=framework=Speech");
+    println!("cargo:rustc-link-lib=framework=AVFoundation");
+    println!("cargo:rustc-link-lib=framework=CoreMedia");
 }
 
 fn xcrun(args: &[&str]) -> String {

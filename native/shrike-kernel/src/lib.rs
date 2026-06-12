@@ -48,7 +48,7 @@ pub use runtime::{block_on, init_runtime, spawn_op};
 // The engine contract (#342): traits live in shrike-engine-api — the kernel
 // consumes them and re-exports for downstream paths; it names no engine.
 pub use shrike_engine_api::{
-    Embedder, ImageEmbedder, ImageResolver, MediaItem, Recognition, Recognizer, Segment,
+    Embedder, ImageEmbedder, ImageResolver, Locator, MediaItem, Recognition, Recognizer, Segment,
 };
 
 /// The collection as a task-actor (#374): every access is one job sent to a
@@ -1410,7 +1410,7 @@ mod no_cpython_smoke {
                             segments: vec![Segment {
                                 text,
                                 confidence: 0.95,
-                                bbox: Some([0.0, 0.0, 1.0, 0.1]),
+                                locator: Some(Locator::Bbox([0.0, 0.0, 1.0, 0.1])),
                             }],
                         }
                     })

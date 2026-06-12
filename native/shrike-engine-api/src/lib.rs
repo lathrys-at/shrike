@@ -105,6 +105,7 @@ pub fn mime_for_name(name: &str) -> Option<String> {
         "m4a" => "audio/mp4",
         "flac" => "audio/flac",
         "opus" => "audio/opus",
+        "aiff" | "aif" => "audio/aiff",
         "mp4" => "video/mp4",
         "webm" => "video/webm",
         "mkv" => "video/x-matroska",
@@ -176,15 +177,29 @@ pub trait ImageResolver: Send + Sync {
 
 // ── recognition (#228) ───────────────────────────────────────────────────────
 
-/// One recognized segment: a line/word for OCR (with an optional normalized
-/// top-left `[x, y, w, h]` box) — the shape generalizes to time spans for
-/// ASR (a future field, not a bbox reuse).
+/// Where a segment sits in its medium: a normalized top-left `[x, y, w, h]`
+/// box for OCR, or a `[start_seconds, duration_seconds]` time span for ASR
+/// (#410). One enum, not two optionals — a segment can't carry both, and
+/// the type makes that unrepresentable. The flattened lowercase tag keeps
+/// the wire identical to the historical shape (`"bbox": [...]`), so
+/// existing derived rows parse unchanged and the span variant joins as
+/// `"span": [...]`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Locator {
+    Bbox([f64; 4]),
+    Span([f64; 2]),
+}
+
+/// One recognized segment: a line/word for OCR, a stretch of speech for
+/// ASR — with the locator that fits the medium, or none at all (absent
+/// locators stay off the wire entirely).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
     pub text: String,
     pub confidence: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bbox: Option<[f64; 4]>,
+    #[serde(flatten)]
+    pub locator: Option<Locator>,
 }
 
 /// One media item's recognition: the flattened text (reading order), the
@@ -553,24 +568,41 @@ mod tests {
     }
 
     #[test]
-    fn recognition_serde_round_trips_and_omits_absent_bbox() {
+    fn recognition_serde_round_trips_and_omits_absent_locators() {
         let r = Recognition {
             text: "label".into(),
             confidence: 0.8,
-            segments: vec![Segment {
-                text: "label".into(),
-                confidence: 0.8,
-                bbox: Some([0.1, 0.2, 0.3, 0.05]),
-            }],
+            segments: vec![
+                Segment {
+                    text: "label".into(),
+                    confidence: 0.8,
+                    locator: Some(Locator::Bbox([0.1, 0.2, 0.3, 0.05])),
+                },
+                // The ASR shape: a time span, not a box (#410).
+                Segment {
+                    text: "spoken".into(),
+                    confidence: 0.9,
+                    locator: Some(Locator::Span([1.25, 0.75])),
+                },
+            ],
         };
         let json = serde_json::to_string(&r).unwrap();
+        // The flattened tag keeps the historical wire keys.
+        assert!(json.contains(r#""bbox":[0.1"#) && json.contains(r#""span":[1.25"#));
         assert_eq!(serde_json::from_str::<Recognition>(&json).unwrap(), r);
-        let no_box = serde_json::to_string(&Segment {
+        let bare = serde_json::to_string(&Segment {
             text: "t".into(),
             confidence: 1.0,
-            bbox: None,
+            locator: None,
         })
         .unwrap();
-        assert!(!no_box.contains("bbox"));
+        assert!(!bare.contains("bbox") && !bare.contains("span"));
+        // Pre-#410 rows parse unchanged: bare segments and bbox'd segments.
+        let old: Segment = serde_json::from_str(r#"{"text":"t","confidence":1.0}"#).unwrap();
+        assert_eq!(old.locator, None);
+        let boxed: Segment =
+            serde_json::from_str(r#"{"text":"t","confidence":1.0,"bbox":[0.0,0.1,0.2,0.3]}"#)
+                .unwrap();
+        assert_eq!(boxed.locator, Some(Locator::Bbox([0.0, 0.1, 0.2, 0.3])));
     }
 }
