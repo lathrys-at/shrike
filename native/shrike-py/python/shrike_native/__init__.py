@@ -40,6 +40,7 @@ from shrike_native._native import (
     schema_catalog,
     schema_roundtrip,
     version,
+    wire_protocol_version,
 )
 
 # Feature-gated (#278 series, step 1): present only in `anki-core` builds
@@ -99,4 +100,5 @@ __all__ = [
     "schema_catalog",
     "schema_roundtrip",
     "version",
+    "wire_protocol_version",
 ]

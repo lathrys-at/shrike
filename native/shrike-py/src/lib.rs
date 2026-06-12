@@ -143,6 +143,13 @@ fn schema_catalog() -> std::collections::HashMap<&'static str, String> {
     shrike_schemas::schema_catalog().into_iter().collect()
 }
 
+/// The action exchange's protocol version (#392) -- the contract test pins
+/// the Python mirror equal; a future remote handshake checks it.
+#[pyfunction]
+fn wire_protocol_version() -> u32 {
+    shrike_schemas::WIRE_PROTOCOL_VERSION
+}
+
 /// Deserialize `json` as the named wire type and re-serialize it through the
 /// Rust types -- the instance-level wire-parity probe. Raises NativeInputError
 /// for an unknown name or a payload the type rejects.
@@ -865,6 +872,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "anki-core")]
     m.add_function(wrap_pyfunction!(rrf_fuse, m)?)?;
     m.add_function(wrap_pyfunction!(schema_catalog, m)?)?;
+    m.add_function(wrap_pyfunction!(wire_protocol_version, m)?)?;
     m.add_function(wrap_pyfunction!(schema_roundtrip, m)?)?;
     // The native image-prep pipeline version — folded into the clip-rs
     // fingerprint by the facade (a pixel-math change must invalidate vectors).

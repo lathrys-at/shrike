@@ -39,6 +39,7 @@ from shrike.harness import Harness, KernelConfigError
 # unchanged.
 from shrike.log import configure_logging
 from shrike.paths import cache_dir, state_dir
+from shrike.schemas import WIRE_PROTOCOL_VERSION
 from shrike.tools import register_tools
 
 # The kernel saver's built-in flush tuning (#355): the --index-save-* help
@@ -303,6 +304,7 @@ def _register_custom_routes(
 
         status: dict[str, Any] = {
             "running": True,
+            "wire_protocol_version": WIRE_PROTOCOL_VERSION,
             "pid": os.getpid(),
             "url": meta.get("url"),
             "collection": meta.get("collection"),

@@ -944,6 +944,10 @@ pub struct DedupStats {
 pub struct ServerStatus {
     #[serde(default)]
     pub running: LiteralTrue,
+    /// The action exchange's protocol version (#392); absent = 1 (a server
+    /// too old to report the field IS version 1).
+    #[serde(default = "default_wire_protocol_version")]
+    pub wire_protocol_version: u32,
     pub pid: i64,
     pub url: String,
     pub collection: String,
@@ -1068,6 +1072,31 @@ macro_rules! catalog {
             }
         }
     };
+}
+
+/// The action exchange's protocol version (#392) — the compatibility story,
+/// decided while there is one consumer:
+///
+/// - **The exchange evolves additively.** A breaking change to an action's
+///   contract ships as a NEW action name (`upsert_notes_v2`) with its own
+///   types alongside the old — at this layer that's an addition, so old
+///   clients never see it. New union variants count as breaking for an old
+///   consumer of an EXISTING action (exhaustive tagged-union parses), which
+///   is exactly why the name-versioning discipline exists.
+/// - **This constant is the backstop**, bumped only when the exchange fabric
+///   itself breaks (envelope semantics, error taxonomy, FFI conventions) —
+///   never for per-action evolution. A future remote handshake (thin client,
+///   relay) refuses on mismatch; `/status` reports it today.
+/// - The MCP tool surface (external clients, no handshake possible) rides
+///   the same discipline: a breaking tool change is a new tool name carrying
+///   its new schema types; the old tool keeps its old types while served.
+///
+/// The Python mirror (`shrike.schemas.WIRE_PROTOCOL_VERSION`) is pinned
+/// equal by the schema contract test.
+pub const WIRE_PROTOCOL_VERSION: u32 = 1;
+
+fn default_wire_protocol_version() -> u32 {
+    WIRE_PROTOCOL_VERSION
 }
 
 catalog![

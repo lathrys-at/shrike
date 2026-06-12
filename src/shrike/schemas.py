@@ -54,6 +54,15 @@ from pydantic import BaseModel, Field, model_validator
 # error class, orthogonal to every tool's response (the op never ran).
 COLLECTION_BUSY_CODE = "collection_busy"
 
+# The action exchange's protocol version (#392) — mirrors shrike-schemas'
+# WIRE_PROTOCOL_VERSION (the schema contract test pins them equal). The
+# exchange evolves additively: a breaking change to an action ships as a NEW
+# action/tool name carrying its own types (upsert_notes_v2), so this bumps
+# only when the exchange fabric itself breaks (envelope semantics, error
+# taxonomy) — the backstop a future remote handshake checks. Reported in
+# GET /status.
+WIRE_PROTOCOL_VERSION = 1
+
 # ============================================================================
 # Request models (tool inputs)
 # ============================================================================
@@ -1011,6 +1020,10 @@ class ServerStatus(BaseModel):
     """
 
     running: Literal[True] = True
+    # The action exchange's protocol version (#392) — a future remote client
+    # checks this before speaking. Defaulted to 1: a server too old to report
+    # the field IS version 1.
+    wire_protocol_version: int = 1
     pid: int
     url: str
     collection: str

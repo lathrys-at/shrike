@@ -29,6 +29,12 @@ import shrike.schemas as schemas
 
 shrike_native = pytest.importorskip("shrike_native")
 
+
+def test_wire_protocol_version_mirrors_rust() -> None:
+    # The #392 constant: one number, two homes, never allowed to drift.
+    assert shrike_native.wire_protocol_version() == schemas.WIRE_PROTOCOL_VERSION
+
+
 # Union aliases (Annotated[..., Field(discriminator=...)]) and their tag field.
 UNIONS: dict[str, str] = {
     "UpsertNoteResult": "status",

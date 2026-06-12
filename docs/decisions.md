@@ -993,3 +993,34 @@ nothing and deleted ~1,500 lines of adaptation.
 **What survived from #342:** the per-concern engine crates, the contract
 crate, the layering rule, native end-to-end attach, `WithPolicy` +
 host-assembled identity, the batch-safety probe, and every behavioral pin.
+
+## Wire-protocol versioning: name-versioned actions, one backstop constant (#392, June 2026)
+
+Decided while the exchange has one consumer (the in-process host), because it
+is a blocker for any remote-transport work (thin client, relay) and free now.
+
+**The action exchange evolves additively, and a breaking change to an action
+ships as a new action name** (`upsert_notes_v2`) carrying its own schema
+types alongside the old. This matters more than it sounds with our
+union-heavy schemas: unknown-key tolerance covers added *fields*, but a new
+*variant* in a tagged union (a new `status` on a result) breaks any old
+client that parses the union exhaustively — so "additive" evolution of an
+existing action is a weaker guarantee than it looks, and the name-versioning
+discipline is what actually keeps the exchange additive. At the exchange
+layer a v2 action is purely an addition; old clients never see it.
+
+**`WIRE_PROTOCOL_VERSION` (shrike-schemas, mirrored in `schemas.py`, pinned
+equal by the schema contract test) is the backstop**, bumped only when the
+exchange fabric itself breaks — envelope semantics, the error taxonomy, FFI
+conventions — never for per-action evolution. A future remote handshake
+refuses on mismatch; `GET /status` reports it today (`wire_protocol_version`,
+defaulted to 1 in `ServerStatus` since a server too old to report the field
+is version 1).
+
+The MCP tool surface rides the same discipline for the same reason from the
+other side: external clients can't be handshaken (tools are discovered via
+`tools/list`), so a breaking tool change is a new tool name with its new
+types, and the old tool keeps serving its old types for as long as it is
+offered. Since shrike-schemas types are both the exchange payloads and the
+MCP response models, the two layers stay versioned in lockstep by
+construction.
