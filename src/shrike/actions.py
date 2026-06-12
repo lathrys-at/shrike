@@ -1616,32 +1616,22 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             unused_media,
             dry_run,
         )
-        result, removed_note_ids = await wrapper.prune(
-            unused_tags=unused_tags,
-            empty_notes=empty_notes,
-            empty_cards=empty_cards,
-            unused_media=unused_media,
-            dry_run=dry_run,
+        # Re-homed (#391): the kernel op runs the cleanups AND the index
+        # maintenance tail (deletions drop their sidecars; a tags-only prune
+        # advances the watermarks). Removed note ids stay kernel-internal.
+        result = CollectionPruneResponse.model_validate_json(
+            await kernel.collection_prune(
+                unused_tags, empty_notes, empty_cards, unused_media, dry_run
+            )
         )
-        # `or {}`: an unselected cleanup arrives as an explicit null on the
-        # typed wire (#391), so a key-missing default alone never fires.
+        removed = (len(result.empty_notes.removed) if result.empty_notes else 0) + (
+            len(result.empty_cards.notes_deleted) if result.empty_cards else 0
+        )
         note_outcome(
-            f"{'previewed' if dry_run else 'applied'}: {len(removed_note_ids)} note(s) removed, "
-            f"tags={(result.get('unused_tags') or {}).get('removed', '-')}"
+            f"{'previewed' if dry_run else 'applied'}: {removed} note(s) removed, "
+            f"tags={result.unused_tags.removed if result.unused_tags else '-'}"
         )
-
-        if not dry_run:
-            # forget_notes drops vectors + fingerprints + derived rows and
-            # advances both watermarks; a tags-only prune is a metadata-only
-            # change. Best-effort either way.
-            try:
-                if removed_note_ids:
-                    await kernel.forget_notes(removed_note_ids)
-                elif (result.get("unused_tags") or {}).get("removed"):
-                    await kernel.metadata_changed()
-            except Exception:
-                logger.warning("Failed to update index after prune", exc_info=True)
-        return CollectionPruneResponse.model_validate(result)
+        return result
 
     @_action
     async def store_media(
@@ -1679,11 +1669,15 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         the returned name. Per-item errors (bad base64, unfetchable URL, disabled
         or out-of-root path, oversize) are reported per item and don't sink the batch."""
         logger.debug("store_media count=%d", len(items))
+        # Re-homed (#391): the kernel prepares byte sources concurrently on
+        # its blocking pool and writes the batch as one collection job.
         item_dicts = [i.model_dump(exclude_none=True) for i in items]
-        results = await wrapper.store_media(
-            item_dicts,
-            allow_private_fetch=allow_private_fetch,
-            server_path_roots=server_path_roots,
+        results = json.loads(
+            await kernel.store_media(
+                json.dumps(item_dicts),
+                allow_private_fetch,
+                server_path_roots or [],
+            )
         )
         stored = sum(1 for r in results if r.get("status") == "stored")
         errors = len(results) - stored
@@ -1710,7 +1704,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         share the server's disk. Every `found` file reports `url`, `path`, `mime`,
         and `size_bytes`."""
         logger.debug("fetch_media count=%d", len(filenames))
-        results = await wrapper.fetch_media(filenames)
+        results = json.loads(await kernel.fetch_media(filenames))
         for r in results:
             if r["status"] == "found":
                 r["url"] = _media_url(r["filename"])
@@ -1740,7 +1734,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         and `size_bytes`). `media_dir` is the absolute media-folder path; fetch any
         file's bytes by GETting its `url` (the server's `GET /media/<name>`)."""
         logger.debug("list_media pattern=%s limit=%d", pattern, limit)
-        result = await wrapper.list_media(pattern=pattern, limit=limit)
+        result = json.loads(await kernel.list_media(pattern, limit))
         for f in result["files"]:
             f["url"] = _media_url(f["filename"])
         note_outcome(f"{len(result['files'])}/{result['count']} file(s)")
@@ -1761,7 +1755,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         unreferenced ('unused') media first. Returns `deleted` and `not_found`
         name lists; a missing file is skipped, not an error."""
         logger.debug("delete_media requested=%d", len(filenames))
-        result = await wrapper.delete_media(filenames)
+        result = json.loads(await kernel.delete_media(filenames))
         note_outcome(f"{len(result['deleted'])} deleted, {len(result['not_found'])} not found")
         return DeleteMediaResponse.model_validate(result)
 
@@ -1775,7 +1769,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         `missing_media_notes` (the note IDs with such references), and `have_trash`
         (whether Anki's media trash holds anything). Nothing is modified."""
         logger.debug("collection_check")
-        result = await wrapper.media_check()
+        result = json.loads(await kernel.media_check())
         note_outcome(
             f"{len(result['unused'])} unused, {len(result['missing'])} missing, "
             f"trash={result['have_trash']}"

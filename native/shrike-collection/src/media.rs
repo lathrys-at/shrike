@@ -96,6 +96,42 @@ fn check_media_size(len: usize) -> NativeResult<()> {
     Ok(())
 }
 
+/// The filename a URL's path implies (basename-sanitized), for a `url` store
+/// item with no explicit `filename`. Pub for the kernel's off-actor prepare
+/// (#391 re-home), which resolves names where it fetches.
+pub fn media_name_from_url(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()
+        .map(|u| safe_media_name(u.path()))
+        .filter(|n| !n.is_empty())
+}
+
+/// One store item after the kernel's off-actor prepare (#391 re-home): byte
+/// sources arrive fetched/decoded; `path` items pass through whole (their
+/// gates are collection policy and run under the write); a failed prepare
+/// carries its per-item error.
+pub struct PreparedMedia {
+    pub index: i64,
+    /// The caller's `filename`, echoed on errors.
+    pub filename: Option<String>,
+    pub source: PreparedMediaSource,
+}
+
+pub enum PreparedMediaSource {
+    /// Decoded base64 or a completed download; `name` already folds the
+    /// URL-derived fallback.
+    Bytes {
+        name: String,
+        data: Vec<u8>,
+        content_type: Option<String>,
+    },
+    /// A server-local path item, gated under the write.
+    Path { path: String },
+    /// The prepare failed (bad base64, refused/failed download, invalid
+    /// item); stored nothing.
+    Failed { error: String },
+}
+
 impl CollectionCore {
     /// The shared write tail of every store path — the full `_write_one_media`
     /// semantics: extension derived from `content_type` when the name lacks
@@ -162,8 +198,9 @@ impl CollectionCore {
     /// `url` (SSRF-guarded download, step 5b), or server-local `path`
     /// (honored only when contained in one of `path_roots`). Per-item errors
     /// never sink the batch (`stored` with `deduped`, or `error`). Items are
-    /// prepared sequentially here — the host facade keeps its concurrent
-    /// prepare; the kernel's async layer is where native fan-out lands later.
+    /// prepared sequentially here — the standalone wrapper's path; the
+    /// kernel's `store_media` op fans the prepare out on its blocking pool
+    /// and writes through [`store_prepared_media`](Self::store_prepared_media).
     pub fn store_media_items(
         &self,
         items: &[StoreMediaItem],
@@ -195,31 +232,8 @@ impl CollectionCore {
         use shrike_ffi::NativeError;
         item.validate().map_err(NativeError::invalid_input)?;
 
-        // server-local path (zero-copy intent; #164/#170 gates)
         if let Some(path) = item.path.as_deref() {
-            if path_roots.is_empty() {
-                return Err(NativeError::invalid_input(
-                    "server-local paths are not enabled (set --media-path-root on a \
-                     purely-local daemon)",
-                ));
-            }
-            let target = std::fs::canonicalize(path)
-                .map_err(|_| NativeError::invalid_input(format!("file not found: {path}")))?;
-            let target_str = target.to_string_lossy().to_string();
-            if !crate::media_fetch::path_within_any_root(&target_str, path_roots) {
-                return Err(NativeError::invalid_input(
-                    "path is outside the configured media root(s)",
-                ));
-            }
-            if !target.is_file() {
-                return Err(NativeError::invalid_input(format!(
-                    "file not found: {path}"
-                )));
-            }
-            let base = safe_media_name(&target_str);
-            let data = std::fs::read(&target)
-                .map_err(|e| NativeError::invalid_input(format!("read failed: {e}")))?;
-            return self.write_media_bytes(index, base, &data, None);
+            return self.store_path_item(path, index, path_roots);
         }
 
         // base64 data / URL download
@@ -227,11 +241,7 @@ impl CollectionCore {
             (crate::media_fetch::decode_media_b64(data)?, None, None)
         } else if let Some(url) = item.url.as_deref() {
             let (raw, ct) = crate::media_fetch::fetch_media_url(url, allow_private_fetch)?;
-            let from_path = url::Url::parse(url)
-                .ok()
-                .map(|u| safe_media_name(u.path()))
-                .filter(|n| !n.is_empty());
-            (raw, ct, from_path)
+            (raw, ct, media_name_from_url(url))
         } else {
             // validate() guarantees one source, but keep the legacy message
             // as the backstop.
@@ -243,6 +253,76 @@ impl CollectionCore {
         check_media_size(raw.len())?;
         let name = item.filename.clone().or(derived_name).unwrap_or_default();
         self.write_media_bytes(index, name, &raw, content_type.as_deref())
+    }
+
+    /// The server-local `path` source (zero-copy intent; the #164/#170
+    /// gates): honored only with configured roots, after `..`/symlink
+    /// resolution, contained in one of them.
+    fn store_path_item(
+        &self,
+        path: &str,
+        index: i64,
+        path_roots: &[String],
+    ) -> NativeResult<StoreMediaResult> {
+        use shrike_ffi::NativeError;
+        if path_roots.is_empty() {
+            return Err(NativeError::invalid_input(
+                "server-local paths are not enabled (set --media-path-root on a \
+                 purely-local daemon)",
+            ));
+        }
+        let target = std::fs::canonicalize(path)
+            .map_err(|_| NativeError::invalid_input(format!("file not found: {path}")))?;
+        let target_str = target.to_string_lossy().to_string();
+        if !crate::media_fetch::path_within_any_root(&target_str, path_roots) {
+            return Err(NativeError::invalid_input(
+                "path is outside the configured media root(s)",
+            ));
+        }
+        if !target.is_file() {
+            return Err(NativeError::invalid_input(format!(
+                "file not found: {path}"
+            )));
+        }
+        let base = safe_media_name(&target_str);
+        let data = std::fs::read(&target)
+            .map_err(|e| NativeError::invalid_input(format!("read failed: {e}")))?;
+        self.write_media_bytes(index, base, &data, None)
+    }
+
+    /// The write half of the kernel's re-homed store (#391): byte sources
+    /// were fetched/decoded off-actor on the kernel's blocking pool; `path`
+    /// items run their gates here (containment is collection policy). One
+    /// collection job per batch; per-item errors never sink it.
+    pub fn store_prepared_media(
+        &self,
+        prepared: &[PreparedMedia],
+        path_roots: &[String],
+    ) -> NativeResult<Vec<StoreMediaResult>> {
+        let mut results: Vec<StoreMediaResult> = Vec::new();
+        for p in prepared {
+            let result = match &p.source {
+                PreparedMediaSource::Bytes {
+                    name,
+                    data,
+                    content_type,
+                } => check_media_size(data.len()).and_then(|()| {
+                    self.write_media_bytes(p.index, name.clone(), data, content_type.as_deref())
+                }),
+                PreparedMediaSource::Path { path } => {
+                    self.store_path_item(path, p.index, path_roots)
+                }
+                PreparedMediaSource::Failed { error } => {
+                    Err(shrike_ffi::NativeError::invalid_input(error.clone()))
+                }
+            };
+            results.push(result.unwrap_or_else(|e| StoreMediaResult::Error {
+                index: p.index,
+                filename: p.filename.clone(),
+                error: e.message,
+            }));
+        }
+        Ok(results)
     }
 
     /// Resolve filenames to where their bytes live — never the bytes

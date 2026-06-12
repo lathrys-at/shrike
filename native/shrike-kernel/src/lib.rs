@@ -1052,6 +1052,165 @@ impl Kernel {
         Ok(removed)
     }
 
+    // ── media + maintenance ops (#391 re-home, decision 3) ──────────────────
+    // The #70 media tools and the #89 prune as maintained kernel ops: the
+    // host keeps only the tool signatures (and the serving-URL fill, which is
+    // host config). Media never touches embedding text, so none of these do
+    // index work — except prune, whose deletions carry their own sidecar
+    // tail below.
+
+    /// The full store_media batch: each item's byte source (base64 decode /
+    /// SSRF-guarded URL download) prepares CONCURRENTLY on the blocking pool
+    /// — the host facade's gather-over-to_thread, re-homed — then the batch
+    /// writes as ONE collection job (`path` items run their containment
+    /// gates under that job; they carry no prepare work).
+    pub async fn store_media(
+        &self,
+        items: Vec<shrike_schemas::StoreMediaItem>,
+        allow_private_fetch: bool,
+        path_roots: Vec<String>,
+    ) -> NativeResult<Vec<shrike_schemas::StoreMediaResult>> {
+        use shrike_collection::{media_name_from_url, PreparedMedia, PreparedMediaSource};
+
+        fn prepare_one(
+            index: i64,
+            item: shrike_schemas::StoreMediaItem,
+            allow_private_fetch: bool,
+        ) -> PreparedMedia {
+            let filename = item.filename.clone();
+            let source = if let Err(e) = item.validate() {
+                PreparedMediaSource::Failed { error: e }
+            } else if let Some(path) = item.path {
+                PreparedMediaSource::Path { path }
+            } else if let Some(data) = item.data.as_deref() {
+                match shrike_collection::media_fetch::decode_media_b64(data) {
+                    Ok(bytes) => PreparedMediaSource::Bytes {
+                        name: item.filename.unwrap_or_default(),
+                        data: bytes,
+                        content_type: None,
+                    },
+                    Err(e) => PreparedMediaSource::Failed { error: e.message },
+                }
+            } else if let Some(url) = item.url.as_deref() {
+                match shrike_collection::media_fetch::fetch_media_url(url, allow_private_fetch) {
+                    Ok((bytes, ct)) => PreparedMediaSource::Bytes {
+                        name: item
+                            .filename
+                            .clone()
+                            .or_else(|| media_name_from_url(url))
+                            .unwrap_or_default(),
+                        data: bytes,
+                        content_type: ct,
+                    },
+                    Err(e) => PreparedMediaSource::Failed { error: e.message },
+                }
+            } else {
+                // validate() guarantees one source; backstop message kept.
+                PreparedMediaSource::Failed {
+                    error: "each item needs one of data, url, or path".to_string(),
+                }
+            };
+            PreparedMedia {
+                index,
+                filename,
+                source,
+            }
+        }
+
+        let handles: Vec<_> = items
+            .into_iter()
+            .enumerate()
+            .map(|(i, item)| {
+                tokio::task::spawn_blocking(move || {
+                    prepare_one(i as i64, item, allow_private_fetch)
+                })
+            })
+            .collect();
+        let mut prepared = Vec::with_capacity(handles.len());
+        for handle in handles {
+            prepared.push(
+                handle
+                    .await
+                    .map_err(|e| NativeError::internal(format!("media prepare task: {e}")))?,
+            );
+        }
+        self.collection
+            .run(move |core| core.store_prepared_media(&prepared, &path_roots))
+            .await?
+    }
+
+    /// Resolve filenames to where their bytes live (never the bytes; the
+    /// host fills the serving `url`).
+    pub async fn fetch_media(
+        &self,
+        filenames: Vec<String>,
+    ) -> NativeResult<Vec<shrike_schemas::MediaFetchResult>> {
+        self.collection
+            .run(move |core| core.fetch_media(&filenames))
+            .await?
+    }
+
+    /// List media files (sorted, optional glob + limit).
+    pub async fn list_media(
+        &self,
+        pattern: Option<String>,
+        limit: Option<usize>,
+    ) -> NativeResult<shrike_schemas::ListMediaResponse> {
+        self.collection
+            .run(move |core| core.list_media(pattern.as_deref(), limit))
+            .await?
+    }
+
+    /// Move media files to Anki's recoverable trash.
+    pub async fn delete_media(
+        &self,
+        filenames: Vec<String>,
+    ) -> NativeResult<shrike_schemas::DeleteMediaResponse> {
+        self.collection
+            .run(move |core| core.delete_media(&filenames))
+            .await?
+    }
+
+    /// Read-only media diagnostics.
+    pub async fn media_check(&self) -> NativeResult<shrike_schemas::CollectionCheckResponse> {
+        self.collection.run(move |core| core.media_check()).await?
+    }
+
+    /// The #89 prune with its maintenance tail (the host's old post-apply
+    /// block, re-homed): deletions drop their sidecars like `delete_notes`;
+    /// a tags-only prune is a metadata-only watermark advance. The tail is
+    /// best-effort — a failure logs and the response still returns (the next
+    /// boot's drift check repairs).
+    pub async fn collection_prune(
+        &self,
+        unused_tags: bool,
+        empty_notes: bool,
+        empty_cards: bool,
+        unused_media: bool,
+        dry_run: bool,
+    ) -> NativeResult<shrike_schemas::CollectionPruneResponse> {
+        let (response, removed_note_ids) = self
+            .collection
+            .run(move |core| {
+                core.prune(unused_tags, empty_notes, empty_cards, unused_media, dry_run)
+            })
+            .await??;
+        if !dry_run {
+            let tags_removed = response.unused_tags.as_ref().is_some_and(|t| t.removed > 0);
+            let tail = if !removed_note_ids.is_empty() {
+                self.forget_notes(removed_note_ids).await
+            } else if tags_removed {
+                self.metadata_changed().await
+            } else {
+                Ok(())
+            };
+            if let Err(e) = tail {
+                tracing::warn!(error = %e, "index maintenance after prune failed");
+            }
+        }
+        Ok(response)
+    }
+
     /// Fused search with the kernel's default arguments — a thin delegate to
     /// [`actions::search_notes`], the ONE fused-search spine (#388): no
     /// scope, no threshold, no image floor, the canonical `fusion` weights.
@@ -1357,6 +1516,106 @@ mod no_cpython_smoke {
             kernel.close().await.unwrap();
             // Idempotent (#382): a second close after the actor drained is
             // already-closed, not an actor-gone error.
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
+    fn media_ops_and_prune_run_as_kernel_ops() {
+        // The #391 re-home: store_media's byte prepare rides the blocking
+        // pool with per-item errors, the read ops round-trip, and prune
+        // carries its own maintenance tail (vectors leave with the notes,
+        // the watermark advances — no host-side forget/metadata calls).
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            // store: a good data item + a sourceless one — the bad slot
+            // errors, the batch survives, indexes echo positions.
+            let items = vec![
+                shrike_schemas::StoreMediaItem {
+                    filename: Some("pic.png".into()),
+                    data: Some("UE5HREFUQQ==".into()), // b64("PNGDATA")
+                    ..Default::default()
+                },
+                shrike_schemas::StoreMediaItem::default(),
+            ];
+            let stored = kernel.store_media(items, false, Vec::new()).await.unwrap();
+            assert!(matches!(
+                &stored[0],
+                shrike_schemas::StoreMediaResult::Stored { index: 0, filename, .. }
+                    if filename == "pic.png"
+            ));
+            assert!(matches!(
+                &stored[1],
+                shrike_schemas::StoreMediaResult::Error { index: 1, .. }
+            ));
+
+            // fetch/list/check round-trip on the kernel ops.
+            let fetched = kernel
+                .fetch_media(vec!["pic.png".into(), "ghost.png".into()])
+                .await
+                .unwrap();
+            assert!(matches!(
+                &fetched[0],
+                shrike_schemas::MediaFetchResult::Found { .. }
+            ));
+            assert!(matches!(
+                &fetched[1],
+                shrike_schemas::MediaFetchResult::Missing { .. }
+            ));
+            assert_eq!(kernel.list_media(None, None).await.unwrap().count, 1);
+            assert_eq!(kernel.media_check().await.unwrap().unused.len(), 1);
+
+            // A note that goes blank via a raw (external-style) edit: prune
+            // applies, and the kernel tail drops its vector + advances the
+            // watermark — no drift on the next reindex check.
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+            let CreateOutcome::Created(nid) = kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["temp".into(), "".into()],
+                    vec!["onlytag".into()],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("create failed")
+            };
+            assert!(kernel.index().engine().contains(nid));
+            kernel
+                .collection
+                .run(move |core| core.update_note(nid, &["".into(), "".into()], None))
+                .await
+                .unwrap()
+                .unwrap();
+
+            let preview = kernel
+                .collection_prune(true, true, true, true, true)
+                .await
+                .unwrap();
+            assert!(preview.dry_run);
+            assert!(kernel.index().engine().contains(nid)); // untouched
+
+            let applied = kernel
+                .collection_prune(true, true, true, true, false)
+                .await
+                .unwrap();
+            assert!(!applied.dry_run);
+            assert_eq!(applied.empty_notes.unwrap().removed, vec![nid]);
+            assert!(!kernel.index().engine().contains(nid));
+            assert!(!kernel.reindex_if_needed().await.unwrap());
+
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
         });

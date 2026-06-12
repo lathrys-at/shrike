@@ -341,6 +341,106 @@ impl AsyncKernel {
         kernel_op(py, async move { kernel.delete_notes(note_ids).await })
     }
 
+    // ── media + maintenance ops (#391 re-home) ──────────────────────────────
+
+    /// The full store_media batch (#70): byte sources prepare concurrently
+    /// on the kernel's blocking pool, the batch writes as one collection
+    /// job. Per-item results JSON; the host fills nothing.
+    #[pyo3(signature = (items_json, allow_private_fetch=false, path_roots=None))]
+    fn store_media<'py>(
+        &self,
+        py: Python<'py>,
+        items_json: String,
+        allow_private_fetch: bool,
+        path_roots: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let items: Vec<shrike_schemas::StoreMediaItem> = serde_json::from_str(&items_json)
+            .map_err(|e| {
+                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                    "items must be a JSON list: {e}"
+                )))
+            })?;
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let results = kernel
+                .store_media(items, allow_private_fetch, path_roots.unwrap_or_default())
+                .await?;
+            crate::kernel_actions::wire(&results)
+        })
+    }
+
+    /// Locate media files (never bytes): per-item found/missing JSON (the
+    /// host fills each found file's serving `url`).
+    fn fetch_media<'py>(
+        &self,
+        py: Python<'py>,
+        filenames: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let results = kernel.fetch_media(filenames).await?;
+            crate::kernel_actions::wire(&results)
+        })
+    }
+
+    /// List media filenames (sorted; optional glob pattern + limit), JSON.
+    #[pyo3(signature = (pattern=None, limit=None))]
+    fn list_media<'py>(
+        &self,
+        py: Python<'py>,
+        pattern: Option<String>,
+        limit: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let response = kernel.list_media(pattern, limit).await?;
+            crate::kernel_actions::wire(&response)
+        })
+    }
+
+    /// Move media files to Anki's recoverable trash, JSON result.
+    fn delete_media<'py>(
+        &self,
+        py: Python<'py>,
+        filenames: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let response = kernel.delete_media(filenames).await?;
+            crate::kernel_actions::wire(&response)
+        })
+    }
+
+    /// Read-only media diagnostics, JSON.
+    fn media_check<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let response = kernel.media_check().await?;
+            crate::kernel_actions::wire(&response)
+        })
+    }
+
+    /// The #89 prune with its kernel-side maintenance tail; response JSON
+    /// (removed note ids stay kernel-internal).
+    #[pyo3(signature = (unused_tags=true, empty_notes=true, empty_cards=true, unused_media=true, dry_run=true))]
+    fn collection_prune<'py>(
+        &self,
+        py: Python<'py>,
+        unused_tags: bool,
+        empty_notes: bool,
+        empty_cards: bool,
+        unused_media: bool,
+        dry_run: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let response = kernel
+                .collection_prune(unused_tags, empty_notes, empty_cards, unused_media, dry_run)
+                .await?;
+            crate::kernel_actions::wire(&response)
+        })
+    }
+
     /// Fused search: `(note_id, score, [(signal, rank)])` rows.
     fn search<'py>(
         &self,
