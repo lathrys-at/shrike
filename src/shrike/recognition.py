@@ -2,11 +2,12 @@
 ``Recognizer`` slot.
 
 Since the engine-plugin migration (#342 P3) the Apple Vision engine is native
-(`shrike-recognize-apple`, objc2 + the Vision framework — no pyobjc, no extra
-to install; Vision ships with macOS). ``make_recognizer`` constructs the
-native backend object; ``Harness.attach_recognizer`` hands it to the kernel,
-where recognition runs native end-to-end (engine → executor lane), Python
-never on the sweep path.
+(`shrike-recognize-apple`; since #398 its platform glue is Swift behind Rust,
+driving Apple's Swift-only ``RecognizeTextRequest`` API — nothing extra to
+install at runtime; Vision and the Swift runtime ship with macOS).
+``make_recognizer`` constructs the native backend object;
+``Harness.attach_recognizer`` hands it to the kernel, where recognition runs
+native end-to-end, Python never on the sweep path.
 
 A *custom* backend remains first-class: any object satisfying
 ``RecognizerBackend`` — a blocking ``recognize(items)`` returning one

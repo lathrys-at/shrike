@@ -2,8 +2,23 @@
 # undefined at link time (the host interpreter resolves them at import) —
 # the same flags the Bazel rust_shared_library rules pass via rustc_flags.
 # Bazel ignores this file; it exists for local `cargo build/test`.
+#
+# The /usr/lib/swift rpath (#398): libswift_Concurrency's SDK stub remaps to
+# an @rpath install name when the final link's deployment target is ≤ 12.0
+# (the `$ld$previous` back-deploy window) — and rustc links at its 11.0
+# default. The rpath resolves it from the OS shared cache wherever the Swift
+# glue (shrike-recognize-apple) is linked in, and is inert everywhere else.
+# Bazel-side the same flag rides the swift_glue cc_library's linkopts.
 [target.aarch64-apple-darwin]
-rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+rustflags = [
+    "-C", "link-arg=-undefined",
+    "-C", "link-arg=dynamic_lookup",
+    "-C", "link-arg=-Wl,-rpath,/usr/lib/swift",
+]
 
 [target.x86_64-apple-darwin]
-rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+rustflags = [
+    "-C", "link-arg=-undefined",
+    "-C", "link-arg=dynamic_lookup",
+    "-C", "link-arg=-Wl,-rpath,/usr/lib/swift",
+]

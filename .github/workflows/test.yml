@@ -12,9 +12,10 @@ on:
   # the suite runs once, at the end, when you add `ci`. (Public repo: standard
   # runners bill nothing — the deferral buys wall-clock/queue/noise, and keeps
   # the posture safe if the repo ever goes private.)
-  # `labeled` is in the trigger types so adding `ci`/`rc` re-fires the workflow
-  # (the default types don't fire on label changes); `unlabeled` so removing the
-  # label re-evaluates the `ci-ok` gate (flips it back to "add the ci label").
+  # `labeled` is in the trigger types so adding `ci`/`rc`/`macOS` re-fires the
+  # workflow (the default types don't fire on label changes); `unlabeled` so
+  # removing the label re-evaluates the `ci-ok` gate (flips it back to "add the
+  # ci label").
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, labeled, unlabeled]
@@ -63,7 +64,8 @@ jobs:
     # (lint/bazel/embedding all `needs: changes`), so skipping it here when the PR
     # lacks `ci`/`rc` cascades — every downstream lane is skipped too, and not a
     # single test runner spins up. `cross-platform` is the only lane outside this
-    # graph; it stays `rc`-gated (and `rc` is part of this condition anyway).
+    # graph; it is `rc`/`macOS`-gated on its own (`rc` is part of this condition
+    # anyway; a bare `macOS` label adds the macos leg without implying `ci`).
     if: contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     outputs:
@@ -305,22 +307,30 @@ jobs:
             --repository_cache="$HOME/.cache/shrike/bazel-repo" \
             -- //tests/integration:embedding_core //tests/integration:embedding_backends
 
-  # macOS + ARM are expensive (macOS bills at 10x), so they NEVER run on plain
-  # PRs or on merges to main — only when a PR carries the `rc` (release
-  # candidate) label. Apply the label when you're about to tag a release and want
-  # full cross-platform coverage first. Runs the whole Bazel graph (including the
-  # `manual` embedding target + the Rust/PyO3 seam) for that platform — the
-  # macOS-only PyO3 link path (-undefined dynamic_lookup) + the .so rename can't
-  # be reached on the per-PR linux lane (#247 review). Label-gated regardless of
-  # paths: a release candidate gets full coverage no matter how small the diff.
+  # macOS + ARM never run on plain PRs or on merges to main — only by label.
+  # Two labels gate this lane, by intent:
+  #   - `rc` (release candidate): the FULL os matrix. Apply when you're about
+  #     to tag a release and want complete cross-platform coverage first.
+  #   - `macOS`: just the macos-latest leg, for a PR whose change is
+  #     macOS-specific (the Swift/Vision platform glue, the PyO3 link path)
+  #     and needs a macOS CI proof without the broader rc treatment.
+  # Runs the whole Bazel graph (including the `manual` embedding target + the
+  # Rust/PyO3 seam) for each selected platform — the macOS-only PyO3 link path
+  # (-undefined dynamic_lookup) + the .so rename can't be reached on the
+  # per-PR linux lane (#247 review). Label-gated regardless of paths: the
+  # label asks for platform coverage no matter how small the diff.
   cross-platform:
     name: Cross-platform (${{ matrix.os }})
-    if: contains(github.event.pull_request.labels.*.name, 'rc')
+    if: >-
+      contains(github.event.pull_request.labels.*.name, 'rc') ||
+      contains(github.event.pull_request.labels.*.name, 'macOS')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04-arm, macos-latest]
+        # `rc` selects the full matrix; a bare `macOS` label selects only the
+        # macos-latest leg.
+        os: ${{ fromJSON(contains(github.event.pull_request.labels.*.name, 'rc') && '["ubuntu-24.04-arm", "macos-latest"]' || '["macos-latest"]') }}
     steps:
       - uses: actions/checkout@v6
       # Same split caches as the per-PR lane (different os/arch key scope, so no

@@ -4,10 +4,60 @@ package(default_visibility = ["//native:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
-# The Apple Vision OCR engine (#342 P3): macOS-only innards behind the
-# engine-api traits; the off-macOS build is the unavailable stub, so this
-# target exists on every platform (the workspace's first cfg-conditional dep
-# — crate_universe renders the [target.'cfg(macos)'] deps as a select).
+# The Swift half (#398): the same `xcrun swiftc` invocation as build.rs (the
+# cargo lane), so both builds produce identical Swift — the 13.0 target is
+# build.rs's default deployment floor (the cargo lane additionally honors
+# MACOSX_DEPLOYMENT_TARGET). macOS-only; off macOS nothing here is built and
+# the crate compiles to the unavailable stub. rules_swift was deliberately
+# not adopted: for 1–2 sources a genrule keeps MODULE.bazel untouched and
+# the two build systems byte-identical.
+genrule(
+    name = "swift_glue_a",
+    srcs = glob(["swift/*.swift"]),
+    outs = ["libShrikeRecognizeApple.a"],
+    cmd = """
+        SDK=$$(xcrun --sdk macosx --show-sdk-path)
+        $$(xcrun --sdk macosx --find swiftc) \\
+            -emit-library -static -parse-as-library -O \\
+            -module-name ShrikeRecognizeApple \\
+            -sdk "$$SDK" \\
+            -target "$$(uname -m)-apple-macos13.0" \\
+            $(SRCS) -o $@
+    """,
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
+cc_import(
+    name = "swift_glue_import",
+    static_library = ":swift_glue_a",
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
+# The link surface for the Swift glue: the archive plus what its autolink
+# metadata needs resolved — the SDK's Swift stub libs (at runtime the
+# absolute /usr/lib/swift install names win; the OS ships the runtime) and
+# the frameworks. __BAZEL_XCODE_SDKROOT__ is the toolchain's placeholder for
+# the active SDK path.
+cc_library(
+    name = "swift_glue",
+    linkopts = [
+        "-L__BAZEL_XCODE_SDKROOT__/usr/lib/swift",
+        # libswift_Concurrency's stub remaps to an @rpath install name when
+        # the final link targets ≤ 12.0 (the $ld$previous back-deploy
+        # window); the rpath resolves it from the OS shared cache.
+        "-Wl,-rpath,/usr/lib/swift",
+        "-framework",
+        "Vision",
+        "-framework",
+        "Foundation",
+    ],
+    target_compatible_with = ["@platforms//os:macos"],
+    deps = [":swift_glue_import"],
+)
+
+# The Apple Vision OCR engine (#342 P3, Swift glue since #398): macOS-only
+# innards behind the engine-api traits; the off-macOS build is the
+# unavailable stub, so this target exists on every platform.
 rust_library(
     name = "shrike_recognize_apple",
     srcs = glob(["src/**/*.rs"]),
@@ -18,10 +68,9 @@ rust_library(
         "@crates//:tracing",
     ] + select({
         "@platforms//os:macos": [
-            "@crates//:objc2",
-            "@crates//:objc2-core-foundation",
-            "@crates//:objc2-foundation",
-            "@crates//:objc2-vision",
+            ":swift_glue",
+            "@crates//:serde",
+            "@crates//:serde_json",
         ],
         "//conditions:default": [],
     }),

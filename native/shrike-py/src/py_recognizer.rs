@@ -118,9 +118,9 @@ impl AppleVisionRecognizer {
         })
     }
 
-    /// The platform identity: `apple-vision:rev{N}:macos{X.Y[.Z]}` —
-    /// byte-compatible with the retired pyobjc backend, so the swap never
-    /// re-derives existing text.
+    /// The platform identity: `apple-vision-swift:{revision}:macos{X.Y.Z}`
+    /// — the hard-cut Swift-glue lineage (#398); a changed fingerprint
+    /// re-derives OCR rows exactly like a model change rebuilds vectors.
     fn model_fingerprint(&self) -> Option<String> {
         Some(self.engine.fingerprint_str().to_string())
     }

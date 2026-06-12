@@ -1,20 +1,24 @@
-//! Apple Vision OCR as a native engine crate (#342 P3, the port of #221's
-//! pyobjc backend): `VNRecognizeTextRequest` at accurate level with language
-//! correction, per-line text + confidence + normalized top-left boxes — the
-//! one-pass text+positions contract, 1:1 with the retired Python backend
-//! (including the fingerprint format, so existing derived text never
-//! spuriously re-derives on the swap).
+//! Apple Vision OCR as a native engine crate (#342 P3; Swift glue since
+//! #398): Apple's new `RecognizeTextRequest` (macOS 15+, Swift-only) at
+//! accurate level with language correction, per-line text + confidence +
+//! normalized top-left boxes — the one-pass text+positions contract. The
+//! platform glue is Swift bolted behind Rust: `swift/Recognize.swift`
+//! exports a 3-function C ABI, `imp.rs` is the `extern "C"` shim, and the
+//! fingerprint took a hard cut (`apple-vision-swift:…`) so the new model
+//! lineage re-derives existing OCR rows exactly once.
 //!
-//! Route 1 of the engine contract: Vision's `performRequests:` is synchronous,
-//! so the engine implements [`RecognizeMedia`] (pure chunk compute, no
-//! execution assumptions) and the `Blocking` adapter moves it onto
-//! the kernel runtime's blocking pool. The struct holds only plain config — every
-//! Vision/Foundation object is created per call on whatever thread runs it —
-//! so it is naturally `Send + Sync`.
+//! Route 1 of the engine contract: the C entries are synchronous (the Swift
+//! side bridges the async API internally — safe because these run on the
+//! kernel runtime's *blocking* pool via the `Blocking` adapter, disjoint
+//! from Swift's cooperative executor), so the engine implements
+//! [`RecognizeMedia`] (pure chunk compute, no execution assumptions). The
+//! struct holds only its cached fingerprint, so it is naturally
+//! `Send + Sync`.
 //!
 //! Off macOS the crate compiles to the same API with a constructor returning
 //! `NativeError::unavailable` — the workspace builds everywhere without
-//! platform surgery in the build graph.
+//! platform surgery in the build graph (build.rs no-ops, no Swift toolchain
+//! needed).
 
 use shrike_engine_api::{MediaItem, Recognition, RecognizeMedia};
 use shrike_ffi::{NativeError, NativeResult};
@@ -40,10 +44,11 @@ impl AppleVisionRecognizer {
         })
     }
 
-    /// The platform identity: `apple-vision:rev{N}:macos{X.Y[.Z]}` — request
-    /// revision + OS version, byte-compatible with the Python backend's
-    /// format (an OS upgrade re-derives, exactly like a model change
-    /// rebuilds vectors).
+    /// The platform identity: `apple-vision-swift:{revision}:macos{X.Y.Z}`
+    /// — model revision + OS version (an OS upgrade re-derives, exactly
+    /// like a model change rebuilds vectors). A deliberate hard cut from
+    /// the objc2 engine's `apple-vision:rev{N}` lineage (#398): the new
+    /// API rides a newer text model, so all OCR rows re-derive once.
     pub fn fingerprint_str(&self) -> &str {
         &self.fingerprint
     }
@@ -79,13 +84,6 @@ pub(crate) fn empty_recognition() -> Recognition {
     }
 }
 
-/// Round to 4 decimal places (the segments contract's box precision, matching
-/// the Python backend's `round(v, 4)`).
-#[cfg(target_os = "macos")]
-pub(crate) fn round4(v: f64) -> f64 {
-    (v * 10_000.0).round() / 10_000.0
-}
-
 // Keep the unavailable error construction in one place for the stub.
 #[allow(dead_code)]
 pub(crate) fn unavailable() -> NativeError {
@@ -113,18 +111,15 @@ mod tests {
         }
 
         #[test]
-        fn fingerprint_format_matches_python_backend() {
+        fn fingerprint_format() {
             let fp = engine().fingerprint_str().to_string();
-            // apple-vision:rev{N}:macos{X.Y[.Z]} — and stable across calls.
-            assert!(fp.starts_with("apple-vision:rev"), "{fp}");
+            // apple-vision-swift:{revision}:macos{X.Y.Z} — stable across
+            // calls; a hard cut from the objc2 lineage (#398).
+            assert!(fp.starts_with("apple-vision-swift:revision"), "{fp}");
             let macos = fp.split(":macos").nth(1).expect("macos segment");
             let parts: Vec<&str> = macos.split('.').collect();
-            assert!(parts.len() >= 2, "{fp}");
+            assert_eq!(parts.len(), 3, "un-elided X.Y.Z: {fp}");
             assert!(parts.iter().all(|p| p.parse::<u32>().is_ok()), "{fp}");
-            assert!(
-                !macos.ends_with(".0"),
-                "trailing .0 patch must be elided for Python-backend parity: {fp}"
-            );
             assert_eq!(engine().fingerprint_str(), fp);
         }
 
