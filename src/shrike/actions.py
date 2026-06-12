@@ -831,9 +831,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 # ran (it assigns all-or-nothing) — the typed kernel results
                 # carry `neighbors: []` even before the attach, so key
                 # absence stopped being a usable sentinel (#391).
-                pending = [
-                    r["id"] for r in results if r.get("status") in ("created", "updated")
-                ]
+                pending = [r["id"] for r in results if r.get("status") in ("created", "updated")]
                 for r in results:
                     if r.get("id") in pending:
                         r["neighbors_unavailable"] = True
