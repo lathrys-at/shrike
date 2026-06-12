@@ -37,6 +37,14 @@ pub const DEFAULT_MIN_MEMBERS: usize = 2;
 pub const DEFAULT_MAX_COVERAGE: f64 = 0.5;
 pub const DEFAULT_BLOCKLIST: &[&str] = &["leech", "marked"];
 
+/// Per-tag ceiling on members scored during query expansion (#445): a huge
+/// tag — approaching the whole collection at 100k notes — would otherwise
+/// pay a vector read + dot product per member on every query it activates
+/// for. Tags over the ceiling are stride-sampled (deterministic, spread
+/// across the member range); a tag that big is weakly informative as a
+/// concept anyway, and the expansion feeds a 50-slot cap.
+pub const MEMBER_SCORE_CEILING: usize = 4096;
+
 /// The hygiene filter configuration: which tags are *concepts* worth a vector.
 #[derive(Debug, Clone)]
 pub struct TagCentroidConfig {
@@ -143,6 +151,30 @@ impl TagKeyMap {
             .get(&key)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// The not-yet-`seen` members behind a centroid key, stride-sampled down
+    /// to `ceiling` under the read lock (#445) — the expansion's bounded
+    /// working set, never the full member clone `members()` hands out. The
+    /// stride is deterministic and spreads the sample across the member
+    /// range rather than biasing toward the lowest note ids.
+    fn fresh_members(
+        &self,
+        key: i64,
+        seen: &std::collections::BTreeSet<i64>,
+        ceiling: usize,
+    ) -> Vec<i64> {
+        let state = self.inner.read().expect("tag keys poisoned");
+        let Some(members) = state.members.get(&key) else {
+            return Vec::new();
+        };
+        let fresh = members.iter().filter(|nid| !seen.contains(nid));
+        let n = fresh.clone().count();
+        if n <= ceiling {
+            return fresh.copied().collect();
+        }
+        // ceil-stride keeps the sample at or under the ceiling.
+        fresh.copied().step_by(n.div_ceil(ceiling)).collect()
     }
 
     pub fn len(&self) -> usize {
@@ -253,10 +285,6 @@ pub const TAG_RANK_CAP: usize = 50;
 /// future refinement; this fixed floor is the v1 knob.
 pub const TAG_ACTIVATION: f64 = 0.35;
 
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
 /// The tag retrieval signal (#179): rank the `tag.text` space with the query
 /// vector, activate tags whose centroid cosine clears `threshold` (the same
 /// floor the semantic note ranking uses — centroids live in the text space,
@@ -297,23 +325,30 @@ pub fn tag_ranking(
         if f64::from(1.0 - dist) < threshold {
             break;
         }
-        let mut members: Vec<(i64, f32)> = keys
-            .members(*key)
-            .iter()
-            .filter_map(|nid| {
-                let vectors = engine.modality_get("text", *nid)?;
-                let v = vectors.first()?;
-                (v.len() == query.len()).then(|| (*nid, dot(query, v)))
-            })
-            .collect();
-        members.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for (nid, _) in members {
-            if seen.insert(nid) {
-                out.push(nid);
-                if out.len() >= cap {
-                    return out;
-                }
-            }
+        // Fresh-first (#445): members an earlier (better) tag already ranked
+        // would only be skipped *after* scoring — filtering them up front
+        // means hierarchy overlap is never re-scored, and pushing the fresh
+        // subset in score order is exactly what the full sort + skip did.
+        let fresh = keys.fresh_members(*key, &seen, MEMBER_SCORE_CEILING);
+        if fresh.is_empty() {
+            continue;
+        }
+        let mut scored = engine.dot_scores("text", &fresh, query);
+        // Only the top `needed` ever leave this loop iteration — partition
+        // them out, then order just that slice (#445: a huge tag previously
+        // paid a full O(m log m) sort to fill a 50-slot cap).
+        let needed = cap - out.len();
+        if scored.len() > needed {
+            scored.select_nth_unstable_by(needed - 1, |a, b| b.1.total_cmp(&a.1));
+            scored.truncate(needed);
+        }
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for (nid, _) in scored {
+            seen.insert(nid);
+            out.push(nid);
+        }
+        if out.len() >= cap {
+            return out;
         }
     }
     out
@@ -402,6 +437,66 @@ mod tests {
 
         // The cap bounds the expansion.
         assert_eq!(tag_ranking(&engine, &keys, &[1.0, 0.0], 0.5, 3, 1).len(), 1);
+    }
+
+    #[test]
+    fn tag_ranking_dedupes_across_overlapping_tags() {
+        // Hierarchy overlap: `a::b`'s member is also `a`'s (roll-up). The
+        // fresh-first expansion (#445) must still surface each note once,
+        // best tag first.
+        let engine = MultiModalIndex::new(vec![
+            "text".to_string(),
+            "image".to_string(),
+            TAG_TEXT_SPACE.to_string(),
+        ])
+        .unwrap();
+        engine.ensure("text", 2).unwrap();
+        engine
+            .add(
+                "text",
+                &[1, 2],
+                &[vec![1.0, 0.0], vec![0.9, (1.0f32 - 0.81).sqrt()]],
+            )
+            .unwrap();
+        let rows = vec![(1, vec!["a::b".to_string()]), (2, vec!["a".to_string()])];
+        let keys = TagKeyMap::default();
+        let config = TagCentroidConfig {
+            min_members: 1,
+            max_coverage: 1.0,
+            ..TagCentroidConfig::default()
+        };
+        recompute(&engine, &rows, 2, &config, &keys).unwrap();
+        assert_eq!(keys.members(tag_key("a")), vec![1, 2]);
+        assert_eq!(keys.members(tag_key("a::b")), vec![1]);
+
+        // `a::b`'s centroid is note 1 exactly → activates first; `a` then
+        // contributes only its fresh member.
+        let ranking = tag_ranking(&engine, &keys, &[1.0, 0.0], 0.5, 3, 50);
+        assert_eq!(ranking, vec![1, 2]);
+    }
+
+    #[test]
+    fn fresh_members_filters_seen_and_bounds_to_ceiling() {
+        let keys = TagKeyMap::default();
+        let members: Vec<i64> = (1..=10).collect();
+        keys.replace(
+            BTreeMap::from([(7, "t".to_string())]),
+            BTreeMap::from([(7, members)]),
+        );
+        let seen: std::collections::BTreeSet<i64> = [2, 4].into_iter().collect();
+
+        // Under the ceiling: every fresh member, in member order.
+        assert_eq!(
+            keys.fresh_members(7, &seen, 100),
+            vec![1, 3, 5, 6, 7, 8, 9, 10]
+        );
+        // Over the ceiling: bounded, all fresh, deterministic.
+        let sampled = keys.fresh_members(7, &seen, 3);
+        assert_eq!(sampled.len(), 3);
+        assert!(sampled.iter().all(|n| !seen.contains(n)));
+        assert_eq!(sampled, keys.fresh_members(7, &seen, 3));
+        // Unknown key: empty.
+        assert!(keys.fresh_members(99, &seen, 3).is_empty());
     }
 
     #[test]

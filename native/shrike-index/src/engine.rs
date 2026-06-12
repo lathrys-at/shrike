@@ -414,6 +414,41 @@ impl MultiModalIndex {
         keys
     }
 
+    /// Dot-score each key's FIRST stored vector against `query` in one lock
+    /// hold (#445): the tag expansion previously paid a mutex acquire plus a
+    /// full per-vector heap clone per member via `modality_get`. Each key's
+    /// vectors are read into one reused buffer and only `(key, dot)` pairs
+    /// come back; missing keys are skipped, a query/ndim mismatch returns
+    /// empty. Callers bound `keys` (the expansion's member ceiling), so the
+    /// single hold stays in low-millisecond territory — unlike calibration,
+    /// which holds per-search because its total runs much longer.
+    pub fn dot_scores(&self, modality: &str, keys: &[i64], query: &[f32]) -> Vec<(i64, f32)> {
+        let state = self.lock();
+        let Some(sub) = state.indexes.get(modality) else {
+            return Vec::new();
+        };
+        let ndim = sub.index.dimensions();
+        if ndim != query.len() {
+            return Vec::new();
+        }
+        let mut buf: Vec<f32> = Vec::new();
+        keys.iter()
+            .filter_map(|key| {
+                let count = sub.index.count(*key as u64);
+                if count == 0 {
+                    return None;
+                }
+                buf.resize(count * ndim, 0.0);
+                let copied = sub.index.get(*key as u64, &mut buf).ok()?;
+                if copied == 0 {
+                    return None;
+                }
+                let dot = buf[..ndim].iter().zip(query).map(|(x, y)| x * y).sum();
+                Some((*key, dot))
+            })
+            .collect()
+    }
+
     pub fn modality_get(&self, modality: &str, key: i64) -> Option<Vec<Vec<f32>>> {
         let state = self.lock();
         let sub = state.indexes.get(modality)?;
@@ -697,6 +732,30 @@ mod tests {
         assert_eq!(modality, "image");
         assert!(*count >= 30.0);
         assert!(*std >= 0.0);
+    }
+
+    #[test]
+    fn dot_scores_matches_get_and_skips_misses() {
+        let e = engine();
+        e.add("text", &[1, 2], &[unit(1, 8), unit(2, 8)]).unwrap();
+        let q = unit(7, 8);
+        let scores = e.dot_scores("text", &[1, 2, 99], &q);
+        assert_eq!(scores.iter().map(|(k, _)| *k).collect::<Vec<_>>(), [1, 2]);
+        for (k, s) in &scores {
+            let v = &e.modality_get("text", *k).unwrap()[0];
+            let expect: f32 = v.iter().zip(&q).map(|(x, y)| x * y).sum();
+            assert!((s - expect).abs() < 1e-6);
+        }
+        // A multi-vector key scores its FIRST vector (the expansion's
+        // existing semantics).
+        e.add("text", &[3, 3], &[unit(8, 8), unit(9, 8)]).unwrap();
+        let first = &e.modality_get("text", 3).unwrap()[0];
+        let expect: f32 = first.iter().zip(&q).map(|(x, y)| x * y).sum();
+        let scored = e.dot_scores("text", &[3], &q);
+        assert!((scored[0].1 - expect).abs() < 1e-6);
+        // Dim mismatch and unknown modality degrade to empty, never panic.
+        assert!(e.dot_scores("text", &[1], &[1.0]).is_empty());
+        assert!(e.dot_scores("nope", &[1], &q).is_empty());
     }
 
     #[test]
