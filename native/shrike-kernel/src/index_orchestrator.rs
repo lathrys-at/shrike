@@ -402,6 +402,12 @@ impl IndexOrchestrator {
     /// vector and no hash, but previously rewrote the full engine files to
     /// persist one i64. The vectors/hashes on disk are unchanged by
     /// definition on this path, so meta stays truthful.
+    ///
+    /// Caller contract: only sound when the on-disk engine/hashes already
+    /// match memory — today's sole caller (reconcile's empty-diff branch) is
+    /// reachable only after `open` loaded persisted hashes, which exist only
+    /// if a prior full `save()` landed. A new caller on a path where `add`
+    /// populated hashes without a persist would write a lying meta.
     pub fn save_meta_only(&self) -> NativeResult<()> {
         let _saving = self.save_guard.lock().expect("save guard poisoned");
         let Some(ndim) = self.engine.ndim() else {
