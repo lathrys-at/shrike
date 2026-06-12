@@ -28,6 +28,7 @@ anki-core = ["dep:shrike-collection", "dep:shrike-kernel"]
 pyo3 = { workspace = true }
 shrike-collection = { path = "../shrike-collection", optional = true }
 shrike-kernel = { path = "../shrike-kernel", optional = true }
+serde = "1"
 serde_json = "1"
 # Runtime-agnostic future building blocks for the worker executor (no runtime).
 futures = "0.3"

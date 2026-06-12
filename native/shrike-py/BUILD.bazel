@@ -53,6 +53,7 @@ rust_shared_library(
         "@crates//:futures",
         "@crates//:tokio",
         "@crates//:pyo3",
+        "@crates//:serde",
         "@crates//:serde_json",
         "@crates//:log",
         "@crates//:pyo3-log",

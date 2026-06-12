@@ -6,11 +6,22 @@
 //! runs the whole action body in `shrike_kernel::actions`, and returns the
 //! canonical response as JSON for the Pydantic binding to validate. The GIL is
 //! released for the duration (`py.detach`).
+//!
+//! THIS is the host edge where a typed response becomes JSON (#391 phase 2) —
+//! through `shrike_schemas::to_wire_json`, which reproduces the legacy
+//! hand-built wire byte-for-byte (compact, key-sorted, `None` omitted).
 
 use pyo3::prelude::*;
 
 use crate::anki_core::CollectionCore;
 use crate::to_py_err;
+
+/// Serialize a typed response onto the host wire; a failure is a native bug.
+/// Shared with the direct `CollectionCore` read bindings in `anki_core`.
+pub(crate) fn wire<T: serde::Serialize>(value: &T) -> Result<String, shrike_ffi::NativeError> {
+    shrike_schemas::to_wire_json(value)
+        .map_err(|e| shrike_ffi::NativeError::internal(format!("response wire shape: {e}")))
+}
 
 /// The kernel-side registry — the Python binding asserts its forwarding list
 /// against this so the two sides can't drift silently.
@@ -28,8 +39,11 @@ pub(crate) fn action_collection_info(
     note_type_details: Vec<String>,
 ) -> PyResult<String> {
     let inner = core.core_ref();
-    py.detach(|| shrike_kernel::actions::collection_info(inner, &include, &note_type_details))
-        .map_err(to_py_err)
+    py.detach(|| {
+        let resp = shrike_kernel::actions::collection_info(inner, &include, &note_type_details)?;
+        wire(&resp)
+    })
+    .map_err(to_py_err)
 }
 
 #[pyfunction]
@@ -56,8 +70,11 @@ pub(crate) fn action_list_notes(
         with_fields,
         limit,
     };
-    py.detach(|| shrike_kernel::actions::list_notes(inner, &params))
-        .map_err(to_py_err)
+    py.detach(|| {
+        let resp = shrike_kernel::actions::list_notes(inner, &params)?;
+        wire(&resp)
+    })
+    .map_err(to_py_err)
 }
 
 #[pyfunction]
@@ -70,8 +87,11 @@ pub(crate) fn action_collection_query(
     limit: usize,
 ) -> PyResult<String> {
     let inner = core.core_ref();
-    py.detach(|| shrike_kernel::actions::collection_query(inner, &query, with_fields, limit))
-        .map_err(to_py_err)
+    py.detach(|| {
+        let resp = shrike_kernel::actions::collection_query(inner, &query, with_fields, limit)?;
+        wire(&resp)
+    })
+    .map_err(to_py_err)
 }
 
 /// `attach_neighbors` (#391 phase 1): the upsert dedup policy in the kernel.

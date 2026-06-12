@@ -144,7 +144,9 @@ impl CollectionCore {
             .map_err(to_py_err)
     }
 
-    /// The raw Anki search escape hatch — list_notes-shaped JSON.
+    /// The raw Anki search escape hatch — list_notes-shaped JSON (the core
+    /// returns the typed response since #391 phase 2; this binding is its
+    /// serialization edge, byte-identical to the old hand-built wire).
     #[pyo3(signature = (search, with_fields=true, limit=50))]
     fn query(
         &self,
@@ -153,8 +155,11 @@ impl CollectionCore {
         with_fields: bool,
         limit: usize,
     ) -> PyResult<String> {
-        py.detach(|| self.inner.query(&search, with_fields, limit))
-            .map_err(to_py_err)
+        py.detach(|| {
+            let resp = self.inner.query(&search, with_fields, limit)?;
+            crate::kernel_actions::wire(&resp)
+        })
+        .map_err(to_py_err)
     }
 
     /// Full raw field map per note id: `(note_id, names, values)` rows
@@ -534,7 +539,7 @@ impl CollectionCore {
         limit: usize,
     ) -> PyResult<String> {
         py.detach(|| {
-            self.inner.list_notes(
+            let resp = self.inner.list_notes(
                 ids.as_deref(),
                 deck.as_deref(),
                 tags.as_deref(),
@@ -542,7 +547,8 @@ impl CollectionCore {
                 modified_since,
                 with_fields,
                 limit,
-            )
+            )?;
+            crate::kernel_actions::wire(&resp)
         })
         .map_err(to_py_err)
     }
@@ -557,10 +563,11 @@ impl CollectionCore {
         detail_names: Option<Vec<String>>,
     ) -> PyResult<String> {
         py.detach(|| {
-            self.inner.collection_info(
+            let resp = self.inner.collection_info(
                 sections.as_deref().unwrap_or(&[]),
                 detail_names.as_deref().unwrap_or(&[]),
-            )
+            )?;
+            crate::kernel_actions::wire(&resp)
         })
         .map_err(to_py_err)
     }

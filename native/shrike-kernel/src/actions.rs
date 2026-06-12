@@ -1,9 +1,10 @@
 //! The action core (#331, kernel inversion S2) — slice 1: the read surface.
 //!
 //! Each action is the *whole* tool body: parameter normalization, the
-//! collection-core call, and validation into the Rust-canonical response type
-//! (#330) — so the typed contract guards the internal wire, not just the MCP
-//! edge. Python's `actions.py` shrinks to a binding per re-homed action:
+//! collection-core call, and the Rust-canonical response type (#330) — typed
+//! end-to-end since #391 phase 2 (the read surface returns `shrike-schemas`
+//! types straight from the core; serialization happens once, at the host
+//! edge). Python's `actions.py` shrinks to a binding per re-homed action:
 //! typed signature (FastMCP's inputSchema source) + context assembly + the
 //! completion-log fragment.
 //!
@@ -34,6 +35,11 @@ pub const REHOMED_ACTIONS: &[&str] = &[
 ///
 /// A parse failure here is a *bug* (the core and the schema disagree), not
 /// caller input — surfaced as an internal error with the type named.
+///
+/// The read surface no longer needs this (#391 phase 2: the core returns the
+/// typed values directly); it stays for the unconverted modules — the
+/// media/write/note-type re-homes still ride core-emitted JSON.
+#[allow(dead_code)]
 fn validate<T: DeserializeOwned>(name: &str, json: &str) -> NativeResult<T> {
     serde_json::from_str(json).map_err(|e| {
         NativeError::internal(format!(
@@ -46,17 +52,14 @@ fn validate<T: DeserializeOwned>(name: &str, json: &str) -> NativeResult<T> {
 ///
 /// `include` mirrors the tool param (empty = summary, `"all"` expands);
 /// `note_type_details` selects which note types carry their full definition.
+/// Typed end-to-end (#391 phase 2): the core builds the canonical type, the
+/// action forwards it, and serialization happens once, at the host edge.
 pub fn collection_info(
     core: &CollectionCore,
     include: &[String],
     note_type_details: &[String],
-) -> NativeResult<String> {
-    let raw = core.collection_info(include, note_type_details)?;
-    validate::<CollectionInfo>("CollectionInfo", &raw)?;
-    // Return the ORIGINAL string (#445): the typed parse is the contract
-    // guard; re-serializing it cost a full third JSON pass per call (and
-    // alphabetized note fields through the BTreeMap, a wire-fidelity drift).
-    Ok(raw)
+) -> NativeResult<CollectionInfo> {
+    core.collection_info(include, note_type_details)
 }
 
 /// Structured filters for [`list_notes`]. `modified_since_epoch` is an
@@ -75,8 +78,11 @@ pub struct ListNotesParams {
 
 /// `list_notes` — filter/retrieve notes (filters ANDed; at least one given,
 /// enforced by the core as invalid input).
-pub fn list_notes(core: &CollectionCore, params: &ListNotesParams) -> NativeResult<String> {
-    let raw = core.list_notes(
+pub fn list_notes(
+    core: &CollectionCore,
+    params: &ListNotesParams,
+) -> NativeResult<ListNotesResponse> {
+    core.list_notes(
         params.ids.as_deref(),
         params.deck.as_deref(),
         params.tags.as_deref(),
@@ -84,9 +90,7 @@ pub fn list_notes(core: &CollectionCore, params: &ListNotesParams) -> NativeResu
         params.modified_since_epoch,
         params.with_fields,
         params.limit,
-    )?;
-    validate::<ListNotesResponse>("ListNotesResponse", &raw)?;
-    Ok(raw)
+    )
 }
 
 /// `collection_query` — a raw Anki search expression (the read-only escape
@@ -97,10 +101,8 @@ pub fn collection_query(
     query: &str,
     with_fields: bool,
     limit: usize,
-) -> NativeResult<String> {
-    let raw = core.query(query, with_fields, limit)?;
-    validate::<ListNotesResponse>("ListNotesResponse", &raw)?;
-    Ok(raw)
+) -> NativeResult<ListNotesResponse> {
+    core.query(query, with_fields, limit)
 }
 
 // ── upsert dedup neighbors (#391 phase 1, re-homed from actions.py) ─────────
@@ -359,10 +361,8 @@ mod tests {
     fn collection_info_returns_typed_sections() {
         let (_dir, core) = temp_collection();
         add_note(&core, "Q", "A");
-        let info: CollectionInfo = serde_json::from_str(
-            &collection_info(&core, &["summary".into(), "decks".into()], &[]).unwrap(),
-        )
-        .unwrap();
+        let info: CollectionInfo =
+            collection_info(&core, &["summary".into(), "decks".into()], &[]).unwrap();
         let summary = info.summary.expect("summary requested");
         assert_eq!(summary.notes, 1);
         assert!(info.decks.is_some());
@@ -375,17 +375,14 @@ mod tests {
         let (_dir, core) = temp_collection();
         let id = add_note(&core, "mitochondria", "powerhouse");
         add_note(&core, "momentum", "mass times velocity");
-        let resp: ListNotesResponse = serde_json::from_str(
-            &list_notes(
-                &core,
-                &ListNotesParams {
-                    deck: Some("D".into()),
-                    with_fields: true,
-                    limit: 50,
-                    ..Default::default()
-                },
-            )
-            .unwrap(),
+        let resp: ListNotesResponse = list_notes(
+            &core,
+            &ListNotesParams {
+                deck: Some("D".into()),
+                with_fields: true,
+                limit: 50,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(resp.total, 2);
@@ -417,8 +414,7 @@ mod tests {
     fn collection_query_runs_raw_expressions() {
         let (_dir, core) = temp_collection();
         add_note(&core, "the cell", "biology");
-        let resp: ListNotesResponse =
-            serde_json::from_str(&collection_query(&core, "deck:D", false, 10).unwrap()).unwrap();
+        let resp: ListNotesResponse = collection_query(&core, "deck:D", false, 10).unwrap();
         assert_eq!(resp.total, 1);
         assert!(resp.notes[0].content.is_none()); // meta mode
         assert!(collection_query(&core, "prop:bogus(((", false, 10).is_err());

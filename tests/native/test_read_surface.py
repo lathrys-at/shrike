@@ -219,6 +219,38 @@ def test_list_notes_filters_and_errors(native_core):
         native_core.list_notes()
 
 
+def test_read_wire_bytes_are_the_legacy_format(native_core):
+    """#391 phase 2 byte pin: the read surface now returns typed structs in
+    Rust, serialized once at the binding edge — and the bytes Python receives
+    must stay exactly the pre-seam hand-built-``Value`` format: compact,
+    keys sorted (serde_json's map is a BTreeMap), ``None`` fields omitted
+    (no ``content`` key in meta mode, only requested sections), never an
+    explicit ``null``. ``json.dumps(sort_keys=True, separators=(",", ":"))``
+    of the parse reproduces that format exactly, so equality here is a
+    byte-level pin of the wire."""
+    basic = native_core.notetype_id("Basic")
+    nid = native_core.create_note(basic, DEFAULT_DECK, ["alpha", "beta"], ["t1"])
+
+    payloads = [
+        native_core.list_notes(ids=[nid]),
+        native_core.list_notes(tags=["t1"], with_fields=False),
+        native_core.query("tag:t1", with_fields=True, limit=10),
+        native_core.collection_info(["summary", "decks"], []),
+        native_core.collection_info(["all"], ["Basic"]),
+    ]
+    for raw in payloads:
+        canonical = json.dumps(
+            json.loads(raw), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        assert raw == canonical
+        assert "null" not in raw
+
+    meta = json.loads(payloads[1])
+    assert "content" not in meta["notes"][0]
+    subset = json.loads(payloads[3])
+    assert set(subset) == {"summary", "decks"}
+
+
 def test_note_embed_inputs_and_derived_rows(native_core):
     basic = native_core.notetype_id("Basic")
     nid = native_core.create_note(basic, DEFAULT_DECK, ['<img src="pic.png"> a diagram', ""], [])
