@@ -354,12 +354,22 @@ impl DerivedEngine {
         if notes.is_empty() {
             return Ok(());
         }
+        // Duplicate ids: LAST entry wins — matching the per-note loop this
+        // replaced (each occurrence delete+inserted, so the final one stood).
+        // The batch deletes each id's rows ONCE up front, so without this
+        // guard a duplicate would double-insert (#447 review).
+        let mut last: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+        for (i, (id, _)) in notes.iter().enumerate() {
+            last.insert(*id, i);
+        }
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
         let ids: Vec<i64> = notes.iter().map(|(id, _)| *id).collect();
         Self::delete_rows(&tx, &ids, Some(source))?;
-        for (note_id, refs_text) in notes {
-            Self::insert_rows(&tx, *note_id, source, refs_text)?;
+        for (i, (note_id, refs_text)) in notes.iter().enumerate() {
+            if last.get(note_id) == Some(&i) {
+                Self::insert_rows(&tx, *note_id, source, refs_text)?;
+            }
         }
         tx.commit().map_err(db_err)
     }
@@ -752,6 +762,55 @@ mod tests {
         // Agrees with the full read, filtered.
         let full = e.texts_for_source("ocr").unwrap();
         assert_eq!(full.len(), 2);
+    }
+
+    #[test]
+    fn ingest_many_and_scoped_texts_work_beyond_the_inline_cap() {
+        // The staged-temp-table branch (> INLINE_ID_MAX ids) changes the SQL
+        // shape (id params go empty; only `source` stays bound) — pin it for
+        // both new APIs (#447 review).
+        let (e, _dir) = store();
+        let n = DerivedEngine::INLINE_ID_MAX + 7;
+        let batch: Vec<(i64, Vec<(String, String)>)> = (0..n as i64)
+            .map(|i| {
+                (
+                    i + 1,
+                    vec![("Front".to_string(), format!("text number {i}"))],
+                )
+            })
+            .collect();
+        e.ingest_many(&batch, "ocr").unwrap();
+        assert_eq!(e.count().unwrap(), n as i64);
+
+        let all_ids: Vec<i64> = (1..=n as i64).collect();
+        let scoped = e.texts_for_source_for_notes("ocr", &all_ids).unwrap();
+        let full = e.texts_for_source("ocr").unwrap();
+        assert_eq!(scoped.len(), full.len());
+        assert_eq!(scoped.len(), n);
+
+        // Re-ingesting the same ids beyond the cap REPLACES (the staged
+        // delete half), never accumulates.
+        e.ingest_many(&batch, "ocr").unwrap();
+        assert_eq!(e.count().unwrap(), n as i64);
+    }
+
+    #[test]
+    fn ingest_many_duplicate_ids_last_entry_wins() {
+        let (e, _dir) = store();
+        e.ingest_many(
+            &[
+                (1, vec![("Front".into(), "first version".into())]),
+                (1, vec![("Front".into(), "second version".into())]),
+            ],
+            "field",
+        )
+        .unwrap();
+        assert_eq!(e.count().unwrap(), 1);
+        let hits = e
+            .search_substring("second version", 10, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]
