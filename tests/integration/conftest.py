@@ -163,7 +163,12 @@ def _populate_bazel_model_dir() -> None:
             target = model_root / dest
             target.parent.mkdir(parents=True, exist_ok=True)
             if not target.exists():
-                shutil.copy(loc, target)
+                # Copy-then-rename so concurrent xdist workers (this module-level
+                # code runs once per worker process) can't observe or produce a
+                # half-written model file; os.replace is atomic within TEST_TMPDIR.
+                tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+                shutil.copy(loc, tmp)
+                os.replace(tmp, target)
         found = True
     if found:
         os.environ["SHRIKE_TEST_MODEL_DIR"] = str(model_root)
