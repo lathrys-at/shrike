@@ -252,7 +252,7 @@ impl AsyncKernel {
         let inner = Arc::clone(&self.inner);
         kernel_op(py, async move {
             let report = inner.recognize_pending(max_items).await?;
-            Ok(report.to_string())
+            crate::kernel_actions::wire(&report)
         })
     }
 
@@ -393,8 +393,8 @@ impl AsyncKernel {
     }
 
     /// The index status block as JSON (state/size/progress/stamps).
-    fn index_status_json(&self) -> String {
-        self.inner.index().status().to_string()
+    fn index_status_json(&self) -> PyResult<String> {
+        crate::kernel_actions::wire(&self.inner.index().status()).map_err(crate::to_py_err)
     }
 
     /// Flush the index + sidecars now (shutdown path).

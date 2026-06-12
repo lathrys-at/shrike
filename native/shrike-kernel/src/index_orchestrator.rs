@@ -109,12 +109,34 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 }
 
 /// The index build/availability state (mirrors `IndexState`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OrchestratorState {
     Ready,
     Building,
     Unavailable,
     Error,
+}
+
+/// The status block (state, size, progress, stamps) the harness serves —
+/// typed since #391; the binding serializes once at the edge.
+#[derive(Debug, Clone, Serialize)]
+pub struct OrchestratorStatus {
+    pub state: OrchestratorState,
+    pub size: usize,
+    pub ndim: Option<usize>,
+    pub col_mod: Option<i64>,
+    pub model_id: Option<String>,
+    pub progress: BuildProgress,
+    pub error: Option<String>,
+    pub activation: Option<BTreeMap<String, BTreeMap<String, f64>>>,
+}
+
+/// `status()`'s build progress pair (indexed so far / total planned).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct BuildProgress {
+    pub indexed: u64,
+    pub total: u64,
 }
 
 struct Shared {
@@ -1048,24 +1070,21 @@ impl IndexOrchestrator {
     }
 
     /// The status block (state, size, progress, stamps) for the harness.
-    pub fn status(&self) -> serde_json::Value {
+    pub fn status(&self) -> OrchestratorStatus {
         let shared = self.shared.lock().expect("orchestrator poisoned");
-        let state = match shared.state {
-            OrchestratorState::Ready => "ready",
-            OrchestratorState::Building => "building",
-            OrchestratorState::Unavailable => "unavailable",
-            OrchestratorState::Error => "error",
-        };
-        serde_json::json!({
-            "state": state,
-            "size": self.engine.size(),
-            "ndim": self.engine.ndim(),
-            "col_mod": shared.col_mod,
-            "model_id": shared.model_id,
-            "progress": {"indexed": shared.build_progress.0, "total": shared.build_progress.1},
-            "error": shared.error,
-            "activation": shared.activation,
-        })
+        OrchestratorStatus {
+            state: shared.state,
+            size: self.engine.size(),
+            ndim: self.engine.ndim(),
+            col_mod: shared.col_mod,
+            model_id: shared.model_id.clone(),
+            progress: BuildProgress {
+                indexed: shared.build_progress.0,
+                total: shared.build_progress.1,
+            },
+            error: shared.error.clone(),
+            activation: shared.activation.clone(),
+        }
     }
 }
 

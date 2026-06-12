@@ -69,6 +69,26 @@ impl RecognitionGate {
     }
 }
 
+/// What one `recognize_pending` sweep did — the typed contract for the host's
+/// background driver (#391). Counts ride only the variant where a batch was
+/// actually sent; `Ran { recognized: 0, .. }` is the no-progress signal (an
+/// unreadable window) the harness stops on.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SweepReport {
+    /// No recognizer attached.
+    Unavailable,
+    /// Nothing pending — the sweep had no work.
+    Idle,
+    /// A batch was sent: `recognized` items reached the engine, `stored`
+    /// cleared the gate, `remaining` are left beyond this window.
+    Ran {
+        recognized: usize,
+        stored: usize,
+        remaining: usize,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
