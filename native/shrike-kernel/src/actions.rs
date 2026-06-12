@@ -320,7 +320,9 @@ pub struct SearchArgs {
     pub exclude: Vec<i64>,
     /// The #201b activation floor for the image modality (None = no gating).
     pub image_floor: Option<f64>,
-    /// Per-signal RRF weights (the harness passes SEARCH_WEIGHTS).
+    /// Per-signal RRF weights. EMPTY means the canonical set
+    /// (`fusion::search_weights`) — the sentinel a future `--search-*`
+    /// override knob must preserve; a non-empty map is used verbatim.
     pub weights: std::collections::BTreeMap<String, f64>,
     /// Whether semantic ranking runs (index ready + backend up); `vectors`
     /// carries one query vector per source when true.

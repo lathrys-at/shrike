@@ -21,9 +21,8 @@ pub const PRIORITY_SIGNAL: &str = "exact";
 /// The CANONICAL per-signal RRF weights for fused search (#388): `fuzzy`
 /// below the rest — a near-miss is weaker evidence than a literal or
 /// semantic hit. The single source of truth; the action defaults to these
-/// when the host passes none, and `shrike.search_fusion.SEARCH_WEIGHTS`
-/// is the frozen Python reference copy pinned against this by the parity
-/// suite.
+/// when the host passes none (the host parameter stays as an override
+/// seam for a future config knob).
 pub fn search_weights() -> BTreeMap<String, f64> {
     [
         ("text", 1.0),
