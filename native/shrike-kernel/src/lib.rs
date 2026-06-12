@@ -1214,6 +1214,88 @@ impl Kernel {
         Ok(response)
     }
 
+    // ── tag + deck ops (#391 re-home, long-tail group 2) ────────────────────
+    // Tags and deck names are not embedding text: each op is one collection
+    // job plus the best-effort metadata watermark tail when anything changed
+    // (the host's old _bump_col_mod_after_metadata_change, re-homed).
+
+    /// The shared metadata tail: advance the watermarks so a vectors-
+    /// unchanged col_mod bump doesn't read as drift on next boot. Best-effort
+    /// — cache bookkeeping never fails an op already committed.
+    async fn metadata_tail(&self, changed: bool) {
+        if !changed {
+            return;
+        }
+        if let Err(e) = self.metadata_changed().await {
+            tracing::warn!(error = %e, "watermark bump after metadata change failed");
+        }
+    }
+
+    /// Edit tags on a note set (`set` full-replace XOR add/remove — the
+    /// exclusivity is the host's input validation).
+    pub async fn update_note_tags(
+        &self,
+        note_ids: Vec<i64>,
+        set_tags: Option<Vec<String>>,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> NativeResult<shrike_schemas::UpdateNoteTagsResponse> {
+        let response = self
+            .collection
+            .run(move |core| core.update_note_tags(&note_ids, set_tags.as_deref(), &add, &remove))
+            .await??;
+        self.metadata_tail(response.notes_modified > 0).await;
+        Ok(response)
+    }
+
+    /// Rename a tag collection-wide (empty `note_ids`) or exactly on a set.
+    pub async fn rename_tag(
+        &self,
+        old: String,
+        new: String,
+        note_ids: Vec<i64>,
+    ) -> NativeResult<shrike_schemas::RenameTagResponse> {
+        let response = self
+            .collection
+            .run(move |core| core.rename_tag(&old, &new, &note_ids))
+            .await??;
+        self.metadata_tail(response.notes_modified > 0).await;
+        Ok(response)
+    }
+
+    /// Create or rename decks in bulk (id present = rename; never merges).
+    pub async fn upsert_decks(
+        &self,
+        decks: Vec<shrike_schemas::DeckInput>,
+    ) -> NativeResult<Vec<shrike_schemas::UpsertDeckResult>> {
+        let results = self
+            .collection
+            .run(move |core| core.upsert_decks(&decks))
+            .await??;
+        let changed = results.iter().any(|r| {
+            matches!(
+                r,
+                shrike_schemas::UpsertDeckResult::Created { .. }
+                    | shrike_schemas::UpsertDeckResult::Updated { .. }
+            )
+        });
+        self.metadata_tail(changed).await;
+        Ok(results)
+    }
+
+    /// Delete decks by reference — only if empty.
+    pub async fn delete_decks(
+        &self,
+        refs: Vec<String>,
+    ) -> NativeResult<shrike_schemas::DeleteDecksResponse> {
+        let response = self
+            .collection
+            .run(move |core| core.delete_decks(&refs))
+            .await??;
+        self.metadata_tail(!response.deleted.is_empty()).await;
+        Ok(response)
+    }
+
     /// Fused search with the kernel's default arguments — a thin delegate to
     /// [`actions::search_notes`], the ONE fused-search spine (#388): no
     /// scope, no threshold, no image floor, the canonical `fusion` weights.

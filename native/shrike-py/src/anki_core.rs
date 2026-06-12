@@ -205,7 +205,7 @@ impl CollectionCore {
     }
 
     /// Tags on a note set: `set_tags` replaces (exclusive with add/remove,
-    /// validated by the caller). Returns `(notes_modified, not_found)`.
+    /// validated by the caller). Response JSON.
     #[pyo3(signature = (note_ids, set_tags=None, add=None, remove=None))]
     fn update_note_tags(
         &self,
@@ -214,14 +214,16 @@ impl CollectionCore {
         set_tags: Option<Vec<String>>,
         add: Option<Vec<String>>,
         remove: Option<Vec<String>>,
-    ) -> PyResult<(usize, Vec<i64>)> {
+    ) -> PyResult<String> {
         py.detach(|| {
-            self.inner.update_note_tags(
-                &note_ids,
-                set_tags.as_deref(),
-                add.as_deref().unwrap_or(&[]),
-                remove.as_deref().unwrap_or(&[]),
-            )
+            self.inner
+                .update_note_tags(
+                    &note_ids,
+                    set_tags.as_deref(),
+                    add.as_deref().unwrap_or(&[]),
+                    remove.as_deref().unwrap_or(&[]),
+                )
+                .and_then(|r| crate::kernel_actions::wire(&r))
         })
         .map_err(to_py_err)
     }
@@ -233,21 +235,39 @@ impl CollectionCore {
         old: String,
         new: String,
         note_ids: Vec<i64>,
-    ) -> PyResult<usize> {
-        py.detach(|| self.inner.rename_tag(&old, &new, &note_ids))
-            .map_err(to_py_err)
+    ) -> PyResult<String> {
+        py.detach(|| {
+            self.inner
+                .rename_tag(&old, &new, &note_ids)
+                .and_then(|r| crate::kernel_actions::wire(&r))
+        })
+        .map_err(to_py_err)
     }
 
     /// Create or rename decks in bulk (JSON in/out; id present = rename).
     fn upsert_decks(&self, py: Python<'_>, decks_json: String) -> PyResult<String> {
-        py.detach(|| self.inner.upsert_decks(&decks_json))
-            .map_err(to_py_err)
+        py.detach(|| {
+            let decks: Vec<shrike_schemas::DeckInput> =
+                serde_json::from_str(&decks_json).map_err(|e| {
+                    shrike_ffi::NativeError::invalid_input(format!(
+                        "decks must be a JSON list: {e}"
+                    ))
+                })?;
+            self.inner
+                .upsert_decks(&decks)
+                .and_then(|r| crate::kernel_actions::wire(&r))
+        })
+        .map_err(to_py_err)
     }
 
     /// Delete decks by reference, empty-only (JSON result echoes the refs).
     fn delete_decks(&self, py: Python<'_>, refs: Vec<String>) -> PyResult<String> {
-        py.detach(|| self.inner.delete_decks(&refs))
-            .map_err(to_py_err)
+        py.detach(|| {
+            self.inner
+                .delete_decks(&refs)
+                .and_then(|r| crate::kernel_actions::wire(&r))
+        })
+        .map_err(to_py_err)
     }
 
     /// Anki's find_and_replace over a note set + changed-id diff (JSON out).

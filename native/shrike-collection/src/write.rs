@@ -10,7 +10,8 @@ use serde_json::{json, Value};
 use shrike_ffi::{NativeError, NativeResult};
 
 use shrike_schemas::{
-    DeleteNoteTypeResult, NoteInput, NoteValidationReason, SkipReason, UpsertAction,
+    DeckInput, DeleteDecksResponse, DeleteNoteTypeResult, NoteInput, NoteValidationReason,
+    RenameTagResponse, SkipReason, UpdateNoteTagsResponse, UpsertAction, UpsertDeckResult,
     UpsertNoteResult,
 };
 
@@ -326,14 +327,14 @@ impl CollectionCore {
 
     /// Edit tags on a note set — `set_tags` is a full replace (mutually
     /// exclusive with add/remove, validated by the caller); add/remove apply
-    /// subtractively-then-additively. Returns `(notes_modified, not_found)`.
+    /// subtractively-then-additively.
     pub fn update_note_tags(
         &self,
         note_ids: &[i64],
         set_tags: Option<&[String]>,
         add: &[String],
         remove: &[String],
-    ) -> NativeResult<(usize, Vec<i64>)> {
+    ) -> NativeResult<UpdateNoteTagsResponse> {
         let existing: HashSet<i64> = self
             .adapter
             .search_notes(&format!("nid:{}", ids_csv(note_ids)))?
@@ -366,47 +367,60 @@ impl CollectionCore {
                 }
             }
         }
-        Ok((targets.len(), not_found))
+        Ok(UpdateNoteTagsResponse {
+            notes_modified: targets.len() as i64,
+            not_found,
+            message: None,
+        })
     }
 
     /// Rename a tag collection-wide (empty `note_ids`) or exactly on a note
     /// set (never substring: renaming `jp` never touches `jp-verbs`).
-    pub fn rename_tag(&self, old: &str, new: &str, note_ids: &[i64]) -> NativeResult<usize> {
-        if note_ids.is_empty() {
-            return self.adapter.rename_tags(old, new);
-        }
-        let matching = self
-            .adapter
-            .search_notes(&format!("(nid:{}) tag:{old}", ids_csv(note_ids)))?;
-        if !matching.is_empty() {
-            self.adapter.remove_note_tags(&matching, old)?;
-            self.adapter.add_note_tags(&matching, new)?;
-        }
-        Ok(matching.len())
+    pub fn rename_tag(
+        &self,
+        old: &str,
+        new: &str,
+        note_ids: &[i64],
+    ) -> NativeResult<RenameTagResponse> {
+        let notes_modified = if note_ids.is_empty() {
+            self.adapter.rename_tags(old, new)?
+        } else {
+            let matching = self
+                .adapter
+                .search_notes(&format!("(nid:{}) tag:{old}", ids_csv(note_ids)))?;
+            if !matching.is_empty() {
+                self.adapter.remove_note_tags(&matching, old)?;
+                self.adapter.add_note_tags(&matching, new)?;
+            }
+            matching.len()
+        };
+        Ok(RenameTagResponse {
+            notes_modified: notes_modified as i64,
+        })
     }
 
     /// Create or rename decks in bulk (id present = rename; never merges).
-    /// JSON in (list of `{name, id?}`) / per-item results JSON out.
-    pub fn upsert_decks(&self, decks_json: &str) -> NativeResult<String> {
-        let decks: Vec<Value> = serde_json::from_str(decks_json)
-            .map_err(|e| NativeError::invalid_input(format!("decks must be a JSON list: {e}")))?;
-        let mut results: Vec<Value> = Vec::new();
+    /// Typed both directions (#391): per-item errors never sink the batch.
+    pub fn upsert_decks(&self, decks: &[DeckInput]) -> NativeResult<Vec<UpsertDeckResult>> {
+        let mut results: Vec<UpsertDeckResult> = Vec::new();
         for (index, deck) in decks.iter().enumerate() {
             results.push(match self.upsert_one_deck(deck) {
                 Ok(r) => r,
-                Err(e) => json!({"status": "error", "index": index, "error": e.message}),
+                Err(e) => UpsertDeckResult::Error {
+                    index: index as i64,
+                    name: None,
+                    error: e.message,
+                },
             });
         }
-        Ok(json!(results).to_string())
+        Ok(results)
     }
 
-    fn upsert_one_deck(&self, deck: &Value) -> NativeResult<Value> {
-        let name = deck
-            .get("name")
-            .and_then(Value::as_str)
+    fn upsert_one_deck(&self, deck: &DeckInput) -> NativeResult<UpsertDeckResult> {
+        let name = Some(deck.name.as_str())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| NativeError::invalid_input("name is required"))?;
-        if let Some(deck_id) = deck.get("id").and_then(Value::as_i64) {
+        if let Some(deck_id) = deck.id {
             let known: HashMap<i64, String> = self.adapter.deck_names()?.into_iter().collect();
             if !known.contains_key(&deck_id) {
                 return Err(NativeError::invalid_input(format!(
@@ -421,22 +435,31 @@ impl CollectionCore {
                 }
             }
             self.adapter.rename_deck(deck_id, name)?;
-            return Ok(json!({"status": "updated", "id": deck_id, "name": name}));
+            return Ok(UpsertDeckResult::Updated {
+                id: deck_id,
+                name: name.to_string(),
+            });
         }
         if let Some(existing) = self.adapter.deck_id_by_name(name)? {
-            return Ok(json!({"status": "updated", "id": existing, "name": name}));
+            return Ok(UpsertDeckResult::Updated {
+                id: existing,
+                name: name.to_string(),
+            });
         }
         let new_id = self.adapter.add_deck(name)?;
-        Ok(json!({"status": "created", "id": new_id, "name": name}))
+        Ok(UpsertDeckResult::Created {
+            id: new_id,
+            name: name.to_string(),
+        })
     }
 
     /// Delete decks by reference — only if empty (no cards in the deck or its
     /// subdecks). Result lists echo the caller's references.
-    pub fn delete_decks(&self, refs: &[String]) -> NativeResult<String> {
+    pub fn delete_decks(&self, refs: &[String]) -> NativeResult<DeleteDecksResponse> {
         let all: Vec<(i64, String)> = self.adapter.deck_names()?;
-        let mut deleted: Vec<&str> = Vec::new();
-        let mut not_found: Vec<&str> = Vec::new();
-        let mut not_empty: Vec<&str> = Vec::new();
+        let mut deleted: Vec<String> = Vec::new();
+        let mut not_found: Vec<String> = Vec::new();
+        let mut not_empty: Vec<String> = Vec::new();
         let mut to_remove: Vec<i64> = Vec::new();
         for reference in refs {
             let resolved = self.resolve_deck_ref(reference)?;
@@ -445,7 +468,7 @@ impl CollectionCore {
                 None => None,
             };
             let Some(deck_id) = deck_id else {
-                not_found.push(reference);
+                not_found.push(reference.clone());
                 continue;
             };
             // Card count incl. subdecks (and filtered-deck originals), via the
@@ -473,16 +496,20 @@ impl CollectionCore {
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
             if count > 0 {
-                not_empty.push(reference);
+                not_empty.push(reference.clone());
             } else {
                 to_remove.push(deck_id);
-                deleted.push(reference);
+                deleted.push(reference.clone());
             }
         }
         if !to_remove.is_empty() {
             self.adapter.remove_decks(&to_remove)?;
         }
-        Ok(json!({"deleted": deleted, "not_found": not_found, "not_empty": not_empty}).to_string())
+        Ok(DeleteDecksResponse {
+            deleted,
+            not_found,
+            not_empty,
+        })
     }
 
     /// Apply a find/replace over a note set's fields via Anki's own

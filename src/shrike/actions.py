@@ -1499,15 +1499,12 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         else:
             logger.debug("update_note_tags notes=%d add=%s remove=%s", len(note_ids), add, remove)
 
-        result = await wrapper.update_note_tags(note_ids, set_tags=set, add=add, remove=remove)
-        note_outcome(
-            f"modified {result['notes_modified']} note(s), {len(result['not_found'])} not found"
+        # Re-homed (#391): the kernel op carries the watermark tail.
+        result = UpdateNoteTagsResponse.model_validate_json(
+            await kernel.update_note_tags(note_ids, set_tags=set, add=add, remove=remove)
         )
-
-        if result["notes_modified"]:
-            await _bump_col_mod_after_metadata_change()
-
-        return UpdateNoteTagsResponse.model_validate(result)
+        note_outcome(f"modified {result.notes_modified} note(s), {len(result.not_found)} not found")
+        return result
 
     @_action
     async def rename_tag(
@@ -1535,11 +1532,10 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         if old == new:
             raise ToolInputError("`old` and `new` tags are identical — nothing to rename.")
         logger.debug("rename_tag %r -> %r (scope=%d notes)", old, new, len(note_ids))
-        result = await wrapper.rename_tag(old, new, note_ids)
-        note_outcome(f"modified {result['notes_modified']} note(s)")
-        if result["notes_modified"]:
-            await _bump_col_mod_after_metadata_change()
-        return RenameTagResponse.model_validate(result)
+        # Re-homed (#391): the kernel op carries the watermark tail.
+        result = RenameTagResponse.model_validate_json(await kernel.rename_tag(old, new, note_ids))
+        note_outcome(f"modified {result.notes_modified} note(s)")
+        return result
 
     @_action
     async def collection_prune(
@@ -1804,8 +1800,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         creates = sum(1 for d in decks if d.id is None)
         logger.debug("upsert_decks count=%d (renames=%d)", len(decks), len(decks) - creates)
 
+        # Re-homed (#391): the kernel op carries the watermark tail.
         deck_dicts = [d.model_dump(exclude_none=True) for d in decks]
-        results = await wrapper.upsert_decks(deck_dicts)
+        results = json.loads(await kernel.upsert_decks(json.dumps(deck_dicts)))
 
         created = sum(1 for r in results if r.get("status") == "created")
         updated = sum(1 for r in results if r.get("status") == "updated")
@@ -1814,9 +1811,6 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         for r in results:
             if r.get("status") == "error":
                 logger.warning("upsert_decks item %d failed: %s", r.get("index"), r["error"])
-
-        if created or updated:
-            await _bump_col_mod_after_metadata_change()
         return UpsertDecksResponse.model_validate({"results": results})
 
     @_action
@@ -1842,13 +1836,12 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         Returns `deleted`, `not_found`, and `not_empty` name lists; a non-empty
         or missing deck is skipped, not an error."""
         logger.debug("delete_decks requested=%d", len(decks))
-        result = await wrapper.delete_decks(decks)
+        # Re-homed (#391): the kernel op carries the watermark tail.
+        result = DeleteDecksResponse.model_validate_json(await kernel.delete_decks(decks))
         note_outcome(
-            f"{len(result['deleted'])} deleted, {len(result['not_found'])} not found, "
-            f"{len(result['not_empty'])} not empty"
+            f"{len(result.deleted)} deleted, {len(result.not_found)} not found, "
+            f"{len(result.not_empty)} not empty"
         )
-        if result["deleted"]:
-            await _bump_col_mod_after_metadata_change()
-        return DeleteDecksResponse.model_validate(result)
+        return result
 
     return actions
