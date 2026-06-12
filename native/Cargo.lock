@@ -5010,7 +5010,6 @@ version = "0.0.0"
 dependencies = [
  "anki",
  "anki_proto",
- "base64 0.22.1",
  "fancy-regex",
  "prost",
  "regex",
@@ -5019,8 +5018,6 @@ dependencies = [
  "shrike-schemas",
  "shrike-store-api",
  "tokio",
- "ureq",
- "url",
 ]
 
 [[package]]
@@ -5104,6 +5101,7 @@ dependencies = [
 name = "shrike-kernel"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "blake2",
  "futures",
  "serde",
@@ -5117,6 +5115,8 @@ dependencies = [
  "shrike-store-api",
  "tokio",
  "tracing",
+ "ureq",
+ "url",
 ]
 
 [[package]]

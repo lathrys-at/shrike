@@ -415,12 +415,22 @@ impl CollectionCore {
                         "items must be a JSON list: {e}"
                     ))
                 })?;
+            // The sequential per-item prepare over the kernel's ONE prepare
+            // fn (#389 B2 — the core's byte-source branches retired with the
+            // network half), then the batch write under the collection.
+            let prepared: Vec<_> = items
+                .into_iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    shrike_kernel::media_fetch::prepare_media_item(
+                        i as i64,
+                        item,
+                        allow_private_fetch,
+                    )
+                })
+                .collect();
             self.inner
-                .store_media_items(
-                    &items,
-                    allow_private_fetch,
-                    path_roots.as_deref().unwrap_or(&[]),
-                )
+                .store_prepared_media(&prepared, path_roots.as_deref().unwrap_or(&[]))
                 .and_then(|r| crate::kernel_actions::wire(&r))
         })
         .map_err(to_py_err)
@@ -432,7 +442,7 @@ impl CollectionCore {
         let addr: std::net::IpAddr = ip
             .parse()
             .map_err(|e| crate::NativeInputError::new_err(format!("bad ip: {e}")))?;
-        Ok(shrike_collection::media_fetch::ip_is_allowed(addr))
+        Ok(shrike_kernel::media_fetch::ip_is_allowed(addr))
     }
 
     // ── note types (#278 step 4) ─────────────────────────────────────────────

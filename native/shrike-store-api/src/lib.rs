@@ -29,6 +29,11 @@ pub use collection::{
 use shrike_ffi::NativeResult;
 use std::collections::BTreeMap;
 
+/// The byte-source media size cap — ONE policy value: the collection's write
+/// tail and the kernel's fetch/decode caps must agree, so it lives where
+/// both can see it.
+pub const MEDIA_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 /// One modality's ranked hits for one query: `(keys, scores)`, best-first.
 pub type ModalityRanking = (Vec<i64>, Vec<f32>);
 

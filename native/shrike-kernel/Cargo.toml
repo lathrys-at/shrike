@@ -22,6 +22,11 @@ shrike-derived = { path = "../shrike-derived" }
 shrike-engine-api = { path = "../shrike-engine-api" }
 shrike-ffi = { workspace = true }
 shrike-store-api = { workspace = true }
+# media URL fetch (#278 step 5b, kernel-owned since #389 B2): ureq is a
+# SYNCHRONOUS client — no tokio coupling; the prepare rides the blocking pool.
+ureq = "2"
+base64 = "0.22"
+url = "2"
 shrike-index = { path = "../shrike-index" }
 shrike-schemas = { path = "../shrike-schemas" }
 serde = "1"

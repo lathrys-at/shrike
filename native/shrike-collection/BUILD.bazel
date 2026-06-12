@@ -20,14 +20,11 @@ rust_library(
         "//native/shrike-schemas:shrike_schemas",
         "@crates//:anki",
         "@crates//:anki_proto",
-        "@crates//:base64",
         "@crates//:fancy-regex",
         "@crates//:prost",
         "@crates//:regex",
         "@crates//:serde_json",
         "@crates//:tokio",
-        "@crates//:ureq",
-        "@crates//:url",
     ],
 )
 

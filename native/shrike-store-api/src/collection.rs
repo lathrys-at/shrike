@@ -13,9 +13,9 @@ use shrike_schemas::{
     DeleteDecksResponse, DeleteMediaResponse, DeleteNoteTypeResult, FieldMetadataInput, FieldOp,
     FindReplaceNoteTypesResponse, ListMediaResponse, ListNotesResponse, MediaFetchResult,
     MigrateNoteTypeResponse, NoteInput, NoteTypeInput, NoteTypeResult, RenameTagResponse,
-    StoreMediaItem, StoreMediaResult, TemplateOp, UpdateNoteTagsResponse,
-    UpdateNoteTypeFieldMetadataResponse, UpdateNoteTypeFieldsResponse,
-    UpdateNoteTypeTemplatesResponse, UpsertDeckResult, UpsertNoteResult,
+    StoreMediaResult, TemplateOp, UpdateNoteTagsResponse, UpdateNoteTypeFieldMetadataResponse,
+    UpdateNoteTypeFieldsResponse, UpdateNoteTypeTemplatesResponse, UpsertDeckResult,
+    UpsertNoteResult,
 };
 
 /// What `create_note` does about a first-field duplicate (the #77 policy).
@@ -258,13 +258,6 @@ pub trait Collection: Send + Sync {
         data: &[u8],
         content_type: Option<&str>,
     ) -> NativeResult<StoreMediaResult>;
-    /// The standalone sequential batch (prepare + write per item).
-    fn store_media_items(
-        &self,
-        items: &[StoreMediaItem],
-        allow_private_fetch: bool,
-        path_roots: &[String],
-    ) -> NativeResult<Vec<StoreMediaResult>>;
     /// The write half of the kernel's re-homed store (#490): byte sources
     /// arrive prepared; `path` items run their gates here.
     fn store_prepared_media(

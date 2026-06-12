@@ -20,14 +20,12 @@
 mod adapter;
 pub mod embed_text;
 mod media;
-pub mod media_fetch;
 mod note_types;
 mod read;
 mod write;
 
 pub use adapter::{FieldsState, ServiceAdapter};
 pub use embed_text::{extract_image_refs, EMBED_TEXT_VERSION};
-pub use media::media_name_from_url;
 use shrike_ffi::{NativeError, NativeResult};
 
 // Canonical homes moved to the store contract (#389); re-exported so the
@@ -269,7 +267,7 @@ mod contract {
         DeleteDecksResponse, DeleteMediaResponse, DeleteNoteTypeResult, FieldMetadataInput,
         FieldOp, FindReplaceNoteTypesResponse, ListMediaResponse, ListNotesResponse,
         MediaFetchResult, MigrateNoteTypeResponse, NoteInput, NoteTypeInput, NoteTypeResult,
-        RenameTagResponse, StoreMediaItem, StoreMediaResult, TemplateOp, UpdateNoteTagsResponse,
+        RenameTagResponse, StoreMediaResult, TemplateOp, UpdateNoteTagsResponse,
         UpdateNoteTypeFieldMetadataResponse, UpdateNoteTypeFieldsResponse,
         UpdateNoteTypeTemplatesResponse, UpsertDeckResult, UpsertNoteResult,
     };
@@ -531,14 +529,6 @@ mod contract {
             content_type: Option<&str>,
         ) -> NativeResult<StoreMediaResult> {
             Self::store_media_bytes(self, filename, data, content_type)
-        }
-        fn store_media_items(
-            &self,
-            items: &[StoreMediaItem],
-            allow_private_fetch: bool,
-            path_roots: &[String],
-        ) -> NativeResult<Vec<StoreMediaResult>> {
-            Self::store_media_items(self, items, allow_private_fetch, path_roots)
         }
         fn store_prepared_media(
             &self,
@@ -1359,22 +1349,33 @@ mod tests {
         assert_eq!(deleted.not_found, vec!["nope.png"]);
 
         // The byte-source size cap (the path source is deliberately uncapped).
-        let oversize = vec![0u8; crate::media_fetch::MEDIA_MAX_BYTES + 1];
+        let oversize = vec![0u8; shrike_store_api::MEDIA_MAX_BYTES + 1];
         assert!(core
             .store_media_bytes(Some("big.bin"), &oversize, None)
             .is_err());
 
-        // store_media_items: typed input, per-item errors never sink the
-        // batch (a sourceless item fails its own slot only).
-        let items = vec![
-            shrike_schemas::StoreMediaItem {
+        // store_prepared_media: per-item errors never sink the batch (the
+        // sequential prepare lives at the binding edge over the kernel's
+        // shared prepare since #389 B2 — a Failed slot is already an error).
+        let prepared = vec![
+            PreparedMedia {
+                index: 0,
                 filename: Some("from-batch.png".into()),
-                data: Some("QkFUQ0g=".into()), // b64("BATCH")
-                ..Default::default()
+                source: PreparedMediaSource::Bytes {
+                    name: "from-batch.png".into(),
+                    data: b"BATCH".to_vec(),
+                    content_type: None,
+                },
             },
-            shrike_schemas::StoreMediaItem::default(),
+            PreparedMedia {
+                index: 1,
+                filename: None,
+                source: PreparedMediaSource::Failed {
+                    error: "provide exactly one of `data`, `url`, or `path`".into(),
+                },
+            },
         ];
-        let batch = core.store_media_items(&items, false, &[]).unwrap();
+        let batch = core.store_prepared_media(&prepared, &[]).unwrap();
         assert!(matches!(
             batch[0],
             shrike_schemas::StoreMediaResult::Stored { index: 0, .. }

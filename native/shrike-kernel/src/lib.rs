@@ -26,6 +26,7 @@
 pub mod actions;
 pub mod fusion;
 pub mod index_orchestrator;
+pub mod media_fetch;
 pub mod recognize;
 pub mod tag_centroids;
 pub mod textsim;
@@ -42,8 +43,7 @@ use shrike_collection::CollectionCore;
 use shrike_derived::DerivedEngine;
 use shrike_ffi::{NativeError, NativeResult};
 use shrike_index::MultiModalIndex;
-use shrike_store_api::DerivedStore;
-use shrike_store_api::{Collection, CreateOutcome, DuplicatePolicy};
+use shrike_store_api::{Collection, CreateOutcome, DerivedStore, DuplicatePolicy, VectorIndex};
 
 pub mod runtime;
 pub use runtime::{block_on, init_runtime, spawn_op};
@@ -109,6 +109,24 @@ impl SerializedCollection {
             jobs: Mutex::new(Some(jobs_tx)),
             actor: Mutex::new(Some(actor)),
         })
+    }
+
+    /// The actor around a PRE-BUILT store (#389 compose): same loop, same
+    /// serialization discipline — only construction differs (an injected
+    /// impl is built by the host's assembly, not on the actor task; the
+    /// path-opening convenience above keeps anki construction inside it).
+    pub fn from_store(core: Arc<dyn Collection>) -> Self {
+        let (jobs_tx, mut jobs_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+        let actor = runtime::handle().spawn(async move {
+            while let Some(job) = jobs_rx.recv().await {
+                job();
+            }
+        });
+        Self {
+            core,
+            jobs: Mutex::new(Some(jobs_tx)),
+            actor: Mutex::new(Some(actor)),
+        }
     }
 
     /// A live sender, or the actor-is-gone error (post-shutdown).
@@ -299,16 +317,68 @@ impl Kernel {
         save_delay: Option<f64>,
         save_threshold: Option<u64>,
     ) -> NativeResult<Self> {
+        // The derived store opens its file under cache_dir before assemble
+        // runs, so the dir must exist first (assemble re-creates idempotently
+        // for composed callers).
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
         let collection = Arc::new(SerializedCollection::open(collection_path.to_string()).await?);
-        let engine = Arc::new(MultiModalIndex::new(
+        let engine: Arc<dyn VectorIndex> = Arc::new(MultiModalIndex::new(
             NOTE_MODALITIES
                 .iter()
                 .map(|m| m.to_string())
                 .chain(std::iter::once(TAG_TEXT_SPACE.to_string()))
                 .collect(),
         )?);
+        let derived: Arc<dyn DerivedStore> = Arc::new(DerivedEngine::open(
+            &format!("{}/shrike.db", cache_dir.trim_end_matches('/')),
+            DerivedEngine::SCHEMA_VERSION,
+        )?);
+        tracing::debug!(collection = collection_path, "kernel opened");
+        Self::assemble(
+            collection,
+            engine,
+            derived,
+            cache_dir,
+            save_delay,
+            save_threshold,
+        )
+    }
+
+    /// The injection seam (#389): a kernel over PRE-BUILT stores — the
+    /// deployment ladder's composition point (remote/platform impls swap in
+    /// here; [`Self::open`] is the all-local convenience over it). The
+    /// collection arrives as the bare store; the kernel wraps it in its own
+    /// task-actor (serialization is kernel policy, not the store's).
+    pub fn compose(
+        collection: Arc<dyn Collection>,
+        index: Arc<dyn VectorIndex>,
+        derived: Arc<dyn DerivedStore>,
+        cache_dir: &str,
+        save_delay: Option<f64>,
+        save_threshold: Option<u64>,
+    ) -> NativeResult<Self> {
+        let collection = Arc::new(SerializedCollection::from_store(collection));
+        Self::assemble(
+            collection,
+            index,
+            derived,
+            cache_dir,
+            save_delay,
+            save_threshold,
+        )
+    }
+
+    fn assemble(
+        collection: Arc<SerializedCollection>,
+        engine: Arc<dyn VectorIndex>,
+        derived: Arc<dyn DerivedStore>,
+        cache_dir: &str,
+        save_delay: Option<f64>,
+        save_threshold: Option<u64>,
+    ) -> NativeResult<Self> {
+        std::fs::create_dir_all(cache_dir)
+            .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
         let orchestrator = Arc::new(index_orchestrator::IndexOrchestrator::open(
             cache_dir, engine,
         ));
@@ -317,11 +387,6 @@ impl Kernel {
             save_delay.unwrap_or(index_orchestrator::DEFAULT_SAVE_DELAY),
             save_threshold.unwrap_or(index_orchestrator::DEFAULT_SAVE_THRESHOLD),
         );
-        let derived = Arc::new(DerivedEngine::open(
-            &format!("{}/shrike.db", cache_dir.trim_end_matches('/')),
-            DerivedEngine::SCHEMA_VERSION,
-        )?);
-        tracing::debug!(collection = collection_path, "kernel opened");
         let embed: Arc<RwLock<Option<Arc<EmbedService>>>> = Arc::new(RwLock::new(None));
         let tag_keys = Arc::new(tag_centroids::TagKeyMap::default());
         let tag_config = tag_centroids::TagCentroidConfig::default();
@@ -1072,65 +1137,18 @@ impl Kernel {
         allow_private_fetch: bool,
         path_roots: Vec<String>,
     ) -> NativeResult<Vec<shrike_schemas::StoreMediaResult>> {
-        use shrike_collection::{media_name_from_url, PreparedMedia, PreparedMediaSource};
-
-        fn prepare_one(
-            index: i64,
-            item: shrike_schemas::StoreMediaItem,
-            allow_private_fetch: bool,
-        ) -> PreparedMedia {
-            let filename = item.filename.clone();
-            let source = if let Err(e) = item.validate() {
-                PreparedMediaSource::Failed { error: e }
-            } else if let Some(path) = item.path {
-                PreparedMediaSource::Path { path }
-            } else if let Some(data) = item.data.as_deref() {
-                match shrike_collection::media_fetch::decode_media_b64(data) {
-                    Ok(bytes) => PreparedMediaSource::Bytes {
-                        name: item.filename.unwrap_or_default(),
-                        data: bytes,
-                        content_type: None,
-                    },
-                    Err(e) => PreparedMediaSource::Failed { error: e.message },
-                }
-            } else if let Some(url) = item.url.as_deref() {
-                match shrike_collection::media_fetch::fetch_media_url(url, allow_private_fetch) {
-                    Ok((bytes, ct)) => PreparedMediaSource::Bytes {
-                        name: item
-                            .filename
-                            .clone()
-                            .or_else(|| media_name_from_url(url))
-                            .unwrap_or_default(),
-                        data: bytes,
-                        content_type: ct,
-                    },
-                    Err(e) => PreparedMediaSource::Failed { error: e.message },
-                }
-            } else {
-                // validate() guarantees one source; backstop message kept.
-                PreparedMediaSource::Failed {
-                    error: "each item needs one of data, url, or path".to_string(),
-                }
-            };
-            PreparedMedia {
-                index,
-                filename,
-                source,
-            }
-        }
-
         let handles: Vec<_> = items
             .into_iter()
             .enumerate()
             .map(|(i, item)| {
                 tokio::task::spawn_blocking(move || {
-                    prepare_one(i as i64, item, allow_private_fetch)
+                    crate::media_fetch::prepare_media_item(i as i64, item, allow_private_fetch)
                 })
             })
             .collect();
         let mut prepared = Vec::with_capacity(handles.len());
         for handle in handles {
-            // A JoinError is a PANIC in prepare_one (every expected failure
+            // A JoinError is a PANIC in the prepare (every expected failure
             // is already a per-item Failed) — a bug fails the whole batch
             // deliberately, never a per-item error.
             prepared.push(
@@ -1749,6 +1767,61 @@ mod no_cpython_smoke {
             kernel.close().await.unwrap();
             // Idempotent (#382): a second close after the actor drained is
             // already-closed, not an actor-gone error.
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
+    fn composed_kernel_serves_ops_over_injected_stores() {
+        // The #389 injection seam: a kernel assembled from PRE-BUILT stores
+        // (the deployment ladder's composition point) behaves like an opened
+        // one — the actor wraps the injected collection, ops serve, and the
+        // index/derived paths ride the injected trait objects.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            std::fs::create_dir_all(dir.join("cache")).unwrap();
+            let collection: Arc<dyn shrike_store_api::Collection> =
+                Arc::new(CollectionCore::open(dir.join("c.anki2").to_str().unwrap()).unwrap());
+            let index: Arc<dyn VectorIndex> =
+                Arc::new(MultiModalIndex::new(vec!["text".to_owned()]).unwrap());
+            let derived: Arc<dyn DerivedStore> = Arc::new(
+                DerivedEngine::open(
+                    dir.join("cache/shrike.db").to_str().unwrap(),
+                    DerivedEngine::SCHEMA_VERSION,
+                )
+                .unwrap(),
+            );
+            let kernel = Kernel::compose(
+                collection,
+                index,
+                derived,
+                dir.join("cache").to_str().unwrap(),
+                None,
+                None,
+            )
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+            let CreateOutcome::Created(nid) = kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["composed kernels serve".into(), "b".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("create failed")
+            };
+            assert!(kernel.index().engine().contains(nid));
+            let hits = kernel.search("composed kernels", 5).await.unwrap();
+            assert_eq!(hits[0].note_id, nid);
+
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
         });

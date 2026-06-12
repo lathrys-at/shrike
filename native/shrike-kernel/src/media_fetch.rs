@@ -27,9 +27,11 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 
 use base64::Engine;
 use shrike_ffi::{NativeError, NativeResult};
+use shrike_schemas::StoreMediaItem;
+use shrike_store_api::{PreparedMedia, PreparedMediaSource};
 use url::Url;
 
-pub const MEDIA_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub use shrike_store_api::MEDIA_MAX_BYTES;
 pub const URL_FETCH_TIMEOUT_SECS: u64 = 30;
 pub const MAX_MEDIA_REDIRECTS: usize = 5;
 
@@ -154,21 +156,6 @@ pub fn decode_media_b64(data: &str) -> NativeResult<Vec<u8>> {
         .map_err(|e| invalid(format!("invalid base64 data: {e}")))
 }
 
-/// `_path_within_any_root`: containment on resolved real paths (canonicalize
-/// collapses `..` and resolves symlinks on both sides), component-aware (the
-/// `/srv/media-evil` vs `/srv/media` prefix bug can't happen on `Path`
-/// components).
-pub fn path_within_any_root(path: &str, roots: &[String]) -> bool {
-    let Ok(target) = std::fs::canonicalize(path) else {
-        return false;
-    };
-    roots.iter().any(|root| {
-        std::fs::canonicalize(root)
-            .map(|r| target.starts_with(&r))
-            .unwrap_or(false)
-    })
-}
-
 /// `_fetch_media_url`: download into memory, returning (bytes, content_type).
 pub fn fetch_media_url(url: &str, allow_private: bool) -> NativeResult<(Vec<u8>, Option<String>)> {
     let mut logical = url.to_string();
@@ -257,6 +244,77 @@ pub fn fetch_media_url(url: &str, allow_private: bool) -> NativeResult<(Vec<u8>,
     Err(invalid(format!(
         "too many redirects (>{MAX_MEDIA_REDIRECTS})"
     )))
+}
+
+/// The filename a URL's path implies (basename-sanitized via the same rule
+/// the collection's media names use), for a `url` store item with no
+/// explicit `filename`.
+pub fn media_name_from_url(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    let base = parsed
+        .path()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let checked = base.trim();
+    if checked.is_empty() || checked == "." || checked == ".." {
+        None
+    } else {
+        Some(base)
+    }
+}
+
+/// One store_media item's prepare — validate, then decode/fetch the byte
+/// source (path items pass through; their gates are collection policy and
+/// run under the write). The ONE prepare both drivers share: the kernel's
+/// concurrent op fans it onto the blocking pool, the binding's sequential
+/// edge calls it inline.
+pub fn prepare_media_item(
+    index: i64,
+    item: StoreMediaItem,
+    allow_private_fetch: bool,
+) -> PreparedMedia {
+    let filename = item.filename.clone();
+    let source = if let Err(e) = item.validate() {
+        PreparedMediaSource::Failed { error: e }
+    } else if let Some(path) = item.path {
+        PreparedMediaSource::Path { path }
+    } else if let Some(data) = item.data.as_deref() {
+        match decode_media_b64(data) {
+            Ok(bytes) => PreparedMediaSource::Bytes {
+                name: item.filename.unwrap_or_default(),
+                data: bytes,
+                content_type: None,
+            },
+            Err(e) => PreparedMediaSource::Failed { error: e.message },
+        }
+    } else if let Some(url) = item.url.as_deref() {
+        match fetch_media_url(url, allow_private_fetch) {
+            Ok((bytes, ct)) => PreparedMediaSource::Bytes {
+                name: item
+                    .filename
+                    .clone()
+                    .or_else(|| media_name_from_url(url))
+                    .unwrap_or_default(),
+                data: bytes,
+                content_type: ct,
+            },
+            Err(e) => PreparedMediaSource::Failed { error: e.message },
+        }
+    } else {
+        // validate() guarantees one source; backstop message kept.
+        PreparedMediaSource::Failed {
+            error: "each item needs one of data, url, or path".to_string(),
+        }
+    };
+    PreparedMedia {
+        index,
+        filename,
+        source,
+    }
 }
 
 #[cfg(test)]
