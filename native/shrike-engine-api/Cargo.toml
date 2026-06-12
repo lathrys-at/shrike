@@ -14,7 +14,11 @@ shrike-ffi = { workspace = true }
 # the same rule as the kernel (#308/#310).
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
+# The one adapter (#374 C): Blocking<E> bridges sync compute onto the owned
+# runtime's blocking pool. rt only — no runtime is built here.
+tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
 serde_json = "1"
 futures = { version = "0.3", features = ["executor"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

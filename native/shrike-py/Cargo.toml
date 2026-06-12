@@ -31,6 +31,8 @@ shrike-kernel = { path = "../shrike-kernel", optional = true }
 serde_json = "1"
 # Runtime-agnostic future building blocks for the worker executor (no runtime).
 futures = "0.3"
+# Blocking Python backend calls ride the kernel runtime's blocking pool (#374 C).
+tokio = { version = "1", features = ["rt"] }
 shrike-compute = { path = "../shrike-compute" }
 shrike-derived = { path = "../shrike-derived", default-features = false }
 shrike-embed = { path = "../shrike-embed" }

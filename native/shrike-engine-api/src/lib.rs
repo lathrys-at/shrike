@@ -15,12 +15,11 @@
 //! - **Route 1 — naturally-sync compute** (ort inference, a synchronous HTTP
 //!   client): implement the sync compute traits ([`EmbedText`],
 //!   [`EmbedImages`], [`RecognizeMedia`]) — chunk-level, `Send + Sync`, no
-//!   futures, no threads, no executors, assuming *nothing* about execution.
-//!   The host bridges to the async traits with an adapter at composition
-//!   time: [`Inline`] (compute on whatever thread polls — the C host's
-//!   calling-thread model) or [`OnExecutor`] (submit each chunk to a
-//!   host-injected [`ComputeExecutor`] lane). The adapter owns the batch
-//!   loop; batching is execution policy, not engine compute.
+//!   futures, no threads, assuming *nothing* about execution. The ONE
+//!   adapter, [`Blocking`], bridges to the async traits over the owned
+//!   runtime's blocking pool (#374): an eager `spawn_blocking` with the
+//!   `safe_batch` chunk loop inside — batching is execution policy, not
+//!   engine compute.
 //! - **Route 2 — naturally-async engines** (a completion-handler platform
 //!   API reached through ObjC/Swift glue; an async HTTP client): implement
 //!   the async traits directly — the future suspends and completes from the
@@ -29,17 +28,14 @@
 //!   this is the preferred shape: a blocking lane would waste a thread
 //!   waiting on a callback.
 //!
-//! # Execution is the host's, topology is the kernel's
+//! # Execution is the runtime's, topology is the kernel's
 //!
 //! Pipeline *topology* — what must order before what — is the kernel's
-//! consistency model. Execution *capacity and placement* are host facts,
-//! handed over through adapter composition: the host assigns a
-//! [`ComputeExecutor`] lane per engine (two engines sharing one GPU get the
-//! same lane; a remote engine gets a wide one; a mobile host maps lanes onto
-//! its own queues). Engines spawn no threads and assume no runtime — the
-//! same injected-scheduling principle as the kernel's `SerialExecutor`. An
-//! engine future must never submit to the kernel's collection executor
-//! (re-entrancy is a deadlock by contract).
+//! consistency model; independent engine futures are `try_join`ed by the
+//! kernel. Execution lives on the kernel's owned tokio runtime (#374):
+//! sync engines ride the blocking pool through [`Blocking`], async engines
+//! complete from their own sources. Engines spawn no threads themselves and
+//! never block a runtime worker.
 //!
 //! # Errors
 //!
@@ -363,67 +359,47 @@ impl<E: RecognizeMedia> RecognizeMedia for WithPolicy<E> {
     }
 }
 
-// ── adapters: execution policy, composed by the host ────────────────────────
+// ── the adapter: sync compute onto the owned runtime (#374 C) ───────────────
 
-/// A host-injected execution lane for engine compute: `submit` schedules the
-/// job somewhere of the host's choosing and returns a runtime-agnostic
-/// future for its completion — the `SerialExecutor` shape *without* the
-/// serialization requirement. Submissions may be in flight concurrently
-/// (one completion per submission; an implementation must not serialize
-/// internally unless the lane's whole point is to serialize, e.g. one GPU).
-pub trait ComputeExecutor: Send + Sync {
-    fn submit(&self, job: Box<dyn FnOnce() + Send>) -> BoxFuture<'static, NativeResult<()>>;
+/// Route-1 engines become kernel-facing async engines here: each call moves
+/// the chunk loop onto the runtime's blocking pool via
+/// `tokio::task::spawn_blocking`. **Eager by contract**: the work is
+/// scheduled inside `embed()` itself, before the returned future is first
+/// polled — that is what lets the kernel build engine futures ahead of
+/// lexical/sibling work and genuinely overlap them (the #342 search/add
+/// overlap properties).
+///
+/// Must be called in runtime context (kernel ops are — the action-exchange
+/// edge spawns every op onto the kernel runtime); calling an adapted engine
+/// off-runtime is a contract violation and panics fast in tokio.
+///
+/// Dropping a returned future detaches it (a `JoinHandle` drop never aborts
+/// the blocking task) — wasted compute at worst, consistent with the edge's
+/// detach semantics.
+pub struct Blocking<E>(pub Arc<E>);
+
+fn run_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> NativeResult<T> + Send + 'static,
+) -> BoxFuture<'static, NativeResult<T>> {
+    let handle = tokio::task::spawn_blocking(work);
+    Box::pin(async move {
+        handle
+            .await
+            .map_err(|e| NativeError::internal(format!("blocking engine task failed: {e}")))?
+    })
 }
 
-/// The inline conformer: runs the job on the calling/polling thread. The C
-/// host's calling-thread model; also the test default.
-pub struct InlineComputeExecutor;
-
-impl ComputeExecutor for InlineComputeExecutor {
-    fn submit(&self, job: Box<dyn FnOnce() + Send>) -> BoxFuture<'static, NativeResult<()>> {
-        job();
-        Box::pin(futures::future::ready(Ok(())))
-    }
-}
-
-/// Route-1 adapter: ready futures, compute on whatever thread polls.
-pub struct Inline<E>(pub E);
-
-/// Route-1 adapter: each call submits ONE job to the injected
-/// [`ComputeExecutor`] lane; the adapter-owned batch loop (splitting the
-/// kernel's batch by the engine's `safe_batch`) runs inside that job, so
-/// chunk-to-chunk order is trivially preserved (output order mirrors input
-/// order) and the lane sees one submission per kernel call. *Cross-call*
-/// concurrency is the lane's business (the [`ComputeExecutor`] contract
-/// requires concurrent in-flight submissions).
-pub struct OnExecutor<E> {
-    engine: Arc<E>,
-    lane: Arc<dyn ComputeExecutor>,
-}
-
-impl<E> OnExecutor<E> {
-    pub fn new(engine: Arc<E>, lane: Arc<dyn ComputeExecutor>) -> Self {
-        Self { engine, lane }
-    }
-}
-
-fn chunked<T: Clone, R>(
-    items: &[T],
-    chunk: usize,
-    mut f: impl FnMut(&[T]) -> NativeResult<Vec<R>>,
-) -> NativeResult<Vec<R>> {
-    let chunk = chunk.max(1);
-    let mut out = Vec::with_capacity(items.len());
-    for piece in items.chunks(chunk) {
-        out.extend(f(piece)?);
-    }
-    Ok(out)
-}
-
-impl<E: EmbedText> Embedder for Inline<E> {
+impl<E: EmbedText + 'static> Embedder for Blocking<E> {
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
-        let result = chunked(&texts, self.0.safe_batch(), |c| self.0.embed_chunk(c));
-        Box::pin(futures::future::ready(result))
+        let engine = Arc::clone(&self.0);
+        run_blocking(move || {
+            let chunk = engine.safe_batch().max(1);
+            let mut out = Vec::with_capacity(texts.len());
+            for piece in texts.chunks(chunk) {
+                out.extend(engine.embed_chunk(piece)?);
+            }
+            Ok(out)
+        })
     }
 
     fn fingerprint(&self) -> Option<String> {
@@ -435,77 +411,21 @@ impl<E: EmbedText> Embedder for Inline<E> {
     }
 }
 
-impl<E: EmbedImages + 'static> ImageEmbedder for Inline<E> {
+impl<E: EmbedImages + 'static> ImageEmbedder for Blocking<E> {
     fn embed_images(&self, images: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
-        let result = chunked(&images, usize::MAX, |c| self.0.embed_image_chunk(c));
-        Box::pin(futures::future::ready(result))
+        let engine = Arc::clone(&self.0);
+        run_blocking(move || engine.embed_image_chunk(&images))
     }
 }
 
-impl<E: RecognizeMedia> Recognizer for Inline<E> {
+impl<E: RecognizeMedia + 'static> Recognizer for Blocking<E> {
     fn recognize(&self, items: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
-        let result = self.0.recognize_chunk(&items);
-        Box::pin(futures::future::ready(result))
+        let engine = Arc::clone(&self.0);
+        run_blocking(move || engine.recognize_chunk(&items))
     }
 
     fn fingerprint(&self) -> Option<String> {
         self.0.fingerprint()
-    }
-}
-
-/// Run `compute` on the lane, delivering its output through a oneshot. The
-/// generic-payload helper both `OnExecutor` impls share: the job closure
-/// owns the inputs and the sender; the returned future joins the lane's
-/// completion with the payload.
-fn run_on_lane<R: Send + 'static>(
-    lane: &Arc<dyn ComputeExecutor>,
-    compute: impl FnOnce() -> NativeResult<R> + Send + 'static,
-) -> BoxFuture<'static, NativeResult<R>> {
-    let (tx, rx) = futures::channel::oneshot::channel::<NativeResult<R>>();
-    let submitted = lane.submit(Box::new(move || {
-        let _ = tx.send(compute());
-    }));
-    Box::pin(async move {
-        submitted.await?;
-        // A dropped job is an executor-availability condition (a lane torn
-        // down mid-flight, e.g. host shutdown) — not an engine bug.
-        rx.await
-            .map_err(|_| NativeError::unavailable("compute lane dropped the job"))?
-    })
-}
-
-impl<E: EmbedText> Embedder for OnExecutor<E> {
-    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
-        let engine = Arc::clone(&self.engine);
-        run_on_lane(&self.lane, move || {
-            chunked(&texts, engine.safe_batch(), |c| engine.embed_chunk(c))
-        })
-    }
-
-    fn fingerprint(&self) -> Option<String> {
-        self.engine.fingerprint()
-    }
-
-    fn dim(&self) -> Option<usize> {
-        self.engine.dim()
-    }
-}
-
-impl<E: EmbedImages> ImageEmbedder for OnExecutor<E> {
-    fn embed_images(&self, images: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
-        let engine = Arc::clone(&self.engine);
-        run_on_lane(&self.lane, move || engine.embed_image_chunk(&images))
-    }
-}
-
-impl<E: RecognizeMedia> Recognizer for OnExecutor<E> {
-    fn recognize(&self, items: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
-        let engine = Arc::clone(&self.engine);
-        run_on_lane(&self.lane, move || engine.recognize_chunk(&items))
-    }
-
-    fn fingerprint(&self) -> Option<String> {
-        self.engine.fingerprint()
     }
 }
 
@@ -533,18 +453,27 @@ mod tests {
         }
     }
 
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .unwrap()
+    }
+
     #[test]
-    fn adapters_chunk_by_safe_batch_and_preserve_order() {
+    fn blocking_adapter_chunks_by_safe_batch_and_preserves_order() {
         let toy = Arc::new(Toy {
             batch_cap: 2,
             calls: std::sync::Mutex::new(Vec::new()),
         });
-        let adapted = OnExecutor::new(Arc::clone(&toy), Arc::new(InlineComputeExecutor));
+        let adapted = Blocking(Arc::clone(&toy));
         let texts: Vec<String> = ["a", "bb", "ccc", "dddd", "eeeee"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let out = futures::executor::block_on(adapted.embed(texts)).unwrap();
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        let out = rt.block_on(adapted.embed(texts)).unwrap();
         assert_eq!(
             out,
             vec![vec![1.0], vec![2.0], vec![3.0], vec![4.0], vec![5.0]],
@@ -558,16 +487,29 @@ mod tests {
         assert_eq!(adapted.fingerprint().as_deref(), Some("toy:v1"));
     }
 
+    /// The eager-embed pin (#374 C): the blocking task is scheduled inside
+    /// `embed()` itself — observable as the engine running WITHOUT the
+    /// returned future ever being polled. The #342 overlap properties
+    /// (search embed ∥ lexical reads; orchestrator try_join) depend on this.
     #[test]
-    fn inline_adapter_matches_on_executor() {
+    fn blocking_embed_is_eager() {
+        let rt = test_runtime();
+        let _guard = rt.enter();
         let toy = Arc::new(Toy {
-            batch_cap: 3,
+            batch_cap: 8,
             calls: std::sync::Mutex::new(Vec::new()),
         });
-        let inline = Inline(Arc::clone(&toy));
-        let texts: Vec<String> = ["x", "yy"].iter().map(|s| s.to_string()).collect();
-        let out = futures::executor::block_on(inline.embed(texts)).unwrap();
-        assert_eq!(out, vec![vec![1.0], vec![2.0]]);
+        let adapted = Blocking(Arc::clone(&toy));
+        let fut = adapted.embed(vec!["scheduled before any poll".into()]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while toy.calls.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            !toy.calls.lock().unwrap().is_empty(),
+            "the engine ran without the future being polled (eager scheduling)"
+        );
+        drop(fut); // and dropping the unpolled future detached, not panicked
     }
 
     #[test]
@@ -586,9 +528,11 @@ mod tests {
         assert_eq!(tuned.fingerprint().as_deref(), Some("host:fp:textprep=3"));
         assert_eq!(tuned.dim(), Some(384));
         // The adapter chunks by the POLICY batch, not the engine's.
-        let adapted = OnExecutor::new(Arc::new(tuned), Arc::new(InlineComputeExecutor));
+        let adapted = Blocking(Arc::new(tuned));
         let texts: Vec<String> = ["a", "bb", "ccc"].iter().map(|s| s.to_string()).collect();
-        let out = futures::executor::block_on(adapted.embed(texts)).unwrap();
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        let out = rt.block_on(adapted.embed(texts)).unwrap();
         assert_eq!(out, vec![vec![1.0], vec![2.0], vec![3.0]]);
         assert_eq!(*toy.calls.lock().unwrap(), vec![2, 1]);
         // safe_batch is floored at 1 (a zero would loop forever).

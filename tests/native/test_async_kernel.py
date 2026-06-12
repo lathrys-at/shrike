@@ -550,3 +550,35 @@ class TestRecognition:
             await kernel.close()
 
         asyncio.run(flow())
+
+
+class TestCloseDrainsTheActor:
+    """#374 design 7 (the review-HIGH regression guard): AsyncKernel.close
+    routes through Kernel::close, which drains the collection actor — after
+    it resolves, nothing is in flight and the actor is GONE (a subsequent
+    collection op fails actor-gone rather than queueing into a leaked task).
+    """
+
+    def test_ops_after_close_hit_a_drained_actor(self, tmp_path) -> None:
+        async def flow():
+            kernel = await shrike_native.async_kernel_open(
+                str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
+            )
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            results = await kernel.upsert_notes(
+                [(basic, 1, ["drained actor", "guard"], [])], "error"
+            )
+            assert all(r[0] == "created" for r in results)
+
+            await kernel.close()
+
+            # The actor is drained: the op can't be queued into a leaked
+            # task — it fails loud instead.
+            with pytest.raises(shrike_native.NativeInternalError, match="actor is gone"):
+                await kernel.col_mod()
+
+            # And a second close is idempotent (the drain already happened).
+            await kernel.close()
+
+        asyncio.run(flow())
