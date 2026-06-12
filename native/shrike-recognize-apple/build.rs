@@ -5,9 +5,14 @@
 //! toolchain). On macOS, building requires full Xcode (the Swift-only
 //! Vision module isn't in the Command Line Tools SDK); *running* needs
 //! nothing extra — the Swift runtime ships with the OS and is linked
-//! dynamically (its `/usr/lib/swift` install names are absolute, so no
-//! rpath; static-stdlib was rejected: it risks a duplicate runtime if
-//! anything else in the host process loads Swift).
+//! dynamically (static-stdlib was rejected: it risks a duplicate runtime
+//! if anything else in the host process loads Swift). One catch the crate
+//! can't fix from here: downstream FINAL links (rustc's 11.0 default
+//! deployment target) fall in libswift_Concurrency's `$ld$previous`
+//! back-deploy window (≤ 12.0), which remaps its install name to @rpath —
+//! so every final link needs `-rpath /usr/lib/swift`, carried by
+//! `native/.cargo/config.toml` (cargo) and the `swift_glue` cc_library
+//! linkopts (bazel). Don't remove either.
 //!
 //! Bazel never runs this file (first-party targets are hand-written
 //! `rust_library`s) — `BUILD.bazel`'s genrule runs the same `xcrun swiftc`

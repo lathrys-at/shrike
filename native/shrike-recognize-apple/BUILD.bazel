@@ -5,10 +5,12 @@ package(default_visibility = ["//native:__subpackages__"])
 exports_files(["Cargo.toml"])
 
 # The Swift half (#398): the same `xcrun swiftc` invocation as build.rs (the
-# cargo lane), so both builds produce identical Swift. macOS-only; off macOS
-# nothing here is built and the crate compiles to the unavailable stub.
-# rules_swift was deliberately not adopted: for 1–2 sources a genrule keeps
-# MODULE.bazel untouched and the two build systems byte-identical.
+# cargo lane), so both builds produce identical Swift — the 13.0 target is
+# build.rs's default deployment floor (the cargo lane additionally honors
+# MACOSX_DEPLOYMENT_TARGET). macOS-only; off macOS nothing here is built and
+# the crate compiles to the unavailable stub. rules_swift was deliberately
+# not adopted: for 1–2 sources a genrule keeps MODULE.bazel untouched and
+# the two build systems byte-identical.
 genrule(
     name = "swift_glue_a",
     srcs = glob(["swift/*.swift"]),
