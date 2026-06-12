@@ -151,13 +151,17 @@ fn image_pair(
 /// embedder slot is runtime-swappable (#342), so a kernel opens (and serves
 /// lexical search + every collection op) with none.
 #[pyfunction]
+#[pyo3(signature = (collection_path, cache_dir, save_delay=None, save_threshold=None))]
 pub(crate) fn async_kernel_open<'py>(
     py: Python<'py>,
     collection_path: String,
     cache_dir: String,
+    save_delay: Option<f64>,
+    save_threshold: Option<u64>,
 ) -> PyResult<Bound<'py, PyAny>> {
     kernel_op(py, async move {
-        let kernel = Kernel::open(&collection_path, &cache_dir).await?;
+        let kernel =
+            Kernel::open_with(&collection_path, &cache_dir, save_delay, save_threshold).await?;
         Ok(AsyncKernel {
             inner: Arc::new(kernel),
         })

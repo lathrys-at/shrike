@@ -15,6 +15,12 @@ description: >
 runs:
   using: composite
   steps:
+    # Since Bazel 9 (#420) the bazel-repo path ALSO carries the repo contents
+    # cache (extracted repo directories, defaulting to
+    # `{--repository_cache}/contents`), not just downloads — which is what
+    # collapses a fresh runner's loading/repo-extraction phase from minutes to
+    # seconds (measured: 290s -> 6s post-expunge locally). No extra flag: the
+    # default location lands inside the path this stanza already saves.
     - name: Cache Bazel toolchains + repo
       uses: actions/cache@v5
       with:

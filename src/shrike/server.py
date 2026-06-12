@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import shrike_native
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import (
     TransportSecurityMiddleware,
@@ -32,10 +33,6 @@ from shrike.embedding import (
     EmbeddingRuntime,
 )
 from shrike.harness import Harness, KernelConfigError
-from shrike.index import (
-    DEFAULT_SAVE_DELAY,
-    DEFAULT_SAVE_THRESHOLD,
-)
 
 # The transport-free core (#275). The collectors and _maybe_rebuild moved there
 # with it; re-exported here so existing import sites (tests included) are
@@ -43,6 +40,12 @@ from shrike.index import (
 from shrike.log import configure_logging
 from shrike.paths import cache_dir, state_dir
 from shrike.tools import register_tools
+
+# The kernel saver's built-in flush tuning (#355): the --index-save-* help
+# names the defaults the flags would override. Sourced from the kernel, not
+# the retired Python facade.
+DEFAULT_SAVE_DELAY = float(shrike_native.INDEX_SAVE_DELAY_DEFAULT)
+DEFAULT_SAVE_THRESHOLD = int(shrike_native.INDEX_SAVE_THRESHOLD_DEFAULT)
 
 logger = logging.getLogger("shrike.server")
 
@@ -847,6 +850,8 @@ def main() -> None:
             hold_seconds=hold_seconds,
             media_read=_read_img,
             media_exists=_img_exists,
+            index_save_delay=args.index_save_delay,
+            index_save_threshold=args.index_save_threshold,
         )
         await harness.boot(start_embedding=bool(args.embedding_model) and not args.no_embedding)
 

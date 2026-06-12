@@ -63,6 +63,8 @@ with contextlib.suppress(ImportError):
     from shrike_native._native import decode_media_b64  # noqa: F401
     from shrike_native._native import fetch_media_url  # noqa: F401
     from shrike_native._native import rehomed_actions  # noqa: F401
+    from shrike_native._native import INDEX_SAVE_DELAY_DEFAULT  # noqa: F401
+    from shrike_native._native import INDEX_SAVE_THRESHOLD_DEFAULT  # noqa: F401
 
 __all__ = [
     "AppleVisionRecognizer",

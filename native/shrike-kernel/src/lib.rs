@@ -276,8 +276,22 @@ impl Kernel {
     /// store and the index files, like the Python host's cache layout).
     /// Scheduling AND timing are the kernel's own (#374): the owned runtime
     /// spawns the collection actor, and the debounced index flush rides
-    /// tokio::time unconditionally.
+    /// tokio::time unconditionally. Saver defaults apply; a host with tuning
+    /// flags uses [`Self::open_with`].
     pub async fn open(collection_path: &str, cache_dir: &str) -> NativeResult<Self> {
+        Self::open_with(collection_path, cache_dir, None, None).await
+    }
+
+    /// [`Self::open`] with the index-flush tuning the host's
+    /// `--index-save-*` flags carry (#355 item 2): `save_delay` is the idle
+    /// debounce in seconds, `save_threshold` the unsaved-change count that
+    /// forces an immediate flush. `None` = the built-in default.
+    pub async fn open_with(
+        collection_path: &str,
+        cache_dir: &str,
+        save_delay: Option<f64>,
+        save_threshold: Option<u64>,
+    ) -> NativeResult<Self> {
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
         let collection = SerializedCollection::open(collection_path.to_string()).await?;
@@ -293,8 +307,8 @@ impl Kernel {
         ));
         let saver = index_orchestrator::DebouncedSaver::new(
             Arc::clone(&orchestrator),
-            index_orchestrator::DEFAULT_SAVE_DELAY,
-            index_orchestrator::DEFAULT_SAVE_THRESHOLD,
+            save_delay.unwrap_or(index_orchestrator::DEFAULT_SAVE_DELAY),
+            save_threshold.unwrap_or(index_orchestrator::DEFAULT_SAVE_THRESHOLD),
         );
         let derived = Arc::new(DerivedEngine::open(
             &format!("{}/shrike.db", cache_dir.trim_end_matches('/')),
