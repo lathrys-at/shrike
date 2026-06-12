@@ -58,6 +58,9 @@ pub(crate) struct Permit<'a> {
     gate: &'a Gate,
 }
 
+// RAII release is what keeps the drain handshake panic-safe: an unwinding
+// attach window still drops its permit. This depends on the workspace never
+// building the cdylib with `panic = "abort"` (no profile sets it today).
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
         self.gate.in_flight.fetch_sub(1, Ordering::SeqCst);
