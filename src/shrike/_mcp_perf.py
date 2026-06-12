@@ -9,12 +9,15 @@ dwarfing the actual tool work (~0.1 ms) and the MCP dispatch (~0.3 ms). It's pur
 redundant overhead: Shrike's tools take typed params and return Pydantic models,
 so both ends are already validated by Pydantic before the SDK re-checks them.
 
-We don't *disable* the SDK's validation (it's a cheap belt-and-suspenders once
-fast, and there's no toggle for output validation anyway) — we make it fast by
-reusing one compiled validator per schema. The SDK caches its ``Tool``
-definitions, so the schema dicts are stable for the server's lifetime; we key on
-identity and pin the schema object so its ``id`` can't be recycled. Behavior is
-identical: a bad instance still raises ``jsonschema.ValidationError``.
+The original shim (#140) cached validator *compilation*, which fixed the small
+payloads — but the data-proportional instance WALK survived, and at scale it
+dominates: measured 6.5 ms (output, 200-note response) + 2.5 ms (input,
+100-note upsert) per call against ~0.5 ms for everything else in the Python
+layer combined (#445). Both ends are enforced by Pydantic regardless (typed
+params in, response models out — with better error messages), so the walk is
+now skipped entirely. A malformed input still fails the tool call: FastMCP's
+Pydantic parse rejects it; the SDK's jsonschema pass was a second, slower
+spelling of the same check.
 
 Scope: we replace the ``jsonschema`` *name* inside the SDK's low-level server
 module with a thin proxy, so the global ``jsonschema.validate`` is untouched —
@@ -29,24 +32,21 @@ _installed = False
 
 
 class _CachingJsonschema:
-    """Proxy over the ``jsonschema`` module that compiles each schema once.
+    """Proxy over the ``jsonschema`` module whose ``validate`` is a no-op.
 
-    ``validate`` reuses a per-schema validator (keyed on object identity, with
-    the schema pinned so the id is stable); every other attribute
-    (``ValidationError``, ``exceptions``, …) forwards to the real module.
+    (Name kept from the #140 compile-caching shim so the install seam stays
+    recognizable.) Every other attribute (``ValidationError``, ``exceptions``,
+    …) forwards to the real module.
     """
 
     def __init__(self, real: Any) -> None:
         self._real = real
-        self._cache: dict[int, tuple[Any, Any]] = {}
 
     def validate(self, instance: Any, schema: Any) -> None:
-        entry = self._cache.get(id(schema))
-        if entry is None or entry[0] is not schema:
-            cls = self._real.validators.validator_for(schema)
-            entry = (schema, cls(schema))
-            self._cache[id(schema)] = entry
-        entry[1].validate(instance)
+        # Deliberately a no-op (#445): both ends of every Shrike tool call are
+        # already Pydantic-validated; the SDK's per-call jsonschema walk is a
+        # redundant O(payload) pass (~9 ms on the large calls).
+        return None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)

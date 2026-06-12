@@ -19,6 +19,7 @@ re-homes in Rust.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from contextvars import ContextVar
@@ -630,7 +631,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         vectors: list[list[float]] = []
         if semantic_ok:
             assert index is not None
-            embedded = index.embed_queries([t for (_, t, _) in sources])
+            # Off the event loop (#445): embed_queries blocks on backend
+            # inference / HTTP; inline it froze every concurrent request.
+            embedded = await asyncio.to_thread(index.embed_queries, [t for (_, t, _) in sources])
             if embedded is None:
                 semantic_ok = False
             else:
@@ -900,9 +903,13 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         assert index is not None
         try:
             exclude_set = set(changed_ids)
-            raw_results = index.search(texts, top_k=top_k + len(exclude_set))
+            # Off the event loop (#445): this embeds the whole changed-note
+            # batch (up to 100 texts) — inline it froze the loop for the
+            # duration of the embed + HNSW pass.
+            raw_results = await asyncio.to_thread(index.search, texts, top_k + len(exclude_set))
 
             id_to_neighbors: dict[int, list[dict[str, Any]]] = {}
+            ordered_by_note: dict[int, list[tuple[int, dict[str, Any]]]] = {}
             for nid, text, matches in zip(changed_ids, texts, raw_results, strict=True):
                 # Semantic candidates: paraphrase dupes (rank = the note's
                 # position in this draft's own cosine ranking).
@@ -973,16 +980,22 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                         kv[1]["provenance"][0]["rank"],
                     ),
                 )
+                ordered_by_note[nid] = ordered
+
+            # ONE batched metadata read for every candidate across the batch
+            # (#445 — this was one kernel job per neighbor, up to ~500
+            # sequential actor round trips per upsert call). An id missing
+            # from the map is the old "unreadable note" skip.
+            all_candidates = sorted(
+                {cid for ordered in ordered_by_note.values() for cid, _ in ordered}
+            )
+            meta_by_id = await wrapper.notes_by_id(all_candidates, "meta")
+            for nid, ordered in ordered_by_note.items():
                 neighbors: list[dict[str, Any]] = []
                 for neighbor_id, info in ordered:
-                    try:
-                        note_data = await wrapper.note_to_dict(neighbor_id, "meta")
-                    except Exception:
-                        logger.debug(
-                            "neighbor lookup: skipping unreadable note %s",
-                            neighbor_id,
-                            exc_info=True,
-                        )
+                    note_data = meta_by_id.get(neighbor_id)
+                    if note_data is None:
+                        logger.debug("neighbor lookup: skipping unreadable note %s", neighbor_id)
                         continue
                     neighbors.append(
                         {
