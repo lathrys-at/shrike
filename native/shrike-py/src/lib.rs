@@ -30,6 +30,7 @@ mod anki_core;
 #[cfg(feature = "anki-core")]
 mod async_kernel;
 mod asyncio_bridge;
+mod finalize_gate;
 #[cfg(feature = "anki-core")]
 mod kernel_actions;
 // The engine containers/capture handles exist to be ATTACHED to a kernel;
@@ -821,6 +822,10 @@ fn fused_add_text(
 /// filename (`_native`), since PyO3 exports `PyInit__native` from it.
 #[pymodule]
 fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // The interpreter-finalization gate (#435): exported (the teardown tests
+    // close it deliberately) and armed via atexit in every importing process.
+    m.add_function(wrap_pyfunction!(finalize_gate::finalize_gate_close, m)?)?;
+    finalize_gate::register_exit_hook(m)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
     m.add_function(wrap_pyfunction!(parallel_sum, m)?)?;

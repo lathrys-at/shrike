@@ -21,6 +21,12 @@ use shrike_ffi::{NativeError, NativeResult};
 
 type VecResult = NativeResult<Vec<Vec<f32>>>;
 
+/// The refusal every gated site returns once the interpreter is exiting
+/// (#435) — the `Unavailable` tier, like any other unreachable backend.
+pub(crate) fn shutting_down() -> NativeError {
+    NativeError::unavailable("interpreter is exiting; Python backend unreachable")
+}
+
 /// What one dispatch embeds: a text batch (`embed_texts`) or an image-bytes
 /// batch (`embed_images`) — same blocking-pool shape either way.
 enum EmbedPayload {
@@ -56,9 +62,19 @@ impl PyEmbedderHandle {
 
     /// One blocking backend call on the pool — eager (scheduled before the
     /// returned future is polled), GIL acquired only on the pool thread.
+    /// Both attach windows ride the finalization gate (#435): an op still
+    /// running while the interpreter exits must not touch Python.
     fn dispatch(&self, payload: EmbedPayload) -> BoxFuture<'static, VecResult> {
-        let backend = Python::attach(|py| self.backend.clone_ref(py));
+        let backend = {
+            let Some(_permit) = crate::finalize_gate::permit() else {
+                return Box::pin(std::future::ready(Err(shutting_down())));
+            };
+            Python::attach(|py| self.backend.clone_ref(py))
+        };
         let handle = tokio::task::spawn_blocking(move || -> VecResult {
+            let Some(_permit) = crate::finalize_gate::permit() else {
+                return Err(shutting_down());
+            };
             Python::attach(|py| {
                 let method = backend.bind(py).getattr(payload.method()).map_err(|e| {
                     NativeError::unavailable(format!("harness embedder missing method: {e}"))
@@ -132,6 +148,9 @@ impl PyMediaResolver {
 
 impl ImageResolver for PyMediaResolver {
     fn read(&self, name: &str) -> Option<Vec<u8>> {
+        // Gate-refused (#435) ⇒ "unreadable", silently: even a log line would
+        // re-enter Python via pyo3-log on this foreign thread.
+        let _permit = crate::finalize_gate::permit()?;
         Python::attach(|py| {
             match self
                 .read
@@ -150,6 +169,10 @@ impl ImageResolver for PyMediaResolver {
     }
 
     fn exists(&self, name: &str) -> bool {
+        // Same refusal shape as `read`: absent.
+        let Some(_permit) = crate::finalize_gate::permit() else {
+            return false;
+        };
         Python::attach(|py| {
             match self
                 .exists

@@ -13,6 +13,7 @@ __all__ = [
     "version",
     "bridge_live_poll_callbacks",
     "bridge_parked_forever",
+    "finalize_gate_close",
     "build_info",
     "parallel_sum",
     "checked_div",
@@ -48,6 +49,7 @@ BATCH_PROBE_TEXTS: list[str]
 def version() -> str: ...
 def bridge_live_poll_callbacks() -> int: ...
 def bridge_parked_forever() -> object: ...
+def finalize_gate_close() -> None: ...
 
 INDEX_SAVE_DELAY_DEFAULT: float
 INDEX_SAVE_THRESHOLD_DEFAULT: int
