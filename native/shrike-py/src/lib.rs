@@ -371,16 +371,18 @@ impl RemoteEmbedder {
 impl RemoteEmbedder {
     #[new]
     #[pyo3(signature = (base_url, *, api_key=None, model=None))]
-    fn new(base_url: String, api_key: Option<String>, model: Option<String>) -> Self {
-        Self {
-            inner: std::sync::Arc::new(shrike_embed_remote::RemoteEmbedder::new(
-                shrike_embed_remote::RemoteEmbedderConfig {
-                    base_url,
-                    api_key,
-                    model,
-                },
-            )),
-        }
+    fn new(base_url: String, api_key: Option<String>, model: Option<String>) -> PyResult<Self> {
+        // Construction validates the API key (header-injection guard, #383).
+        let engine =
+            shrike_embed_remote::RemoteEmbedder::new(shrike_embed_remote::RemoteEmbedderConfig {
+                base_url,
+                api_key,
+                model,
+            })
+            .map_err(to_py_err)?;
+        Ok(Self {
+            inner: std::sync::Arc::new(engine),
+        })
     }
 
     /// Embed one chunk of texts as a single request (one vector per input).
