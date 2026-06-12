@@ -12,11 +12,17 @@ Trunk-based. `main` is always releasable — no `develop` branch, no Gitflow.
   pushes to `main`.
 - **Squash merge** PRs, so `main` keeps a linear, one-commit-per-change history
   that bisects cleanly.
-- `main` is protected: the Linux CI checks (`lint`, `test`, `embedding`) must pass
-  before merge. The expensive cross-platform lanes (macOS + ARM) run **only** on
-  PRs labelled `rc` — never on plain PRs or on merge to `main`, to keep the
-  iterate-and-merge loop off the 10×-billed macOS runners. See
-  [`.github/workflows/test.yml`](.github/workflows/test.yml).
+- `main` is protected: the single required status check is `ci-ok`. CI is
+  **gated on the `ci` label** — no test lane runs on a PR until it carries `ci`
+  (or `rc`), and `ci-ok` fails with an actionable message until then, so CI is
+  deferred while a PR churns through review, never skipped. Add the label once
+  review is complete; toggling it re-evaluates the gate.
+- The cross-platform lanes (macOS + ARM) run only on labelled PRs: `rc`
+  (release candidate) selects the full OS matrix — apply it before tagging a
+  release; `macOS` selects just the macOS leg, for changes to the
+  macOS-specific platform glue. Neither runs on plain PRs or on merge to
+  `main` — the gating keeps the iterate-and-merge loop fast and the signal
+  clean. See [`.github/workflows/test.yml`](.github/workflows/test.yml).
 - Branch names are `‹type›/‹issue#›-‹slug›`, where `‹type›` is one of `feat`,
   `fix`, `docs`, `chore`, `refactor`, `test`, `xfail` — e.g.
   `fix/44-version-tag-drift`, `feat/33-ankiweb-sync`,
@@ -57,8 +63,8 @@ tag-triggered workflow (`.github/workflows/release.yml`) runs the full
 cross-platform suite, builds the **sdist + wheel**, the **`anki-cards.skill`**
 bundle (`scripts/package-skill.py`), and a **`SHA256SUMS`**, and attaches them to a
 GitHub Release. Final-release notes come from the matching `## [X.Y.Z]` section of
-`CHANGELOG.md`; an rc tag uses auto-generated commit notes instead. (PyPI publishing
-is not wired up — see #43.)
+`CHANGELOG.md`; an rc tag uses auto-generated commit notes instead. A final release
+(not an rc) is also published to PyPI as `shrike-mcp`, via trusted publishing.
 
 **Cut release candidates first, with the changelog left under `[Unreleased]`:**
 
@@ -86,11 +92,13 @@ The roadmap and all tracked work live in GitHub issues and milestones — not in
 prose in the docs (that's how the old README/CLAUDE roadmaps drifted out of sync
 with reality).
 
-- One **milestone per minor version** (`v0.4.0 — Sync`, …).
+- Each **milestone is a themed body of work** (*Search*, *Sync*, *Terminal UI
+  (TUI)*, …), not a version number — what ships in a given release is decided
+  at tag time.
 - Each milestone has an **epic** tracking issue (label `epic`) whose body is a
   checklist of its deliverables. Fine-grained issues are broken out for the
-  next-up version and linked from the epic; later versions stay as the epic until
-  they come into focus.
+  next-up work and linked from the epic; later work stays as the epic until
+  it comes into focus.
 - Shipped-design rationale lives in [`docs/decisions.md`](docs/decisions.md), not in
   closed issues.
 
@@ -131,11 +139,21 @@ it once when the project goes public; it can also be scripted later via `gh api`
 ## Local checks before a PR
 
 ```bash
-ruff check src/shrike/ tests/
-ruff format --check src/shrike/ tests/
+ruff check src/shrike/ tests/ native/shrike-py/python/
+ruff format --check src/shrike/ tests/ native/shrike-py/python/
 mypy src/shrike/
 pytest tests/unit -q
 pytest tests/integration -q -m "integration and not embedding"
+```
+
+For a change touching the Rust workspace, also run the native gate (and rebuild
+the extension into your venv before pytest, which otherwise tests the stale one):
+
+```bash
+(cd native && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings)
+(cd native && cargo test --workspace)
+scripts/build-native.sh && pytest tests/unit tests/native -q
+./bazel test //...     # the authoritative CI lane
 ```
 
 `scripts/coverage.sh` runs the coverage measurement locally and enforces the

@@ -48,15 +48,15 @@ shrike server stop
 
 ## Semantic search
 
-`shrike note search` finds notes by meaning instead of keywords. You supply an embedding model to turn your notes into vectors, and pick a backend to run it. Shrike has two backends, and which one suits you depends mostly on whether your cards are plain text.
+`shrike note search` finds notes by meaning instead of keywords. You supply an embedding model to turn your notes into vectors, and pick a backend to run it. Shrike has three backends, and which one suits you depends mostly on what's on your cards.
 
 ### Choosing a backend
 
 For plain-text cards, which is the common case, the ONNX backend is the simpler choice. It runs inside Shrike, so there's no separate binary to install or process to keep alive, single-card lookups are quick, and a small quantized model keeps memory use low. Reach for this one if you just want related-card search to work.
 
-Pick the llama-server backend if you already use llama.cpp, want to run a GGUF or MLX model, or want to follow the multimodal search work (finding image and audio cards by description) as it lands, since that builds on the llama-server path. Both backends can use a GPU; see the ONNX section below for the NVIDIA and Apple paths.
+Pick the llama-server backend if you already use llama.cpp or want to run a GGUF or MLX model. Pick the CLIP backend if your cards carry images you want to search by content — it embeds text and images into one shared space, so a text query can surface a card whose meaning lives in its picture. All three can use a GPU; see the ONNX section below for the NVIDIA and Apple paths.
 
-Either way the search works the same, text-only models are fully supported on both, and search quality comes from the model you choose rather than the backend.
+Whichever you pick, search works the same, text-only models are fully supported, and search quality comes from the model you choose rather than the backend.
 
 ### ONNX backend
 
@@ -84,6 +84,26 @@ shrike server start --collection ~/path/to/collection.anki2 \
 
 If `--llama-server` or `--embedding-model` isn't given on the command line or in your config file, Shrike falls back to `LLAMA_SERVER_PATH` and a `llama-server` on your `PATH` for the binary, and to `SHRIKE_EMBEDDING_MODEL` for the model.
 
+### CLIP backend (search images by content)
+
+Install the `clip` extra and point `--embedding-model` at a CLIP ONNX export — a directory holding `text_model.onnx`, `vision_model.onnx`, `tokenizer.json`, and `preprocessor_config.json` (the layout of [Xenova/clip-vit-base-patch32](https://huggingface.co/Xenova/clip-vit-base-patch32); a larger model like jina-clip-v2 searches noticeably better):
+
+```bash
+pip install 'shrike-mcp[clip]'
+
+shrike server start --collection ~/path/to/collection.anki2 \
+  --embedding-backend clip \
+  --embedding-model ~/models/clip-vit-base-patch32
+```
+
+With this backend, a query like "diagram of the Krebs cycle" can find a card whose answer is a picture, even when the card's text never says so. Text-only search still works exactly as on the other backends.
+
+### Reading text inside images (OCR)
+
+On macOS, `--ocr-backend apple` runs Apple's Vision OCR over the images on your cards in the background (nothing extra to install — Vision ships with the OS). Recognized text becomes searchable like field text: exact and typo-tolerant matches work with any backend, and with an embedding backend the text is indexed for semantic search too. Results tell you which image matched.
+
+### The index
+
 Shrike builds an index of your notes in the background. A large collection takes a little while the first time; search will tell you if it's still indexing. Once it's ready:
 
 ```bash
@@ -91,7 +111,7 @@ shrike note search "electron transport chain"
 shrike note search --similar-to 1700000000123
 ```
 
-`shrike note search` also matches your query as exact text, so it finds notes that contain the words literally as well as ones that are semantically close; each result shows you which applied. The exact-text part works even without the embedding service running.
+`shrike note search` also matches your query as exact text and as a near-miss (so `protien` still finds protein cards); each result shows you which applied. These text matches work even without the embedding service running.
 
 ## CLI
 
@@ -184,6 +204,15 @@ shrike type create --name Vocab --field Word --field Meaning \
   --template 'Card 1:{{Word}}:{{FrontSide}}<hr>{{Meaning}}'
 ```
 
+`shrike media` gets images and audio into the collection (reference the stored name from a note field with `<img src="...">` or `[sound:...]`):
+
+```bash
+shrike media store diagram.png                  # upload a local file
+shrike media store --url https://example.com/cell.png
+shrike media list '*.png'
+shrike media fetch diagram.png -o /tmp/out.png  # download it back
+```
+
 Every command takes `--json` for scriptable output. See [the CLI reference](docs/cli-reference.md) for the full list of commands and flags.
 
 ## Connect an MCP client
@@ -233,7 +262,12 @@ Shrike exposes these MCP tools:
 - **delete_decks**: delete decks by name, if empty
 - **delete_notes**: permanently delete notes by ID
 - **delete_note_types**: delete note types by ID, if no notes use them
-- **collection_prune**: clean up unused tags, empty notes, and empty cards (previews by default)
+- **store_media**: store media files from base64 data, a URL, or a server-local path
+- **fetch_media**: locate media files; returns a download URL per file, never bytes
+- **list_media**: list media filenames, optionally filtered by a glob
+- **delete_media**: move media files to Anki's recoverable trash
+- **collection_check**: read-only media diagnostics — unused files, missing files, broken references
+- **collection_prune**: clean up unused tags, empty notes, empty cards, and unused media (previews by default)
 
 The machine schema is whatever the running server advertises via `tools/list`. [`docs/mcp-tools.md`](docs/mcp-tools.md) is the human-readable companion.
 

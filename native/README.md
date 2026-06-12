@@ -1,30 +1,42 @@
 # Shrike native workspace
 
-The Rust compute plane behind Shrike's Python facades (epic #265). A single
-Cargo workspace; Bazel (`crate_universe`) resolves third-party crates from the
-one `Cargo.lock` here, and `rules_rust` builds everything against the hermetic
-CPython toolchain.
+The Rust compute core (epics #265 → #279/#332). The kernel owns the collection,
+the vector index, the derived-text store, and search fusion; the Python side is
+the assembling harness (server, CLI, client). A single Cargo workspace; Bazel
+(`crate_universe`) resolves third-party crates from the one `Cargo.lock` here,
+and `rules_rust` builds everything against the hermetic CPython toolchain.
 
 ## Crates
 
 | Crate | Role | pyo3? |
 |---|---|---|
+| `shrike-kernel` | **The kernel**: collection ops, index orchestration, derived-text ingest, recognition sweeps, RRF fusion. Owns the process's tokio runtime; pure plugin host (engines are injected, never named) | no |
+| `shrike-collection` | anki via its protobuf service layer — the **only** anki coupling | no |
+| `shrike-index` | Per-modality USearch HNSW vector index | no |
+| `shrike-derived` | FTS5 trigram engine (substring/fuzzy search, OCR rows) | no |
+| `shrike-engine-api` | The engine contract (#342): kernel-facing async traits, sync compute traits, the `Blocking` adapter, the batch-safety probe | no |
+| `shrike-embed` | ort/tokenizers text + CLIP embedding engines | no |
+| `shrike-embed-remote` | Text embedding over any OpenAI-compatible endpoint | no |
+| `shrike-describe-remote` | VLM image→text description over OpenAI-compatible chat completions (#433) | no |
+| `shrike-llama-server` | llama-server subprocess lifecycle (spawn/health/reap/stop) — a manager, not an engine | no |
+| `shrike-recognize-apple` | Apple Vision OCR engine (Swift glue behind Rust, macOS 15+; stub elsewhere) | no |
+| `shrike-schemas` | serde+schemars wire types — canonical; `shrike/schemas.py` binds them | no |
 | `shrike-ffi` | FFI conventions: error taxonomy (`NativeError`: `invalid_input` / `unavailable` / `internal`) + the marshaling rules (crate docs) | no |
 | `shrike-py` | The one PyO3 binding crate — builds the `shrike_native._native` extension module | **yes** |
 | `_demo` | The #247 polyglot proof (kept as the smoke target) | yes |
 
-**Layering rule (epic #265 convention 5):** `pyo3` may appear only in
-`shrike-py` and `_demo`. Compute/kernel crates stay pure Rust so the eventual
-no-CPython kernel (#279) is structural. Enforced by `//native:layering_check`.
+**Layering rule:** `pyo3` may appear only in `shrike-py` and `_demo`. Every
+other crate stays pure Rust, which is what makes the kernel deployable in
+non-Python hosts. Enforced by `//native:layering_check`.
 
 ## Conventions every native module follows
 
 - **Protocol → Python facade → native module.** The Python protocol
-  (`embedding_base.py`) is the interface truth; the facade (e.g. `OnnxBackend`)
-  stays a plain Python class — patchable, `spec=`-able, strictly typed — and
-  imports `shrike_native` lazily so a missing native install degrades to a
-  clean `ImportError`. The native module is internal: **no test file imports
-  it.**
+  (`embedding_base.py`, `recognition.py`) is the harness-side interface truth;
+  the facade (e.g. `OnnxBackend`) stays a plain Python class — patchable,
+  `spec=`-able, strictly typed — and hands the kernel a native engine
+  composition at attach. The binding surface itself is tested in
+  `tests/native/`; the rest of the suite goes through the facades.
 - **Marshaling:** only strings, bytes, f32 vectors, i64 key arrays, and small
   JSON-able dicts cross the boundary; coarse, batched calls; zero-copy numpy
   interchange where arrays must cross. No live Python objects into worker
@@ -43,7 +55,7 @@ no-CPython kernel (#279) is structural. Enforced by `//native:layering_check`.
 ## Building and testing
 
 ```bash
-# Bazel (what CI runs — the gated native lane in test.yml):
+# Bazel (CI runs one `./bazel test //...` over the whole graph; this is its native slice):
 ./bazel test //native/...                  # crates, layering check, smoke, stubtest
 ./bazel build //native/shrike-py:wheel     # the shrike-native platform wheel (manual tag)
 
@@ -71,15 +83,16 @@ Bazel crate graph to it.
 
 ## Packaging
 
-The canonical release artifact is `//native/shrike-py:wheel` — a
-`shrike-native` abi3 (cp312+) platform wheel carrying `_native.so`, the stubs,
-and `py.typed`. The main `shrike-mcp` wheel stays pure Python; the native
-package is an optional accelerator the facades probe for. Linux wheels use
-plain `linux_*` tags until PyPI publishing is wired (#43) — manylinux auditing
-happens then. ort linkage decision for #270 is recorded there: **load-dynamic
-against the pinned onnxruntime the Python backend already installs** (no
-`download-binaries`, no duplicated runtime, guaranteed version match for the
-parity bake).
+`//native/shrike-py:wheel` builds a `shrike-native` abi3 (cp312+) platform
+wheel carrying `_native.so`, the stubs, and `py.typed`. The main `shrike-mcp`
+wheel stays pure Python — but since the kernel inversion the server *requires*
+`shrike_native` (it is the kernel, not an accelerator), so how the native wheel
+is composed and shipped for releases is open work (#338/#340: feature gating
+and pip-extra symmetry). Linux wheels use plain `linux_*` tags for now —
+manylinux auditing comes with the native publishing story. ort linkage decision
+for #270: **load-dynamic against the pinned onnxruntime the Python backend
+already installs** (no `download-binaries`, no duplicated runtime, guaranteed
+version match for the parity bake).
 
 ## Licensing inventory
 

@@ -59,6 +59,7 @@ Start the server as a background daemon. The collection path can come from `--co
 | `--embedding-batch-size INTEGER` | Cap the embedding batch size (any backend). Default: batch as large as a startup self-check proves safe. A batch-variant model (e.g. int8 ONNX) is always embedded serially regardless. |
 | `--llama-server PATH` | Path to the `llama-server` binary (default: `LLAMA_SERVER_PATH` or `PATH`). `llama` backend only. |
 | `--no-embedding` | Start without the embedding service even if a model is configured. |
+| `--ocr-backend` | OCR backend for recognizing text in note images. Off by default; `apple` uses macOS Vision (ships with the OS, macOS 15+). Recognized text feeds exact/fuzzy search and the vector index in the background. |
 | `--save-config` | Persist the resolved flags to the config file. Without this, `server start` never writes config — it stays under your control and start always reflects the flags you pass. |
 
 The embedding flags above are also accepted by `shrike embedding start`, which cycles the service on an already-running server.
@@ -235,7 +236,7 @@ shrike note delete 1779749914797 1779749914798 --yes
 
 ### `shrike note search [QUERIES]...`
 
-Search the collection by meaning **and** by exact text. Each query is matched both by semantic similarity (needs the embedding service and a built index) and as an exact, case-insensitive substring of note fields. Results are folded together: each shows a similarity score when ranked and the matched field + a snippet when the text occurs literally. Exact matches work even with no embedding service (you'll see a note that semantic ranking was skipped). Accepts query strings, note IDs to find similar notes, or both.
+Search the collection by meaning **and** by text. Each query is matched by semantic similarity (needs the embedding service and a built index), as an exact, case-insensitive substring of note fields, and fuzzily (trigram matching, so a typo like `protien` still finds protein cards). Results are folded together: each shows a similarity score when ranked and the matched field + a snippet when the text matched. Text matches work even with no embedding service (you'll see a note that semantic ranking was skipped). Accepts query strings, note IDs to find similar notes, or both.
 
 | Option | Description |
 |---|---|
@@ -347,6 +348,69 @@ shrike tag rename jp japanese --note 1779749914797 --note 1779749914798
 
 ---
 
+## `shrike media`
+
+Manage the collection's media folder — the images and audio that note fields reference with `<img src="...">` and `[sound:...]`. Anki resolves name collisions (identical content keeps the name; different content under the same name gets a hashed suffix), so always reference the filename the store command *returns*.
+
+### `shrike media store [PATHS]...`
+
+Store local files and/or URLs into the media folder. Local paths are read here and uploaded as bytes, so they work against a remote daemon. URLs are fetched by the server by default (http/https only; private and internal addresses are refused unless the server runs with `--allow-private-media-fetch`).
+
+| Option | Description |
+|---|---|
+| `--name TEXT` | Override the stored filename (single item only). |
+| `--url URL` | URL to fetch and store. Repeatable. |
+| `--client-fetch` | Download `--url` files locally and upload the bytes — for when this machine has the network path or proxy, not the server. |
+| `--server-path PATH` | Store a file already on the *server's* disk without sending bytes (repeatable). Off by default: the server must be started with one or more `--media-path-root DIR` (config `server.media_path_roots`, env `SHRIKE_MEDIA_PATH_ROOTS`) on a purely-local configuration, and the file must be under one of those roots. |
+
+```bash
+shrike media store diagram.png
+shrike media store a.png b.jpg c.ogg
+shrike media store --url https://example.com/cell.png
+shrike media store --server-path /data/big-lecture.mp4
+```
+
+### `shrike media fetch <NAMES>...`
+
+Write media files out to local disk.
+
+| Option | Description |
+|---|---|
+| `-o, --output PATH` | Write a single file to this path. |
+| `--out-dir PATH` | Directory to write files into (default: current directory). |
+
+```bash
+shrike media fetch diagram.png -o /tmp/out.png
+shrike media fetch a.png b.jpg --out-dir ./assets
+```
+
+### `shrike media list [PATTERN]`
+
+List media filenames, with size and type, optionally filtered by a glob pattern.
+
+| Option | Description |
+|---|---|
+| `--limit INTEGER` | Maximum files to show. |
+
+```bash
+shrike media list
+shrike media list '*.png' --limit 20
+```
+
+### `shrike media delete <NAMES>...`
+
+Move media files to Anki's recoverable trash. This does **not** check whether a note still references the file — run `shrike collection check` first to find unused media.
+
+| Option | Description |
+|---|---|
+| `-y, --yes` | Skip confirmation. |
+
+```bash
+shrike media delete orphan.png --yes
+```
+
+---
+
 ## `shrike collection`
 
 Collection-wide query and maintenance.
@@ -368,13 +432,14 @@ shrike collection query "deck:Japanese (tag:verb OR tag:adj)" --limit 100
 
 ### `shrike collection prune`
 
-Tidy up the collection: remove unused tags, empty notes, and empty cards. Select cleanups with the flags below; **with none selected, all three run.** By default this only **previews** what would be removed — pass `--apply` to actually remove (it previews, asks for confirmation, then applies). An empty note has every field blank, where a field is blank only if it has no text **and** no media, so an image- or audio-only note is kept.
+Tidy up the collection: remove unused tags, empty notes, empty cards, and unused media. Select cleanups with the flags below; **with none selected, all four run.** By default this only **previews** what would be removed — pass `--apply` to actually remove (it previews, asks for confirmation, then applies). An empty note has every field blank, where a field is blank only if it has no text **and** no media, so an image- or audio-only note is kept.
 
 | Option | Description |
 |---|---|
 | `--unused-tags` | Remove tag-registry names no note uses. |
 | `--empty-notes` | Delete notes whose every field is blank (text- and media-free). |
 | `--empty-cards` | Remove cards that render empty; a note that loses its last card is deleted. |
+| `--unused-media` | Move media files no note references to Anki's recoverable trash. |
 | `--apply` | Apply the changes. Without it, the command only previews. |
 | `-y, --yes` | Skip the confirmation prompt (with `--apply`). |
 
@@ -385,7 +450,15 @@ shrike collection prune --apply                  # preview, confirm, then prune 
 shrike collection prune --empty-notes --apply -y # remove empty notes, no prompt
 ```
 
-`--apply` is destructive and cannot be undone; preview first.
+`--apply` is destructive (deleted notes and cards cannot be recovered; trashed media can, from Anki's media trash); preview first.
+
+### `shrike collection check`
+
+Report media-integrity issues without changing anything: files on disk no note references (prune candidates), references to files that are missing, the notes holding those broken references, and whether Anki's media trash holds anything.
+
+```bash
+shrike collection check
+```
 
 ### `shrike collection reload`
 
@@ -395,7 +468,7 @@ Close and re-open the collection without restarting the daemon. Picks up changes
 shrike collection reload
 ```
 
-Note: while the daemon is running it holds the collection's lock, so external tools (Anki desktop, sync) generally cannot edit it underneath you — reload is mainly for file-level replacement today, and becomes more broadly useful once cooperative locking lands.
+Note: in the default locking mode the daemon holds the collection's lock for its whole life, so external tools (Anki desktop, sync) generally cannot edit the collection underneath you — reload is mainly for file-level replacement. With `--cooperative-lock`, the daemon already re-checks for external edits each time it re-acquires the collection, so a manual reload is rarely needed.
 
 ---
 
@@ -527,8 +600,9 @@ Normally the index auto-saves via a debounced flush, so this is rarely needed.
 
 ## `shrike embedding`
 
-Manage the `llama-server` embedding service that powers semantic search. It can
-be cycled independently of the Shrike server (model swaps, freeing GPU/RAM).
+Manage the embedding service that powers semantic search, whichever backend it
+runs on. It can be cycled independently of the Shrike server (model swaps,
+freeing GPU/RAM).
 
 ### `shrike embedding status`
 
