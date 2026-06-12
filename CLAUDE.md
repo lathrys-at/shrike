@@ -138,6 +138,9 @@ native/                           # the Rust workspace (the compute core)
 │                                 #   traits, the Blocking adapter, WithPolicy, the batch probe
 ├── shrike-embed/                 # ort/tokenizers text + CLIP engines (implement the contract in-crate)
 ├── shrike-embed-remote/          # EmbedText over any OpenAI-compatible endpoint (ureq; llama/cloud/tailnet)
+├── shrike-describe-remote/       # VLM image→text describe over OpenAI-compatible chat completions
+│                                 #   (#433; embedding-space-only destination — attach waits on the
+│                                 #   kernel's per-engine destination policy)
 ├── shrike-llama-server/          # llama-server lifecycle ONLY (spawn/health/reap/stop) — not an engine
 ├── shrike-recognize-apple/       # Apple Vision OCR engine (Swift glue behind Rust, #398;
 │                                 #   off-macOS unavailable stub; building needs Xcode)

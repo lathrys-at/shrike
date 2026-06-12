@@ -16,6 +16,7 @@ members = [
     "shrike-derived",
     "shrike-embed",
     "shrike-embed-remote",
+    "shrike-describe-remote",
     "shrike-engine-api",
     "shrike-ffi",
     "shrike-index",

@@ -31,6 +31,7 @@ ENGINE_CRATES = {
     "shrike-embed",
     "shrike-recognize-apple",
     "shrike-embed-remote",
+    "shrike-describe-remote",
     "shrike-llama-server",
 }
 
