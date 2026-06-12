@@ -136,8 +136,25 @@ impl SerializedCollection {
             .map_err(|_| NativeError::internal("executor dropped a collection job"))?
     }
 
+    /// Close the collection on the actor. Idempotent: once the actor is
+    /// drained (a prior close/shutdown) the collection went down with it, so
+    /// already-gone is the already-closed outcome, not an error — typed here
+    /// rather than string-matched by the caller (#382). Mirrors `run` except
+    /// for that one rule.
     pub async fn close(&self) -> NativeResult<()> {
-        self.run(|core| core.close()).await?
+        let Ok(sender) = self.sender() else {
+            return Ok(());
+        };
+        let core = Arc::clone(&self.core);
+        let (tx, rx) = oneshot::channel();
+        let job: Job = Box::new(move || {
+            let _ = tx.send(core.ensure_open().and_then(|_| core.close()));
+        });
+        if sender.send(job).is_err() {
+            return Ok(()); // drained while queueing: same already-closed outcome
+        }
+        rx.await
+            .map_err(|_| NativeError::internal("executor dropped a collection job"))?
     }
 
     /// Drain the actor: take-and-drop the sender (the channel closes; the
@@ -405,6 +422,7 @@ impl Kernel {
     /// collection materializes an empty-but-ready index. Returns whether any
     /// reindexing ran. The harness drives this as a background task — the
     /// kernel serves while it runs.
+    #[must_use = "whether reindexing ran is the caller's signal to refresh status"]
     pub async fn reindex_if_needed(&self) -> NativeResult<bool> {
         let Some(svc) = self.embed_service() else {
             return Ok(false); // no embedder → nothing to (re)index
@@ -492,9 +510,8 @@ impl Kernel {
             std::collections::HashMap::new();
         match self.derived.texts_for_source(OCR_SOURCE) {
             Ok(rows) => {
-                let min = self.recognition_gate.min_chars_vector;
                 for (nid, _r, text) in rows {
-                    if text.trim().chars().count() >= min {
+                    if self.recognition_gate.vector_worthy(&text) {
                         ocr_map.entry(nid).or_default().push(text);
                     }
                 }
@@ -824,8 +841,14 @@ impl Kernel {
     /// path: the collection op removed them internally; this is the sidecar
     /// half of `delete_notes`).
     pub async fn forget_notes(&self, note_ids: Vec<i64>) -> NativeResult<()> {
-        self.orchestrator.remove(&note_ids)?;
-        self.derived.remove(&note_ids, None)?;
+        self.drop_note_sidecars(&note_ids).await
+    }
+
+    /// The sidecar tail shared by every note-deletion shape (#382): drop the
+    /// notes' vectors + derived rows, advance the watermarks, refresh tags.
+    async fn drop_note_sidecars(&self, note_ids: &[i64]) -> NativeResult<()> {
+        self.orchestrator.remove(note_ids)?;
+        self.derived.remove(note_ids, None)?;
         self.advance_watermarks(self.embed_service().is_some())
             .await?;
         self.refresh_tags_best_effort().await;
@@ -846,11 +869,7 @@ impl Kernel {
             .collection
             .run(move |core| core.delete_notes(&ids))
             .await??;
-        self.orchestrator.remove(&note_ids)?;
-        self.derived.remove(&note_ids, None)?;
-        self.advance_watermarks(self.embed_service().is_some())
-            .await?;
-        self.refresh_tags_best_effort().await;
+        self.drop_note_sidecars(&note_ids).await?;
         Ok(removed)
     }
 
@@ -983,14 +1002,10 @@ impl Kernel {
     /// Close the collection and drain the actor — close returns with nothing
     /// in flight (the interpreter-teardown guard, #374 design 7). Works
     /// through `&self` so shared handles (the binding's `Arc<Kernel>`) can
-    /// close; idempotent (a drained actor close is the actor-gone error,
-    /// swallowed here as already-closed).
+    /// close; idempotent (`SerializedCollection::close` treats a drained
+    /// actor as already-closed, #382).
     pub async fn close(&self) -> NativeResult<()> {
-        let result = match self.collection.close().await {
-            // A second close after shutdown: the actor is gone — fine.
-            Err(e) if e.to_string().contains("actor is gone") => Ok(()),
-            other => other,
-        };
+        let result = self.collection.close().await;
         self.collection.shutdown().await;
         result
     }
@@ -1171,6 +1186,9 @@ mod no_cpython_smoke {
             let hits = kernel.search("capital of france", 5).await.unwrap();
             assert!(hits[0].signals.iter().any(|(s, _)| s == "text"));
 
+            kernel.close().await.unwrap();
+            // Idempotent (#382): a second close after the actor drained is
+            // already-closed, not an actor-gone error.
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
         });

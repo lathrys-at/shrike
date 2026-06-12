@@ -67,8 +67,11 @@ impl CollectionCore {
         );
         let mut rows: HashMap<i64, (i64, String)> = HashMap::new();
         for r in self.adapter.db_rows(&sql)? {
-            let (Some(id), Some(mid), Some(flds)) = (r[0].as_i64(), r[1].as_i64(), r[2].as_str())
-            else {
+            let (Some(id), Some(mid), Some(flds)) = (
+                r.first().and_then(Value::as_i64),
+                r.get(1).and_then(Value::as_i64),
+                r.get(2).and_then(Value::as_str),
+            ) else {
                 return Err(NativeError::internal(
                     "unexpected notes row shape".to_string(),
                 ));
@@ -168,7 +171,10 @@ impl CollectionCore {
             .adapter
             .db_rows("select id, tags from notes where tags != ''")?
         {
-            let (Some(id), Some(tags)) = (r[0].as_i64(), r[1].as_str()) else {
+            let (Some(id), Some(tags)) = (
+                r.first().and_then(Value::as_i64),
+                r.get(1).and_then(Value::as_str),
+            ) else {
                 return Err(NativeError::internal(
                     "unexpected notes tag row shape".to_string(),
                 ));
@@ -336,11 +342,11 @@ impl CollectionCore {
             "select id, mid, tags, flds, mod from notes where id in ({id_list})"
         ))? {
             let (Some(id), Some(mid), Some(tags), Some(flds), Some(modified)) = (
-                r[0].as_i64(),
-                r[1].as_i64(),
-                r[2].as_str(),
-                r[3].as_str(),
-                r[4].as_i64(),
+                r.first().and_then(Value::as_i64),
+                r.get(1).and_then(Value::as_i64),
+                r.get(2).and_then(Value::as_str),
+                r.get(3).and_then(Value::as_str),
+                r.get(4).and_then(Value::as_i64),
             ) else {
                 return Err(NativeError::internal(
                     "unexpected notes row shape".to_string(),
@@ -353,7 +359,10 @@ impl CollectionCore {
         for r in self.adapter.db_rows(&format!(
             "select nid, did from cards where nid in ({id_list}) order by ord"
         ))? {
-            if let (Some(nid), Some(did)) = (r[0].as_i64(), r[1].as_i64()) {
+            if let (Some(nid), Some(did)) = (
+                r.first().and_then(Value::as_i64),
+                r.get(1).and_then(Value::as_i64),
+            ) {
                 deck_by_nid.entry(nid).or_insert(did);
             }
         }
@@ -560,7 +569,10 @@ impl CollectionCore {
         for r in self.adapter.db_rows(
             "select nid, did from cards union select nid, odid from cards where odid != 0",
         )? {
-            if let (Some(nid), Some(did)) = (r[0].as_i64(), r[1].as_i64()) {
+            if let (Some(nid), Some(did)) = (
+                r.first().and_then(Value::as_i64),
+                r.get(1).and_then(Value::as_i64),
+            ) {
                 nids_by_deck.entry(did).or_default().insert(nid);
             }
         }

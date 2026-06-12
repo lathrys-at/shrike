@@ -18,8 +18,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use blake2::digest::{Update, VariableOutput};
-use blake2::Blake2bVar;
+use blake2::digest::consts::U8;
+use blake2::{Blake2b, Digest};
 use serde::{Deserialize, Serialize};
 
 use shrike_ffi::{NativeError, NativeResult};
@@ -34,12 +34,12 @@ pub const DEFAULT_SAVE_DELAY: f64 = 60.0;
 pub const DEFAULT_SAVE_THRESHOLD: u64 = 100;
 
 /// Stable fingerprint of a note's embedding text — bit-identical to Python's
-/// `hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest()`.
+/// `hashlib.blake2b(text.encode("utf-8"), digest_size=8).hexdigest()`. The
+/// fixed-size `Blake2b<U8>` folds the same digest length into the parameter
+/// block as `Blake2bVar::new(8)` did (same bytes, no per-call fallible
+/// construction on the hot hash path — #382; the parity tests pin it).
 pub fn hash_text(text: &str) -> String {
-    let mut hasher = Blake2bVar::new(8).expect("8-byte blake2b");
-    hasher.update(text.as_bytes());
-    let mut out = [0u8; 8];
-    hasher.finalize_variable(&mut out).expect("8-byte output");
+    let out = Blake2b::<U8>::digest(text.as_bytes());
     out.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -180,8 +180,16 @@ impl IndexOrchestrator {
                         .note_hashes
                         .as_ref()
                         .map(|m| m.keys().copied().collect());
-                    let restored =
-                        engine.restore(dir.to_str().unwrap_or_default(), candidates.as_deref());
+                    // A non-UTF-8 cache dir can't be handed to the engine's
+                    // path-taking API — treat it as a failed restore rather
+                    // than silently retargeting to the cwd (#382).
+                    let restored = match dir.to_str() {
+                        Some(d) => engine.restore(d, candidates.as_deref()),
+                        None => {
+                            tracing::warn!(path = %dir.display(), "non-UTF-8 index dir; skipping restore");
+                            false
+                        }
+                    };
                     if !restored {
                         shared.note_hashes = None; // rebuild repopulates both together
                     }
@@ -226,6 +234,7 @@ impl IndexOrchestrator {
     /// The drift policy (mirrors `VectorIndex.check_drift`): nothing loaded /
     /// no stamp / model change / a v1 layout under an image-capable backend →
     /// rebuild; a bare `col_mod` move → reconcile; otherwise current.
+    #[must_use]
     pub fn check_drift(
         &self,
         current_col_mod: i64,
@@ -253,6 +262,7 @@ impl IndexOrchestrator {
     /// Which notes changed/added/vanished vs the per-note fingerprints — the
     /// reconcile diff. `None` = no prior state, do a full rebuild instead.
     #[allow(clippy::type_complexity)]
+    #[must_use]
     pub fn reconcile_diff(
         &self,
         new_hashes: &BTreeMap<i64, String>,
@@ -319,8 +329,12 @@ impl IndexOrchestrator {
         };
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| NativeError::internal(format!("index dir: {e}")))?;
+        // A non-UTF-8 cache dir must error, not silently save to the cwd (#382).
+        let dir_str = self.dir.to_str().ok_or_else(|| {
+            NativeError::internal(format!("non-UTF-8 index dir: {}", self.dir.display()))
+        })?;
         self.engine
-            .save(self.dir.to_str().unwrap_or_default())
+            .save(dir_str)
             .map_err(|e| NativeError::internal(format!("engine save: {e}")))?;
         let meta = IndexMeta {
             ndim: ndim as i64,

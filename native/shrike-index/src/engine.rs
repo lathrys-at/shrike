@@ -79,8 +79,12 @@ fn file_name(text_modality: &str, modality: &str) -> String {
 fn ensure_capacity(index: &Index, extra: usize) -> NativeResult<()> {
     let needed = index.size() + extra;
     if needed > index.capacity() {
+        // Grow 1.5× (or straight to the request when larger): amortizes like
+        // the old next_power_of_two doubling without over-allocating up to
+        // ~2× a large collection's footprint on the last step (#382).
+        let target = needed.max(index.capacity() + index.capacity() / 2).max(64);
         index
-            .reserve(needed.max(64).next_power_of_two())
+            .reserve(target)
             .map_err(|e| NativeError::internal(format!("usearch reserve: {e}")))?;
     }
     Ok(())
@@ -313,8 +317,10 @@ impl MultiModalIndex {
                     continue;
                 }
             }
-            let index_size = sub.index.size();
-            if index_size == 0 {
+            // Also subsumes the Python binding's empty-index phantom-(0, 0)
+            // guard: an empty sub-index never reaches the hit loop, so no
+            // per-hit phantom check is needed (frozen-contract parity, #382).
+            if sub.index.size() == 0 {
                 continue;
             }
             for (qi, query) in queries.iter().enumerate() {
@@ -328,11 +334,6 @@ impl MultiModalIndex {
                 for (key, dist) in hits.keys.iter().zip(hits.distances.iter()) {
                     let nid = *key as i64;
                     if seen.contains(&nid) {
-                        continue;
-                    }
-                    // The Python binding's empty-index phantom (0, 0) guard —
-                    // inert under this binding, kept as frozen-contract parity.
-                    if nid == 0 && *dist == 0.0 && index_size == 0 {
                         continue;
                     }
                     seen.insert(nid);
@@ -406,6 +407,12 @@ impl MultiModalIndex {
         let ndim = index.dimensions();
         let mut buf = vec![0.0f32; count * ndim];
         let copied = index.get(key, &mut buf).ok()?;
+        // count() sized the buffer; a short read would mean the index
+        // mutated under us (the lock forbids it) or a usearch bug (#382).
+        debug_assert_eq!(
+            copied, count,
+            "usearch get returned fewer vectors than count"
+        );
         Some(
             (0..copied)
                 .map(|i| buf[i * ndim..(i + 1) * ndim].to_vec())
