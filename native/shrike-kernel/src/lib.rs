@@ -50,26 +50,6 @@ pub use shrike_engine_api::{
     Embedder, ImageEmbedder, ImageResolver, MediaItem, Recognition, Recognizer, Segment,
 };
 
-/// The debounce/idle-timer contract the harness injects (#332 S3c-1; slated
-/// for tokio::time in #374 B2) — the index saver's debounce rides it. One-shot:
-/// `schedule` arms a job after `delay_secs`; the returned handle cancels it
-/// (a no-op once fired). No threads owned here either — the asyncio harness
-/// backs this with `loop.call_later`, an embedded host with its own timers.
-pub trait TimerHost: Send + Sync {
-    fn schedule(
-        &self,
-        delay_secs: f64,
-        job: Box<dyn FnOnce() + Send + 'static>,
-    ) -> Box<dyn TimerCancel>;
-}
-
-/// Cancels a scheduled (not-yet-fired) timer job. Dropping without calling
-/// `cancel` leaves the timer armed (cancellation is explicit, like the
-/// asyncio handle it mirrors).
-pub trait TimerCancel: Send {
-    fn cancel(&self);
-}
-
 /// The collection as a task-actor (#374): every access is one job sent to a
 /// single spawned task that runs them **inline, sequentially** — FIFO
 /// serialization by construction, no thread affinity (the task owns the
@@ -201,12 +181,12 @@ pub struct NoteSpec {
 /// async fn on the kernel's own runtime (#374). No transport, no Python.
 /// Index maintenance is **kernel-internal** (#332 S3d):
 /// upserts/deletes keep the orchestrator's vectors, fingerprints, and
-/// watermarks current, and the debounced saver (over the injected
-/// [`TimerHost`]) bounds what a crash can discard.
+/// watermarks current, and the debounced saver (tokio::time, #374 B2)
+/// bounds what a crash can discard.
 pub struct Kernel {
     collection: SerializedCollection,
     orchestrator: Arc<index_orchestrator::IndexOrchestrator>,
-    saver: Option<Arc<index_orchestrator::DebouncedSaver>>,
+    saver: Arc<index_orchestrator::DebouncedSaver>,
     derived: DerivedEngine,
     /// The attachable embedding service (#342's first registry slot):
     /// swappable at runtime — the harness attaches on embedding start,
@@ -276,15 +256,10 @@ pub const TAG_TEXT_SPACE: &str = "tag.text";
 impl Kernel {
     /// Open a collection and its sidecar stores (cache_dir holds the derived
     /// store and the index files, like the Python host's cache layout).
-    /// Scheduling is the kernel's own (#374 — the owned runtime spawns the
-    /// collection actor); `timers`, when given, arms the debounced index
-    /// flush (without it, the index persists only on explicit `save`/rebuild
-    /// — fine for tests and one-shot hosts).
-    pub async fn open(
-        collection_path: &str,
-        cache_dir: &str,
-        timers: Option<Arc<dyn TimerHost>>,
-    ) -> NativeResult<Self> {
+    /// Scheduling AND timing are the kernel's own (#374): the owned runtime
+    /// spawns the collection actor, and the debounced index flush rides
+    /// tokio::time unconditionally.
+    pub async fn open(collection_path: &str, cache_dir: &str) -> NativeResult<Self> {
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
         let collection = SerializedCollection::open(collection_path.to_string()).await?;
@@ -298,14 +273,11 @@ impl Kernel {
         let orchestrator = Arc::new(index_orchestrator::IndexOrchestrator::open(
             cache_dir, engine,
         ));
-        let saver = timers.map(|t| {
-            index_orchestrator::DebouncedSaver::new(
-                Arc::clone(&orchestrator),
-                t,
-                index_orchestrator::DEFAULT_SAVE_DELAY,
-                index_orchestrator::DEFAULT_SAVE_THRESHOLD,
-            )
-        });
+        let saver = index_orchestrator::DebouncedSaver::new(
+            Arc::clone(&orchestrator),
+            index_orchestrator::DEFAULT_SAVE_DELAY,
+            index_orchestrator::DEFAULT_SAVE_THRESHOLD,
+        );
         let derived = DerivedEngine::open(
             &format!("{}/shrike.db", cache_dir.trim_end_matches('/')),
             DerivedEngine::SCHEMA_VERSION,
@@ -381,9 +353,7 @@ impl Kernel {
             &self.tag_config,
             &self.tag_keys,
         )?;
-        if let Some(saver) = &self.saver {
-            saver.request_save();
-        }
+        self.saver.request_save();
         Ok(built)
     }
 
@@ -770,9 +740,7 @@ impl Kernel {
         self.derived.set_col_mod(col_mod)?;
         if index_maintained {
             self.orchestrator.set_col_mod(col_mod);
-            if let Some(saver) = &self.saver {
-                saver.request_save();
-            }
+            self.saver.request_save();
         }
         Ok(())
     }
@@ -1170,7 +1138,6 @@ mod no_cpython_smoke {
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
                 dir.join("cache").to_str().unwrap(),
-                None,
             )
             .await
             .unwrap();
@@ -1219,7 +1186,6 @@ mod no_cpython_smoke {
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
                 dir.join("cache").to_str().unwrap(),
-                None,
             )
             .await
             .unwrap();
@@ -1267,7 +1233,6 @@ mod no_cpython_smoke {
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
                 dir.join("cache").to_str().unwrap(),
-                None,
             )
             .await
             .unwrap();
@@ -1325,7 +1290,6 @@ mod no_cpython_smoke {
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
                 dir.join("cache").to_str().unwrap(),
-                None,
             )
             .await
             .unwrap();
@@ -1435,7 +1399,6 @@ mod no_cpython_smoke {
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
                 dir.join("cache").to_str().unwrap(),
-                None,
             )
             .await
             .unwrap();
@@ -1506,7 +1469,6 @@ mod no_cpython_smoke {
             let kernel2 = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
                 dir.join("cache").to_str().unwrap(),
-                None,
             )
             .await
             .unwrap();
@@ -1532,7 +1494,7 @@ mod no_cpython_smoke {
         let col = dir.join("collection.anki2");
         let cache = dir.join("cache");
         // The harness assembles the scheduling: here the thread-free
-        let kernel = Kernel::open(col.to_str().unwrap(), cache.to_str().unwrap(), None)
+        let kernel = Kernel::open(col.to_str().unwrap(), cache.to_str().unwrap())
             .await
             .unwrap();
         // The harness attaches the embedding service (#342's registry slot).
@@ -1631,7 +1593,7 @@ mod no_cpython_smoke {
         // drift and reconciles — re-embedding every live note via the
         // collection read surface (find_notes + note_embed_inputs).
         kernel.close().await.unwrap();
-        let kernel2 = Kernel::open(col.to_str().unwrap(), cache.to_str().unwrap(), None)
+        let kernel2 = Kernel::open(col.to_str().unwrap(), cache.to_str().unwrap())
             .await
             .unwrap();
         kernel2.attach_embedder(Arc::new(HashEmbedder), None);

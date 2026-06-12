@@ -27,7 +27,7 @@ fn full_flow_on_a_current_thread_runtime() {
 
     let main_thread = std::thread::current().id();
     shrike_kernel::block_on(async move {
-        let kernel = Arc::new(Kernel::open(&collection, &cache, None).await.unwrap());
+        let kernel = Arc::new(Kernel::open(&collection, &cache).await.unwrap());
 
         // The actor's jobs run on THIS thread (the one driving block_on).
         let kernel2 = Arc::clone(&kernel);

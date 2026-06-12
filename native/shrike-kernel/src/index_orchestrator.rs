@@ -25,8 +25,6 @@ use serde::{Deserialize, Serialize};
 use shrike_ffi::{NativeError, NativeResult};
 use shrike_index::MultiModalIndex;
 
-use crate::{TimerCancel, TimerHost};
-
 /// The on-disk schema version of a freshly built index (mirrors
 /// `index.INDEX_SCHEMA_VERSION`: v2 = per-modality sub-indexes, #201a).
 pub const INDEX_SCHEMA_VERSION: i64 = 2;
@@ -347,14 +345,15 @@ impl IndexOrchestrator {
     }
 }
 
-/// The debounced saver over the injected [`TimerHost`] (mirrors `IndexSaver`):
-/// a flush `delay` seconds after the last change, or immediately at
-/// `threshold` unsaved changes — whichever first. No threads, no loop
-/// assumption: the timer host is whatever the harness runs on.
+/// The debounced saver on the kernel's own clock (#374 B2 — tokio::time;
+/// mirrors `IndexSaver`): a flush `delay` seconds after the last change, or
+/// immediately at `threshold` unsaved changes — whichever first. The armed
+/// timer is one spawned task sleeping then flushing; re-arm aborts it (an
+/// abort lands only at the sleep — once past it the flush completes, which
+/// is fine: flush is idempotent).
 pub struct DebouncedSaver {
     orchestrator: Arc<IndexOrchestrator>,
-    timers: Arc<dyn TimerHost>,
-    delay: f64,
+    delay: std::time::Duration,
     threshold: u64,
     pending: Mutex<PendingState>,
 }
@@ -362,20 +361,14 @@ pub struct DebouncedSaver {
 #[derive(Default)]
 struct PendingState {
     changes: u64,
-    armed: Option<Box<dyn TimerCancel>>,
+    armed: Option<tokio::task::AbortHandle>,
 }
 
 impl DebouncedSaver {
-    pub fn new(
-        orchestrator: Arc<IndexOrchestrator>,
-        timers: Arc<dyn TimerHost>,
-        delay: f64,
-        threshold: u64,
-    ) -> Arc<Self> {
+    pub fn new(orchestrator: Arc<IndexOrchestrator>, delay_secs: f64, threshold: u64) -> Arc<Self> {
         Arc::new(Self {
             orchestrator,
-            timers,
-            delay,
+            delay: std::time::Duration::from_secs_f64(delay_secs.max(0.0)),
             threshold,
             pending: Mutex::new(PendingState::default()),
         })
@@ -387,7 +380,7 @@ impl DebouncedSaver {
             let mut pending = self.pending.lock().expect("saver poisoned");
             pending.changes += 1;
             if let Some(armed) = pending.armed.take() {
-                armed.cancel();
+                armed.abort();
             }
             pending.changes >= self.threshold
         };
@@ -396,10 +389,12 @@ impl DebouncedSaver {
             return;
         }
         let this = Arc::clone(self);
-        let cancel = self
-            .timers
-            .schedule(self.delay, Box::new(move || this.flush()));
-        self.pending.lock().expect("saver poisoned").armed = Some(cancel);
+        let delay = self.delay;
+        let task = crate::runtime::handle().spawn(async move {
+            tokio::time::sleep(delay).await;
+            this.flush();
+        });
+        self.pending.lock().expect("saver poisoned").armed = Some(task.abort_handle());
     }
 
     /// Unsaved changes since the last flush.
@@ -411,7 +406,9 @@ impl DebouncedSaver {
         {
             let mut pending = self.pending.lock().expect("saver poisoned");
             if let Some(armed) = pending.armed.take() {
-                armed.cancel();
+                // Possibly our own handle (the timer task flushing) — an
+                // abort after the sleep is a no-op.
+                armed.abort();
             }
             pending.changes = 0;
         }
@@ -480,26 +477,6 @@ mod tests {
         assert!(v1.col_mod.is_none());
     }
 
-    struct ManualTimers {
-        jobs: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
-    }
-
-    struct NoCancel;
-    impl TimerCancel for NoCancel {
-        fn cancel(&self) {}
-    }
-
-    impl TimerHost for ManualTimers {
-        fn schedule(
-            &self,
-            _delay: f64,
-            job: Box<dyn FnOnce() + Send + 'static>,
-        ) -> Box<dyn TimerCancel> {
-            self.jobs.lock().unwrap().push(job);
-            Box::new(NoCancel)
-        }
-    }
-
     fn temp_orchestrator() -> Arc<IndexOrchestrator> {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -558,21 +535,36 @@ mod tests {
 
     #[test]
     fn saver_debounces_and_bursts() {
+        // The threshold (burst) path is synchronous and deterministic; the
+        // re-arm path is observable through pending_changes staying put while
+        // the (long) idle timer never fires.
         let orch = temp_orchestrator();
-        let timers = Arc::new(ManualTimers {
-            jobs: Mutex::new(Vec::new()),
-        });
-        let saver = DebouncedSaver::new(orch, Arc::clone(&timers) as Arc<dyn TimerHost>, 60.0, 3);
+        let saver = DebouncedSaver::new(orch, 60.0, 3);
         saver.request_save();
         saver.request_save();
-        assert_eq!(saver.pending_changes(), 2);
-        assert_eq!(timers.jobs.lock().unwrap().len(), 2); // re-armed per change
+        assert_eq!(saver.pending_changes(), 2); // armed, not flushed
         saver.request_save(); // hits the burst cap → immediate flush
         assert_eq!(saver.pending_changes(), 0);
-        // Firing a stale timer after the flush is harmless (a fresh save).
-        let job = timers.jobs.lock().unwrap().pop().unwrap();
-        job();
+        // Explicit flush after a fresh change cancels the armed timer.
+        saver.request_save();
+        assert_eq!(saver.pending_changes(), 1);
+        saver.flush();
         assert_eq!(saver.pending_changes(), 0);
+    }
+
+    #[test]
+    fn saver_idle_timer_actually_fires() {
+        // The real-clock half (bounded, generous): a short delay flushes
+        // without reaching the threshold.
+        let orch = temp_orchestrator();
+        let saver = DebouncedSaver::new(orch, 0.05, 100);
+        saver.request_save();
+        assert_eq!(saver.pending_changes(), 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while saver.pending_changes() != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(saver.pending_changes(), 0, "the idle debounce flushed");
     }
 }
 

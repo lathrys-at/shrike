@@ -32,11 +32,9 @@ mod async_kernel;
 mod asyncio_bridge;
 #[cfg(feature = "anki-core")]
 mod kernel_actions;
-mod kernel_index;
 mod native_embedder;
 mod py_embedder;
 mod py_recognizer;
-mod timer_host;
 
 pyo3::create_exception!(
     _native,
@@ -850,14 +848,10 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<async_kernel::AsyncKernel>()?;
         m.add_function(wrap_pyfunction!(async_kernel::async_kernel_open, m)?)?;
     }
-    m.add_class::<timer_host::LoopTimerHost>()?;
     m.add_class::<py_embedder::PyEmbedder>()?;
     m.add_class::<native_embedder::NativeEmbedder>()?;
-    m.add_class::<kernel_index::KernelIndex>()?;
-    m.add_class::<kernel_index::KernelIndexSaver>()?;
     m.add_function(wrap_pyfunction!(py_embedder::embedder_probe, m)?)?;
     m.add_function(wrap_pyfunction!(native_embedder::native_embedder_probe, m)?)?;
-    m.add_function(wrap_pyfunction!(timer_host::timer_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;
     m.add_function(wrap_pyfunction!(rrf_fuse, m)?)?;

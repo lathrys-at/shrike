@@ -22,12 +22,10 @@ rust_shared_library(
         "src/async_kernel.rs",
         "src/asyncio_bridge.rs",
         "src/kernel_actions.rs",
-        "src/kernel_index.rs",
         "src/lib.rs",
         "src/native_embedder.rs",
         "src/py_embedder.rs",
         "src/py_recognizer.rs",
-        "src/timer_host.rs",
     ],
     edition = "2021",
     rustc_flags = select({

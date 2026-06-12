@@ -18,7 +18,6 @@ use shrike_kernel::{Kernel, NoteSpec, SerializedCollection};
 use crate::asyncio_bridge::future_into_py;
 use crate::native_embedder::NativeEmbedder;
 use crate::py_embedder::{PyEmbedder, PyEmbedderHandle, PyMediaResolver};
-use crate::timer_host::LoopTimerHost;
 
 /// An open collection whose every op is an awaitable serialized through the
 /// kernel's injected executor.
@@ -157,11 +156,10 @@ pub(crate) fn async_kernel_open<'py>(
     collection_path: String,
     cache_dir: String,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let timers: Arc<dyn shrike_kernel::TimerHost> = Arc::new(LoopTimerHost::capture_host(py)?);
     future_into_py(
         py,
         shrike_kernel::spawn_op(async move {
-            let kernel = Kernel::open(&collection_path, &cache_dir, Some(timers)).await?;
+            let kernel = Kernel::open(&collection_path, &cache_dir).await?;
             Ok(AsyncKernel {
                 inner: Arc::new(kernel),
             })
