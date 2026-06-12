@@ -77,7 +77,8 @@ class TestCollectionQuery:
         full = _query(wrapper, "tag:m", fields_mode="full")["notes"][0]
         meta = _query(wrapper, "tag:m", fields_mode="meta")["notes"][0]
         assert full["content"]["Front"] == "metacard"
-        assert "content" not in meta  # meta mode omits the field entirely
+        # Meta mode: no content (explicit null on the raw wire, #391).
+        assert meta.get("content") is None
 
     def test_empty_result(self, wrapper):
         _add(wrapper, "lonely")

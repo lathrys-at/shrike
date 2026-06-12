@@ -208,7 +208,9 @@ def test_list_notes_filters_and_errors(native_core):
 
     by_type = json.loads(native_core.list_notes(note_type="Basic", with_fields=False))
     assert by_type["total"] == 2
-    assert "content" not in by_type["notes"][0]
+    # Meta mode: no content (an explicit null on the wire since the #391
+    # to_wire retirement — .get() is the convention-stable form).
+    assert by_type["notes"][0].get("content") is None
 
     recent = json.loads(native_core.list_notes(modified_since=0))
     assert recent["total"] == 2
@@ -219,36 +221,46 @@ def test_list_notes_filters_and_errors(native_core):
         native_core.list_notes()
 
 
-def test_read_wire_bytes_are_the_legacy_format(native_core):
-    """#391 phase 2 byte pin: the read surface now returns typed structs in
-    Rust, serialized once at the binding edge — and the bytes Python receives
-    must stay exactly the pre-seam hand-built-``Value`` format: compact,
-    keys sorted (serde_json's map is a BTreeMap), ``None`` fields omitted
-    (no ``content`` key in meta mode, only requested sections), never an
-    explicit ``null``. ``json.dumps(sort_keys=True, separators=(",", ":"))``
-    of the parse reproduces that format exactly, so equality here is a
-    byte-level pin of the wire."""
+def test_read_wire_is_the_pydantic_shape(native_core):
+    """#391 phase 2 (the to_wire retirement): the read surface serializes with
+    plain serde at the binding edge — ONE wire convention, the Pydantic one
+    (an unset ``Option`` is an explicit ``null``, never a dropped key; the
+    schema contract test pins the two sides agree). Deliberately shape-level,
+    not byte-level: every consumer revalidates through the schemas.py models,
+    so the gate is "each payload validates into its model and the optional
+    markers read as None either way"."""
+    from shrike.schemas import CollectionInfo, ListNotesResponse
+
     basic = native_core.notetype_id("Basic")
     nid = native_core.create_note(basic, DEFAULT_DECK, ["alpha", "beta"], ["t1"])
 
-    payloads = [
+    listings = [
         native_core.list_notes(ids=[nid]),
         native_core.list_notes(tags=["t1"], with_fields=False),
         native_core.query("tag:t1", with_fields=True, limit=10),
+    ]
+    for raw in listings:
+        ListNotesResponse.model_validate_json(raw)
+    infos = [
         native_core.collection_info(["summary", "decks"], []),
         native_core.collection_info(["all"], ["Basic"]),
     ]
-    for raw in payloads:
-        canonical = json.dumps(
-            json.loads(raw), sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        )
-        assert raw == canonical
-        assert "null" not in raw
+    for raw in infos:
+        CollectionInfo.model_validate_json(raw)
 
-    meta = json.loads(payloads[1])
-    assert "content" not in meta["notes"][0]
-    subset = json.loads(payloads[3])
-    assert set(subset) == {"summary", "decks"}
+    # Meta mode: content is null-or-absent (.get() is the stable form).
+    meta = json.loads(listings[1])
+    assert meta["notes"][0].get("content") is None
+    full = json.loads(listings[0])
+    assert full["notes"][0]["content"] == {"Front": "alpha", "Back": "beta"}
+
+    # A section subset: requested sections are present, unrequested ones
+    # read as None (explicit null on the wire under plain serde).
+    subset = json.loads(infos[0])
+    assert subset["summary"]["notes"] == 1
+    assert subset["decks"]
+    assert subset.get("stats") is None
+    assert subset.get("note_types") is None
 
 
 def test_note_embed_inputs_and_derived_rows(native_core):

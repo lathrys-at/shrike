@@ -6,8 +6,8 @@
 //! Typed since #391 phase 2: the read ops return the canonical
 //! `shrike-schemas` types directly — no JSON-string assembly here.
 //! Serialization to the host wire happens exactly once, at the binding edge,
-//! through `shrike_schemas::to_wire_json` (compact, key-sorted, `None`
-//! omitted — byte-identical to the hand-built `Value` wire this replaced).
+//! with plain serde (an unset `Option` is an explicit `null` — the one wire
+//! convention, the Pydantic shape the schema contract test pins).
 
 use std::collections::{HashMap, HashSet};
 
@@ -443,13 +443,15 @@ impl CollectionCore {
 
     /// The typed notes as internal-wire `Value` dicts — the kernel's search
     /// assembly annotates candidates in place (`substring`/`score`/...), so it
-    /// wants mutable JSON objects, in the exact legacy wire shape
-    /// (`to_wire_value`: no `content` key in meta mode).
+    /// wants mutable JSON objects. Plain serde (#391 to_wire retirement): a
+    /// meta-mode note carries an explicit `"content": null`, never a dropped
+    /// key — every consumer reads via `.get(..)` + `as_*`, which treat `Null`
+    /// exactly like absent.
     pub fn note_dicts(&self, note_ids: &[i64], with_fields: bool) -> NativeResult<Vec<Value>> {
         self.typed_notes(note_ids, with_fields)?
             .iter()
             .map(|note| {
-                shrike_schemas::to_wire_value(note)
+                serde_json::to_value(note)
                     .map_err(|e| NativeError::internal(format!("note wire shape: {e}")))
             })
             .collect()

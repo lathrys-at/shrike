@@ -146,7 +146,7 @@ impl CollectionCore {
 
     /// The raw Anki search escape hatch — list_notes-shaped JSON (the core
     /// returns the typed response since #391 phase 2; this binding is its
-    /// serialization edge, byte-identical to the old hand-built wire).
+    /// serialization edge — plain serde, explicit nulls).
     #[pyo3(signature = (search, with_fields=true, limit=50))]
     fn query(
         &self,

@@ -453,10 +453,9 @@ mod tests {
         assert_eq!(rows[0].2, "Front");
 
         // list_notes: tag filter, full fields, wire shape (typed since #391
-        // phase 2; asserted through the host-edge wire view).
-        let listed = shrike_schemas::to_wire_value(
-            &core
-                .list_notes(None, None, Some(&["bio".into()]), None, None, true, 50)
+        // phase 2; asserted through the host-edge wire view — plain serde).
+        let listed = serde_json::to_value(
+            core.list_notes(None, None, Some(&["bio".into()]), None, None, true, 50)
                 .unwrap(),
         )
         .unwrap();
@@ -473,16 +472,14 @@ mod tests {
         assert!(note["modified"].as_str().unwrap().ends_with("+00:00"));
 
         // deck reference forms: name, id, #id, unknown #id.
-        let by_id = shrike_schemas::to_wire_value(
-            &core
-                .list_notes(None, Some("1"), None, None, None, false, 50)
+        let by_id = serde_json::to_value(
+            core.list_notes(None, Some("1"), None, None, None, false, 50)
                 .unwrap(),
         )
         .unwrap();
         assert_eq!(by_id["total"], 1);
-        let unknown = shrike_schemas::to_wire_value(
-            &core
-                .list_notes(None, Some("#424242"), None, None, None, false, 50)
+        let unknown = serde_json::to_value(
+            core.list_notes(None, Some("#424242"), None, None, None, false, 50)
                 .unwrap(),
         )
         .unwrap();
@@ -495,9 +492,8 @@ mod tests {
         assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
 
         // collection_info: all sections, summary/stats/decks coherent.
-        let info = shrike_schemas::to_wire_value(
-            &core
-                .collection_info(&["all".to_string()], &["Basic".to_string()])
+        let info = serde_json::to_value(
+            core.collection_info(&["all".to_string()], &["Basic".to_string()])
                 .unwrap(),
         )
         .unwrap();
@@ -531,14 +527,13 @@ mod tests {
     }
 
     #[test]
-    fn read_wire_bytes_match_the_legacy_hand_built_wire() {
-        // #391 phase 2 byte pin: the typed read responses, serialized through
-        // the host-edge wire helper, must be byte-identical to the
-        // `serde_json::Value` trees the pre-seam code hand-built — compact,
-        // key-sorted (Value's map is a BTreeMap; no preserve_order), the
-        // `content` key ABSENT in meta mode (never an explicit null), and
-        // only the requested collection_info sections present. The oracles
-        // below reproduce the legacy `json!` assembly verbatim.
+    fn read_wire_is_plain_serde_with_explicit_nulls() {
+        // #391 phase 2 (the to_wire retirement): ONE wire convention — plain
+        // serde of the schema types, where an unset `Option` is an explicit
+        // `null`, never a pruned key (the Pydantic shape the schema contract
+        // test pins). Shape-level, deliberately not byte-level: every
+        // consumer revalidates through the Pydantic models, so the contract
+        // is "parses back into the schema type with the same content".
         let (core, dir) = temp_core();
         let basic = core.notetype_id("Basic").unwrap();
         let CreateOutcome::Created(nid) = core
@@ -554,76 +549,39 @@ mod tests {
             panic!("create failed")
         };
 
-        // Full mode.
-        let full = core
-            .list_notes(Some(&[nid]), None, None, None, None, true, 50)
-            .unwrap();
-        let n = &full.notes[0];
-        let legacy = serde_json::json!({
-            "notes": [{
-                "id": n.id,
-                "note_type": "Basic",
-                "deck": "Default",
-                "tags": ["t1"],
-                "modified": n.modified.clone(),
-                "content": {"Front": "alpha", "Back": "beta"},
-            }],
-            "total": 1,
-            "limit": 50,
-        })
-        .to_string();
-        assert_eq!(shrike_schemas::to_wire_json(&full).unwrap(), legacy);
-
-        // Meta mode: no "content" key at all.
+        // Meta mode: `content` is an explicit null on the wire, and the
+        // payload round-trips losslessly into the schema type.
         let meta = core
             .list_notes(Some(&[nid]), None, None, None, None, false, 50)
             .unwrap();
-        let wire = shrike_schemas::to_wire_json(&meta).unwrap();
-        let legacy = serde_json::json!({
-            "notes": [{
-                "id": n.id,
-                "note_type": "Basic",
-                "deck": "Default",
-                "tags": ["t1"],
-                "modified": n.modified.clone(),
-            }],
-            "total": 1,
-            "limit": 50,
-        })
-        .to_string();
-        assert_eq!(wire, legacy);
-        assert!(!wire.contains("content"));
+        let wire = serde_json::to_string(&meta).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(value["notes"][0]["content"], serde_json::Value::Null);
+        let back: shrike_schemas::ListNotesResponse = serde_json::from_str(&wire).unwrap();
+        assert!(back.notes[0].content.is_none());
+        assert_eq!(back.notes[0].id, nid);
+        assert_eq!(back.total, 1);
 
-        // `query` rides the same serialization (the shared response shape).
+        // `query` rides the same response shape.
         let queried = core.query("tag:t1", false, 10).unwrap();
-        assert_eq!(
-            shrike_schemas::to_wire_json(&queried).unwrap(),
-            legacy.replace("\"limit\":50", "\"limit\":10")
-        );
+        let qvalue = serde_json::to_value(&queried).unwrap();
+        assert_eq!(qvalue["notes"][0]["content"], serde_json::Value::Null);
+        assert_eq!(qvalue["limit"], 10);
 
-        // collection_info: a section subset — unrequested sections absent.
+        // collection_info: an unrequested section is an explicit null, a
+        // requested one an object — and the payload validates back.
         let info = core
             .collection_info(&["summary".into(), "decks".into()], &[])
             .unwrap();
-        let s = info.summary.as_ref().unwrap();
-        let legacy = serde_json::json!({
-            "summary": {
-                "path": s.path.clone(),
-                "created": s.created.clone(),
-                "modified": s.modified.clone(),
-                "notes": 1,
-                "cards": 1,
-                "decks": 1,
-                "note_types": s.note_types,
-                "tags": 1,
-                "due_today": s.due_today,
-            },
-            "decks": [{"name": "Default", "id": 1, "note_count": 1}],
-        })
-        .to_string();
-        let wire = shrike_schemas::to_wire_json(&info).unwrap();
-        assert_eq!(wire, legacy);
-        assert!(!wire.contains("stats") && !wire.contains("null"));
+        let wire = serde_json::to_string(&info).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert!(value["summary"].is_object());
+        assert!(value["decks"].is_array());
+        assert_eq!(value["stats"], serde_json::Value::Null);
+        assert_eq!(value["note_types"], serde_json::Value::Null);
+        let back: shrike_schemas::CollectionInfo = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back.summary.as_ref().unwrap().notes, 1);
+        assert!(back.stats.is_none());
 
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
@@ -764,9 +722,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fr2["replacements"], 1);
-        let info = shrike_schemas::to_wire_value(
-            &core
-                .collection_info(&["note_types".to_string()], &["Custom".to_string()])
+        let info = serde_json::to_value(
+            core.collection_info(&["note_types".to_string()], &["Custom".to_string()])
                 .unwrap(),
         )
         .unwrap();

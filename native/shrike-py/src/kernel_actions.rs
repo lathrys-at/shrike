@@ -8,8 +8,10 @@
 //! released for the duration (`py.detach`).
 //!
 //! THIS is the host edge where a typed response becomes JSON (#391 phase 2) —
-//! through `shrike_schemas::to_wire_json`, which reproduces the legacy
-//! hand-built wire byte-for-byte (compact, key-sorted, `None` omitted).
+//! plain serde of the schema type. One wire convention: an unset `Option` is
+//! an explicit `null` (the Pydantic shape the schema contract test pins);
+//! every consumer revalidates through the `schemas.py` models, so the wire is
+//! shape-compat, not byte-pinned.
 
 use pyo3::prelude::*;
 
@@ -19,7 +21,7 @@ use crate::to_py_err;
 /// Serialize a typed response onto the host wire; a failure is a native bug.
 /// Shared with the direct `CollectionCore` read bindings in `anki_core`.
 pub(crate) fn wire<T: serde::Serialize>(value: &T) -> Result<String, shrike_ffi::NativeError> {
-    shrike_schemas::to_wire_json(value)
+    serde_json::to_string(value)
         .map_err(|e| shrike_ffi::NativeError::internal(format!("response wire shape: {e}")))
 }
 
