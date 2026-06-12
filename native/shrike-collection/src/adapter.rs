@@ -590,6 +590,36 @@ impl ServiceAdapter {
         Ok(proto_to_note(resp))
     }
 
+    /// Set the exact tag list on many notes in ONE `UpdateNotes` call
+    /// (#445): one transaction + one undo entry, instead of a get+update
+    /// round trip and a journal commit per note (the 1000-note tag-set op
+    /// previously paid 3 RPCs and an fsync each). Each note's proto is
+    /// fetched current (mtime/usn stay authoritative) and only its tags
+    /// overwritten.
+    pub fn set_note_tags_bulk(&self, note_ids: &[i64], tags: &[String]) -> NativeResult<usize> {
+        let mut notes = Vec::with_capacity(note_ids.len());
+        for nid in note_ids {
+            let mut current: anki_proto::notes::Note = self.call(
+                SVC_NOTES,
+                NOTES_GET_NOTE,
+                &anki_proto::notes::NoteId { nid: *nid },
+            )?;
+            current.tags = tags.to_vec();
+            notes.push(current);
+        }
+        if notes.is_empty() {
+            return Ok(0);
+        }
+        let count = notes.len();
+        let req = anki_proto::notes::UpdateNotesRequest {
+            notes,
+            skip_undo_entry: false,
+        };
+        let _: anki_proto::collection::OpChanges =
+            self.call(SVC_NOTES, NOTES_UPDATE_NOTES, &req)?;
+        Ok(count)
+    }
+
     pub fn update_note(&self, note: &ServiceNote) -> NativeResult<()> {
         // Round-trip through get_note so untouched proto fields (mtime/usn)
         // stay authoritative; we overwrite only fields/tags.

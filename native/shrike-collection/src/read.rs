@@ -48,7 +48,7 @@ type NoteFieldRow = (i64, std::sync::Arc<Vec<String>>, Vec<String>);
 /// The binding-facing field-map row: owned names (the pyo3 wire shape).
 pub type OwnedFieldRow = (i64, Vec<String>, Vec<String>);
 
-fn ids_sql_list(ids: &[i64]) -> String {
+pub(crate) fn ids_sql_list(ids: &[i64]) -> String {
     ids.iter()
         .map(|i| i.to_string())
         .collect::<Vec<_>>()

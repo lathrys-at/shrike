@@ -566,15 +566,28 @@ impl CollectionCore {
                 .map_err(|e| invalid(format!("template_map must be a JSON object: {e}")))?
         };
 
-        let mut notes = Vec::new();
-        for nid in note_ids {
-            notes.push(
-                self.adapter
-                    .get_note(*nid)
-                    .map_err(|e| invalid(format!("Note not found: {}", e.message)))?,
+        // One (id, mid) query (#445): the per-note get_note loop paid a full
+        // note-proto RPC per note just to learn the shared source type and
+        // validate existence.
+        let mut mid_of: HashMap<i64, i64> = HashMap::new();
+        if !note_ids.is_empty() {
+            let sql = format!(
+                "select id, mid from notes where id in ({})",
+                crate::read::ids_sql_list(note_ids)
             );
+            for r in self.adapter.db_rows(&sql)? {
+                if let (Some(id), Some(mid)) = (
+                    r.first().and_then(Value::as_i64),
+                    r.get(1).and_then(Value::as_i64),
+                ) {
+                    mid_of.insert(id, mid);
+                }
+            }
         }
-        let source_mids: HashSet<i64> = notes.iter().map(|n| n.notetype_id).collect();
+        if let Some(missing) = note_ids.iter().find(|nid| !mid_of.contains_key(nid)) {
+            return Err(invalid(format!("Note not found: {missing}")));
+        }
+        let source_mids: HashSet<i64> = mid_of.values().copied().collect();
         if source_mids.len() != 1 {
             return Err(invalid(
                 "All notes must currently share one note type to migrate together.",
@@ -690,7 +703,7 @@ impl CollectionCore {
             );
         }
 
-        let changed: Vec<i64> = notes.iter().map(|n| n.id).collect();
+        let changed: Vec<i64> = note_ids.to_vec();
         let result = json!({
             "changed": changed,
             "from_note_type": source_name,
