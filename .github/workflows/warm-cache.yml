@@ -57,7 +57,7 @@ jobs:
     name: Warm Bazel cache (linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Same paths/keys as the bazel + embedding jobs in test.yml, so PRs restore
       # exactly what this saves. The disk cache is content-addressed, so crates
       # compiled here are cache hits for any PR with the same Cargo.lock + toolchain
@@ -66,7 +66,7 @@ jobs:
       # the per-PR bazel lane; the rc cross-platform lane (arm64/macOS) is rare and
       # warms on its own.
       - name: Cache Bazel toolchains + repo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/shrike/bazelisk
@@ -75,7 +75,7 @@ jobs:
           key: bazel-repo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock', 'requirements_lock.txt', '.bazelversion', 'tools/bazel.lock') }}
           restore-keys: bazel-repo-${{ runner.os }}-${{ runner.arch }}-
       - name: Cache Bazel action results
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/shrike/bazel-disk
           key: bazel-disk-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
@@ -103,7 +103,7 @@ jobs:
     name: Warm Rust lint cache (linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:

@@ -15,7 +15,7 @@
 //! calibration) follow with the `PyEmbedder` inversion (S3c-3).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use blake2::digest::consts::U8;
@@ -96,6 +96,16 @@ pub struct IndexMeta {
 
 fn default_schema_v1() -> i64 {
     1
+}
+
+/// Write via a same-directory `.tmp` + rename — atomic on one filesystem, so
+/// a crash mid-write leaves the old file complete, never a torn one (#381).
+fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// The index build/availability state (mirrors `IndexState`).
@@ -322,6 +332,10 @@ impl IndexOrchestrator {
     /// Persist the engine files + both sidecars (the Python `save` semantics:
     /// meta carries ndim/col_mod/model_id/schema and the activation key only
     /// once calibration ran; hashes ride alongside when present).
+    ///
+    /// Every artifact lands via tmp + rename, ordered engine → hashes → meta:
+    /// meta is the commit point, so it must never describe vectors or hashes
+    /// that aren't already durably on disk (#381).
     pub fn save(&self) -> NativeResult<()> {
         let shared = self.shared.lock().expect("orchestrator poisoned");
         let Some(ndim) = self.engine.ndim() else {
@@ -336,6 +350,14 @@ impl IndexOrchestrator {
         self.engine
             .save(dir_str)
             .map_err(|e| NativeError::internal(format!("engine save: {e}")))?;
+        if let Some(hashes) = &shared.note_hashes {
+            let as_strings: BTreeMap<String, &String> =
+                hashes.iter().map(|(k, v)| (k.to_string(), v)).collect();
+            let hashes_json = serde_json::to_string(&as_strings)
+                .map_err(|e| NativeError::internal(format!("hashes encode: {e}")))?;
+            write_atomic(&self.dir.join("index.hashes.json"), &hashes_json)
+                .map_err(|e| NativeError::internal(format!("hashes write: {e}")))?;
+        }
         let meta = IndexMeta {
             ndim: ndim as i64,
             col_mod: shared.col_mod,
@@ -345,16 +367,8 @@ impl IndexOrchestrator {
         };
         let meta_json = serde_json::to_string(&meta)
             .map_err(|e| NativeError::internal(format!("meta encode: {e}")))?;
-        std::fs::write(self.dir.join("index.meta.json"), meta_json)
+        write_atomic(&self.dir.join("index.meta.json"), &meta_json)
             .map_err(|e| NativeError::internal(format!("meta write: {e}")))?;
-        if let Some(hashes) = &shared.note_hashes {
-            let as_strings: BTreeMap<String, &String> =
-                hashes.iter().map(|(k, v)| (k.to_string(), v)).collect();
-            let hashes_json = serde_json::to_string(&as_strings)
-                .map_err(|e| NativeError::internal(format!("hashes encode: {e}")))?;
-            std::fs::write(self.dir.join("index.hashes.json"), hashes_json)
-                .map_err(|e| NativeError::internal(format!("hashes write: {e}")))?;
-        }
         Ok(())
     }
 }
@@ -1148,6 +1162,14 @@ mod op_tests {
         .unwrap();
         let dir = orch.dir.clone();
         drop(orch);
+
+        // A completed save leaves no staging files; stranded ones from a
+        // crashed atomic save are ignored on load (exact-name reads only).
+        assert!(!dir.join("index.meta.json.tmp").exists());
+        assert!(!dir.join("index.hashes.json.tmp").exists());
+        std::fs::write(dir.join("index.meta.json.tmp"), b"torn").unwrap();
+        std::fs::write(dir.join("index.hashes.json.tmp"), b"torn").unwrap();
+        std::fs::write(dir.join("index.usearch.tmp"), b"torn").unwrap();
 
         let engine =
             Arc::new(MultiModalIndex::new(vec![TEXT.to_owned(), "image".to_owned()]).unwrap());
