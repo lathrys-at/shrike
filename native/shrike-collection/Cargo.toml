@@ -18,6 +18,9 @@ name = "shrike_collection"
 # tag == the pip wheel version, bumped together.
 [dependencies]
 shrike-ffi = { workspace = true }
+# The typed read seam (#391 phase 2): the read surface returns the canonical
+# wire types directly. schemas is a leaf (pure serde, no pyo3) — no cycle.
+shrike-schemas = { path = "../shrike-schemas" }
 anki = { git = "https://github.com/ankitects/anki", tag = "25.09.4", package = "anki" }
 anki_proto = { git = "https://github.com/ankitects/anki", tag = "25.09.4", package = "anki_proto" }
 prost = "0.13"

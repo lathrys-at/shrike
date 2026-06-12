@@ -1,12 +1,22 @@
 //! The read surface (#278 series, step 2): collection_info, list_notes +
 //! note serialization, and the embedding-text readers — ports of the
-//! CollectionWrapper methods of the same names, shape-identical JSON out
-//! (the tests/native parity harness compares against the pip core).
+//! CollectionWrapper methods of the same names (the tests/native parity
+//! harness compares against the pip core).
+//!
+//! Typed since #391 phase 2: the read ops return the canonical
+//! `shrike-schemas` types directly — no JSON-string assembly here.
+//! Serialization to the host wire happens exactly once, at the binding edge,
+//! through `shrike_schemas::to_wire_json` (compact, key-sorted, `None`
+//! omitted — byte-identical to the hand-built `Value` wire this replaced).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use shrike_ffi::{NativeError, NativeResult};
+use shrike_schemas::{
+    CollectionInfo, DeckInfo, DeckStat, FieldDetail, ListNotesResponse, Note, NoteTypeDetail,
+    NoteTypeInfo, Stats, Summary, TemplateInfo,
+};
 
 use crate::{embed_text, CollectionCore};
 
@@ -271,14 +281,22 @@ impl CollectionCore {
     }
 
     /// The raw Anki search escape hatch (`collection_query`): the full grammar
-    /// straight to search, `list_notes`-shaped JSON out (`total` = the full
-    /// match count before `limit`).
-    pub fn query(&self, search: &str, with_fields: bool, limit: usize) -> NativeResult<String> {
+    /// straight to search, `list_notes`-shaped (`total` = the full match
+    /// count before `limit`).
+    pub fn query(
+        &self,
+        search: &str,
+        with_fields: bool,
+        limit: usize,
+    ) -> NativeResult<ListNotesResponse> {
         let note_ids = self.adapter.search_notes(search)?;
         let total = note_ids.len();
         let take: Vec<i64> = note_ids.into_iter().take(limit).collect();
-        let notes = self.notes_to_dicts(&take, with_fields)?;
-        Ok(json!({"notes": notes, "total": total, "limit": limit}).to_string())
+        Ok(ListNotesResponse {
+            notes: self.typed_notes(&take, with_fields)?,
+            total: total as i64,
+            limit: limit as i64,
+        })
     }
 
     /// Per note: the FULL raw field map `(note_id, [(name, value)...])` —
@@ -327,8 +345,8 @@ impl CollectionCore {
     }
 
     /// Structured filters → notes, shape-identical to the wrapper's
-    /// `list_notes` (`{"notes": [...], "total": N, "limit": L}` as JSON).
-    /// `modified_since` is an epoch-seconds cutoff (the host parses ISO).
+    /// `list_notes` (`{notes, total, limit}`). `modified_since` is an
+    /// epoch-seconds cutoff (the host parses ISO).
     /// Divergence from the Python original: "no filter given" raises
     /// invalid_input here instead of returning an `{"error": ...}` dict (the
     /// facade owns that wire shape).
@@ -342,14 +360,18 @@ impl CollectionCore {
         modified_since: Option<i64>,
         with_fields: bool,
         limit: usize,
-    ) -> NativeResult<String> {
+    ) -> NativeResult<ListNotesResponse> {
         // ids-only fast path (mirrors _get_notes_by_ids).
         if let Some(ids) = ids {
             if deck.is_none() && tags.is_none() && note_type.is_none() && modified_since.is_none() {
                 let take: Vec<i64> = ids.iter().take(limit).copied().collect();
-                let notes = self.notes_to_dicts(&take, with_fields)?;
-                let total = notes.len();
-                return Ok(json!({"notes": notes, "total": total, "limit": limit}).to_string());
+                let notes = self.typed_notes(&take, with_fields)?;
+                let total = notes.len() as i64;
+                return Ok(ListNotesResponse {
+                    notes,
+                    total,
+                    limit: limit as i64,
+                });
             }
         }
 
@@ -358,7 +380,11 @@ impl CollectionCore {
         if let Some(deck) = deck {
             match self.resolve_deck_ref(deck)? {
                 None => {
-                    return Ok(json!({"notes": [], "total": 0, "limit": limit}).to_string());
+                    return Ok(ListNotesResponse {
+                        notes: Vec::new(),
+                        total: 0,
+                        limit: limit as i64,
+                    });
                 }
                 Some(resolved) => parts.push(format!("\"deck:{resolved}\"")),
             }
@@ -408,20 +434,31 @@ impl CollectionCore {
         }
         let total = note_ids.len();
         note_ids.truncate(limit);
-        let notes = self.notes_to_dicts(&note_ids, with_fields)?;
-        Ok(json!({"notes": notes, "total": total, "limit": limit}).to_string())
+        Ok(ListNotesResponse {
+            notes: self.typed_notes(&note_ids, with_fields)?,
+            total: total as i64,
+            limit: limit as i64,
+        })
     }
 
-    /// Serialize many notes in a fixed number of queries — `_notes_to_dicts`:
+    /// The typed notes as internal-wire `Value` dicts — the kernel's search
+    /// assembly annotates candidates in place (`substring`/`score`/...), so it
+    /// wants mutable JSON objects, in the exact legacy wire shape
+    /// (`to_wire_value`: no `content` key in meta mode).
+    pub fn note_dicts(&self, note_ids: &[i64], with_fields: bool) -> NativeResult<Vec<Value>> {
+        self.typed_notes(note_ids, with_fields)?
+            .iter()
+            .map(|note| {
+                shrike_schemas::to_wire_value(note)
+                    .map_err(|e| NativeError::internal(format!("note wire shape: {e}")))
+            })
+            .collect()
+    }
+
+    /// Read many notes in a fixed number of queries — `_notes_to_dicts`:
     /// note rows + first-card decks via the DB proxy, names from the
     /// notetype/deck services; input order kept, missing ids skipped.
-    /// Public per-id note dicts (the kernel's search assembly reads candidates
-    /// one at a time, skipping unreadable notes like the Python original).
-    pub fn note_dicts(&self, note_ids: &[i64], with_fields: bool) -> NativeResult<Vec<Value>> {
-        self.notes_to_dicts(note_ids, with_fields)
-    }
-
-    fn notes_to_dicts(&self, note_ids: &[i64], with_fields: bool) -> NativeResult<Vec<Value>> {
+    fn typed_notes(&self, note_ids: &[i64], with_fields: bool) -> NativeResult<Vec<Note>> {
         if note_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -481,31 +518,34 @@ impl CollectionCore {
                 .get(nid)
                 .and_then(|did| deck_names.get(did).cloned())
                 .unwrap_or_else(|| "Default".to_string());
-            let mut entry = json!({
-                "id": nid,
-                "note_type": name,
-                "deck": deck,
-                "tags": tags.split_whitespace().collect::<Vec<_>>(),
-                "modified": iso_utc(*modified),
+            let content = with_fields.then(|| {
+                field_names
+                    .iter()
+                    .cloned()
+                    .zip(flds.split('\u{1f}').map(str::to_string))
+                    .collect()
             });
-            if with_fields {
-                let values: Vec<&str> = flds.split('\u{1f}').collect();
-                let content: BTreeMap<&str, &str> =
-                    field_names.iter().map(String::as_str).zip(values).collect();
-                entry["content"] = json!(content);
-            }
-            out.push(entry);
+            out.push(Note {
+                id: *nid,
+                note_type: name,
+                deck,
+                tags: tags.split_whitespace().map(str::to_string).collect(),
+                modified: iso_utc(*modified),
+                content,
+            });
         }
         Ok(out)
     }
 
-    /// `collection_info` — the wrapper's sectioned info dict as JSON.
+    /// `collection_info` — the wrapper's sectioned info, typed: a requested
+    /// section is `Some`, an unrequested one `None` (the wire helper omits
+    /// it, exactly like the hand-built dict it replaced).
     /// `sections` mirrors `include` (`"all"` expands; empty = summary).
     pub fn collection_info(
         &self,
         sections: &[String],
         detail_names: &[String],
-    ) -> NativeResult<String> {
+    ) -> NativeResult<CollectionInfo> {
         const ALL: [&str; 5] = ["summary", "note_types", "decks", "tags", "stats"];
         let sections: Vec<&str> = if sections.iter().any(|s| s == "all") {
             ALL.to_vec()
@@ -515,7 +555,7 @@ impl CollectionCore {
             sections.iter().map(String::as_str).collect()
         };
         let detail: HashSet<&str> = detail_names.iter().map(String::as_str).collect();
-        let mut result = serde_json::Map::new();
+        let mut result = CollectionInfo::default();
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -536,31 +576,35 @@ impl CollectionCore {
             match *section {
                 "summary" => {
                     let tree = tree.as_ref().expect("tree computed for summary");
-                    result.insert("summary".to_string(), self.info_summary(tree)?);
+                    result.summary = Some(self.info_summary(tree)?);
                 }
                 "note_types" => {
-                    result.insert("note_types".to_string(), self.info_note_types(&detail)?);
+                    result.note_types = Some(self.info_note_types(&detail)?);
                 }
                 "decks" => {
                     let counts = counts.as_ref().expect("counts computed for decks");
-                    let decks: Vec<Value> = self
+                    let decks: Vec<DeckInfo> = self
                         .adapter
                         .deck_names()?
                         .into_iter()
                         .map(|(id, name)| {
                             let count = counts.get(&name).copied().unwrap_or(0);
-                            json!({"name": name, "id": id, "note_count": count})
+                            DeckInfo {
+                                name,
+                                id,
+                                note_count: count as i64,
+                            }
                         })
                         .collect();
-                    result.insert("decks".to_string(), json!(decks));
+                    result.decks = Some(decks);
                 }
                 "tags" => {
-                    result.insert("tags".to_string(), json!(self.adapter.all_tags()?));
+                    result.tags = Some(self.adapter.all_tags()?);
                 }
                 "stats" => {
                     let tree = tree.as_ref().expect("tree computed for stats");
                     let counts = counts.as_ref().expect("counts computed for stats");
-                    result.insert("stats".to_string(), self.info_stats(tree, counts)?);
+                    result.stats = Some(self.info_stats(tree, counts)?);
                 }
                 other => {
                     return Err(NativeError::invalid_input(format!(
@@ -569,7 +613,7 @@ impl CollectionCore {
                 }
             }
         }
-        Ok(Value::Object(result).to_string())
+        Ok(result)
     }
 
     fn count_scalar(&self, sql: &str) -> NativeResult<i64> {
@@ -581,7 +625,7 @@ impl CollectionCore {
             .ok_or_else(|| NativeError::internal(format!("scalar query shape: {sql}")))
     }
 
-    fn info_summary(&self, tree: &anki_proto::decks::DeckTreeNode) -> NativeResult<Value> {
+    fn info_summary(&self, tree: &anki_proto::decks::DeckTreeNode) -> NativeResult<Summary> {
         let total_due: i64 = tree
             .children
             .iter()
@@ -589,53 +633,50 @@ impl CollectionCore {
             .sum();
         let crt = self.count_scalar("select crt from col")?;
         let mod_ms = self.adapter.col_mod()?;
-        Ok(json!({
-            "path": self.collection_path,
-            "created": date_utc(crt),
-            "modified": iso_utc(mod_ms / 1000),
-            "notes": self.count_scalar("select count() from notes")?,
-            "cards": self.count_scalar("select count() from cards")?,
-            "decks": self.adapter.deck_names()?.len(),
-            "note_types": self.adapter.notetype_names()?.len(),
-            "tags": self.adapter.all_tags()?.len(),
-            "due_today": total_due,
-        }))
+        Ok(Summary {
+            path: self.collection_path.clone(),
+            created: date_utc(crt),
+            modified: iso_utc(mod_ms / 1000),
+            notes: self.count_scalar("select count() from notes")?,
+            cards: self.count_scalar("select count() from cards")?,
+            decks: self.adapter.deck_names()?.len() as i64,
+            note_types: self.adapter.notetype_names()?.len() as i64,
+            tags: self.adapter.all_tags()?.len() as i64,
+            due_today: total_due,
+        })
     }
 
-    fn info_note_types(&self, detail: &HashSet<&str>) -> NativeResult<Value> {
-        let mut out: Vec<Value> = Vec::new();
+    fn info_note_types(&self, detail: &HashSet<&str>) -> NativeResult<Vec<NoteTypeInfo>> {
+        let mut out: Vec<NoteTypeInfo> = Vec::new();
         for (id, _name) in self.adapter.notetype_names()? {
             let nt = self.adapter.notetype(id)?;
             let is_cloze = nt.config.as_ref().is_some_and(|c| {
                 c.kind == anki_proto::notetypes::notetype::config::Kind::Cloze as i32
             });
-            let field_names: Vec<&str> = nt.fields.iter().map(|f| f.name.as_str()).collect();
-            let mut entry = json!({
-                "name": nt.name,
-                "id": nt.id,
-                "fields": field_names,
-                "type": if is_cloze { "cloze" } else { "standard" },
-            });
-            if detail.contains(nt.name.as_str()) {
-                let templates: Vec<Value> = nt
+            let entry_detail = detail.contains(nt.name.as_str()).then(|| {
+                let templates: Vec<TemplateInfo> = nt
                     .templates
                     .iter()
                     .map(|t| {
                         let cfg = t.config.clone().unwrap_or_default();
-                        json!({"name": t.name, "front": cfg.q_format, "back": cfg.a_format})
+                        TemplateInfo {
+                            name: t.name.clone(),
+                            front: cfg.q_format,
+                            back: cfg.a_format,
+                        }
                     })
                     .collect();
-                let fields: Vec<Value> = nt
+                let fields: Vec<FieldDetail> = nt
                     .fields
                     .iter()
                     .map(|f| {
                         let cfg = f.config.clone().unwrap_or_default();
-                        json!({
-                            "name": f.name,
-                            "font": cfg.font_name,
-                            "size": cfg.font_size,
-                            "description": cfg.description,
-                        })
+                        FieldDetail {
+                            name: f.name.clone(),
+                            font: cfg.font_name,
+                            size: i64::from(cfg.font_size),
+                            description: cfg.description,
+                        }
                     })
                     .collect();
                 let css = nt
@@ -643,11 +684,21 @@ impl CollectionCore {
                     .as_ref()
                     .map(|c| c.css.clone())
                     .unwrap_or_default();
-                entry["detail"] = json!({"templates": templates, "css": css, "fields": fields});
-            }
-            out.push(entry);
+                NoteTypeDetail {
+                    templates,
+                    css,
+                    fields,
+                }
+            });
+            out.push(NoteTypeInfo {
+                name: nt.name,
+                id: nt.id,
+                fields: nt.fields.into_iter().map(|f| f.name).collect(),
+                r#type: if is_cloze { "cloze" } else { "standard" }.to_owned(),
+                detail: entry_detail,
+            });
         }
-        Ok(json!(out))
+        Ok(out)
     }
 
     /// Note count per deck (including subdecks and filtered-deck originals),
@@ -691,7 +742,7 @@ impl CollectionCore {
         &self,
         tree: &anki_proto::decks::DeckTreeNode,
         note_counts: &HashMap<String, usize>,
-    ) -> NativeResult<Value> {
+    ) -> NativeResult<Stats> {
         let total_due: i64 = tree
             .children
             .iter()
@@ -699,12 +750,12 @@ impl CollectionCore {
             .sum();
         let total_new: i64 = tree.children.iter().map(|t| i64::from(t.new_count)).sum();
 
-        let mut decks_summary = serde_json::Map::new();
+        let mut decks_summary = std::collections::BTreeMap::new();
         fn walk(
             node: &anki_proto::decks::DeckTreeNode,
             prefix: &str,
             counts: &HashMap<String, usize>,
-            out: &mut serde_json::Map<String, Value>,
+            out: &mut std::collections::BTreeMap<String, DeckStat>,
         ) {
             let name = if prefix.is_empty() {
                 node.name.clone()
@@ -714,7 +765,10 @@ impl CollectionCore {
             let due = i64::from(node.review_count) + i64::from(node.learn_count);
             out.insert(
                 name.clone(),
-                json!({"notes": counts.get(&name).copied().unwrap_or(0), "due": due}),
+                DeckStat {
+                    notes: counts.get(&name).copied().unwrap_or(0) as i64,
+                    due,
+                },
             );
             for child in &node.children {
                 walk(child, &name, counts, out);
@@ -723,12 +777,12 @@ impl CollectionCore {
         for top in &tree.children {
             walk(top, "", note_counts, &mut decks_summary);
         }
-        Ok(json!({
-            "total_notes": self.count_scalar("select count() from notes")?,
-            "total_cards": self.count_scalar("select count() from cards")?,
-            "cards_due_today": total_due,
-            "new_cards": total_new,
-            "decks_summary": Value::Object(decks_summary),
-        }))
+        Ok(Stats {
+            total_notes: self.count_scalar("select count() from notes")?,
+            total_cards: self.count_scalar("select count() from cards")?,
+            cards_due_today: total_due,
+            new_cards: total_new,
+            decks_summary,
+        })
     }
 }
