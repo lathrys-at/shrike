@@ -32,6 +32,7 @@ from shrike_native._native import (
     schema_catalog,
     schema_roundtrip,
     version,
+    wire_protocol_version,
 )
 from shrike_native._native import INDEX_SAVE_DELAY_DEFAULT as INDEX_SAVE_DELAY_DEFAULT
 from shrike_native._native import INDEX_SAVE_THRESHOLD_DEFAULT as INDEX_SAVE_THRESHOLD_DEFAULT
@@ -83,4 +84,5 @@ __all__ = [
     "schema_roundtrip",
     "parallel_sum",
     "version",
+    "wire_protocol_version",
 ]
