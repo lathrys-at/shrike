@@ -1,6 +1,8 @@
-# Feature-gated symbols (#278): declared in the stubs but absent from default
-# builds (anki-core off). stubtest runs against the default build in CI;
-# --ignore-unused-allowlist keeps these harmless on an anki-core build.
+# Feature-gated symbols (#278/#499): declared in the stubs but absent from a
+# build without the matching feature. The default build (the full server set,
+# anki-core ON) carries them all — stubtest runs against that build in CI, so
+# --ignore-unused-allowlist keeps these entries harmless there while a lean
+# build still has its absences excused.
 shrike_native.CollectionCore
 shrike_native._native.CollectionCore
 # pyo3 auto-generates _native.__all__ from the registered names, so its VALUE

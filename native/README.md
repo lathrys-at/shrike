@@ -76,7 +76,8 @@ lifecycle). The cargo default is the full SERVER set, pinned verbatim on
 `//native/shrike-py:shrike_py_native`; the MOBILE set (anki-core +
 engine-remote + engine-apple — no ort, no managers) is proven by
 `//native/shrike-py:mobile_skeleton`, which the per-PR `//...` lane builds so
-an ungated engine reference fails CI. The same proof by hand:
+an ungated engine reference fails CI (the Bazel target is the authoritative
+proof — it really links; the cargo line below is the convenience check):
 
 ```bash
 cd native && cargo check -p shrike-py --no-default-features \

@@ -44,9 +44,10 @@ from shrike_native._native import (
 )
 
 # Feature-gated (#278 series, step 1): present only in `anki-core` builds
-# (scripts/build-native.sh --anki-core). Deliberately outside __all__ — the
-# parity harness (tests/native) imports it explicitly; on a default build the
-# name simply doesn't exist (the harness skips).
+# (the scripts/build-native.sh default since the cutover). Deliberately
+# outside __all__ — the parity harness (tests/native) imports it explicitly;
+# on a build without the feature the name simply doesn't exist (the harness
+# skips).
 with contextlib.suppress(ImportError):
     from shrike_native._native import (
         INDEX_SAVE_DELAY_DEFAULT,  # noqa: F401

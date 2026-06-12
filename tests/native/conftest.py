@@ -25,7 +25,7 @@ CORE = _native_collection_core()
 
 requires_anki_core = pytest.mark.skipif(
     CORE is None,
-    reason="needs an anki-core build of shrike_native (scripts/build-native.sh --anki-core)",
+    reason="needs an anki-core build of shrike_native (scripts/build-native.sh default)",
 )
 
 
