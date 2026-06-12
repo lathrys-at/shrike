@@ -1,11 +1,11 @@
 """The fused native pipeline end to end (#274).
 
-Two layers: a direct parity check on the raw native handles — the fused
-embed→add/search calls (vectors never crossing the FFI) return the same
-results as the per-side native paths — and ONE fully-native server (native
-onnx backend + native index + native compute) exercising upsert→index→search
-over the wire. (The facade-shaped variant retired with #355; shrike-compute's
-fused_* survive as the standalone embed→index composition.) The server boots
+ONE fully-native server (native onnx backend + native index) exercising
+upsert→index→search over the wire. The standalone ``fused_*`` parity layer
+retired with the crate that carried it (#443): the fused embed→index
+composition lives inside the kernel now, exercised end to end by
+``TestFullyNativeServer`` below, and the raw per-side handle surfaces are
+pinned in ``tests/native/test_index_engine_binding.py``. The server boots
 via the retired ``onnx-rs`` alias, which IS the alias-normalization test
 (absorbed from test_onnx_native.py, #441 — the two files booted near-identical
 servers for the same seam).
@@ -14,7 +14,6 @@ servers for the same seam).
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import httpx
 import pytest
@@ -27,51 +26,6 @@ from tests.integration.conftest import (
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedding]
-
-
-@requires_onnxruntime
-@requires_shrike_native
-class TestFusedIndexParity:
-    def test_fused_add_and_search_match_unfused(self, onnx_model: Path) -> None:
-        import shrike_native
-
-        from shrike.embedding_onnx import OnnxBackend
-
-        texts = {
-            1: "the mitochondria is the powerhouse of the cell",
-            2: "momentum is mass times velocity",
-            3: "a derivative is the instantaneous rate of change",
-        }
-        ids = list(texts)
-        bodies = list(texts.values())
-
-        backend = OnnxBackend(model=str(onnx_model))
-        backend.start()
-        try:
-            native = backend._native_engine  # the shrike_native.OnnxTextEmbedder handle
-            assert native is not None
-
-            # Fused: embed→add composes inside one GIL-released native call.
-            fused_engine = shrike_native.NativeIndexEngine(["text", "image"])
-            chunk = backend._effective_batch(len(bodies))
-            shrike_native.fused_add_text(native, fused_engine, "text", ids, bodies, chunk)
-
-            # Per-side: the vectors cross the FFI — must build the identical index.
-            plain_engine = shrike_native.NativeIndexEngine(["text", "image"])
-            plain_engine.add("text", ids, backend.embed_texts(bodies))
-
-            for query in ("rate of change calculus", "physics of motion"):
-                fused_ids, fused_dists = shrike_native.fused_search_text(
-                    native, fused_engine, [query], 3, ["text"]
-                )[0]["text"]
-                plain_ids, plain_dists = plain_engine.search_by_modality(
-                    backend.embed_texts([query]), 3, ["text"]
-                )[0]["text"]
-                assert list(fused_ids) == list(plain_ids)
-                for f, p in zip(fused_dists, plain_dists, strict=True):
-                    assert f == pytest.approx(p, abs=1e-5)
-        finally:
-            backend.stop()
 
 
 @requires_onnxruntime

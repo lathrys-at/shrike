@@ -22,8 +22,6 @@ __all__ = [
     "rrf_fuse",
     "schema_catalog",
     "schema_roundtrip",
-    "fused_search_text",
-    "fused_add_text",
     "derived_fts5_probe",
     "derived_sqlite_bundled",
     "OnnxTextEmbedder",
@@ -105,21 +103,6 @@ def rrf_fuse(
     k: int = 60,
     priority_signals: list[str] = ...,
 ) -> list[tuple[int, float, list[tuple[str, int]]]]: ...
-def fused_search_text(
-    embedder: OnnxTextEmbedder,
-    engine: NativeIndexEngine,
-    texts: list[str],
-    k: int,
-    modalities: list[str] | None = None,
-) -> list[dict[str, tuple[list[int], list[float]]]]: ...
-def fused_add_text(
-    embedder: OnnxTextEmbedder,
-    engine: NativeIndexEngine,
-    modality: str,
-    keys: list[int],
-    texts: list[str],
-    chunk: int,
-) -> int: ...
 
 @final
 class OnnxTextEmbedder:

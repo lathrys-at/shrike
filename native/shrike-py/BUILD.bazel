@@ -39,7 +39,6 @@ rust_shared_library(
     crate_features = ["anki-core"],
     deps = [
         "//native/shrike-collection:shrike_collection",
-        "//native/shrike-compute:shrike_compute",
         "//native/shrike-derived:shrike_derived",
         "//native/shrike-embed:shrike_embed",
         "//native/shrike-embed-remote:shrike_embed_remote",

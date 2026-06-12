@@ -11,9 +11,10 @@ Two structural rules over every workspace manifest:
    a dependency on a concrete engine (ort embedding, a platform recognizer, a
    remote client, subprocess management) is an architecture regression. The
    check is over the kernel's TRANSITIVE closure across workspace members
-   (#380): naming an engine through an intermediary (the shrike-compute →
-   shrike-embed leak) still links the whole engine stack into the kernel, so
-   the direct-deps-only check was a hole, not a gate.
+   (#380): naming an engine through an intermediary (the since-dissolved
+   shrike-compute crate's shrike-embed leak) still links the whole engine
+   stack into the kernel, so the direct-deps-only check was a hole, not a
+   gate.
 """
 
 from __future__ import annotations
