@@ -907,17 +907,30 @@ def collection_server(server_factory, embedding_model: Path) -> ServerInfo:
     """
     srv = server_factory("semantic", embedding_model=str(embedding_model))
 
+    # Poll for embedding availability: on a fresh CI runner llama-server's
+    # first boot builds its model-preset cache (~6s, single-threaded), which
+    # can stall /status past a single short read timeout (warm locally, so it
+    # never reproduces). Mirrors the poll loop of the fixtures this replaced.
     status_url = srv.url.rsplit("/", 1)[0] + "/status"
-    status = httpx.get(status_url, timeout=5.0).json()
-    emb = status.get("embedding", {})
-    if not emb.get("available"):
+    status: dict[str, Any] = {}
+    deadline = time.monotonic() + 120.0
+    while time.monotonic() < deadline:
+        try:
+            status = httpx.get(status_url, timeout=10.0).json()
+        except (httpx.ReadTimeout, httpx.ConnectError):
+            time.sleep(0.05)
+            continue
+        if status.get("embedding", {}).get("available"):
+            break
+        time.sleep(0.05)
+    if not status.get("embedding", {}).get("available"):
         log_dir = Path(srv.log_dir)
         stderr_log = log_dir / "llama-server-stderr.log"
         stderr_content = stderr_log.read_text() if stderr_log.exists() else "(no stderr log)"
         server_log = log_dir / "shrike.log"
         server_content = server_log.read_text() if server_log.exists() else "(no server log)"
         raise RuntimeError(
-            f"Embedding service not available after server start.\n"
+            f"Embedding service not available within 120s of server start.\n"
             f"Status: {status}\n"
             f"--- llama-server stderr ---\n{stderr_content}\n"
             f"--- shrike server log ---\n{server_content}"
