@@ -521,7 +521,9 @@ impl Kernel {
     /// Pending = a resolvable image with no OCR row (or all of them, after a
     /// recognizer-fingerprint change invalidates the prior text). Returns
     /// `{status, recognized, stored, remaining}` — the harness loops while
-    /// `remaining > 0`, so one call never occupies the executor for long.
+    /// `remaining > 0` and the batch made progress (`recognized > 0`), so
+    /// one call never occupies the executor for long and a permanently
+    /// unreadable window can't spin the driver.
     pub async fn recognize_pending(&self, max_items: usize) -> NativeResult<serde_json::Value> {
         let Some(svc) = self.recognize_service() else {
             return Ok(serde_json::json!({"status": "unavailable"}));
@@ -669,10 +671,13 @@ impl Kernel {
             self.index_written(&affected).await?;
         }
 
-        // `recognized` counts what was actually sent; a skipped (unreadable)
-        // item still counts against this sweep's batch in `remaining`, so a
-        // persistently failing read can't spin the harness loop — it just
-        // stays pending for the next sweep.
+        // `recognized` counts what was actually sent. A skipped (unreadable)
+        // item stores nothing, so it STAYS PENDING and the next call re-takes
+        // the same window — with an unreadable prefix of the pending order
+        // and more items beyond it, `remaining` stays > 0 indefinitely. The
+        // kernel does not terminate that loop; the HARNESS's driver stops on
+        // a no-progress batch (`recognized == 0`) and the next sweep trigger
+        // (boot, /reload, cooperative re-acquire) retries the read.
         Ok(serde_json::json!({
             "status": "ran",
             "recognized": sent.len(),
@@ -1602,6 +1607,80 @@ mod no_cpython_smoke {
 
             // And now everything is done.
             let idle = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(idle["status"], "idle");
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
+    fn unreadable_prefix_reports_no_progress_for_the_driver() {
+        // #386 livelock shape: total_pending > max_items with a permanently
+        // unreadable PREFIX of the pending order. Skipped items stay pending,
+        // so each call re-takes the same window — the kernel can't drain it.
+        // The report must let a driver detect the no-progress batch
+        // (recognized == 0 with remaining > 0) and stop instead of spinning.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            let notes = vec![serde_json::json!({"note_type": "Basic", "deck": "Default",
+                "fields": {"Front":
+                    "<img src=\"u1.png\"> <img src=\"u2.png\"> <img src=\"ok.png\">",
+                    "Back": "b"}})];
+            kernel
+                .upsert_notes_json(
+                    serde_json::json!(notes).to_string(),
+                    "error".to_string(),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let mut media = std::collections::HashMap::new();
+            media.insert("u1.png".to_string(), b"unreadable one".to_vec());
+            media.insert("u2.png".to_string(), b"unreadable two".to_vec());
+            media.insert("ok.png".to_string(), b"readable tail text".to_vec());
+            let resolver = Arc::new(MapResolver::new(media));
+            {
+                let mut unreadable = resolver.unreadable.lock().unwrap();
+                unreadable.insert("u1.png".to_string());
+                unreadable.insert("u2.png".to_string());
+            }
+            kernel.attach_recognizer(Arc::new(StubRecognizer), resolver.clone());
+
+            // The batch window covers only the unreadable prefix: nothing is
+            // sent, nothing stored, and the readable tail stays beyond the
+            // window — the exact shape a driver must stop on, since the next
+            // call would re-take the identical window.
+            let report = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(report["status"], "ran");
+            assert_eq!(report["recognized"], 0);
+            assert_eq!(report["stored"], 0);
+            assert_eq!(report["remaining"], 1);
+
+            // And it really would: a second call is byte-identical.
+            let again = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(again, report);
+
+            // Healed reads drain normally across batches, then go idle.
+            resolver.unreadable.lock().unwrap().clear();
+            let healed = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(healed["recognized"], 2);
+            assert_eq!(healed["stored"], 2);
+            assert_eq!(healed["remaining"], 1);
+            let tail = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(tail["recognized"], 1);
+            assert_eq!(tail["remaining"], 0);
+            let idle = kernel.recognize_pending(2).await.unwrap();
             assert_eq!(idle["status"], "idle");
 
             kernel.close().await.unwrap();
