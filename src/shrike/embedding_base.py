@@ -1,20 +1,20 @@
 """Embedding backend protocol — the seam every embedder implements.
 
-Shrike's vector index (`index.py`) and server boot path (`server.py`) depend only
+Shrike's server boot path (`server.py`) and the kernel attach point depend only
 on this minimal surface, never on a specific runtime. The implementations are
 ``LlamaServerBackend`` (a llama-server subprocess, `embedding.py`) and
 ``OnnxBackend`` (in-process onnxruntime, `embedding_onnx.py`); a future multimodal
 embedder is just another implementation that advertises more ``modalities``.
 
 Keeping the surface this small is what lets the backend be swapped without
-touching the index: drift detection, the per-note hash sidecar, and persistence
-are all backend-agnostic — they only ever call ``embed_texts`` and read
-``model_fingerprint``/``embedding_dim``.
+touching the index (kernel-owned since #332/#353): drift detection, the
+per-note fingerprints, and persistence are all backend-agnostic — they only
+ever call ``embed_texts`` and read ``model_fingerprint``/``embedding_dim``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -110,98 +110,4 @@ class EmbedderBackend(Protocol):
 
     def health(self) -> dict[str, Any]:
         """Status dict for the ``/status`` endpoint (carries at least ``available``)."""
-        ...
-
-
-@runtime_checkable
-class IndexEngine(Protocol):
-    """The storage engine under the ``VectorIndex`` orchestrator (#267).
-
-    **Frozen as the future FFI surface** (#273): the native ``shrike-index``
-    crate implements this verbatim, so the calls are coarse and batched,
-    trafficking only in i64 key arrays, f32 vector arrays (numpy or nested
-    sequences), and small JSON-able dicts — never live Python objects. The
-    orchestrator keeps everything that is *policy*: the state machine, drift
-    detection, the reconcile hash-diff and its fallback ladder, background
-    threads, and metadata persistence. Implementations are instance-per-space
-    with no global state (#232's multi-space manager is "make N engines").
-
-    Engine quirks are part of the contract (pinned by the unit suite): the
-    phantom ``(0, 0)`` hit on an empty index is filtered inside
-    ``search_by_modality``; multi-key dedup is min-distance-per-note (== max-sim
-    over a note's vectors); ``remove`` returns the count removed from the *text*
-    sub-index.
-    """
-
-    @property
-    def size(self) -> int:
-        """Total vectors across every modality sub-index."""
-        ...
-
-    @property
-    def ndim(self) -> int | None:
-        """The shared vector dimension, or None before the first add/restore."""
-        ...
-
-    def modality_sizes(self) -> dict[str, int]:
-        """Vector count per loaded modality (a created-but-empty sub-index counts, at 0)."""
-        ...
-
-    def ensure(self, modality: str, ndim: int) -> None:
-        """Create the (empty) sub-index for a modality if it doesn't exist yet."""
-        ...
-
-    def clear(self) -> None:
-        """Drop every in-memory sub-index (file deletion is the orchestrator's)."""
-        ...
-
-    def restore(self, path: str, candidate_keys: Sequence[int] | None = None) -> bool:
-        """Load sub-index files under ``path``; False (and empty) on a corrupt present file.
-
-        ``candidate_keys`` are the note ids that may be indexed (the
-        orchestrator's hashes sidecar). The Python engine ignores them (its
-        binding enumerates keys natively); the Rust engine reconstructs its
-        per-key map from them, returning False — the standard drift rebuild —
-        when they can't account for every stored vector (#273).
-        """
-        ...
-
-    def save(self, path: str) -> None:
-        """Persist every loaded sub-index under ``path``; delete stale modality files."""
-        ...
-
-    def add(self, modality: str, keys: Any, vectors: Any) -> None:
-        """Add f32 vectors under i64 keys to one modality (pure add — no replace)."""
-        ...
-
-    def remove(self, keys: Any) -> int:
-        """Remove the keys' vectors from every sub-index; returns the text-index count."""
-        ...
-
-    def search_by_modality(
-        self,
-        query_vectors: Any,
-        k: int,
-        *,
-        modalities: Sequence[str] | None = None,
-    ) -> list[dict[str, list[dict[str, Any]]]]:
-        """Per-query ``{modality: [{note_id, distance}, ...]}`` rankings (max-sim per note)."""
-        ...
-
-    def contains(self, key: int) -> bool:
-        """Whether a note is indexed (every indexed note has a text vector)."""
-        ...
-
-    def keys(self) -> list[int]:
-        """The distinct note ids in the text sub-index."""
-        ...
-
-    def get(self, key: int) -> Any:
-        """A note's stored text vector(s), or None if absent."""
-        ...
-
-    def calibrate_activation(
-        self, sample_size: int, k: int, min_count: int
-    ) -> dict[str, dict[str, float]]:
-        """Per-(non-text-)modality best-match ``{n, mean, std}`` stats (#201b), ``{}`` if N/A."""
         ...

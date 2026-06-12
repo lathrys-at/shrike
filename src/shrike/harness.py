@@ -16,7 +16,6 @@ import contextlib
 import json
 import logging
 from collections import OrderedDict
-from types import SimpleNamespace
 from typing import Any
 
 import shrike_native
@@ -83,9 +82,6 @@ class KernelIndexView:
         self._kernel = kernel
         self._runtime = runtime
         self._engine_handle = kernel.engine_handle()
-        # Facade-shaped engine access: the search action extracts the native
-        # handle as `index._engine._rust`, so mirror that exact attribute.
-        self._engine = SimpleNamespace(_rust=self._engine_handle)
         self._embed_cache: OrderedDict[tuple[int, str], list[float]] = OrderedDict()
 
     def _status(self) -> dict[str, Any]:
