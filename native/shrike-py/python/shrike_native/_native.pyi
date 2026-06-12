@@ -320,6 +320,35 @@ class AsyncKernel:
         unused_media: bool = True,
         dry_run: bool = True,
     ) -> Future[str]: ...
+    # note-type ops (#391 re-home, long-tail group 3)
+    def upsert_note_types(self, note_types_json: str) -> Future[str]: ...
+    def update_note_type_fields(self, note_type_name: str, operations_json: str) -> Future[str]: ...
+    def update_note_type_templates(
+        self, note_type_name: str, operations_json: str
+    ) -> Future[str]: ...
+    def find_replace_note_types(
+        self,
+        note_type_name: str,
+        search: str,
+        replacement: str,
+        regex: bool = False,
+        match_case: bool = True,
+        front: bool = True,
+        back: bool = True,
+        css: bool = True,
+    ) -> Future[str]: ...
+    def update_note_type_field_metadata(
+        self, note_type_name: str, updates_json: str
+    ) -> Future[str]: ...
+    def migrate_note_type(
+        self,
+        note_ids: list[int],
+        new_note_type: str,
+        field_map_json: str,
+        template_map_json: str,
+        dry_run: bool,
+    ) -> Future[str]: ...
+    def delete_note_types(self, ids: list[int]) -> Future[str]: ...
     def search(
         self, query: str, top_k: int
     ) -> Future[list[tuple[int, float, list[tuple[str, int]]]]]: ...

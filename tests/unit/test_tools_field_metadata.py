@@ -1,5 +1,8 @@
 """Tool-layer tests for update_note_type_field_metadata (#119): col_mod bump,
-no re-embed. Kernel-harness port (#355)."""
+no re-embed. Since the #391 re-home the watermark tail runs inside the
+kernel's op, so the assertions read observable state (the index watermark,
+the embed-call log) rather than spying host-side kernel calls that no
+longer happen."""
 
 from __future__ import annotations
 
@@ -18,17 +21,10 @@ def backend():
 
 
 @pytest.fixture()
-def kproxy(kharness, backend):
+def mcp_app(kharness, backend):
     kharness.attach_embedder(backend)
-    proxy = kharness.proxy()
-    proxy.spy("metadata_changed")
-    return proxy
-
-
-@pytest.fixture()
-def mcp_app(kharness, kproxy):
     mcp = FastMCP("test")
-    register_tools(mcp, kharness.wrapper, kernel=kproxy)
+    register_tools(mcp, kharness.wrapper, kernel=kharness.kernel)
     return mcp
 
 
@@ -52,7 +48,7 @@ def model(kharness):
 
 
 class TestSetFieldMetadataTool:
-    def test_bumps_col_mod_without_reembed(self, kharness, model, backend, kproxy, mcp_app):
+    def test_bumps_col_mod_without_reembed(self, kharness, model, backend, mcp_app):
         embeds_before = len(backend.calls)
         result = kharness.call_tool(
             mcp_app,
@@ -60,10 +56,11 @@ class TestSetFieldMetadataTool:
             {"note_type": "M", "fields": [{"name": "F", "size": 28, "description": "prompt"}]},
         )
         assert result["fields_updated"] == ["F"]
-        # Editor metadata isn't embedding text: no re-embed, but col_mod advances.
+        # Editor metadata isn't embedding text: no re-embed, but the kernel
+        # tail advances the watermark — the col_mod bump isn't drift.
         assert len(backend.calls) == embeds_before
-        assert kproxy.calls["metadata_changed"] == 1
         assert kharness.index_status()["col_mod"] == kharness.col_mod()
+        assert kharness.reindex_if_needed() is False
 
     def test_unknown_field_is_tool_error(self, kharness, model, mcp_app):
         with pytest.raises(ToolError):

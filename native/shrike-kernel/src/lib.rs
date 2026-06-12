@@ -1214,6 +1214,151 @@ impl Kernel {
         Ok(response)
     }
 
+    // ── note-type ops (#391 re-home, long-tail group 3) ─────────────────────
+    // The #76/#119/#75 note-type tools as maintained kernel ops. The
+    // structural edits (upsert/fields/templates/delete) carry NO tail: a
+    // field-list change can alter embedding text, so their col.mod bump
+    // deliberately reads as drift on the next boot (a removed field makes a
+    // rebuild correct; for the rest it's conservative — the pre-re-home
+    // contract). Template/CSS text and field metadata never feed embedding
+    // text, so those two advance the watermarks; migration moves note fields,
+    // so an apply re-embeds the changed notes.
+
+    /// Create/update note-type definitions in bulk (the position-keyed
+    /// replace with the #76 unsound-move rejection), per-item results.
+    pub async fn upsert_note_types(
+        &self,
+        note_types: Vec<shrike_schemas::NoteTypeInput>,
+    ) -> NativeResult<Vec<shrike_schemas::NoteTypeResult>> {
+        self.collection
+            .run(move |core| core.upsert_note_types(&note_types))
+            .await?
+    }
+
+    /// Identity-based field ops (add/remove/rename/reposition), atomic.
+    pub async fn update_note_type_fields(
+        &self,
+        note_type_name: String,
+        operations: Vec<shrike_schemas::FieldOp>,
+    ) -> NativeResult<shrike_schemas::UpdateNoteTypeFieldsResponse> {
+        self.collection
+            .run(move |core| core.update_note_type_fields(&note_type_name, &operations))
+            .await?
+    }
+
+    /// Identity-based template ops (add/remove/rename/reposition), atomic.
+    pub async fn update_note_type_templates(
+        &self,
+        note_type_name: String,
+        operations: Vec<shrike_schemas::TemplateOp>,
+    ) -> NativeResult<shrike_schemas::UpdateNoteTypeTemplatesResponse> {
+        self.collection
+            .run(move |core| core.update_note_type_templates(&note_type_name, &operations))
+            .await?
+    }
+
+    /// Literal-or-regex rewrite over one model's template HTML + CSS, with
+    /// its watermark tail: template/CSS text isn't embedding text, so a real
+    /// replace advances the watermarks instead of reading as drift (a no-op
+    /// replace saves nothing and bumps nothing). Best-effort — a tail
+    /// failure logs and the response still returns.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_replace_note_types(
+        &self,
+        note_type_name: String,
+        search: String,
+        replacement: String,
+        regex: bool,
+        match_case: bool,
+        front: bool,
+        back: bool,
+        css: bool,
+    ) -> NativeResult<shrike_schemas::FindReplaceNoteTypesResponse> {
+        let response = self
+            .collection
+            .run(move |core| {
+                core.find_and_replace_note_types(
+                    &note_type_name,
+                    &search,
+                    &replacement,
+                    regex,
+                    match_case,
+                    front,
+                    back,
+                    css,
+                )
+            })
+            .await??;
+        if response.replacements > 0 {
+            if let Err(e) = self.metadata_changed().await {
+                tracing::warn!(error = %e, "watermark advance after find_replace_note_types failed");
+            }
+        }
+        Ok(response)
+    }
+
+    /// Per-field editor metadata (font/size/description), with the
+    /// unconditional watermark tail: editor cosmetics never touch embedding
+    /// text, but the persist bumps col.mod. Best-effort, like the tag/deck
+    /// metadata ops.
+    pub async fn update_note_type_field_metadata(
+        &self,
+        note_type_name: String,
+        updates: Vec<shrike_schemas::FieldMetadataInput>,
+    ) -> NativeResult<shrike_schemas::UpdateNoteTypeFieldMetadataResponse> {
+        let response = self
+            .collection
+            .run(move |core| core.update_note_type_field_metadata(&note_type_name, &updates))
+            .await??;
+        if let Err(e) = self.metadata_changed().await {
+            tracing::warn!(error = %e, "watermark advance after field-metadata update failed");
+        }
+        Ok(response)
+    }
+
+    /// Change notes' note type via name maps (#75). Migration moves field
+    /// content — embedding text — under unchanged ids, so an apply re-embeds
+    /// and re-ingests the changed notes (best-effort: the migration is
+    /// committed either way; the next boot's drift check repairs). Dry-run
+    /// touches nothing.
+    pub async fn migrate_note_type(
+        &self,
+        note_ids: Vec<i64>,
+        new_note_type: String,
+        field_map: std::collections::BTreeMap<String, String>,
+        template_map: std::collections::BTreeMap<String, String>,
+        dry_run: bool,
+    ) -> NativeResult<shrike_schemas::MigrateNoteTypeResponse> {
+        let response = self
+            .collection
+            .run(move |core| {
+                core.migrate_note_type(
+                    &note_ids,
+                    &new_note_type,
+                    &field_map,
+                    &template_map,
+                    dry_run,
+                )
+            })
+            .await??;
+        if !dry_run && !response.changed.is_empty() {
+            if let Err(e) = self.reindex_notes(&response.changed).await {
+                tracing::warn!(error = %e, "index maintenance after migrate_note_type failed");
+            }
+        }
+        Ok(response)
+    }
+
+    /// Delete note types by id, only-if-unused, per-item results.
+    pub async fn delete_note_types(
+        &self,
+        ids: Vec<i64>,
+    ) -> NativeResult<Vec<shrike_schemas::DeleteNoteTypeResult>> {
+        self.collection
+            .run(move |core| core.delete_note_types(&ids))
+            .await?
+    }
+
     /// Fused search with the kernel's default arguments — a thin delegate to
     /// [`actions::search_notes`], the ONE fused-search spine (#388): no
     /// scope, no threshold, no image floor, the canonical `fusion` weights.
@@ -1617,6 +1762,137 @@ mod no_cpython_smoke {
             assert!(!applied.dry_run);
             assert_eq!(applied.empty_notes.unwrap().removed, vec![nid]);
             assert!(!kernel.index().engine().contains(nid));
+            assert!(!kernel.reindex_if_needed().await.unwrap());
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
+    fn note_type_ops_run_as_kernel_ops() {
+        // The #391 re-home, long-tail group 3: the metadata-tail ops advance
+        // the watermark inside the kernel (field metadata unconditionally, a
+        // template/CSS replace only when something matched), and an applied
+        // migration re-embeds the changed notes — no host-side
+        // metadata_changed/reindex_notes calls anywhere.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// HashEmbedder vectors + an embed-call counter, so "migrate-apply
+        /// re-embeds" is a direct observation, not a watermark inference.
+        struct CountingEmbedder(AtomicUsize);
+
+        impl Embedder for CountingEmbedder {
+            fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(HashEmbedder::embed_sync(&texts)) })
+            }
+
+            fn fingerprint(&self) -> Option<String> {
+                Some("hash-embedder:v1".to_string())
+            }
+
+            fn dim(&self) -> Option<usize> {
+                Some(64)
+            }
+        }
+
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            let embedder = Arc::new(CountingEmbedder(AtomicUsize::new(0)));
+            kernel.attach_embedder(Arc::clone(&embedder) as Arc<dyn Embedder>, None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            // Field metadata: the unconditional watermark tail — the persist
+            // bumps col.mod, yet the next drift check sees nothing.
+            let resp = kernel
+                .update_note_type_field_metadata(
+                    "Basic".into(),
+                    vec![shrike_schemas::FieldMetadataInput {
+                        name: "Front".into(),
+                        font: None,
+                        size: Some(28),
+                        description: None,
+                    }],
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.fields_updated, vec!["Front"]);
+            assert!(!kernel.reindex_if_needed().await.unwrap());
+
+            // find_replace: a real replace advances the watermark too.
+            let basic_css = kernel
+                .find_replace_note_types(
+                    "Basic".into(),
+                    "text-align: center".into(),
+                    "text-align: left".into(),
+                    false,
+                    true,
+                    false,
+                    false,
+                    true,
+                )
+                .await
+                .unwrap();
+            assert!(basic_css.replacements > 0);
+            assert!(!kernel.reindex_if_needed().await.unwrap());
+
+            // Migrate-apply: field content moves under an unchanged id, so
+            // the kernel tail re-embeds it (an extra embed call lands, the
+            // vector stays present, no drift remains).
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+            let CreateOutcome::Created(nid) = kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["hello front".into(), "back".into()],
+                    Vec::new(),
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("create failed")
+            };
+            let embeds_before = embedder.0.load(Ordering::SeqCst);
+
+            let field_map: std::collections::BTreeMap<String, String> = [
+                ("Front".to_string(), "Text".to_string()),
+                ("Back".to_string(), "Back Extra".to_string()),
+            ]
+            .into();
+            let dry = kernel
+                .migrate_note_type(
+                    vec![nid],
+                    "Cloze".into(),
+                    field_map.clone(),
+                    Default::default(),
+                    true,
+                )
+                .await
+                .unwrap();
+            assert!(dry.dry_run);
+            assert_eq!(embedder.0.load(Ordering::SeqCst), embeds_before); // untouched
+
+            let applied = kernel
+                .migrate_note_type(
+                    vec![nid],
+                    "Cloze".into(),
+                    field_map,
+                    Default::default(),
+                    false,
+                )
+                .await
+                .unwrap();
+            assert_eq!(applied.changed, vec![nid]);
+            assert!(embedder.0.load(Ordering::SeqCst) > embeds_before);
+            assert!(kernel.index().engine().contains(nid));
             assert!(!kernel.reindex_if_needed().await.unwrap());
 
             kernel.close().await.unwrap();

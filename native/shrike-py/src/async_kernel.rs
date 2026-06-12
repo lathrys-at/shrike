@@ -441,6 +441,181 @@ impl AsyncKernel {
         })
     }
 
+    // ── note-type ops (#391 re-home, long-tail group 3) ─────────────────────
+
+    /// Create/update note-type definitions in bulk (#76 positional replace);
+    /// per-item results JSON.
+    fn upsert_note_types<'py>(
+        &self,
+        py: Python<'py>,
+        note_types_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let note_types: Vec<shrike_schemas::NoteTypeInput> = serde_json::from_str(&note_types_json)
+            .map_err(|e| {
+                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                    "note_types must be a JSON list: {e}"
+                )))
+            })?;
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let results = kernel.upsert_note_types(note_types).await?;
+            crate::kernel_actions::wire(&results)
+        })
+    }
+
+    /// Identity-based field ops (add/remove/rename/reposition), atomic; JSON.
+    fn update_note_type_fields<'py>(
+        &self,
+        py: Python<'py>,
+        note_type_name: String,
+        operations_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let operations: Vec<shrike_schemas::FieldOp> = serde_json::from_str(&operations_json)
+            .map_err(|e| {
+                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                    "operations must be a JSON list: {e}"
+                )))
+            })?;
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let response = kernel
+                .update_note_type_fields(note_type_name, operations)
+                .await?;
+            crate::kernel_actions::wire(&response)
+        })
+    }
+
+    /// Identity-based template ops, atomic; JSON.
+    fn update_note_type_templates<'py>(
+        &self,
+        py: Python<'py>,
+        note_type_name: String,
+        operations_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let operations: Vec<shrike_schemas::TemplateOp> = serde_json::from_str(&operations_json)
+            .map_err(|e| {
+                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                    "operations must be a JSON list: {e}"
+                )))
+            })?;
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let response = kernel
+                .update_note_type_templates(note_type_name, operations)
+                .await?;
+            crate::kernel_actions::wire(&response)
+        })
+    }
+
+    /// Literal-or-regex rewrite over one model's template HTML + CSS, with
+    /// the kernel-side watermark tail on a real replace; JSON.
+    #[pyo3(signature = (note_type_name, search, replacement, regex=false, match_case=true, front=true, back=true, css=true))]
+    #[allow(clippy::too_many_arguments)]
+    fn find_replace_note_types<'py>(
+        &self,
+        py: Python<'py>,
+        note_type_name: String,
+        search: String,
+        replacement: String,
+        regex: bool,
+        match_case: bool,
+        front: bool,
+        back: bool,
+        css: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let response = kernel
+                .find_replace_note_types(
+                    note_type_name,
+                    search,
+                    replacement,
+                    regex,
+                    match_case,
+                    front,
+                    back,
+                    css,
+                )
+                .await?;
+            crate::kernel_actions::wire(&response)
+        })
+    }
+
+    /// Per-field editor metadata (font/size/description), with the kernel's
+    /// unconditional watermark tail; JSON.
+    fn update_note_type_field_metadata<'py>(
+        &self,
+        py: Python<'py>,
+        note_type_name: String,
+        updates_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let updates: Vec<shrike_schemas::FieldMetadataInput> = serde_json::from_str(&updates_json)
+            .map_err(|e| {
+                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                    "updates must be a JSON list: {e}"
+                )))
+            })?;
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let response = kernel
+                .update_note_type_field_metadata(note_type_name, updates)
+                .await?;
+            crate::kernel_actions::wire(&response)
+        })
+    }
+
+    /// Change notes' note type via name maps (#75); on apply the kernel
+    /// re-embeds the changed notes. An empty `template_map_json` = map
+    /// templates by ordinal (the established edge contract); JSON.
+    fn migrate_note_type<'py>(
+        &self,
+        py: Python<'py>,
+        note_ids: Vec<i64>,
+        new_note_type: String,
+        field_map_json: String,
+        template_map_json: String,
+        dry_run: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let field_map: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&field_map_json).map_err(|e| {
+                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                    "field_map must be a JSON object: {e}"
+                )))
+            })?;
+        let template_map: std::collections::BTreeMap<String, String> =
+            if template_map_json.is_empty() {
+                Default::default()
+            } else {
+                serde_json::from_str(&template_map_json).map_err(|e| {
+                    crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                        "template_map must be a JSON object: {e}"
+                    )))
+                })?
+            };
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let response = kernel
+                .migrate_note_type(note_ids, new_note_type, field_map, template_map, dry_run)
+                .await?;
+            crate::kernel_actions::wire(&response)
+        })
+    }
+
+    /// Delete note types by id, only-if-unused; wraps in
+    /// `DeleteNoteTypesResponse` so the `{"results": ...}` wire matches the
+    /// sync edge. JSON.
+    fn delete_note_types<'py>(
+        &self,
+        py: Python<'py>,
+        ids: Vec<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let results = kernel.delete_note_types(ids).await?;
+            crate::kernel_actions::wire(&shrike_schemas::DeleteNoteTypesResponse { results })
+        })
+    }
+
     /// Fused search: `(note_id, score, [(signal, rank)])` rows.
     fn search<'py>(
         &self,

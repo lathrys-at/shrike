@@ -961,7 +961,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         logger.debug("upsert_note_types count=%d names=%s", len(note_types), ", ".join(names))
 
         nt_dicts = [nt.model_dump(exclude_none=True) for nt in note_types]
-        results = await wrapper.upsert_note_types(nt_dicts)
+        results = json.loads(await kernel.upsert_note_types(json.dumps(nt_dicts)))
 
         for r in results:
             status = r.get("status", "unknown")
@@ -1010,7 +1010,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         logger.debug("update_note_type_fields %r ops=%d", note_type, len(operations))
         op_dicts = [op.model_dump(exclude_none=True) for op in operations]
         try:
-            result = await wrapper.update_note_type_fields(note_type, op_dicts)
+            result = json.loads(
+                await kernel.update_note_type_fields(note_type, json.dumps(op_dicts))
+            )
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
         note_outcome(f"fields -> {result['fields']}")
@@ -1055,7 +1057,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         logger.debug("update_note_type_templates %r ops=%d", note_type, len(operations))
         op_dicts = [op.model_dump(exclude_none=True) for op in operations]
         try:
-            result = await wrapper.update_note_type_templates(note_type, op_dicts)
+            result = json.loads(
+                await kernel.update_note_type_templates(note_type, json.dumps(op_dicts))
+            )
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
         note_outcome(f"templates -> {result['templates']}")
@@ -1125,16 +1129,20 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             css,
             regex,
         )
+        # Re-homed (#391): the kernel op carries the watermark tail (a real
+        # replace bumps col.mod without touching vectors; a no-op bumps nothing).
         try:
-            result = await wrapper.find_replace_note_types(
-                note_type,
-                search=search,
-                replacement=replace,
-                regex=regex,
-                match_case=match_case,
-                front=front,
-                back=back,
-                css=css,
+            result = json.loads(
+                await kernel.find_replace_note_types(
+                    note_type,
+                    search,
+                    replace,
+                    regex,
+                    match_case,
+                    front,
+                    back,
+                    css,
+                )
             )
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
@@ -1142,11 +1150,6 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             f"{result['replacements']} replacement(s) in "
             f"{len(result['templates_changed'])} template(s), css={result['css_changed']}"
         )
-        # Templates/CSS aren't note embedding text, so vectors stay valid — but
-        # update_dict bumped col.mod. Advance the stored col_mod without
-        # re-embedding, like the tag/deck metadata ops.
-        if result["replacements"]:
-            await _bump_col_mod_after_metadata_change()
         return FindReplaceNoteTypesResponse.model_validate(result)
 
     @_action
@@ -1177,14 +1180,15 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         To change which fields exist or their order, use update_note_type_fields."""
         logger.debug("update_note_type_field_metadata %r fields=%d", note_type, len(fields))
         updates = [f.model_dump(exclude_none=True) for f in fields]
+        # Re-homed (#391): the kernel op carries the watermark tail (editor
+        # metadata isn't embedding text — col_mod advances, no re-embed).
         try:
-            result = await wrapper.update_note_type_field_metadata(note_type, updates)
+            result = json.loads(
+                await kernel.update_note_type_field_metadata(note_type, json.dumps(updates))
+            )
         except NoteTypeOpError as e:
             raise ToolInputError(str(e)) from e
         note_outcome(f"updated {result['fields_updated']}")
-        # Editor metadata isn't note embedding text, so vectors stay valid; advance
-        # col_mod without re-embedding (like the tag/deck/find_replace_note_types ops).
-        await _bump_col_mod_after_metadata_change()
         return UpdateNoteTypeFieldMetadataResponse.model_validate(result)
 
     @_action
@@ -1378,31 +1382,26 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             new_note_type,
             dry_run,
         )
+        # Re-homed (#391): the kernel op migrates and, on apply, re-embeds +
+        # re-ingests the changed notes (empty template_map = map by ordinal).
         try:
-            result = await wrapper.migrate_note_type(
-                note_ids,
-                new_note_type,
-                field_map,
-                template_map=template_map or None,
-                dry_run=dry_run,
+            result = json.loads(
+                await kernel.migrate_note_type(
+                    note_ids,
+                    new_note_type,
+                    json.dumps(field_map),
+                    json.dumps(template_map) if template_map else "",
+                    dry_run,
+                )
             )
         except ValueError as e:
             raise ToolInputError(str(e)) from e
 
-        changed = result["changed"]
         note_outcome(
-            f"{'would migrate' if dry_run else 'migrated'} {len(changed)} note(s) "
+            f"{'would migrate' if dry_run else 'migrated'} {len(result['changed'])} note(s) "
             f"{result['from_note_type']} -> {result['to_note_type']}, "
             f"dropped={result['dropped_fields']}"
         )
-
-        if not dry_run and changed:
-            # One maintained kernel op re-embeds + re-ingests the set.
-            try:
-                await kernel.reindex_notes(changed)
-            except Exception:
-                logger.warning("Failed to update index after migrate_note_type", exc_info=True)
-
         return MigrateNoteTypeResponse.model_validate(result)
 
     @_action
@@ -1421,7 +1420,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         A note type can only be deleted if no notes currently use it.
         Check use counts via collection_info first."""
         logger.debug("delete_note_types requested=%d", len(ids))
-        result = await wrapper.delete_note_types(ids)
+        result = json.loads(await kernel.delete_note_types(ids))
         statuses: dict[str, int] = {}
         for r in result["results"]:
             s = r["status"]
