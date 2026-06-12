@@ -15,7 +15,7 @@ from shrike.cli.config import (
     locking_args,
     resolve_cache_dir,
     resolve_collection,
-    resolve_embedding,
+    resolve_embedding_profile,
     resolve_index_save,
     resolve_locking,
     resolve_recognition,
@@ -366,22 +366,31 @@ def server_start(
     )
     resolved_log_level = log_level or log_config.get("level", "info")
 
-    # Resolve embedding settings once (config → env → flags) for both the
-    # spawned server args and the config we persist.
-    resolved_embedding = resolve_embedding(
-        config,
-        backend=embedding_backend,
-        model=embedding_model,
-        port=embedding_port,
-        context_size=embedding_context_size,
-        threads=embedding_threads,
-        gpu_layers=embedding_gpu_layers,
-        pooling=embedding_pooling,
-        extra_args=list(embedding_arg) or None,
-        llama_server=llama_server,
-        onnx_providers=list(embedding_onnx_provider) or None,
-        batch_size=embedding_batch_size,
-    )
+    # Resolve embedding settings once for both the spawned server args and the
+    # config we persist — v2-first (#498): a config declaring embedders:/managed:
+    # resolves against the build's compiled features and rejects the legacy
+    # flags; otherwise the legacy config → env → flag cascade runs unchanged.
+    from shrike.profiles import ProfileError
+
+    try:
+        resolved_embedding = resolve_embedding_profile(
+            config,
+            {
+                "backend": embedding_backend,
+                "model": embedding_model,
+                "port": embedding_port,
+                "context_size": embedding_context_size,
+                "threads": embedding_threads,
+                "gpu_layers": embedding_gpu_layers,
+                "pooling": embedding_pooling,
+                "extra_args": list(embedding_arg) or None,
+                "llama_server": llama_server,
+                "onnx_providers": list(embedding_onnx_provider) or None,
+                "batch_size": embedding_batch_size,
+            },
+        )
+    except ProfileError as e:
+        raise click.ClickException(str(e)) from e
     embedding_cli_args = embedding_args(resolved_embedding, no_embedding=no_embedding)
     resolved_recognition = resolve_recognition(config, ocr_backend=ocr_backend)
     recognition_cli_args = (
@@ -448,9 +457,13 @@ def server_start(
         if resolved_locking["hold_seconds"] is not None:
             config["server"]["lock_hold_seconds"] = resolved_locking["hold_seconds"]
         # Remember embedding settings so `shrike embedding start` works later.
-        for key, value in resolved_embedding.items():
-            if value is not None:
-                config.setdefault("embedding", {})[key] = value
+        # Skipped for a v2 config (#498): the embedders:/managed: sections pass
+        # through save_config verbatim — writing the bridged params back as a
+        # legacy embedding: section would create the forbidden v2+legacy mix.
+        if not any(config.get(k) is not None for k in ("embedders", "recognizers", "managed")):
+            for key, value in resolved_embedding.items():
+                if value is not None:
+                    config.setdefault("embedding", {})[key] = value
         if resolved_cache_dir:
             config["cache_dir"] = resolved_cache_dir
         for key, value in resolved_index_save.items():

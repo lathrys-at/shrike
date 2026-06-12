@@ -206,6 +206,26 @@ fn build_info() -> String {
     )
 }
 
+/// The #499 build-matrix features compiled into this extension. The config
+/// layer's capability source (#498): a config entry declaring a `runtime`
+/// whose feature is absent here is a config error naming the build profile —
+/// never a silent no-op.
+#[pyfunction]
+fn build_features() -> Vec<&'static str> {
+    let mut features = Vec::new();
+    #[cfg(feature = "anki-core")]
+    features.push("anki-core");
+    #[cfg(feature = "engine-ort")]
+    features.push("engine-ort");
+    #[cfg(feature = "engine-remote")]
+    features.push("engine-remote");
+    #[cfg(feature = "engine-apple")]
+    features.push("engine-apple");
+    #[cfg(feature = "manage-llama")]
+    features.push("manage-llama");
+    features
+}
+
 /// Conventions exemplar: a coarse, batched compute call with the GIL released.
 #[pyfunction]
 fn parallel_sum(py: Python<'_>, values: Vec<f64>) -> f64 {
@@ -830,6 +850,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     finalize_gate::register_exit_hook(m)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(build_features, m)?)?;
     m.add_function(wrap_pyfunction!(parallel_sum, m)?)?;
     m.add_function(wrap_pyfunction!(checked_div, m)?)?;
     #[cfg(feature = "engine-ort")]

@@ -7,6 +7,19 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 
 ## [Unreleased]
 
+### Added
+- The config file understands the new capability sections (#498): an
+  `embedders:` list (each entry declaring its `modalities` and `runtime:
+  onnx | remote`, with `endpoint`/`api_key_env` for remote entries), a
+  `recognizers:` map, and a `managed:` section (`llama_server` with
+  `manage: auto`, the spawn-and-own behavior). These replace the
+  `embedding:`/`recognition:` sections and the `--embedding-*` flags, which
+  still work for one more release and print a deprecation pointer. A config
+  that declares something this build or this release can't serve fails with
+  an error naming what's missing — never a silent no-op. Settings declared
+  in the new sections can't be overridden by the old flags or environment
+  variables (the config file is their only home).
+
 ### Removed
 - In-process Apple Vision OCR is no longer compiled into the server (#496):
   on-device platform models belong to the mobile apps, and the server-side

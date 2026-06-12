@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from shrike.cli.config import (
@@ -470,3 +472,52 @@ def test_server_spec_includes_locking_args() -> None:
     assert spec is not None
     assert "--cooperative-lock" in spec.locking_args
     assert "--lock-hold-seconds" in spec.locking_args
+
+
+class TestEmbeddingProfileResolution:
+    """The #498 slice-1 wiring: a v2 config drives the legacy param shape
+    through resolve_embedding_profile; legacy configs run the old cascade."""
+
+    V2 = {
+        "embedders": [{"modalities": ["text"], "runtime": "onnx", "model": "~/m", "pooling": "cls"}]
+    }
+
+    def test_v2_config_bridges_to_legacy_params(self) -> None:
+        from shrike.cli.config import resolve_embedding_profile
+
+        resolved = resolve_embedding_profile(dict(self.V2), None)
+        assert resolved["backend"] == "onnx"
+        assert resolved["model"] == os.path.expanduser("~/m")
+        assert resolved["pooling"] == "cls"
+
+    def test_v2_config_rejects_legacy_flags(self) -> None:
+        from shrike.cli.config import resolve_embedding_profile
+        from shrike.profiles import ProfileError
+
+        with pytest.raises(ProfileError, match="only home"):
+            resolve_embedding_profile(dict(self.V2), {"model": "/elsewhere.gguf"})
+
+    def test_v2_config_warns_on_ignored_env(self, monkeypatch, capsys) -> None:
+        from shrike.cli.config import resolve_embedding_profile
+
+        monkeypatch.setenv("SHRIKE_EMBEDDING_MODEL", "/ambient.gguf")
+        resolved = resolve_embedding_profile(dict(self.V2), None)
+        assert resolved["model"] == os.path.expanduser("~/m")  # env did NOT win
+        assert "SHRIKE_EMBEDDING_MODEL" in capsys.readouterr().err
+
+    def test_legacy_config_runs_the_old_cascade(self, capsys) -> None:
+        from shrike.cli.config import resolve_embedding, resolve_embedding_profile
+
+        legacy = {"embedding": {"model": "~/m.gguf", "pooling": "last"}}
+        assert resolve_embedding_profile(dict(legacy), None) == resolve_embedding(dict(legacy))
+        assert "deprecated" in capsys.readouterr().err
+
+    def test_save_config_passes_v2_sections_through(self, tmp_path) -> None:
+        cfg = {
+            "embedders": [{"modalities": ["text"], "runtime": "onnx", "model": "/m"}],
+            "managed": {"llama_server": {"manage": "auto"}},
+        }
+        path = save_config(cfg, tmp_path / "config.yml")
+        reloaded = load_config(path)
+        assert reloaded["embedders"] == cfg["embedders"]
+        assert reloaded["managed"] == cfg["managed"]

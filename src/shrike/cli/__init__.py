@@ -118,8 +118,17 @@ def cli(
 
     # The client auto-starts a local daemon from this spec on connection
     # failure. None (no collection configured) disables auto-start — e.g. when
-    # targeting a remote server.
-    spec = build_server_spec(config)
+    # targeting a remote server. A capability config error (#498) disables
+    # auto-start with a warning rather than breaking every command — commands
+    # against an already-running or remote server still work; `shrike server
+    # start` surfaces the same error loudly.
+    from shrike.profiles import ProfileError
+
+    try:
+        spec = build_server_spec(config)
+    except ProfileError as e:
+        click.echo(f"warning: {e} (auto-start disabled)", err=True)
+        spec = None
 
     # Imported here, not at module top, so commands that never reach this
     # callback (tab-completion, --help, --version) don't pull in httpx/Pydantic.
