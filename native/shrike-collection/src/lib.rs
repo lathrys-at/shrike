@@ -1057,6 +1057,12 @@ mod tests {
     /// the source (the SVC_ pin's pattern), drives the whole public surface
     /// once, and asserts the dispatch recorder saw every pair. Build-time
     /// derivation from anki's descriptors remains the preferred end-state.
+    ///
+    /// The recorder fires at dispatch (before the call returns): this gate is
+    /// REACHABILITY; the sibling round-trip tests validate responses. Note
+    /// the parser treats every bare `const X: u32` in adapter.rs as a method
+    /// index (SVC_-prefixed ones as services) — an unrelated u32 const there
+    /// panics this test loudly rather than passing falsely.
     #[test]
     fn every_method_constant_is_dispatched_by_the_surface() {
         // Parse `const NAME: u32 = N;` declarations out of adapter.rs.
