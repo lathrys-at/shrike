@@ -31,6 +31,7 @@ mod anki_core;
 mod async_kernel;
 mod asyncio_bridge;
 mod finalize_gate;
+mod gated_log;
 #[cfg(feature = "anki-core")]
 mod kernel_actions;
 // The engine containers/capture handles exist to be ATTACHED to a kernel;
@@ -96,11 +97,17 @@ pub(crate) fn to_py_err(e: NativeError) -> PyErr {
 /// Rig native observability into the Python host (#308/#310) with the
 /// first-class bridges, not a hand-rolled forwarder:
 ///
-/// - `pyo3_log::try_init()` installs the `log` crate's global logger,
+/// - a `pyo3_log::Logger` is installed as the `log` crate's global logger,
 ///   forwarding every record to the stdlib `logging` module — logger name =
 ///   the Rust target (`shrike_derived`, ...), levels mapped, Python-side
 ///   filtering respected (with pyo3-log's level caching, so call this *after*
-///   the host configures `logging`).
+///   the host configures `logging`). It is wrapped in [`gated_log::GatedLog`]
+///   (#450): a record emitted from a kernel-runtime thread attaches the GIL
+///   inside pyo3-log, so each delivery claims a finalization-gate permit and
+///   a record racing interpreter exit is dropped instead of straddling
+///   `Py_Finalize` (the #435 abort class). Construction mirrors
+///   `pyo3_log::try_init()` — `Caching::LoggersAndLevels`, `Debug` default
+///   filter, matching `log::set_max_level` — just with the gate in front.
 /// - the native crates instrument with `tracing` only; the `log-always`
 ///   compat feature (enabled in this crate's Cargo.toml, unified across the
 ///   build graph) makes every tracing event also emit a `log` record even
@@ -114,10 +121,16 @@ pub(crate) fn to_py_err(e: NativeError) -> PyErr {
 /// A non-Python host (mobile) skips this and installs its own `tracing`
 /// subscriber instead — the kernel/compute crates never log directly.
 #[pyfunction]
-fn init_logging() -> PyResult<()> {
+fn init_logging(py: Python<'_>) -> PyResult<()> {
     use tracing_subscriber::layer::SubscriberExt;
 
-    let _ = pyo3_log::try_init();
+    let logger = pyo3_log::Logger::new(py, pyo3_log::Caching::LoggersAndLevels)?;
+    let gated = gated_log::GatedLog::new(finalize_gate::process_gate(), logger);
+    if log::set_boxed_logger(Box::new(gated)).is_ok() {
+        // try_init() parity: the max level is the logger's default Debug
+        // filter (no per-target filters are configured here).
+        log::set_max_level(log::LevelFilter::Debug);
+    }
     let subscriber = tracing_subscriber::registry().with(tracing_error::ErrorLayer::default());
     let _ = tracing::subscriber::set_global_default(subscriber);
     Ok(())

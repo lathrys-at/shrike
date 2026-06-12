@@ -148,8 +148,8 @@ impl PyMediaResolver {
 
 impl ImageResolver for PyMediaResolver {
     fn read(&self, name: &str) -> Option<Vec<u8>> {
-        // Gate-refused (#435) ⇒ "unreadable", silently: even a log line would
-        // re-enter Python via pyo3-log on this foreign thread.
+        // Gate-refused (#435) ⇒ "unreadable", silently: a log line would just
+        // be dropped by the gated pyo3-log wrapper anyway (#450).
         let _permit = crate::finalize_gate::permit()?;
         Python::attach(|py| {
             match self
