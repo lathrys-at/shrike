@@ -827,10 +827,12 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 # search keyed on the note's own ID. We only reach here when
                 # the index was available, so search_notes(ids=...) is a
                 # viable retry.
+                # neighbors_ok is the explicit signal that the attach never
+                # ran (it assigns all-or-nothing) — the typed kernel results
+                # carry `neighbors: []` even before the attach, so key
+                # absence stopped being a usable sentinel (#391).
                 pending = [
-                    r["id"]
-                    for r in results
-                    if r.get("status") in ("created", "updated") and "neighbors" not in r
+                    r["id"] for r in results if r.get("status") in ("created", "updated")
                 ]
                 for r in results:
                     if r.get("id") in pending:
