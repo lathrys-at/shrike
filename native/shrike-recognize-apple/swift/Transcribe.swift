@@ -96,6 +96,10 @@ private func extensionFor(mime: String?) -> String {
             let analyzer = SpeechAnalyzer(modules: [transcriber])
             let file = try AVAudioFile(forReading: url)
 
+            // On a throw below, structured concurrency cancels and awaits
+            // this child — the no-hang guarantee at the C boundary rests on
+            // `results` terminating when the analyzer/transcriber go away
+            // (Apple's contract; exercised by the garbage-bytes live test).
             async let collected = collect(transcriber)
             let last = try await analyzer.analyzeSequence(from: file)
             if let last {

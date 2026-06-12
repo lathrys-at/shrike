@@ -238,7 +238,10 @@ mod tests {
             let err = AppleSpeechTranscriber::new(Some("xx-XX"))
                 .err()
                 .expect("an unsupported locale must fail construction");
-            assert!(err.to_string().contains("unavailable") || !err.to_string().is_empty());
+            assert!(
+                err.to_string().contains("supported locale"),
+                "the unavailable error names the locale condition: {err}"
+            );
         }
 
         #[test]
