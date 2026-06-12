@@ -7,36 +7,51 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["Cargo.toml"])
 
+SHRIKE_PY_SRCS = [
+    "src/anki_core.rs",
+    "src/async_kernel.rs",
+    "src/asyncio_bridge.rs",
+    "src/finalize_gate.rs",
+    "src/gated_log.rs",
+    "src/kernel_actions.rs",
+    "src/lib.rs",
+    "src/native_embedder.rs",
+    "src/py_embedder.rs",
+    "src/py_recognizer.rs",
+]
+
+# On macOS the Python symbols stay undefined at link time (resolved by the
+# host at import), same as the _demo proof.
+SHRIKE_PY_LINK_FLAGS = select({
+    "@platforms//os:macos": [
+        "-Clink-arg=-undefined",
+        "-Clink-arg=dynamic_lookup",
+    ],
+    "//conditions:default": [],
+})
+
 # The Shrike PyO3 binding crate (#269) — the ONE crate that sees pyo3. Built as
-# a cdylib against the stable ABI (abi3-py312, no libpython linked); on macOS
-# the Python symbols stay undefined at link time (resolved by the host at
-# import), same as the _demo proof.
+# a cdylib against the stable ABI (abi3-py312, no libpython linked). This is
+# the SERVER build (#499; docs/distribution.md's matrix): the full engine/
+# manager set, matching the crate's cargo default features exactly — Bazel
+# crate_features don't inherit cargo defaults, so they're pinned here.
 rust_shared_library(
     name = "shrike_py_native",
-    # anki_core.rs is the feature-gated (#278) collection binding; this target
-    # builds default features (anki-core off), so it's cfg'd out here — listed
-    # for completeness/sandbox correctness.
-    srcs = [
-        "src/anki_core.rs",
-        "src/async_kernel.rs",
-        "src/asyncio_bridge.rs",
-        "src/finalize_gate.rs",
-        "src/gated_log.rs",
-        "src/kernel_actions.rs",
-        "src/lib.rs",
-        "src/native_embedder.rs",
-        "src/py_embedder.rs",
-        "src/py_recognizer.rs",
-    ],
+    srcs = SHRIKE_PY_SRCS,
     edition = "2021",
-    rustc_flags = select({
-        "@platforms//os:macos": [
-            "-Clink-arg=-undefined",
-            "-Clink-arg=dynamic_lookup",
-        ],
-        "//conditions:default": [],
-    }),
-    crate_features = ["anki-core"],
+    rustc_flags = SHRIKE_PY_LINK_FLAGS,
+    crate_features = [
+        "anki-core",
+        # Inert for this crate under Bazel (the cargo feature only forwards to
+        # shrike-derived/bundled; here the derived TARGET pins `bundled`
+        # itself) — listed to mirror the cargo default set verbatim.
+        "bundled-sqlite",
+        "engine-ort",
+        "engine-remote",
+        # Transitional in the server set — see the feature's note in Cargo.toml.
+        "engine-apple",
+        "manage-llama",
+    ],
     deps = [
         "//native/shrike-collection:shrike_collection",
         "//native/shrike-derived:shrike_derived",
@@ -48,6 +63,49 @@ rust_shared_library(
         "//native/shrike-index:shrike_index",
         "//native/shrike-kernel:shrike_kernel",
         "//native/shrike-llama-server:shrike_llama_server",
+        "//native/shrike-recognize-apple:shrike_recognize_apple",
+        "//native/shrike-schemas:shrike_schemas",
+        "@crates//:futures",
+        "@crates//:tokio",
+        "@crates//:pyo3",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:log",
+        "@crates//:pyo3-log",
+        "@crates//:tracing",
+        "@crates//:tracing-error",
+        "@crates//:tracing-subscriber",
+    ],
+)
+
+# The lean-build CI proof (#499, the #338 "minimal profile is its own Bazel
+# target" hazard finally built): the MOBILE feature set — anki-core +
+# engine-remote + engine-apple, no ort, no managers — compiled as its own
+# cdylib so a feature-gating regression (an ungated engine reference) fails
+# the per-PR `//...` lane instead of surfacing when #504's real mobile
+# binding crate first builds. Deliberately NOT `manual`, and deliberately a
+# build-only target: nothing imports it (the Python facade rides the server
+# build; mobile has no Python).
+rust_shared_library(
+    name = "mobile_skeleton",
+    srcs = SHRIKE_PY_SRCS,
+    edition = "2021",
+    rustc_flags = SHRIKE_PY_LINK_FLAGS,
+    crate_features = [
+        "anki-core",
+        "bundled-sqlite",
+        "engine-remote",
+        "engine-apple",
+    ],
+    deps = [
+        "//native/shrike-collection:shrike_collection",
+        "//native/shrike-derived:shrike_derived",
+        "//native/shrike-embed-remote:shrike_embed_remote",
+        "//native/shrike-engine-api:shrike_engine_api",
+        "//native/shrike-ffi:shrike_ffi",
+        "//native/shrike-store-api:shrike_store_api",
+        "//native/shrike-index:shrike_index",
+        "//native/shrike-kernel:shrike_kernel",
         "//native/shrike-recognize-apple:shrike_recognize_apple",
         "//native/shrike-schemas:shrike_schemas",
         "@crates//:futures",

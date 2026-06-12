@@ -106,17 +106,20 @@ impl Recognizer for PyRecognizerHandle {
 /// kernel attach path takes `engine_arc()` — recognition then runs native
 /// end-to-end (engine → Blocking → the runtime's blocking pool), no Python
 /// on the sweep.
+#[cfg(feature = "engine-apple")]
 #[pyclass(frozen)]
 pub(crate) struct AppleVisionRecognizer {
     engine: Arc<shrike_recognize_apple::AppleVisionRecognizer>,
 }
 
+#[cfg(feature = "engine-apple")]
 impl AppleVisionRecognizer {
     pub(crate) fn engine_arc(&self) -> Arc<shrike_recognize_apple::AppleVisionRecognizer> {
         Arc::clone(&self.engine)
     }
 }
 
+#[cfg(feature = "engine-apple")]
 #[pymethods]
 impl AppleVisionRecognizer {
     #[new]

@@ -10,6 +10,12 @@ rust_library(
     name = "shrike_derived",
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
+    # Pinned explicitly (#499): the LINKAGE is bundled either way (crate-universe
+    # resolves @crates//:rusqlite with the workspace-unified `bundled` feature),
+    # but the crate's own `cfg!(feature = "bundled")` probe (`sqlite_bundled()`)
+    # reads Bazel's crate_features — without the pin it reported platform
+    # linkage under Bazel while actually linking bundled.
+    crate_features = ["bundled"],
     deps = [
         "//native/shrike-ffi:shrike_ffi",
         "//native/shrike-store-api:shrike_store_api",

@@ -121,9 +121,12 @@ enum AnyEmbedder<'py> {
 
 /// Either recognizer shape (#342 P3) — the same split as [`AnyEmbedder`]:
 /// the native Vision engine (adapted onto the blocking pool at attach) or a
-/// captured Python backend (custom/test recognizers).
+/// captured Python backend (custom/test recognizers). The native variant
+/// exists only in `engine-apple` builds (#499) — without it the captured
+/// handle is the sole shape.
 #[derive(FromPyObject)]
 enum AnyRecognizer<'py> {
+    #[cfg(feature = "engine-apple")]
     Native(PyRef<'py, crate::py_recognizer::AppleVisionRecognizer>),
     Captured(PyRef<'py, crate::py_recognizer::PyRecognizer>),
 }
@@ -222,6 +225,7 @@ impl AsyncKernel {
         let resolver: Arc<dyn shrike_kernel::ImageResolver> =
             Arc::new(PyMediaResolver::new(media_read, media_exists));
         match recognizer {
+            #[cfg(feature = "engine-apple")]
             AnyRecognizer::Native(native) => {
                 let adapted: Arc<dyn shrike_kernel::Recognizer> =
                     Arc::new(shrike_engine_api::Blocking(native.engine_arc()));

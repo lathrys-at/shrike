@@ -22,6 +22,7 @@
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 // Trait import for the remote engine's chunk method (its only embed surface).
+#[cfg(feature = "engine-remote")]
 use shrike_engine_api::EmbedText as _;
 use shrike_ffi::{ErrorKind, NativeError};
 
@@ -225,10 +226,15 @@ fn checked_div(py: Python<'_>, a: f64, b: f64) -> PyResult<f64> {
 }
 
 // ── Embedding (#270) ─────────────────────────────────────────────────────────
+// The ort-backed engines (text + CLIP) are `engine-ort` builds only (#499);
+// the remote engine is `engine-remote`; the llama-server manager is
+// `manage-llama`. The default feature set carries them all (the server
+// profile), so existing builds are unchanged.
 
 /// Point the ort runtime at a specific onnxruntime shared library (process-wide,
 /// idempotent). The facade passes the dylib from the installed onnxruntime
 /// Python wheel, so native and Python backends run the same runtime build.
+#[cfg(feature = "engine-ort")]
 #[pyfunction]
 fn init_onnx_runtime(py: Python<'_>, dylib_path: String) -> PyResult<()> {
     py.detach(move || shrike_embed::init_runtime(&dylib_path))
@@ -241,11 +247,13 @@ fn init_onnx_runtime(py: Python<'_>, dylib_path: String) -> PyResult<()> {
 /// whole tokenize→run→pool pipeline. Construction loads the session+tokenizer;
 /// dropping the object frees them (the facade's `stop()` just drops its
 /// reference).
+#[cfg(feature = "engine-ort")]
 #[pyclass(frozen)]
 pub(crate) struct OnnxTextEmbedder {
     inner: std::sync::Arc<shrike_embed::TextEmbedder>,
 }
 
+#[cfg(feature = "engine-ort")]
 impl OnnxTextEmbedder {
     /// The loaded engine, shared — `NativeEmbedder` composes the kernel-slot
     /// handle from the same instance the facade probed (#342 P2).
@@ -254,6 +262,7 @@ impl OnnxTextEmbedder {
     }
 }
 
+#[cfg(feature = "engine-ort")]
 #[pymethods]
 impl OnnxTextEmbedder {
     #[new]
@@ -311,11 +320,13 @@ impl OnnxTextEmbedder {
 /// Image bytes (PNG/JPEG/...) in, vectors out — preprocessing (decode, resize,
 /// center-crop, normalize) runs crate-side via the `image` crate, with the
 /// whole pipeline GIL-released.
+#[cfg(feature = "engine-ort")]
 #[pyclass(frozen)]
 pub(crate) struct ClipEmbedder {
     inner: std::sync::Arc<shrike_embed::ClipEmbedder>,
 }
 
+#[cfg(feature = "engine-ort")]
 impl ClipEmbedder {
     /// The loaded engine, shared (see [`OnnxTextEmbedder::engine_arc`]).
     pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_embed::ClipEmbedder> {
@@ -323,6 +334,7 @@ impl ClipEmbedder {
     }
 }
 
+#[cfg(feature = "engine-ort")]
 #[pymethods]
 impl ClipEmbedder {
     #[new]
@@ -383,18 +395,21 @@ impl ClipEmbedder {
 /// and the future `backend: remote` kind (URL + key, no subprocess). One
 /// `/v1/embeddings` request per chunk, GIL released; identity ingredients
 /// (`/v1/models` id + meta) served raw for the facade's fingerprint policy.
+#[cfg(feature = "engine-remote")]
 #[pyclass(frozen)]
 pub(crate) struct RemoteEmbedder {
     inner: std::sync::Arc<shrike_embed_remote::RemoteEmbedder>,
 }
 
+#[cfg(feature = "engine-remote")]
 impl RemoteEmbedder {
-    /// The engine, shared (see [`OnnxTextEmbedder::engine_arc`]).
+    /// The engine, shared (see the ort engines' `engine_arc`).
     pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_embed_remote::RemoteEmbedder> {
         std::sync::Arc::clone(&self.inner)
     }
 }
 
+#[cfg(feature = "engine-remote")]
 #[pymethods]
 impl RemoteEmbedder {
     #[new]
@@ -438,6 +453,7 @@ impl RemoteEmbedder {
 /// The llama-server lifecycle manager (#342 P4b) under the llama facade:
 /// spawn + health-wait + orphan reaping + escalating stop, all native. NOT
 /// an embedder — the facade composes manager → endpoint → RemoteEmbedder.
+#[cfg(feature = "manage-llama")]
 #[pyclass]
 pub(crate) struct LlamaServerManager {
     inner: std::sync::Mutex<shrike_llama_server::LlamaServerManager>,
@@ -451,6 +467,7 @@ pub(crate) struct LlamaServerManager {
     passthrough: Vec<String>,
 }
 
+#[cfg(feature = "manage-llama")]
 #[pymethods]
 impl LlamaServerManager {
     #[new]
@@ -815,6 +832,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
     m.add_function(wrap_pyfunction!(parallel_sum, m)?)?;
     m.add_function(wrap_pyfunction!(checked_div, m)?)?;
+    #[cfg(feature = "engine-ort")]
     m.add_function(wrap_pyfunction!(init_onnx_runtime, m)?)?;
     m.add_function(wrap_pyfunction!(init_logging, m)?)?;
     #[cfg(feature = "anki-core")]
@@ -822,13 +840,22 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(fetch_media_url, m)?)?;
         m.add_function(wrap_pyfunction!(decode_media_b64, m)?)?;
     }
-    m.add_class::<OnnxTextEmbedder>()?;
-    m.add_class::<ClipEmbedder>()?;
+    // The engine/manager matrix (#499): a class is present exactly when its
+    // feature is compiled — a lean build simply lacks the name (the Python
+    // facade only rides full server builds, so nothing suppresses these).
+    #[cfg(feature = "engine-ort")]
+    {
+        m.add_class::<OnnxTextEmbedder>()?;
+        m.add_class::<ClipEmbedder>()?;
+    }
+    #[cfg(feature = "engine-remote")]
     m.add_class::<RemoteEmbedder>()?;
+    #[cfg(feature = "manage-llama")]
     m.add_class::<LlamaServerManager>()?;
     m.add_class::<NativeIndexEngine>()?;
     m.add_class::<DerivedTextEngine>()?;
     m.add_class::<py_recognizer::PyRecognizer>()?;
+    #[cfg(feature = "engine-apple")]
     m.add_class::<py_recognizer::AppleVisionRecognizer>()?;
     // Feature-gated (#278): present only in `anki-core` builds; the stubtest
     // allowlist covers its absence from default builds.
@@ -876,6 +903,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(schema_roundtrip, m)?)?;
     // The native image-prep pipeline version — folded into the clip-rs
     // fingerprint by the facade (a pixel-math change must invalidate vectors).
+    #[cfg(feature = "engine-ort")]
     m.add("IMAGE_PREP_VERSION_RS", shrike_embed::IMAGE_PREP_VERSION_RS)?;
     // The kernel saver's built-in flush tuning (#355 item 2) — the host's
     // --index-save-* help text names the defaults it would override.

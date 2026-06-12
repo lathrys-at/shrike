@@ -67,11 +67,27 @@ cd native && cargo build && cargo test
 scripts/build-native.sh            # debug; --release for optimized
 ```
 
+**The build matrix (#499; docs/distribution.md is canonical):** the
+engine/manager crates are cargo features on the binding crate — `engine-ort`
+(text + CLIP via ort), `engine-remote` (OpenAI-compatible embeddings;
+shrike-describe-remote joins at #485), `engine-apple` (Vision OCR —
+transitional in the server set, see Cargo.toml), `manage-llama` (llama-server
+lifecycle). The cargo default is the full SERVER set, pinned verbatim on
+`//native/shrike-py:shrike_py_native`; the MOBILE set (anki-core +
+engine-remote + engine-apple — no ort, no managers) is proven by
+`//native/shrike-py:mobile_skeleton`, which the per-PR `//...` lane builds so
+an ungated engine reference fails CI. The same proof by hand:
+
+```bash
+cd native && cargo check -p shrike-py --no-default-features \
+  --features bundled-sqlite,anki-core,engine-remote,engine-apple
+```
+
 **SQLite linkage (#300):** `shrike-derived` bundles its own SQLite by default
 (FTS5 + trigram guaranteed — the #281 property; release wheels keep this).
-`scripts/build-native.sh --system-sqlite` (or
-`cargo build -p shrike-py --no-default-features`) links the platform
-libsqlite3 instead — any sqlite3-ABI-compatible library works via the standard
+`scripts/build-native.sh --system-sqlite` (or `cargo build -p shrike-py
+--no-default-features --features <the server set minus bundled-sqlite>`)
+links the platform libsqlite3 instead — any sqlite3-ABI-compatible library works via the standard
 libsqlite3-sys overrides (pkg-config / `SQLITE3_LIB_DIR`), including libsql
 builds exposing the sqlite3 C API. Under platform linkage FTS5/trigram are
 probed at runtime (`shrike_native.derived_fts5_probe`), and the store degrades

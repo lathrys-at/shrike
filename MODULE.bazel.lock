@@ -344,7 +344,7 @@
           "FILE:@@//native/shrike-index/Cargo.toml ab28f4bb2c11df06c84af101b6f9f4314525efa15a884c14adaa643e8328c74a",
           "FILE:@@//native/shrike-kernel/Cargo.toml 018d115955e750e35e19ab52652f278ccc42c4bae5e47c064831fdeb906c83c7",
           "FILE:@@//native/shrike-llama-server/Cargo.toml 2ba84d1c20c7a4a4f7c07d776d6d709fb424bc4120ddc6d144b61a465a726120",
-          "FILE:@@//native/shrike-py/Cargo.toml 3f2efa7ae80d30c254d116c80e80ba8af6394787956a83cab41b3a28aeb1d9e7",
+          "FILE:@@//native/shrike-py/Cargo.toml 0b20b911807cd215c10b5a3e9afa8ea6e2e168a0e67a4aafe9f2405117feea91",
           "FILE:@@//native/shrike-recognize-apple/Cargo.toml 93d0d36b463976aec4aab37f508203da791606b3f168c131c71411ce8a452b94",
           "FILE:@@//native/shrike-schemas/Cargo.toml 152c9745bd02ef5371419fb6578a2b6325e242d7f70b65c5e527bdcd132f3394",
           "FILE:@@//native/shrike-store-api/Cargo.toml 808482e49da3634feed264f14d1ce6a774061df070a6934a5f8e61bd9cf52839"

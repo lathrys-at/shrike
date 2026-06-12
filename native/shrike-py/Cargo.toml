@@ -14,15 +14,42 @@ name = "shrike_py"
 crate-type = ["cdylib"]
 
 [features]
+# default = the full SERVER set (#499; docs/distribution.md's build matrix):
+# everything the daemon profile compiles — nothing changes for existing
+# builds. The matrix's lean (mobile) set is anki-core + engine-remote +
+# engine-apple, proven by //native/shrike-py:mobile_skeleton.
+default = [
+    "bundled-sqlite",
+    "anki-core",
+    "engine-ort",
+    "engine-remote",
+    "engine-apple",
+    "manage-llama",
+]
 # Forwarded to shrike-derived (#300): default = bundled SQLite (FTS5 + trigram
 # guaranteed). Build with --no-default-features to link the platform SQLite.
-default = ["bundled-sqlite", "anki-core"]
 bundled-sqlite = ["shrike-derived/bundled"]
 # The anki collection core binding (#278). DEFAULT ON since the cutover:
 # CollectionWrapper runs on the native core, so every shrike_native build
 # carries it (protoc required at build time; Bazel provides a hermetic one).
 # Still a named feature so a compute-only embed/index build remains possible.
 anki-core = ["dep:shrike-collection", "dep:shrike-kernel"]
+# ── The engine/manager matrix (#499) ─────────────────────────────────────────
+# In-process ONNX engines (text + CLIP) via ort load-dynamic.
+engine-ort = ["dep:shrike-embed"]
+# Embeddings over any OpenAI-compatible endpoint (the managed llama-server, an
+# attached server, cloud/tailnet). shrike-describe-remote joins this feature
+# when its kernel integration lands (#485).
+engine-remote = ["dep:shrike-embed-remote"]
+# Platform recognition engines (Apple Vision OCR; off-macOS it's the
+# unavailable stub). TRANSITIONAL default-on: the settled end state
+# (docs/distribution.md) keeps platform engines OUT of the server build on
+# every OS — this leaves the server's default set when the remote recognizer
+# rows (#502) / the mobile binding (#504) can replace today's shipped
+# `--ocr-backend apple` story.
+engine-apple = ["dep:shrike-recognize-apple"]
+# llama-server lifecycle manager (manage-class, not an engine).
+manage-llama = ["dep:shrike-llama-server"]
 
 [dependencies]
 pyo3 = { workspace = true }
@@ -35,16 +62,16 @@ futures = "0.3"
 # Blocking Python backend calls ride the kernel runtime's blocking pool (#374 C).
 tokio = { version = "1", features = ["rt"] }
 shrike-derived = { path = "../shrike-derived", default-features = false }
-shrike-embed = { path = "../shrike-embed" }
-shrike-embed-remote = { path = "../shrike-embed-remote" }
-shrike-llama-server = { path = "../shrike-llama-server" }
+shrike-embed = { path = "../shrike-embed", optional = true }
+shrike-embed-remote = { path = "../shrike-embed-remote", optional = true }
+shrike-llama-server = { path = "../shrike-llama-server", optional = true }
 # The engine contract (#342): the binding composes engines (WithPolicy +
 # OnExecutor over the asyncio lane) into the kernel's Arc<dyn Embedder> slot.
 shrike-engine-api = { path = "../shrike-engine-api" }
 shrike-ffi = { workspace = true }
 shrike-store-api = { workspace = true }
 # The Apple Vision OCR engine (#342 P3) — attached native, like the embedders.
-shrike-recognize-apple = { path = "../shrike-recognize-apple" }
+shrike-recognize-apple = { path = "../shrike-recognize-apple", optional = true }
 shrike-index = { path = "../shrike-index" }
 shrike-schemas = { path = "../shrike-schemas" }
 # First-class observability bridges (#310): pyo3-log forwards `log` records to

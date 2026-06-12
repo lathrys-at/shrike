@@ -22,7 +22,10 @@ CARGO_FLAGS=()
 for arg in "$@"; do
   case "$arg" in
     --release) PROFILE="release"; CARGO_FLAGS+=(--release) ;;
-    --system-sqlite) CARGO_FLAGS+=(--no-default-features) ;;
+    # Drop ONLY the bundling: re-enable the rest of the default (server) set
+    # (#499 — a bare --no-default-features would also drop anki-core and every
+    # engine, leaving an extension the server can't run on).
+    --system-sqlite) CARGO_FLAGS+=(--no-default-features --features "anki-core,engine-ort,engine-remote,engine-apple,manage-llama") ;;
     *) echo "unknown arg: $arg" >&2; exit 1 ;;
   esac
 done
