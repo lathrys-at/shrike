@@ -260,6 +260,16 @@ class Neighbor(BaseModel):
     provenance: list[SignalContribution] = []
 
 
+class UpsertNeighbors(BaseModel):
+    """One draft note's dedup outcome (#391 phase 1): the attached neighbor
+    candidates plus the calibration sample (``best`` semantic cosine, ``None``
+    on no-match) the host's dedup-stats recorder consumes. The internal wire
+    of the kernel's attach-neighbors action."""
+
+    neighbors: list[Neighbor] = []
+    best: float | None = None
+
+
 class TemplateInfo(BaseModel):
     name: str
     front: str
