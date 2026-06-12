@@ -856,6 +856,13 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_embedder::native_embedder_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;
+    // Bridge lifecycle test seams (#387): the leak tripwire counter + a
+    // waker-retaining pending future to park on it.
+    m.add_function(wrap_pyfunction!(
+        asyncio_bridge::bridge_live_poll_callbacks,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(asyncio_bridge::bridge_parked_forever, m)?)?;
     m.add_function(wrap_pyfunction!(rrf_fuse, m)?)?;
     m.add_function(wrap_pyfunction!(schema_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(schema_roundtrip, m)?)?;
