@@ -276,10 +276,14 @@ impl CollectionCore {
         .map_err(to_py_err)
     }
 
-    /// Delete note types by id, only-if-unused (JSON per-item results).
+    /// Delete note types by id, only-if-unused (typed core results, JSON
+    /// serialized once here at the edge).
     fn delete_note_types(&self, py: Python<'_>, ids: Vec<i64>) -> PyResult<String> {
-        py.detach(|| self.inner.delete_note_types(&ids))
-            .map_err(to_py_err)
+        py.detach(|| {
+            let results = self.inner.delete_note_types(&ids)?;
+            crate::kernel_actions::wire(&shrike_schemas::DeleteNoteTypesResponse { results })
+        })
+        .map_err(to_py_err)
     }
 
     // ── media + maintenance (#278 step 5a) ───────────────────────────────────
@@ -383,11 +387,21 @@ impl CollectionCore {
 
     // ── note types (#278 step 4) ─────────────────────────────────────────────
 
-    /// Create/update note-type definitions in bulk (JSON in/out; the
-    /// position-keyed replace with the #76 unsound-move rejection).
+    /// Create/update note-type definitions in bulk (the position-keyed
+    /// replace with the #76 unsound-move rejection). JSON at this edge only:
+    /// typed inputs in, typed per-item results serialized once on the way out.
     fn upsert_note_types(&self, py: Python<'_>, note_types_json: String) -> PyResult<String> {
-        py.detach(|| self.inner.upsert_note_types(&note_types_json))
-            .map_err(to_py_err)
+        py.detach(|| -> shrike_ffi::NativeResult<String> {
+            let inputs: Vec<shrike_schemas::NoteTypeInput> = serde_json::from_str(&note_types_json)
+                .map_err(|e| {
+                    shrike_ffi::NativeError::invalid_input(format!(
+                        "note_types must be a JSON list: {e}"
+                    ))
+                })?;
+            let results = self.inner.upsert_note_types(&inputs)?;
+            crate::kernel_actions::wire(&results)
+        })
+        .map_err(to_py_err)
     }
 
     /// Identity-based field ops (add/remove/rename/reposition), atomic.
@@ -397,9 +411,17 @@ impl CollectionCore {
         note_type_name: String,
         operations_json: String,
     ) -> PyResult<String> {
-        py.detach(|| {
-            self.inner
-                .update_note_type_fields(&note_type_name, &operations_json)
+        py.detach(|| -> shrike_ffi::NativeResult<String> {
+            let operations: Vec<shrike_schemas::FieldOp> = serde_json::from_str(&operations_json)
+                .map_err(|e| {
+                shrike_ffi::NativeError::invalid_input(format!(
+                    "operations must be a JSON list: {e}"
+                ))
+            })?;
+            let resp = self
+                .inner
+                .update_note_type_fields(&note_type_name, &operations)?;
+            crate::kernel_actions::wire(&resp)
         })
         .map_err(to_py_err)
     }
@@ -411,9 +433,17 @@ impl CollectionCore {
         note_type_name: String,
         operations_json: String,
     ) -> PyResult<String> {
-        py.detach(|| {
-            self.inner
-                .update_note_type_templates(&note_type_name, &operations_json)
+        py.detach(|| -> shrike_ffi::NativeResult<String> {
+            let operations: Vec<shrike_schemas::TemplateOp> =
+                serde_json::from_str(&operations_json).map_err(|e| {
+                    shrike_ffi::NativeError::invalid_input(format!(
+                        "operations must be a JSON list: {e}"
+                    ))
+                })?;
+            let resp = self
+                .inner
+                .update_note_type_templates(&note_type_name, &operations)?;
+            crate::kernel_actions::wire(&resp)
         })
         .map_err(to_py_err)
     }
@@ -434,7 +464,7 @@ impl CollectionCore {
         css: bool,
     ) -> PyResult<String> {
         py.detach(|| {
-            self.inner.find_and_replace_note_types(
+            let resp = self.inner.find_and_replace_note_types(
                 &note_type_name,
                 &search,
                 &replacement,
@@ -443,7 +473,8 @@ impl CollectionCore {
                 front,
                 back,
                 css,
-            )
+            )?;
+            crate::kernel_actions::wire(&resp)
         })
         .map_err(to_py_err)
     }
@@ -455,9 +486,17 @@ impl CollectionCore {
         note_type_name: String,
         updates_json: String,
     ) -> PyResult<String> {
-        py.detach(|| {
-            self.inner
-                .update_note_type_field_metadata(&note_type_name, &updates_json)
+        py.detach(|| -> shrike_ffi::NativeResult<String> {
+            let updates: Vec<shrike_schemas::FieldMetadataInput> =
+                serde_json::from_str(&updates_json).map_err(|e| {
+                    shrike_ffi::NativeError::invalid_input(format!(
+                        "updates must be a JSON list: {e}"
+                    ))
+                })?;
+            let resp = self
+                .inner
+                .update_note_type_field_metadata(&note_type_name, &updates)?;
+            crate::kernel_actions::wire(&resp)
         })
         .map_err(to_py_err)
     }
@@ -474,14 +513,31 @@ impl CollectionCore {
         template_map_json: &str,
         dry_run: bool,
     ) -> PyResult<String> {
-        py.detach(|| {
-            self.inner.migrate_note_type(
+        py.detach(|| -> shrike_ffi::NativeResult<String> {
+            let field_map: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(&field_map_json).map_err(|e| {
+                    shrike_ffi::NativeError::invalid_input(format!(
+                        "field_map must be a JSON object: {e}"
+                    ))
+                })?;
+            let template_map: std::collections::BTreeMap<String, String> =
+                if template_map_json.is_empty() {
+                    Default::default()
+                } else {
+                    serde_json::from_str(template_map_json).map_err(|e| {
+                        shrike_ffi::NativeError::invalid_input(format!(
+                            "template_map must be a JSON object: {e}"
+                        ))
+                    })?
+                };
+            let resp = self.inner.migrate_note_type(
                 &note_ids,
                 &new_note_type,
-                &field_map_json,
-                template_map_json,
+                &field_map,
+                &template_map,
                 dry_run,
-            )
+            )?;
+            crate::kernel_actions::wire(&resp)
         })
         .map_err(to_py_err)
     }
