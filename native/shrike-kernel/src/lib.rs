@@ -557,8 +557,9 @@ impl Kernel {
     /// One bounded recognition sweep (#228): recognize up to `max_items`
     /// pending (note, image) pairs, persist gated text + segments to the
     /// derived store, and re-embed the affected notes so OCR vectors mint.
-    /// Pending = a resolvable image with no OCR row (or all of them, after a
-    /// recognizer-fingerprint change invalidates the prior text). Returns
+    /// Pending = a resolvable image with no OCR row AND no below-gate marker
+    /// (#416) — or all of them, after a recognizer-fingerprint change
+    /// invalidates the prior text and the markers together. Returns
     /// `{status, recognized, stored, remaining}` — the harness loops while
     /// `remaining > 0` and the batch made progress (`recognized > 0`), so
     /// one call never occupies the executor for long and a permanently
@@ -616,9 +617,17 @@ impl Kernel {
                 );
                 self.derived.remove(&stale, Some(OCR_SOURCE))?;
             }
+            // Below-gate markers ride the same invalidation (#416): the new
+            // engine may read what the old one couldn't, so gated items
+            // re-enter the pending set exactly like stored rows re-derive.
+            self.derived.clear_gated(OCR_SOURCE)?;
         }
 
-        // Pending set: resolvable images without an OCR row.
+        // Pending set: resolvable images without an OCR row — and without a
+        // below-gate marker (#416): an item the gate dropped is DONE (its
+        // outcome can't change until the fingerprint does), not pending, so
+        // it is never re-recognized and an all-gated window converges instead
+        // of re-taking itself forever.
         let raw = self
             .collection
             .run(|core| -> NativeResult<_> {
@@ -626,11 +635,12 @@ impl Kernel {
                 core.note_embed_inputs(&ids)
             })
             .await??;
-        let done: std::collections::HashSet<(i64, String)> = self
+        let mut done: std::collections::HashSet<(i64, String)> = self
             .derived
             .refs_for_source(OCR_SOURCE)?
             .into_iter()
             .collect();
+        done.extend(self.derived.gated_refs_for_source(OCR_SOURCE)?);
         let mut pending: Vec<(i64, String)> = Vec::new();
         for (note_id, _text, image_names) in &raw {
             for name in image_names {
@@ -686,14 +696,12 @@ impl Kernel {
         }
 
         // Persist per note: ingest REPLACES a note's rows for the source, so
-        // merge with what already exists. A gated-out item stores an EMPTY
-        // ref row marker? No — gated-out items simply store nothing; the
-        // pending set will re-offer them, so remember them as done via a
-        // zero-text row is wrong (it would index ""). Instead they re-judge
-        // each sweep only if the image still resolves — cheap (no
-        // re-recognition: the gate runs before storage, so re-offering means
-        // re-recognizing; accept that for dropped items, they're rare and
-        // bounded by max_items).
+        // merge with what already exists. A gated-out item stores no text row
+        // (a zero-text row would index "" — FTS5 pollution) but DOES persist
+        // a below-gate marker (#416), so the next sweep's pending diff counts
+        // it done instead of re-recognizing it forever. Markers are cleared
+        // with the rows on a fingerprint change (above), so an engine upgrade
+        // re-judges them like everything else.
         let mut existing: std::collections::HashMap<i64, Vec<(String, String)>> =
             std::collections::HashMap::new();
         for (nid, r, text) in self.derived.texts_for_source(OCR_SOURCE)? {
@@ -703,9 +711,13 @@ impl Kernel {
         let mut touched: std::collections::BTreeMap<i64, Vec<(String, String)>> =
             std::collections::BTreeMap::new();
         let mut segments: Vec<(i64, String, String)> = Vec::new();
+        let mut gated: Vec<(i64, String)> = Vec::new();
         for ((note_id, name), recognition) in sent.iter().zip(recognitions.iter()) {
             match self.recognition_gate.judge(recognition) {
-                recognize::GateOutcome::Drop => continue,
+                recognize::GateOutcome::Drop => {
+                    gated.push((*note_id, name.clone()));
+                    continue;
+                }
                 recognize::GateOutcome::Lexical | recognize::GateOutcome::LexicalAndVector => {
                     touched
                         .entry(*note_id)
@@ -728,6 +740,7 @@ impl Kernel {
             self.derived
                 .put_segments(*note_id, OCR_SOURCE, name, json)?;
         }
+        self.derived.mark_gated(OCR_SOURCE, &gated)?;
         self.derived
             .meta_set(RECOGNIZER_FINGERPRINT_KEY, &fingerprint)?;
 
@@ -1707,6 +1720,192 @@ mod no_cpython_smoke {
             assert_eq!(tail["remaining"], 0);
             let idle = kernel.recognize_pending(2).await.unwrap();
             assert_eq!(idle["status"], "idle");
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    /// A [`StubRecognizer`] that counts every item it is handed and whose
+    /// fingerprint a test can swap mid-flight (the OS/model-upgrade shape).
+    struct CountingRecognizer {
+        items_seen: std::sync::atomic::AtomicUsize,
+        fingerprint: std::sync::Mutex<String>,
+    }
+
+    impl CountingRecognizer {
+        fn new(fingerprint: &str) -> Self {
+            Self {
+                items_seen: std::sync::atomic::AtomicUsize::new(0),
+                fingerprint: std::sync::Mutex::new(fingerprint.to_string()),
+            }
+        }
+    }
+
+    impl Recognizer for CountingRecognizer {
+        fn recognize(
+            &self,
+            items: Vec<MediaItem>,
+        ) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
+            self.items_seen
+                .fetch_add(items.len(), std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(items
+                    .iter()
+                    .map(|b| Recognition {
+                        text: String::from_utf8_lossy(&b.bytes).to_string(),
+                        confidence: 0.95,
+                        segments: Vec::new(),
+                    })
+                    .collect())
+            })
+        }
+
+        fn fingerprint(&self) -> Option<String> {
+            Some(self.fingerprint.lock().unwrap().clone())
+        }
+    }
+
+    #[test]
+    fn gated_items_are_judged_once_and_rederive_on_fingerprint_change() {
+        // #416: an item the gate drops gets a below-gate marker, so it is
+        // recognized ONCE — not re-OCR'd every sweep — and only a recognizer
+        // fingerprint change (engine upgrade) puts it back in the pending
+        // set, exactly like stored rows re-derive.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            let notes = vec![serde_json::json!({"note_type": "Basic", "deck": "Default",
+                "fields": {"Front":
+                    "<img src=\"tiny.png\"> <img src=\"good.png\">", "Back": "b"}})];
+            kernel
+                .upsert_notes_json(
+                    serde_json::json!(notes).to_string(),
+                    "error".to_string(),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let mut media = std::collections::HashMap::new();
+            // "ok" is 2 trimmed chars < min_chars_lexical → GateOutcome::Drop.
+            media.insert("tiny.png".to_string(), b"ok".to_vec());
+            media.insert(
+                "good.png".to_string(),
+                b"substantive recognized diagram text".to_vec(),
+            );
+            let recognizer = Arc::new(CountingRecognizer::new("stub:v1"));
+            kernel.attach_recognizer(recognizer.clone(), Arc::new(MapResolver::new(media)));
+
+            // Sweep 1: both items recognized, one stored, the gated one
+            // marked done — nothing remains.
+            let report = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(report["status"], "ran");
+            assert_eq!(report["recognized"], 2);
+            assert_eq!(report["stored"], 1);
+            assert_eq!(report["remaining"], 0);
+            let seen = || {
+                recognizer
+                    .items_seen
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            };
+            assert_eq!(seen(), 2);
+
+            // Sweep 2: idle — the gated item is DONE, not re-judged (the
+            // recognizer is never called again).
+            let again = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(again["status"], "idle");
+            assert_eq!(seen(), 2, "the gated item must not re-OCR");
+
+            // Engine upgrade: a fingerprint change invalidates rows AND
+            // markers, so BOTH items re-derive.
+            *recognizer.fingerprint.lock().unwrap() = "stub:v2".to_string();
+            let rederived = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(rederived["status"], "ran");
+            assert_eq!(rederived["recognized"], 2);
+            assert_eq!(rederived["stored"], 1);
+            assert_eq!(seen(), 4);
+
+            // And the new outcome sticks: idle again, no further calls.
+            let idle = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(idle["status"], "idle");
+            assert_eq!(seen(), 4);
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
+    fn all_gated_window_converges_across_batches() {
+        // The #416 residual livelock shape: a permanently-gated prefix wider
+        // than the batch window. Markers make each batch's gated items DONE,
+        // so successive windows advance and the sweep converges to idle —
+        // instead of re-taking the identical window forever (which the #413
+        // no-progress stop, keyed on recognized == 0, deliberately does not
+        // terminate).
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            let notes = vec![serde_json::json!({"note_type": "Basic", "deck": "Default",
+                "fields": {"Front":
+                    "<img src=\"t1.png\"> <img src=\"t2.png\"> <img src=\"t3.png\">",
+                    "Back": "b"}})];
+            kernel
+                .upsert_notes_json(
+                    serde_json::json!(notes).to_string(),
+                    "error".to_string(),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            let mut media = std::collections::HashMap::new();
+            for name in ["t1.png", "t2.png", "t3.png"] {
+                media.insert(name.to_string(), b"no".to_vec()); // all below-gate
+            }
+            let recognizer = Arc::new(CountingRecognizer::new("stub:v1"));
+            kernel.attach_recognizer(recognizer.clone(), Arc::new(MapResolver::new(media)));
+
+            // Window 1: all recognized, all gated — real work (recognized > 0,
+            // so the driver keeps going), and the window is now done.
+            let first = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(first["status"], "ran");
+            assert_eq!(first["recognized"], 2);
+            assert_eq!(first["stored"], 0);
+            assert_eq!(first["remaining"], 1);
+
+            // Window 2 ADVANCES past the marked items and drains the tail.
+            let second = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(second["status"], "ran");
+            assert_eq!(second["recognized"], 1);
+            assert_eq!(second["remaining"], 0);
+
+            // Convergence: idle, with each item judged exactly once.
+            let idle = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(idle["status"], "idle");
+            assert_eq!(
+                recognizer
+                    .items_seen
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                3
+            );
 
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();

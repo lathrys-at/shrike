@@ -472,9 +472,11 @@ runtime's blocking pool via `spawn_blocking` + GIL attach since #374).
 
 **One pass, many consumers** (the epic's load-bearing rule): the kernel's
 `recognize_pending(max_items)` sweeps bounded batches of pending (note, image)
-pairs — pending = a resolvable image with no OCR row, or everything after the
-recognizer *fingerprint* changes (an OS upgrade re-derives, like a model change
-rebuilds vectors) — and persists BOTH the flattened text (derived rows,
+pairs — pending = a resolvable image with no OCR row *and no below-gate marker*
+(#416: a gate-dropped item is recorded in the derived store's `gated` table, so
+it's judged once, not re-OCR'd every sweep), or everything after the recognizer
+*fingerprint* changes (an OS upgrade re-derives rows AND markers, like a model
+change rebuilds vectors) — and persists BOTH the flattened text (derived rows,
 `source='ocr'` → substring/fuzzy search + provenance light up through the
 existing seam) and the per-segment structure (the `segments` table; boxes today,
 #230 occlusion's input). Gating (#199, `RecognitionGate` kernel-side): confidence

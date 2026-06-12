@@ -2,7 +2,8 @@
 //! `DerivedTextStore` facade, on rusqlite's **bundled** SQLite.
 //!
 //! The ONE implementation of the sidecar (`idx` FTS5 trigram + `rowmap`
-//! provenance + `segments` + `meta` in `shrike.db`; the Python
+//! provenance + `segments` + `gated` below-gate markers + `meta` in
+//! `shrike.db`; the Python
 //! `SqliteDerivedEngine` it originally mirrored retired with the engine
 //! cutover). On a schema-version mismatch — or an `idx`↔`rowmap` pairing
 //! inconsistency found at open — the derived data is dropped and the next
@@ -142,6 +143,7 @@ impl DerivedEngine {
             "DROP TABLE IF EXISTS idx",
             "DROP TABLE IF EXISTS rowmap",
             "DROP TABLE IF EXISTS segments",
+            "DROP TABLE IF EXISTS gated",
             "DELETE FROM meta WHERE key='col_mod'",
         ] {
             conn.execute(sql, []).map_err(db_err)?;
@@ -166,6 +168,20 @@ impl DerivedEngine {
             "CREATE TABLE IF NOT EXISTS segments(\
              note_id INTEGER NOT NULL, source TEXT NOT NULL, ref TEXT NOT NULL, \
              json TEXT NOT NULL, PRIMARY KEY(note_id, source, ref))",
+            [],
+        )
+        .map_err(db_err)?;
+        // Below-gate recognition markers (#416): a (note, source, ref) the
+        // recognizer judged and the gate dropped — no text row exists, but
+        // the pending sweep must count it DONE (or it re-recognizes forever).
+        // Invalidated with the recognized rows on a recognizer-fingerprint
+        // change ([`Self::clear_gated`]). IF NOT EXISTS + create_tables-on-open
+        // retrofits existing stores, like the rowmap_source index — no schema
+        // bump (an absent/empty table just means nothing is marked yet).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS gated(\
+             note_id INTEGER NOT NULL, source TEXT NOT NULL, ref TEXT NOT NULL, \
+             PRIMARY KEY(note_id, source, ref))",
             [],
         )
         .map_err(db_err)?;
@@ -374,11 +390,43 @@ impl DerivedEngine {
         tx.commit().map_err(db_err)
     }
 
+    /// Drop the below-gate markers for a set of notes (one source, or all).
+    /// Deliberately NOT part of [`Self::delete_rows`]: `ingest` replaces a
+    /// note's *text rows* and must leave its judgement markers standing (a
+    /// note's newly stored image must not put its sibling gated image back
+    /// in the pending set).
+    fn delete_gated(conn: &Connection, note_ids: &[i64], source: Option<&str>) -> NativeResult<()> {
+        if note_ids.is_empty() {
+            return Ok(());
+        }
+        let (id_clause, id_params) = Self::note_id_clause(conn, "note_id", note_ids)?;
+        let clause = match source {
+            Some(_) => format!("{id_clause} AND source=?"),
+            None => id_clause,
+        };
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = id_params
+            .iter()
+            .map(|n| Box::new(*n) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        if let Some(s) = source {
+            params.push(Box::new(s.to_string()));
+        }
+        conn.execute(
+            &format!("DELETE FROM gated WHERE {clause}"),
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+        )
+        .map_err(db_err)?;
+        Ok(())
+    }
+
     /// Drop notes' rows (all sources, or just one), in one transaction.
+    /// Note REMOVAL (deletion / invalidation) also drops the notes' below-gate
+    /// markers — unlike `ingest`'s internal replace, which preserves them.
     pub fn remove(&self, note_ids: &[i64], source: Option<&str>) -> NativeResult<()> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
         Self::delete_rows(&tx, note_ids, source)?;
+        Self::delete_gated(&tx, note_ids, source)?;
         tx.commit().map_err(db_err)
     }
 
@@ -414,12 +462,16 @@ impl DerivedEngine {
             )
             .map_err(db_err)?;
         }
-        // Prune recognition rows (and their segments) for notes no longer in
-        // the collection: the build rows are the authoritative note set.
+        // Prune recognition rows (and their segments, and below-gate markers)
+        // for notes no longer in the collection: the build rows are the
+        // authoritative note set.
         let live: std::collections::HashSet<i64> = rows.iter().map(|r| r.0).collect();
         let stale: Vec<i64> = {
             let mut stmt = tx
-                .prepare("SELECT DISTINCT note_id FROM rowmap WHERE source != 'field'")
+                .prepare(
+                    "SELECT DISTINCT note_id FROM rowmap WHERE source != 'field' \
+                     UNION SELECT DISTINCT note_id FROM gated",
+                )
                 .map_err(db_err)?;
             let ids: Vec<i64> = stmt
                 .query_map([], |r| r.get(0))
@@ -430,6 +482,7 @@ impl DerivedEngine {
         };
         if !stale.is_empty() {
             Self::delete_rows(&tx, &stale, None)?;
+            Self::delete_gated(&tx, &stale, None)?;
         }
         tx.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('col_mod', ?1)",
@@ -509,6 +562,50 @@ impl DerivedEngine {
             .collect::<Result<Vec<(i64, String)>, _>>()
             .map_err(db_err)?;
         Ok(rows)
+    }
+
+    /// Record below-gate outcomes (#416): each (note_id, ref) was recognized
+    /// and the gate dropped it — no text row, but the pending sweep counts it
+    /// done. One transaction per batch.
+    pub fn mark_gated(&self, source: &str, pairs: &[(i64, String)]) -> NativeResult<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(db_err)?;
+        for (note_id, reference) in pairs {
+            tx.execute(
+                "INSERT OR REPLACE INTO gated(note_id, source, ref) VALUES(?1,?2,?3)",
+                rusqlite::params![note_id, source, reference],
+            )
+            .map_err(db_err)?;
+        }
+        tx.commit().map_err(db_err)
+    }
+
+    /// All below-gate (note_id, ref) markers for one source — unioned with
+    /// [`Self::refs_for_source`] by the pending sweep's done-set diff (#416).
+    pub fn gated_refs_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT note_id, ref FROM gated WHERE source = ?1")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(db_err)?
+            .collect::<Result<Vec<(i64, String)>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Drop ALL below-gate markers for one source — the recognizer-fingerprint
+    /// invalidation path (#416): a new engine re-judges everything, gated
+    /// items included, exactly like stored rows re-derive.
+    pub fn clear_gated(&self, source: &str) -> NativeResult<()> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM gated WHERE source = ?1", [source])
+            .map_err(db_err)?;
+        Ok(())
     }
 
     /// All (note_id, ref, text) rows for one source — the embed-input
@@ -949,6 +1046,60 @@ mod tests {
             e.meta_get("recognizer_fingerprint").unwrap().as_deref(),
             Some("vision:1")
         );
+    }
+
+    #[test]
+    fn gated_markers_persist_survive_ingest_and_invalidate() {
+        // #416: below-gate markers round-trip, survive a sibling image's
+        // ingest (the replace must not put a gated item back in the pending
+        // set), drop with note removal, prune with dead notes on rebuild,
+        // and clear wholesale on fingerprint invalidation.
+        let (e, _dir) = store();
+        assert!(e.gated_refs_for_source("ocr").unwrap().is_empty());
+        e.mark_gated(
+            "ocr",
+            &[(1, "tiny.png".to_string()), (2, "logo.png".to_string())],
+        )
+        .unwrap();
+        // Re-marking is idempotent (INSERT OR REPLACE on the keyed table).
+        e.mark_gated("ocr", &[(1, "tiny.png".to_string())]).unwrap();
+        let mut got = e.gated_refs_for_source("ocr").unwrap();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![(1, "tiny.png".to_string()), (2, "logo.png".to_string())]
+        );
+        // Markers are source-scoped.
+        assert!(e.gated_refs_for_source("asr").unwrap().is_empty());
+
+        // ingest (note 1 stores a DIFFERENT image's text) preserves markers.
+        e.ingest(1, "ocr", &[("big.png".into(), "substantive text".into())])
+            .unwrap();
+        assert!(e
+            .gated_refs_for_source("ocr")
+            .unwrap()
+            .contains(&(1, "tiny.png".to_string())));
+
+        // remove (note deletion) drops the note's markers with its rows.
+        e.remove(&[1], None).unwrap();
+        assert_eq!(
+            e.gated_refs_for_source("ocr").unwrap(),
+            vec![(2, "logo.png".to_string())]
+        );
+
+        // A rebuild prunes markers of notes gone from the collection — even
+        // marker-only notes (note 2 has no text rows at all).
+        e.build(
+            &[(3, "field".into(), "Front".into(), "still here".into())],
+            100,
+        )
+        .unwrap();
+        assert!(e.gated_refs_for_source("ocr").unwrap().is_empty());
+
+        // clear_gated drops the whole source (fingerprint invalidation).
+        e.mark_gated("ocr", &[(3, "x.png".to_string())]).unwrap();
+        e.clear_gated("ocr").unwrap();
+        assert!(e.gated_refs_for_source("ocr").unwrap().is_empty());
     }
 
     #[test]
