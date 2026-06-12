@@ -134,21 +134,36 @@ impl PyMediaResolver {
 impl ImageResolver for PyMediaResolver {
     fn read(&self, name: &str) -> Option<Vec<u8>> {
         Python::attach(|py| {
-            self.read
+            match self
+                .read
                 .call1(py, (name,))
-                .ok()
-                .and_then(|v| v.extract::<Option<Vec<u8>>>(py).ok())
-                .flatten()
+                .and_then(|v| v.extract::<Option<Vec<u8>>>(py))
+            {
+                Ok(bytes) => bytes,
+                // A raising/misbehaving resolver degrades to "unreadable"
+                // (the kernel skips the item), but never silently (#386).
+                Err(e) => {
+                    tracing::warn!(image = %name, error = %e, "media resolver read raised");
+                    None
+                }
+            }
         })
     }
 
     fn exists(&self, name: &str) -> bool {
         Python::attach(|py| {
-            self.exists
+            match self
+                .exists
                 .call1(py, (name,))
-                .ok()
-                .and_then(|v| v.extract::<bool>(py).ok())
-                .unwrap_or(false)
+                .and_then(|v| v.extract::<bool>(py))
+            {
+                Ok(present) => present,
+                // Same degradation as read: absent, with a signal.
+                Err(e) => {
+                    tracing::warn!(image = %name, error = %e, "media resolver exists raised");
+                    false
+                }
+            }
         })
     }
 }
