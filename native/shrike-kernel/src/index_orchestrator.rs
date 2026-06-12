@@ -1092,9 +1092,9 @@ impl IndexOrchestrator {
 #[cfg(test)]
 mod op_tests {
     use super::*;
-    use shrike_index::MultiModalIndex;
     use futures::executor::block_on;
     use futures::future::BoxFuture;
+    use shrike_index::MultiModalIndex;
 
     #[test]
     fn status_wire_shape() {
