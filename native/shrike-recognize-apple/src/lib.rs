@@ -7,9 +7,8 @@
 //!
 //! Route 1 of the engine contract: Vision's `performRequests:` is synchronous,
 //! so the engine implements [`RecognizeMedia`] (pure chunk compute, no
-//! execution assumptions) and the host adapts it onto its lane
-//! (`OnExecutor` over the asyncio pool in the Python server; a dispatch queue
-//! on a future Swift host). The struct holds only plain config — every
+//! execution assumptions) and the `Blocking` adapter moves it onto
+//! the kernel runtime's blocking pool. The struct holds only plain config — every
 //! Vision/Foundation object is created per call on whatever thread runs it —
 //! so it is naturally `Send + Sync`.
 //!

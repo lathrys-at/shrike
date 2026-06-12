@@ -890,18 +890,17 @@ layering check enforces it structurally: `shrike-kernel` may depend on no
 engine crate, ever.
 
 **Two conformance routes, chosen by the engine's natural shape.** The kernel
-only sees runtime-agnostic async traits (`Embedder`/`ImageEmbedder`/
-`Recognizer`). A naturally-sync engine (ort inference, a sync HTTP client)
-implements chunk-level sync compute traits (`EmbedText`/`EmbedImages`/
-`RecognizeMedia`) and the host bridges with an adapter at composition time —
-`Inline` (the C host's calling-thread model) or `OnExecutor` over a
-host-injected `ComputeExecutor` lane (the server's asyncio thread pool). A
-naturally-async engine implements the async traits directly. Execution
-*capacity and placement* are host facts (lane assignment); pipeline
-*topology* — what must order — stays kernel-owned, with independent engine
-futures `try_join`ed (a host-described execution graph was rejected: it
-would push the kernel's consistency invariants into a meta-layer every host
-re-implements).
+only sees the async traits (`Embedder`/`ImageEmbedder`/`Recognizer`). A
+naturally-sync engine (ort inference, a sync HTTP client) implements
+chunk-level sync compute traits (`EmbedText`/`EmbedImages`/`RecognizeMedia`)
+and is bridged by an adapter; a naturally-async engine implements the async
+traits directly. Pipeline *topology* — what must order — stays kernel-owned,
+with independent engine futures `try_join`ed (a host-described execution
+graph was rejected: it would push the kernel's consistency invariants into a
+meta-layer every host re-implements). *(Historical note: the original
+host-injected execution machinery — `Inline`/`OnExecutor` over a
+`ComputeExecutor` lane — was superseded days later by the tokio pivot's one
+`Blocking` adapter; see the #374 entry below.)*
 
 **Named slots, not a registry — until n>2 capability *kinds*.** Two slots
 (embed, recognize) compose cleanly; a keyed modality→engine registry is
@@ -935,3 +934,61 @@ the probe, fingerprint assembly, `health()`) and hand the kernel a native
 composition (`NativeEmbedder.from_onnx/from_clip/from_remote`); the
 `PyEmbedder`/`PyRecognizer` capture seam remains permanently as the
 custom/test-backend escape hatch — no production path rides it.
+
+
+## The tokio pivot: the kernel owns its runtime; the injected-executor model walked back (#374, June 2026)
+
+**The decision (hours after #342's realization merged):** the
+injected-runtime model is walked back — the core installs tokio and is
+architected around it; tokio supports every platform this project targets.
+The design's center of gravity: **the kernel is perfectly idiomatic async
+Rust — no executor traits, no runtime-agnostic gymnastics muddling the
+picture** — with **the exchange of actions as THE async boundary** every
+host adapts (`async fn(action_request) -> response`; a future C layer would
+be completion-callback shaped).
+
+**What it replaced, and why.** The #308-era injected model (`SerialExecutor`
++ a harness worker thread, `TimerHost` over the asyncio loop, a hand-rolled
+polling bridge, and #342's `ComputeExecutor`/`OnExecutor`/`AsyncioComputeLane`
+engine lanes) bought runtime-portability the platforms never demanded, at
+real cost: a custom bridge, eager-submit subtleties, and lock-contention
+hazards (the P4b loop-stall bug came from exactly this machinery). tokio was
+already in the dependency tree (transitively via anki), so owning it added
+nothing and deleted ~1,500 lines of adaptation.
+
+**The shape (PRs #375–#379):**
+- A process-global runtime owned by `shrike_kernel::runtime`; only the
+  `Handle` escapes. `init_runtime` is the builder seam — the degenerate
+  proof installs a `current_thread` runtime and runs the whole kernel on
+  one thread (no `block_in_place` anywhere is what keeps that honest).
+- **The collection is a task-actor**: one spawned task owns the core and
+  runs jobs inline off an mpsc — FIFO by construction, serialization from
+  the task's sequential loop rather than thread affinity (a task, not a
+  thread — less presumptive of threads, and what makes the single-thread
+  degenerate mode work by construction).
+- **The action exchange at the edge**: `spawn_op` spawns each public op
+  onto the runtime and returns a oneshot-backed Send future pollable from
+  any context. Dropping it DETACHES (the task completes; never a JoinHandle
+  abort — a half-applied collection write would be corruption). The
+  hand-rolled asyncio bridge survives, shrunk to a one-wake completion
+  handoff; pyo3-async-runtimes stayed out (it would add a second runtime
+  for nothing — inverting #332's rejection made it possible, not useful).
+- **Timers** ride `tokio::time` (the debounced saver re-arms by aborting a
+  sleeping task, under one lock — the re-arm race was caught in review).
+- **Engine execution is one adapter**: `Blocking<E>`, an eager
+  `spawn_blocking` (scheduled inside `embed()` itself — eagerness is what
+  preserves the search/batch overlap properties and is pinned by test).
+  The Python capture seam (`PyEmbedder`/`PyRecognizer`) does
+  `spawn_blocking` + GIL-attach; no loop machinery anywhere.
+- **Runtime singularity**: anki's internal lazy runtime is never
+  instantiated — its only consumers are the sync/AnkiWeb services Shrike
+  never dispatches, pinned structurally over the adapter's service-index
+  table. One runtime in the process.
+- **`shrike-cabi` removed** (speculative surface, no confirmed need) and
+  the #338 minimal-core feature discipline relaxed — gating returns when a
+  real lean consumer exists. A future C surface adapts the action exchange with
+  completion callbacks instead of the calling-thread/block_on model.
+
+**What survived from #342:** the per-concern engine crates, the contract
+crate, the layering rule, native end-to-end attach, `WithPolicy` +
+host-assembled identity, the batch-safety probe, and every behavioral pin.

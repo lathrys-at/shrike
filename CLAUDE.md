@@ -15,10 +15,10 @@ plugin host.** The server is an *assembling harness*: it opens one
 constructs engines from config, attaches them to the kernel's service slots
 (`attach_embedder`/`attach_recognizer`), and serves. The kernel composes
 `Arc<dyn Embedder>`/`Arc<dyn Recognizer>` it is *given* — it names no engine,
-no runtime (ort), no platform, no transport; the contracts live in
+no engine, no platform, no transport; the contracts live in
 `shrike-engine-api` (async traits the kernel consumes; sync compute traits
-engines implement; `Inline`/`OnExecutor` adapters the host composes with its
-own execution lane; the batch-safety probe). Each engine is its own crate:
+engines implement; the one `Blocking` adapter onto the runtime's blocking
+pool; the batch-safety probe). Each engine is its own crate:
 `shrike-embed` (ort text + CLIP), `shrike-recognize-apple` (Vision OCR),
 `shrike-embed-remote` (any OpenAI-compatible embeddings endpoint) — with
 `shrike-llama-server` as the *lifecycle manager* that produces the local
@@ -29,12 +29,23 @@ escape hatch. The kernel owns the collection (anki via its protobuf service
 layer ONLY), the vector index orchestration (drift, per-note fingerprints,
 debounced saves), and the derived-text ingest; write actions route through
 maintained kernel ops (`upsert_notes_json`, `delete_notes`, `reindex_notes`,
-`forget_notes`, `metadata_changed`). Scheduling is *injected*: the harness
-thread runs the kernel's `WorkerExecutor`; the kernel owns no threads and
-assumes no runtime (no tokio — the asyncio loop polls kernel futures via the
-runtime-less bridge), and engine compute runs on host-assigned
-`ComputeExecutor` lanes (the asyncio thread pool in the server) with
-independent batch futures `try_join`ed by the kernel.
+`forget_notes`, `metadata_changed`). **Since the tokio pivot (#374) the
+kernel owns its runtime**: it is idiomatic async Rust on a process-global
+tokio runtime (`shrike_kernel::runtime` — only the Handle escapes;
+`init_runtime` is the builder seam, proven down to a single-thread
+`current_thread` mode). The collection serializes through a task-actor (one
+spawned task looping an mpsc inline — FIFO by construction, no thread
+affinity, no `block_in_place`); timers (the debounced index flush) ride
+`tokio::time`; engine compute runs on the blocking pool via the one
+`Blocking<E>` adapter (eager `spawn_blocking`, which is what preserves the
+search/batch overlap properties); independent batch futures are `try_join`ed
+by the kernel. **The action exchange is the host boundary**: the binding
+spawns each op onto the kernel runtime (`spawn_op`) and awaits a
+oneshot-backed completion future through the one-wake asyncio bridge —
+dropping it detaches observation, never aborts the work. anki's internal
+runtime is never instantiated on Shrike's call paths (its only consumers are
+the sync/AnkiWeb services Shrike never dispatches — pinned in
+shrike-collection), so the kernel's runtime is the only one in the process.
 
 ```
 CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP, server.py = the host)
@@ -125,7 +136,7 @@ native/                           # the Rust workspace (the compute core)
 ├── shrike-index/                 # per-modality USearch engine
 ├── shrike-derived/               # FTS5 trigram engine
 ├── shrike-engine-api/            # THE engine contract (#342): kernel-facing traits, sync compute
-│                                 #   traits, Inline/OnExecutor adapters, WithPolicy, the batch probe
+│                                 #   traits, the Blocking adapter, WithPolicy, the batch probe
 ├── shrike-embed/                 # ort/tokenizers text + CLIP engines (implement the contract in-crate)
 ├── shrike-embed-remote/          # EmbedText over any OpenAI-compatible endpoint (ureq; llama/cloud/tailnet)
 ├── shrike-llama-server/          # llama-server lifecycle ONLY (spawn/health/reap/stop) — not an engine
@@ -445,8 +456,8 @@ Vision ships with the OS). Off-macOS the backend degrades the recognition state
 to `error` without disturbing boot. The Python contract is `RecognizerBackend` (`recognition.py`): a *blocking*
 `recognize(items: list[bytes]) -> list[tuple[str, float, str]]` — (text,
 confidence, segments-JSON) — plus `model_fingerprint()`; `PyRecognizer.capture`
-bridges it to the kernel with the PyEmbedder dispatch shape (loop → thread pool →
-oneshot, never the collection executor).
+bridges it to the kernel (the custom/test seam; blocking calls ride the kernel
+runtime's blocking pool via `spawn_blocking` + GIL attach since #374).
 
 **One pass, many consumers** (the epic's load-bearing rule): the kernel's
 `recognize_pending(max_items)` sweeps bounded batches of pending (note, image)

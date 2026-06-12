@@ -196,8 +196,8 @@ class TestRecognition:
     def test_native_vision_sweep_end_to_end(self, tmp_path) -> None:
         # #342 P3: the native recognizer rides the kernel sweep with no Python
         # on the recognition path — harness attach takes the native pyclass
-        # straight through (AnyRecognizer::Native → OnExecutor → asyncio
-        # lane → Vision), and the recognized text lands as derived rows the
+        # straight through (AnyRecognizer::Native → Blocking → the
+        # runtime's blocking pool → Vision), and the recognized text lands as derived rows the
         # lexical consumer reads back.
         PIL = pytest.importorskip("PIL")  # noqa: F841 — fixture rendering only
         import io

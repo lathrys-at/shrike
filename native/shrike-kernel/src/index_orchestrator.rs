@@ -974,7 +974,7 @@ mod op_tests {
     type Events = Arc<std::sync::Mutex<Vec<(&'static str, &'static str)>>>;
 
     /// A thread-backed slow engine: compute starts when the future is BUILT
-    /// (the eager-adapter shape — `OnExecutor` submits at call time) and
+    /// (the eager-adapter shape — `Blocking` schedules at call time) and
     /// completes through a oneshot ~50ms later, recording start/end edges.
     struct SlowEngine {
         name: &'static str,

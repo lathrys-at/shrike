@@ -1,9 +1,9 @@
 //! The generic remote-embeddings engine (#342 P4): [`EmbedText`] over any
 //! OpenAI-compatible embeddings endpoint — llama-server locally, a cloud
 //! embedding API with a key, a service across a tailnet. Route 1 of the
-//! engine contract: ureq is synchronous (no runtime), so the host adapts the
-//! engine onto its lane (`OnExecutor` over the asyncio pool in the Python
-//! server) and network calls never block a polling thread.
+//! engine contract: ureq is synchronous (no runtime), so the `Blocking`
+//! adapter moves each request onto the runtime's blocking pool and network
+//! calls never block a runtime worker.
 //!
 //! Scope discipline: this crate **talks to an endpoint**, nothing else.
 //! Launching/managing a llama-server subprocess is a different concern
