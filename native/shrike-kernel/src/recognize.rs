@@ -69,6 +69,26 @@ impl RecognitionGate {
     }
 }
 
+/// What one `recognize_pending` sweep did — the typed contract for the host's
+/// background driver (#391). Counts ride only the variant where a batch was
+/// actually sent; `Ran { recognized: 0, .. }` is the no-progress signal (an
+/// unreadable window) the harness stops on.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SweepReport {
+    /// No recognizer attached.
+    Unavailable,
+    /// Nothing pending — the sweep had no work.
+    Idle,
+    /// A batch was sent: `recognized` items reached the engine, `stored`
+    /// cleared the gate, `remaining` are left beyond this window.
+    Ran {
+        recognized: usize,
+        stored: usize,
+        remaining: usize,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +133,22 @@ mod tests {
         assert!(gate.vector_worthy("The inner membrane hosts the electron transport chain"));
         // Whitespace padding doesn't count as substance.
         assert!(!gate.vector_worthy(&format!("{}short{}", " ".repeat(30), " ".repeat(30))));
+    }
+
+    #[test]
+    fn sweep_report_wire_shape() {
+        // The host's driver parses this wire — pin it at the type's home so
+        // a serde attribute change can't silently reshape it.
+        let to = |r: &SweepReport| serde_json::to_string(r).unwrap();
+        assert_eq!(to(&SweepReport::Unavailable), r#"{"status":"unavailable"}"#);
+        assert_eq!(to(&SweepReport::Idle), r#"{"status":"idle"}"#);
+        assert_eq!(
+            to(&SweepReport::Ran {
+                recognized: 2,
+                stored: 1,
+                remaining: 3
+            }),
+            r#"{"status":"ran","recognized":2,"stored":1,"remaining":3}"#
+        );
     }
 }

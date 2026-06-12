@@ -642,9 +642,12 @@ impl Kernel {
         Ok((n, dmod, now))
     }
 
-    pub async fn recognize_pending(&self, max_items: usize) -> NativeResult<serde_json::Value> {
+    pub async fn recognize_pending(
+        &self,
+        max_items: usize,
+    ) -> NativeResult<recognize::SweepReport> {
         let Some(svc) = self.recognize_service() else {
-            return Ok(serde_json::json!({"status": "unavailable"}));
+            return Ok(recognize::SweepReport::Unavailable);
         };
 
         // Fingerprint drift: a changed engine invalidates ALL recognized text
@@ -703,9 +706,7 @@ impl Kernel {
         if pending.is_empty() {
             self.derived
                 .meta_set(RECOGNIZER_FINGERPRINT_KEY, &fingerprint)?;
-            return Ok(serde_json::json!({
-                "status": "idle", "recognized": 0, "stored": 0, "remaining": 0
-            }));
+            return Ok(recognize::SweepReport::Idle);
         }
 
         // One pass, many consumers: recognize the batch, keep text AND
@@ -817,12 +818,11 @@ impl Kernel {
         // kernel does not terminate that loop; the HARNESS's driver stops on
         // a no-progress batch (`recognized == 0`) and the next sweep trigger
         // (boot, /reload, cooperative re-acquire) retries the read.
-        Ok(serde_json::json!({
-            "status": "ran",
-            "recognized": sent.len(),
-            "stored": stored_count,
-            "remaining": total_pending.saturating_sub(pending.len()),
-        }))
+        Ok(recognize::SweepReport::Ran {
+            recognized: sent.len(),
+            stored: stored_count,
+            remaining: total_pending.saturating_sub(pending.len()),
+        })
     }
 
     async fn index_written(&self, written: &[i64]) -> NativeResult<()> {
@@ -1649,7 +1649,7 @@ mod no_cpython_smoke {
 
             // No recognizer attached → the sweep reports unavailable.
             let off = kernel.recognize_pending(10).await.unwrap();
-            assert_eq!(off["status"], "unavailable");
+            assert_eq!(off, recognize::SweepReport::Unavailable);
 
             let mut media = std::collections::HashMap::new();
             media.insert(
@@ -1659,9 +1659,14 @@ mod no_cpython_smoke {
             kernel.attach_recognizer(Arc::new(StubRecognizer), Arc::new(MapResolver::new(media)));
 
             let report = kernel.recognize_pending(10).await.unwrap();
-            assert_eq!(report["status"], "ran");
-            assert_eq!(report["stored"], 1);
-            assert_eq!(report["remaining"], 0);
+            assert_eq!(
+                report,
+                recognize::SweepReport::Ran {
+                    recognized: 1,
+                    stored: 1,
+                    remaining: 0
+                }
+            );
 
             // Lexical consumer: a literal phrase living ONLY inside the image
             // hits, with ocr provenance riding the existing seam.
@@ -1683,7 +1688,7 @@ mod no_cpython_smoke {
 
             // The sweep is idempotent: a second call has nothing to do.
             let again = kernel.recognize_pending(10).await.unwrap();
-            assert_eq!(again["status"], "idle");
+            assert_eq!(again, recognize::SweepReport::Idle);
 
             // Persistence + reconcile==rebuild: a fresh kernel over the same
             // cache sees no drift (the hash folds the OCR text) and still
@@ -1749,10 +1754,14 @@ mod no_cpython_smoke {
             // unreadable one is skipped (not recognized as empty bytes) and
             // counted against the batch so the harness loop can't spin.
             let report = kernel.recognize_pending(10).await.unwrap();
-            assert_eq!(report["status"], "ran");
-            assert_eq!(report["recognized"], 1);
-            assert_eq!(report["stored"], 1);
-            assert_eq!(report["remaining"], 0);
+            assert_eq!(
+                report,
+                recognize::SweepReport::Ran {
+                    recognized: 1,
+                    stored: 1,
+                    remaining: 0
+                }
+            );
             let hits = kernel.search("flaky secret", 5).await.unwrap();
             assert!(
                 !hits
@@ -1764,16 +1773,26 @@ mod no_cpython_smoke {
             // Sweep 2: still unreadable → still pending, still skipped — a
             // sweep ran (it was offered again), but nothing was sent.
             let again = kernel.recognize_pending(10).await.unwrap();
-            assert_eq!(again["status"], "ran");
-            assert_eq!(again["recognized"], 0);
-            assert_eq!(again["stored"], 0);
+            assert_eq!(
+                again,
+                recognize::SweepReport::Ran {
+                    recognized: 0,
+                    stored: 0,
+                    remaining: 0
+                }
+            );
 
             // Heal the read: the next sweep recognizes the REAL bytes.
             resolver.unreadable.lock().unwrap().clear();
             let healed = kernel.recognize_pending(10).await.unwrap();
-            assert_eq!(healed["status"], "ran");
-            assert_eq!(healed["recognized"], 1);
-            assert_eq!(healed["stored"], 1);
+            assert_eq!(
+                healed,
+                recognize::SweepReport::Ran {
+                    recognized: 1,
+                    stored: 1,
+                    remaining: 0
+                }
+            );
             let hits = kernel.search("flaky secret", 5).await.unwrap();
             assert!(
                 hits.iter()
@@ -1783,7 +1802,7 @@ mod no_cpython_smoke {
 
             // And now everything is done.
             let idle = kernel.recognize_pending(10).await.unwrap();
-            assert_eq!(idle["status"], "idle");
+            assert_eq!(idle, recognize::SweepReport::Idle);
 
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
@@ -1837,26 +1856,41 @@ mod no_cpython_smoke {
             // window — the exact shape a driver must stop on, since the next
             // call would re-take the identical window.
             let report = kernel.recognize_pending(2).await.unwrap();
-            assert_eq!(report["status"], "ran");
-            assert_eq!(report["recognized"], 0);
-            assert_eq!(report["stored"], 0);
-            assert_eq!(report["remaining"], 1);
+            assert_eq!(
+                report,
+                recognize::SweepReport::Ran {
+                    recognized: 0,
+                    stored: 0,
+                    remaining: 1
+                }
+            );
 
-            // And it really would: a second call is byte-identical.
+            // And it really would: a second call is identical.
             let again = kernel.recognize_pending(2).await.unwrap();
             assert_eq!(again, report);
 
             // Healed reads drain normally across batches, then go idle.
             resolver.unreadable.lock().unwrap().clear();
             let healed = kernel.recognize_pending(2).await.unwrap();
-            assert_eq!(healed["recognized"], 2);
-            assert_eq!(healed["stored"], 2);
-            assert_eq!(healed["remaining"], 1);
+            assert_eq!(
+                healed,
+                recognize::SweepReport::Ran {
+                    recognized: 2,
+                    stored: 2,
+                    remaining: 1
+                }
+            );
             let tail = kernel.recognize_pending(2).await.unwrap();
-            assert_eq!(tail["recognized"], 1);
-            assert_eq!(tail["remaining"], 0);
+            assert!(matches!(
+                tail,
+                recognize::SweepReport::Ran {
+                    recognized: 1,
+                    remaining: 0,
+                    ..
+                }
+            ));
             let idle = kernel.recognize_pending(2).await.unwrap();
-            assert_eq!(idle["status"], "idle");
+            assert_eq!(idle, recognize::SweepReport::Idle);
 
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
@@ -1944,10 +1978,14 @@ mod no_cpython_smoke {
             // Sweep 1: both items recognized, one stored, the gated one
             // marked done — nothing remains.
             let report = kernel.recognize_pending(10).await.unwrap();
-            assert_eq!(report["status"], "ran");
-            assert_eq!(report["recognized"], 2);
-            assert_eq!(report["stored"], 1);
-            assert_eq!(report["remaining"], 0);
+            assert_eq!(
+                report,
+                recognize::SweepReport::Ran {
+                    recognized: 2,
+                    stored: 1,
+                    remaining: 0
+                }
+            );
             let seen = || {
                 recognizer
                     .items_seen
@@ -1958,21 +1996,26 @@ mod no_cpython_smoke {
             // Sweep 2: idle — the gated item is DONE, not re-judged (the
             // recognizer is never called again).
             let again = kernel.recognize_pending(10).await.unwrap();
-            assert_eq!(again["status"], "idle");
+            assert_eq!(again, recognize::SweepReport::Idle);
             assert_eq!(seen(), 2, "the gated item must not re-OCR");
 
             // Engine upgrade: a fingerprint change invalidates rows AND
             // markers, so BOTH items re-derive.
             *recognizer.fingerprint.lock().unwrap() = "stub:v2".to_string();
             let rederived = kernel.recognize_pending(10).await.unwrap();
-            assert_eq!(rederived["status"], "ran");
-            assert_eq!(rederived["recognized"], 2);
-            assert_eq!(rederived["stored"], 1);
+            assert!(matches!(
+                rederived,
+                recognize::SweepReport::Ran {
+                    recognized: 2,
+                    stored: 1,
+                    ..
+                }
+            ));
             assert_eq!(seen(), 4);
 
             // And the new outcome sticks: idle again, no further calls.
             let idle = kernel.recognize_pending(10).await.unwrap();
-            assert_eq!(idle["status"], "idle");
+            assert_eq!(idle, recognize::SweepReport::Idle);
             assert_eq!(seen(), 4);
 
             kernel.close().await.unwrap();
@@ -2021,20 +2064,29 @@ mod no_cpython_smoke {
             // Window 1: all recognized, all gated — real work (recognized > 0,
             // so the driver keeps going), and the window is now done.
             let first = kernel.recognize_pending(2).await.unwrap();
-            assert_eq!(first["status"], "ran");
-            assert_eq!(first["recognized"], 2);
-            assert_eq!(first["stored"], 0);
-            assert_eq!(first["remaining"], 1);
+            assert_eq!(
+                first,
+                recognize::SweepReport::Ran {
+                    recognized: 2,
+                    stored: 0,
+                    remaining: 1
+                }
+            );
 
             // Window 2 ADVANCES past the marked items and drains the tail.
             let second = kernel.recognize_pending(2).await.unwrap();
-            assert_eq!(second["status"], "ran");
-            assert_eq!(second["recognized"], 1);
-            assert_eq!(second["remaining"], 0);
+            assert!(matches!(
+                second,
+                recognize::SweepReport::Ran {
+                    recognized: 1,
+                    remaining: 0,
+                    ..
+                }
+            ));
 
             // Convergence: idle, with each item judged exactly once.
             let idle = kernel.recognize_pending(2).await.unwrap();
-            assert_eq!(idle["status"], "idle");
+            assert_eq!(idle, recognize::SweepReport::Idle);
             assert_eq!(
                 recognizer
                     .items_seen

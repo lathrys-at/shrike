@@ -137,13 +137,13 @@ def test_cross_core_media_prune_parity(tmp_path, native_core):
     native_check.pop("media_dir")
     assert native_check == pip["check"]
 
-    native_preview = json.loads(native_core.prune())
-    native_preview.pop("removed_note_ids")
+    preview_json, _ = native_core.prune()
+    native_preview = json.loads(preview_json)
     native_preview["empty_notes"]["removed"] = len(native_preview["empty_notes"]["removed"])
     assert native_preview == pip["preview"]
 
-    native_applied = json.loads(native_core.prune(dry_run=False))
-    removed = native_applied.pop("removed_note_ids")
+    applied_json, removed = native_core.prune(dry_run=False)
+    native_applied = json.loads(applied_json)
     native_applied["empty_notes"]["removed"] = len(native_applied["empty_notes"]["removed"])
     assert native_applied == pip["applied"]
     assert len(removed) == pip["removed_count"] == 1
