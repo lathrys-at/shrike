@@ -9,6 +9,17 @@ description = "Native embedding backends: ort + tokenizers + pooling (#270)."
 [lib]
 name = "shrike_embed"
 
+# The GPU execution providers are additive features (#384). The default keeps
+# the full set — the server profile (what shrike-py builds) is unchanged; the
+# features exist so slim builds (mobile/embedded minimal-core, #338) can drop
+# the GPU EP glue they can never use via `default-features = false`. CoreML
+# stays in the base: it's the macOS path, wanted on exactly the slim targets.
+[features]
+default = ["cuda", "tensorrt", "directml"]
+cuda = ["ort/cuda"]
+tensorrt = ["ort/tensorrt"]
+directml = ["ort/directml"]
+
 # Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py.
 [dependencies]
 shrike-ffi = { workspace = true }
@@ -19,7 +30,9 @@ shrike-engine-api = { path = "../shrike-engine-api" }
 # at runtime from the *pinned onnxruntime Python wheel* the Python backend already
 # installs (decision recorded in native/README.md + #269) — no duplicated runtime,
 # guaranteed version match for the Phase-1 parity bake.
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24", "coreml", "cuda", "tensorrt", "directml"] }
+# Exact rc pin (like usearch's =2.25.3): rc-to-rc churn in ort's EP API is real
+# (the ep::CoreML builder shape has changed across rcs).
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24", "coreml"] }
 # The same Rust crate the Python `tokenizers` package wraps — tokenization parity
 # is structural. onig matches the python wheel's regex engine.
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
