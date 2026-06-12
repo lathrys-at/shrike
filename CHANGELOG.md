@@ -7,6 +7,22 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 
 ## [Unreleased]
 
+### Fixed
+- The published wheel can now actually run (#497): `shrike-mcp` ships as a
+  platform-tagged wheel (cp312-abi3; macOS arm64/x86_64, Linux x86_64/aarch64)
+  with the `shrike_native` extension inside. The previous pure-Python wheel
+  imported a native module that was published nowhere, so a pip/pipx install
+  could not start the server.
+
+### Changed
+- `onnxruntime` is now a regular dependency — it ships with every install as
+  the runtime the in-process embedding engines load. **Breaking for install
+  scripts:** the `onnx` and `clip` extras are gone (no longer needed — plain
+  `pip install shrike-mcp` covers both backends), and the `onnx-gpu` extra is
+  renamed to `gpu` (`pip install 'shrike-mcp[gpu]'`; the CUDA/TensorRT
+  onnxruntime build still must replace the base one, which pip cannot do for
+  you — uninstall `onnxruntime` after installing).
+
 ## [0.4.0] — 2026-06-06
 
 _Media release: author cards with images and audio end to end. Get assets into

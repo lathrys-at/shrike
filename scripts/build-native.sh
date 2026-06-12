@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the Shrike native extension with cargo and install it (editable) into the
-# active venv (#269). The canonical release artifact is the Bazel wheel
-# (//native/shrike-py:wheel); this is the fast inner loop for the pip lane:
+# active venv (#269). The canonical release artifact is the Bazel wheel (//:wheel —
+# the platform-tagged shrike-mcp wheel ships shrike_native inside it since #497);
+# this is the fast inner loop for the pip lane:
 #
 #   source .venv/bin/activate && scripts/build-native.sh
 #   pytest tests/unit -q          # facades now see the real extension

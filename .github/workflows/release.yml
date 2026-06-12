@@ -52,9 +52,12 @@ jobs:
   # glibc symbols the extension links, so the oldest supported runner gives the
   # widest-installing tag (manylinux_2_35 at most). macOS x86_64 rides the
   # macos-15-intel runner (the last hosted Intel image; macos-13 retired
-  # 2025-12). Neither extra runner is warmed by warm-cache.yml (it only runs
-  # the test.yml matrix), so those two legs cold-compile the Rust workspace at
-  # tag time — accepted: it's release cadence, not the PR loop.
+  # 2025-12) — that leg is build-and-check-only: the test matrix above has no
+  # Intel mac, so the x86_64 wheel ships untested by the suite (accepted; same
+  # abi3 source as the arm64 wheel the suite does cover). Neither extra runner
+  # is warmed by warm-cache.yml (it only runs the test.yml matrix), so those
+  # two legs cold-compile the Rust workspace at tag time — accepted: it's
+  # release cadence, not the PR loop.
   build-wheels:
     name: Build wheel (${{ matrix.os }})
     needs: test
