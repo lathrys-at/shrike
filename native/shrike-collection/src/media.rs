@@ -4,8 +4,13 @@
 //! SSRF guard + IP pinning) is deliberately NOT here — it is trust-boundary
 //! code and lands as its own step (5b) under the security-review gate.
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use shrike_ffi::NativeResult;
+use shrike_schemas::{
+    CollectionCheckResponse, CollectionPruneResponse, DeleteMediaResponse, ListMediaResponse,
+    MediaFetchResult, MediaFileInfo, PruneEmptyCards, PruneEmptyNotes, PruneUnusedMedia,
+    PruneUnusedTags, StoreMediaItem, StoreMediaResult,
+};
 
 use crate::{embed_text, CollectionCore};
 
@@ -79,23 +84,22 @@ fn mime_extension(content_type: &str) -> Option<&'static str> {
 }
 
 impl CollectionCore {
-    /// Store one media item from prepared bytes — the full `_write_one_media`
+    /// The shared write tail of every store path — the full `_write_one_media`
     /// semantics: extension derived from `content_type` when the name lacks
     /// one, basename-sanitized, Anki collision handling, `deduped` = identical
     /// content already existed (the caller must use the RETURNED filename).
-    pub fn store_media_bytes(
+    /// `index` echoes the caller's batch position. The size cap stays with
+    /// the byte sources (caller-supplied/downloaded bytes) — a server-local
+    /// `path` inside an operator-configured root is deliberately uncapped.
+    fn write_media_bytes(
         &self,
-        filename: Option<&str>,
+        index: i64,
+        mut name: String,
         data: &[u8],
         content_type: Option<&str>,
-    ) -> NativeResult<String> {
-        if data.len() > crate::media_fetch::MEDIA_MAX_BYTES {
-            return Err(shrike_ffi::NativeError::invalid_input(format!(
-                "file exceeds the {}-byte limit",
-                crate::media_fetch::MEDIA_MAX_BYTES
-            )));
-        }
-        let mut name = filename.unwrap_or_default().to_string();
+    ) -> NativeResult<StoreMediaResult> {
+        // Derive an extension from the HTTP type when the name lacks one
+        // (pylib's add_extension_based_on_mime map).
         let basename_has_ext = name.rsplit('/').next().unwrap_or(&name).contains('.');
         if name.is_empty() || !basename_has_ext {
             if let Some(ct) = content_type {
@@ -115,59 +119,66 @@ impl CollectionCore {
         }
         let existed = std::path::Path::new(&self.media_dir).join(&safe).is_file();
         let stored = self.adapter.add_media_file(&safe, data)?;
-        Ok(json!({
-            "status": "stored",
-            "filename": stored,
-            "mime": guess_mime(&stored),
-            "size_bytes": data.len(),
-            "deduped": existed && stored == safe,
+        Ok(StoreMediaResult::Stored {
+            index,
+            mime: guess_mime(&stored).map(str::to_string),
+            size_bytes: data.len() as i64,
+            deduped: existed && stored == safe,
+            filename: stored,
         })
-        .to_string())
+    }
+
+    /// Store one media item from prepared bytes. The single-item entry knows
+    /// no batch position, so `index` is 0 — the host overwrites it with the
+    /// caller's.
+    pub fn store_media_bytes(
+        &self,
+        filename: Option<&str>,
+        data: &[u8],
+        content_type: Option<&str>,
+    ) -> NativeResult<StoreMediaResult> {
+        self.write_media_bytes(0, filename.unwrap_or_default().to_string(), data, content_type)
     }
 
     /// `store_media` (#70): the full batch — each item one of `data` (base64),
     /// `url` (SSRF-guarded download, step 5b), or server-local `path`
     /// (honored only when contained in one of `path_roots`). Per-item errors
-    /// never sink the batch; result dicts mirror `_write_one_media`
-    /// (`stored` with `deduped`, or `error`). Items are prepared sequentially
-    /// here — the host facade keeps its concurrent prepare; the kernel's
-    /// async layer is where native fan-out lands later.
+    /// never sink the batch (`stored` with `deduped`, or `error`). Items are
+    /// prepared sequentially here — the host facade keeps its concurrent
+    /// prepare; the kernel's async layer is where native fan-out lands later.
     pub fn store_media_items(
         &self,
-        items_json: &str,
+        items: &[StoreMediaItem],
         allow_private_fetch: bool,
         path_roots: &[String],
-    ) -> NativeResult<String> {
-        let items: Vec<Value> = serde_json::from_str(items_json)
-            .map_err(|e| shrike_ffi::NativeError::invalid_input(format!("items: {e}")))?;
-        let mut results: Vec<Value> = Vec::new();
+    ) -> NativeResult<Vec<StoreMediaResult>> {
+        let mut results: Vec<StoreMediaResult> = Vec::new();
         for (index, item) in items.iter().enumerate() {
-            let name = item.get("filename").and_then(Value::as_str);
-            match self.prepare_and_write_media(item, index, allow_private_fetch, path_roots) {
+            match self.prepare_and_write_media(item, index as i64, allow_private_fetch, path_roots)
+            {
                 Ok(r) => results.push(r),
-                Err(e) => results.push(json!({
-                    "status": "error",
-                    "index": index,
-                    "filename": name,
-                    "error": e.message,
-                })),
+                Err(e) => results.push(StoreMediaResult::Error {
+                    index: index as i64,
+                    filename: item.filename.clone(),
+                    error: e.message,
+                }),
             }
         }
-        Ok(json!(results).to_string())
+        Ok(results)
     }
 
     fn prepare_and_write_media(
         &self,
-        item: &Value,
-        index: usize,
+        item: &StoreMediaItem,
+        index: i64,
         allow_private_fetch: bool,
         path_roots: &[String],
-    ) -> NativeResult<Value> {
+    ) -> NativeResult<StoreMediaResult> {
         use shrike_ffi::NativeError;
-        let name = item.get("filename").and_then(Value::as_str);
+        item.validate().map_err(NativeError::invalid_input)?;
 
         // server-local path (zero-copy intent; #164/#170 gates)
-        if let Some(path) = item.get("path").and_then(Value::as_str) {
+        if let Some(path) = item.path.as_deref() {
             if path_roots.is_empty() {
                 return Err(NativeError::invalid_input(
                     "server-local paths are not enabled (set --media-path-root on a \
@@ -190,72 +201,33 @@ impl CollectionCore {
             let base = safe_media_name(&target_str);
             let data = std::fs::read(&target)
                 .map_err(|e| NativeError::invalid_input(format!("read failed: {e}")))?;
-            let existed = std::path::Path::new(&self.media_dir).join(&base).is_file();
-            let stored = self.adapter.add_media_file(&base, &data)?;
-            return Ok(json!({
-                "status": "stored",
-                "index": index,
-                "filename": stored,
-                "mime": guess_mime(&stored),
-                "size_bytes": data.len(),
-                "deduped": existed && stored == base,
-            }));
+            return self.write_media_bytes(index, base, &data, None);
         }
 
         // base64 data / URL download
-        let (raw, content_type, derived_name) =
-            if let Some(data) = item.get("data").and_then(Value::as_str) {
-                (crate::media_fetch::decode_media_b64(data)?, None, None)
-            } else if let Some(url) = item.get("url").and_then(Value::as_str) {
-                let (raw, ct) = crate::media_fetch::fetch_media_url(url, allow_private_fetch)?;
-                let from_path = url::Url::parse(url)
-                    .ok()
-                    .map(|u| safe_media_name(u.path()))
-                    .filter(|n| !n.is_empty());
-                (raw, ct, from_path)
-            } else {
-                return Err(NativeError::invalid_input(
-                    "each item needs one of data, url, or path",
-                ));
-            };
+        let (raw, content_type, derived_name) = if let Some(data) = item.data.as_deref() {
+            (crate::media_fetch::decode_media_b64(data)?, None, None)
+        } else if let Some(url) = item.url.as_deref() {
+            let (raw, ct) = crate::media_fetch::fetch_media_url(url, allow_private_fetch)?;
+            let from_path = url::Url::parse(url)
+                .ok()
+                .map(|u| safe_media_name(u.path()))
+                .filter(|n| !n.is_empty());
+            (raw, ct, from_path)
+        } else {
+            // validate() guarantees one source, but keep the legacy message
+            // as the backstop.
+            return Err(NativeError::invalid_input(
+                "each item needs one of data, url, or path",
+            ));
+        };
 
-        if raw.len() > crate::media_fetch::MEDIA_MAX_BYTES {
-            return Err(NativeError::invalid_input(format!(
-                "file exceeds the {}-byte limit",
-                crate::media_fetch::MEDIA_MAX_BYTES
-            )));
-        }
-        let mut name = name
-            .map(str::to_string)
+        let name = item
+            .filename
+            .clone()
             .or(derived_name)
             .unwrap_or_default();
-        // Derive an extension from the HTTP type when the name lacks one
-        // (pylib's add_extension_based_on_mime map).
-        let basename_has_ext = name.rsplit('/').next().unwrap_or(&name).contains('.');
-        if name.is_empty() || !basename_has_ext {
-            if let Some(ct) = &content_type {
-                if let Some(ext) = mime_extension(ct) {
-                    if name.is_empty() {
-                        name = "media".to_string();
-                    }
-                    name.push_str(ext);
-                }
-            }
-        }
-        let safe = safe_media_name(&name);
-        if safe.is_empty() {
-            return Err(NativeError::invalid_input("could not determine a filename"));
-        }
-        let existed = std::path::Path::new(&self.media_dir).join(&safe).is_file();
-        let stored = self.adapter.add_media_file(&safe, &raw)?;
-        Ok(json!({
-            "status": "stored",
-            "index": index,
-            "filename": stored,
-            "mime": guess_mime(&stored),
-            "size_bytes": raw.len(),
-            "deduped": existed && stored == safe,
-        }))
+        self.write_media_bytes(index, name, &raw, content_type.as_deref())
     }
 
     /// Resolve filenames to where their bytes live — never the bytes
