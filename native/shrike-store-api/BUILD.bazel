@@ -1,0 +1,17 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//native:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# The store contract (#389): the traits the kernel consumes for its three
+# stores and each store crate implements. A LEAF — no store deps, no kernel
+# dep, no pyo3.
+rust_library(
+    name = "shrike_store_api",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        "//native/shrike-ffi:shrike_ffi",
+    ],
+)

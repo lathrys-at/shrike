@@ -42,6 +42,7 @@ use shrike_collection::{CollectionCore, CreateOutcome, DuplicatePolicy};
 use shrike_derived::DerivedEngine;
 use shrike_ffi::{NativeError, NativeResult};
 use shrike_index::MultiModalIndex;
+use shrike_store_api::DerivedStore;
 
 pub mod runtime;
 pub use runtime::{block_on, init_runtime, spawn_op};
@@ -208,7 +209,7 @@ pub struct Kernel {
     collection: Arc<SerializedCollection>,
     orchestrator: Arc<index_orchestrator::IndexOrchestrator>,
     saver: Arc<index_orchestrator::DebouncedSaver>,
-    derived: Arc<DerivedEngine>,
+    derived: Arc<dyn DerivedStore>,
     /// The attachable embedding service (#342's first registry slot):
     /// swappable at runtime — the harness attaches on embedding start,
     /// detaches on stop, and a model swap is detach + attach. Ops that need
@@ -1481,8 +1482,8 @@ impl Kernel {
                 .run(move |core| {
                     actions::search_notes(
                         core,
-                        Some(&engine),
-                        Some(&derived),
+                        Some(&*engine),
+                        Some(&*derived),
                         Some(&tag_keys),
                         &sources,
                         &vectors,

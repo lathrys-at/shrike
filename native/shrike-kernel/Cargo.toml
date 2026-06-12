@@ -21,6 +21,7 @@ shrike-collection = { path = "../shrike-collection" }
 shrike-derived = { path = "../shrike-derived" }
 shrike-engine-api = { path = "../shrike-engine-api" }
 shrike-ffi = { workspace = true }
+shrike-store-api = { workspace = true }
 shrike-index = { path = "../shrike-index" }
 shrike-schemas = { path = "../shrike-schemas" }
 serde = "1"

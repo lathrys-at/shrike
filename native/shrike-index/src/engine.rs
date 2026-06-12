@@ -32,10 +32,7 @@ const SEARCH_OVERFETCH: usize = 4;
 
 /// One modality's ranking for one query: parallel (note_ids, distances),
 /// best-first, deduped to distinct notes.
-pub type ModalityRanking = (Vec<i64>, Vec<f32>);
-
-/// Per-(non-text-)modality activation stats: (modality, n, mean, std).
-pub type ActivationStats = Vec<(String, f64, f64, f64)>;
+pub use shrike_store_api::{ActivationStats, ModalityRanking};
 
 struct Sub {
     index: Index,
@@ -584,6 +581,82 @@ impl MultiModalIndex {
             }
         }
         Ok(stats)
+    }
+}
+
+/// The store contract (#389): every method forwards to the inherent impl, so
+/// the concrete engine keeps its full API while the kernel consumes
+/// `Arc<dyn VectorIndex>`.
+impl shrike_store_api::VectorIndex for MultiModalIndex {
+    fn size(&self) -> usize {
+        Self::size(self)
+    }
+    fn ndim(&self) -> Option<usize> {
+        Self::ndim(self)
+    }
+    fn modality_sizes(&self) -> Vec<(String, usize)> {
+        Self::modality_sizes(self)
+    }
+    fn modality_names(&self) -> Vec<String> {
+        Self::modality_names(self)
+    }
+    fn ensure(&self, modality: &str, ndim: usize) -> NativeResult<()> {
+        Self::ensure(self, modality, ndim)
+    }
+    fn clear(&self) {
+        Self::clear(self)
+    }
+    fn drop_modality(&self, modality: &str) {
+        Self::drop_modality(self, modality)
+    }
+    fn restore(&self, dir: &str, candidates: Option<&[i64]>) -> bool {
+        Self::restore(self, dir, candidates)
+    }
+    fn save(&self, dir: &str) -> NativeResult<()> {
+        Self::save(self, dir)
+    }
+    fn add(&self, modality: &str, keys: &[i64], vectors: &[Vec<f32>]) -> NativeResult<()> {
+        Self::add(self, modality, keys, vectors)
+    }
+    fn remove(&self, keys: &[i64]) -> NativeResult<usize> {
+        Self::remove(self, keys)
+    }
+    fn search_by_modality(
+        &self,
+        queries: &[Vec<f32>],
+        k: usize,
+        modalities: Option<&[String]>,
+    ) -> NativeResult<Vec<std::collections::BTreeMap<String, ModalityRanking>>> {
+        Self::search_by_modality(self, queries, k, modalities)
+    }
+    fn contains(&self, key: i64) -> bool {
+        Self::contains(self, key)
+    }
+    fn keys(&self) -> Vec<i64> {
+        Self::keys(self)
+    }
+    fn get(&self, key: i64) -> Option<Vec<Vec<f32>>> {
+        Self::get(self, key)
+    }
+    fn modality_contains(&self, modality: &str, key: i64) -> bool {
+        Self::modality_contains(self, modality, key)
+    }
+    fn modality_keys(&self, modality: &str) -> Vec<i64> {
+        Self::modality_keys(self, modality)
+    }
+    fn modality_get(&self, modality: &str, key: i64) -> Option<Vec<Vec<f32>>> {
+        Self::modality_get(self, modality, key)
+    }
+    fn dot_scores(&self, modality: &str, keys: &[i64], query: &[f32]) -> Vec<(i64, f32)> {
+        Self::dot_scores(self, modality, keys, query)
+    }
+    fn calibrate_activation(
+        &self,
+        sample_size: usize,
+        k: usize,
+        min_count: usize,
+    ) -> NativeResult<ActivationStats> {
+        Self::calibrate_activation(self, sample_size, k, min_count)
     }
 }
 

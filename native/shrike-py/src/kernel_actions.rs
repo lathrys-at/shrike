@@ -115,8 +115,12 @@ pub(crate) fn action_attach_neighbors(
     threshold: f64,
 ) -> PyResult<String> {
     let inner = core.core_ref();
-    let index = index_engine.as_ref().map(|e| &*e.inner);
-    let derived = derived_engine.as_ref().map(|e| &e.inner);
+    let index = index_engine
+        .as_ref()
+        .map(|e| &*e.inner as &dyn shrike_store_api::VectorIndex);
+    let derived = derived_engine
+        .as_ref()
+        .map(|e| &e.inner as &dyn shrike_store_api::DerivedStore);
     py.detach(|| {
         let out = shrike_kernel::actions::attach_neighbors(
             inner, index, derived, &texts, &vectors, &exclude, top_k, threshold,
@@ -155,8 +159,12 @@ pub(crate) fn action_search_notes(
     // the GIL-bound PyRef never crosses the detach.
     let tag_kernel = kernel.as_ref().map(|k| k.kernel_arc());
     let inner = core.core_ref();
-    let index = index_engine.as_ref().map(|e| &*e.inner);
-    let derived = derived_engine.as_ref().map(|e| &e.inner);
+    let index = index_engine
+        .as_ref()
+        .map(|e| &*e.inner as &dyn shrike_store_api::VectorIndex);
+    let derived = derived_engine
+        .as_ref()
+        .map(|e| &e.inner as &dyn shrike_store_api::DerivedStore);
     let sources: Vec<shrike_kernel::actions::SearchSource> = sources
         .into_iter()
         .map(

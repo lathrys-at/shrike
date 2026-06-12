@@ -30,8 +30,7 @@ use shrike_ffi::{NativeError, NativeResult};
 /// part of the pinned engine behaviour).
 const SNIPPET_TOKENS: i64 = 12;
 
-/// (note_id, source, ref, txt, snippet) — one MATCH result row.
-pub type MatchRow = (i64, String, String, Option<String>, Option<String>);
+pub use shrike_store_api::MatchRow;
 
 /// Whether this build statically links rusqlite's bundled SQLite (#300).
 /// Bundled guarantees FTS5 + trigram; a platform-linked build must rely on
@@ -763,6 +762,112 @@ impl DerivedEngine {
     }
 }
 
+/// The store contract (#389): every method forwards to the inherent impl, so
+/// the concrete engine keeps its full API while the kernel consumes
+/// `Arc<dyn DerivedStore>`.
+impl shrike_store_api::DerivedStore for DerivedEngine {
+    fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()> {
+        Self::build(self, rows, col_mod)
+    }
+    fn ingest(
+        &self,
+        note_id: i64,
+        source: &str,
+        refs_text: &[(String, String)],
+    ) -> NativeResult<()> {
+        Self::ingest(self, note_id, source, refs_text)
+    }
+    fn ingest_many(
+        &self,
+        notes: &[(i64, Vec<(String, String)>)],
+        source: &str,
+    ) -> NativeResult<()> {
+        Self::ingest_many(self, notes, source)
+    }
+    fn remove(&self, note_ids: &[i64], source: Option<&str>) -> NativeResult<()> {
+        Self::remove(self, note_ids, source)
+    }
+    fn count(&self) -> NativeResult<i64> {
+        Self::count(self)
+    }
+    fn get_col_mod(&self) -> Option<i64> {
+        Self::get_col_mod(self)
+    }
+    fn set_col_mod(&self, value: i64) -> NativeResult<()> {
+        Self::set_col_mod(self, value)
+    }
+    fn meta_get(&self, key: &str) -> NativeResult<Option<String>> {
+        Self::meta_get(self, key)
+    }
+    fn meta_set(&self, key: &str, value: &str) -> NativeResult<()> {
+        Self::meta_set(self, key, value)
+    }
+    fn refs_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String)>> {
+        Self::refs_for_source(self, source)
+    }
+    fn texts_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String, String)>> {
+        Self::texts_for_source(self, source)
+    }
+    fn texts_for_source_for_notes(
+        &self,
+        source: &str,
+        note_ids: &[i64],
+    ) -> NativeResult<Vec<(i64, String, String)>> {
+        Self::texts_for_source_for_notes(self, source, note_ids)
+    }
+    fn mark_gated(&self, source: &str, pairs: &[(i64, String)]) -> NativeResult<()> {
+        Self::mark_gated(self, source, pairs)
+    }
+    fn gated_refs_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String)>> {
+        Self::gated_refs_for_source(self, source)
+    }
+    fn clear_gated(&self, source: &str) -> NativeResult<()> {
+        Self::clear_gated(self, source)
+    }
+    fn put_segments(
+        &self,
+        note_id: i64,
+        source: &str,
+        reference: &str,
+        json: &str,
+    ) -> NativeResult<()> {
+        Self::put_segments(self, note_id, source, reference, json)
+    }
+    fn get_segments(
+        &self,
+        note_id: i64,
+        source: &str,
+        reference: &str,
+    ) -> NativeResult<Option<String>> {
+        Self::get_segments(self, note_id, source, reference)
+    }
+    fn match_rows(
+        &self,
+        expr: &str,
+        limit: i64,
+        with_text: bool,
+        scope: Option<&[i64]>,
+    ) -> NativeResult<Vec<MatchRow>> {
+        Self::match_rows(self, expr, limit, with_text, scope)
+    }
+    fn search_substring(
+        &self,
+        query: &str,
+        limit: i64,
+        scope: Option<&[i64]>,
+    ) -> NativeResult<Option<Vec<LexicalRow>>> {
+        Self::search_substring(self, query, limit, scope)
+    }
+    fn search_fuzzy(
+        &self,
+        query: &str,
+        top_k: i64,
+        scope: Option<&[i64]>,
+    ) -> NativeResult<Vec<LexicalRow>> {
+        Self::search_fuzzy(self, query, top_k, scope)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1199,8 +1304,7 @@ pub const MIN_TRIGRAM: usize = 3;
 /// A fuzzy candidate must share at least this many query trigrams (noise floor).
 pub const FUZZY_MIN_SHARED: usize = 2;
 
-/// One lexical hit with its provenance: `(note_id, source, ref, snippet)`.
-pub type LexicalRow = (i64, String, String, Option<String>);
+pub use shrike_store_api::LexicalRow;
 
 /// Lowercased char-level trigrams (mirrors the Python `_trigrams`: code-point
 /// windows over `text.lower()`).

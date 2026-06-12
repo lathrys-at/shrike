@@ -32,5 +32,6 @@ py_test(
         "//native/shrike-py:Cargo.toml",
         "//native/shrike-recognize-apple:Cargo.toml",
         "//native/shrike-schemas:Cargo.toml",
+        "//native/shrike-store-api:Cargo.toml",
     ],
 )

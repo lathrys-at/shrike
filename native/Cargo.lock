@@ -5028,6 +5028,7 @@ version = "0.0.0"
 dependencies = [
  "rusqlite",
  "shrike-ffi",
+ "shrike-store-api",
  "tracing",
 ]
 
@@ -5093,6 +5094,7 @@ name = "shrike-index"
 version = "0.0.0"
 dependencies = [
  "shrike-ffi",
+ "shrike-store-api",
  "tracing",
  "usearch",
 ]
@@ -5111,6 +5113,7 @@ dependencies = [
  "shrike-ffi",
  "shrike-index",
  "shrike-schemas",
+ "shrike-store-api",
  "tokio",
  "tracing",
 ]
@@ -5154,6 +5157,7 @@ dependencies = [
  "shrike-llama-server",
  "shrike-recognize-apple",
  "shrike-schemas",
+ "shrike-store-api",
  "tokio",
  "tracing",
  "tracing-error",
@@ -5178,6 +5182,13 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "shrike-store-api"
+version = "0.1.0"
+dependencies = [
+ "shrike-ffi",
 ]
 
 [[package]]

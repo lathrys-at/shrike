@@ -1,0 +1,14 @@
+# The store contract crate (#389): the traits the kernel consumes for its
+# three stores (collection / vector index / derived text) and each store
+# crate implements — the scale-down seam (engines are swappable compute;
+# stores are the kernel's owned state, composed at assembly). A LEAF — no
+# store deps, no kernel dep, no pyo3, no runtime. If a change here needs
+# more than shrike-ffi, it belongs somewhere else.
+[package]
+name = "shrike-store-api"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+shrike-ffi = { workspace = true }

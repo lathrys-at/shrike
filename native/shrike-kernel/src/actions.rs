@@ -159,8 +159,8 @@ struct NeighborCandidate {
 #[allow(clippy::too_many_arguments)]
 pub fn attach_neighbors(
     core: &CollectionCore,
-    index: Option<&MultiModalIndex>,
-    derived: Option<&DerivedEngine>,
+    index: Option<&dyn VectorIndex>,
+    derived: Option<&dyn DerivedStore>,
     texts: &[String],
     vectors: &[Vec<f32>],
     exclude: &[i64],
@@ -510,9 +510,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
-use shrike_derived::{DerivedEngine, MIN_TRIGRAM};
-use shrike_index::MultiModalIndex;
+use shrike_derived::MIN_TRIGRAM;
 use shrike_schemas::SearchResultGroup;
+use shrike_store_api::{DerivedStore, VectorIndex};
 
 /// One source's per-modality semantic rankings (`search_by_modality`'s row).
 type ModalityHits = std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>;
@@ -755,7 +755,7 @@ fn rank_modality(
 
 fn collect_substring_candidates(
     core: &CollectionCore,
-    derived: Option<&DerivedEngine>,
+    derived: Option<&dyn DerivedStore>,
     text: &str,
     note_data: &mut NoteData,
     exclude: &HashSet<i64>,
@@ -867,7 +867,7 @@ type FuzzyEvidence = HashMap<i64, (String, String, Option<String>)>;
 
 fn collect_fuzzy(
     core: &CollectionCore,
-    derived: Option<&DerivedEngine>,
+    derived: Option<&dyn DerivedStore>,
     text: &str,
     note_data: &mut NoteData,
     exclude: &HashSet<i64>,
@@ -919,8 +919,8 @@ fn collect_fuzzy(
 /// one query vector per source when `args.semantic`.
 pub fn search_notes(
     core: &CollectionCore,
-    index: Option<&MultiModalIndex>,
-    derived: Option<&DerivedEngine>,
+    index: Option<&dyn VectorIndex>,
+    derived: Option<&dyn DerivedStore>,
     tag_keys: Option<&crate::tag_centroids::TagKeyMap>,
     sources: &[SearchSource],
     vectors: &[Vec<f32>],
@@ -1165,6 +1165,8 @@ pub const SUBSTRING_MIN_QUERY: usize = MIN_TRIGRAM;
 mod search_tests {
     use super::*;
     use crate::actions::tests::{add_note, temp_collection};
+    use shrike_derived::DerivedEngine;
+    use shrike_index::MultiModalIndex;
 
     fn derived_for(core: &CollectionCore, dir: &std::path::Path) -> DerivedEngine {
         let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
@@ -1443,6 +1445,8 @@ mod search_tests {
 mod neighbor_tests {
     use super::*;
     use crate::actions::tests::{add_note, temp_collection};
+    use shrike_derived::DerivedEngine;
+    use shrike_index::MultiModalIndex;
 
     fn derived_for(core: &CollectionCore, dir: &std::path::Path) -> DerivedEngine {
         let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();

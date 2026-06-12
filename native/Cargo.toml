@@ -24,6 +24,7 @@ members = [
     "shrike-py",
     "shrike-recognize-apple",
     "shrike-schemas",
+    "shrike-store-api",
 ]
 
 [workspace.package]
@@ -39,3 +40,4 @@ license = "AGPL-3.0-or-later"
 # across 3.12+). Matches the hermetic toolchain's minor.
 pyo3 = { version = "0.28", features = ["extension-module", "abi3-py312"] }
 shrike-ffi = { path = "shrike-ffi" }
+shrike-store-api = { path = "shrike-store-api" }

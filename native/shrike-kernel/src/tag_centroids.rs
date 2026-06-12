@@ -26,7 +26,7 @@ use blake2::digest::consts::U8;
 use blake2::{Blake2b, Digest};
 
 use shrike_ffi::NativeResult;
-use shrike_index::MultiModalIndex;
+use shrike_store_api::VectorIndex;
 
 use crate::TAG_TEXT_SPACE;
 
@@ -218,7 +218,7 @@ impl TagKeyMap {
 /// everything the skipped ones would have.
 pub struct TagRefresher {
     collection: Arc<crate::SerializedCollection>,
-    engine: Arc<MultiModalIndex>,
+    engine: Arc<dyn VectorIndex>,
     keys: Arc<TagKeyMap>,
     config: TagCentroidConfig,
     saver: Arc<crate::index_orchestrator::DebouncedSaver>,
@@ -243,7 +243,7 @@ pub const TAG_REFRESH_WINDOW: f64 = 2.0;
 impl TagRefresher {
     pub fn new(
         collection: Arc<crate::SerializedCollection>,
-        engine: Arc<MultiModalIndex>,
+        engine: Arc<dyn VectorIndex>,
         keys: Arc<TagKeyMap>,
         config: TagCentroidConfig,
         saver: Arc<crate::index_orchestrator::DebouncedSaver>,
@@ -315,7 +315,7 @@ impl TagRefresher {
                 .collection
                 .run(|core| -> NativeResult<_> { Ok((core.note_tag_rows()?, core.note_count()?)) })
                 .await??;
-            recompute(&self.engine, &rows, total, &self.config, &self.keys)?;
+            recompute(&*self.engine, &rows, total, &self.config, &self.keys)?;
             Ok(())
         }
         .await;
@@ -330,7 +330,7 @@ impl TagRefresher {
 /// replace the `tag.text` space wholesale. Returns the centroid count.
 /// Centroid = renormalized mean (the mean of unit vectors is not unit-norm).
 pub fn recompute(
-    engine: &MultiModalIndex,
+    engine: &dyn VectorIndex,
     rows: &[(i64, Vec<String>)],
     total_notes: usize,
     config: &TagCentroidConfig,
@@ -430,7 +430,7 @@ pub const TAG_ACTIVATION: f64 = 0.35;
 /// wins), capped at `cap`. Conditionally present: no tags / no activation /
 /// empty state → an empty ranking, which contributes nothing to RRF.
 pub fn tag_ranking(
-    engine: &MultiModalIndex,
+    engine: &dyn VectorIndex,
     keys: &TagKeyMap,
     query: &[f32],
     threshold: f64,
@@ -493,6 +493,7 @@ pub fn tag_ranking(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shrike_index::MultiModalIndex;
 
     #[test]
     fn hierarchy_expands_prefixes() {

@@ -656,7 +656,7 @@ impl DerivedTextEngine {
 struct NativeIndexEngine {
     /// `Arc`-shared with the kernel's `IndexOrchestrator` (`KernelIndex`):
     /// one engine, two roles — the harness searches it, the kernel maintains it.
-    pub(crate) inner: std::sync::Arc<shrike_index::MultiModalIndex>,
+    pub(crate) inner: std::sync::Arc<dyn shrike_store_api::VectorIndex>,
 }
 
 #[pymethods]

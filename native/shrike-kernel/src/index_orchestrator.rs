@@ -23,7 +23,7 @@ use blake2::{Blake2b, Digest};
 use serde::{Deserialize, Serialize};
 
 use shrike_ffi::{NativeError, NativeResult};
-use shrike_index::MultiModalIndex;
+use shrike_store_api::VectorIndex;
 
 /// The on-disk schema version of a freshly built index (mirrors
 /// `index.INDEX_SCHEMA_VERSION`: v2 = per-modality sub-indexes, #201a).
@@ -158,7 +158,7 @@ struct Shared {
 /// the orchestrator maintains (one set of vectors, two roles).
 pub struct IndexOrchestrator {
     pub(crate) dir: PathBuf,
-    engine: Arc<MultiModalIndex>,
+    engine: Arc<dyn VectorIndex>,
     shared: Mutex<Shared>,
     /// Serializes SAVERS only (#445): `save` snapshots `shared` briefly and
     /// writes files OUTSIDE that lock, so two concurrent saves would race the
@@ -171,7 +171,7 @@ impl IndexOrchestrator {
     /// (the Python `_load` semantics: corrupt meta → unloaded; corrupt/missing
     /// hashes → `None` (rebuild-on-reconcile); engine restore failure clears
     /// both so drift forces a full rebuild).
-    pub fn open(dir: impl Into<PathBuf>, engine: Arc<MultiModalIndex>) -> Self {
+    pub fn open(dir: impl Into<PathBuf>, engine: Arc<dyn VectorIndex>) -> Self {
         let dir = dir.into();
         let mut shared = Shared {
             state: OrchestratorState::Unavailable,
@@ -244,12 +244,12 @@ impl IndexOrchestrator {
         }
     }
 
-    pub fn engine(&self) -> &MultiModalIndex {
-        &self.engine
+    pub fn engine(&self) -> &dyn VectorIndex {
+        &*self.engine
     }
 
     /// The shared engine, for a harness search handle over the same vectors.
-    pub fn engine_arc(&self) -> Arc<MultiModalIndex> {
+    pub fn engine_arc(&self) -> Arc<dyn VectorIndex> {
         Arc::clone(&self.engine)
     }
 
@@ -557,6 +557,7 @@ impl DebouncedSaver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shrike_index::MultiModalIndex;
 
     #[test]
     fn hash_text_matches_python_blake2b() {
@@ -1091,6 +1092,7 @@ impl IndexOrchestrator {
 #[cfg(test)]
 mod op_tests {
     use super::*;
+    use shrike_index::MultiModalIndex;
     use futures::executor::block_on;
     use futures::future::BoxFuture;
 
