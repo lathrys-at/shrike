@@ -14,6 +14,7 @@ module(
 )
 
 bazel_dep(name = "rules_python", version = "2.0.2")
+bazel_dep(name = "rules_cc", version = "0.2.19")  # Bazel 9 removed the native cc_* rules (#420)
 
 # Hermetic CPython, matching .python-version's minor (3.12). The patch level is
 # whatever python-build-standalone build rules_python bundles for this version;
@@ -118,13 +119,13 @@ crate.annotation(
 )
 crate.annotation(
     crate = "anki_i18n",
-    build_script_data = ["@@+_repo_rules+anki_src//:ftl"],
+    build_script_data = ["@@+http_archive+anki_src//:ftl"],
     build_script_env = {
         # The pinned source archive's ftl tree (see @anki_src). EXTRA_FTL_ROOT
         # being set selects the no-qt branch of get_ftl_data; the patched
         # gather.rs tolerates the dir not existing.
         "EXTRA_FTL_ROOT": "_absent_",
-        "FTL_BASE": "$(execpath @@+_repo_rules+anki_src//:ftl)",
+        "FTL_BASE": "$(execpath @@+http_archive+anki_src//:ftl)",
     },
     patch_args = ["-p1"],
     patches = [
