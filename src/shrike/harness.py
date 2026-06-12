@@ -295,10 +295,14 @@ class Harness:
             logger.info("Collection changed while idle; index reconciled")
 
     async def _maybe_build_derived(self) -> None:
-        """Cheap col_mod probe; full text read only on real drift."""
+        """Cheap col_mod probe; the rebuild itself is fire-and-forget — boot
+        and /reload must not block on the FTS5 build (#451 review: the old
+        thread path never did; the store reports BUILDING and searches fall
+        back until ready). The claim in _rebuild_derived dedupes double-fires."""
         col_mod = await self.wrapper.col_mod()
         if self.derived.check_drift(col_mod):
-            await self._rebuild_derived()
+            task = asyncio.ensure_future(self._rebuild_derived())
+            task.add_done_callback(_log_task_failure)
 
     async def _rebuild_derived(self) -> None:
         # Kernel-side rebuild (#445): the field rows used to round-trip the
