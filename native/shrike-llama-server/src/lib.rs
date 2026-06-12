@@ -20,7 +20,11 @@ use std::time::{Duration, Instant};
 use shrike_ffi::{NativeError, NativeResult};
 
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
-pub const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// 50ms, not 250 (#426): a localhost health GET costs ~1ms, and every service
+/// start rounds up to one poll quantum — a small model loads faster than a
+/// single 250ms tick, so the coarser interval was pure added boot latency
+/// (felt acutely by the embedding test suites, which boot servers per fixture).
+pub const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// After a SIGKILL escalation death is fast — a killed process can't linger
 /// like one ignoring SIGTERM. Also bounds the post-kill wait for the kernel

@@ -40,7 +40,7 @@ class TestOnnxRsServer:
             status = httpx.get(f"{base}/status", timeout=5.0).json()
             if status["embedding"]["available"]:
                 return server
-            time.sleep(0.5)
+            time.sleep(0.05)
         pytest.fail("onnx-rs embedding service did not become available")
 
     def test_health_reports_native_backend(self, srv: ServerInfo) -> None:
@@ -79,7 +79,7 @@ class TestOnnxRsServer:
             idx = httpx.get(f"{base}/status", timeout=5.0).json()["index"]
             if idx.get("state") == "ready" and idx.get("size", 0) >= 3:
                 break
-            time.sleep(0.5)
+            time.sleep(0.05)
         else:
             pytest.fail("index did not become ready")
 

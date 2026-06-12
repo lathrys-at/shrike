@@ -80,7 +80,7 @@ def _wait_for_index_ready(server: ServerInfo, timeout: float = 60.0) -> dict:
         idx = httpx.get(f"{base}/status", timeout=5.0).json().get("index", {})
         if idx.get("state") == "ready" and idx.get("size", 0) > 0:
             return idx
-        time.sleep(0.5)
+        time.sleep(0.05)
     raise TimeoutError("Index did not become ready")
 
 
@@ -118,7 +118,7 @@ def backend_server(request: pytest.FixtureRequest, server_factory) -> tuple[Serv
     while time.monotonic() < deadline:
         if httpx.get(f"{base}/status", timeout=5.0).json()["embedding"]["available"]:
             break
-        time.sleep(0.5)
+        time.sleep(0.05)
     else:
         pytest.skip(f"{backend} embedding service did not become available")
 

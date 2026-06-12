@@ -49,6 +49,7 @@ alias(
 py_library(
     name = "conftest",
     srcs = [
+        "backend_cases.py",
         "conftest.py",
         "model_cache.py",
     ],
@@ -61,30 +62,51 @@ py_library(
     ],
 )
 
+# The embedding-half rosters, named here so :integration can be a GLOB minus
+# these (#426): an explicit srcs list silently orphans new files — five test
+# files on disk were in no target at all, so they ran in no CI lane. With the
+# glob, a new test file lands in :integration by default; if it actually needs
+# model externals it fails loudly there, and the author moves it into a half.
+_EMBEDDING_CORE = [
+    "test_embedding.py",
+    "test_semantic.py",
+]
+
+_EMBEDDING_BACKENDS = [
+    "test_backend_conformance.py",
+    "test_backends.py",
+    "test_clip_model.py",
+    "test_clip_native.py",
+    "test_fused_pipeline.py",
+    "test_onnx_models.py",
+    "test_onnx_native.py",
+]
+
 # Non-embedding integration: one aggregate target, `-n auto` (xdist), mirroring the
 # pip `pytest tests/integration -n auto` lane — import + server-spawn cost amortized.
+# Glob-partitioned: everything that isn't an embedding half runs here.
 pytest_test(
     name = "integration",
     size = "large",
-    srcs = [
-        "test_cli.py",
-        "test_media.py",
-        "test_security.py",
-        "test_tools.py",
-    ],
+    srcs = glob(
+        ["test_*.py"],
+        exclude = _EMBEDDING_CORE + _EMBEDDING_BACKENDS,
+    ),
     deps = [":conftest"],
 )
 
 # Embedding integration: two `manual` halves (so the per-PR //... lane never
-# fetches the hundreds of MB of model + llama-server externals; they run as a
-# gated step in the bazel lane, #262/#418). Pulls models as pinned http_files and
-# the host llama-server as an http_archive; the conftest assembles whichever are
-# in a target's runfiles. Each half runs SERIALLY (xdist=None): it's
-# model-load-bound with session-scoped servers, so one process = one llama boot +
-# one load of each model, not N — but the two halves run CONCURRENTLY as separate
-# Bazel test actions, each booting only its own models, so the lane's wall cost
-# is ~max of the halves instead of their sum. Split balanced by measured per-file
-# cost (#418: core ≈ 12s, backends ≈ 17s locally), not by theme alone.
+# fetches the hundreds of MB of model + llama-server externals; they run as
+# part of the unified lane, #262/#418/#422). Pulls models as pinned http_files
+# and the host llama-server as an http_archive; the conftest assembles
+# whichever are in a target's runfiles (atomically, so any future xdist
+# workers can't race the copy). Each half runs SERIALLY (xdist=None): it's
+# model-load-bound with session/module-scoped servers, so one process = one
+# boot per fixture — measured (#426): file-parallel xdist was a net LOSS here
+# (each extra worker pays the full interpreter+import tax and oversubscribes
+# the runner against the other concurrent test actions). The two halves run
+# CONCURRENTLY as separate Bazel test actions, so the lane's wall cost is
+# ~max of the halves, not their sum.
 
 # The llama-server core: the embedding-service lifecycle (incl. orphan reaping)
 # + semantic search / neighbors / index CLI against the GGUF model. The server
@@ -93,10 +115,7 @@ pytest_test(
 pytest_test(
     name = "embedding_core",
     size = "large",
-    srcs = [
-        "test_embedding.py",
-        "test_semantic.py",
-    ],
+    srcs = _EMBEDDING_CORE,
     tags = ["manual"],
     xdist = None,
     deps = [":conftest"],
@@ -106,19 +125,15 @@ pytest_test(
     ],
 )
 
-# The backend zoo: per-backend contracts (llama / onnx fp32+int8 / clip) and the
-# model lineages. //bin:server_embedding carries the onnx/clip extras for the
-# tests whose server loads a backend (test_backends). Keeps llama_server + the
-# GGUF too: test_backends exercises LlamaServerBackend alongside the in-process
-# ones.
+# The backend zoo: per-backend contracts (llama / onnx fp32+int8 / clip,
+# conformance + native-attach + the fused pipeline) and the model lineages.
+# //bin:server_embedding carries the onnx/clip extras for the tests whose
+# server loads a backend. Keeps llama_server + the GGUF too: test_backends
+# exercises LlamaServerBackend alongside the in-process ones.
 pytest_test(
     name = "embedding_backends",
     size = "large",
-    srcs = [
-        "test_backends.py",
-        "test_clip_model.py",
-        "test_onnx_models.py",
-    ],
+    srcs = _EMBEDDING_BACKENDS,
     tags = ["manual"],
     xdist = None,
     deps = [

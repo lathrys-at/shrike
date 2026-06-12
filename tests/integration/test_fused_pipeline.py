@@ -80,7 +80,7 @@ class TestFullyNativeServer:
         while time.monotonic() < deadline:
             if httpx.get(f"{base}/status", timeout=5.0).json()["embedding"]["available"]:
                 return server
-            time.sleep(0.5)
+            time.sleep(0.05)
         pytest.fail("fully-native embedding service did not become available")
 
     def test_upsert_index_search_round_trip(self, srv: ServerInfo) -> None:
@@ -112,7 +112,7 @@ class TestFullyNativeServer:
             idx = httpx.get(f"{base}/status", timeout=5.0).json()["index"]
             if idx.get("state") == "ready" and idx.get("size", 0) >= 3:
                 break
-            time.sleep(0.5)
+            time.sleep(0.05)
         else:
             pytest.fail("index did not become ready")
 
