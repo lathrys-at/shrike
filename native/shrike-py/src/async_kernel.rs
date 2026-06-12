@@ -482,14 +482,16 @@ impl AsyncKernel {
         )
     }
 
-    /// Flush the index, then close the collection — awaitable.
+    /// Flush the index, then close the collection AND drain the actor
+    /// (`Kernel::close` — the #374 interpreter-teardown guard: nothing is
+    /// mid-job when this resolves). Awaitable.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
         future_into_py(
             py,
             shrike_kernel::spawn_op(async move {
                 let _ = kernel.index().save();
-                kernel.collection().close().await
+                kernel.close().await
             }),
         )
     }
