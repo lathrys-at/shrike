@@ -55,7 +55,8 @@ pub struct ServiceNote {
     pub tags: Vec<String>,
 }
 
-/// One note's full raw field map: `(note_id, names, values)`.
+/// One note's full raw field map: `(note_id, names, values)` — owned names
+/// because this is the pyo3 wire shape the binding hands across.
 pub type OwnedFieldRow = (i64, Vec<String>, Vec<String>);
 
 /// One store_media item after the kernel's off-actor prepare (#490): byte
