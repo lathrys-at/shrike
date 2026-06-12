@@ -169,6 +169,9 @@ class TestRecognition:
                 media_exists=lambda name: name in media,
             )
             await harness.boot(start_embedding=False)
+            # Deterministic (#471): the boot-drift derived rebuild commits
+            # off the actor; settle it before racing ingests against it.
+            await harness.settle_background()
             await harness.wrapper.upsert_notes(
                 [
                     {
