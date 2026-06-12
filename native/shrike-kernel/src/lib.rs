@@ -785,6 +785,17 @@ impl Kernel {
         if written.is_empty() {
             return Ok(());
         }
+        // First-occurrence dedupe (#445): a batch that wrote the same note
+        // twice must not index it twice — and the collection readers' move-
+        // out assembly hands a repeated id its content on the first
+        // occurrence only.
+        let mut seen = std::collections::BTreeSet::new();
+        let written: Vec<i64> = written
+            .iter()
+            .copied()
+            .filter(|id| seen.insert(*id))
+            .collect();
+        let written = &written[..];
         let ids = written.to_vec();
         let (raw_inputs, rows, tagged) = self
             .collection

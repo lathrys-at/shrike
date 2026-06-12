@@ -48,7 +48,13 @@ static WS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
 /// Replace cloze deletions with their answer text (wrapper + hint dropped).
 /// Iterates to flatten shallow nesting; bounded like the Python original.
-fn fill_clozes(text: &str) -> String {
+/// Borrowed pass-through for the overwhelmingly common cloze-free field
+/// (#445: the old unconditional `to_string` copied every field of every
+/// note on the rebuild path).
+fn fill_clozes(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("{{c") {
+        return std::borrow::Cow::Borrowed(text);
+    }
     let mut text = text.to_string();
     for _ in 0..10 {
         let new = CLOZE_RE
@@ -61,11 +67,11 @@ fn fill_clozes(text: &str) -> String {
             })
             .into_owned();
         if new == text {
-            return new;
+            break;
         }
         text = new;
     }
-    text
+    std::borrow::Cow::Owned(text)
 }
 
 /// Turn one raw Anki field value into stable plain text for embedding —
@@ -83,8 +89,21 @@ pub fn normalize_for_embedding(
     let text = MATHJAX_RE.replace_all(&text, " ");
     let text = SOUND_RE.replace_all(&text, " ");
     let text = BLOCK_TAG_RE.replace_all(&text, " ");
-    let text = strip_html(&text)?;
-    let text = text.replace('\u{a0}', " ");
+    // Skip the strip service call when it provably can't change anything:
+    // with no tag ('<') and no entity ('&') the pinned anki stripper is
+    // byte-identity (#445 — verified against the real backend; on the
+    // rebuild path this drops a per-field RPC for every plain-text field).
+    let text: std::borrow::Cow<'_, str> = if text.contains('<') || text.contains('&') {
+        std::borrow::Cow::Owned(strip_html(&text)?)
+    } else {
+        text
+    };
+    // NBSP replace only when one exists (gated: `replace` always reallocates).
+    let text: std::borrow::Cow<'_, str> = if text.contains('\u{a0}') {
+        std::borrow::Cow::Owned(text.replace('\u{a0}', " "))
+    } else {
+        text
+    };
     Ok(WS_RE.replace_all(&text, " ").trim().to_string())
 }
 
@@ -136,7 +155,14 @@ pub fn field_is_blank(
 /// property: attributes are tokenized, so a `data-src=` or a `src=` inside
 /// another attribute's quoted value can't be mistaken for the tag's own src.
 pub fn extract_image_refs(value: &str) -> Vec<String> {
-    if value.is_empty() || !value.to_lowercase().contains("<img") {
+    // Same ASCII-case-insensitive byte probe `img_src_values` uses — the
+    // old `to_lowercase()` allocated a full copy of every field value of
+    // every note just to answer "any <img here?" (#445).
+    let has_img = value
+        .as_bytes()
+        .windows(4)
+        .any(|w| w.eq_ignore_ascii_case(b"<img"));
+    if !has_img {
         return Vec::new();
     }
     let mut names: Vec<String> = Vec::new();
@@ -321,6 +347,31 @@ mod tests {
             normalize_for_embedding("x [sound:a.mp3] \\(e=mc^2\\) [latex]y[/latex]  z", &no_html)
                 .unwrap();
         assert_eq!(out, "x e=mc^2 y z");
+    }
+
+    #[test]
+    fn strip_skipped_only_without_tags_and_entities() {
+        // #445: the strip service call is skipped when it provably can't
+        // change anything (no '<', no '&' — the pinned anki stripper is
+        // byte-identity there; the tests/native parity suite pins the
+        // real-backend equivalence). The bomb proves the skip; the second
+        // case proves tags/entities still go through the stripper.
+        let bomb = |_: &str| -> NativeResult<String> { panic!("strip must not be called") };
+        assert_eq!(
+            normalize_for_embedding("plain text  here", &bomb).unwrap(),
+            "plain text here"
+        );
+        let called =
+            |s: &str| -> NativeResult<String> { Ok(s.replace("<b>", "").replace("</b>", "")) };
+        assert_eq!(
+            normalize_for_embedding("a <b>bold</b>", &called).unwrap(),
+            "a bold"
+        );
+        assert_eq!(
+            normalize_for_embedding("salt &amp; pepper", &|s: &str| Ok(s.replace("&amp;", "&")))
+                .unwrap(),
+            "salt & pepper"
+        );
     }
 
     #[test]

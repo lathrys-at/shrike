@@ -39,8 +39,14 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// One note's `(note_id, field_names, field_values)`.
-type NoteFieldRow = (i64, Vec<String>, Vec<String>);
+/// One note's `(note_id, field_names, field_values)`. Field names are
+/// shared per notetype (#445): the old per-note `Vec<String>` clone copied
+/// every field name once per note — ~400k string allocations per rebuild
+/// read at 100k notes.
+type NoteFieldRow = (i64, std::sync::Arc<Vec<String>>, Vec<String>);
+
+/// The binding-facing field-map row: owned names (the pyo3 wire shape).
+pub type OwnedFieldRow = (i64, Vec<String>, Vec<String>);
 
 fn ids_sql_list(ids: &[i64]) -> String {
     ids.iter()
@@ -78,18 +84,19 @@ impl CollectionCore {
             };
             rows.insert(id, (mid, flds.to_string()));
         }
-        let mut field_names: HashMap<i64, Vec<String>> = HashMap::new();
+        let mut field_names: HashMap<i64, std::sync::Arc<Vec<String>>> = HashMap::new();
         let mut out = Vec::new();
         for nid in note_ids {
             let Some((mid, flds)) = rows.get(nid) else {
                 continue;
             };
             let names = match field_names.get(mid) {
-                Some(n) => n.clone(),
+                Some(n) => std::sync::Arc::clone(n),
                 None => {
                     let nt = self.adapter.notetype(*mid)?;
-                    let names: Vec<String> = nt.fields.into_iter().map(|f| f.name).collect();
-                    field_names.insert(*mid, names.clone());
+                    let names: std::sync::Arc<Vec<String>> =
+                        std::sync::Arc::new(nt.fields.into_iter().map(|f| f.name).collect());
+                    field_names.insert(*mid, std::sync::Arc::clone(&names));
                     names
                 }
             };
@@ -100,7 +107,10 @@ impl CollectionCore {
     }
 
     /// Normalized embedding text per note id, "" for missing ids (positions
-    /// preserved) — the port of `CollectionWrapper.note_texts`.
+    /// preserved; a REPEATED id carries its text on the first occurrence
+    /// only — the move-out assembly (#445) replaced a full per-note text
+    /// clone, and no caller passes duplicates).
+    /// The port of `CollectionWrapper.note_texts`.
     pub fn note_texts(&self, note_ids: &[i64]) -> NativeResult<Vec<String>> {
         let strip = self.strip_fn();
         let mut rendered: HashMap<i64, String> = HashMap::new();
@@ -109,7 +119,7 @@ impl CollectionCore {
         }
         Ok(note_ids
             .iter()
-            .map(|nid| rendered.get(nid).cloned().unwrap_or_default())
+            .map(|nid| rendered.remove(nid).unwrap_or_default())
             .collect())
     }
 
@@ -138,7 +148,10 @@ impl CollectionCore {
         Ok(note_ids
             .iter()
             .map(|nid| {
-                let (text, images) = by_id.get(nid).cloned().unwrap_or_default();
+                // Move-out, not clone (#445): the rebuild path assembled a
+                // second full copy of every note's text here. Same repeated-
+                // id caveat as `note_texts` (no caller passes duplicates).
+                let (text, images) = by_id.remove(nid).unwrap_or_default();
                 (*nid, text, images)
             })
             .collect())
@@ -233,8 +246,14 @@ impl CollectionCore {
     /// unlike `derived_field_rows`, empty fields are included (`note_field_map`
     /// feeds substring_info + the find/replace preview, which want every
     /// field). Missing ids are absent.
-    pub fn note_field_map(&self, note_ids: &[i64]) -> NativeResult<Vec<NoteFieldRow>> {
-        self.note_field_rows(note_ids)
+    pub fn note_field_map(&self, note_ids: &[i64]) -> NativeResult<Vec<OwnedFieldRow>> {
+        // Owned names on this surface (the pyo3 binding's wire shape); the
+        // Arc sharing is an internal property of `note_field_rows` (#445).
+        Ok(self
+            .note_field_rows(note_ids)?
+            .into_iter()
+            .map(|(nid, names, values)| (nid, names.as_ref().clone(), values))
+            .collect())
     }
 
     /// One field value through the embedding normalization — the parity-test
