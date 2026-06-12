@@ -9,26 +9,28 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{json, Value};
 use shrike_ffi::{NativeError, NativeResult};
 
+use shrike_schemas::{NoteInput, NoteValidationReason, SkipReason, UpsertAction, UpsertNoteResult};
+
 use crate::adapter::FieldsState;
-use crate::CollectionCore;
+use crate::{CollectionCore, DuplicatePolicy};
 
 // Mirrors collection.py's _STRUCTURAL_PROBLEMS / _DUPLICATE_MESSAGE exactly
 // (the parity test compares result dicts verbatim).
 const DUPLICATE_MESSAGE: &str = "The first field duplicates an existing note of this type.";
 
-fn structural_problem(state: FieldsState) -> Option<(&'static str, &'static str)> {
+fn structural_problem(state: FieldsState) -> Option<(NoteValidationReason, &'static str)> {
     match state {
-        FieldsState::Empty => Some(("empty", "The first field is empty.")),
+        FieldsState::Empty => Some((NoteValidationReason::Empty, "The first field is empty.")),
         FieldsState::MissingCloze => Some((
-            "missing_cloze",
+            NoteValidationReason::MissingCloze,
             "No cloze deletions ({{c1::...}}) were found in the cloze field.",
         )),
         FieldsState::NotetypeNotCloze => Some((
-            "notetype_not_cloze",
+            NoteValidationReason::NotetypeNotCloze,
             "Cloze syntax was used but the note type is not a cloze type.",
         )),
         FieldsState::FieldNotCloze => Some((
-            "field_not_cloze",
+            NoteValidationReason::FieldNotCloze,
             "A cloze deletion is in a field that is not the cloze field.",
         )),
         _ => None,
@@ -71,55 +73,53 @@ impl CollectionCore {
     /// with the same `reason` vocabulary as `_upsert_notes`.
     pub fn upsert_notes(
         &self,
-        notes_json: &str,
-        on_duplicate: &str,
+        notes: &[NoteInput],
+        policy: DuplicatePolicy,
         dry_run: bool,
-    ) -> NativeResult<String> {
-        let notes: Vec<Value> = serde_json::from_str(notes_json)
-            .map_err(|e| NativeError::invalid_input(format!("notes must be a JSON list: {e}")))?;
-        if !matches!(on_duplicate, "error" | "skip" | "allow") {
-            return Err(NativeError::invalid_input(format!(
-                "on_duplicate must be error/skip/allow (got {on_duplicate:?})"
-            )));
-        }
-        let mut results: Vec<Value> = Vec::new();
+    ) -> NativeResult<Vec<UpsertNoteResult>> {
+        let mut results: Vec<UpsertNoteResult> = Vec::new();
         let mut memo = UpsertMemo::default();
         for (index, note_input) in notes.iter().enumerate() {
-            let result = if note_input.get("id").is_some_and(|v| !v.is_null()) {
+            let result = if note_input.id.is_some() {
                 self.update_note_named(note_input, index, dry_run, &mut memo)
             } else {
-                self.create_note_named(note_input, index, on_duplicate, dry_run, &mut memo)
+                self.create_note_named(note_input, index, policy, dry_run, &mut memo)
             };
             results.push(match result {
                 Ok(r) => r,
                 // Per-item try/except: one failure doesn't sink the batch.
-                Err(e) => json!({"status": "error", "index": index, "error": e.message}),
+                Err(e) => UpsertNoteResult::Error {
+                    index: index as i64,
+                    error: e.message,
+                    reason: None,
+                },
             });
         }
-        Ok(json!(results).to_string())
+        Ok(results)
     }
 
     fn create_note_named(
         &self,
-        note_input: &Value,
+        note_input: &NoteInput,
         index: usize,
-        on_duplicate: &str,
+        policy: DuplicatePolicy,
         dry_run: bool,
         memo: &mut UpsertMemo,
-    ) -> NativeResult<Value> {
+    ) -> NativeResult<UpsertNoteResult> {
+        let index = index as i64;
         let note_type_name = note_input
-            .get("note_type")
-            .and_then(Value::as_str)
+            .note_type
+            .as_deref()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| NativeError::invalid_input("note_type is required for new notes"))?;
         let deck_ref = note_input
-            .get("deck")
-            .and_then(Value::as_str)
+            .deck
+            .as_deref()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| NativeError::invalid_input("deck is required for new notes"))?;
         let fields = note_input
-            .get("fields")
-            .and_then(Value::as_object)
+            .fields
+            .as_ref()
             .filter(|m| !m.is_empty())
             .ok_or_else(|| NativeError::invalid_input("fields is required for new notes"))?;
 
@@ -133,12 +133,11 @@ impl CollectionCore {
             }
         };
         let Some(notetype_id) = notetype_id else {
-            return Ok(json!({
-                "status": "error",
-                "index": index,
-                "error": format!("Note type '{note_type_name}' not found"),
-                "reason": "unknown_note_type",
-            }));
+            return Ok(UpsertNoteResult::Error {
+                index,
+                error: format!("Note type '{note_type_name}' not found"),
+                reason: Some(NoteValidationReason::UnknownNoteType),
+            });
         };
 
         // Resolve the deck reference (read-only: a plain not-yet-existing name
@@ -162,58 +161,64 @@ impl CollectionCore {
         };
         for (field_name, value) in fields {
             let Some(pos) = names.iter().position(|n| n == field_name) else {
-                return Ok(json!({
-                    "status": "error",
-                    "index": index,
-                    "error": format!(
+                return Ok(UpsertNoteResult::Error {
+                    index,
+                    error: format!(
                         "Field '{field_name}' not found in note type '{note_type_name}'. \
                          Available fields: {}",
                         py_list_repr(&names)
                     ),
-                    "reason": "unknown_field",
-                }));
+                    reason: Some(NoteValidationReason::UnknownField),
+                });
             };
-            note.fields[pos] = value.as_str().unwrap_or_default().to_string();
+            note.fields[pos] = value.clone();
         }
-        if let Some(tags) = note_input.get("tags").and_then(Value::as_array) {
-            note.tags = tags
-                .iter()
-                .map(|t| t.as_str().unwrap_or_default().to_string())
-                .collect();
+        if let Some(tags) = &note_input.tags {
+            note.tags = tags.clone();
         }
 
         // Anki's own add-note validation, before any write (dry runs and real
         // runs classify identically).
         match self.adapter.fields_check(&note)? {
             FieldsState::Normal => {}
-            FieldsState::Duplicate => match on_duplicate {
-                "allow" => {}
-                "skip" => {
-                    return Ok(json!({"status": "skipped", "index": index, "reason": "duplicate"}));
+            FieldsState::Duplicate => match policy {
+                DuplicatePolicy::Allow => {}
+                DuplicatePolicy::Skip => {
+                    return Ok(UpsertNoteResult::Skipped {
+                        index,
+                        reason: SkipReason::Duplicate,
+                    });
                 }
-                _ => {
-                    return Ok(json!({
-                        "status": "error",
-                        "index": index,
-                        "error": DUPLICATE_MESSAGE,
-                        "reason": "duplicate",
-                    }));
+                DuplicatePolicy::Error => {
+                    return Ok(UpsertNoteResult::Error {
+                        index,
+                        error: DUPLICATE_MESSAGE.to_string(),
+                        reason: Some(NoteValidationReason::Duplicate),
+                    });
                 }
             },
             other => {
-                let (reason, message) = structural_problem(other)
-                    .unwrap_or(("invalid", "Note failed Anki's field validation."));
-                return Ok(json!({
-                    "status": "error",
-                    "index": index,
-                    "error": message,
-                    "reason": reason,
-                }));
+                // The fallback (an unmapped FieldsState) carries reason: None
+                // — the typed wire has no "invalid" variant, and the message
+                // still says what happened. (The old raw "invalid" string
+                // would have failed response validation anyway.)
+                let (reason, message) = match structural_problem(other) {
+                    Some((reason, message)) => (Some(reason), message),
+                    None => (None, "Note failed Anki's field validation."),
+                };
+                return Ok(UpsertNoteResult::Error {
+                    index,
+                    error: message.to_string(),
+                    reason,
+                });
             }
         }
 
         if dry_run {
-            return Ok(json!({"status": "ok", "index": index, "action": "create"}));
+            return Ok(UpsertNoteResult::Ok {
+                index,
+                action: UpsertAction::Create,
+            });
         }
 
         let deck_id = match self.adapter.deck_id_by_name(&deck_name)? {
@@ -221,19 +226,23 @@ impl CollectionCore {
             None => self.adapter.add_deck(&deck_name)?,
         };
         let id = self.adapter.add_note(&note, deck_id)?;
-        Ok(json!({"status": "created", "id": id}))
+        Ok(UpsertNoteResult::Created {
+            id,
+            neighbors: Vec::new(),
+            neighbors_unavailable: false,
+        })
     }
 
     fn update_note_named(
         &self,
-        note_input: &Value,
+        note_input: &NoteInput,
         index: usize,
         dry_run: bool,
         memo: &mut UpsertMemo,
-    ) -> NativeResult<Value> {
+    ) -> NativeResult<UpsertNoteResult> {
+        let index = index as i64;
         let nid = note_input
-            .get("id")
-            .and_then(Value::as_i64)
+            .id
             .ok_or_else(|| NativeError::invalid_input("id must be an integer"))?;
         let mut note = self
             .adapter
@@ -253,7 +262,7 @@ impl CollectionCore {
             }
         };
 
-        if let Some(requested) = note_input.get("note_type").and_then(Value::as_str) {
+        if let Some(requested) = note_input.note_type.as_deref() {
             if requested != current_type {
                 return Err(NativeError::invalid_input(format!(
                     "Cannot change note type (current: '{current_type}', \
@@ -262,37 +271,36 @@ impl CollectionCore {
             }
         }
 
-        if let Some(fields) = note_input.get("fields").and_then(Value::as_object) {
+        if let Some(fields) = &note_input.fields {
             for (field_name, value) in fields {
                 let Some(pos) = names.iter().position(|n| n == field_name) else {
-                    return Ok(json!({
-                        "status": "error",
-                        "index": index,
-                        "error": format!(
+                    return Ok(UpsertNoteResult::Error {
+                        index,
+                        error: format!(
                             "Field '{field_name}' not found in note type '{current_type}'. \
                              Available fields: {}",
                             py_list_repr(&names)
                         ),
-                        "reason": "unknown_field",
-                    }));
+                        reason: Some(NoteValidationReason::UnknownField),
+                    });
                 };
-                note.fields[pos] = value.as_str().unwrap_or_default().to_string();
+                note.fields[pos] = value.clone();
             }
         }
-        if let Some(tags) = note_input.get("tags").and_then(Value::as_array) {
-            note.tags = tags
-                .iter()
-                .map(|t| t.as_str().unwrap_or_default().to_string())
-                .collect();
+        if let Some(tags) = &note_input.tags {
+            note.tags = tags.clone();
         }
 
         if dry_run {
-            return Ok(json!({"status": "ok", "index": index, "action": "update"}));
+            return Ok(UpsertNoteResult::Ok {
+                index,
+                action: UpsertAction::Update,
+            });
         }
 
         self.adapter.update_note(&note)?;
 
-        if let Some(deck_ref) = note_input.get("deck").and_then(Value::as_str) {
+        if let Some(deck_ref) = note_input.deck.as_deref() {
             let Some(deck_name) = self.resolve_deck_ref(deck_ref)? else {
                 return Err(NativeError::invalid_input(format!(
                     "Deck '{deck_ref}' not found"
@@ -306,7 +314,11 @@ impl CollectionCore {
             self.adapter.set_card_deck(&card_ids, deck_id)?;
         }
 
-        Ok(json!({"status": "updated", "id": nid}))
+        Ok(UpsertNoteResult::Updated {
+            id: nid,
+            neighbors: Vec::new(),
+            neighbors_unavailable: false,
+        })
     }
 
     /// Edit tags on a note set — `set_tags` is a full replace (mutually
