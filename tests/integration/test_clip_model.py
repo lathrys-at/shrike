@@ -47,7 +47,13 @@ def be(clip_model: Path) -> Iterator[ClipBackend]:
     backend.stop()
 
 
-def _png_bytes(color: tuple[int, int, int], size: tuple[int, int] = (256, 256)) -> bytes:
+# 224x224 == the CLIP preprocess crop size (#441 fixture eval): the native
+# preprocess runs a CatmullRom resize UNCONDITIONALLY, and that resize — not
+# decode or inference — dominates per-image cost (53ms from 256², 37ms from
+# 96², 16.7ms at crop size). Solid-colour vectors are bit-identical across
+# source sizes, so the contracts are unaffected; the one deliberately non-224
+# image below (300x200) stays as the resize+crop path canary.
+def _png_bytes(color: tuple[int, int, int], size: tuple[int, int] = (224, 224)) -> bytes:
     from PIL import Image
 
     buf = io.BytesIO()
@@ -62,7 +68,7 @@ class TestClipModel:
         from PIL import Image
 
         for color, name in [((220, 30, 30), "red"), ((30, 30, 220), "blue")]:
-            iv = np.array(be.embed_images([Image.new("RGB", (256, 256), color)])[0])
+            iv = np.array(be.embed_images([Image.new("RGB", (224, 224), color)])[0])
             match = float(iv @ np.array(be.embed_texts([f"a solid {name} colour image"])[0]))
             others = [float(iv @ np.array(be.embed_texts([t])[0])) for t in _UNRELATED]
             # A text query lands nearer the matching image than unrelated ones — image-by-text.
@@ -73,6 +79,7 @@ class TestClipModel:
 
         assert be.embedding_dim() == _CLIP_DIM
         tvecs = be.embed_texts(["a cat", "a dog"])
+        # Deliberately non-224: the resize+crop path canary (see _png_bytes note).
         ivec = np.array(be.embed_images([Image.new("RGB", (300, 200), (10, 200, 10))])[0])
         # Text + image both land in the same 512-dim space, L2-normalized.
         assert all(len(v) == _CLIP_DIM for v in tvecs) and len(ivec) == _CLIP_DIM
@@ -141,7 +148,7 @@ class TestClipImageIndex:
 
         async def flow():
             kernel, media_dir = await self._open_kernel(tmp_path, be)
-            Image.new("RGB", (128, 128), (220, 30, 30)).save(os.path.join(media_dir, "red.png"))
+            Image.new("RGB", (224, 224), (220, 30, 30)).save(os.path.join(media_dir, "red.png"))
             # The note's TEXT never names a colour; its meaning lives in the image.
             red, other = await self._seed(
                 kernel,
@@ -174,7 +181,7 @@ class TestClipImageIndex:
 
         async def flow():
             kernel, media_dir = await self._open_kernel(tmp_path, be)
-            Image.new("RGB", (128, 128), (220, 30, 30)).save(os.path.join(media_dir, "red.png"))
+            Image.new("RGB", (224, 224), (220, 30, 30)).save(os.path.join(media_dir, "red.png"))
             red, other = await self._seed(
                 kernel,
                 [self._note('study card <img src="red.png">'), self._note("ancient rome")],
@@ -212,7 +219,7 @@ class TestClipImageIndex:
                 r, g, b = colorsys.hsv_to_rgb(i / n, 0.85, 0.9)  # hue 0 (card 0) is red
                 rgb = (int(r * 255), int(g * 255), int(b * 255))
                 fn = f"c{i}.png"
-                Image.new("RGB", (96, 96), rgb).save(os.path.join(media_dir, fn))
+                Image.new("RGB", (224, 224), rgb).save(os.path.join(media_dir, fn))
                 notes.append(self._note(f'study card number {i} <img src="{fn}">'))
             await self._seed(kernel, notes)
             await kernel.rebuild_index()  # full rebuild calibrates the gate (#201b)
