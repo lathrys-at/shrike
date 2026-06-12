@@ -269,7 +269,7 @@
           "@@//native/shrike-compute/Cargo.toml": "d65f8a01aa370340b849f6404e43fd100b66839cba34f5020300df1edf7c9335",
           "@@//native/shrike-derived/Cargo.toml": "f36d6c2661a5d424095cd1478b799b27726cba47af493014e6e782f314eddad6",
           "@@//native/shrike-embed-remote/Cargo.toml": "8d6fa9e0d0bee4a82f2f21d2c5386d8dc81d7099605ee6a5ce8ef7f24982df94",
-          "@@//native/shrike-embed/Cargo.toml": "713a365af5c8f4fcb7eff7c37e2864d2d8b48bc20a89fe802ed74059135f6d89",
+          "@@//native/shrike-embed/Cargo.toml": "9315e1af3a022d7ba0441b91a9ec542cbb617d26686cef9a00fcf81da795fa17",
           "@@//native/shrike-engine-api/Cargo.toml": "0724d4b9a9a4181431c5d0cf528b92aeddf15116d29cf4ee42a0f1781dd6c68b",
           "@@//native/shrike-ffi/Cargo.toml": "301d8940c81e622ec51284cb10bfcb1ae260cf900a3fc182c5d2ff2af62f6119",
           "@@//native/shrike-index/Cargo.toml": "d64349b6c90544f430b6c77ea48c0f2c17f5b77f3786b856ae837a2baef151c0",
