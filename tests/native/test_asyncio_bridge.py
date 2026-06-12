@@ -9,6 +9,7 @@ collection ops → close — plus cancellation and concurrent awaits.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 
 import pytest
@@ -95,6 +96,69 @@ class TestAsyncioBridge:
             return ids
 
         assert len(_run(flow())) == 1
+
+
+class TestBridgeLifecycle:
+    """#387: the bridge releases its state however an op's observation ends.
+
+    ``bridge_parked_forever`` is a never-resolving future that *retains its
+    waker* — the in-flight-op shape (a oneshot receiver parks its waker the
+    same way) whose stored waker once formed a Rust-side reference cycle
+    (future → waker → callback → future slot) invisible to Python's GC.
+    ``bridge_live_poll_callbacks`` counts live callbacks Rust-side, so these
+    assertions don't depend on the GC even seeing the objects.
+    """
+
+    def test_abandoned_loop_releases_bridge_state(self) -> None:
+        baseline = shrike_native.bridge_live_poll_callbacks()
+        holder: list = []
+
+        async def start() -> None:
+            holder.append(shrike_native.bridge_parked_forever())
+            await asyncio.sleep(0)  # let the first poll park the waker
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(start())
+            assert shrike_native.bridge_live_poll_callbacks() > baseline
+        finally:
+            loop.close()
+        # The loop died with the op still pending; dropping the asyncio
+        # future must release the callback — the waker's weak reference and
+        # the GC-visible callback↔future cycle are exactly what #387 fixed.
+        del holder[:], loop
+        gc.collect()
+        assert shrike_native.bridge_live_poll_callbacks() == baseline
+
+    def test_cancellation_releases_bridge_state_promptly(self) -> None:
+        baseline = shrike_native.bridge_live_poll_callbacks()
+
+        async def flow() -> None:
+            fut = shrike_native.bridge_parked_forever()
+            await asyncio.sleep(0)
+            fut.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await fut
+            # The done callback fired on the cancellation itself — the Rust
+            # future is dropped without waiting for a wake that never comes.
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+        asyncio.run(flow())
+        gc.collect()
+        assert shrike_native.bridge_live_poll_callbacks() == baseline
+
+    def test_completion_releases_bridge_state(self, tmp_path) -> None:
+        baseline = shrike_native.bridge_live_poll_callbacks()
+
+        async def flow() -> None:
+            col = await shrike_native.async_collection_open(str(tmp_path / "c.anki2"))
+            assert isinstance(await col.col_mod(), int)
+            await col.close()
+
+        asyncio.run(flow())
+        gc.collect()
+        assert shrike_native.bridge_live_poll_callbacks() == baseline
 
 
 class TestPyEmbedder:
