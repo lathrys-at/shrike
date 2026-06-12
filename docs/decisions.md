@@ -899,7 +899,7 @@ with independent engine futures `try_join`ed (a host-described execution
 graph was rejected: it would push the kernel's consistency invariants into a
 meta-layer every host re-implements). *(Historical note: the original
 host-injected execution machinery — `Inline`/`OnExecutor` over a
-`ComputeExecutor` lane — was superseded days later by the tokio pivot's one
+`ComputeExecutor` lane — was superseded hours later by the tokio pivot's one
 `Blocking` adapter; see the #374 entry below.)*
 
 **Named slots, not a registry — until n>2 capability *kinds*.** Two slots
