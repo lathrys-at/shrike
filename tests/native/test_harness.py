@@ -63,9 +63,14 @@ class TestHarness:
             # Recognition is off until a backend is configured (#228/#485): the
             # keyed-by-source map is empty (distinct from attached-but-errored).
             assert status["recognition"] == {}
-            # The coverage matrix (#498/#235): shape-stable, all-False with
-            # embedding down — no modality is semantically searchable.
-            assert status["coverage"] == {"text": False, "image": False, "audio": False}
+            # The cross-modal coverage matrix (#498/#235): shape-stable, every
+            # (query, target) cell `unavailable` with embedding down — nothing
+            # is reachable natively or via derived text.
+            assert status["coverage"] == {
+                "text": {"text": "unavailable", "image": "unavailable", "audio": "unavailable"},
+                "image": {"text": "unavailable", "image": "unavailable", "audio": "unavailable"},
+                "audio": {"text": "unavailable", "image": "unavailable", "audio": "unavailable"},
+            }
 
             # Index verbs degrade correctly without a backend.
             with pytest.raises(KernelConfigError):

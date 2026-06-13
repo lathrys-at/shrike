@@ -1024,6 +1024,58 @@ class RecognitionEngineStatus(BaseModel):
     fingerprint: str | None = None
 
 
+class CoverageCell(StrEnum):
+    """How one (query-modality → target-modality) pair is reachable (#235).
+
+    The honest cross-modal contract a caller needs to know what a query can
+    actually retrieve:
+
+    - ``native``: a single live embedding space embeds BOTH the query and the
+      target modality, so a query of the one retrieves content of the other in
+      that shared space (text→text whenever a text space is up; text→image when
+      a CLIP/omni space serves both).
+    - ``via_derived_text``: the target isn't natively embeddable from the query,
+      but a recognizer derives TEXT from it into the text space, so the (text)
+      query reaches it there — text→image when an ``ocr`` or ``describe`` engine
+      is attached (OCR text / VLM prose lands in the text vector space),
+      text→audio when an ``asr`` engine is attached. Weaker than ``native``: it
+      searches the derived text, not the media's own content.
+    - ``unavailable``: neither — the target can't be reached from this query.
+    """
+
+    NATIVE = "native"
+    VIA_DERIVED_TEXT = "via_derived_text"
+    UNAVAILABLE = "unavailable"
+
+
+class CoverageRow(BaseModel):
+    """One query modality's reachability to each target modality (#235).
+
+    Every cell is a ``CoverageCell`` — there is no "absent" target, only an
+    ``unavailable`` one, so the shape is stable for clients regardless of which
+    spaces/recognizers came up."""
+
+    text: CoverageCell = CoverageCell.UNAVAILABLE
+    image: CoverageCell = CoverageCell.UNAVAILABLE
+    audio: CoverageCell = CoverageCell.UNAVAILABLE
+
+
+class CoverageMatrix(BaseModel):
+    """The cross-modal coverage matrix (#235): for each query modality, a
+    ``CoverageRow`` naming how each target modality is reachable.
+
+    Derived from the live embedding spaces (the ``native`` cells) plus the
+    attached, ready recognizers (the ``via_derived_text`` cells). A typed
+    matrix rather than a flat ``{modality: bool}`` so the surface tells a caller
+    e.g. that text→audio is reachable only via ASR-derived text, not natively.
+    With embedding down every cell is ``unavailable``; with one text space up,
+    text→text is ``native`` and the rest follow from the recognizers."""
+
+    text: CoverageRow = CoverageRow()
+    image: CoverageRow = CoverageRow()
+    audio: CoverageRow = CoverageRow()
+
+
 class DedupStats(BaseModel):
     """Rolling dedup best-match statistics (#207): one sample per upsert draft
     note — the best SEMANTIC neighbor cosine, or a `no_match` tick when none
@@ -1105,11 +1157,13 @@ class ServerStatus(BaseModel):
     # which is a present row with state=error. Defaulted (empty) so older
     # payloads validate.
     recognition: dict[str, RecognitionEngineStatus] = {}
-    # The modality coverage matrix (#498/#235): for each modality, whether a
-    # live embedding space serves it (search by that modality's content lights
-    # up where True). Today at most one space (#229 adds more); None on
-    # payloads from older servers.
-    coverage: dict[str, bool] | None = None
+    # The cross-modal coverage matrix (#498/#235): for each (query, target)
+    # modality pair, how the target is reachable — ``native`` (one space embeds
+    # both), ``via_derived_text`` (a recognizer derives text from the target
+    # into the text space), or ``unavailable``. Derived from the live spaces and
+    # attached recognizers; None on payloads from older servers (which sent the
+    # flat ``{modality: bool}`` shape).
+    coverage: CoverageMatrix | None = None
     # Multi-collection routing (#68): one row per known collection — the
     # daemon's boot/default collection plus every registered profile — with its
     # held/index/col_mod state. None on a single-collection server / older

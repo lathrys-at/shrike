@@ -999,6 +999,47 @@ pub struct CollectionStatus {
     pub col_mod: Option<i64>,
 }
 
+/// How one (query-modality → target-modality) pair is reachable (#235). The
+/// Rust mirror of `shrike.schemas.CoverageCell`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageCell {
+    // A single live space embeds both the query and target modality.
+    Native,
+    // A recognizer derives text from the target into the text space.
+    ViaDerivedText,
+    // Neither — the target can't be reached from this query (the default for a
+    // partial/older payload).
+    #[default]
+    Unavailable,
+}
+
+/// One query modality's reachability to each target modality (#235). The Rust
+/// mirror of `shrike.schemas.CoverageRow`; every cell is a `CoverageCell` (no
+/// absent target, only an `Unavailable` one).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CoverageRow {
+    #[serde(default)]
+    pub text: CoverageCell,
+    #[serde(default)]
+    pub image: CoverageCell,
+    #[serde(default)]
+    pub audio: CoverageCell,
+}
+
+/// The cross-modal coverage matrix (#235): per query modality, a `CoverageRow`
+/// naming how each target modality is reachable. The Rust mirror of
+/// `shrike.schemas.CoverageMatrix`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CoverageMatrix {
+    #[serde(default)]
+    pub text: CoverageRow,
+    #[serde(default)]
+    pub image: CoverageRow,
+    #[serde(default)]
+    pub audio: CoverageRow,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ServerStatus {
     #[serde(default)]
@@ -1031,10 +1072,12 @@ pub struct ServerStatus {
     /// "nothing attached" (distinct from an attached-but-errored engine).
     #[serde(default)]
     pub recognition: std::collections::BTreeMap<String, RecognitionEngineStatus>,
-    /// The modality coverage matrix (#498/#235): per modality, whether a live
-    /// embedding space serves it. None on payloads from older servers.
+    /// The cross-modal coverage matrix (#498/#235): for each (query, target)
+    /// modality pair, how the target is reachable — `native`, `via_derived_text`
+    /// (a recognizer derives text from the target into the text space), or
+    /// `unavailable`. None on payloads from older servers (the flat shape).
     #[serde(default)]
-    pub coverage: Option<std::collections::BTreeMap<String, bool>>,
+    pub coverage: Option<CoverageMatrix>,
     /// Multi-collection routing (#68): one row per known collection (the
     /// boot/default plus every registered profile). None on a single-collection
     /// server / older payloads; the top-level fields describe the default
@@ -1344,6 +1387,8 @@ catalog![
     ("RecognitionEngineStatus", RecognitionEngineStatus),
     ("DerivedStatus", DerivedStatus),
     ("CollectionStatus", CollectionStatus),
+    ("CoverageRow", CoverageRow),
+    ("CoverageMatrix", CoverageMatrix),
     ("ServerStatus", ServerStatus),
     ("IndexRebuildResponse", IndexRebuildResponse),
     ("IndexSaveResponse", IndexSaveResponse),

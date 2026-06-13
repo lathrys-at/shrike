@@ -305,6 +305,16 @@ ROUNDTRIP_CASES: list[tuple[str, dict]] = [
         },
     ),
     (
+        # The cross-modal coverage matrix (#235): every cell value rides Rust
+        # unchanged, pinning the snake_case enum spelling on both sides.
+        "CoverageMatrix",
+        {
+            "text": {"text": "native", "image": "via_derived_text", "audio": "unavailable"},
+            "image": {"text": "unavailable", "image": "unavailable", "audio": "unavailable"},
+            "audio": {"text": "unavailable", "image": "unavailable", "audio": "unavailable"},
+        },
+    ),
+    (
         "SearchMatch",
         {
             "id": 5,

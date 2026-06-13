@@ -36,7 +36,31 @@ from shrike.daemon import (
 )
 from shrike.embedding import BACKEND_ALIASES, SUPPORTED_BACKENDS
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
-from shrike.schemas import ServerStatus
+from shrike.schemas import CoverageCell, CoverageMatrix, CoverageRow, ServerStatus
+
+# The cross-modal coverage cells, styled for the status table (#235): native is
+# the strong (green) form, via-derived-text the weaker (yellow) reachability,
+# unavailable a dim dash so the matrix reads at a glance.
+_COVERAGE_CELL_STYLE: dict[CoverageCell, str] = {
+    CoverageCell.NATIVE: "[green]native[/green]",
+    CoverageCell.VIA_DERIVED_TEXT: "[yellow]via text[/yellow]",
+    CoverageCell.UNAVAILABLE: "[dim]—[/dim]",
+}
+
+# The modalities the matrix is scoped to (mirrors profiles.MODALITIES; the CLI
+# renders from the wire model, which is fixed at these three).
+_COVERAGE_MODALITIES = ("text", "image", "audio")
+
+
+def _render_coverage(coverage: CoverageMatrix) -> None:
+    """Render the cross-modal coverage matrix (#235) as a query×target table."""
+    output.section("Coverage (query → target)")
+    rows: list[list[str]] = []
+    for q in _COVERAGE_MODALITIES:
+        row: CoverageRow = getattr(coverage, q)
+        cells = [_COVERAGE_CELL_STYLE[getattr(row, t)] for t in _COVERAGE_MODALITIES]
+        rows.append([q, *cells])
+    output.table(["query \\ target", *_COVERAGE_MODALITIES], rows)
 
 
 def _render_status(status: ServerStatus) -> None:
@@ -135,13 +159,14 @@ def _render_status(status: ServerStatus) -> None:
     else:
         output.kv("Recognition", "[dim]none (no recognizer attached)[/dim]")
 
-    # The modality coverage matrix (#498/#235): what semantic search can reach.
+    # The cross-modal coverage matrix (#498/#235): for each (query, target)
+    # modality pair, how the target is reachable — native (one space embeds
+    # both), via derived text (a recognizer derives text from the target into
+    # the text space), or unavailable. Rendered as a small table (rows = query
+    # modality, columns = target modality) so the honest cross-modal contract is
+    # legible: e.g. text→audio reads "via text" when only ASR reaches it.
     if status.coverage is not None:
-        served = [m for m, on in status.coverage.items() if on]
-        output.kv(
-            "Semantic coverage",
-            ", ".join(served) if served else "[dim]none (embedding off)[/dim]",
-        )
+        _render_coverage(status.coverage)
 
     # Multi-collection routing (#68): per-collection rows. The figures above
     # (embedding/index/derived) are the DEFAULT collection's — the one the

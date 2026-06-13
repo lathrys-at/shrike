@@ -91,6 +91,10 @@ _INDEX = ["test_index_policy.py"]
 
 _CACHE_LAYOUT = ["test_cache_layout.py"]
 
+# The harness coverage-matrix logic (#235): pure helper over modalities +
+# recognizers, so it needs the harness module (and schemas for the wire model).
+_HARNESS = ["test_coverage_matrix.py"]
+
 _PATHSAFETY = ["test_pathsafety.py"]
 
 _DERIVED = [
@@ -232,6 +236,17 @@ pytest_test(
 )
 
 pytest_test(
+    name = "harness",
+    srcs = _HARNESS,
+    xdist = None,
+    deps = [
+        ":conftest",
+        "//src/shrike:harness",
+        "//src/shrike:schemas",
+    ],
+)
+
+pytest_test(
     name = "pathsafety",
     srcs = _PATHSAFETY,
     xdist = None,
@@ -334,7 +349,7 @@ pytest_test(
 # one cluster (or _PIP_ONLY). A forgotten file fails the build loudly here
 # instead of silently never running under Bazel.
 _ASSIGNED = _PIP_ONLY + _CORE + _CLIENT + _DAEMON + _LOG + _INDEX + _CACHE_LAYOUT + \
-            _PATHSAFETY + _DERIVED + \
+            _HARNESS + _PATHSAFETY + _DERIVED + \
             _EMBED_HELPERS + _EMBEDDING + _ACTIONS + _TOOLS + \
             _SERVER + _CONFIG + _CLI
 
