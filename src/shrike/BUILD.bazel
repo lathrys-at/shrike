@@ -310,6 +310,7 @@ py_library(
     ],
     imports = [".."],
     deps = [
+        ":cache_layout",  # server.py resolves the namespaced derived-store path (#547)
         ":cli_core",
         ":collection",
         ":daemon",
