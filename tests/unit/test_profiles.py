@@ -2,7 +2,7 @@
 
 Pure-module tests — build features are passed in, so every build/profile
 combination is exercised without needing that build. The serving shapes are
-pinned through `plan_to_legacy_embedding` (the slice-1 bridge onto today's
+pinned through `plan_to_runtime_params` (the slice-1 bridge onto today's
 runtime).
 """
 
@@ -15,7 +15,7 @@ from shrike.profiles import (
     ManagedLlama,
     ProfileError,
     parse_capabilities,
-    plan_to_legacy_embedding,
+    plan_to_runtime_params,
     resolve_profile,
 )
 
@@ -281,7 +281,7 @@ class TestLegacyMigration:
         assert caps.embedders == () and caps.recognizers == ()
         plan = resolve_profile(caps, SERVER)
         assert plan.embedder is None
-        assert plan_to_legacy_embedding(plan)["backend"] is None
+        assert plan_to_runtime_params(plan)["backend"] is None
 
 
 # ── Resolution: build-capability intersection, named errors ──────────────────
@@ -346,12 +346,42 @@ class TestResolve:
         with pytest.raises(ProfileError, match="#36"):
             _resolve(config)
 
-    def test_manage_attach_names_the_pending_slice(self):
+    def test_manage_attach_resolves_without_manage_llama_feature(self):
+        # attach uses someone else's server — works on builds without the
+        # manager (the mobile set), unlike manage: auto.
         config = {
-            "embedders": [{"modalities": ["text"], "runtime": "remote", "model": "m.gguf"}],
-            "managed": {"llama_server": {"manage": "attach"}},
+            "embedders": [{"modalities": ["text"], "runtime": "remote"}],
+            "managed": {"llama_server": {"manage": "attach", "port": 9000}},
         }
-        with pytest.raises(ProfileError, match="attach"):
+        plan = resolve_profile(parse_capabilities(config), MOBILE)
+        assert plan.managed_llama is not None and plan.managed_llama.manage == "attach"
+
+    def test_attach_rejects_launch_knobs(self):
+        config = {
+            "embedders": [{"modalities": ["text"], "runtime": "remote"}],
+            "managed": {"llama_server": {"manage": "attach", "binary": "/opt/llama-server"}},
+        }
+        with pytest.raises(ProfileError, match="launch knobs"):
+            _resolve(config)
+        config["managed"]["llama_server"] = {"manage": "attach", "args": ["--mlock"]}
+        with pytest.raises(ProfileError, match="args don't apply"):
+            _resolve(config)
+
+    @pytest.mark.parametrize(
+        "managed",
+        [
+            {"llama_server": {"manage": "attach"}},
+            None,  # explicit endpoint, no manager at all
+        ],
+    )
+    def test_pooling_rejected_when_shrike_does_not_launch_the_server(self, managed):
+        entry = {"modalities": ["text"], "runtime": "remote", "pooling": "last"}
+        if managed is None:
+            entry["endpoint"] = "https://api.example.com/v1"
+        config = {"embedders": [entry]}
+        if managed is not None:
+            config["managed"] = managed
+        with pytest.raises(ProfileError, match="owns its own pooling"):
             _resolve(config)
 
     def test_remote_without_endpoint_and_manager_off_is_an_error(self):
@@ -386,7 +416,7 @@ class TestLegacyBridge:
                 ]
             }
         )
-        legacy = plan_to_legacy_embedding(plan)
+        legacy = plan_to_runtime_params(plan)
         assert legacy["backend"] == "onnx" and legacy["pooling"] == "cls"
         assert legacy["onnx_providers"] == ["CPUExecutionProvider"]
 
@@ -394,7 +424,7 @@ class TestLegacyBridge:
         plan = _resolve(
             {"embedders": [{"modalities": ["text", "image"], "runtime": "onnx", "model": "~/clip"}]}
         )
-        assert plan_to_legacy_embedding(plan)["backend"] == "clip"
+        assert plan_to_runtime_params(plan)["backend"] == "clip"
 
     def test_managed_remote_entry_drives_llama_backend(self):
         plan = _resolve(
@@ -416,28 +446,52 @@ class TestLegacyBridge:
                 },
             }
         )
-        legacy = plan_to_legacy_embedding(plan)
+        legacy = plan_to_runtime_params(plan)
         assert legacy["backend"] == "llama"
         assert legacy["llama_server"] == "/opt/llama-server"
         assert legacy["port"] == 8474 and legacy["extra_args"] == ["--mlock"]
         assert legacy["pooling"] == "last"
 
-    def test_external_endpoint_names_the_pending_slice(self):
+    def test_external_endpoint_drives_remote_backend(self):
         plan = _resolve(
             {
                 "embedders": [
                     {
                         "modalities": ["text"],
                         "runtime": "remote",
-                        "model": "m",
+                        "model": "text-embedding-3-small",
                         "endpoint": "https://api.example.com/v1",
-                        "api_key_env": "K",
+                        "api_key_env": "EXAMPLE_API_KEY",
                     }
                 ]
             }
         )
-        with pytest.raises(ProfileError, match="facade rework"):
-            plan_to_legacy_embedding(plan)
+        params = plan_to_runtime_params(plan)
+        assert params["backend"] == "remote"
+        assert params["endpoint"] == "https://api.example.com/v1"
+        assert params["api_key_env"] == "EXAMPLE_API_KEY"
+        assert params["model"] == "text-embedding-3-small"
+
+    def test_attach_drives_remote_backend_at_the_managed_port(self):
+        plan = _resolve(
+            {
+                "embedders": [{"modalities": ["text"], "runtime": "remote"}],
+                "managed": {"llama_server": {"manage": "attach", "port": 9000}},
+            }
+        )
+        params = plan_to_runtime_params(plan)
+        assert params["backend"] == "remote"
+        assert params["endpoint"] == "http://127.0.0.1:9000"
+        assert params["api_key_env"] is None
+
+    def test_attach_without_port_uses_the_manager_default(self):
+        plan = _resolve(
+            {
+                "embedders": [{"modalities": ["text"], "runtime": "remote"}],
+                "managed": {"llama_server": {"manage": "attach"}},
+            }
+        )
+        assert plan_to_runtime_params(plan)["endpoint"] == "http://127.0.0.1:8373"
 
     def test_legacy_round_trip_matches_original_section(self):
         # A legacy llama config migrated to v2 and bridged back yields the
@@ -460,7 +514,7 @@ class TestLegacyBridge:
             }
         }
         plan = _resolve(legacy_section)
-        bridged = plan_to_legacy_embedding(plan)
+        bridged = plan_to_runtime_params(plan)
         assert bridged["backend"] == "llama"
         for key in ("llama_server", "port", "pooling", "context_size", "threads", "gpu_layers"):
             expected = legacy_section["embedding"][key if key != "llama_server" else "llama_server"]

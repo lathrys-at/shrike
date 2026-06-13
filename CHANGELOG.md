@@ -10,15 +10,21 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 ### Added
 - The config file understands the new capability sections (#498): an
   `embedders:` list (each entry declaring its `modalities` and `runtime:
-  onnx | remote`, with `endpoint`/`api_key_env` for remote entries), a
-  `recognizers:` map, and a `managed:` section (`llama_server` with
-  `manage: auto`, the spawn-and-own behavior). These replace the
+  onnx | remote`), a `recognizers:` map, and a `managed:` section for the
+  components Shrike runs for you. These replace the
   `embedding:`/`recognition:` sections and the `--embedding-*` flags, which
   still work for one more release and print a deprecation pointer. A config
   that declares something this build or this release can't serve fails with
   an error naming what's missing — never a silent no-op. Settings declared
   in the new sections can't be overridden by the old flags or environment
   variables (the config file is their only home).
+- Embeddings from a server Shrike doesn't run (#498): an `embedders:` entry
+  with an `endpoint` uses any OpenAI-compatible embeddings service — a cloud
+  provider (the API key is referenced by env-var name via `api_key_env`,
+  never written in the config), a server on your tailnet, or a llama-server
+  another process owns via `managed.llama_server.manage: attach` (Shrike
+  health-checks and uses it, but never starts, restarts, or stops it).
+  `manage: auto` keeps today's spawn-and-own behavior.
 
 ### Removed
 - In-process Apple Vision OCR is no longer compiled into the server (#496):

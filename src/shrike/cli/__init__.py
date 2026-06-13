@@ -125,7 +125,7 @@ def cli(
     from shrike.profiles import ProfileError
 
     try:
-        spec = build_server_spec(config)
+        spec = build_server_spec(config, config_path=config_path)
     except ProfileError as e:
         click.echo(f"warning: {e} (auto-start disabled)", err=True)
         spec = None

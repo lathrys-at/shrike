@@ -504,7 +504,7 @@ def resolve_embedding_profile(
     from shrike.profiles import (
         ProfileError,
         parse_capabilities,
-        plan_to_legacy_embedding,
+        plan_to_runtime_params,
         resolve_profile,
     )
 
@@ -552,7 +552,7 @@ def resolve_embedding_profile(
     if not quiet:
         for warning in plan.warnings:
             print(f"warning: {warning}", file=sys.stderr)
-    resolved = plan_to_legacy_embedding(plan)
+    resolved = plan_to_runtime_params(plan)
     for key in ("model", "llama_server"):
         if resolved.get(key):
             resolved[key] = os.path.expanduser(str(resolved[key]))
@@ -562,6 +562,7 @@ def resolve_embedding_profile(
 def build_server_spec(
     config: dict[str, Any],
     *,
+    config_path: Path | str | None = None,
     collection: str | None = None,
     host: str | None = None,
     port: int | None = None,
@@ -593,6 +594,11 @@ def build_server_spec(
     # quiet: this resolution runs passively on every client command (the
     # auto-start spec); the explicit start commands own the warnings.
     resolved_emb = resolve_embedding_profile(config, embedding_overrides, quiet=True)
+    # A v2 config rides --config (#498): the daemon resolves the structured
+    # sections itself (remote endpoints have no flag spelling), so the spec
+    # carries the config path and NO embedding flags.
+    is_v2 = any(config.get(k) is not None for k in ("embedders", "recognizers", "managed"))
+    v2_config_path = str(config_path or DEFAULT_CONFIG_PATH) if is_v2 else None
     resolved_index = resolve_index_save(config, **(index_save_overrides or {}))
     resolved_transport = resolve_transport(config, **(transport_overrides or {}))
     resolved_locking = resolve_locking(config, **(locking_overrides or {}))
@@ -625,7 +631,12 @@ def build_server_spec(
         log_dir=resolved_log_dir,
         log_level=log_level or log_config.get("level", "info"),
         cache_dir=resolve_cache_dir(config, cache_dir),
-        embedding_args=embedding_args(resolved_emb, no_embedding=no_embedding),
+        embedding_args=(
+            (["--no-embedding"] if no_embedding else [])
+            if is_v2
+            else embedding_args(resolved_emb, no_embedding=no_embedding)
+        ),
+        config_path=v2_config_path,
         index_args=index_args(resolved_index),
         locking_args=locking_args(resolved_locking),
     )

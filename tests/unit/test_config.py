@@ -521,3 +521,40 @@ class TestEmbeddingProfileResolution:
         reloaded = load_config(path)
         assert reloaded["embedders"] == cfg["embedders"]
         assert reloaded["managed"] == cfg["managed"]
+
+
+class TestV2ServerSpec:
+    """A v2 config rides --config to the daemon (#498 slice 2)."""
+
+    V2 = {
+        "collection": "/tmp/c.anki2",
+        "embedders": [{"modalities": ["text"], "runtime": "onnx", "model": "/m"}],
+    }
+
+    def test_spec_carries_config_path_and_no_embedding_flags(self) -> None:
+        from shrike.cli.config import build_server_spec
+
+        spec = build_server_spec(dict(self.V2), config_path="/etc/shrike/config.yml")
+        assert spec is not None
+        assert spec.config_path == "/etc/shrike/config.yml"
+        assert spec.embedding_args == []
+
+    def test_no_embedding_survives_under_v2(self) -> None:
+        from shrike.cli.config import build_server_spec
+
+        spec = build_server_spec(
+            dict(self.V2), config_path="/etc/shrike/config.yml", no_embedding=True
+        )
+        assert spec is not None
+        assert spec.embedding_args == ["--no-embedding"]
+
+    def test_legacy_spec_has_no_config_path(self) -> None:
+        from shrike.cli.config import build_server_spec
+
+        spec = build_server_spec(
+            {"collection": "/tmp/c.anki2", "embedding": {"model": "/m.gguf"}},
+            config_path="/etc/shrike/config.yml",
+        )
+        assert spec is not None
+        assert spec.config_path is None
+        assert "--embedding-model" in spec.embedding_args

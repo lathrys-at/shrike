@@ -155,6 +155,14 @@ def embedding_start(
     except ProfileError as e:
         raise click.ClickException(str(e)) from e
 
+    # Under a v2 config send NO overrides: the daemon booted with --config and
+    # owns the resolution — "start what the config says". (The bridged params
+    # include keys like endpoint that the legacy override body doesn't carry.)
+    from shrike.profiles import parse_capabilities
+
+    if not parse_capabilities(config).legacy:
+        resolved = {}
+
     with output.spinner("Starting embedding service…"):
         data = client.embedding_start(**resolved)
 

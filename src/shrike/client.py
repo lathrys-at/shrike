@@ -141,6 +141,10 @@ class ServerSpec:
     embedding_args: list[str] = field(default_factory=list)
     index_args: list[str] = field(default_factory=list)
     locking_args: list[str] = field(default_factory=list)
+    # Set for a config declaring the v2 capability sections (#498): the daemon
+    # resolves embedders:/managed: from this file itself (structured entries
+    # have no flag spelling), and embedding_args stays empty.
+    config_path: str | None = None
 
     @property
     def url(self) -> str:
@@ -860,6 +864,8 @@ class ShrikeClient:
         cmd += spec.index_args
         cmd += spec.locking_args
         cmd += spec.embedding_args
+        if spec.config_path:
+            cmd += ["--config", spec.config_path]
 
         daemon.STATE_DIR.mkdir(parents=True, exist_ok=True)
         log_dir = Path(spec.log_dir) if spec.log_dir else daemon.STATE_DIR

@@ -431,6 +431,15 @@ def main() -> None:
         help="Path to the Anki collection file (collection.anki2)",
     )
     parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to a config file declaring the v2 capability sections "
+        "(embedders:/recognizers:/managed:, #498). The daemon resolves them "
+        "itself — structured entries (remote endpoints, api_key_env) have no "
+        "flag spelling. Mutually exclusive with the legacy --embedding-*/"
+        "--llama-server/--ocr-backend flags.",
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=8372,
@@ -727,21 +736,88 @@ def main() -> None:
     # llama-server stays on loopback regardless of the MCP bind host — there is
     # never a reason to expose the embedding backend to the network.
     resolved_state_dir = state_dir_override or state_dir()
+    emb_params: dict[str, Any] = {
+        "backend": args.embedding_backend or DEFAULT_BACKEND,
+        "model": args.embedding_model,
+        "port": args.embedding_port or 8373,
+        "context_size": args.embedding_context_size,
+        "threads": args.embedding_threads,
+        "gpu_layers": args.embedding_gpu_layers,
+        "pooling": args.embedding_pooling,
+        "extra_args": args.embedding_arg,
+        "llama_server": args.llama_server,
+        "onnx_providers": args.embedding_onnx_provider,
+        "batch_size": args.embedding_batch_size,
+        "endpoint": None,
+        "api_key_env": None,
+    }
+    if args.config:
+        # The daemon resolves the v2 capability sections itself (#498):
+        # structured entries (remote endpoints, api_key_env) have no flag
+        # spelling, so the CLI hands over the config path instead of params.
+        # A ProfileError here is a config error — refuse to boot, loudly
+        # (the CLI pre-validates, so this is the direct-invocation backstop).
+        legacy_flags = [
+            name
+            for name, value in (
+                ("--embedding-backend", args.embedding_backend),
+                ("--embedding-model", args.embedding_model),
+                ("--embedding-pooling", args.embedding_pooling),
+                ("--llama-server", args.llama_server),
+                ("--ocr-backend", args.ocr_backend),
+            )
+            if value
+        ]
+        if legacy_flags:
+            parser.error(
+                f"--config is mutually exclusive with {', '.join(legacy_flags)} — "
+                "the config file is the only home for these (docs/distribution.md)"
+            )
+        from shrike.cli.config import load_config
+        from shrike.profiles import (
+            ProfileError,
+            parse_capabilities,
+            plan_to_runtime_params,
+            resolve_profile,
+        )
+
+        try:
+            caps = parse_capabilities(load_config(Path(args.config)))
+            plan = resolve_profile(caps, shrike_native.build_features())
+        except ProfileError as e:
+            parser.error(str(e))
+        for warning in plan.warnings:
+            logger.warning("%s", warning)
+        v2_params = plan_to_runtime_params(plan)
+        for key in ("model", "llama_server"):
+            if v2_params.get(key):
+                v2_params[key] = os.path.expanduser(str(v2_params[key]))
+        emb_params.update({k: v for k, v in v2_params.items() if v is not None})
+        emb_params["backend"] = v2_params.get("backend") or DEFAULT_BACKEND
+        logger.info(
+            "Capability config resolved from %s: backend=%s model=%s endpoint=%s",
+            args.config,
+            emb_params["backend"],
+            emb_params.get("model"),
+            emb_params.get("endpoint"),
+        )
     runtime = EmbeddingRuntime(
-        backend=args.embedding_backend or DEFAULT_BACKEND,
-        model=args.embedding_model,
+        backend=emb_params["backend"],
+        model=emb_params["model"],
         host="127.0.0.1",
-        port=args.embedding_port or 8373,
+        port=emb_params.get("port") or 8373,
         log_dir=log_dir,
-        context_size=args.embedding_context_size,
-        threads=args.embedding_threads,
-        gpu_layers=args.embedding_gpu_layers,
-        pooling=args.embedding_pooling,
-        extra_args=args.embedding_arg,
-        llama_server=args.llama_server,
+        context_size=emb_params.get("context_size"),
+        threads=emb_params.get("threads"),
+        gpu_layers=emb_params.get("gpu_layers"),
+        pooling=emb_params.get("pooling"),
+        extra_args=emb_params.get("extra_args"),
+        llama_server=emb_params.get("llama_server"),
         pid_file=resolved_state_dir / "embedding.pid",
-        onnx_providers=args.embedding_onnx_provider,
-        batch_size=args.embedding_batch_size,
+        onnx_providers=emb_params.get("onnx_providers"),
+        batch_size=emb_params.get("batch_size"),
+        endpoint=emb_params.get("endpoint"),
+        api_key_env=emb_params.get("api_key_env"),
     )
 
     # The derived-text store (FTS5 trigram sidecar) — engine factory injected
