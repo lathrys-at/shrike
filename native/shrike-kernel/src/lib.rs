@@ -2993,7 +2993,10 @@ mod no_cpython_smoke {
 
             // Delete → both spaces drop the note (remove_all fans out).
             assert_eq!(kernel.delete_notes(vec![nid]).await.unwrap(), 1);
-            assert!(!kernel.index().engine().contains(nid), "gone from text space");
+            assert!(
+                !kernel.index().engine().contains(nid),
+                "gone from text space"
+            );
             assert!(
                 !clip_orch.engine().contains(nid),
                 "gone from image space too (fan-out)"
@@ -3047,7 +3050,10 @@ mod no_cpython_smoke {
                 "no semantic signal with zero spaces"
             );
             assert!(
-                hits[0].signals.iter().any(|(s, _)| s == "exact" || s == "fuzzy"),
+                hits[0]
+                    .signals
+                    .iter()
+                    .any(|(s, _)| s == "exact" || s == "fuzzy"),
                 "the lexical signal carried the hit"
             );
             kernel.close().await.unwrap();

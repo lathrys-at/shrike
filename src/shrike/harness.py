@@ -107,9 +107,7 @@ def _coverage_matrix(
     """
     # The per-space sets for the `native` cell. None → the union is one implicit
     # space (N≤1 / single-backend → byte-identical to the pre-#235 union check).
-    per_space: tuple[frozenset[str], ...] = (
-        tuple(spaces) if spaces is not None else (served,)
-    )
+    per_space: tuple[frozenset[str], ...] = tuple(spaces) if spaces is not None else (served,)
 
     def native(q: str, t: str) -> bool:
         return any(q in s and t in s for s in per_space)
