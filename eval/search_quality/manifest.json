@@ -1,0 +1,1399 @@
+{
+  "name": "adversarial-real-corpus",
+  "closed_world": true,
+  "_about": "Manual real-model adversarial corpus (#559 PR2). Images from Wikimedia Commons, resolved+pinned at build time (resolved_urls.json), bytes downloaded on demand into the gitignored cache. Per-image attribution in ASSETS.md. Never run in CI.",
+  "cards": [
+    {
+      "id": 1,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 1",
+        "Back": "<img src=\"$IMG:heart\">"
+      },
+      "media": [
+        {
+          "handle": "heart",
+          "source": "commons",
+          "spec": {
+            "search_term": "human heart anatomy diagram chambers"
+          }
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 2, lecture 3",
+        "Back": "<img src=\"$IMG:skeleton\">"
+      },
+      "media": [
+        {
+          "handle": "skeleton",
+          "source": "commons",
+          "spec": {
+            "search_term": "human skeleton anterior front labelled"
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 3",
+        "Back": "<img src=\"$IMG:dna\">"
+      },
+      "media": [
+        {
+          "handle": "dna",
+          "source": "commons",
+          "spec": {
+            "search_term": "DNA double helix structure"
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 4, lecture 5",
+        "Back": "<img src=\"$IMG:eye\">"
+      },
+      "media": [
+        {
+          "handle": "eye",
+          "source": "commons",
+          "spec": {
+            "search_term": "human eye cross section diagram"
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 5",
+        "Back": "<img src=\"$IMG:neuron\">"
+      },
+      "media": [
+        {
+          "handle": "neuron",
+          "source": "commons",
+          "spec": {
+            "search_term": "neuron diagram axon dendrite"
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 6, lecture 1",
+        "Back": "<img src=\"$IMG:plant_cell\">"
+      },
+      "media": [
+        {
+          "handle": "plant_cell",
+          "source": "commons",
+          "spec": {
+            "search_term": "plant cell structure labelled diagram"
+          }
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 7",
+        "Back": "<img src=\"$IMG:animal_cell\">"
+      },
+      "media": [
+        {
+          "handle": "animal_cell",
+          "source": "commons",
+          "spec": {
+            "search_term": "animal cell structure biology LadyofHats"
+          }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 8, lecture 3",
+        "Back": "<img src=\"$IMG:citric_acid\">"
+      },
+      "media": [
+        {
+          "handle": "citric_acid",
+          "source": "commons",
+          "spec": {
+            "search_term": "citric acid cycle krebs diagram"
+          }
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 9, lecture 4",
+        "Back": "<img src=\"$IMG:water_cycle\">"
+      },
+      "media": [
+        {
+          "handle": "water_cycle",
+          "source": "commons",
+          "spec": {
+            "search_term": "water cycle diagram evaporation"
+          }
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 10",
+        "Back": "<img src=\"$IMG:periodic_table\">"
+      },
+      "media": [
+        {
+          "handle": "periodic_table",
+          "source": "commons",
+          "spec": {
+            "search_term": "periodic table of elements"
+          }
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 11, lecture 6",
+        "Back": "<img src=\"$IMG:world_map\">"
+      },
+      "media": [
+        {
+          "handle": "world_map",
+          "source": "commons",
+          "spec": {
+            "search_term": "old world map continents hemispheres"
+          }
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 12",
+        "Back": "<img src=\"$IMG:volcano\">"
+      },
+      "media": [
+        {
+          "handle": "volcano",
+          "source": "commons",
+          "spec": {
+            "search_term": "stratovolcano cross section diagram"
+          }
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 13, lecture 2",
+        "Back": "<img src=\"$IMG:rc_circuit\">"
+      },
+      "media": [
+        {
+          "handle": "rc_circuit",
+          "source": "commons",
+          "spec": {
+            "search_term": "resistor capacitor RC circuit schematic"
+          }
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 14, lecture 3",
+        "Back": "<img src=\"$IMG:eiffel\">"
+      },
+      "media": [
+        {
+          "handle": "eiffel",
+          "source": "commons",
+          "spec": {
+            "search_term": "Eiffel Tower Paris photograph"
+          }
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 15, lecture 4",
+        "Back": "<img src=\"$IMG:great_wall\">"
+      },
+      "media": [
+        {
+          "handle": "great_wall",
+          "source": "commons",
+          "spec": {
+            "search_term": "Great Wall of China photograph"
+          }
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Portrait",
+      "note_type": "Basic",
+      "tags": [
+        "adv-portrait"
+      ],
+      "fields": {
+        "Front": "History figure card 20",
+        "Back": "<img src=\"$IMG:napoleon\">"
+      },
+      "media": [
+        {
+          "handle": "napoleon",
+          "source": "commons",
+          "spec": {
+            "search_term": "Napoleon Bonaparte Jacques-Louis David The Emperor in His Study"
+          }
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "kind": "text_only",
+      "deck": "AdversarialEval::Text",
+      "note_type": "Basic",
+      "tags": [
+        "adv-text"
+      ],
+      "fields": {
+        "Front": "Napoleon's final defeat",
+        "Back": "The Battle of Waterloo in 1815 was Napoleon's final defeat, ending the Napoleonic Wars and his rule as Emperor of the French."
+      }
+    },
+    {
+      "id": 22,
+      "kind": "text_only",
+      "deck": "AdversarialEval::Text",
+      "note_type": "Basic",
+      "tags": [
+        "adv-text"
+      ],
+      "fields": {
+        "Front": "Napoleon's exile",
+        "Back": "After Waterloo, Napoleon was exiled to the remote island of Saint Helena in the South Atlantic, where he died in 1821."
+      }
+    },
+    {
+      "id": 23,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Portrait",
+      "note_type": "Basic",
+      "tags": [
+        "adv-portrait"
+      ],
+      "fields": {
+        "Front": "History figure card 23",
+        "Back": "<img src=\"$IMG:curie\">"
+      },
+      "media": [
+        {
+          "handle": "curie",
+          "source": "commons",
+          "spec": {
+            "search_term": "Marie Curie Nobel portrait photograph"
+          }
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "kind": "text_only",
+      "deck": "AdversarialEval::Text",
+      "note_type": "Basic",
+      "tags": [
+        "adv-text"
+      ],
+      "fields": {
+        "Front": "Marie Curie's discovery",
+        "Back": "Marie Curie discovered the elements polonium and radium and pioneered research into radioactivity, winning Nobel Prizes in physics and chemistry."
+      }
+    },
+    {
+      "id": 25,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Portrait",
+      "note_type": "Basic",
+      "tags": [
+        "adv-portrait"
+      ],
+      "fields": {
+        "Front": "History figure card 25",
+        "Back": "<img src=\"$IMG:darwin\">"
+      },
+      "media": [
+        {
+          "handle": "darwin",
+          "source": "commons",
+          "spec": {
+            "search_term": "Charles Darwin Julia Margaret Cameron 1868"
+          }
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "kind": "text_only",
+      "deck": "AdversarialEval::Text",
+      "note_type": "Basic",
+      "tags": [
+        "adv-text"
+      ],
+      "fields": {
+        "Front": "Darwin's theory",
+        "Back": "Charles Darwin proposed the theory of evolution by natural selection in On the Origin of Species, explaining how species change over generations."
+      }
+    },
+    {
+      "id": 30,
+      "kind": "both",
+      "deck": "AdversarialEval::Language",
+      "note_type": "Basic",
+      "tags": [
+        "adv-language"
+      ],
+      "fields": {
+        "Front": "apple",
+        "Back": "manzana / pomme / Apfel <img src=\"$IMG:apple\">"
+      },
+      "media": [
+        {
+          "handle": "apple",
+          "source": "commons",
+          "spec": {
+            "search_term": "Granny Smith green apple Australia"
+          }
+        }
+      ]
+    },
+    {
+      "id": 101,
+      "kind": "text_only",
+      "deck": "AdversarialEval::Text",
+      "note_type": "Basic",
+      "tags": [
+        "adv-text"
+      ],
+      "fields": {
+        "Front": "The mitochondrion generates most of a ce",
+        "Back": "The mitochondrion generates most of a cell's ATP through oxidative phosphorylation."
+      }
+    },
+    {
+      "id": 102,
+      "kind": "text_only",
+      "deck": "AdversarialEval::Text",
+      "note_type": "Basic",
+      "tags": [
+        "adv-text"
+      ],
+      "fields": {
+        "Front": "Photosynthesis converts light, water and",
+        "Back": "Photosynthesis converts light, water and carbon dioxide into glucose and oxygen in chloroplasts."
+      }
+    },
+    {
+      "id": 103,
+      "kind": "text_only",
+      "deck": "AdversarialEval::Text",
+      "note_type": "Basic",
+      "tags": [
+        "adv-text"
+      ],
+      "fields": {
+        "Front": "Newton's second law states acceleration ",
+        "Back": "Newton's second law states acceleration is proportional to net force and inversely proportional to mass."
+      }
+    },
+    {
+      "id": 104,
+      "kind": "text_only",
+      "deck": "AdversarialEval::Text",
+      "note_type": "Basic",
+      "tags": [
+        "adv-text"
+      ],
+      "fields": {
+        "Front": "Insulin is a hormone produced by the pan",
+        "Back": "Insulin is a hormone produced by the pancreas that regulates blood glucose levels."
+      }
+    },
+    {
+      "id": 105,
+      "kind": "text_only",
+      "deck": "AdversarialEval::Text",
+      "note_type": "Basic",
+      "tags": [
+        "adv-text"
+      ],
+      "fields": {
+        "Front": "Plate tectonics describes the slow movem",
+        "Back": "Plate tectonics describes the slow movement of Earth's lithospheric plates causing earthquakes and volcanoes."
+      }
+    },
+    {
+      "id": 106,
+      "kind": "text_only",
+      "deck": "AdversarialEval::Text",
+      "note_type": "Basic",
+      "tags": [
+        "adv-text"
+      ],
+      "fields": {
+        "Front": "Vaccines train the immune system to reco",
+        "Back": "Vaccines train the immune system to recognise a pathogen without causing the disease."
+      }
+    },
+    {
+      "id": 301,
+      "kind": "distractor",
+      "deck": "AdversarialEval::Distractor",
+      "note_type": "Basic",
+      "tags": [
+        "adv-distractor"
+      ],
+      "fields": {
+        "Front": "A topically adjacent but wrong card abou",
+        "Back": "A topically adjacent but wrong card about the respiratory system and the lungs."
+      }
+    },
+    {
+      "id": 302,
+      "kind": "distractor",
+      "deck": "AdversarialEval::Distractor",
+      "note_type": "Basic",
+      "tags": [
+        "adv-distractor"
+      ],
+      "fields": {
+        "Front": "Cellular respiration releases energy sto",
+        "Back": "Cellular respiration releases energy stored in glucose across the inner membrane."
+      }
+    },
+    {
+      "id": 303,
+      "kind": "distractor",
+      "deck": "AdversarialEval::Distractor",
+      "note_type": "Basic",
+      "tags": [
+        "adv-distractor"
+      ],
+      "fields": {
+        "Front": "The French Revolution began in 1789 and ",
+        "Back": "The French Revolution began in 1789 and ended the absolute monarchy."
+      }
+    },
+    {
+      "id": 40,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 40",
+        "Back": "<img src=\"$IMG:einstein\">"
+      },
+      "media": [
+        {
+          "handle": "einstein",
+          "source": "commons",
+          "spec": {
+            "search_term": "Albert Einstein 1921 Mishkin portrait"
+          }
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 41",
+        "Back": "<img src=\"$IMG:newton\">"
+      },
+      "media": [
+        {
+          "handle": "newton",
+          "source": "commons",
+          "spec": {
+            "search_term": "Isaac Newton Godfrey Kneller 1689 portrait"
+          }
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 42",
+        "Back": "<img src=\"$IMG:mona_lisa\">"
+      },
+      "media": [
+        {
+          "handle": "mona_lisa",
+          "source": "commons",
+          "spec": {
+            "search_term": "Mona Lisa Leonardo da Vinci"
+          }
+        }
+      ]
+    },
+    {
+      "id": 43,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 43",
+        "Back": "<img src=\"$IMG:starry_night\">"
+      },
+      "media": [
+        {
+          "handle": "starry_night",
+          "source": "commons",
+          "spec": {
+            "search_term": "Starry Night Van Gogh"
+          }
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 44",
+        "Back": "<img src=\"$IMG:cat\">"
+      },
+      "media": [
+        {
+          "handle": "cat",
+          "source": "commons",
+          "spec": {
+            "search_term": "domestic cat photograph snow"
+          }
+        }
+      ]
+    },
+    {
+      "id": 45,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 45",
+        "Back": "<img src=\"$IMG:guitar\">"
+      },
+      "media": [
+        {
+          "handle": "guitar",
+          "source": "commons",
+          "spec": {
+            "search_term": "acoustic guitar instrument photograph"
+          }
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 46",
+        "Back": "<img src=\"$IMG:monarch\">"
+      },
+      "media": [
+        {
+          "handle": "monarch",
+          "source": "commons",
+          "spec": {
+            "search_term": "monarch butterfly orange"
+          }
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 47",
+        "Back": "<img src=\"$IMG:sunflower\">"
+      },
+      "media": [
+        {
+          "handle": "sunflower",
+          "source": "commons",
+          "spec": {
+            "search_term": "sunflower yellow flower photograph"
+          }
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 48",
+        "Back": "<img src=\"$IMG:lighthouse\">"
+      },
+      "media": [
+        {
+          "handle": "lighthouse",
+          "source": "commons",
+          "spec": {
+            "search_term": "lighthouse coast photograph"
+          }
+        }
+      ]
+    },
+    {
+      "id": 49,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 49",
+        "Back": "<img src=\"$IMG:bicycle\">"
+      },
+      "media": [
+        {
+          "handle": "bicycle",
+          "source": "commons",
+          "spec": {
+            "search_term": "bicycle photograph side view"
+          }
+        }
+      ]
+    },
+    {
+      "id": 50,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 50",
+        "Back": "<img src=\"$IMG:coffee\">"
+      },
+      "media": [
+        {
+          "handle": "coffee",
+          "source": "commons",
+          "spec": {
+            "search_term": "cup of coffee photograph"
+          }
+        }
+      ]
+    },
+    {
+      "id": 51,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 51",
+        "Back": "<img src=\"$IMG:violin\">"
+      },
+      "media": [
+        {
+          "handle": "violin",
+          "source": "commons",
+          "spec": {
+            "search_term": "violin string instrument photograph"
+          }
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 52",
+        "Back": "<img src=\"$IMG:mushroom\">"
+      },
+      "media": [
+        {
+          "handle": "mushroom",
+          "source": "commons",
+          "spec": {
+            "search_term": "mushroom fungus photograph forest"
+          }
+        }
+      ]
+    },
+    {
+      "id": 53,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": [
+        "adv-image"
+      ],
+      "fields": {
+        "Front": "Review card 53",
+        "Back": "<img src=\"$IMG:lion\">"
+      },
+      "media": [
+        {
+          "handle": "lion",
+          "source": "commons",
+          "spec": {
+            "search_term": "lion male photograph savanna"
+          }
+        }
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "q": "a labelled diagram of the human heart chambers and valves",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 1,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "the human skeleton bones, front view",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 2,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "the double helix structure of DNA",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 3,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a cross-section of the human eye with retina and lens",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 4,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a diagram of a neuron with axon and dendrites",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 5,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a labelled plant cell with chloroplasts and a vacuole",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 6,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a labelled animal cell showing the nucleus and membrane",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 7,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "the Krebs / citric acid cycle pathway diagram",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 8,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "evaporation, condensation and precipitation water cycle",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 9,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "the periodic table of the chemical elements",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 10,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a map of the world showing the continents",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 11,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a cross-section of a volcano with the magma chamber",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 12,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a resistor and capacitor circuit schematic",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 13,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a photo of the Eiffel Tower in Paris",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 14,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a photograph of the Great Wall of China",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 15,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a painted portrait of Napoleon Bonaparte",
+      "adversarial_class": "modality_gap_vs_token_share",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 20,
+          "grade": 3
+        }
+      ],
+      "hard_negatives": [
+        {
+          "id": 21,
+          "grade": 1
+        },
+        {
+          "id": 22,
+          "grade": 1
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a photograph portrait of Marie Curie",
+      "adversarial_class": "modality_gap_vs_token_share",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 23,
+          "grade": 3
+        }
+      ],
+      "hard_negatives": [
+        {
+          "id": 24,
+          "grade": 1
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a portrait photograph of Charles Darwin",
+      "adversarial_class": "modality_gap_vs_token_share",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 25,
+          "grade": 3
+        }
+      ],
+      "hard_negatives": [
+        {
+          "id": 26,
+          "grade": 1
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "what was Napoleon's final defeat",
+      "adversarial_class": "gate_no_inject_portrait",
+      "expected_signal": "text",
+      "modality": "text",
+      "gold": [
+        {
+          "id": 21,
+          "grade": 3
+        },
+        {
+          "id": 22,
+          "grade": 2
+        }
+      ],
+      "hard_negatives": [
+        {
+          "id": 20,
+          "grade": 0
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "which elements did Marie Curie discover",
+      "adversarial_class": "gate_no_inject_portrait",
+      "expected_signal": "text",
+      "modality": "text",
+      "gold": [
+        {
+          "id": 24,
+          "grade": 3
+        }
+      ],
+      "hard_negatives": [
+        {
+          "id": 23,
+          "grade": 0
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "manzana",
+      "adversarial_class": "cross_lingual_exact",
+      "expected_signal": "exact",
+      "modality": "text",
+      "gold": [
+        {
+          "id": 30,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a photo of a green apple",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 30,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "une pomme rouge ou verte",
+      "adversarial_class": "cross_lingual_semantic_characterization",
+      "expected_signal": "text",
+      "modality": "text",
+      "gold": [
+        {
+          "id": 30,
+          "grade": 2
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.3
+    },
+    {
+      "q": "which organelle produces most of the cell's energy",
+      "adversarial_class": "semantic_text",
+      "expected_signal": "text",
+      "modality": "text",
+      "gold": [
+        {
+          "id": 101,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "how plants turn sunlight into chemical energy",
+      "adversarial_class": "semantic_text",
+      "expected_signal": "text",
+      "modality": "text",
+      "gold": [
+        {
+          "id": 102,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "the relationship between force, mass and acceleration",
+      "adversarial_class": "semantic_text",
+      "expected_signal": "text",
+      "modality": "text",
+      "gold": [
+        {
+          "id": 103,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "the hormone that controls blood sugar",
+      "adversarial_class": "semantic_text",
+      "expected_signal": "text",
+      "modality": "text",
+      "gold": [
+        {
+          "id": 104,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "what causes earthquakes and mountain ranges",
+      "adversarial_class": "semantic_text",
+      "expected_signal": "text",
+      "modality": "text",
+      "gold": [
+        {
+          "id": 105,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "how do vaccines protect against illness",
+      "adversarial_class": "semantic_text",
+      "expected_signal": "text",
+      "modality": "text",
+      "gold": [
+        {
+          "id": 106,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "purple elephant umbrella dancing on the moon",
+      "adversarial_class": "over_return",
+      "expected_signal": null,
+      "modality": "text",
+      "gold": [],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a photograph of a domestic cat",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 44,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a sunflower with yellow petals",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 47,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "the Mona Lisa painting by Leonardo da Vinci",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [
+        {
+          "id": 42,
+          "grade": 3
+        }
+      ],
+      "top_k": 10,
+      "threshold": 0.5
+    }
+  ]
+}

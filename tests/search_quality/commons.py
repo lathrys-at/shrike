@@ -133,14 +133,18 @@ def _search_and_metadata(term: str, width_hint: int) -> tuple[str, dict[str, Any
 def _title_from_url(url: str) -> str | None:
     """Recover a ``File:Name`` title from a commons upload URL (best-effort).
 
-    Commons upload URLs end in the filename (possibly under a ``/thumb/.../NNNpx-``
-    rendition); the last path segment after stripping a thumb prefix is the file."""
+    A plain upload URL ends in the filename; a ``/thumb/X/XX/<File>/<NNNpx-…>``
+    rendition carries the real file as the segment *before* the ``NNNpx-``
+    rendition. Pick that segment for a thumb URL, else the last."""
     from urllib.parse import unquote
 
-    name = unquote(url.rstrip("/").split("/")[-1])
-    # A thumb URL's last segment is "640px-Original_Name.ext" — drop the prefix.
-    if "px-" in name and "/thumb/" in url:
-        name = name.split("px-", 1)[1]
+    parts = [p for p in url.split("/") if p]
+    if "thumb" in parts:
+        # .../thumb/X/XX/<File>/<NNNpx-rendition> → the <File> segment.
+        name = parts[-2]
+    else:
+        name = parts[-1]
+    name = unquote(name)
     return f"File:{name}" if name else None
 
 
