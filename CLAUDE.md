@@ -213,6 +213,12 @@ scripts/coverage.sh            # full suite; prints the report, exits non-zero b
 scripts/coverage.sh --html     # also writes a browsable htmlcov/index.html
 ```
 
+A Bazel-lane equivalent exists (`scripts/coverage-bazel.sh`, #262): it captures
+the spawned server subprocess too and lands within a point of the pip number
+(lcov is line-only; coverage.py's total folds in branches). Report-only — the
+published number and the `fail_under` gate stay on the pip path until the Bazel
+number proves out side-by-side. Mechanics in `docs/build-bazel.md` § Coverage.
+
 The script enables subprocess coverage and runs the exact CI command. The hook
 matters because the integration suite runs the server as a `python -m shrike.server`
 subprocess; without it ~all of `server.py`/`daemon.py` reads as uncovered. It's a
