@@ -270,6 +270,15 @@ pub struct Kernel {
     /// when its slot is empty.
     recognize: RwLock<BTreeMap<recognize::RecognitionPurpose, Arc<RecognizeService>>>,
     recognition_gate: recognize::RecognitionGate,
+    /// Bounds concurrent LONG-RUNNING recognition dispatches (#485): a VLM
+    /// describe / ASR call parks a blocking-pool thread for its whole duration
+    /// while holding model residency, so an unbounded fan-out (several
+    /// purposes, several collections sharing one runtime, or a future
+    /// batch-parallel sweep) could starve the pool. Each long-running
+    /// `recognize()` acquires a permit; OCR never touches it. A `Semaphore`
+    /// (not a batch-size cap) because it bounds CONCURRENCY without shrinking a
+    /// single sweep's batch — throughput per call is unchanged.
+    slow_recognition: Arc<tokio::sync::Semaphore>,
 }
 
 /// One attached recognition capability: the engine + the media resolver it
@@ -279,6 +288,16 @@ pub struct RecognizeService {
     pub recognizer: Arc<dyn Recognizer>,
     pub resolver: Arc<dyn ImageResolver>,
 }
+
+/// How many long-running recognition dispatches (VLM describe / ASR) may run
+/// concurrently across the kernel (#485). A small bound: these calls park a
+/// blocking-pool thread for their whole duration while holding model
+/// residency, so the ceiling protects the pool from an unbounded fan-out
+/// (multiple purposes, several collections sharing the runtime, a future
+/// batch-parallel sweep). 2 keeps a describe and an ASR sweep able to overlap
+/// (different engines) without letting either multiply without bound; OCR is
+/// fast/bounded and never acquires a permit.
+pub const SLOW_RECOGNITION_CONCURRENCY: usize = 2;
 
 /// The derived-store source recognized image text lands under (#199/#228).
 pub const OCR_SOURCE: &str = "ocr";
@@ -473,6 +492,7 @@ impl Kernel {
             tag_refresh,
             recognize: RwLock::new(BTreeMap::new()),
             recognition_gate: recognize::RecognitionGate::default(),
+            slow_recognition: Arc::new(tokio::sync::Semaphore::new(SLOW_RECOGNITION_CONCURRENCY)),
         })
     }
 
@@ -1043,9 +1063,26 @@ impl Kernel {
         }
         // The chunk-Err propagates HERE — before any persist or fingerprint
         // advance below — so a down endpoint leaves the backlog intact.
+        // A long-running purpose (describe/ASR) holds a concurrency permit
+        // ONLY across the recognize() call (#485): the call parks a
+        // blocking-pool thread for its whole duration while holding model
+        // residency, so the kernel bounds how many run at once. The permit is
+        // released the instant recognition returns (before the cheap persist),
+        // so it never delays anything but the next SLOW dispatch. OCR is fast
+        // and never acquires — its dispatch is byte-identical.
         let recognitions = if items.is_empty() {
             Vec::new()
         } else {
+            let _permit = if purpose.is_long_running() {
+                Some(
+                    self.slow_recognition
+                        .acquire()
+                        .await
+                        .expect("slow-recognition semaphore never closes"),
+                )
+            } else {
+                None
+            };
             svc.recognizer.recognize(items).await?
         };
         if recognitions.len() != sent.len() {
@@ -3536,6 +3573,128 @@ mod no_cpython_smoke {
             assert_eq!(idle, recognize::SweepReport::Idle);
 
             kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    /// A recognizer that records the PEAK number of `recognize()` calls
+    /// in-flight at once — the probe for the slow-recognition concurrency
+    /// bound (#485). Each call holds for a beat (so concurrent calls actually
+    /// overlap) and transcribes the bytes.
+    struct ConcurrencyProbeRecognizer {
+        in_flight: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Recognizer for ConcurrencyProbeRecognizer {
+        fn recognize(
+            &self,
+            items: Vec<MediaItem>,
+        ) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
+            let in_flight = Arc::clone(&self.in_flight);
+            let peak = Arc::clone(&self.peak);
+            Box::pin(async move {
+                let now = in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(items
+                    .iter()
+                    .map(|m| Recognition {
+                        text: String::from_utf8_lossy(&m.bytes).to_string(),
+                        confidence: 0.9,
+                        segments: Vec::new(),
+                    })
+                    .collect())
+            })
+        }
+
+        fn fingerprint(&self) -> Option<String> {
+            Some("probe:v1".to_string())
+        }
+    }
+
+    #[test]
+    fn slow_recognition_concurrency_is_bounded() {
+        // #485 PR2: a long-running purpose's recognize() holds a concurrency
+        // permit, so no more than SLOW_RECOGNITION_CONCURRENCY run at once even
+        // when several single-item sweeps are driven CONCURRENTLY. (One audio
+        // note per item; max_items=1 makes each concurrent sweep one
+        // recognize() dispatch.) The probe records the peak overlap.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            // Several audio notes so concurrent single-item sweeps pick
+            // distinct items (the pending diff hands each a different ref).
+            let n = 6;
+            let mut media = std::collections::HashMap::new();
+            let notes: Vec<serde_json::Value> = (0..n)
+                .map(|i| {
+                    let name = format!("clip{i}.mp3");
+                    media.insert(name.clone(), format!("transcript number {i} here").into_bytes());
+                    serde_json::json!({"note_type": "Basic", "deck": "Default",
+                        "fields": {"Front": format!("Listen [sound:{name}]"), "Back": "b"}})
+                })
+                .collect();
+            upsert_wire(
+                &kernel,
+                serde_json::json!(notes).to_string(),
+                "error".to_string(),
+                false,
+            )
+            .await;
+
+            let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            kernel.attach_recognizer_with(
+                recognize::RecognitionPurpose::Asr,
+                Arc::new(ConcurrencyProbeRecognizer {
+                    in_flight: Arc::clone(&in_flight),
+                    peak: Arc::clone(&peak),
+                }),
+                Arc::new(MapResolver::new(media)),
+            );
+
+            // Drive `n` concurrent single-item ASR sweeps. Without the bound,
+            // peak would reach up to `n`; with it, peak ≤ the ceiling.
+            let kernel = Arc::new(kernel);
+            let mut handles = Vec::new();
+            for _ in 0..n {
+                let k = Arc::clone(&kernel);
+                handles.push(tokio::spawn(async move {
+                    k.recognize_pending_for(recognize::RecognitionPurpose::Asr, 1)
+                        .await
+                }));
+            }
+            for h in handles {
+                h.await.unwrap().unwrap();
+            }
+
+            let observed_peak = peak.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                observed_peak >= 2,
+                "the probe should have observed real overlap (peak {observed_peak})"
+            );
+            assert!(
+                observed_peak <= SLOW_RECOGNITION_CONCURRENCY,
+                "slow-recognition concurrency must be bounded by \
+                 SLOW_RECOGNITION_CONCURRENCY={SLOW_RECOGNITION_CONCURRENCY}, saw peak \
+                 {observed_peak}"
+            );
+
+            Arc::try_unwrap(kernel)
+                .unwrap_or_else(|_| panic!("kernel still shared"))
+                .close()
+                .await
+                .unwrap();
             std::fs::remove_dir_all(dir).ok();
         });
     }

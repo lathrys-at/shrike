@@ -92,6 +92,21 @@ impl RecognitionPurpose {
             RecognitionPurpose::Describe => Destination::VectorOnly,
         }
     }
+
+    /// Whether a single recognition call of this purpose is **long-running and
+    /// model-resident** — a VLM describe (tens of seconds per image, often a
+    /// remote/cloud round-trip) or an ASR transcription (whole-clip decode).
+    /// These park a blocking-pool thread for the call's full duration while
+    /// holding model residency, so the kernel bounds how many run concurrently
+    /// ([`crate::SLOW_RECOGNITION_CONCURRENCY`]). OCR is fast and per-item
+    /// bounded (a page of glyphs), so it is never throttled — its behaviour
+    /// stays byte-identical.
+    pub fn is_long_running(self) -> bool {
+        match self {
+            RecognitionPurpose::Describe | RecognitionPurpose::Asr => true,
+            RecognitionPurpose::Ocr => false,
+        }
+    }
 }
 
 /// The gating policy (#199): which recognitions mint an OCR vector, and
@@ -258,6 +273,12 @@ mod tests {
         assert_eq!(Asr.destination(), Destination::LexicalAndVector);
         // The load-bearing rule: describe is vector-only.
         assert_eq!(Describe.destination(), Destination::VectorOnly);
+        // Concurrency classification (#485): describe + ASR are long-running
+        // (model-resident, slow per call) and bounded; OCR is fast and never
+        // throttled — its dispatch stays byte-identical.
+        assert!(Describe.is_long_running());
+        assert!(Asr.is_long_running());
+        assert!(!Ocr.is_long_running());
     }
 
     #[test]
