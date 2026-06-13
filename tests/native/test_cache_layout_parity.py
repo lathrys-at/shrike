@@ -25,13 +25,17 @@ pytestmark = pytest.mark.skipif(
 
 
 # A spread of shapes: absolute, relative, `.`/`..` segments, a symlinked prefix
-# on macOS (/tmp → /private/tmp), and an existing file (added at runtime).
+# on macOS (/tmp → /private/tmp), an existing file (added at runtime), and a raw
+# `~`-path — neither side expands `~` (the contract is callers pre-expand), so a
+# `~`-spelling must hash identically on both. This pins the divergence that a
+# re-introduced expanduser() on either side would cause.
 _CASES = [
     "/home/alice/collection.anki2",
     "/home/bob/Anki2/User 1/collection.anki2",
     "relative/c.anki2",
     "/coll/a/../b/deck.anki2",
     "/tmp/shrike-nonexistent-67/c.anki2",
+    "~/Anki2/collection.anki2",
 ]
 
 

@@ -31,21 +31,26 @@ INDEX_SUBDIR = "index"
 def _canonicalize_for_identity(collection_path: str) -> str:
     """Resolve a collection path to the stable string the identity hashes.
 
-    Mirrors the kernel's ``canonicalize_for_identity`` exactly so the fallback
-    matches the native ``index_namespace`` byte-for-byte: an **existing** file
-    is fully canonicalized (``realpath`` — folds ``..``, symlinks, and a
-    relative-vs-absolute spelling of the same file to one identity, like Rust's
-    ``std::fs::canonicalize``); an **absent** file (a fresh collection) falls
-    back to a lexical absolutize (``abspath`` — collapses ``.``/``..`` WITHOUT
-    resolving symlinks, matching the kernel's lexical-absolute fallback) so the
-    key is still stable run-to-run. The split matters where a path prefix is a
-    symlink (e.g. macOS ``/tmp`` → ``/private/tmp``): ``realpath`` would resolve
-    it for an absent file but the kernel's fallback would not.
+    Mirrors the kernel's ``canonicalize_for_identity`` (cache_layout.rs)
+    **byte-for-byte**: an **existing** file is fully canonicalized (``realpath``
+    — folds ``..``, symlinks, and a relative-vs-absolute spelling of the same
+    file to one identity, like Rust's ``std::fs::canonicalize``); an **absent**
+    file (a fresh collection) falls back to a lexical absolutize (``abspath`` —
+    collapses ``.``/``..`` WITHOUT resolving symlinks, matching the kernel's
+    lexical-absolute fallback) so the key is still stable run-to-run. The split
+    matters where a path prefix is a symlink (e.g. macOS ``/tmp`` →
+    ``/private/tmp``): ``realpath`` would resolve it for an absent file but the
+    kernel's fallback would not.
+
+    Deliberately does **no** ``~`` expansion — the kernel's canonicalizer does
+    not either, so doing it here would diverge the two namespaces for a raw
+    ``~``-path. The contract is that callers pass already-expanded paths: the
+    registry stores ``abspath(expanduser(...))`` and ``config.resolve_collection``
+    expanduser's before the path ever reaches here.
     """
-    expanded = os.path.expanduser(collection_path)
-    if os.path.exists(expanded):
-        return os.path.realpath(expanded)
-    return os.path.abspath(expanded)
+    if os.path.exists(collection_path):
+        return os.path.realpath(collection_path)
+    return os.path.abspath(collection_path)
 
 
 def index_namespace(collection_path: str) -> str:
