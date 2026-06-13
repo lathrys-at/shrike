@@ -18,8 +18,11 @@ for an order-dependent target or one you want to step through under a debugger.
 Every other default is overridable per-target the same way: `size` (default
 "small"), `deps` / `data` / `args`, and any other `py_test` attribute
 (`tags`, `timeout`, `flaky`, `env`, …) passed through via `**kwargs`. The only
-non-negotiable deps are the launcher + pytest/pytest-asyncio/pytest-xdist + the
-shrike library, which every pytest target needs; callers add to them via `deps`.
+non-negotiable deps are the launcher + pytest/pytest-asyncio/pytest-xdist;
+the code under test comes from the caller's `deps` (since #259 the shrike
+package is fine-grained sub-libraries, so a target names the specific
+libraries it exercises — usually via its package's conftest — instead of
+getting the whole package implicitly).
 """
 
 load("@rules_python//python:defs.bzl", "py_test")
@@ -40,7 +43,6 @@ def pytest_test(name, srcs, deps = [], data = [], args = [], size = "small", xdi
         # runfiles root at test time, so $(location ...) resolves correctly.
         args = ["$(location {})".format(s) for s in srcs] + xdist_args + args,
         deps = deps + [
-            "//src/shrike",
             requirement("pytest"),
             requirement("pytest-asyncio"),
             requirement("pytest-xdist"),

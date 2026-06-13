@@ -114,7 +114,9 @@ py_wheel(
         "native/shrike-py/python",
     ],
     deps = [
-        "//src/shrike:shrike",
+        # The package tree as a filegroup — py_wheel packages direct files only, so
+        # the (srcs-less, #259) //src/shrike:shrike umbrella wouldn't contribute.
+        "//src/shrike:wheel_srcs",
         "//src/shrike:py_typed",
         # The shrike_native package payload: __init__.py + .pyi stubs + py.typed +
         # the compiled _native.so (py_wheel packages a filegroup's files directly).

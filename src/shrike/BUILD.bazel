@@ -3,28 +3,366 @@ load("@shrike_pip//:requirements.bzl", "requirement")
 
 package(default_visibility = ["//visibility:public"])
 
-# The Shrike Python package. src-layout: imports=[".."] puts src/ on sys.path so
-# this imports as `shrike` (not `src.shrike`). The optional embedding backends
-# (onnx/clip) import their heavy deps lazily, so onnxruntime/tokenizers/pillow are
-# NOT hard deps here — the test targets that exercise them add those extras
-# (Phase 2, #244). The runnable entry points live in //bin (thin launchers), kept
-# out of this package so a binary target never collides with a subpackage dir.
+# The Shrike Python package, as fine-grained sub-libraries (#259). One library
+# per module (or per import-cluster), with explicit deps mirroring the real
+# import graph — so a test target depending on, say, :client is invalidated by
+# a client.py/schemas.py edit but not by a tools.py one, and Bazel's per-target
+# test caching actually pays off on source PRs. The :shrike umbrella at the
+# bottom aggregates everything for consumers that want the whole package
+# (//bin, the wheel, the integration/native suites).
+#
+# Ground rules:
+#  - src-layout: every target sets imports=[".."] so src/ is on sys.path and
+#    the package imports as `shrike` (not `src.shrike`).
+#  - deps cover *lazy* (function-level) imports too — Bazel deps are about
+#    runfiles at run time, not import time. The one cyclic module pair,
+#    server ⇄ cli (server lazily reads cli.config; cli/server_cmd lazily runs
+#    server in the foreground), is broken by the :cli_core split.
+#  - the optional embedding backends import their heavy deps (onnxruntime)
+#    lazily, so those wheels are deliberately NOT deps here — the test/binary
+#    targets that exercise them add the extras (//bin:server_embedding).
+#  - a new module goes in its own target (or an existing cluster) with explicit
+#    deps, and joins the umbrella's list.
+
+# --- leaf tier (no intra-package deps) -------------------------------------
+
+# The package marker. Every other target depends on it: importing any
+# shrike.* module executes shrike/__init__.py (the lazy _version shim).
 py_library(
-    name = "shrike",
-    srcs = glob(["**/*.py"]),
+    name = "pkg",
+    srcs = ["__init__.py"],
+    imports = [".."],
+)
+
+py_library(
+    name = "errors",
+    srcs = ["errors.py"],
+    imports = [".."],
+    deps = [":pkg"],
+)
+
+py_library(
+    name = "paths",
+    srcs = ["paths.py"],
     imports = [".."],
     deps = [
-        # The native core is REQUIRED since the #278 cutover — the collection
-        # layer runs in Rust; pip `anki` is a test oracle only (tests add it).
+        ":pkg",
+        requirement("platformdirs"),
+    ],
+)
+
+py_library(
+    name = "schemas",
+    srcs = ["schemas.py"],
+    imports = [".."],
+    deps = [
+        ":pkg",
+        requirement("pydantic"),
+    ],
+)
+
+py_library(
+    name = "index",
+    srcs = ["index.py"],
+    imports = [".."],
+    deps = [":pkg"],
+)
+
+py_library(
+    name = "profiles",
+    srcs = ["profiles.py"],
+    imports = [".."],
+    deps = [":pkg"],
+)
+
+py_library(
+    name = "embed_text",
+    srcs = ["embed_text.py"],
+    imports = [".."],
+    deps = [":pkg"],
+)
+
+py_library(
+    name = "embedding_base",
+    srcs = ["embedding_base.py"],
+    imports = [".."],
+    deps = [":pkg"],
+)
+
+py_library(
+    name = "search_fusion",
+    srcs = ["search_fusion.py"],
+    imports = [".."],
+    deps = [
+        ":pkg",
         "//native/shrike-py:shrike_native",
-        requirement("mcp"),
-        requirement("click"),
+    ],
+)
+
+py_library(
+    name = "recognition",
+    srcs = ["recognition.py"],
+    imports = [".."],
+    deps = [
+        ":pkg",
+        "//native/shrike-py:shrike_native",
+    ],
+)
+
+# --- mid tier ---------------------------------------------------------------
+
+py_library(
+    name = "log",
+    srcs = ["log.py"],
+    imports = [".."],
+    deps = [
+        ":paths",
+        ":pkg",
+        requirement("rich"),
+    ],
+)
+
+py_library(
+    name = "daemon",
+    srcs = ["daemon.py"],
+    imports = [".."],
+    deps = [
+        ":paths",
+        ":pkg",
         requirement("filelock"),
         requirement("httpx"),
-        requirement("platformdirs"),
+    ],
+)
+
+py_library(
+    name = "client",
+    srcs = ["client.py"],
+    imports = [".."],
+    deps = [
+        ":daemon",
+        ":errors",
+        ":pkg",
+        ":schemas",
+        requirement("httpx"),
+        requirement("pydantic"),
+    ],
+)
+
+py_library(
+    name = "embed_batching",
+    srcs = ["embed_batching.py"],
+    imports = [".."],
+    deps = [
+        ":pkg",
+        "//native/shrike-py:shrike_native",
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "collection",
+    srcs = ["collection.py"],
+    imports = [".."],
+    deps = [
+        ":embedding_base",
+        ":pkg",
+        ":schemas",
+        "//native/shrike-py:shrike_native",
+    ],
+)
+
+py_library(
+    name = "derived",
+    srcs = ["derived.py"],
+    imports = [".."],
+    deps = [
+        ":index",
+        ":pkg",
+        "//native/shrike-py:shrike_native",
+    ],
+)
+
+# The embedding runtime + the in-process backends (onnx/clip) as one cluster:
+# embedding.py constructs the backends lazily, and they share the probe/text
+# helpers, so they version together. onnxruntime stays out (lazy heavy import).
+py_library(
+    name = "embedding",
+    srcs = [
+        "embedding.py",
+        "embedding_clip.py",
+        "embedding_onnx.py",
+        "embedding_onnx_common.py",
+    ],
+    imports = [".."],
+    deps = [
+        ":embed_batching",
+        ":embed_text",
+        ":embedding_base",
+        ":pkg",
+        "//native/shrike-py:shrike_native",
+    ],
+)
+
+# --- assembly tier ----------------------------------------------------------
+
+py_library(
+    name = "harness",
+    srcs = ["harness.py"],
+    imports = [".."],
+    deps = [
+        ":collection",
+        ":derived",
+        ":embedding",
+        ":embedding_base",
+        ":index",
+        ":pkg",
+        ":recognition",
+        "//native/shrike-py:shrike_native",
+    ],
+)
+
+py_library(
+    name = "actions",
+    srcs = ["actions.py"],
+    imports = [".."],
+    deps = [
+        ":collection",
+        ":derived",
+        ":index",
+        ":pkg",
+        ":schemas",
+        "//native/shrike-py:shrike_native",
+        requirement("pydantic"),
+    ],
+)
+
+py_library(
+    name = "tools",
+    srcs = [
+        "mcp_adapter.py",
+        "tools.py",
+    ],
+    imports = [".."],
+    deps = [
+        ":actions",
+        ":collection",
+        ":derived",
+        ":pkg",
+        "//native/shrike-py:shrike_native",
+        requirement("mcp"),
+    ],
+)
+
+# The dependency-light half of the cli package: the root Click group (lazy
+# subcommands), config loading, and output formatting. Split from :cli so
+# server.py's lazy `cli.config.load_config` import doesn't cycle (server →
+# :cli_core; :cli → :server).
+py_library(
+    name = "cli_core",
+    srcs = [
+        "cli/__init__.py",
+        "cli/config.py",
+        "cli/output.py",
+    ],
+    imports = [".."],
+    deps = [
+        ":client",
+        ":errors",
+        ":paths",
+        ":pkg",
+        ":profiles",
+        ":schemas",
+        "//native/shrike-py:shrike_native",
+        requirement("click"),
+        requirement("pydantic"),
         requirement("pyyaml"),
         requirement("rich"),
-        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "server",
+    srcs = [
+        "_mcp_perf.py",
+        "server.py",
+    ],
+    imports = [".."],
+    deps = [
+        ":cli_core",
+        ":collection",
+        ":daemon",
+        ":derived",
+        ":embedding",
+        ":harness",
+        ":log",
+        ":paths",
+        ":pkg",
+        ":profiles",
+        ":schemas",
+        ":tools",
+        "//native/shrike-py:shrike_native",
+        requirement("mcp"),
+    ],
+)
+
+# The cli command modules (lazy-loaded by the root group in :cli_core).
+# server_cmd lazily imports shrike.server for foreground mode, hence :server.
+py_library(
+    name = "cli",
+    srcs = glob(
+        ["cli/*.py"],
+        exclude = [
+            "cli/__init__.py",
+            "cli/config.py",
+            "cli/output.py",
+        ],
+    ),
+    imports = [".."],
+    deps = [
+        ":cli_core",
+        ":client",
+        ":daemon",
+        ":embedding",
+        ":log",
+        ":pkg",
+        ":profiles",
+        ":schemas",
+        ":server",
+        requirement("click"),
+    ],
+)
+
+# --- the umbrella -----------------------------------------------------------
+
+# The whole package, for consumers that genuinely want all of it: //bin's
+# launchers, //:wheel, the integration/native suites. No srcs of its own —
+# every module lives in exactly one sub-library above.
+py_library(
+    name = "shrike",
+    deps = [
+        ":actions",
+        ":cli",
+        ":cli_core",
+        ":client",
+        ":collection",
+        ":daemon",
+        ":derived",
+        ":embed_batching",
+        ":embed_text",
+        ":embedding",
+        ":embedding_base",
+        ":errors",
+        ":harness",
+        ":index",
+        ":log",
+        ":paths",
+        ":pkg",
+        ":profiles",
+        ":recognition",
+        ":schemas",
+        ":search_fusion",
+        ":server",
+        ":tools",
     ],
 )
 
@@ -34,6 +372,22 @@ py_library(
 filegroup(
     name = "py_typed",
     srcs = ["py.typed"],
+)
+
+# The package sources for //:wheel. py_wheel packages only the DIRECT files of its
+# deps (it does not walk a py_library's transitive closure), so the srcs-less
+# :shrike umbrella contributes nothing — the wheel names this glob instead. A glob
+# is right here: the artifact wants "the whole package tree" regardless of how the
+# build graph slices it. _version.py is excluded deliberately — the Bazel wheel
+# resolves its version via importlib.metadata (see __init__.py and the IGNORE_FILES
+# note in tools/check-wheel-parity.sh), and a stale locally-generated copy must not
+# leak into the release artifact.
+filegroup(
+    name = "wheel_srcs",
+    srcs = glob(
+        ["**/*.py"],
+        exclude = ["_version.py"],
+    ),
 )
 
 # Source files for the //:sdist source distribution (#245) — the package tree minus
