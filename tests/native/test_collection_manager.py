@@ -121,13 +121,10 @@ class TestSelectorResolution:
         # rather than erroring — the boot collection is the implicit default.
         async def flow():
             cfg = tmp_path / "config.yml"
-            # Two registered, neither the boot collection, no default set.
+            # Two registered profiles, neither the boot collection, no default.
             reg = Registry()
             reg.add("a", str(tmp_path / "a.anki2"))
             reg.add("b", str(tmp_path / "b.anki2"))
-            reg.remove("a")  # leaves b but clears default? no — sole survivor...
-            # Re-add to get 2 with no default: remove clears default among 2.
-            reg.add("a", str(tmp_path / "a.anki2"))
             reg.default = None
             config = load_config(cfg)
             reg.apply_to_config(config)
@@ -138,7 +135,7 @@ class TestSelectorResolution:
                 tmp_path / "cache", tmp_path / "default.anki2", runtime
             )
             mgr = _manager(tmp_path, cfg, default, runtime)
-            key, path = mgr.resolve(None)
+            _, path = mgr.resolve(None)
             assert path.endswith("default.anki2")
             await mgr.close()
 

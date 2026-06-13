@@ -771,12 +771,18 @@ class CollectionManager:
             logger.debug("registry re-read failed; routing to the default collection only")
             return Registry()
 
-    def _key_for_path(self, path: str) -> str | None:
+    def _key_for_path(self, path: str, registry: Registry | None = None) -> str | None:
         """The registry profile name whose collection path matches ``path``
         (path-based, canonicalized through cache_layout so two spellings of one
-        file match), or None if unregistered."""
+        file match), or None if unregistered.
+
+        ``registry`` lets a caller pass an already-read snapshot so a fan-out
+        (``status_rows``) shares one config read instead of re-reading per
+        lookup; None re-reads the live view (the construction-time default-key
+        resolution, which runs once)."""
+        reg = registry if registry is not None else self.registry()
         target = cache_layout.index_namespace(path)
-        for profile in self.registry().profiles:
+        for profile in reg.profiles:
             if cache_layout.index_namespace(profile.path) == target:
                 return profile.name
         return None
@@ -898,10 +904,19 @@ class CollectionManager:
         The top-level ``/status`` embedding/index/derived fields describe the
         DEFAULT collection (which the operational routes act on); these rows are
         the per-collection view tool calls route across."""
+        # One config read for the whole fan-out (the live registry is shared by
+        # every lookup below — `resolve()`'s per-routed-call read is the hot
+        # path, but a status sweep needn't re-read four times).
         registry = self.registry()
-        # The routing default `resolve(None)` picks (registry default, else the
-        # boot collection) — marked `is_default` on whichever row matches it.
-        _, default_path = self.resolve(None)
+        # The routing default a bare call resolves to (registry default, else
+        # the boot collection) — inlined from `resolve(None)` to reuse the one
+        # snapshot. Marked `is_default` on whichever row matches it.
+        default = registry.resolve_default()
+        default_path = (
+            os.path.abspath(os.path.expanduser(default.path))
+            if default is not None
+            else self._default_path
+        )
         default_ns = cache_layout.index_namespace(default_path)
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -932,7 +947,7 @@ class CollectionManager:
 
         # The daemon's boot collection ALWAYS gets a row (it's assembled and
         # physically open), named by the registry if it matches a profile.
-        boot_profile_name = self._key_for_path(self._default_path)
+        boot_profile_name = self._key_for_path(self._default_path, registry)
         _add(
             name=boot_profile_name or self.DEFAULT_KEY,
             path=self._default_path,
