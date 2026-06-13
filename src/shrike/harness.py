@@ -648,11 +648,8 @@ class Harness:
         from shrike.recognition import make_describe_recognizer
 
         try:
-            backend = make_describe_recognizer(
+            backend, fingerprint = make_describe_recognizer(
                 endpoint, model=model, api_key_env=api_key_env, mmproj=mmproj
-            )
-            fingerprint = shrike_native.RemoteDescriber.compose_fingerprint(
-                *backend.model_info(), model, mmproj
             )
             self.attach_recognizer(backend, RECOGNITION_DESCRIBE)
         except (ImportError, ValueError, RuntimeError, KernelConfigError) as e:

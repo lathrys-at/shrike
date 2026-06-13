@@ -67,7 +67,7 @@ def make_describe_recognizer(
     model: str | None = None,
     api_key_env: str | None = None,
     mmproj: str | None = None,
-) -> Any:
+) -> tuple[Any, str]:
     """Construct the remote VLM describe engine (#433/#485) for the kernel's
     ``describe`` recognition purpose — image→descriptive prose into the text
     embedding space (vector-only).
@@ -77,12 +77,13 @@ def make_describe_recognizer(
     identity (``RemoteDescriber.compose_fingerprint`` — the crate's recipe),
     folding ``mmproj`` ONLY for a host-launched local managed server (a cloud
     endpoint passes ``None``, byte-identical to "no mmproj suffix"; the
-    ``prompt=N`` suffix is unconditional). Returns a constructed
-    ``RemoteDescriber`` carrying that fingerprint, ready for the native attach.
+    ``prompt=N`` suffix is unconditional). Returns ``(engine, fingerprint)`` —
+    the constructed ``RemoteDescriber`` carrying that fingerprint, ready for
+    the native attach, plus the fingerprint string for the harness's status.
 
     Raises ``ImportError`` when the engine isn't compiled into this build
     (so boot degrades like a missing optional dependency), ``RuntimeError``
-    on a missing key env / dead endpoint.
+    on a missing key env.
     """
     import shrike_native
 
@@ -111,6 +112,7 @@ def make_describe_recognizer(
         # backlog pending until the endpoint comes up).
         logger.info("describe endpoint %s has no /health; probing /v1/models", endpoint)
     model_id, meta_json = probe.model_info()
-    fingerprint = cls.compose_fingerprint(model_id, meta_json, model, mmproj)
+    fingerprint: str = cls.compose_fingerprint(model_id, meta_json, model, mmproj)
     logger.info("describe recognizer fingerprint: %s", fingerprint)
-    return cls(endpoint, api_key=api_key, model=model, fingerprint=fingerprint)
+    engine = cls(endpoint, api_key=api_key, model=model, fingerprint=fingerprint)
+    return engine, fingerprint

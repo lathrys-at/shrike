@@ -368,9 +368,7 @@ class TestRecognition:
 
         asyncio.run(flow())
 
-    def test_start_recognition_describe_dead_endpoint_degrades_to_error_row(
-        self, tmp_path
-    ) -> None:
+    def test_start_recognition_describe_dead_endpoint_degrades_to_error_row(self, tmp_path) -> None:
         # #485 PR1: start_recognition_describe against an unreachable endpoint
         # lands an 'error' row keyed by the vlm source — the per-engine /status
         # map populates without disturbing boot (the construction probes
@@ -641,8 +639,7 @@ class TestDescribeAttach:
             # search path (asserted above via kernel.search), not at storage.
             assert harness.derived.search_substring("chlorophyll absorption", limit=5)
             assert harness.derived.search_substring("sunlit mountain valley", limit=5), (
-                "the describe row is stored (provenance + reconcile) even though "
-                "search hides it"
+                "the describe row is stored (provenance + reconcile) even though search hides it"
             )
 
             # The dedup view (the other binding search seam) also surfaces the
