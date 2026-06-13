@@ -236,6 +236,136 @@ class TestAsyncKernel:
         asyncio.run(flow())
 
 
+class TestCrossSpaceWiring:
+    """#234: the PRODUCTION search path (`action_search_notes` + the host
+    `cross_space=` param) threads injected secondary-space results into the
+    fusion + runs the relative gate — proving the host plumbing at the binding
+    level, WITHOUT depending on the secondary-space WRITE fan-out (the
+    immediately-following #232 write PR). The cross_space JSON here is exactly
+    the shape `build_cross_space_json` produces."""
+
+    class _Planted:
+        """Plants EXACT vectors per text keyword so cosines are controlled: the
+        text-target is at cos 0.6 from the query (below the injected vision 0.95
+        → the gate opens), and the image note is ORTHOGONAL (cos 0 → never
+        surfaces via the primary text signal)."""
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            out = []
+            for t in texts:
+                if "qqquery" in t:
+                    out.append([1.0, 0.0, 0.0])  # the query axis
+                elif "tttarget" in t:
+                    out.append([0.6, 0.8, 0.0])  # cos 0.6 with the query
+                else:  # the image note's text — orthogonal to the query
+                    out.append([0.0, 0.0, 1.0])
+            return out
+
+        def model_fingerprint(self) -> str:
+            return "planted:v1"
+
+        def embedding_dim(self) -> int:
+            return 3
+
+    def test_action_search_notes_threads_cross_space_and_runs_the_gate(self, tmp_path) -> None:
+        async def flow():
+            backend = self._Planted()
+            kernel = await _open(tmp_path, backend)
+            assert await kernel.reindex_if_needed()  # materialize empty
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+
+            # A text-target note (planted cos 0.6 from the query, below the
+            # injected vision 0.95 → the gate opens) + an "image-bearing" note
+            # whose text is ORTHOGONAL to the query (so the primary text signal
+            # never surfaces it — only the injected vision space does, the
+            # cross-space payoff).
+            results = await kernel.upsert_notes(
+                [
+                    (basic, 1, ["tttarget photosynthesis adjacent card", "biology"], []),
+                    (basic, 1, ["zzz an orthogonal picture-only card zzz", "img"], []),
+                ],
+                "error",
+            )
+            image_note = results[1][1]
+
+            # The host embeds the PRIMARY query (#331) — one vector per source.
+            query = "qqquery photosynthesis overview"
+            vectors = backend.embed_texts([query])
+
+            # Build the cross_space JSON exactly as `build_cross_space_json`
+            # would: a "clip" vision space surfacing the image note at a STRONG
+            # image cosine (dist 0.05 → cos 0.95) whose best clears the primary
+            # text best for this off-topic-for-text query, so the relative gate
+            # OPENS and the image note joins via `image#clip`.
+            cross_space = json.dumps(
+                [
+                    {
+                        "space_key": "clip",
+                        "per_source": [
+                            {
+                                "modality_hits": {"image": [[image_note], [0.05]]},
+                                "best_query_cosine": 0.95,
+                            }
+                        ],
+                    }
+                ]
+            )
+
+            def call(c):
+                return shrike_native.action_search_notes(
+                    c,
+                    kernel.engine_handle(),
+                    None,
+                    [(query, query, True)],
+                    vectors,
+                    10,
+                    0.3,  # threshold (excludes the orthogonal image note from the text signal)
+                    kernel=kernel,
+                    semantic=True,
+                    index_size=kernel.engine_handle().size(),
+                    cross_space=cross_space,
+                )
+
+            raw = await kernel.run_job(lambda: call(core))
+            groups = json.loads(raw)
+            matches = groups[0]["matches"]
+            # SearchMatch flattens the note, so the id is at the top level.
+            ids = [m["id"] for m in matches]
+            # The injected vision space surfaced the image note through the host
+            # param + the gate (it would be ABSENT in a text-only search — the
+            # primary never matched its text).
+            assert image_note in ids, "cross_space threaded through and the gate fired"
+            img_match = next(m for m in matches if m["id"] == image_note)
+            signals = [c["signal"] for c in img_match["provenance"]]
+            assert "image#clip" in signals, "per-space provenance carried end-to-end"
+
+            # N=1 byte-identical control: the SAME search with cross_space absent
+            # (the single-space case) never surfaces the image note — the host
+            # param defaults to None and the path is exactly today's.
+            def call_n1(c):
+                return shrike_native.action_search_notes(
+                    c,
+                    kernel.engine_handle(),
+                    None,
+                    [(query, query, True)],
+                    vectors,
+                    10,
+                    0.3,
+                    kernel=kernel,
+                    semantic=True,
+                    index_size=kernel.engine_handle().size(),
+                )
+
+            raw_n1 = await kernel.run_job(lambda: call_n1(core))
+            ids_n1 = [m["id"] for m in json.loads(raw_n1)[0]["matches"]]
+            assert image_note not in ids_n1, "without cross_space the image note is absent (N=1)"
+
+            await kernel.close()
+
+        asyncio.run(flow())
+
+
 class _ImageBackend(_Backend):
     """A dual-encoder stand-in: advertises the image modality and embeds
     image bytes into the same 4-dim space."""
