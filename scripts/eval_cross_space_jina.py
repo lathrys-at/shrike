@@ -26,6 +26,7 @@ fails to import torchvision):
     pip install 'transformers==4.49.0' sentence-transformers torch einops timm pillow numpy httpx
     python scripts/eval_cross_space_jina.py [-k 5] [--rrf-k 60] [--rank-cap 10] [--gate-margin 2.0]
 """
+# ruff: noqa: E501  (throwaway eval: prose docstrings + aligned print tables read better un-wrapped)
 
 from __future__ import annotations
 
@@ -53,6 +54,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 # Reuse the companion script's Space / metrics / fmt and the project's frozen RRF reference.
 from eval_cross_space import Space, fmt, metrics  # noqa: E402
+
 from shrike.search_fusion import rrf_fuse  # noqa: E402
 
 
@@ -104,7 +106,8 @@ def main() -> None:
 
     def enc_image(images: list[Any]) -> np.ndarray:
         return np.asarray(
-            clip.encode(images, normalize_embeddings=True, show_progress_bar=False), dtype=np.float32
+            clip.encode(images, normalize_embeddings=True, show_progress_bar=False),
+            dtype=np.float32,
         )
 
     print(f"\nFetching {len(image_notes)} Commons images (pinned) ...")
@@ -121,9 +124,7 @@ def main() -> None:
     # Shared corpus: all notes; image notes carry an image vector too.
     bodies_map = {n["id"]: n["text"] for n in text_notes}
     for n in img_notes:
-        bodies_map[n["id"]] = (
-            f"study flashcard {n['id']}" if args.blind_image_bodies else n["text"]
-        )
+        bodies_map[n["id"]] = f"study flashcard {n['id']}" if args.blind_image_bodies else n["text"]
     ids = list(bodies_map.keys())
     bodies = [bodies_map[i] for i in ids]
 
@@ -199,8 +200,12 @@ def main() -> None:
     on = np.array([sp_vision.best_score(iq_vec[i]) for i in image_q])
     print("\n--- cross-space activation diagnostic (vision space best-cosine) ---")
     print(f"  image-target (on-topic):  mean={on.mean():.3f} std={on.std():.3f} min={on.min():.3f}")
-    print(f"  text-target  (off-topic): mean={off.mean():.3f} std={off.std():.3f} max={off.max():.3f}")
-    print(f"  separation (on-off): {on.mean() - off.mean():+.3f}  gate(mean+{args.gate_margin}std)={gate:.3f}")
+    print(
+        f"  text-target  (off-topic): mean={off.mean():.3f} std={off.std():.3f} max={off.max():.3f}"
+    )
+    print(
+        f"  separation (on-off): {on.mean() - off.mean():+.3f}  gate(mean+{args.gate_margin}std)={gate:.3f}"
+    )
     print("\nDone.")
 
 

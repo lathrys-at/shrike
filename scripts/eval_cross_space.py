@@ -1,45 +1,48 @@
 #!/usr/bin/env python3
-"""Cross-space retrieval eval — the GO/NO-GO gate for the multi-space epic (#231 / #229).
+"""Cross-space retrieval eval — the mechanism gate for the multi-space epic (#231 / #229).
 
-NOT production code. This is the *cross-space* question, distinct from `scripts/eval_multimodal.py`
-(the #193 single-shared-space eval). It answers: when there is no single omni embedder, does running
-a **dedicated text embedder** and a **CLIP** as TWO SEPARATE vector spaces and **RRF-fusing the query
-across the two spaces** actually work — and does it beat the *one* omni/CLIP space that already ships
-(#532/#533)?
+NOT production code. Distinct from `scripts/eval_multimodal.py` (the #193 single-shared-space eval).
+This validates the *cross-space* MECHANISM: on a deployment that has NO single omni embedder — only
+a dedicated TEXT space and a separate joint text<->image CLIP space (the canonical mobile config:
+platform text-embedding API + a separate platform CLIP API) — is RRF-fusing a text query across the
+two spaces SOUND? Multi-space is a *requirement* for those no-omni targets, so this is not a
+build-vs-don't gate; it asks whether the fusion mechanism preserves text quality and delivers image
+recall, and what params (RRF k, per-space rank caps, a cross-space activation gate) make it so.
 
 Three conditions, one shared corpus (all notes — text-bearing and image-bearing — in ONE collection,
 so every query competes against the full distractor set, the realistic shape):
 
-  (a) text-only baseline        : a dedicated text embedder (ONNX MiniLM), ONE index of note text.
-  (b) single-CLIP-shared-space  : CLIP embeds note text AND images into ONE space, one index keyed by
-                                  note_id (text vec + one vec per image, the shipped #532/#533 shape).
-  (c) cross-space FUSED (NEW)   : a SEPARATE MiniLM text index + a SEPARATE CLIP index, the query
-                                  embedded into BOTH, the two spaces' per-space rankings RRF-FUSED,
-                                  results aggregated items -> notes by max-over-items.
+  (a) text-only baseline   : a dedicated text embedder (ONNX MiniLM), ONE index of note text. THE BAR
+                             (c) must not regress: text<->text quality of the dedicated space alone.
+  (b) single CLIP pooled   : CLIP embeds note text AND images into ONE space, pooled into one cosine
+                             ranking (the unified-space REFERENCE CEILING, where one happens to exist
+                             — NOT the bar; the no-omni targets don't have it).
+  (c) cross-space FUSED     : the dedicated MiniLM text space + the joint CLIP space (its text-tower
+                             body vectors AND image vectors), each ranked in its OWN space, RRF-fused.
+                             Why keep the separate text space: CLIP's text tower is weaker than a
+                             dedicated text embedder, so we lean on the dedicated space for text and
+                             only ADD the CLIP/image hits — without dragging text down. (+gate/+relgate
+                             apply the cross-space activation gate, the #201b analogue.)
 
-For (b) and (c) the per-space ranker is itself per-vector max-over-items (a note's rank in a space is
-its best vector for the query), exactly as the kernel's `search_by_modality` aggregates today.
+Each per-space ranker is per-vector max-over-items (a note's rank = its best vector for the query),
+exactly as the kernel's `search_by_modality` aggregates today. Scope: TEXT + IMAGE only (audio/video
+reach the text space via OCR/ASR-derived text, no joint audio space on these targets).
 
-Reported per condition × {text-target, image-target} queries: R@1 / R@5 / MRR.
-  - text-target  : the answer is in a text note's body (the 12 text_notes) — does cross-space fusion
-                   PRESERVE text<->text quality, i.e. not drag it toward CLIP's weaker text tower?
-  - image-target : the answer is in a note's image (the 16 image_notes) — does the CLIP space surface
-                   the image-bearing note at useful recall?
-
-Models (the project's OWN native backends — NO torch / sentence-transformers; this is exactly what
-Shrike would ship): ONNX MiniLM (`OnnxBackend`, 384-dim text-only) + the small CLIP fixture
-(`ClipBackend`, int8 dual-encoder, 512-dim shared space). Both load from the shared test-model cache
-(`$SHRIKE_TEST_MODEL_DIR` or `~/.cache/shrike-test-models`); fetch them with
-`scripts/fetch-multimodal-model.sh` is NOT needed — the CLIP/MiniLM ONNX fixtures come from the test
-suite (`tests/integration/model_cache.py`). Build the native extension first
-(`scripts/build-native.sh`); `shrike_native.ClipEmbedder` is required.
+Models (the project's OWN native backends — NO torch / sentence-transformers; exactly what Shrike
+ships): ONNX MiniLM (`OnnxBackend`, 384-dim text-only) + the small CLIP fixture (`ClipBackend`, int8
+dual-encoder, 512-dim joint space). Both load from the shared test-model cache (`$SHRIKE_TEST_MODEL_DIR`
+or `~/.cache/shrike-test-models`); the CLIP/MiniLM ONNX fixtures come from the test suite
+(`tests/integration/model_cache.py`). Build the native extension first (`scripts/build-native.sh`);
+`shrike_native.ClipEmbedder` is required. A strong-vision-space robustness run (jina-clip-v2) lives in
+`scripts/eval_cross_space_jina.py`.
 
 Image selection is pinned in `eval/multimodal/resolved_urls.json` (committed, reused verbatim from
 the #193 eval) and bytes cached locally, so the numbers replay; `--refresh` re-resolves.
 
 Run:
-    python scripts/eval_cross_space.py [-k 5] [--rrf-k 60] [--refresh]
+    python scripts/eval_cross_space.py [-k 5] [--rrf-k 60] [--rank-cap 10] [--gate-margin 2.0]
 """
+# ruff: noqa: E501  (throwaway eval: prose docstrings + aligned print tables read better un-wrapped)
 
 from __future__ import annotations
 
@@ -50,7 +53,6 @@ import json
 import os
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +62,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 EVAL_DIR = ROOT / "eval" / "multimodal"
 MANIFEST = EVAL_DIR / "manifest.json"
-RESOLVED = EVAL_DIR / "resolved_urls.json"  # committed: pins image selection (shared with #193 eval)
+RESOLVED = (
+    EVAL_DIR / "resolved_urls.json"
+)  # committed: pins image selection (shared with #193 eval)
 CACHE = EVAL_DIR / "cache"  # gitignored: image bytes
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 UA = {"User-Agent": "shrike-cross-space-eval/0.1 (https://github.com/lathrys-at/shrike)"}
@@ -284,9 +288,7 @@ def main() -> None:
     from shrike.embedding_clip import ClipBackend
     from shrike.embedding_onnx import OnnxBackend
 
-    txt_dir = _first_existing(
-        model_cache, ("all-MiniLM-L6-v2-onnx-fp32", "all-MiniLM-L6-v2-onnx")
-    )
+    txt_dir = _first_existing(model_cache, ("all-MiniLM-L6-v2-onnx-fp32", "all-MiniLM-L6-v2-onnx"))
     clip_dir = model_cache / "clip-vit-base-patch32-onnx"
     if txt_dir is None or not (clip_dir / "preprocessor_config.json").is_file():
         print(
@@ -337,7 +339,9 @@ def main() -> None:
     mini_body = {i: v for i, v in zip(corpus_ids, text_embed(bodies), strict=True)}
     clip_body = {i: v for i, v in zip(corpus_ids, clip_text(bodies), strict=True)}
     img_vecs = {n["id"]: clip_image([n["image"]])[0] for n in img_notes}
-    print(f"  embedded {len(corpus_ids)} notes ({len(img_vecs)} with images) in {time.time() - t0:.1f}s")
+    print(
+        f"  embedded {len(corpus_ids)} notes ({len(img_vecs)} with images) in {time.time() - t0:.1f}s"
+    )
 
     # Query sets.
     text_q = {n["id"]: n["query"] for n in text_notes}
@@ -381,7 +385,7 @@ def main() -> None:
 
     # Run all conditions over one query set (one mini-query-vec + one clip-query-vec per id).
     def run(query_mini: dict, query_clip: dict) -> dict[str, list[list[int]]]:
-        out: dict[str, list[list[int]]] = {"a": [], "b": [], "c": [], "c_gate": []}
+        out: dict[str, list[list[int]]] = {"a": [], "b": [], "c": [], "c_gate": [], "c_relgate": []}
         for qid in query_mini:
             qm, qc = query_mini[qid], query_clip[qid]
             mini_r = sp_mini.rank(qm, cap)
@@ -411,6 +415,17 @@ def main() -> None:
                 sigs["clip_image"] = cimg_r
                 wts["clip_image"] = 1.0
             out["c_gate"].append(fuse(sigs, wts))
+
+            # (c+relgate) RELATIVE gate: fire the image signal only when its best cosine for this
+            #     query beats the dedicated TEXT space's best for the same query — "is the image
+            #     match more compelling than the text match?". Self-calibrating (no off-topic sample),
+            #     and robust to a model's absolute cosine band, unlike the absolute mean+margin·std.
+            rsigs = {"text": mini_r, "clip_text": ctext_r}
+            rwts = {"text": 1.0, "clip_text": 1.0}
+            if sp_clip_image.best_score(qc) >= sp_mini.best_score(qm):
+                rsigs["clip_image"] = cimg_r
+                rwts["clip_image"] = 1.0
+            out["c_relgate"].append(fuse(rsigs, rwts))
         return out
 
     text_expect = list(text_q.keys())
@@ -435,13 +450,33 @@ def main() -> None:
     print(fmt("(a) text-only [MiniLM]", metrics(text_target["a"], text_expect, k), k))
     print(fmt("(b) single CLIP pooled space", metrics(text_target["b"], text_expect, k), k))
     print(fmt("(c) cross-space RRF fused", metrics(text_target["c"], text_expect, k), k))
-    print(fmt("(c+gate) cross-space + img gate", metrics(text_target["c_gate"], text_expect, k), k))
+    print(
+        fmt(
+            "(c+gate) cross-space + abs img gate", metrics(text_target["c_gate"], text_expect, k), k
+        )
+    )
+    print(
+        fmt("(c+relgate) + relative img gate", metrics(text_target["c_relgate"], text_expect, k), k)
+    )
 
     print(f"\n--- image-target queries ({len(image_expect)}: answer in the IMAGE) ---")
     print(fmt("(a) text-only [MiniLM]", metrics(image_target["a"], image_expect, k), k))
     print(fmt("(b) single CLIP pooled space", metrics(image_target["b"], image_expect, k), k))
     print(fmt("(c) cross-space RRF fused", metrics(image_target["c"], image_expect, k), k))
-    print(fmt("(c+gate) cross-space + img gate", metrics(image_target["c_gate"], image_expect, k), k))
+    print(
+        fmt(
+            "(c+gate) cross-space + abs img gate",
+            metrics(image_target["c_gate"], image_expect, k),
+            k,
+        )
+    )
+    print(
+        fmt(
+            "(c+relgate) + relative img gate",
+            metrics(image_target["c_relgate"], image_expect, k),
+            k,
+        )
+    )
 
     # ---- isolating control: CLIP image-only retrieval (images-only corpus, no text vectors) ----
     # Proves the image signal IS present in the small CLIP (the #193 finding) — so any image-recall
@@ -461,8 +496,12 @@ def main() -> None:
     on_topic = [sp_clip_image.best_score(clip_image_q[i]) for i in image_q]
     off_topic = [sp_clip_image.best_score(clip_text_q[i]) for i in text_q]
     print("\n--- cross-space activation diagnostic (CLIP image space best-cosine) ---")
-    print(f"  image-target queries (on-topic):  mean={np.mean(on_topic):.3f}  std={np.std(on_topic):.3f}")
-    print(f"  text-target  queries (off-topic): mean={np.mean(off_topic):.3f}  std={np.std(off_topic):.3f}")
+    print(
+        f"  image-target queries (on-topic):  mean={np.mean(on_topic):.3f}  std={np.std(on_topic):.3f}"
+    )
+    print(
+        f"  text-target  queries (off-topic): mean={np.mean(off_topic):.3f}  std={np.std(off_topic):.3f}"
+    )
     sep = float(np.mean(on_topic) - np.mean(off_topic))
     print(f"  separation (on - off): {sep:+.3f}  (gate threshold mean+1·std = {image_gate:.3f})")
 
