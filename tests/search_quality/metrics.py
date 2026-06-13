@@ -123,6 +123,50 @@ class GradedGold:
         return bool(self.relevant_ids)
 
 
+# The canonical RRF constants (mirror shrike_kernel::fusion / search_fusion.py).
+# Kept here so the golden-order recompute is a pure, dependency-free check the
+# #234 sweep can vary; the parity suite is what pins these against the kernel.
+RRF_K = 60
+RRF_WEIGHTS: dict[str, float] = {
+    "text": 1.0,
+    "image": 1.0,
+    "tag": 1.0,
+    "exact": 1.0,
+    "fuzzy": 0.5,
+}
+PRIORITY_SIGNAL = "exact"
+
+
+@dataclass(frozen=True)
+class RankedCard:
+    """A returned card with its per-signal 1-based ranks (from provenance)."""
+
+    note_id: int
+    signal_ranks: Mapping[str, int]
+
+
+def rrf_order_from_ranks(
+    cards: Sequence[RankedCard],
+    *,
+    k: int = RRF_K,
+    weights: Mapping[str, float] | None = None,
+    priority_signal: str = PRIORITY_SIGNAL,
+) -> list[int]:
+    """Fused order recomputed from per-card per-signal ranks — the pure RRF.
+
+    ``score = Σ_signal w_signal / (k + rank)``; a card carrying ``priority_signal``
+    tiers above the rest; ties break on descending score then ascending note_id
+    (byte-for-byte the kernel's ``rrf_fuse`` ordering)."""
+    w = dict(RRF_WEIGHTS if weights is None else weights)
+    rows = []
+    for c in cards:
+        score = sum(w.get(sig, 1.0) / (k + rank) for sig, rank in c.signal_ranks.items())
+        tier = 0 if priority_signal in c.signal_ranks else 1
+        rows.append((tier, -score, c.note_id))
+    rows.sort()
+    return [nid for _, _, nid in rows]
+
+
 def _dcg(gains: Sequence[float]) -> float:
     return sum(g / math.log2(i + 2) for i, g in enumerate(gains))
 

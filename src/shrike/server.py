@@ -925,13 +925,6 @@ def main() -> None:
         "modalities": None,
         "mmprojs": None,
     }
-    # The deterministic planted-vector backend (#559) — selected by env, never
-    # a public --embedding-backend choice. Gated on SHRIKE_SEARCH_QUALITY=1 (the
-    # search-quality suite's own gate) AND a configured model sentinel, so it is
-    # inert in every production boot. `_make_backend` independently refuses to
-    # build the kind without the gate, so this is select-by-env, not a hole.
-    if os.environ.get("SHRIKE_SEARCH_QUALITY") == "1" and args.embedding_model:
-        emb_params["backend"] = "planted"
     # The v2 recognizers: a list of harness-ready plans (#485). The legacy
     # (no --config) path uses the --ocr-backend flag instead and leaves this
     # empty; a v2 config fills it from the resolved profile.
