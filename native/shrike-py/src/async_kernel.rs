@@ -294,19 +294,6 @@ impl AsyncKernel {
         Ok(())
     }
 
-    /// The derived `source` strings with a currently-attached recognizer
-    /// (#485) — the harness reads this to report per-engine `/status` (one row
-    /// per attached purpose, keyed by source: `"ocr"`/`"vlm"`/`"asr"`).
-    fn attached_recognition_sources(&self, py: Python<'_>) -> Vec<String> {
-        py.detach(|| {
-            self.inner
-                .attached_recognition_purposes()
-                .into_iter()
-                .map(|p| p.source().to_string())
-                .collect()
-        })
-    }
-
     /// One bounded recognition sweep (#228): recognize up to `max_items`
     /// pending images, persist gated text + segments, re-embed the affected
     /// notes. Returns a JSON report ({status, recognized, stored, remaining});
