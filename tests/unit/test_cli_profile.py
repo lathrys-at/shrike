@@ -1,13 +1,16 @@
-"""CLI behavior for `shrike profile` (#66, slice 1).
+"""CLI behavior for `shrike profile` (#66, slices 1-2).
 
 These commands are pure config operations — they never reach the server — so
 the tests drive the real CLI against an isolated --config file and assert on
-the persisted registry.
+the persisted registry. `--discover` points ANKI_BASE at a synthesized
+prefs21.db so the Anki-base-dir scan is exercised end-to-end.
 """
 
 from __future__ import annotations
 
 import os
+import pickle
+import sqlite3
 
 from click.testing import CliRunner
 
@@ -24,6 +27,32 @@ def _run(tmp_path, args, **kwargs):
 
 def _registry(config_path):
     return Registry.from_config(load_config(config_path))
+
+
+def _write_anki_base(base, names, *, make_collections=()):
+    """Synthesize <base>/prefs21.db (Anki's schema + a _global row)."""
+    base.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(base / "prefs21.db")
+    try:
+        conn.execute(
+            "create table if not exists profiles "
+            "(name text primary key collate nocase, data blob not null)"
+        )
+        conn.execute(
+            "insert or replace into profiles values ('_global', ?)",
+            (pickle.dumps({}, protocol=4),),
+        )
+        for name in names:
+            conn.execute(
+                "insert or replace into profiles values (?, ?)",
+                (name, pickle.dumps({}, protocol=4)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    for name in make_collections:
+        (base / name).mkdir(parents=True, exist_ok=True)
+        (base / name / "collection.anki2").write_bytes(b"SQLite format 3\x00")
 
 
 class TestProfileAdd:
@@ -108,3 +137,45 @@ class TestProfileList:
         assert result.exit_code == 0, result.output
         assert '"default": "work"' in result.output
         assert '"name": "work"' in result.output
+
+
+class TestProfileListDiscover:
+    def test_discover_lists_anki_profiles(self, tmp_path, monkeypatch):
+        anki = tmp_path / "Anki2"
+        _write_anki_base(anki, ["User 1", "Work"], make_collections=["User 1"])
+        monkeypatch.setenv("ANKI_BASE", str(anki))
+        result, _ = _run(tmp_path, ["list", "--discover"])
+        assert result.exit_code == 0, result.output
+        assert "User 1" in result.output
+        assert "Work" in result.output
+        # The profile with no collection file on disk is flagged missing.
+        assert "missing" in result.output.lower()
+
+    def test_discover_annotates_registered_by_path(self, tmp_path, monkeypatch):
+        anki = tmp_path / "Anki2"
+        _write_anki_base(anki, ["Work"], make_collections=["Work"])
+        monkeypatch.setenv("ANKI_BASE", str(anki))
+        # Register the same collection under a *different* friendly name —
+        # membership is path-based, so it still reads as registered.
+        coll = str(anki / "Work" / "collection.anki2")
+        _run(tmp_path, ["add", "myhandle", coll])
+        result, _ = _run(tmp_path, ["list", "--discover"])
+        assert result.exit_code == 0, result.output
+        assert "registered" in result.output.lower()
+
+    def test_discover_empty_when_no_base(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ANKI_BASE", str(tmp_path / "absent"))
+        result, _ = _run(tmp_path, ["list", "--discover"])
+        assert result.exit_code == 0, result.output
+        assert "no anki profiles found" in result.output.lower()
+
+    def test_discover_json(self, tmp_path, monkeypatch):
+        anki = tmp_path / "Anki2"
+        _write_anki_base(anki, ["Work"], make_collections=["Work"])
+        monkeypatch.setenv("ANKI_BASE", str(anki))
+        result, _ = _run(tmp_path, ["list", "--discover", "--json"])
+        assert result.exit_code == 0, result.output
+        assert '"name": "Work"' in result.output
+        assert '"exists": true' in result.output
+        assert '"registered": false' in result.output
+        assert '"base_dir"' in result.output

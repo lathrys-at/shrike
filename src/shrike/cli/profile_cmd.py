@@ -142,17 +142,32 @@ def profile_default(ctx: click.Context, name: str) -> None:
 
 @profile.command("list", short_help="List registered profiles")
 @output_options
+@click.option(
+    "--discover",
+    is_flag=True,
+    help="Scan Anki's base directory for profiles instead of listing the registry.",
+)
 @click.pass_context
-def profile_list(ctx: click.Context) -> None:
+def profile_list(ctx: click.Context, discover: bool) -> None:
     """List registered profiles, marking the active default.
+
+    With --discover, scan Anki's base directory (its prefs21.db) for the
+    profiles Anki knows about, annotating which are already registered with
+    Shrike — so you can register them without hunting for paths. Discovery is
+    read-only and never touches Anki's files.
 
     \b
     Examples:
       shrike profile list
       shrike profile list --json
+      shrike profile list --discover
     """
     config = ctx.obj["config"]
     registry = Registry.from_config(config)
+
+    if discover:
+        _list_discovered(ctx, registry)
+        return
 
     if ctx.obj["json"]:
         output.emit_json(
@@ -181,3 +196,66 @@ def profile_list(ctx: click.Context) -> None:
     output.table(["", "Name", "Collection"], rows)
     if registry.default:
         output.console.print(f"\n[dim]* active default: [/dim][cyan]{registry.default}[/cyan]")
+
+
+def _list_discovered(ctx: click.Context, registry: Registry) -> None:
+    """Render Anki-base-dir discovery (`profile list --discover`)."""
+    import os
+
+    from shrike.paths import anki_base_dir, discover_anki_profiles
+
+    base = anki_base_dir()
+    discovered = discover_anki_profiles(base)
+    # Membership is path-based, not name-based: a collection registered under a
+    # different friendly name still reads as known. Compare on the same
+    # normalized (abspath + expanduser) form the registry stores.
+    registered = {p.path for p in registry.profiles}
+
+    def _is_registered(coll_path: str) -> bool:
+        return os.path.abspath(os.path.expanduser(coll_path)) in registered
+
+    if ctx.obj["json"]:
+        output.emit_json(
+            {
+                "base_dir": str(base),
+                "profiles": [
+                    {
+                        "name": p.name,
+                        "path": p.collection_path,
+                        "exists": p.exists,
+                        "registered": _is_registered(p.collection_path),
+                    }
+                    for p in discovered
+                ],
+            }
+        )
+        return
+
+    if not discovered:
+        output.console.print(
+            f"[dim]No Anki profiles found under [/dim][cyan]{base}[/cyan][dim] "
+            "(no prefs21.db, or Anki's base directory is elsewhere — set ANKI_BASE, "
+            "or register collections manually with [/dim]"
+            "[cyan]shrike profile add[/cyan][dim]).[/dim]"
+        )
+        return
+
+    output.console.print(f"[dim]Anki profiles under [/dim][cyan]{base}[/cyan]\n")
+    rows = []
+    for p in discovered:
+        marks = []
+        if _is_registered(p.collection_path):
+            marks.append("[green]registered[/green]")
+        if not p.exists:
+            marks.append("[yellow]missing[/yellow]")
+        rows.append(
+            [
+                f"[cyan]{p.name}[/cyan]",
+                f"[cyan]{p.collection_path}[/cyan]",
+                " ".join(marks),
+            ]
+        )
+    output.table(["Name", "Collection", ""], rows)
+    output.console.print(
+        "\n[dim]Register one with [/dim][cyan]shrike profile add <name> <path>[/cyan][dim].[/dim]"
+    )

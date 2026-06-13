@@ -138,6 +138,7 @@ _SERVER = [
 ]
 
 _CONFIG = [
+    "test_anki_discovery.py",
     "test_config.py",
     "test_profiles.py",
     "test_registry.py",
