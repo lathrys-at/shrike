@@ -121,13 +121,31 @@ class Capabilities:
 
 
 @dataclass(frozen=True)
+class RecognizerPlan:
+    """One resolved recognition engine (#485): the harness-ready shape a
+    ``recognizers:`` entry maps onto. ``purpose`` is the kernel routing key /
+    derived source (``ocr``/``describe``/``asr``); ``kind`` is the construction
+    selector (``apple`` for the platform OCR engine, ``describe-remote`` for the
+    remote VLM). Remote engines carry their ``endpoint`` + optional
+    ``api_key_env`` (resolved to a token at construction, never inlined)."""
+
+    purpose: str
+    kind: str
+    model: str | None = None
+    endpoint: str | None = None
+    api_key_env: str | None = None
+
+
+@dataclass(frozen=True)
 class ResolvedProfile:
     """The declared set intersected with the build: what this process will
     actually serve. Today at most one embedder space (#229 is the multi-space
-    substrate); ``warnings`` aggregates migration + degradation messages."""
+    substrate); ``recognizers`` is the per-purpose recognition set (#485);
+    ``warnings`` aggregates migration + degradation messages."""
 
     embedder: EmbedderEntry | None
     managed_llama: ManagedLlama | None
+    recognizers: tuple[RecognizerEntry, ...] = ()
     warnings: tuple[str, ...] = ()
 
 
@@ -513,11 +531,34 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
                 )
 
     for rec in caps.recognizers:
-        if rec.source in ("asr", "describe"):
+        if rec.source == "asr":
             raise ProfileError(
-                f"recognizers.{rec.source} is declared but the kernel integration for "
-                f"asr/describe hasn't landed yet (#485) — remove the entry for now"
+                "recognizers.asr is declared but the kernel integration for asr hasn't "
+                "landed yet (#485 PR2) — remove the entry for now"
             )
+        if rec.source == "describe":
+            # describe is attachable now (#485 PR1) — VLM image→text into the
+            # embedding space (vector-only). The remote runtime (any
+            # OpenAI-compatible vision endpoint) is the wired shape; platform
+            # (engine-apple) and onnx describe engines don't exist yet.
+            if rec.runtime != "remote":
+                raise ProfileError(
+                    f"recognizers.describe.runtime: {rec.runtime} is not a describe engine — "
+                    "the wired shape is runtime: remote (any OpenAI-compatible vision "
+                    "endpoint); declare endpoint + optional api_key_env"
+                )
+            if _RUNTIME_FEATURE["remote"] not in features:
+                raise ProfileError(
+                    f"recognizers.describe.runtime: remote needs the engine-remote engine, "
+                    f"which the {profile} build does not compile"
+                )
+            if rec.endpoint is None:
+                raise ProfileError(
+                    "recognizers.describe.runtime: remote needs an endpoint (the "
+                    "OpenAI-compatible vision server — a managed describe server is a "
+                    "future capability; point at a running endpoint for now)"
+                )
+            continue
         # ocr rows, by runtime:
         if rec.runtime == "platform":
             if _RUNTIME_FEATURE["platform"] not in features:
@@ -602,6 +643,7 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
     return ResolvedProfile(
         embedder=embedder,
         managed_llama=managed_llama,
+        recognizers=caps.recognizers,
         warnings=tuple(warnings),
     )
 
@@ -667,3 +709,37 @@ def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
             "mmprojs": list(llama.mmprojs),
         }
     raise ProfileError(f"unsupported embedder runtime {e.runtime!r} on this release")
+
+
+#: A resolved recognizer entry's runtime → the harness construction kind.
+_RECOGNIZER_KIND = {
+    ("ocr", "platform"): "apple",
+    ("describe", "remote"): "describe-remote",
+}
+
+
+def recognizer_plans(plan: ResolvedProfile) -> tuple[RecognizerPlan, ...]:
+    """Adapt the resolved recognizers onto the harness-ready
+    :class:`RecognizerPlan` shape (#485) — the recognizer analogue of
+    :func:`plan_to_runtime_params`. ``resolve_profile`` has already validated
+    each entry against the build and this release, so this is a pure mapping;
+    an entry it doesn't know how to construct is a ProfileError (the
+    validation and the mapping must stay in lockstep)."""
+    plans: list[RecognizerPlan] = []
+    for rec in plan.recognizers:
+        kind = _RECOGNIZER_KIND.get((rec.source, rec.runtime))
+        if kind is None:
+            raise ProfileError(
+                f"recognizers.{rec.source}.runtime: {rec.runtime} has no construction "
+                "path on this release"
+            )
+        plans.append(
+            RecognizerPlan(
+                purpose=rec.source,
+                kind=kind,
+                model=rec.model,
+                endpoint=rec.endpoint,
+                api_key_env=rec.api_key_env,
+            )
+        )
+    return tuple(plans)

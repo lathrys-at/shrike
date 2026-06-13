@@ -172,12 +172,30 @@ impl AppleVisionRecognizer {
 #[pyclass(frozen)]
 pub(crate) struct RemoteDescriber {
     engine: Arc<shrike_describe_remote::RemoteDescriber>,
+    /// The host-composed fingerprint (`describe:…:prompt=N`), folded into the
+    /// engine identity at attach. `None` on the probe construction the host
+    /// makes to read `model_info()` before it can compose the string; the
+    /// attach construction carries it. A `None`-fingerprint attach is still
+    /// legal (the kernel treats an absent fingerprint as "re-derive every
+    /// sweep"), but the host always composes one.
+    fingerprint: Option<String>,
 }
 
 #[cfg(feature = "engine-remote")]
 impl RemoteDescriber {
-    pub(crate) fn engine_arc(&self) -> Arc<shrike_describe_remote::RemoteDescriber> {
-        Arc::clone(&self.engine)
+    /// The kernel-facing engine: the pure-compute describe engine carrying the
+    /// host fingerprint via `WithPolicy` (so `Blocking`'s `Recognizer`
+    /// fingerprint reports it). `WithPolicy`'s embed-side knobs (dim/safe_batch)
+    /// are inert for a recognizer — only the fingerprint matters here.
+    pub(crate) fn engine_arc(
+        &self,
+    ) -> Arc<shrike_engine_api::WithPolicy<shrike_describe_remote::RemoteDescriber>> {
+        Arc::new(shrike_engine_api::WithPolicy::new(
+            Arc::clone(&self.engine),
+            self.fingerprint.clone(),
+            None,
+            1,
+        ))
     }
 }
 
@@ -185,8 +203,13 @@ impl RemoteDescriber {
 #[pymethods]
 impl RemoteDescriber {
     #[new]
-    #[pyo3(signature = (base_url, *, api_key=None, model=None))]
-    fn new(base_url: String, api_key: Option<String>, model: Option<String>) -> PyResult<Self> {
+    #[pyo3(signature = (base_url, *, api_key=None, model=None, fingerprint=None))]
+    fn new(
+        base_url: String,
+        api_key: Option<String>,
+        model: Option<String>,
+        fingerprint: Option<String>,
+    ) -> PyResult<Self> {
         // Construction validates the API key (header-injection guard) — the
         // same discipline as RemoteEmbedder.
         let engine = shrike_describe_remote::RemoteDescriber::new(
@@ -200,7 +223,37 @@ impl RemoteDescriber {
         .map_err(crate::to_py_err)?;
         Ok(Self {
             engine: Arc::new(engine),
+            fingerprint,
         })
+    }
+
+    /// The host's fingerprint recipe (the crate's `compose_fingerprint`):
+    /// `describe:<id>[:meta=…][:mmproj=<name>]:prompt=<N>`. Exposed as a
+    /// static method so the host composes the same string the engine identity
+    /// will carry — `model_info()` provides `(id, meta_json)`; `mmproj` is
+    /// folded ONLY for a host-launched local managed server (a cloud endpoint
+    /// passes `None`, byte-identical to "no mmproj suffix").
+    #[staticmethod]
+    #[pyo3(signature = (model_id, meta_json, configured_model=None, mmproj=None))]
+    fn compose_fingerprint(
+        model_id: Option<String>,
+        meta_json: String,
+        configured_model: Option<String>,
+        mmproj: Option<String>,
+    ) -> PyResult<String> {
+        let meta = serde_json::from_str::<serde_json::Value>(&meta_json)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        let info = shrike_describe_remote::ModelInfo {
+            id: model_id,
+            meta,
+        };
+        Ok(shrike_describe_remote::compose_fingerprint(
+            &info,
+            configured_model.as_deref(),
+            mmproj.as_deref(),
+        ))
     }
 
     /// Blocking direct describe in the RecognizerBackend wire shape
