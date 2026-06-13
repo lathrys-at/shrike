@@ -51,6 +51,11 @@ use shrike_store_api::{Collection, CreateOutcome, DerivedStore, DuplicatePolicy,
 pub mod runtime;
 pub use runtime::{block_on, init_runtime, spawn_op};
 
+// The multi-engine routing key (#485): re-exported so the pyo3 binding maps
+// the harness's purpose string onto it as `shrike_kernel::RecognitionPurpose`
+// without reaching into the `recognize` module.
+pub use recognize::RecognitionPurpose;
+
 // The engine contract (#342): traits live in shrike-engine-api — the kernel
 // consumes them and re-exports for downstream paths; it names no engine.
 pub use shrike_engine_api::{

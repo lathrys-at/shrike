@@ -39,10 +39,10 @@ anki-core = ["dep:shrike-collection", "dep:shrike-kernel"]
 # ── The engine/manager matrix (#499) ─────────────────────────────────────────
 # In-process ONNX engines (text + CLIP) via ort load-dynamic.
 engine-ort = ["dep:shrike-embed"]
-# Embeddings over any OpenAI-compatible endpoint (the managed llama-server, an
-# attached server, cloud/tailnet). shrike-describe-remote joins this feature
-# when its kernel integration lands (#485).
-engine-remote = ["dep:shrike-embed-remote"]
+# Embeddings AND VLM describe over any OpenAI-compatible endpoint (the managed
+# llama-server, an attached server, cloud/tailnet). shrike-describe-remote
+# joins the feature now that its kernel integration is attachable (#485).
+engine-remote = ["dep:shrike-embed-remote", "dep:shrike-describe-remote"]
 # Platform recognition engines (Apple Vision OCR; off-macOS it's the
 # unavailable stub). MOBILE-ONLY: never in the server build, on any OS
 # (docs/distribution.md's hard boundary — the server gets OCR via the remote
@@ -65,6 +65,10 @@ tokio = { version = "1", features = ["rt"] }
 shrike-derived = { path = "../shrike-derived", default-features = false }
 shrike-embed = { path = "../shrike-embed", optional = true }
 shrike-embed-remote = { path = "../shrike-embed-remote", optional = true }
+# VLM image→text describe over any OpenAI-compatible chat endpoint (#433/#485)
+# — the recognizer-attach sibling of shrike-embed-remote, same engine-remote
+# feature (pure Rust, server-side).
+shrike-describe-remote = { path = "../shrike-describe-remote", optional = true }
 shrike-llama-server = { path = "../shrike-llama-server", optional = true }
 # The engine contract (#342): the binding composes engines (WithPolicy +
 # OnExecutor over the asyncio lane) into the kernel's Arc<dyn Embedder> slot.

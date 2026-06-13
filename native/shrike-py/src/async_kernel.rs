@@ -128,7 +128,23 @@ enum AnyEmbedder<'py> {
 enum AnyRecognizer<'py> {
     #[cfg(feature = "engine-apple")]
     Native(PyRef<'py, crate::py_recognizer::AppleVisionRecognizer>),
+    #[cfg(feature = "engine-remote")]
+    Describe(PyRef<'py, crate::py_recognizer::RemoteDescriber>),
     Captured(PyRef<'py, crate::py_recognizer::PyRecognizer>),
+}
+
+/// Map the harness's purpose string onto the kernel's routing enum (#485).
+/// The string IS the derived `source` it lands under (`"ocr"`/`"vlm"`/`"asr"`)
+/// — the same names the kernel's `RecognitionPurpose::source()` returns.
+fn purpose_from_str(purpose: &str) -> PyResult<shrike_kernel::RecognitionPurpose> {
+    match purpose {
+        "ocr" => Ok(shrike_kernel::RecognitionPurpose::Ocr),
+        "vlm" | "describe" => Ok(shrike_kernel::RecognitionPurpose::Describe),
+        "asr" => Ok(shrike_kernel::RecognitionPurpose::Asr),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown recognition purpose {other:?} (choices: ocr, describe, asr)"
+        ))),
+    }
 }
 
 /// Build the kernel's image pair from a captured embedder + the resolver
@@ -211,17 +227,34 @@ impl AsyncKernel {
         py.detach(|| self.inner.detach_embedder())
     }
 
-    /// Attach the recognition service (#228, the second #342 slot): an OCR/ASR
-    /// engine plus the media-resolver callables it reads bytes through
-    /// (independent of the embed slot — OCR works with a text-only embedder).
-    /// Takes either recognizer shape ([`AnyRecognizer`]); the native engine
-    /// is adapted onto the asyncio compute lane here (call from a coroutine).
+    /// Attach the OCR recognition service (#228, the second #342 slot) — the
+    /// OCR-defaulting convenience over [`attach_recognizer_with`] (#485):
+    /// existing hosts/tests keep the single-arg shape and target the OCR
+    /// purpose. An OCR/ASR/describe engine plus the media-resolver callables it
+    /// reads bytes through (independent of the embed slot — recognition works
+    /// with a text-only embedder).
     fn attach_recognizer(
         &self,
         recognizer: AnyRecognizer<'_>,
         media_read: Py<PyAny>,
         media_exists: Py<PyAny>,
-    ) {
+    ) -> PyResult<()> {
+        self.attach_recognizer_with("ocr", recognizer, media_read, media_exists)
+    }
+
+    /// Attach (or swap) the recognition service for a specific purpose (#485)
+    /// — OCR, describe, or ASR, each routed to its own pending set / source /
+    /// fingerprint / destination by the kernel sweep. Takes either recognizer
+    /// shape ([`AnyRecognizer`]); the native engines are adapted onto the
+    /// blocking pool here via `Blocking`, exactly like OCR.
+    fn attach_recognizer_with(
+        &self,
+        purpose: &str,
+        recognizer: AnyRecognizer<'_>,
+        media_read: Py<PyAny>,
+        media_exists: Py<PyAny>,
+    ) -> PyResult<()> {
+        let purpose = purpose_from_str(purpose)?;
         let resolver: Arc<dyn shrike_kernel::ImageResolver> =
             Arc::new(PyMediaResolver::new(media_read, media_exists));
         match recognizer {
@@ -229,19 +262,47 @@ impl AsyncKernel {
             AnyRecognizer::Native(native) => {
                 let adapted: Arc<dyn shrike_kernel::Recognizer> =
                     Arc::new(shrike_engine_api::Blocking(native.engine_arc()));
-                self.inner.attach_recognizer(adapted, resolver);
+                self.inner.attach_recognizer_with(purpose, adapted, resolver);
+            }
+            #[cfg(feature = "engine-remote")]
+            AnyRecognizer::Describe(describe) => {
+                let adapted: Arc<dyn shrike_kernel::Recognizer> =
+                    Arc::new(shrike_engine_api::Blocking(describe.engine_arc()));
+                self.inner.attach_recognizer_with(purpose, adapted, resolver);
             }
             AnyRecognizer::Captured(captured) => {
                 let handle: Arc<dyn shrike_kernel::Recognizer> = Arc::clone(&captured.handle) as _;
-                self.inner.attach_recognizer(handle, resolver);
+                self.inner.attach_recognizer_with(purpose, handle, resolver);
             }
         }
+        Ok(())
     }
 
-    /// Detach the recognition service: derived text stays (still valid output
-    /// of the engine that produced it); only new recognition stops.
+    /// Detach the OCR recognition service (the OCR-defaulting convenience):
+    /// derived text stays (still valid output of the engine that produced it);
+    /// only new OCR recognition stops.
     fn detach_recognizer(&self, py: Python<'_>) {
         py.detach(|| self.inner.detach_recognizer())
+    }
+
+    /// Detach the recognition service for a specific purpose (#485).
+    fn detach_recognizer_for(&self, py: Python<'_>, purpose: &str) -> PyResult<()> {
+        let purpose = purpose_from_str(purpose)?;
+        py.detach(|| self.inner.detach_recognizer_for(purpose));
+        Ok(())
+    }
+
+    /// The derived `source` strings with a currently-attached recognizer
+    /// (#485) — the harness reads this to report per-engine `/status` (one row
+    /// per attached purpose, keyed by source: `"ocr"`/`"vlm"`/`"asr"`).
+    fn attached_recognition_sources(&self, py: Python<'_>) -> Vec<String> {
+        py.detach(|| {
+            self.inner
+                .attached_recognition_purposes()
+                .into_iter()
+                .map(|p| p.source().to_string())
+                .collect()
+        })
     }
 
     /// One bounded recognition sweep (#228): recognize up to `max_items`

@@ -937,6 +937,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<py_recognizer::PyRecognizer>()?;
     #[cfg(feature = "engine-apple")]
     m.add_class::<py_recognizer::AppleVisionRecognizer>()?;
+    #[cfg(feature = "engine-remote")]
+    m.add_class::<py_recognizer::RemoteDescriber>()?;
     // Feature-gated (#278): present only in `anki-core` builds; the stubtest
     // allowlist covers its absence from default builds.
     #[cfg(feature = "anki-core")]
