@@ -2967,6 +2967,131 @@ mod no_cpython_smoke {
         });
     }
 
+    // ── 0 / 1 / N graceful degradation (#235) ───────────────────────────────
+
+    #[test]
+    fn delete_fans_out_to_every_space_at_n2() {
+        // A note's vectors leave EVERY space on delete (#232/#235): the text
+        // space drops its text vector, the CLIP space drops its image vector.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let mut media = std::collections::HashMap::new();
+            media.insert("a.png".to_string(), b"aaa".to_vec());
+            let (kernel, _text, _clip) = two_space_kernel(&dir, media).await;
+            kernel.reindex_if_needed().await.unwrap();
+
+            let nid = upsert_image_note(&kernel, "front <img src=\"a.png\">").await;
+            let clip_orch = kernel
+                .index_set()
+                .orchestrator_for("clip-primary:v1")
+                .unwrap();
+            assert!(kernel.index().engine().contains(nid), "text space has it");
+            assert!(
+                clip_orch.engine().modality_contains("image", nid),
+                "image space has it"
+            );
+
+            // Delete → both spaces drop the note (remove_all fans out).
+            assert_eq!(kernel.delete_notes(vec![nid]).await.unwrap(), 1);
+            assert!(!kernel.index().engine().contains(nid), "gone from text space");
+            assert!(
+                !clip_orch.engine().contains(nid),
+                "gone from image space too (fan-out)"
+            );
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
+    #[test]
+    fn search_with_no_embedder_degrades_to_lexical_only() {
+        // 0-space search (#235): no text-capable space → semantic is off, the
+        // cross-space fan-out is empty, and search serves the LEXICAL signals
+        // only (no empty-index panic). The literal hit lands via `exact`.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            // No embedder attached at all → zero spaces.
+            assert_eq!(kernel.embed_space_count(), 0);
+            // build_cross_space is empty + safe with zero spaces.
+            assert!(kernel
+                .build_cross_space(&["anything".to_string()], 10)
+                .await
+                .unwrap()
+                .is_empty());
+
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+            let CreateOutcome::Created(nid) = kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["the krebs cycle in biology".into(), "b".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("create works without an embedder")
+            };
+            // Lexical-only: the literal substring hit lands; NO text signal.
+            let hits = kernel.search("krebs cycle", 5).await.unwrap();
+            assert_eq!(hits[0].note_id, nid);
+            assert!(
+                hits[0].signals.iter().all(|(s, _)| s != "text"),
+                "no semantic signal with zero spaces"
+            );
+            assert!(
+                hits[0].signals.iter().any(|(s, _)| s == "exact" || s == "fuzzy"),
+                "the lexical signal carried the hit"
+            );
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
+    #[test]
+    fn upsert_neighbors_pin_to_the_primary_text_space_across_n() {
+        // The dedup neighbor path pins to the PRIMARY text space's engine across
+        // N spaces (#235): adding a separate CLIP space must not change which
+        // engine the text-neighbor query reads — it stays the primary text
+        // engine, so the dedup signal is deterministic, never ambiguous across N.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let mut media = std::collections::HashMap::new();
+            media.insert("a.png".to_string(), b"aaa".to_vec());
+            let (kernel, _text, _clip) = two_space_kernel(&dir, media).await;
+            kernel.reindex_if_needed().await.unwrap();
+
+            // The neighbor path reads the PRIMARY engine (index()), and searches
+            // the `text` modality — independent of the CLIP image space.
+            let primary_engine = kernel.index().engine_arc();
+            let tag_engine = kernel.index_set().tag_engine();
+            assert!(
+                Arc::ptr_eq(&primary_engine, &tag_engine),
+                "the primary/text engine is the one the neighbor + tag paths read"
+            );
+            // The CLIP image space's engine is a DISTINCT engine (not what
+            // neighbors read).
+            let clip_engine = kernel
+                .index_set()
+                .orchestrator_for("clip-primary:v1")
+                .unwrap()
+                .engine_arc();
+            assert!(
+                !Arc::ptr_eq(&primary_engine, &clip_engine),
+                "the CLIP space is a separate engine; neighbors never read it"
+            );
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
     #[test]
     fn composed_kernel_serves_ops_over_injected_stores() {
         // The #389 injection seam: a kernel assembled from PRE-BUILT stores
