@@ -26,18 +26,28 @@ impl CollectionCore {
     /// it and performs the anki export. `.colpkg` rejects any non-whole scope —
     /// it is a whole-collection backup by definition.
     ///
-    /// **Symlink-safe write.** anki's exporters write to the exact path handed
-    /// in, following a symlink at that path. On a shared-host export root
-    /// another user could plant `out.apkg → /etc/passwd` and redirect this
-    /// operator-privileged write outside the root (the host's parent-dir gate
-    /// catches a symlinked *parent*, not a symlinked *basename*). So we never
-    /// hand anki the requested path: we export to a **server-generated temp
-    /// name inside the same parent dir** (which we create, so it can't be a
-    /// symlink) and then atomically `rename` it onto the requested basename.
-    /// `rename` replaces the directory entry without following a symlink at the
-    /// target — a planted `out.apkg` symlink is replaced by the real file, not
-    /// written through — and the swap is crash-safe (no torn package at the
-    /// final path).
+    /// **Symlink-safe write (#71).** anki's exporters write to the exact path
+    /// handed in with create/truncate and NO `O_NOFOLLOW`, following a symlink
+    /// at that path. On a shared-host export root another local user could
+    /// redirect this operator-privileged write outside the root by planting a
+    /// symlink — at the requested basename, OR (the subtler door) at the temp
+    /// name if it were predictable. The host's parent-dir gate catches only a
+    /// symlinked *parent*. So we never hand anki an attacker-influenceable path:
+    ///
+    /// 1. mkdtemp a **securely-random, exclusively-created** subdir inside the
+    ///    target's parent (`tempfile` — random name + `O_EXCL`/mkdir semantics,
+    ///    so a pre-planted entry fails the create; a dir can't be a symlink the
+    ///    write follows). Same filesystem as the target → the rename below is
+    ///    atomic.
+    /// 2. Export the package to a fixed name *inside* that server-owned dir
+    ///    (nothing there is attacker-controlled).
+    /// 3. Atomically `rename` the package out onto the requested basename.
+    ///    `rename` replaces the directory entry without following a symlink at
+    ///    the target, so a planted `out.apkg` symlink is replaced by the real
+    ///    file, not written through — and the swap is crash-safe.
+    /// 4. Drop the temp dir.
+    ///
+    /// Both symlink doors (basename and temp name) are closed.
     pub fn export_package(&self, req: &ExportRequest) -> NativeResult<ExportOutcome> {
         self.ensure_open()?;
         if matches!(req.format, PackageFormat::Colpkg) && !matches!(req.scope, ExportScope::Whole) {
@@ -51,37 +61,34 @@ impl CollectionCore {
             NativeError::invalid_input(format!("export path has no parent dir: {:?}", req.out_path))
         })?;
         // The parent must exist (the host gate already required it). Create it
-        // defensively so the temp write below can't fail on a missing dir.
+        // defensively so the mkdtemp below can't fail on a missing dir.
         std::fs::create_dir_all(parent)
             .map_err(|e| NativeError::internal(format!("export parent dir: {e}")))?;
-        let temp_path = self.export_temp_path(parent);
+
+        // (1) A securely-random, exclusively-created temp dir in the parent.
+        // `tempfile` removes it on drop, so any error path cleans up too.
+        let temp_dir = tempfile::Builder::new()
+            .prefix(".shrike-export-")
+            .tempdir_in(parent)
+            .map_err(|e| NativeError::internal(format!("export temp dir: {e}")))?;
+        // (2) Export into a fixed name inside the server-owned dir.
+        let temp_path = temp_dir.path().join("package");
         let temp_str = temp_path.to_str().ok_or_else(|| {
             NativeError::internal(format!(
                 "non-UTF-8 export temp path: {}",
                 temp_path.display()
             ))
         })?;
-
-        // Export to the server-controlled temp name, then atomically rename
-        // onto the requested basename. On any failure the temp file is cleaned
-        // up so a half-written package never lingers in the operator's root.
-        let result = self.export_to(req, temp_str);
-        match result {
-            Ok(note_count) => {
-                std::fs::rename(&temp_path, final_path).map_err(|e| {
-                    let _ = std::fs::remove_file(&temp_path);
-                    NativeError::internal(format!("finalize export ({}): {e}", req.out_path))
-                })?;
-                Ok(ExportOutcome {
-                    note_count,
-                    out_path: req.out_path.clone(),
-                })
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&temp_path);
-                Err(e)
-            }
-        }
+        let note_count = self.export_to(req, temp_str)?;
+        // (3) Atomically move the package out onto the requested basename.
+        std::fs::rename(&temp_path, final_path).map_err(|e| {
+            NativeError::internal(format!("finalize export ({}): {e}", req.out_path))
+        })?;
+        // (4) temp_dir drops here, removing the now-empty server-owned dir.
+        Ok(ExportOutcome {
+            note_count,
+            out_path: req.out_path.clone(),
+        })
     }
 
     /// Run the anki export to `out` (already a server-controlled temp path),
@@ -126,17 +133,6 @@ impl CollectionCore {
                 )
             }
         }
-    }
-
-    /// A unique, server-generated temp path inside `parent` (never a symlink —
-    /// we create the name). PID + a process-monotonic counter keeps it unique
-    /// across concurrent exports without a rng dependency; the `.tmp` suffix
-    /// and `.shrike-export-` prefix mark it as ours for any debugging eye.
-    fn export_temp_path(&self, parent: &std::path::Path) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        parent.join(format!(".shrike-export-{}-{}.tmp", std::process::id(), n))
     }
 
     /// Map an [`ExportScope`] to anki's `ExportLimit` oneof. A deck ref resolves

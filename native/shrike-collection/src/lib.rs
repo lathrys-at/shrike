@@ -1458,6 +1458,75 @@ mod tests {
     }
 
     #[test]
+    fn export_does_not_write_through_a_pre_planted_temp_dir_name() {
+        // The #71 review hazard: the package's write target must not be a path
+        // an attacker can pre-create. The export mkdtemp's a securely-random,
+        // EXCLUSIVELY-created subdir in the parent — so even a pre-planted entry
+        // can't be the write target. Verify the package lands at the requested
+        // path (the export succeeded via a server-owned temp dir, not a planted
+        // one), the victim a planted name pointed at is untouched, and no temp
+        // dir lingers.
+        let (core, dir) = temp_core();
+        core.create_note(
+            core.notetype_id("Basic").unwrap(),
+            DEFAULT_DECK,
+            &["front".into(), "back".into()],
+            &[],
+            DuplicatePolicy::Error,
+        )
+        .unwrap();
+
+        // Pre-plant a symlink at a guessable temp-style name (the old scheme's
+        // shape) pointing at a victim; the secure mkdtemp must not reuse it.
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, b"keep me").unwrap();
+        let planted = dir.join(".shrike-export-pre-planted");
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+        let out = dir.join("export.apkg");
+        core.export_package(&ExportRequest {
+            out_path: out.to_str().unwrap().to_string(),
+            format: PackageFormat::Apkg,
+            scope: ExportScope::Whole,
+            with_scheduling: false,
+            with_media: true,
+            legacy: false,
+        })
+        .unwrap();
+
+        // The package landed at the requested path (a real, non-empty file)...
+        assert!(out.is_file() && std::fs::metadata(&out).unwrap().len() > 0);
+        // ...the victim is untouched (the write never followed any planted
+        // name)...
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+        // ...and the planted symlink itself is still a symlink (the export
+        // mkdtemp'd its own dir; it neither reused nor clobbered the plant).
+        assert!(std::fs::symlink_metadata(&planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        // No server-owned export temp dir lingers (tempfile drops it).
+        let leftover: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                // The plant is named ...-pre-planted; a leaked server temp dir
+                // would carry tempfile's random suffix after the prefix.
+                n.starts_with(".shrike-export-") && n != ".shrike-export-pre-planted"
+            })
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "export temp dir not cleaned up: {leftover:?}"
+        );
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn busy_surface_release_reopen() {
         // The #64/#65 contention story: a second holder makes reopen BUSY;
         // releasing hands the lock over; reopening after the holder leaves
