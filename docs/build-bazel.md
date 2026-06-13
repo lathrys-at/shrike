@@ -35,7 +35,7 @@ local disk cache makes unchanged targets free. Python itself is hermetic
 | Build | `scripts/build-native.sh` (cargo → venv) | `./bazel build/test ...` |
 | Test | `pytest tests/unit tests/native -q` | `./bazel test //...` |
 | Debug affordances | `-x`, `-s`, `pdb`, `--testmon`, warm xdist | `--test_output=errors`, per-target logs |
-| Coverage | `scripts/coverage.sh` (the only comparable number) | not migrated (#262) |
+| Coverage | `scripts/coverage.sh` (the published number + the fail_under gate) | `scripts/coverage-bazel.sh` (#262; subprocess-capturing, report-only) |
 
 Iterate on the pip lane; run `./bazel test //...` before a PR for anything
 that touches BUILD files, the Rust workspace, or dependencies. The two lanes
@@ -130,6 +130,34 @@ unchanged target on a PR replays as `(cached) PASSED`. The documented
 upgrade path when `actions/cache`'s 10 GB eviction budget bites: a real
 remote cache (BuildBuddy / self-hosted bazel-remote), swapped in by flag in
 the composite action.
+
+## Coverage
+
+`scripts/coverage-bazel.sh` runs `bazel coverage` over the py suites and
+prints a per-file report from the merged lcov
+(`bazel-out/_coverage/_coverage_report.dat`; `--html` renders it with
+genhtml). The pieces that make it correct, all wired in `.bazelrc` and the
+test plumbing (#262):
+
+- **The spawned server subprocess is captured.** A py_binary's rules_python
+  bootstrap self-instruments when it inherits `COVERAGE_DIR`, but every
+  process writes the same fixed `pylcov.dat` name — so the integration
+  conftest gives each spawned server its own `COVERAGE_DIR` subdirectory and
+  Bazel's lcov merger picks them all up.
+- **Serial under coverage.** xdist workers are execnet subprocesses the
+  in-process tracer can't see, so the pytest runner drops `-n` when
+  `COVERAGE_DIR` is set (a parallel coverage run silently measures only the
+  controller).
+- **The CC collector is bypassed.** rules_rust instruments the cdylib
+  whenever the global coverage flag is on, and the resulting `.profraw`
+  trips Bazel's CC collector (no `LLVM_PROFDATA` on the autodetected
+  toolchain); `IGNORE_COVERAGE_COLLECTION_FAILURES=1` downgrades that to a
+  no-op. Rust coverage is a separate lane (cargo), not measured here.
+
+The published number and the `fail_under` ratchet stay on the pip path
+(`scripts/coverage.sh`, `coverage.yml`) until the Bazel number proves out
+side-by-side — note lcov totals are line coverage while coverage.py's total
+folds in branches, so expect a point or so of difference.
 
 ## Optional: direnv
 

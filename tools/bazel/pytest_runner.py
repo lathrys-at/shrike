@@ -38,6 +38,16 @@ def main() -> int:
     # The macro passes the test file path(s) as args.
     args += sys.argv[1:]
 
+    # Under `bazel coverage` (#262), run serially: xdist workers are execnet
+    # subprocesses the bootstrap's in-process tracer can't see, so a `-n auto`
+    # coverage run silently measures only the controller (~10% instead of ~90%).
+    # Coverage runs are off the per-PR hot path, so the serial wall-time cost
+    # lands only on the dedicated coverage lane.
+    if os.environ.get("COVERAGE_DIR"):
+        while "-n" in args:
+            i = args.index("-n")
+            del args[i : i + 2]
+
     ret = pytest.main(args)
     # Bazel applies --test_filter to every target in a `//pkg/...` pattern, so a
     # file with no matching test returns NO_TESTS_COLLECTED (5). For that target,

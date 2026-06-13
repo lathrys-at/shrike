@@ -14,4 +14,22 @@ test --test_output=errors
 # on a version change, since it lands in stable-status.txt.
 build --workspace_status_command=tools/workspace_status.sh
 
+# `bazel coverage` (#262) — measures the Python package, spawned server
+# subprocess included (each py_binary's rules_python bootstrap self-instruments
+# off the inherited COVERAGE_DIR; the integration conftest gives each spawned
+# server its own COVERAGE_DIR subdirectory so the fixed-name pylcov.dat reports
+# don't overwrite each other).
+#  - instrumentation_filter: Python only, mirroring the pip lane's
+#    source=["shrike"]. Rust coverage is a different lane (cargo llvm-cov).
+#  - IGNORE_COVERAGE_COLLECTION_FAILURES: rules_rust instruments the cdylib
+#    whenever the global coverage flag is on (it ignores the instrumentation
+#    filter), so every test emits a .profraw that trips bazel's CC collector
+#    (no LLVM_PROFDATA on the autodetected toolchain). The flag downgrades that
+#    collector failure to a no-op; the Python lcov is unaffected.
+#  - combined_report: one merged lcov for the invocation at
+#    bazel-out/_coverage/_coverage_report.dat (scripts/coverage-bazel.sh reads it).
+coverage --instrumentation_filter=^//src/shrike
+coverage --test_env=IGNORE_COVERAGE_COLLECTION_FAILURES=1
+coverage --combined_report=lcov
+
 try-import %workspace%/.bazelrc.user

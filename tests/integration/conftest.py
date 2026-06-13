@@ -476,10 +476,25 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         if extra_args:
             cmd.extend(extra_args)
 
+        # Under `bazel coverage` the spawned server self-instruments: its
+        # rules_python bootstrap sees the inherited COVERAGE_DIR and writes an
+        # lcov on exit — but to a FIXED name (pylcov.dat), so the test process
+        # and every server would overwrite each other (last writer wins, and
+        # the test exits last — which is exactly how server-side lines used to
+        # read as uncovered, #262). Bazel's LcovMerger scans COVERAGE_DIR
+        # recursively for *.dat, so giving each server its own subdirectory
+        # keeps every report and the merge picks them all up. No-op outside
+        # coverage runs (COVERAGE_DIR unset).
+        env = None
+        if os.environ.get("COVERAGE_DIR"):
+            subprocess_cov = Path(os.environ["COVERAGE_DIR"]) / f"sub-{name}-{port}"
+            subprocess_cov.mkdir(parents=True, exist_ok=True)
+            env = {**os.environ, "COVERAGE_DIR": str(subprocess_cov)}
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
         )
         processes.append(proc)
 
