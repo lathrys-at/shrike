@@ -28,13 +28,16 @@ done
 
 # The non-embedding py suites — the same scope as scripts/coverage.sh's
 # `-m "not embedding"` run. //tests/unit/... covers both the pre- and
-# post-#259 target layout.
-./bazel coverage //tests/unit/... //tests/integration:integration //tests/native:native
+# post-#259 target layout. A failing test still prints the (partial) report —
+# bazel collects no coverage for a failed target, so the number is an
+# undercount then — and the script exits with bazel's status at the end.
+bazel_status=0
+./bazel coverage //tests/unit/... //tests/integration:integration //tests/native:native || bazel_status=$?
 
 report="$(./bazel info output_path)/_coverage/_coverage_report.dat"
 if [ ! -f "$report" ]; then
   echo "no combined report at $report — did the coverage run fail?" >&2
-  exit 1
+  exit "${bazel_status:-1}"
 fi
 
 python3 - "$report" <<'PY'
@@ -72,3 +75,10 @@ if [ "$want_html" = 1 ]; then
     exit 1
   fi
 fi
+
+# Surface a failed test run after the report (the number above is an
+# undercount in that case — failed targets contribute no coverage).
+if [ "$bazel_status" -ne 0 ]; then
+  echo "warning: bazel coverage exited $bazel_status (test failures above); the report is partial" >&2
+fi
+exit "$bazel_status"
