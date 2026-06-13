@@ -42,6 +42,7 @@ Design rules:
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -1167,3 +1168,30 @@ class StopFailed(BaseModel):
 # Discriminated on the bool ``stopped``: a success carries pid/forced, a no-op
 # carries the reason. (daemon.stop_server is the source.)
 StopResponse = Annotated[StopSucceeded | StopFailed, Field(discriminator="stopped")]
+
+
+# -- the action exchange error envelope (#505) -------------------------------
+# The UI edge (POST /actions/{name}) is schema-first WITHOUT the MCP JSON-RPC
+# envelope, so a failure needs its own one wire shape. ActionError is that
+# shape — defined once in shrike-schemas (canonical) and mirrored here. The
+# `code` is a small, stable taxonomy that mirrors the MCP edge's error split
+# (a caller mistake vs contention vs an internal bug) onto HTTP status codes;
+# the route layer (server.py) maps the actions' transport-neutral errors —
+# ToolInputError / CollectionBusyError / NativeBusyError / an unknown name /
+# anything else — onto these. `message` is non-leaking: for INTERNAL_ERROR it
+# is a fixed generic sentence (the real cause + traceback went to the log via
+# _safe_tool), for the caller-actionable codes it carries the actionable text.
+#
+# Like NoteValidationReason, ActionErrorCode is a *field-level* enum (not a
+# standalone catalog entry on either side); its shape is contract-tested
+# through ActionError.
+class ActionErrorCode(StrEnum):
+    INPUT_ERROR = "input_error"
+    COLLECTION_BUSY = "collection_busy"
+    UNKNOWN_ACTION = "unknown_action"
+    INTERNAL_ERROR = "internal_error"
+
+
+class ActionError(BaseModel):
+    code: ActionErrorCode
+    message: str

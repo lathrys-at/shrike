@@ -409,6 +409,12 @@ ROUNDTRIP_CASES: list[tuple[str, dict]] = [
             "unused_media": None,
         },
     ),
+    # The actions-over-HTTP error envelope (#505): one case per code, so the
+    # snake_case wire values agree on both sides in practice.
+    ("ActionError", {"code": "input_error", "message": "bad query"}),
+    ("ActionError", {"code": "collection_busy", "message": "in use"}),
+    ("ActionError", {"code": "unknown_action", "message": "no such action"}),
+    ("ActionError", {"code": "internal_error", "message": "the server failed"}),
 ]
 
 
