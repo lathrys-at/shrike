@@ -943,22 +943,17 @@ pub enum LockingMode {
     Cooperative,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RecognitionState {
     Unavailable,
     Building,
+    // A present engine row defaults to ready (the harness constructs it with an
+    // explicit state; this is the deserialization default for an older/partial
+    // payload).
+    #[default]
     Ready,
     Error,
-}
-
-impl Default for RecognitionState {
-    fn default() -> Self {
-        // A present engine row defaults to ready (the harness constructs it
-        // with an explicit state; this is the deserialization default for an
-        // older/partial payload).
-        Self::Ready
-    }
 }
 
 /// One attached recognition engine's self-report (#228/#485). The Rust mirror
