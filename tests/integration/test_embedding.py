@@ -194,7 +194,12 @@ class TestAttachMode:
             "    manage: attach\n"
             f"    port: {collection_server.embedding_port}\n"
         )
-        attached = server_factory("attach-client", extra_args=["--config", str(cfg)])
+        # Generous boot deadline: the attach boot embeds against the upstream
+        # (connectivity proof + batch probe) before serving — fast on a warm
+        # server, but the factory's model-keyed heuristic can't see it.
+        attached = server_factory(
+            "attach-client", extra_args=["--config", str(cfg)], boot_timeout=120.0
+        )
 
         status = httpx.get(attached.url.rsplit("/", 1)[0] + "/status", timeout=5.0).json()
         emb = status["embedding"]

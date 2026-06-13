@@ -429,6 +429,7 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         *,
         embedding_model: str | None = None,
         extra_args: list[str] | None = None,
+        boot_timeout: float | None = None,
     ) -> ServerInfo:
         root = tmp_path_factory.mktemp(name)
         log_dir = root / "logs"
@@ -487,8 +488,10 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         # in one day (PRs #459/#472, with warm caches) — give it the same
         # generous deadline the collection_server availability poll uses
         # (#444). Costs nothing when boots are fast; the no-embedding case
-        # stays tight.
-        timeout = 120.0 if embedding_model else 10.0
+        # stays tight. ``boot_timeout`` overrides for boots the heuristic
+        # can't see (an attach/remote --config boot embeds over HTTP before
+        # serving, #498).
+        timeout = boot_timeout if boot_timeout is not None else (120.0 if embedding_model else 10.0)
         try:
             _wait_for_server(url, timeout=timeout)
         except TimeoutError:

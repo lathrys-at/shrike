@@ -363,6 +363,7 @@ ROUNDTRIP_CASES: list[tuple[str, dict]] = [
             "provider": None,
             "batch_safe": True,
             "batch": "batched",
+            "modalities": ["text", "image"],
         },
     ),
     ("EmbeddingStatus", {"state": "not_configured", "available": False}),
