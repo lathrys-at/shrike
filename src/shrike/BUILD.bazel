@@ -216,6 +216,7 @@ py_library(
         ":embedding_base",
         ":index",
         ":pkg",
+        ":profiles",
         ":recognition",
         "//native/shrike-py:shrike_native",
     ],
