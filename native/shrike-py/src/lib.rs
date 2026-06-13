@@ -685,7 +685,7 @@ impl DerivedTextEngine {
     ) -> PyResult<Vec<MatchRow>> {
         py.detach(|| {
             self.inner
-                .match_rows(&expr, limit, with_text, scope.as_deref())
+                .match_rows(&expr, limit, with_text, scope.as_deref(), &[])
         })
         .map_err(to_py_err)
     }
@@ -699,8 +699,11 @@ impl DerivedTextEngine {
         limit: i64,
         scope: Option<Vec<i64>>,
     ) -> PyResult<Option<Vec<shrike_derived::LexicalRow>>> {
-        py.detach(|| self.inner.search_substring(&query, limit, scope.as_deref()))
-            .map_err(to_py_err)
+        py.detach(|| {
+            self.inner
+                .search_substring(&query, limit, scope.as_deref(), &[])
+        })
+        .map_err(to_py_err)
     }
 
     /// Fuzzy (trigram/typo) rows, best-first, deduped per note (#331).
@@ -712,8 +715,11 @@ impl DerivedTextEngine {
         top_k: i64,
         scope: Option<Vec<i64>>,
     ) -> PyResult<Vec<shrike_derived::LexicalRow>> {
-        py.detach(|| self.inner.search_fuzzy(&query, top_k, scope.as_deref()))
-            .map_err(to_py_err)
+        py.detach(|| {
+            self.inner
+                .search_fuzzy(&query, top_k, scope.as_deref(), &[])
+        })
+        .map_err(to_py_err)
     }
 }
 

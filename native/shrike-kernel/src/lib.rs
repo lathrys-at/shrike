@@ -243,11 +243,14 @@ pub struct Kernel {
     tag_keys: Arc<tag_centroids::TagKeyMap>,
     tag_config: tag_centroids::TagCentroidConfig,
     tag_refresh: Arc<tag_centroids::TagRefresher>,
-    /// The recognition service (#228/#342, the second registry slot):
-    /// OCR/ASR engines the harness attaches at runtime, exactly like the
-    /// embed slot — the kernel runs the pipeline over whatever is registered
-    /// and recognition is simply off when nothing is.
-    recognize: RwLock<Option<Arc<RecognizeService>>>,
+    /// The recognition services (#228/#342/#485, the second registry slot):
+    /// OCR/ASR/describe engines the harness attaches at runtime, exactly like
+    /// the embed slot — but **keyed by purpose** (#485) so OCR, ASR, and VLM
+    /// describe can be attached independently, each sweeping its own pending
+    /// set / source / fingerprint / destination. The kernel runs the pipeline
+    /// over whatever is registered; recognition for a purpose is simply off
+    /// when its slot is empty.
+    recognize: RwLock<BTreeMap<recognize::RecognitionPurpose, Arc<RecognizeService>>>,
     recognition_gate: recognize::RecognitionGate,
 }
 
@@ -284,6 +287,12 @@ impl EmbedService {
 pub type KernelImages = (Box<dyn ImageEmbedder>, Box<dyn ImageResolver>);
 
 pub(crate) const FIELD_SOURCE: &str = "field";
+
+/// A shared, pre-enumerated `(note_id, media_names)` set for one media kind
+/// (#485): the multi-purpose recognition sweep enumerates each kind once and
+/// hands this Arc to every same-kind purpose's sweep, so the collection is
+/// never re-scanned per purpose.
+type MediaRefs = Arc<[(i64, Vec<String>)]>;
 
 /// The NOTE-item vector spaces (#178): every note search is scoped to these,
 /// so other entity kinds sharing the engine (per-(tag, modality) centroids in
@@ -407,38 +416,118 @@ impl Kernel {
             tag_keys,
             tag_config,
             tag_refresh,
-            recognize: RwLock::new(None),
+            recognize: RwLock::new(BTreeMap::new()),
             recognition_gate: recognize::RecognitionGate::default(),
         })
     }
 
-    /// Attach (or swap) the recognition service — the #342 slot pattern,
-    /// second instance. The harness follows up by driving the pending sweep.
+    /// Attach (or swap) the OCR recognition service — the #342 slot pattern,
+    /// second instance. The OCR-defaulting convenience over
+    /// [`attach_recognizer_with`] (#485): existing hosts and kernel tests keep
+    /// the single-arg shape and target the OCR purpose. The harness follows up
+    /// by driving the pending sweep.
     pub fn attach_recognizer(
         &self,
         recognizer: Arc<dyn Recognizer>,
         resolver: Arc<dyn ImageResolver>,
     ) {
-        *self.recognize.write().expect("recognize slot poisoned") =
-            Some(Arc::new(RecognizeService {
-                recognizer,
-                resolver,
-            }));
+        self.attach_recognizer_with(recognize::RecognitionPurpose::Ocr, recognizer, resolver);
     }
 
-    /// Detach the recognition service. Already-derived text stays (it remains
-    /// valid output of the engine that produced it); only new recognition
-    /// stops.
+    /// Attach (or swap) the recognition service for a specific purpose (#485)
+    /// — OCR, ASR, or VLM describe, each routed to its own pending set /
+    /// source / fingerprint / destination by the sweep.
+    pub fn attach_recognizer_with(
+        &self,
+        purpose: recognize::RecognitionPurpose,
+        recognizer: Arc<dyn Recognizer>,
+        resolver: Arc<dyn ImageResolver>,
+    ) {
+        self.recognize
+            .write()
+            .expect("recognize slot poisoned")
+            .insert(
+                purpose,
+                Arc::new(RecognizeService {
+                    recognizer,
+                    resolver,
+                }),
+            );
+    }
+
+    /// Detach the OCR recognition service (the OCR-defaulting convenience).
+    /// Already-derived text stays (it remains valid output of the engine that
+    /// produced it); only new recognition stops.
     pub fn detach_recognizer(&self) {
-        *self.recognize.write().expect("recognize slot poisoned") = None;
+        self.detach_recognizer_for(recognize::RecognitionPurpose::Ocr);
     }
 
-    /// The currently attached recognition service, if any.
+    /// Detach the recognition service for a specific purpose (#485).
+    pub fn detach_recognizer_for(&self, purpose: recognize::RecognitionPurpose) {
+        self.recognize
+            .write()
+            .expect("recognize slot poisoned")
+            .remove(&purpose);
+    }
+
+    /// The OCR recognition service, if attached (the OCR-defaulting
+    /// convenience).
     pub fn recognize_service(&self) -> Option<Arc<RecognizeService>> {
+        self.recognize_service_for(recognize::RecognitionPurpose::Ocr)
+    }
+
+    /// The recognition service for a specific purpose, if attached (#485).
+    pub fn recognize_service_for(
+        &self,
+        purpose: recognize::RecognitionPurpose,
+    ) -> Option<Arc<RecognizeService>> {
         self.recognize
             .read()
             .expect("recognize slot poisoned")
-            .clone()
+            .get(&purpose)
+            .cloned()
+    }
+
+    /// The purposes with a currently-attached recognizer (sorted) — the
+    /// harness drives one sweep per attached purpose, and `/status` reports
+    /// per-purpose state.
+    pub fn attached_recognition_purposes(&self) -> Vec<recognize::RecognitionPurpose> {
+        self.recognize
+            .read()
+            .expect("recognize slot poisoned")
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    /// Every recognition purpose, in sweep order — the basis for the
+    /// vector-minting and hidden-lexical source sets below (so adding a
+    /// purpose updates both without a second edit).
+    const ALL_PURPOSES: &'static [recognize::RecognitionPurpose] = &[
+        recognize::RecognitionPurpose::Ocr,
+        recognize::RecognitionPurpose::Describe,
+        recognize::RecognitionPurpose::Asr,
+    ];
+
+    /// The derived `source` strings whose rows are vector-minting (#485): the
+    /// union of every purpose's source (all recognition purposes mint
+    /// vectors — only the LEXICAL surfaces differ). `compose_embed_inputs`
+    /// reads OCR/ASR/VLM recognized text from these.
+    fn vector_minting_sources() -> Vec<&'static str> {
+        Self::ALL_PURPOSES.iter().map(|p| p.source()).collect()
+    }
+
+    /// The derived `source` strings HIDDEN from the lexical (substring/fuzzy)
+    /// surfaces (#485) — every [`recognize::Destination::VectorOnly`]
+    /// purpose's source. Passed into the derived store so a VLM-describe row
+    /// is stored (for provenance + reconcile) but never reachable via
+    /// literal/typo search.
+    pub fn hidden_lexical_sources() -> Vec<&'static str> {
+        Self::ALL_PURPOSES
+            .iter()
+            .filter(|p| p.destination() == recognize::Destination::VectorOnly)
+            .map(|p| p.source())
+            .collect()
     }
 
     /// The live tag-key map (key → tag string) for the `tag.text` space.
@@ -597,33 +686,45 @@ impl Kernel {
     }
 
     /// Compose orchestrator inputs from collection rows + the derived
-    /// store's gated recognized texts (#199/#228): the index derives from
-    /// BOTH, so reconcile == rebuild keeps holding after recognition, and a
-    /// note's OCR text mints vectors on any (re-)embed path. Vector-worthiness
-    /// re-judges from the stored text (confidence already gated at ingest).
+    /// store's recognized texts across EVERY vector-minting source
+    /// (#199/#228/#485): the index derives from collection text + OCR + ASR +
+    /// VLM-describe, so reconcile == rebuild keeps holding after recognition,
+    /// and a note's recognized text mints vectors on any (re-)embed path.
+    /// Vector-worthiness re-judges from the stored text (confidence already
+    /// gated at ingest). The destination axis is lexical-visibility only — a
+    /// VectorOnly (VLM) source still feeds this embed path; it is merely
+    /// hidden from the substring/fuzzy surfaces.
     fn compose_embed_inputs(
         &self,
         raw: Vec<(i64, String, Vec<String>)>,
         only_notes: Option<&[i64]>,
     ) -> Vec<index_orchestrator::EmbedInput> {
-        let mut ocr_map: std::collections::HashMap<i64, Vec<String>> =
+        let mut recognized_map: std::collections::HashMap<i64, Vec<String>> =
             std::collections::HashMap::new();
-        // Per-op callers scope the read to the written notes (#445) — the
+        // Union every recognition source's vector-worthy text under the note
+        // key. Per-op callers scope the read to the written notes (#445); the
         // full-set read is for rebuild/reconcile, which consume everything.
-        let texts = match only_notes {
-            Some(ids) => self.derived.texts_for_source_for_notes(OCR_SOURCE, ids),
-            None => self.derived.texts_for_source(OCR_SOURCE),
-        };
-        match texts {
-            Ok(rows) => {
-                for (nid, _r, text) in rows {
-                    if self.recognition_gate.vector_worthy(&text) {
-                        ocr_map.entry(nid).or_default().push(text);
+        // One query per source (a small fixed set — ocr/vlm/asr), each bounded
+        // by rows that EXIST for that source (most notes have none), so this
+        // is proportional to recognized-content volume, not 3× the
+        // collection. (A single `source IN (…)` read could collapse it if a
+        // profile ever flags it.)
+        for source in Self::vector_minting_sources() {
+            let texts = match only_notes {
+                Some(ids) => self.derived.texts_for_source_for_notes(source, ids),
+                None => self.derived.texts_for_source(source),
+            };
+            match texts {
+                Ok(rows) => {
+                    for (nid, _r, text) in rows {
+                        if self.recognition_gate.vector_worthy(&text) {
+                            recognized_map.entry(nid).or_default().push(text);
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                tracing::warn!(error = ?e, "reading recognized texts failed; embedding without them");
+                Err(e) => {
+                    tracing::warn!(error = ?e, %source, "reading recognized texts failed; embedding without them");
+                }
             }
         }
         raw.into_iter()
@@ -632,22 +733,12 @@ impl Kernel {
                     note_id,
                     text,
                     image_names,
-                    ocr_texts: ocr_map.remove(&note_id).unwrap_or_default(),
+                    ocr_texts: recognized_map.remove(&note_id).unwrap_or_default(),
                 },
             )
             .collect()
     }
 
-    /// One bounded recognition sweep (#228): recognize up to `max_items`
-    /// pending (note, image) pairs, persist gated text + segments to the
-    /// derived store, and re-embed the affected notes so OCR vectors mint.
-    /// Pending = a resolvable image with no OCR row AND no below-gate marker
-    /// (#416) — or all of them, after a recognizer-fingerprint change
-    /// invalidates the prior text and the markers together. Returns
-    /// `{status, recognized, stored, remaining}` — the harness loops while
-    /// `remaining > 0` and the batch made progress (`recognized > 0`), so
-    /// one call never occupies the executor for long and a permanently
-    /// unreadable window can't spin the driver.
     /// Full derived-text (FTS5) rebuild, entirely kernel-side (#445): one
     /// collection job collects the field rows, the build runs on the blocking
     /// pool against the kernel's own engine — the rows never cross the FFI.
@@ -709,60 +800,156 @@ impl Kernel {
         Ok((n, dmod, now))
     }
 
+    /// One bounded recognition sweep across EVERY attached purpose
+    /// (#228/#485): for each of OCR / ASR / VLM-describe that has a recognizer
+    /// attached, recognize up to `max_items` of ITS pending media, persist
+    /// gated text + segments per its destination, and re-embed the affected
+    /// notes so recognition vectors mint. Each purpose sweeps independently
+    /// (its own pending set / source / fingerprint key / destination), and
+    /// the per-purpose chunk-Err-aborts-before-persist contract holds per
+    /// sweep — a down describe endpoint leaves its backlog intact without
+    /// touching OCR. Returns an AGGREGATED report (summed counts, max
+    /// remaining) so the harness's existing `remaining > 0` driver loop is
+    /// unchanged; `Unavailable` only when NO purpose is attached.
     pub async fn recognize_pending(
         &self,
         max_items: usize,
     ) -> NativeResult<recognize::SweepReport> {
-        let Some(svc) = self.recognize_service() else {
+        let purposes = self.attached_recognition_purposes();
+        if purposes.is_empty() {
+            return Ok(recognize::SweepReport::Unavailable);
+        }
+        // Enumerate each NEEDED media kind ONCE (#445: no per-purpose
+        // collection re-scan — OCR and describe are both Image, so a single
+        // `note_image_refs` pass over the 100k-note collection serves both).
+        // The shared Arc'd refs are handed to every purpose's sweep.
+        let kinds: std::collections::BTreeSet<recognize::MediaKind> =
+            purposes.iter().map(|p| p.media_kind()).collect();
+        let mut kind_refs: BTreeMap<recognize::MediaKind, MediaRefs> = BTreeMap::new();
+        for kind in kinds {
+            let refs: MediaRefs = self.note_media_refs(kind).await?.into();
+            kind_refs.insert(kind, refs);
+        }
+        // Each purpose's sweep is independent: an Err from one (a down
+        // endpoint) propagates and aborts THIS call before the harness loops
+        // again — that purpose's backlog stays pending, exactly the
+        // chunk-Err-aborts-before-persist contract, now scoped per purpose.
+        // `agg` is Some iff at least one purpose's sweep actually Ran (a
+        // batch reached an engine) — counts summed, remaining max-ed.
+        let mut agg: Option<(usize, usize, usize)> = None; // (recognized, stored, remaining)
+        for purpose in purposes {
+            let refs = Arc::clone(&kind_refs[&purpose.media_kind()]);
+            let report = self
+                .recognize_pending_for_refs(purpose, max_items, &refs)
+                .await?;
+            if let recognize::SweepReport::Ran {
+                recognized,
+                stored,
+                remaining,
+            } = report
+            {
+                let (r, s, rem) = agg.get_or_insert((0, 0, 0));
+                *r += recognized;
+                *s += stored;
+                *rem = (*rem).max(remaining);
+            }
+        }
+        match agg {
+            Some((recognized, stored, remaining)) => Ok(recognize::SweepReport::Ran {
+                recognized,
+                stored,
+                remaining,
+            }),
+            // Every attached purpose was Idle (nothing pending) — the sweep
+            // had no work, the harness's driver stops.
+            None => Ok(recognize::SweepReport::Idle),
+        }
+    }
+
+    /// One bounded recognition sweep for a SINGLE purpose (#485) — the
+    /// per-engine routing of the original #228 sweep. Pending = a resolvable
+    /// media ref of this purpose's media kind with no row for THIS source AND
+    /// no below-gate marker (#416) — or all of them after this purpose's
+    /// recognizer-fingerprint changes (its own meta key, so an OCR upgrade
+    /// never re-derives ASR/VLM and vice versa). Persists per the purpose's
+    /// destination: a VectorOnly (VLM) row is still stored (for provenance +
+    /// reconcile) but the kernel excludes its source from the lexical
+    /// surfaces. On a recognizer chunk `Err`, the sweep aborts BEFORE
+    /// persisting anything or advancing this purpose's fingerprint meta —
+    /// everything stays pending and the next sweep retries (the load-bearing
+    /// describe-engine contract, preserved per purpose).
+    pub async fn recognize_pending_for(
+        &self,
+        purpose: recognize::RecognitionPurpose,
+        max_items: usize,
+    ) -> NativeResult<recognize::SweepReport> {
+        // Enumerate this purpose's media kind once, then delegate. The
+        // multi-purpose driver shares one enumeration across same-kind
+        // purposes (#445); this single-purpose entry point is the
+        // test/binding convenience.
+        if self.recognize_service_for(purpose).is_none() {
+            return Ok(recognize::SweepReport::Unavailable);
+        }
+        let refs: MediaRefs = self.note_media_refs(purpose.media_kind()).await?.into();
+        self.recognize_pending_for_refs(purpose, max_items, &refs)
+            .await
+    }
+
+    /// [`recognize_pending_for`] over a PRE-ENUMERATED media-ref set (#445):
+    /// the multi-purpose driver enumerates each media kind once and shares the
+    /// Arc'd refs across same-kind purposes, so a sweep never re-scans the
+    /// collection per purpose.
+    async fn recognize_pending_for_refs(
+        &self,
+        purpose: recognize::RecognitionPurpose,
+        max_items: usize,
+        raw: &[(i64, Vec<String>)],
+    ) -> NativeResult<recognize::SweepReport> {
+        let Some(svc) = self.recognize_service_for(purpose) else {
             return Ok(recognize::SweepReport::Unavailable);
         };
+        let source = purpose.source();
+        let fingerprint_key = purpose.fingerprint_key();
 
-        // Fingerprint drift: a changed engine invalidates ALL recognized text
-        // (the analog of the embedder's model_id rebuild).
+        // Fingerprint drift: a changed engine invalidates ALL of THIS
+        // purpose's recognized text (the analog of the embedder's model_id
+        // rebuild), keyed by this purpose's own meta key.
         let fingerprint = svc.recognizer.fingerprint().unwrap_or_default();
-        let stored = self
-            .derived
-            .meta_get(RECOGNIZER_FINGERPRINT_KEY)?
-            .unwrap_or_default();
+        let stored = self.derived.meta_get(fingerprint_key)?.unwrap_or_default();
         if !stored.is_empty() && stored != fingerprint {
             let stale: Vec<i64> = self
                 .derived
-                .refs_for_source(OCR_SOURCE)?
+                .refs_for_source(source)?
                 .into_iter()
                 .map(|(nid, _)| nid)
                 .collect();
             if !stale.is_empty() {
                 tracing::info!(
                     notes = stale.len(),
+                    %source,
                     "recognizer fingerprint changed; invalidating recognized text"
                 );
-                self.derived.remove(&stale, Some(OCR_SOURCE))?;
+                self.derived.remove(&stale, Some(source))?;
             }
             // Below-gate markers ride the same invalidation (#416): the new
             // engine may read what the old one couldn't, so gated items
             // re-enter the pending set exactly like stored rows re-derive.
-            self.derived.clear_gated(OCR_SOURCE)?;
+            self.derived.clear_gated(source)?;
         }
 
-        // Pending set: resolvable images without an OCR row — and without a
-        // below-gate marker (#416): an item the gate dropped is DONE (its
-        // outcome can't change until the fingerprint does), not pending, so
-        // it is never re-recognized and an all-gated window converges instead
-        // of re-taking itself forever.
-        // Scoped read (#445): the pending diff needs only (note_id,
-        // image_names) — the old full note_embed_inputs render paid
-        // notetype lookups + normalization + strip per field for the WHOLE
-        // collection, once per sweep batch, and discarded the text.
-        let raw = self.collection.run(|core| core.note_image_refs()).await??;
-        let mut done: std::collections::HashSet<(i64, String)> = self
-            .derived
-            .refs_for_source(OCR_SOURCE)?
-            .into_iter()
-            .collect();
-        done.extend(self.derived.gated_refs_for_source(OCR_SOURCE)?);
+        // Pending set: resolvable media of this purpose's kind without a row
+        // for THIS source — and without a below-gate marker (#416): an item
+        // the gate dropped is DONE (its outcome can't change until the
+        // fingerprint does), not pending, so it is never re-recognized and an
+        // all-gated window converges instead of re-taking itself forever.
+        // `raw` is the pre-enumerated (note_id, names) set shared across
+        // same-kind purposes (#445): the pending diff needs only the names.
+        let mut done: std::collections::HashSet<(i64, String)> =
+            self.derived.refs_for_source(source)?.into_iter().collect();
+        done.extend(self.derived.gated_refs_for_source(source)?);
         let mut pending: Vec<(i64, String)> = Vec::new();
-        for (note_id, image_names) in &raw {
-            for name in image_names {
+        for (note_id, names) in raw {
+            for name in names {
                 if !done.contains(&(*note_id, name.clone())) && svc.resolver.exists(name) {
                     pending.push((*note_id, name.clone()));
                 }
@@ -771,8 +958,7 @@ impl Kernel {
         let total_pending = pending.len();
         pending.truncate(max_items);
         if pending.is_empty() {
-            self.derived
-                .meta_set(RECOGNIZER_FINGERPRINT_KEY, &fingerprint)?;
+            self.derived.meta_set(fingerprint_key, &fingerprint)?;
             return Ok(recognize::SweepReport::Idle);
         }
 
@@ -792,13 +978,16 @@ impl Kernel {
                 }
                 None => {
                     tracing::warn!(
-                        image = %name,
+                        media = %name,
                         note_id,
+                        %source,
                         "media read failed after exists(); skipping until the next sweep"
                     );
                 }
             }
         }
+        // The chunk-Err propagates HERE — before any persist or fingerprint
+        // advance below — so a down endpoint leaves the backlog intact.
         let recognitions = if items.is_empty() {
             Vec::new()
         } else {
@@ -820,7 +1009,7 @@ impl Kernel {
         // with the rows on a fingerprint change (above), so an engine upgrade
         // re-judges them like everything else.
         // Scoped to the batch's notes (#445): the merge previously read the
-        // whole OCR table per sweep.
+        // whole table per sweep.
         let sent_ids: Vec<i64> = sent
             .iter()
             .map(|(nid, _)| *nid)
@@ -829,10 +1018,7 @@ impl Kernel {
             .collect();
         let mut existing: std::collections::HashMap<i64, Vec<(String, String)>> =
             std::collections::HashMap::new();
-        for (nid, r, text) in self
-            .derived
-            .texts_for_source_for_notes(OCR_SOURCE, &sent_ids)?
-        {
+        for (nid, r, text) in self.derived.texts_for_source_for_notes(source, &sent_ids)? {
             existing.entry(nid).or_default().push((r, text));
         }
         let mut stored_count = 0usize;
@@ -862,18 +1048,18 @@ impl Kernel {
         }
         let affected: Vec<i64> = touched.keys().copied().collect();
         for (note_id, refs_text) in &touched {
-            self.derived.ingest(*note_id, OCR_SOURCE, refs_text)?;
+            self.derived.ingest(*note_id, source, refs_text)?;
         }
         for (note_id, name, json) in &segments {
-            self.derived
-                .put_segments(*note_id, OCR_SOURCE, name, json)?;
+            self.derived.put_segments(*note_id, source, name, json)?;
         }
-        self.derived.mark_gated(OCR_SOURCE, &gated)?;
-        self.derived
-            .meta_set(RECOGNIZER_FINGERPRINT_KEY, &fingerprint)?;
+        self.derived.mark_gated(source, &gated)?;
+        self.derived.meta_set(fingerprint_key, &fingerprint)?;
 
-        // Re-embed the affected notes: their hash now folds the OCR text, so
-        // this mints the vectors and the next reconcile sees them current.
+        // Re-embed the affected notes: their hash now folds the recognized
+        // text, so this mints the vectors and the next reconcile sees them
+        // current. (A VectorOnly source's rows are excluded from the lexical
+        // surfaces, but still mint a vector here.)
         if !affected.is_empty() {
             self.index_written(&affected).await?;
         }
@@ -890,6 +1076,24 @@ impl Kernel {
             stored: stored_count,
             remaining: total_pending.saturating_sub(pending.len()),
         })
+    }
+
+    /// `(note_id, media_names)` for every note referencing media of `kind` —
+    /// the sweep's pending-set source, routed by media kind (#485). Image
+    /// refs come from `note_image_refs` (the `<img src>` extractor); audio
+    /// enumeration (`note_audio_refs`, the `[sound:…]` extractor) lands in
+    /// Slice 2 (#485) — until then an Audio purpose has an empty pending set.
+    async fn note_media_refs(
+        &self,
+        kind: recognize::MediaKind,
+    ) -> NativeResult<Vec<(i64, Vec<String>)>> {
+        match kind {
+            recognize::MediaKind::Image => {
+                self.collection.run(|core| core.note_image_refs()).await?
+            }
+            // Slice 2 wires `core.note_audio_refs()` here.
+            recognize::MediaKind::Audio => Ok(Vec::new()),
+        }
     }
 
     async fn index_written(&self, written: &[i64]) -> NativeResult<()> {
@@ -1491,6 +1695,10 @@ impl Kernel {
                 weights: BTreeMap::new(), // empty = the canonical fusion set
                 semantic,
                 index_size: self.orchestrator.engine().size(),
+                hidden_lexical_sources: Self::hidden_lexical_sources()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
                 ..Default::default()
             };
             let engine = self.orchestrator.engine_arc();
@@ -2881,6 +3089,189 @@ mod no_cpython_smoke {
         });
     }
 
+    /// A recognizer that emits FIXED prose regardless of the input bytes,
+    /// with a controllable fingerprint — the VLM-describe shape (the output
+    /// is generated, not a transcription of visible text), so a lexical query
+    /// for its words must NOT hit while a vector query (and provenance) does.
+    struct ProseRecognizer {
+        text: String,
+        fingerprint: std::sync::Mutex<String>,
+    }
+
+    impl ProseRecognizer {
+        fn new(text: &str, fp: &str) -> Self {
+            Self {
+                text: text.to_string(),
+                fingerprint: std::sync::Mutex::new(fp.to_string()),
+            }
+        }
+    }
+
+    impl Recognizer for ProseRecognizer {
+        fn recognize(
+            &self,
+            items: Vec<MediaItem>,
+        ) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
+            let text = self.text.clone();
+            Box::pin(async move {
+                Ok(items
+                    .iter()
+                    .map(|_| Recognition {
+                        text: text.clone(),
+                        confidence: 0.95,
+                        segments: Vec::new(),
+                    })
+                    .collect())
+            })
+        }
+
+        fn fingerprint(&self) -> Option<String> {
+            Some(self.fingerprint.lock().unwrap().clone())
+        }
+    }
+
+    #[test]
+    fn multi_engine_routing_keeps_describe_vector_only_and_ocr_unchanged() {
+        // #485: OCR and VLM-describe attach as INDEPENDENT purposes over one
+        // image. OCR lands in source "ocr" (lexical + vector, bit-identical
+        // to the single-slot sweep). Describe lands in source "vlm",
+        // VECTOR-ONLY: a vector mints (a non-literal query surfaces the note)
+        // but the describe prose is NEVER reachable via substring/fuzzy.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            let notes = vec![serde_json::json!({"note_type": "Basic", "deck": "Default",
+                "fields": {"Front": "photo card <img src=\"photo.png\">", "Back": "b"}})];
+            let results: Vec<serde_json::Value> = serde_json::from_str(
+                &upsert_wire(
+                    &kernel,
+                    serde_json::json!(notes).to_string(),
+                    "error".to_string(),
+                    false,
+                )
+                .await,
+            )
+            .unwrap();
+            let photo_id = results[0]["id"].as_i64().unwrap();
+
+            let mut media = std::collections::HashMap::new();
+            media.insert("photo.png".to_string(), b"opaque image bytes".to_vec());
+            let resolver = Arc::new(MapResolver::new(media));
+
+            // OCR: a recognizer reading visible text (echoes the bytes).
+            kernel.attach_recognizer_with(
+                recognize::RecognitionPurpose::Ocr,
+                Arc::new(StubRecognizer),
+                resolver.clone(),
+            );
+            // Describe: distinctive generated prose under the vlm source.
+            kernel.attach_recognizer_with(
+                recognize::RecognitionPurpose::Describe,
+                Arc::new(ProseRecognizer::new(
+                    "a photograph of a sunlit mountain valley with grazing cattle",
+                    "describe:test:v1",
+                )),
+                resolver.clone(),
+            );
+            assert_eq!(
+                kernel.attached_recognition_purposes(),
+                vec![
+                    recognize::RecognitionPurpose::Ocr,
+                    recognize::RecognitionPurpose::Describe
+                ]
+            );
+
+            // One sweep runs BOTH purposes over the one image: 2 recognized,
+            // 2 stored (the aggregate report).
+            let report = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(
+                report,
+                recognize::SweepReport::Ran {
+                    recognized: 2,
+                    stored: 2,
+                    remaining: 0
+                }
+            );
+
+            // OCR is unchanged: its visible text is lexically searchable.
+            let ocr_hits = kernel.search("opaque image bytes", 5).await.unwrap();
+            let ocr_hit = ocr_hits
+                .iter()
+                .find(|h| h.note_id == photo_id)
+                .expect("ocr text searchable");
+            assert!(ocr_hit.signals.iter().any(|(s, _)| s == "exact"));
+
+            // The describe prose mints a VECTOR (a non-literal token-bag query
+            // surfaces the note via the text space) ...
+            let sem = kernel
+                .search("valley cattle grazing mountain", 5)
+                .await
+                .unwrap();
+            let sem_hit = sem
+                .iter()
+                .find(|h| h.note_id == photo_id)
+                .expect("describe vector ranks");
+            assert!(sem_hit.signals.iter().any(|(s, _)| s == "text"));
+
+            // ... but is NEVER reachable via LEXICAL search: a literal phrase
+            // that lives ONLY in the describe prose must not hit on exact or
+            // fuzzy (the VectorOnly destination — docs/decisions.md).
+            let lex = kernel.search("sunlit mountain valley", 5).await.unwrap();
+            let lex_hit = lex.iter().find(|h| h.note_id == photo_id);
+            assert!(
+                lex_hit.is_none_or(|h| h.signals.iter().all(|(s, _)| s != "exact" && s != "fuzzy")),
+                "describe prose must be hidden from substring/fuzzy"
+            );
+
+            // Per-purpose fingerprint independence: bumping ONLY the describe
+            // recognizer's fingerprint re-derives the vlm rows, never the ocr
+            // ones. Attach a new describe engine with a changed fingerprint;
+            // OCR's stored rows + idle state are untouched.
+            kernel.attach_recognizer_with(
+                recognize::RecognitionPurpose::Describe,
+                Arc::new(ProseRecognizer::new(
+                    "a different generated caption entirely",
+                    "describe:test:v2",
+                )),
+                resolver.clone(),
+            );
+            // OCR alone is idle (its fingerprint didn't change).
+            let ocr_idle = kernel
+                .recognize_pending_for(recognize::RecognitionPurpose::Ocr, 10)
+                .await
+                .unwrap();
+            assert_eq!(ocr_idle, recognize::SweepReport::Idle);
+            // Describe re-derives exactly one row (the changed fingerprint
+            // invalidated its prior vlm row, not the ocr one).
+            let desc = kernel
+                .recognize_pending_for(recognize::RecognitionPurpose::Describe, 10)
+                .await
+                .unwrap();
+            assert_eq!(
+                desc,
+                recognize::SweepReport::Ran {
+                    recognized: 1,
+                    stored: 1,
+                    remaining: 0
+                }
+            );
+            // OCR text still searchable after the describe re-derive.
+            let still = kernel.search("opaque image bytes", 5).await.unwrap();
+            assert!(still.iter().any(|h| h.note_id == photo_id));
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
     #[test]
     fn open_upsert_search_close_without_python() {
         // The harness picks the runtime: here futures' minimal block_on —
@@ -3057,7 +3448,7 @@ mod no_cpython_smoke {
             assert!(
                 !kernel
                     .derived
-                    .search_substring("oxaloacetate", 5, None)
+                    .search_substring("oxaloacetate", 5, None, &[])
                     .unwrap()
                     .unwrap()
                     .is_empty(),
@@ -3068,7 +3459,7 @@ mod no_cpython_smoke {
             assert!(
                 kernel
                     .derived
-                    .search_substring("oxaloacetate", 5, None)
+                    .search_substring("oxaloacetate", 5, None, &[])
                     .unwrap()
                     .unwrap()
                     .is_empty(),
@@ -3082,7 +3473,7 @@ mod no_cpython_smoke {
             assert!(
                 !kernel
                     .derived
-                    .search_substring("oxaloacetate", 5, None)
+                    .search_substring("oxaloacetate", 5, None, &[])
                     .unwrap()
                     .unwrap()
                     .is_empty(),

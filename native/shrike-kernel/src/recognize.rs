@@ -10,6 +10,90 @@
 
 use shrike_engine_api::Recognition;
 
+/// What kind of media a recognition purpose enumerates and reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MediaKind {
+    /// `<img src>` references — OCR and VLM describe.
+    Image,
+    /// `[sound:…]` references — ASR.
+    Audio,
+}
+
+/// Where a purpose's recognized text lands (#485). The OCR-vs-describe
+/// difference collapses to a single **lexical-visibility** axis: every
+/// recognition is STORED in the derived store (so reconcile == rebuild keeps
+/// holding and provenance survives), but a [`Destination::VectorOnly`] source
+/// is excluded from the lexical surfaces (substring/fuzzy) — a literal hit on
+/// invisible generated prose can't be cleanly explained to a user
+/// (docs/decisions.md). Vector-worthy text mints a text-space vector either
+/// way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Destination {
+    /// OCR/ASR: both the lexical (trigram) surfaces AND the embedding space.
+    LexicalAndVector,
+    /// VLM describe: the embedding space ONLY — rows are stored for
+    /// provenance + reconcile, but hidden from substring/fuzzy search.
+    VectorOnly,
+}
+
+/// A recognition purpose (#485): the routing key for the multi-engine sweep.
+/// Each purpose enumerates its own pending set, reads its own media kind,
+/// lands under its own derived `source`, keys its fingerprint meta
+/// independently, and persists per its own [`Destination`] — so OCR, ASR, and
+/// VLM describe run as independent sweeps over one kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RecognitionPurpose {
+    /// Image → searchable text (Apple Vision / remote VLM-OCR). Source
+    /// `"ocr"`, lexical + vector — behaviour bit-identical to the pre-#485
+    /// single-slot sweep.
+    Ocr,
+    /// Image → descriptive prose for retrieval (#433/#436). Source `"vlm"`,
+    /// VECTOR-ONLY (the settled destination rule).
+    Describe,
+    /// Audio → transcript (#410/#428). Source `"asr"`, lexical + vector
+    /// (like OCR).
+    Asr,
+}
+
+impl RecognitionPurpose {
+    /// The derived-store source recognized text lands under. The OCR key is
+    /// unchanged (`"ocr"`), so existing rows + the OCR sweep are untouched.
+    pub fn source(self) -> &'static str {
+        match self {
+            RecognitionPurpose::Ocr => "ocr",
+            RecognitionPurpose::Describe => "vlm",
+            RecognitionPurpose::Asr => "asr",
+        }
+    }
+
+    /// The derived-store meta key holding this purpose's recognizer
+    /// fingerprint. The OCR key is unchanged (`"recognizer_fingerprint"`), so
+    /// an existing index's stored fingerprint still matches on upgrade.
+    pub fn fingerprint_key(self) -> &'static str {
+        match self {
+            RecognitionPurpose::Ocr => "recognizer_fingerprint",
+            RecognitionPurpose::Describe => "describe_fingerprint",
+            RecognitionPurpose::Asr => "asr_fingerprint",
+        }
+    }
+
+    /// Which media kind this purpose enumerates and reads.
+    pub fn media_kind(self) -> MediaKind {
+        match self {
+            RecognitionPurpose::Ocr | RecognitionPurpose::Describe => MediaKind::Image,
+            RecognitionPurpose::Asr => MediaKind::Audio,
+        }
+    }
+
+    /// Where this purpose's recognized text lands.
+    pub fn destination(self) -> Destination {
+        match self {
+            RecognitionPurpose::Ocr | RecognitionPurpose::Asr => Destination::LexicalAndVector,
+            RecognitionPurpose::Describe => Destination::VectorOnly,
+        }
+    }
+}
+
 /// The gating policy (#199): which recognitions mint an OCR vector, and
 /// which enter the lexical store at all. Confidence + substance separate
 /// text-bearing images from pictorial ones automatically — no detector.
@@ -133,6 +217,47 @@ mod tests {
         assert!(gate.vector_worthy("The inner membrane hosts the electron transport chain"));
         // Whitespace padding doesn't count as substance.
         assert!(!gate.vector_worthy(&format!("{}short{}", " ".repeat(30), " ".repeat(30))));
+    }
+
+    #[test]
+    fn purpose_routing_is_per_engine_and_ocr_keys_are_unchanged() {
+        use RecognitionPurpose::*;
+        // OCR's source + fingerprint key are byte-identical to the pre-#485
+        // single-slot constants, so existing rows and stored meta still match
+        // (no spurious re-derive on upgrade).
+        assert_eq!(Ocr.source(), super::super::OCR_SOURCE);
+        assert_eq!(
+            Ocr.fingerprint_key(),
+            super::super::RECOGNIZER_FINGERPRINT_KEY
+        );
+        // Each purpose has its own source + fingerprint key (no collision).
+        assert_eq!(Describe.source(), "vlm");
+        assert_eq!(Asr.source(), "asr");
+        let sources = [Ocr.source(), Describe.source(), Asr.source()];
+        let keys = [
+            Ocr.fingerprint_key(),
+            Describe.fingerprint_key(),
+            Asr.fingerprint_key(),
+        ];
+        assert_eq!(
+            sources
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+        assert_eq!(
+            keys.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
+        );
+        // Media kind + destination per the settled policy.
+        assert_eq!(Ocr.media_kind(), MediaKind::Image);
+        assert_eq!(Describe.media_kind(), MediaKind::Image);
+        assert_eq!(Asr.media_kind(), MediaKind::Audio);
+        assert_eq!(Ocr.destination(), Destination::LexicalAndVector);
+        assert_eq!(Asr.destination(), Destination::LexicalAndVector);
+        // The load-bearing rule: describe is vector-only.
+        assert_eq!(Describe.destination(), Destination::VectorOnly);
     }
 
     #[test]

@@ -155,26 +155,35 @@ pub trait DerivedStore: Send + Sync {
         reference: &str,
     ) -> NativeResult<Option<String>>;
     /// Raw FTS5 MATCH (the expression is the impl's syntax), scoped.
+    /// `exclude_sources` drops rows whose `source` is in the set BEFORE
+    /// ranking/limiting (#485): a VectorOnly recognition source (VLM
+    /// describe) is stored for provenance + reconcile but must never surface
+    /// on a lexical query — an empty slice is the historical behaviour.
     fn match_rows(
         &self,
         expr: &str,
         limit: i64,
         with_text: bool,
         scope: Option<&[i64]>,
+        exclude_sources: &[&str],
     ) -> NativeResult<Vec<MatchRow>>;
     /// Fast substring candidates; `None` = the query can't be served (too
-    /// short for the tokenizer) and the caller falls back.
+    /// short for the tokenizer) and the caller falls back. `exclude_sources`
+    /// hides VectorOnly sources (#485) — see [`Self::match_rows`].
     fn search_substring(
         &self,
         query: &str,
         limit: i64,
         scope: Option<&[i64]>,
+        exclude_sources: &[&str],
     ) -> NativeResult<Option<Vec<LexicalRow>>>;
-    /// Trigram/typo ranking — the `fuzzy` RRF signal (#98).
+    /// Trigram/typo ranking — the `fuzzy` RRF signal (#98). `exclude_sources`
+    /// hides VectorOnly sources (#485) — see [`Self::match_rows`].
     fn search_fuzzy(
         &self,
         query: &str,
         top_k: i64,
         scope: Option<&[i64]>,
+        exclude_sources: &[&str],
     ) -> NativeResult<Vec<LexicalRow>>;
 }

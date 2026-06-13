@@ -185,6 +185,10 @@ pub(crate) fn action_search_notes(
         weights: weights.unwrap_or_default(),
         semantic,
         index_size,
+        hidden_lexical_sources: shrike_kernel::Kernel::hidden_lexical_sources()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
     };
     py.detach(|| {
         let tag_keys = tag_kernel.as_ref().map(|k| k.tag_keys());

@@ -719,6 +719,7 @@ impl DerivedEngine {
         limit: i64,
         with_text: bool,
         scope: Option<&[i64]>,
+        exclude_sources: &[&str],
     ) -> NativeResult<Vec<MatchRow>> {
         let span = tracing::debug_span!("derived.match", limit, with_text);
         let _enter = span.enter();
@@ -744,15 +745,32 @@ impl DerivedEngine {
             Some(_) => "AND 0 ".to_string(), // an empty scope matches nothing
             None => String::new(),
         };
+        // Hidden-source exclusion (#485): a VectorOnly recognition source is
+        // dropped BEFORE ranking/limiting, so its rows never surface on a
+        // lexical query yet stay stored for provenance + reconcile. Bound as
+        // positional params (starting after the three fixed ones below) — the
+        // source strings are kernel-controlled, but binding keeps the path
+        // injection-safe by construction.
+        let exclude_clause = if exclude_sources.is_empty() {
+            String::new()
+        } else {
+            let placeholders = (0..exclude_sources.len())
+                .map(|i| format!("?{}", i + 4))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("AND m.source NOT IN ({placeholders}) ")
+        };
         let sql = format!(
             "SELECT m.note_id, m.source, m.ref, {txt_col}, \
              snippet(idx, 0, '', '', '…', ?1) \
              FROM idx JOIN rowmap m ON m.rowid = idx.rowid \
-             WHERE idx MATCH ?2 {scope_clause}ORDER BY rank LIMIT ?3"
+             WHERE idx MATCH ?2 {scope_clause}{exclude_clause}ORDER BY rank LIMIT ?3"
         );
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&SNIPPET_TOKENS, &expr, &limit];
+        params.extend(exclude_sources.iter().map(|s| s as &dyn rusqlite::ToSql));
         let mut stmt = conn.prepare(&sql).map_err(db_err)?;
         let rows = stmt
-            .query_map(rusqlite::params![SNIPPET_TOKENS, expr, limit], |r| {
+            .query_map(rusqlite::params_from_iter(params), |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })
             .map_err(|e| NativeError::invalid_input(format!("fts5 match: {e}")))?
@@ -847,24 +865,27 @@ impl shrike_store_api::DerivedStore for DerivedEngine {
         limit: i64,
         with_text: bool,
         scope: Option<&[i64]>,
+        exclude_sources: &[&str],
     ) -> NativeResult<Vec<MatchRow>> {
-        Self::match_rows(self, expr, limit, with_text, scope)
+        Self::match_rows(self, expr, limit, with_text, scope, exclude_sources)
     }
     fn search_substring(
         &self,
         query: &str,
         limit: i64,
         scope: Option<&[i64]>,
+        exclude_sources: &[&str],
     ) -> NativeResult<Option<Vec<LexicalRow>>> {
-        Self::search_substring(self, query, limit, scope)
+        Self::search_substring(self, query, limit, scope, exclude_sources)
     }
     fn search_fuzzy(
         &self,
         query: &str,
         top_k: i64,
         scope: Option<&[i64]>,
+        exclude_sources: &[&str],
     ) -> NativeResult<Vec<LexicalRow>> {
-        Self::search_fuzzy(self, query, top_k, scope)
+        Self::search_fuzzy(self, query, top_k, scope, exclude_sources)
     }
 }
 
@@ -919,23 +940,26 @@ mod tests {
         .unwrap();
 
         // Unscoped: both literal hits.
-        let all = e.search_substring("krebs", 10, None).unwrap().unwrap();
+        let all = e.search_substring("krebs", 10, None, &[]).unwrap().unwrap();
         let ids: Vec<i64> = all.iter().map(|r| r.0).collect();
         assert!(ids.contains(&1) && ids.contains(&2));
 
         // Scoped to note 2 only.
         let scoped = e
-            .search_substring("krebs", 10, Some(&[2]))
+            .search_substring("krebs", 10, Some(&[2]), &[])
             .unwrap()
             .unwrap();
         assert_eq!(scoped.iter().map(|r| r.0).collect::<Vec<_>>(), vec![2]);
 
         // An empty scope matches nothing (never falls open).
-        let none = e.search_substring("krebs", 10, Some(&[])).unwrap().unwrap();
+        let none = e
+            .search_substring("krebs", 10, Some(&[]), &[])
+            .unwrap()
+            .unwrap();
         assert!(none.is_empty());
 
         // Fuzzy honors the same scope.
-        let fz = e.search_fuzzy("kreps cycle", 10, Some(&[1])).unwrap();
+        let fz = e.search_fuzzy("kreps cycle", 10, Some(&[1]), &[]).unwrap();
         assert_eq!(fz.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1]);
     }
 
@@ -977,12 +1001,12 @@ mod tests {
         // Note 1 replaced (old gone), note 2 has exactly its non-blank row,
         // note 3 has none.
         let hits = e
-            .search_substring("new text one", 10, None)
+            .search_substring("new text one", 10, None, &[])
             .unwrap()
             .unwrap();
         assert_eq!(hits.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1]);
         let old = e
-            .search_substring("old text one", 10, None)
+            .search_substring("old text one", 10, None, &[])
             .unwrap()
             .unwrap();
         assert!(old.is_empty(), "the pre-batch row must be replaced");
@@ -1052,7 +1076,7 @@ mod tests {
         .unwrap();
         assert_eq!(e.count().unwrap(), 1);
         let hits = e
-            .search_substring("second version", 10, None)
+            .search_substring("second version", 10, None, &[])
             .unwrap()
             .unwrap();
         assert_eq!(hits.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1]);
@@ -1081,7 +1105,9 @@ mod tests {
         e.ingest(1, "field", &[("Front".into(), "the chloroplast".into())])
             .unwrap();
         assert_eq!(e.count().unwrap(), 2);
-        let hits = e.match_rows("\"chloroplast\"", 10, false, None).unwrap();
+        let hits = e
+            .match_rows("\"chloroplast\"", 10, false, None, &[])
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, 1);
         assert_eq!(hits[0].1, "field");
@@ -1112,10 +1138,10 @@ mod tests {
             .unwrap();
         assert_eq!(e.count().unwrap(), 1);
         assert!(e
-            .match_rows("\"alpha\"", 10, false, None)
+            .match_rows("\"alpha\"", 10, false, None, &[])
             .unwrap()
             .is_empty());
-        let hits = e.match_rows("\"gamma\"", 10, false, None).unwrap();
+        let hits = e.match_rows("\"gamma\"", 10, false, None, &[]).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, 2);
         assert_eq!(e.get_col_mod(), Some(2));
@@ -1130,7 +1156,7 @@ mod tests {
             1,
         )
         .unwrap();
-        let rows = e.match_rows("\"beta\"", 10, true, None).unwrap();
+        let rows = e.match_rows("\"beta\"", 10, true, None, &[]).unwrap();
         assert_eq!(rows[0].3.as_deref(), Some("alpha beta gamma"));
         assert!(rows[0].4.as_deref().unwrap().contains("beta"));
         std::fs::remove_dir_all(dir).ok();
@@ -1141,7 +1167,7 @@ mod tests {
         let (e, dir) = store();
         e.build(&[(1, "field".into(), "F".into(), "abc".into())], 1)
             .unwrap();
-        let err = e.match_rows("AND AND (", 10, false, None).unwrap_err();
+        let err = e.match_rows("AND AND (", 10, false, None, &[]).unwrap_err();
         assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
         std::fs::remove_dir_all(dir).ok();
     }
@@ -1193,12 +1219,15 @@ mod tests {
 
         // The OCR text is still searchable; the edited field text too.
         let hits = e
-            .search_substring("electron transport", 10, None)
+            .search_substring("electron transport", 10, None, &[])
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].0, 1);
         assert_eq!(hits[0].1, "ocr");
-        let field_hits = e.search_substring("EDITED", 10, None).unwrap().unwrap();
+        let field_hits = e
+            .search_substring("EDITED", 10, None, &[])
+            .unwrap()
+            .unwrap();
         assert_eq!(field_hits[0].1, "field");
 
         // texts_for_source reads recognized text back for vector minting.
@@ -1334,13 +1363,14 @@ impl DerivedEngine {
         query: &str,
         limit: i64,
         scope: Option<&[i64]>,
+        exclude_sources: &[&str],
     ) -> NativeResult<Option<Vec<LexicalRow>>> {
         let q = query.trim();
         if q.chars().count() < MIN_TRIGRAM {
             return Ok(None);
         }
         // A quoted phrase → contiguous (literal substring) match.
-        let rows = self.match_rows(&fts_quote(q), limit, false, scope)?;
+        let rows = self.match_rows(&fts_quote(q), limit, false, scope, exclude_sources)?;
         Ok(Some(
             rows.into_iter()
                 .map(|(nid, source, r, _txt, snippet)| (nid, source, r, snippet))
@@ -1357,6 +1387,7 @@ impl DerivedEngine {
         query: &str,
         top_k: i64,
         scope: Option<&[i64]>,
+        exclude_sources: &[&str],
     ) -> NativeResult<Vec<LexicalRow>> {
         let grams = trigrams(query.trim());
         if grams.len() < FUZZY_MIN_SHARED {
@@ -1364,7 +1395,7 @@ impl DerivedEngine {
         }
         let gram_set: std::collections::BTreeSet<String> = grams.into_iter().collect();
         let expr: Vec<String> = gram_set.iter().map(|g| fts_quote(g)).collect();
-        let rows = self.match_rows(&expr.join(" OR "), top_k * 4, true, scope)?;
+        let rows = self.match_rows(&expr.join(" OR "), top_k * 4, true, scope, exclude_sources)?;
         let mut seen = std::collections::HashSet::new();
         let mut out: Vec<LexicalRow> = Vec::new();
         for (note_id, source, r, txt, snippet) in rows {
@@ -1427,13 +1458,13 @@ mod lexical_tests {
     fn substring_finds_literal_hits_and_signals_fallback() {
         let e = store();
         let hits = e
-            .search_substring("mitochondria", 10, None)
+            .search_substring("mitochondria", 10, None, &[])
             .unwrap()
             .unwrap();
         assert_eq!(hits[0].0, 1);
-        assert!(e.search_substring("mi", 10, None).unwrap().is_none()); // sub-trigram → fallback
+        assert!(e.search_substring("mi", 10, None, &[]).unwrap().is_none()); // sub-trigram → fallback
         assert!(e
-            .search_substring("q\"uo", 10, None)
+            .search_substring("q\"uo", 10, None, &[])
             .unwrap()
             .unwrap()
             .is_empty()); // quotes safe
@@ -1442,9 +1473,76 @@ mod lexical_tests {
     #[test]
     fn fuzzy_ranks_typos_and_floors_noise() {
         let e = store();
-        let hits = e.search_fuzzy("mitochondira", 10, None).unwrap(); // transposition
+        let hits = e.search_fuzzy("mitochondira", 10, None, &[]).unwrap(); // transposition
         assert!(hits.iter().any(|(nid, ..)| *nid == 1));
-        assert!(e.search_fuzzy("xy", 10, None).unwrap().is_empty()); // too short to rank
+        assert!(e.search_fuzzy("xy", 10, None, &[]).unwrap().is_empty()); // too short to rank
+    }
+
+    #[test]
+    fn exclude_sources_hides_vector_only_rows_from_lexical_search() {
+        // #485: a VectorOnly recognition source (VLM describe) is STORED for
+        // provenance + reconcile, but excluded from substring/fuzzy BEFORE
+        // ranking — so its prose can NEVER surface on a lexical query.
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-excl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+        e.build(
+            &[
+                // A normal field row + a VLM-describe row, same distinctive term.
+                (
+                    1,
+                    "field".into(),
+                    "Front".into(),
+                    "ordinary field text".into(),
+                ),
+                (
+                    2,
+                    "vlm".into(),
+                    "photo.png".into(),
+                    "a sunlit mountain valley with grazing cattle".into(),
+                ),
+            ],
+            1,
+        )
+        .unwrap();
+
+        // Unscoped, no exclusion: the vlm row IS findable (the row exists).
+        let visible = e
+            .search_substring("mountain", 10, None, &[])
+            .unwrap()
+            .unwrap();
+        assert!(visible.iter().any(|(nid, ..)| *nid == 2));
+        // The describe prose is hidden once "vlm" is excluded — substring AND
+        // fuzzy both drop it, and the row is gone before ranking/limit.
+        let hidden = e
+            .search_substring("mountain", 10, None, &["vlm"])
+            .unwrap()
+            .unwrap();
+        assert!(hidden.iter().all(|(nid, ..)| *nid != 2));
+        let fz = e
+            .search_fuzzy("montain valley", 10, None, &["vlm"])
+            .unwrap();
+        assert!(fz.iter().all(|(nid, ..)| *nid != 2));
+        // The ordinary field row is unaffected by the exclusion.
+        let field = e
+            .search_substring("field", 10, None, &["vlm"])
+            .unwrap()
+            .unwrap();
+        assert!(field.iter().any(|(nid, ..)| *nid == 1));
+        // match_rows honors the exclusion directly too.
+        let raw = e
+            .match_rows("\"valley\"", 10, false, None, &["vlm"])
+            .unwrap();
+        assert!(raw.is_empty());
+
+        std::fs::remove_dir_all(dir).ok();
     }
 }
 
@@ -1550,9 +1648,13 @@ mod hardening_tests {
         // A scope wider than the inline cap rides the staged TEMP table and
         // still restricts correctly.
         let scope: Vec<i64> = (1..=n).collect();
-        let hits = e.match_rows("\"shared\"", 10, false, Some(&scope)).unwrap();
+        let hits = e
+            .match_rows("\"shared\"", 10, false, Some(&scope), &[])
+            .unwrap();
         assert!(!hits.is_empty());
-        let narrow = e.match_rows("\"shared\"", 10, false, Some(&[2])).unwrap();
+        let narrow = e
+            .match_rows("\"shared\"", 10, false, Some(&[2]), &[])
+            .unwrap();
         assert_eq!(narrow.iter().map(|r| r.0).collect::<Vec<_>>(), vec![2]);
 
         // A delete wider than the inline cap clears everything in one call.

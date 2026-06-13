@@ -199,6 +199,9 @@ pub fn attach_neighbors(
                     truncate_chars(text, DEDUP_LEXICAL_QUERY_CHARS),
                     (top_k + exclude_set.len()) as i64,
                     None,
+                    // The upsert-neighbor dedup signal is over note CONTENT;
+                    // no lexical-visibility hiding applies here (#485).
+                    &[],
                 ) {
                     Ok(rows) => rows.into_iter().map(|(fid, ..)| fid).collect(),
                     Err(e) => {
@@ -625,6 +628,11 @@ pub struct SearchArgs {
     pub semantic: bool,
     /// The index's current vector count, for the over-fetch clamp.
     pub index_size: usize,
+    /// Derived `source` strings hidden from the lexical (substring/fuzzy)
+    /// surfaces (#485): a VectorOnly recognition source (VLM describe) is
+    /// stored for provenance + reconcile but never surfaced on a lexical
+    /// query. EMPTY (the default) = nothing hidden, the pre-#485 behaviour.
+    pub hidden_lexical_sources: Vec<String>,
 }
 
 /// Insertion-ordered candidate cache: Python dict iteration order is part of
@@ -769,8 +777,13 @@ fn collect_substring_candidates(
     // text outside the store. The wildcard `*text*` fallback (a full field
     // scan) survives only for the cases FTS5 can't serve: a sub-trigram
     // query (<3 chars) or a missing/unbuilt store.
+    let hidden: Vec<&str> = args
+        .hidden_lexical_sources
+        .iter()
+        .map(String::as_str)
+        .collect();
     let lex = if let Some(d) = derived {
-        match d.search_substring(text, (args.top_k + exclude.len()) as i64, scope) {
+        match d.search_substring(text, (args.top_k + exclude.len()) as i64, scope, &hidden) {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::debug!(error = ?e, "FTS5 substring query failed; falling back");
@@ -878,7 +891,12 @@ fn collect_fuzzy(
     let Some(d) = derived else {
         return (Vec::new(), HashMap::new());
     };
-    let hits = match d.search_fuzzy(text, args.top_k as i64, scope) {
+    let hidden: Vec<&str> = args
+        .hidden_lexical_sources
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let hits = match d.search_fuzzy(text, args.top_k as i64, scope, &hidden) {
         Ok(h) => h,
         Err(e) => {
             tracing::debug!(error = ?e, "FTS5 fuzzy query failed");
