@@ -867,7 +867,10 @@ class ShrikeClient:
         if spec.config_path:
             cmd += ["--config", spec.config_path]
 
-        daemon.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        # The state dir is created by whoever writes into it (ServerLock, the
+        # daemon meta/pid writers) — creating it here too touched the real
+        # platformdirs path from unit tests, which the darwin Bazel sandbox
+        # forbids (#424). Only the log destination is client-made.
         log_dir = Path(spec.log_dir) if spec.log_dir else daemon.STATE_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
 

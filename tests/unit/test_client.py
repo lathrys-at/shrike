@@ -164,6 +164,26 @@ class TestLifecycle:
             assert c.ensure_running(spec) == spec.url
         popen.assert_called_once()
 
+    def test_spawn_leaves_state_dir_alone_when_log_dir_set(self, tmp_path) -> None:
+        # #424: the darwin Bazel sandbox forbids creating the real platformdirs
+        # state dir, and _spawn has no business touching it — the daemon side
+        # (ServerLock, the meta/pid writers) creates it where it's used. With a
+        # log_dir set, a spawn must not create the state dir at all.
+        spec = ServerSpec(collection="/c.anki2", port=9007, log_dir=str(tmp_path / "logs"))
+        c = ShrikeClient(spec.url, spec=spec, autostart=False)
+        proc = MagicMock()
+        proc.poll.return_value = None
+        sentinel = tmp_path / "state-dir-must-stay-absent"
+        with (
+            patch("shrike.client.daemon.is_server_alive", return_value=False),
+            patch("shrike.client.daemon.cleanup_state"),
+            patch("shrike.client.daemon.STATE_DIR", sentinel),
+            patch("shrike.client.subprocess.Popen", return_value=proc),
+            patch.object(ShrikeClient, "wait_until_ready", return_value={"running": True}),
+        ):
+            assert c.ensure_running(spec) == spec.url
+        assert not sentinel.exists()
+
     def test_ensure_running_raises_when_spawn_exits(self, tmp_path) -> None:
         spec = ServerSpec(collection="/c.anki2", port=9003, log_dir=str(tmp_path))
         c = ShrikeClient(spec.url, spec=spec, autostart=False)

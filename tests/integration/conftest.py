@@ -497,9 +497,17 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         except TimeoutError:
             proc.kill()
             stdout, stderr = proc.communicate(timeout=5)
+            # stdout/stderr are usually EMPTY here — the server logs to
+            # --log-dir files — so include their tails, or a hung/slow boot
+            # on a CI runner is undiagnosable from the failure alone (#424).
+            log_tails = []
+            for log_file in sorted(Path(log_dir).glob("*.log")):
+                with suppress(OSError):
+                    tail = log_file.read_text(errors="replace")[-4000:]
+                    log_tails.append(f"--- {log_file.name} (tail) ---\n{tail}")
             raise RuntimeError(
-                f"Server '{name}' failed to start.\n"
-                f"stdout: {stdout.decode()}\nstderr: {stderr.decode()}"
+                f"Server '{name}' failed to start within {timeout:.0f}s.\n"
+                f"stdout: {stdout.decode()}\nstderr: {stderr.decode()}\n" + "\n".join(log_tails)
             ) from None
 
         return ServerInfo(url, port, collection_path, str(log_dir), embedding_port)
