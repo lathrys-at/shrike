@@ -10,6 +10,7 @@ import click
 
 from shrike.cli import output
 from shrike.cli.config import (
+    DEFAULT_CONFIG_PATH,
     embedding_args,
     index_args,
     locking_args,
@@ -391,11 +392,29 @@ def server_start(
         )
     except ProfileError as e:
         raise click.ClickException(str(e)) from e
-    embedding_cli_args = embedding_args(resolved_embedding, no_embedding=no_embedding)
-    resolved_recognition = resolve_recognition(config, ocr_backend=ocr_backend)
-    recognition_cli_args = (
-        ["--ocr-backend", resolved_recognition["ocr"]] if resolved_recognition["ocr"] else []
-    )
+    # A v2 config rides --config to the daemon (#498): structured entries
+    # (remote endpoints, api_key_env) have no flag spelling, so the daemon
+    # resolves embedders:/recognizers:/managed: from the file itself. The
+    # legacy flags it replaces are rejected under v2 (resolve_embedding_profile
+    # above; --ocr-backend here — the v2 recognizers map owns recognition).
+    is_v2 = any(config.get(k) is not None for k in ("embedders", "recognizers", "managed"))
+    if is_v2:
+        if ocr_backend:
+            raise click.ClickException(
+                "--ocr-backend is incompatible with a config declaring the v2 sections — "
+                "recognition is declared in recognizers: (docs/distribution.md)"
+            )
+        config_file_path = str(ctx.obj["config_path"] or DEFAULT_CONFIG_PATH)
+        embedding_cli_args = ["--config", config_file_path] + (
+            ["--no-embedding"] if no_embedding else []
+        )
+        recognition_cli_args = []
+    else:
+        embedding_cli_args = embedding_args(resolved_embedding, no_embedding=no_embedding)
+        resolved_recognition = resolve_recognition(config, ocr_backend=ocr_backend)
+        recognition_cli_args = (
+            ["--ocr-backend", resolved_recognition["ocr"]] if resolved_recognition["ocr"] else []
+        )
     remote_args = ["--allow-remote"] if allow_remote else []
 
     # Resolve transport-security additions (config → env → flags) for the spawned

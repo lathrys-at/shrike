@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Sequence
@@ -326,6 +327,181 @@ class LlamaServerBackend:
 EmbeddingService = LlamaServerBackend
 
 
+class RemoteBackend:
+    """An embeddings endpoint Shrike does not manage (#498): a v2 ``embedders:``
+    entry with ``runtime: remote`` and an explicit ``endpoint`` (cloud, tailnet,
+    any OpenAI-compatible server), or ``managed.llama_server.manage: attach``
+    (an existing local llama-server someone else owns — never spawned, reaped,
+    or stopped by Shrike).
+
+    Implements :class:`~shrike.embedding_base.EmbedderBackend`. The lifecycle
+    half of :class:`LlamaServerBackend` is exactly what this class doesn't
+    have: ``start()`` reads the API key from the entry's ``api_key_env``
+    (referenced, never inline), proves connectivity/auth with one embed call,
+    and runs the batch-safety probe; ``stop()`` just drops the client.
+    Config-only — there is deliberately no flag spelling for this backend
+    (structured entries ride ``--config``, #498).
+    """
+
+    modalities = frozenset({TEXT})
+
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        model: str | None = None,
+        api_key_env: str | None = None,
+        batch_size: int | None = None,
+    ) -> None:
+        self._endpoint = endpoint.rstrip("/")
+        self._model = model
+        self._api_key_env = api_key_env
+        self._batch_cap = batch_size
+        self._safe_batch = 1
+        self._model_name: str | None = None
+        self._remote: Any = None
+
+    @property
+    def running(self) -> bool:
+        # No process to poll: "running" is "start() validated the endpoint".
+        # A later outage surfaces as embed errors (and a failed restart).
+        return self._remote is not None
+
+    @property
+    def url(self) -> str:
+        return self._endpoint
+
+    def start(self) -> None:
+        """Validate the endpoint and build the model-pinned client.
+
+        Raises ``RuntimeError`` when the referenced API-key env var is unset,
+        or whatever the first embed call surfaces (bad endpoint, bad key) —
+        the runtime marks the start failed; nothing degrades silently.
+        """
+        if self.running:
+            return
+        started = time.perf_counter()
+        api_key = None
+        if self._api_key_env:
+            api_key = os.environ.get(self._api_key_env)
+            if not api_key:
+                raise RuntimeError(
+                    f"api_key_env names {self._api_key_env}, which is not set in the "
+                    "server's environment (secrets are referenced, never inline)"
+                )
+
+        probe_client = shrike_native.RemoteEmbedder(self._endpoint, api_key=api_key)
+        ident, _meta = probe_client.model_info()
+        self._model_name = self._model or ident
+        remote = shrike_native.RemoteEmbedder(
+            self._endpoint, api_key=api_key, model=self._model_name
+        )
+        # Connectivity/auth proof: one tiny embed. Cloud endpoints have no
+        # /health route, so an embed is the one universal liveness signal —
+        # and it surfaces auth errors at start instead of first use.
+        remote.embed_chunk([" "])
+        self._remote = remote
+
+        try:
+            self._safe_batch = probe_max_safe_batch(self._embed_chunk)
+        except Exception as e:  # noqa: BLE001 — never fail start on a probe hiccup
+            logger.warning("Batch-safety probe failed (%s); embedding serially.", e)
+            self._safe_batch = 1
+        logger.info(
+            "Remote embedding endpoint ready (%s, model %s, %s, %.1fs)",
+            self._endpoint,
+            self._model_name or "endpoint default",
+            "serial" if self._effective_batch(2) == 1 else "batched",
+            time.perf_counter() - started,
+        )
+
+    def stop(self) -> None:
+        """Forget the endpoint client. The remote service is not ours to stop."""
+        self._remote = None
+
+    def health(self) -> dict[str, Any]:
+        if not self.running:
+            return {"available": False}
+        return {
+            "available": True,
+            "url": self._endpoint,
+            "model": self._model_name or self._model,
+            "batch_safe": self._safe_batch >= 2,
+            "batch": "batched" if self._effective_batch(2) >= 2 else "serial",
+        }
+
+    def model_info(self) -> dict[str, Any]:
+        """``/v1/models`` metadata, as :meth:`LlamaServerBackend.model_info`."""
+        if not self.running:
+            return {}
+        ident, meta_json = self._remote.model_info()
+        meta = json.loads(meta_json)
+        if ident is None and not meta:
+            return {}
+        return {"id": ident, "meta": meta}
+
+    def embedding_dim(self) -> int | None:
+        meta = self.model_info().get("meta") or {}
+        n_embd = meta.get("n_embd")
+        if n_embd:
+            return int(n_embd)
+        try:
+            vectors = self.embed_texts([" "])
+        except Exception:
+            return None
+        return len(vectors[0]) if vectors and vectors[0] else None
+
+    def model_fingerprint(self) -> str:
+        """The vector-space identity for an unmanaged endpoint.
+
+        The ``meta:`` recipe when the endpoint serves llama-style numeric
+        metadata (an attached llama-server); otherwise the *model name* — for
+        a cloud endpoint the name IS the identity (``text-embedding-3-small``
+        names one embedding space), and there is no file on disk to fall back
+        to. The endpoint URL is deliberately excluded: two endpoints serving
+        the same model share a vector space. ``textprep`` appended as always.
+        """
+        meta = self.model_info().get("meta") or {}
+        fields = ("n_params", "n_embd", "n_vocab", "n_ctx_train", "size")
+        if any(meta.get(f) is not None for f in fields):
+            base = "meta:" + ":".join(str(meta.get(f, "")) for f in fields)
+        else:
+            base = f"remote:{self._model_name or self._model or 'default'}"
+        return f"{base}:textprep={EMBED_TEXT_VERSION}"
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        if not self.running:
+            raise RuntimeError("Embedding service is not running")
+        if not texts:
+            return []
+        bs = self._effective_batch(len(texts))
+        out: list[list[float]] = []
+        for i in range(0, len(texts), bs):
+            out.extend(self._embed_chunk(texts[i : i + bs]))
+        return out
+
+    def _effective_batch(self, n: int) -> int:
+        if self._safe_batch <= 1:
+            return 1
+        limit = min(self._batch_cap, self._safe_batch) if self._batch_cap else self._safe_batch
+        return max(1, min(limit, n))
+
+    def _embed_chunk(self, texts: list[str]) -> list[list[float]]:
+        vectors: list[list[float]] = self._remote.embed_chunk(texts)
+        return vectors
+
+    def native_embedder(self) -> Any:
+        """The kernel-slot handle — the same composition as the llama facade."""
+        if not self.running:
+            raise RuntimeError("Embedding service is not running")
+        return shrike_native.NativeEmbedder.from_remote(
+            self._remote,
+            fingerprint=self.model_fingerprint(),
+            dim=self.embedding_dim(),
+            safe_batch=self._effective_batch(self._safe_batch),
+        )
+
+
 class EmbeddingRuntime:
     """Owns the embedding backend lifecycle.
 
@@ -362,8 +538,12 @@ class EmbeddingRuntime:
         onnx_providers: Sequence[str] | None = None,
         normalize: bool = True,
         batch_size: int | None = None,
+        endpoint: str | None = None,
+        api_key_env: str | None = None,
     ) -> None:
         self._backend_kind = BACKEND_ALIASES.get(backend, backend)
+        self._endpoint = endpoint
+        self._api_key_env = api_key_env
         self._model = model
         self._host = host
         self._port = port
@@ -413,9 +593,15 @@ class EmbeddingRuntime:
             return "running"
         if self._last_start_failed:
             return "failed"
-        if not self._model:
+        if not self._configured:
             return "not_configured"
         return "stopped"
+
+    @property
+    def _configured(self) -> bool:
+        # A remote backend is configured by its endpoint alone (the endpoint's
+        # default model is a valid choice); every other kind needs a model.
+        return bool(self._model) or (self._backend_kind == "remote" and bool(self._endpoint))
 
     def health(self) -> dict[str, Any]:
         info: dict[str, Any] = (
@@ -438,6 +624,8 @@ class EmbeddingRuntime:
         llama_server: str | None = None,
         onnx_providers: Sequence[str] | None = None,
         batch_size: int | None = None,
+        endpoint: str | None = None,
+        api_key_env: str | None = None,
     ) -> EmbedderBackend:
         """Start the embedding backend.
 
@@ -473,8 +661,12 @@ class EmbeddingRuntime:
                 self._onnx_providers = list(onnx_providers) or None
             if batch_size is not None:
                 self._batch_size = batch_size
+            if endpoint is not None:
+                self._endpoint = endpoint
+            if api_key_env is not None:
+                self._api_key_env = api_key_env
 
-            if not self._model:
+            if not self._configured:
                 raise ValueError("No embedding model configured")
 
             try:
@@ -497,6 +689,16 @@ class EmbeddingRuntime:
         of the published wheel (#497), but an environment missing it still surfaces
         a clean ``ImportError`` only when that backend is actually selected.
         """
+        if self._backend_kind == "remote":
+            # Config-only (#498): an unmanaged endpoint entry (or manage:
+            # attach). No flag spells this kind — it arrives via --config.
+            assert self._endpoint is not None  # _configured checked by callers
+            return RemoteBackend(
+                endpoint=self._endpoint,
+                model=self._model,
+                api_key_env=self._api_key_env,
+                batch_size=self._batch_size,
+            )
         assert self._model is not None  # callers check before constructing
         if self._backend_kind == "onnx":
             from shrike.embedding_onnx import OnnxBackend

@@ -21,10 +21,13 @@ The two-layer rule it enforces (#498):
   asr/describe integration, #502 remote OCR, #36 sync server) — declared
   config never silently does nothing.
 
-Today's serving shapes (the N=1 cases) map onto the existing runtime via
-:func:`plan_to_legacy_embedding`; the facade rework that consumes the plan
-natively (remote-endpoint entries, ``manage: attach``/``off``) is the second
-#498 slice.
+The N=1 serving shapes map onto the runtime via :func:`plan_to_runtime_params`:
+the ort backends keyed by modalities, the managed llama-server (``manage:
+auto``), and the unmanaged ``remote`` backend — an explicit ``endpoint``
+(cloud/tailnet, ``api_key_env``-authenticated) or ``manage: attach`` (an
+existing llama-server Shrike never spawns or stops). Structured entries have
+no flag spelling: a v2 config reaches the daemon as ``--config`` and the
+daemon resolves it here itself.
 """
 
 from __future__ import annotations
@@ -475,10 +478,22 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
                     "llama-server) but managed.llama_server.manage is off — give the entry "
                     "an endpoint or let the manager run"
                 )
-            if "manage-llama" not in features:
+            if llama.manage == "auto" and "manage-llama" not in features:
                 raise ProfileError(
                     f"embedders[0] (remote, no endpoint) needs the managed llama-server, "
-                    f"which the {profile} build does not compile (manage-llama)"
+                    f"which the {profile} build does not compile (manage-llama) — "
+                    "manage: attach (an existing server) works on any build"
+                )
+        if embedder.runtime == "remote" and embedder.pooling is not None:
+            llama = caps.managed_llama or ManagedLlama()
+            if embedder.endpoint is not None or llama.manage == "attach":
+                # Pooling is applied by the server PRODUCING the vectors; an
+                # endpoint Shrike doesn't launch owns its own pooling —
+                # accepting the knob here would be a silent no-op.
+                raise ProfileError(
+                    "embedders[0].pooling applies only when Shrike launches the server "
+                    "(managed llama_server, manage: auto) — an external endpoint or an "
+                    "attached server owns its own pooling"
                 )
 
     for rec in caps.recognizers:
@@ -514,10 +529,40 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
         )
 
     managed_llama = caps.managed_llama
-    if managed_llama is not None and managed_llama.manage == "attach":
+    if managed_llama is not None and managed_llama.manage in ("auto", "attach"):
+        # The managed llama-server exists to serve a remote entry without an
+        # endpoint — a section nothing consumes would be a silent no-op (the
+        # cross-talk rule), and attach + an explicit endpoint would be two
+        # sources for one address. manage: off is a valid explicit "nothing
+        # managed" declaration alongside any embedder.
+        consumed = (
+            embedder is not None and embedder.runtime == "remote" and embedder.endpoint is None
+        )
+        if not consumed:
+            raise ProfileError(
+                f"managed.llama_server (manage: {managed_llama.manage}) is declared but "
+                "nothing consumes it — it serves an embedders: entry with runtime: remote "
+                "and no endpoint; remove the section or set manage: off"
+            )
+    if (
+        managed_llama is not None
+        and managed_llama.manage == "attach"
+        and any(
+            getattr(managed_llama, knob) is not None
+            for knob in ("binary", "context_size", "threads", "gpu_layers")
+        )
+    ):
+        # attach uses a server someone else launched — launch-time knobs
+        # can't apply (the silent-cross-talk rule again). `port` stays: it's
+        # WHERE to attach, not how to launch.
         raise ProfileError(
-            "managed.llama_server.manage: attach (use an existing server) lands with the "
-            "#498 facade rework — use manage: auto, or give the embedder entry an endpoint"
+            "managed.llama_server.manage: attach uses an existing server — the launch "
+            "knobs (binary/context_size/threads/gpu_layers/args) don't apply; set port "
+            "to say where it listens"
+        )
+    if managed_llama is not None and managed_llama.manage == "attach" and managed_llama.args:
+        raise ProfileError(
+            "managed.llama_server.manage: attach uses an existing server — args don't apply"
         )
 
     return ResolvedProfile(
@@ -527,12 +572,23 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
     )
 
 
-def plan_to_legacy_embedding(plan: ResolvedProfile) -> dict[str, Any]:
-    """Adapt a resolved N=1 plan onto the legacy embedding-params shape the
-    current runtime consumes (``resolve_embedding``'s dict). The bridge for
-    the first #498 slice: the v2 config drives today's machinery; the facade
-    rework that consumes the plan natively (remote endpoints, attach mode)
-    replaces this in the second slice.
+#: Where an attached llama-server is assumed to listen when ``managed.
+#: llama_server.port`` is unset — the manager's own default port.
+ATTACH_DEFAULT_PORT = 8373
+
+
+def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
+    """Adapt a resolved N=1 plan onto the runtime-params shape
+    ``EmbeddingRuntime`` consumes (a superset of the legacy
+    ``resolve_embedding`` dict — the ``remote`` kind plus ``endpoint``/
+    ``api_key_env`` exist only here; no flag spells them, they ride
+    ``--config``).
+
+    The mapping: an onnx entry keys the ort backend by its modalities
+    (text → ``onnx``, text+image → ``clip``); a remote entry WITH an
+    endpoint — or under ``manage: attach`` — is the unmanaged ``remote``
+    backend (Shrike never spawns/stops that server); a remote entry without
+    one is the managed llama-server (``manage: auto``, today's behavior).
     """
     e = plan.embedder
     if e is None:
@@ -547,12 +603,16 @@ def plan_to_legacy_embedding(plan: ResolvedProfile) -> dict[str, Any]:
             "batch_size": e.batch_size,
         }
     if e.runtime == "remote":
-        if e.endpoint is not None:
-            raise ProfileError(
-                "embedders[0].endpoint (an external remote endpoint) lands with the #498 "
-                "facade rework — until then, omit endpoint to use the managed llama-server"
-            )
         llama = plan.managed_llama or ManagedLlama()
+        if e.endpoint is not None or llama.manage == "attach":
+            endpoint = e.endpoint or f"http://127.0.0.1:{llama.port or ATTACH_DEFAULT_PORT}"
+            return {
+                "backend": "remote",
+                "model": e.model,
+                "endpoint": endpoint,
+                "api_key_env": e.api_key_env,
+                "batch_size": e.batch_size,
+            }
         return {
             "backend": "llama",
             "model": e.model,
