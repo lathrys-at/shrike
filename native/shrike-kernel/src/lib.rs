@@ -3560,7 +3560,10 @@ mod no_cpython_smoke {
 
             // ... AND mints a vector (a non-literal token-bag query surfaces it
             // via the text space).
-            let sem = kernel.search("cell powerhouse mitochondria", 5).await.unwrap();
+            let sem = kernel
+                .search("cell powerhouse mitochondria", 5)
+                .await
+                .unwrap();
             assert!(
                 sem.iter()
                     .find(|h| h.note_id == audio_id)
@@ -3639,7 +3642,10 @@ mod no_cpython_smoke {
             let notes: Vec<serde_json::Value> = (0..n)
                 .map(|i| {
                     let name = format!("clip{i}.mp3");
-                    media.insert(name.clone(), format!("transcript number {i} here").into_bytes());
+                    media.insert(
+                        name.clone(),
+                        format!("transcript number {i} here").into_bytes(),
+                    );
                     serde_json::json!({"note_type": "Basic", "deck": "Default",
                         "fields": {"Front": format!("Listen [sound:{name}]"), "Back": "b"}})
                 })
