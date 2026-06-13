@@ -26,6 +26,7 @@
 //! transitional Python schedulers from #275.
 
 pub mod actions;
+pub mod cache_layout;
 pub mod fusion;
 pub mod index_orchestrator;
 pub mod media_fetch;
@@ -351,11 +352,19 @@ impl Kernel {
             DerivedEngine::SCHEMA_VERSION,
         )?);
         tracing::debug!(collection = collection_path, "kernel opened");
+        // The vector index is namespaced per collection (#67): each collection
+        // gets its own `<cache_dir>/index/<path-derived-id>/` so a daemon
+        // serving several collections never collides their indexes. The layout
+        // also migrates an existing flat (single-collection) layout into this
+        // collection's namespace, losslessly, so the long-standing text-only
+        // user never pays a spurious rebuild on upgrade.
+        let layout = cache_layout::IndexLayout::for_collection(cache_dir, collection_path);
         Self::assemble(
             collection,
             engine,
             derived,
             cache_dir,
+            layout,
             save_delay,
             save_threshold,
         )
@@ -375,11 +384,17 @@ impl Kernel {
         save_threshold: Option<u64>,
     ) -> NativeResult<Self> {
         let collection = Arc::new(SerializedCollection::from_store(collection));
+        // The injection seam carries pre-built stores and no collection path,
+        // so it can't derive a per-collection index namespace (#67): the index
+        // stays flat under `cache_dir`. The composing caller owns multiplexing
+        // if it ever serves several collections through this seam.
+        let layout = cache_layout::IndexLayout::flat(cache_dir);
         Self::assemble(
             collection,
             index,
             derived,
             cache_dir,
+            layout,
             save_delay,
             save_threshold,
         )
@@ -390,13 +405,18 @@ impl Kernel {
         engine: Arc<dyn VectorIndex>,
         derived: Arc<dyn DerivedStore>,
         cache_dir: &str,
+        index_layout: cache_layout::IndexLayout,
         save_delay: Option<f64>,
         save_threshold: Option<u64>,
     ) -> NativeResult<Self> {
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
-        let orchestrator = Arc::new(index_orchestrator::IndexOrchestrator::open(
-            cache_dir, engine,
+        std::fs::create_dir_all(&index_layout.dir)
+            .map_err(|e| NativeError::internal(format!("index dir: {e}")))?;
+        let orchestrator = Arc::new(index_orchestrator::IndexOrchestrator::open_owned(
+            index_layout.dir,
+            engine,
+            index_layout.owner,
         ));
         let saver = index_orchestrator::DebouncedSaver::new(
             Arc::clone(&orchestrator),

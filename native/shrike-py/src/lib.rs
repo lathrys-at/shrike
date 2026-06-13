@@ -872,6 +872,17 @@ fn rrf_fuse(
     })
 }
 
+/// The path-derived per-collection index identity (#67). The single
+/// implementation lives in the kernel (`shrike_kernel::cache_layout`); this
+/// binds it so the host can resolve the same `<cache_dir>/index/<namespace>/`
+/// the kernel writes (the routing capstone #68, status reporting, tests). A
+/// Python parity test pins the two byte-for-byte.
+#[cfg(feature = "anki-core")]
+#[pyfunction]
+fn index_namespace(py: Python<'_>, collection_path: String) -> String {
+    py.detach(move || shrike_kernel::cache_layout::index_namespace(&collection_path))
+}
+
 /// The module init. Its name MUST match the imported module / the `.so`
 /// filename (`_native`), since PyO3 exports `PyInit__native` from it.
 #[pymodule]
@@ -932,6 +943,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(async_kernel::async_collection_open, m)?)?;
         m.add_class::<async_kernel::AsyncKernel>()?;
         m.add_function(wrap_pyfunction!(async_kernel::async_kernel_open, m)?)?;
+        m.add_function(wrap_pyfunction!(index_namespace, m)?)?;
     }
     m.add_class::<py_embedder::PyEmbedder>()?;
     m.add_class::<native_embedder::NativeEmbedder>()?;

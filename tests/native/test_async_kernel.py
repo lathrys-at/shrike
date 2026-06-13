@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -94,10 +95,13 @@ class TestSaverTuning:
     def test_save_threshold_flushes_immediately(self, tmp_path) -> None:
         # threshold=1: the first indexed change forces a flush, so the index
         # lands on disk without an explicit save_index() or close().
+        from shrike import cache_layout
+
         async def flow():
             backend = _Backend()
+            collection_path = str(tmp_path / "collection.anki2")
             kernel = await shrike_native.async_kernel_open(
-                str(tmp_path / "collection.anki2"),
+                collection_path,
                 str(tmp_path / "cache"),
                 save_threshold=1,
             )
@@ -106,8 +110,11 @@ class TestSaverTuning:
             core = kernel.core_handle()
             basic = core.notetype_id("Basic")
             await kernel.upsert_notes([(basic, 1, ["flush me", "now"], [])], "allow")
+            # The index lands in the per-collection namespace (#67), not the
+            # flat cache root — resolve the same dir the kernel writes.
+            index_dir = cache_layout.collection_index_dir(str(tmp_path / "cache"), collection_path)
+            index_file = Path(index_dir) / "index.usearch"
             # The threshold flush is async (a spawned save) — poll briefly.
-            index_file = tmp_path / "cache" / "index.usearch"
             for _ in range(100):
                 if index_file.exists():
                     break

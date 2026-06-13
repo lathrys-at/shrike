@@ -73,6 +73,7 @@ with contextlib.suppress(ImportError):
         decode_media_b64,  # noqa: F401
         embedder_probe,  # noqa: F401
         fetch_media_url,  # noqa: F401
+        index_namespace,  # noqa: F401
         native_embedder_probe,  # noqa: F401
         rehomed_actions,  # noqa: F401
         rrf_fuse,  # noqa: F401
