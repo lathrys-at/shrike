@@ -785,6 +785,20 @@ class EmbeddingRuntime:
         of the published wheel (#497), but an environment missing it still surfaces
         a clean ``ImportError`` only when that backend is actually selected.
         """
+        if self._backend_kind == "planted":
+            # The deterministic test-only backend (#559): captured (no
+            # native_embedder) so the kernel exercises the real search path
+            # against planted vectors. NEVER a public choice; refuses to build
+            # unless the search-quality gate env is set, so a stray `planted`
+            # on a production box errors rather than serving fake vectors.
+            from shrike.embedding_planted import PlantedBackend, gate_open
+
+            if not gate_open():
+                raise ValueError(
+                    "the 'planted' embedding backend is test-only and requires "
+                    "SHRIKE_SEARCH_QUALITY=1 (search-quality suite, #559)"
+                )
+            return PlantedBackend()
         if self._backend_kind == "remote":
             # Config-only (#498): an unmanaged endpoint entry (or manage:
             # attach). No flag spells this kind — it arrives via --config.
