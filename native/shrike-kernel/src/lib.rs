@@ -2278,7 +2278,12 @@ mod no_cpython_smoke {
             assert_eq!(kernel.embed_space_count(), 1);
             assert_eq!(kernel.embed_spaces().len(), 1);
             assert_eq!(
-                kernel.embed_service().unwrap().embedder.fingerprint().as_deref(),
+                kernel
+                    .embed_service()
+                    .unwrap()
+                    .embedder
+                    .fingerprint()
+                    .as_deref(),
                 Some("hash-embedder:v1"),
                 "the sole space is the primary"
             );
@@ -2289,7 +2294,12 @@ mod no_cpython_smoke {
             assert_eq!(kernel.embed_space_count(), 2);
             assert_eq!(kernel.embed_spaces().len(), 2);
             assert_eq!(
-                kernel.embed_service().unwrap().embedder.fingerprint().as_deref(),
+                kernel
+                    .embed_service()
+                    .unwrap()
+                    .embedder
+                    .fingerprint()
+                    .as_deref(),
                 Some("hash-embedder:v1"),
                 "embed_service() still returns the PRIMARY (first) text space"
             );
@@ -2308,7 +2318,12 @@ mod no_cpython_smoke {
             assert!(kernel.detach_embedder_space("hash-embedder:v1"));
             assert_eq!(kernel.embed_space_count(), 1);
             assert_eq!(
-                kernel.embed_service().unwrap().embedder.fingerprint().as_deref(),
+                kernel
+                    .embed_service()
+                    .unwrap()
+                    .embedder
+                    .fingerprint()
+                    .as_deref(),
                 Some("hash-embedder:v2"),
                 "the surviving space becomes the primary"
             );

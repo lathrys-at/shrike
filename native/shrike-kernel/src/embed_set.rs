@@ -80,11 +80,7 @@ impl EmbedSpaces {
     /// orchestrator readiness flip stays the caller's (the kernel).
     pub fn attach(&mut self, key: Option<String>, service: Arc<EmbedService>) {
         if let Some(k) = key.as_deref() {
-            if let Some(slot) = self
-                .spaces
-                .iter_mut()
-                .find(|s| s.key.as_deref() == Some(k))
-            {
+            if let Some(slot) = self.spaces.iter_mut().find(|s| s.key.as_deref() == Some(k)) {
                 slot.service = service;
                 return;
             }

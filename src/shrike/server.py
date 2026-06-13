@@ -1005,9 +1005,8 @@ def main() -> None:
             emb_params.get("model"),
             emb_params.get("endpoint"),
         )
-    def _runtime_from_params(
-        params: dict[str, Any], *, pid_file: Path | None
-    ) -> EmbeddingRuntime:
+
+    def _runtime_from_params(params: dict[str, Any], *, pid_file: Path | None) -> EmbeddingRuntime:
         return EmbeddingRuntime(
             backend=params["backend"],
             model=params["model"],
@@ -1026,9 +1025,7 @@ def main() -> None:
             endpoint=params.get("endpoint"),
             api_key_env=params.get("api_key_env"),
             **(
-                {"modalities": params["modalities"]}
-                if params.get("modalities") is not None
-                else {}
+                {"modalities": params["modalities"]} if params.get("modalities") is not None else {}
             ),
             **({"mmprojs": params["mmprojs"]} if params.get("mmprojs") is not None else {}),
         )

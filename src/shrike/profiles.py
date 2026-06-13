@@ -595,8 +595,6 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
             "would bind the single managed llama-server; give all but one an explicit endpoint"
         )
 
-    embedder = caps.embedders[0] if caps.embedders else None
-
     for rec in caps.recognizers:
         if rec.source == "asr":
             raise ProfileError(
@@ -659,9 +657,7 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
         # cross-talk rule), and attach + an explicit endpoint would be two
         # sources for one address. manage: off is a valid explicit "nothing
         # managed" declaration alongside any embedder.
-        consumed = any(
-            e.runtime == "remote" and e.endpoint is None for e in caps.embedders
-        )
+        consumed = any(e.runtime == "remote" and e.endpoint is None for e in caps.embedders)
         if not consumed:
             raise ProfileError(
                 f"managed.llama_server (manage: {managed_llama.manage}) is declared but "
@@ -722,7 +718,9 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
 ATTACH_DEFAULT_PORT = 8373
 
 
-def _entry_to_runtime_params(e: EmbedderEntry, managed_llama: ManagedLlama | None) -> dict[str, Any]:
+def _entry_to_runtime_params(
+    e: EmbedderEntry, managed_llama: ManagedLlama | None
+) -> dict[str, Any]:
     """Map ONE resolved embedder entry onto the runtime-params dict
     ``EmbeddingRuntime`` consumes — the per-entry mapping shared by the N=1
     primary accessor (:func:`plan_to_runtime_params`) and the N-dict set
@@ -797,9 +795,7 @@ def plan_to_runtime_params_set(plan: ResolvedProfile) -> tuple[dict[str, Any], .
     tuple. Each dict is the same per-entry mapping :func:`plan_to_runtime_params`
     emits for the primary — N=1 yields a 1-tuple whose sole element equals the
     primary dict, so the single-space runtime is unchanged."""
-    return tuple(
-        _entry_to_runtime_params(re.entry, plan.managed_llama) for re in plan.embedders
-    )
+    return tuple(_entry_to_runtime_params(re.entry, plan.managed_llama) for re in plan.embedders)
 
 
 #: A resolved recognizer entry's runtime → the harness construction kind.

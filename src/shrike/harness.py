@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -606,7 +607,7 @@ class Harness:
             if rt.running:
                 continue
             try:
-                backend = await asyncio.to_thread(lambda rt=rt: rt.start(**overrides))
+                backend = await asyncio.to_thread(functools.partial(rt.start, **overrides))
             except (ValueError, ImportError, FileNotFoundError, RuntimeError, OSError) as e:
                 logger.error(
                     "Secondary embedding space (%s) failed to start: %s — "
