@@ -90,6 +90,10 @@ class TestIndexBuild:
         assert idx["ndim"] is not None
         assert idx["ndim"] > 0
         assert body["embedding"]["available"] is True
+        # The coverage matrix golden (#498/#235): a live text backend serves
+        # exactly the text modality, and the per-space report names it.
+        assert body["coverage"] == {"text": True, "image": False, "audio": False}
+        assert body["embedding"]["modalities"] == ["text"]
 
     def test_save_endpoint(self, collection_server):
         _wait_for_index_ready(collection_server)

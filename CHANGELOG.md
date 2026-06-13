@@ -25,6 +25,12 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
   another process owns via `managed.llama_server.manage: attach` (Shrike
   verifies it answers and uses it, but never starts, restarts, or stops it).
   `manage: auto` keeps today's spawn-and-own behavior.
+- `/status` (and `shrike server status`) report what semantic search can
+  reach (#498): the embedding block names the modalities the running space
+  embeds, and a new `coverage` map says, per modality (text/image/audio),
+  whether a live embedding space serves it — so "can I search images by
+  content right now" has a direct answer instead of being inferred from the
+  backend name.
 
 ### Removed
 - In-process Apple Vision OCR is no longer compiled into the server (#496):

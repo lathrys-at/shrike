@@ -24,6 +24,7 @@ from shrike.collection import CollectionWrapper
 from shrike.derived import DerivedTextStore
 from shrike.embedding import EmbeddingRuntime
 from shrike.embedding_base import EmbedderBackend
+from shrike.profiles import MODALITIES
 
 logger = logging.getLogger("shrike.kernel")
 
@@ -355,6 +356,17 @@ class Harness:
             "state": self._recognition_state,
             "backend": self._recognition_kind,
         }
+        # The modality coverage matrix (#498/#235): which modalities a live
+        # space serves. One space today (#229 adds more — this stays the
+        # union across them); all-False when embedding is down, so the shape
+        # is stable for clients.
+        backend = self.runtime.backend
+        served = (
+            frozenset(backend.modalities)
+            if backend is not None and backend.running
+            else frozenset()
+        )
+        status["coverage"] = {m: m in served for m in MODALITIES}
         return status
 
     def _index_status(self) -> dict[str, Any]:

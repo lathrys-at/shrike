@@ -814,6 +814,9 @@ pub enum EmbeddingStatus {
         batch_safe: Option<bool>,
         #[serde(default)]
         batch: Option<BatchMode>,
+        /// The modalities this space embeds (#498/#235).
+        #[serde(default)]
+        modalities: Option<Vec<String>>,
     },
     Stopped {
         #[serde(default)]
@@ -970,6 +973,10 @@ pub struct ServerStatus {
     /// Recognition (OCR/ASR) state (#228).
     #[serde(default)]
     pub recognition: RecognitionStatus,
+    /// The modality coverage matrix (#498/#235): per modality, whether a live
+    /// embedding space serves it. None on payloads from older servers.
+    #[serde(default)]
+    pub coverage: Option<std::collections::BTreeMap<String, bool>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]

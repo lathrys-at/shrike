@@ -607,6 +607,10 @@ class EmbeddingRuntime:
         info: dict[str, Any] = (
             {"available": False} if self._backend is None else self._backend.health()
         )
+        if self._backend is not None and self._backend.running:
+            # The space's modalities (#498/#235) — what /status reports per
+            # space, and what the coverage matrix is computed from.
+            info.setdefault("modalities", sorted(self._backend.modalities))
         info["state"] = self.state
         return info
 

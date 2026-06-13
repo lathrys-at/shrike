@@ -174,3 +174,41 @@ class TestOrphanReaping:
             if orphan.poll() is None:
                 orphan.kill()
                 orphan.wait()
+
+
+class TestAttachMode:
+    """managed.llama_server.manage: attach (#498): a daemon that embeds via a
+    llama-server another process owns — here, the collection_server's child.
+    The attaching server never spawns, reaps, or stops it."""
+
+    def test_attach_serves_embeddings_from_a_server_it_does_not_own(
+        self, collection_server, server_factory, tmp_path_factory
+    ):
+        cfg = tmp_path_factory.mktemp("attach-config") / "config.yml"
+        cfg.write_text(
+            "embedders:\n"
+            "  - modalities: [text]\n"
+            "    runtime: remote\n"
+            "managed:\n"
+            "  llama_server:\n"
+            "    manage: attach\n"
+            f"    port: {collection_server.embedding_port}\n"
+        )
+        attached = server_factory("attach-client", extra_args=["--config", str(cfg)])
+
+        status = httpx.get(attached.url.rsplit("/", 1)[0] + "/status", timeout=5.0).json()
+        emb = status["embedding"]
+        assert emb["available"] is True
+        # Attached, not owned: it points at the upstream's port and reports no
+        # pid (there is no child process to manage).
+        assert emb["url"] == f"http://127.0.0.1:{collection_server.embedding_port}"
+        assert emb.get("pid") is None
+        # The coverage matrix golden for the attach shape (#498/#235).
+        assert emb["modalities"] == ["text"]
+        assert status["coverage"] == {"text": True, "image": False, "audio": False}
+
+        # And the upstream is untouched — still serving its own daemon.
+        upstream = httpx.get(
+            collection_server.url.rsplit("/", 1)[0] + "/status", timeout=5.0
+        ).json()
+        assert upstream["embedding"]["available"] is True

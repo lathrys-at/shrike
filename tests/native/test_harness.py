@@ -61,6 +61,9 @@ class TestHarness:
             assert status["locking"] == "permanent"
             # Recognition is off until a backend is configured (#228).
             assert status["recognition"] == {"state": "unavailable", "backend": None}
+            # The coverage matrix (#498/#235): shape-stable, all-False with
+            # embedding down — no modality is semantically searchable.
+            assert status["coverage"] == {"text": False, "image": False, "audio": False}
 
             # Index verbs degrade correctly without a backend.
             with pytest.raises(KernelConfigError):

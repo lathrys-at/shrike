@@ -932,7 +932,11 @@ def main() -> None:
             index_save_delay=args.index_save_delay,
             index_save_threshold=args.index_save_threshold,
         )
-        await harness.boot(start_embedding=bool(args.embedding_model) and not args.no_embedding)
+        # Embedding starts at boot when anything configures it: a model (flag
+        # or config entry) OR a bare endpoint (#498 — a remote/attach entry's
+        # endpoint default model is a valid configuration with no model name).
+        embedding_configured = bool(emb_params.get("model") or emb_params.get("endpoint"))
+        await harness.boot(start_embedding=embedding_configured and not args.no_embedding)
 
         # Recognition (#228/#221): attach the OCR backend and sweep in the
         # background. Off unless --ocr-backend is set; a missing extra degrades

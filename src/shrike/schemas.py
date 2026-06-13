@@ -901,6 +901,9 @@ class EmbeddingRunning(BaseModel):
     # ``batch`` is "batched" or "serial"; both absent for a backend that doesn't report them.
     batch_safe: bool | None = None
     batch: Literal["serial", "batched"] | None = None
+    # The modalities this space embeds (#498/#235) — what the running backend
+    # advertises (text, or text+image for CLIP). Optional for older wire shapes.
+    modalities: list[str] | None = None
 
 
 class EmbeddingDown(BaseModel):
@@ -1046,6 +1049,11 @@ class ServerStatus(BaseModel):
     dedup: DedupStats | None = None
     # Recognition (OCR/ASR) state (#228) — defaulted so older payloads validate.
     recognition: RecognitionStatus = RecognitionStatus()
+    # The modality coverage matrix (#498/#235): for each modality, whether a
+    # live embedding space serves it (search by that modality's content lights
+    # up where True). Today at most one space (#229 adds more); None on
+    # payloads from older servers.
+    coverage: dict[str, bool] | None = None
 
 
 # -- custom-endpoint responses (discriminated on `status`) -------------------

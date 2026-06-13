@@ -67,6 +67,8 @@ def _render_status(status: ServerStatus) -> None:
             output.kv("Provider", emb.provider.replace("ExecutionProvider", ""), indent=2)
         if emb.batch:
             output.kv("Batching", emb.batch, indent=2)
+        if emb.modalities:
+            output.kv("Modalities", ", ".join(emb.modalities), indent=2)
     else:
         labels = {
             "running": "[dim]unavailable[/dim]",
@@ -123,6 +125,14 @@ def _render_status(status: ServerStatus) -> None:
         output.kv("Recognition", f"[green]ready[/green] ([cyan]{rec.backend}[/cyan])")
     elif rec.state == "error":
         output.kv("Recognition", "[red]error[/red]")
+
+    # The modality coverage matrix (#498/#235): what semantic search can reach.
+    if status.coverage is not None:
+        served = [m for m, on in status.coverage.items() if on]
+        output.kv(
+            "Semantic coverage",
+            ", ".join(served) if served else "[dim]none (embedding off)[/dim]",
+        )
 
 
 def _wait_for_server(

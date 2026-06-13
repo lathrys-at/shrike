@@ -143,3 +143,12 @@ class TestRuntimeRemoteKind:
         with pytest.raises(RuntimeError):
             rt.start()
         assert rt.state == "failed"
+
+
+def test_runtime_health_reports_modalities_when_running():
+    rt = EmbeddingRuntime(backend="remote", endpoint="http://e", model="m")
+    assert "modalities" not in rt.health()  # down: shape-stable, no modalities
+    rt.start()
+    health = rt.health()
+    assert health["modalities"] == ["text"]
+    assert health["state"] == "running"
