@@ -222,7 +222,7 @@ pub struct TagRefresher {
     keys: Arc<TagKeyMap>,
     config: TagCentroidConfig,
     saver: Arc<crate::index_orchestrator::DebouncedSaver>,
-    embed: Arc<std::sync::RwLock<Option<Arc<crate::EmbedService>>>>,
+    embed: Arc<std::sync::RwLock<crate::EmbedSpaces>>,
     window: std::time::Duration,
     state: std::sync::Mutex<RefreshState>,
 }
@@ -247,7 +247,7 @@ impl TagRefresher {
         keys: Arc<TagKeyMap>,
         config: TagCentroidConfig,
         saver: Arc<crate::index_orchestrator::DebouncedSaver>,
-        embed: Arc<std::sync::RwLock<Option<Arc<crate::EmbedService>>>>,
+        embed: Arc<std::sync::RwLock<crate::EmbedSpaces>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             collection,
@@ -307,7 +307,7 @@ impl TagRefresher {
     }
 
     async fn run_once(&self) {
-        if self.embed.read().expect("embed slot poisoned").is_none() {
+        if self.embed.read().expect("embed slot poisoned").is_empty() {
             return; // no embedder → no text vectors to mean over
         }
         let result: NativeResult<()> = async {

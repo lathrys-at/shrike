@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 
 use shrike_collection::{CreateOutcome, DuplicatePolicy, ImportOptions, ImportUpdateCondition};
 use shrike_ffi::NativeResult;
-use shrike_kernel::{Kernel, NoteSpec, SerializedCollection};
+use shrike_kernel::{Embedder, Kernel, NoteSpec, SerializedCollection};
 
 use crate::asyncio_bridge::future_into_py;
 use crate::native_embedder::NativeEmbedder;
@@ -107,6 +107,20 @@ impl AsyncKernel {
     pub(crate) fn kernel_arc(&self) -> Arc<Kernel> {
         Arc::clone(&self.inner)
     }
+
+    /// Route a resolved embedder + image pair into the kernel's embed SET
+    /// keyed by space (#233). The explicit `space_key` wins; otherwise the key
+    /// is the embedder's own CONTENT fingerprint (so an unkeyed single-embedder
+    /// attach lands exactly one space, byte-identical to the pre-#233 slot).
+    fn attach_space(
+        &self,
+        space_key: Option<String>,
+        embedder: Arc<dyn shrike_kernel::Embedder>,
+        images: Option<shrike_kernel::KernelImages>,
+    ) {
+        let key = space_key.or_else(|| embedder.fingerprint());
+        self.inner.attach_embedder_space(key, embedder, images);
+    }
 }
 
 /// Either embedder shape at the attach seam (#342 P2): the native composition
@@ -189,17 +203,22 @@ pub(crate) fn async_kernel_open<'py>(
 
 #[pymethods]
 impl AsyncKernel {
-    /// Attach (or swap) the embedding service — embedding start / model
-    /// change. Takes either embedder shape ([`AnyEmbedder`]): the native
-    /// composition embeds without re-entering Python; the captured handle
-    /// dispatches to the Python backend. Follow up with `reindex_if_needed`
+    /// Attach (or swap) an embedding space (#233) — embedding start / model
+    /// change / one call per space in the multi-space fan-out. Takes either
+    /// embedder shape ([`AnyEmbedder`]): the native composition embeds without
+    /// re-entering Python; the captured handle dispatches to the Python
+    /// backend. `space_key` pins the space's identity (the CONTENT fingerprint,
+    /// reorder-stable, #233) — when `None` the kernel keys off the embedder's
+    /// own fingerprint, so an existing single-embedder host attaches exactly as
+    /// before (one space, byte-identical). Follow up with `reindex_if_needed`
     /// (a model change is drift).
-    #[pyo3(signature = (embedder, media_read=None, media_exists=None))]
+    #[pyo3(signature = (embedder, media_read=None, media_exists=None, space_key=None))]
     fn attach_embedder(
         &self,
         embedder: AnyEmbedder<'_>,
         media_read: Option<Py<PyAny>>,
         media_exists: Option<Py<PyAny>>,
+        space_key: Option<String>,
     ) {
         match embedder {
             AnyEmbedder::Native(native) => {
@@ -211,20 +230,36 @@ impl AsyncKernel {
                     )),
                     _ => None,
                 };
-                self.inner.attach_embedder(Arc::clone(&native.text), images);
+                let handle = Arc::clone(&native.text);
+                self.attach_space(space_key, handle, images);
             }
             AnyEmbedder::Captured(captured) => {
                 let handle = Arc::clone(&captured.handle);
                 let images = image_pair(&handle, media_read, media_exists);
-                self.inner.attach_embedder(handle, images);
+                self.attach_space(space_key, handle, images);
             }
         }
     }
 
-    /// Detach the embedding service (embedding stop): the index flushes and
-    /// reports unavailable; the collection and lexical search stay live.
-    fn detach_embedder(&self, py: Python<'_>) {
-        py.detach(|| self.inner.detach_embedder())
+    /// Detach the embedding spaces (embedding stop): with no `space_key`, the
+    /// whole set clears (the N=1 stop) — the index flushes and reports
+    /// unavailable; with a key, only that one space detaches (the index keeps
+    /// serving the primary while another space remains). The collection and
+    /// lexical search stay live in both cases.
+    #[pyo3(signature = (space_key=None))]
+    fn detach_embedder(&self, py: Python<'_>, space_key: Option<String>) {
+        py.detach(|| match space_key {
+            Some(key) => {
+                self.inner.detach_embedder_space(&key);
+            }
+            None => self.inner.detach_embedder(),
+        })
+    }
+
+    /// The number of attached embedding spaces (#233) — the multi-space status
+    /// surface. The index/search path still consumes only the primary this PR.
+    fn embed_space_count(&self, py: Python<'_>) -> usize {
+        py.detach(|| self.inner.embed_space_count())
     }
 
     /// Attach the OCR recognition service (#228, the second #342 slot) — the

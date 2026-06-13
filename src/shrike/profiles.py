@@ -137,16 +137,54 @@ class RecognizerPlan:
 
 
 @dataclass(frozen=True)
+class ResolvedEmbedder:
+    """One resolved embedding space (#233): the declared entry plus its
+    routing **role** — the per-modality PRIMARY flags. A modality's primary is
+    the FIRST entry (declaration order) that declares it, which mirrors the
+    kernel's insertion-order primary (``EmbedSpaces::primary``). The role is
+    metadata this PR; the index-narrow / query-wide fan-out it feeds is PR-B/C
+    (#232/#234)."""
+
+    entry: EmbedderEntry
+    #: The note modalities this space is PRIMARY for (it is the first declared
+    #: space carrying each). The index fan-out routes a note item to its
+    #: modality's primary space.
+    primary_modalities: frozenset[str]
+
+    @property
+    def runtime(self) -> str:
+        return self.entry.runtime
+
+    @property
+    def modalities(self) -> tuple[str, ...]:
+        return self.entry.modalities
+
+    @property
+    def text_capable(self) -> bool:
+        """Whether this space embeds the TEXT modality — the query-routing
+        flag (a query fans out to every text-capable space in PR-C)."""
+        return "text" in self.entry.modalities
+
+
+@dataclass(frozen=True)
 class ResolvedProfile:
     """The declared set intersected with the build: what this process will
-    actually serve. Today at most one embedder space (#229 is the multi-space
-    substrate); ``recognizers`` is the per-purpose recognition set (#485);
+    actually serve. ``embedders`` is the ordered set of resolved spaces (#233 —
+    the multi-space substrate; an empty tuple means no embedder, one entry is
+    the N=1 case); ``recognizers`` is the per-purpose recognition set (#485);
     ``warnings`` aggregates migration + degradation messages."""
 
-    embedder: EmbedderEntry | None
+    embedders: tuple[ResolvedEmbedder, ...]
     managed_llama: ManagedLlama | None
     recognizers: tuple[RecognizerEntry, ...] = ()
     warnings: tuple[str, ...] = ()
+
+    @property
+    def embedder(self) -> EmbedderEntry | None:
+        """The PRIMARY (first) embedder entry, or ``None`` — the N=1
+        back-compat accessor. The index path consumes one engine until the
+        fan-out lands (PR-B/C), so the primary entry is the load-bearing one."""
+        return self.embedders[0].entry if self.embedders else None
 
 
 def _require_str(value: Any, where: str) -> str:
@@ -471,6 +509,23 @@ def _profile_name(build_features: set[str]) -> str:
     )
 
 
+def _resolve_embedder_roles(
+    embedders: tuple[EmbedderEntry, ...],
+) -> tuple[ResolvedEmbedder, ...]:
+    """Assign each space its per-modality PRIMARY role (#233): a modality's
+    primary is the FIRST entry (declaration order) that declares it, mirroring
+    the kernel's insertion-order primary. So the first text space is primary
+    for text, the first image space primary for image — and a single entry is
+    primary for every modality it carries (the N=1 case)."""
+    seen: set[str] = set()
+    resolved: list[ResolvedEmbedder] = []
+    for entry in embedders:
+        primary = frozenset(m for m in entry.modalities if m not in seen)
+        seen.update(entry.modalities)
+        resolved.append(ResolvedEmbedder(entry=entry, primary_modalities=primary))
+    return tuple(resolved)
+
+
 def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> ResolvedProfile:
     """Intersect the declared capabilities with what the build compiled.
 
@@ -483,19 +538,17 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
     profile = _profile_name(features)
     warnings = list(caps.warnings)
 
-    if len(caps.embedders) > 1:
-        raise ProfileError(
-            f"{len(caps.embedders)} embedder entries declare multiple vector spaces — "
-            "multi-space embedding is the #229 substrate and isn't built yet; declare "
-            "one entry (one space) for now"
-        )
-
-    embedder = caps.embedders[0] if caps.embedders else None
-    if embedder is not None:
+    # Multi-space is built since #233: each declared entry is its own vector
+    # space, validated independently against the build + this release. The
+    # per-modality PRIMARY is the FIRST entry carrying the modality (mirrors the
+    # kernel's insertion-order primary). The remote/managed-llama coupling is
+    # validated per entry below; the managed-llama-consumption check (further
+    # down) looks across ALL entries.
+    for index, embedder in enumerate(caps.embedders):
         feature = _RUNTIME_FEATURE[embedder.runtime]
         if feature not in features:
             raise ProfileError(
-                f"embedders[0].runtime: {embedder.runtime} needs the {feature} engine, "
+                f"embedders[{index}].runtime: {embedder.runtime} needs the {feature} engine, "
                 f"which the {profile} build does not compile"
                 + (
                     " — platform engines are never in the server build, on any OS "
@@ -508,13 +561,13 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
             llama = caps.managed_llama or ManagedLlama()
             if llama.manage == "off":
                 raise ProfileError(
-                    "embedders[0] declares runtime: remote with no endpoint (= the managed "
-                    "llama-server) but managed.llama_server.manage is off — give the entry "
-                    "an endpoint or let the manager run"
+                    f"embedders[{index}] declares runtime: remote with no endpoint (= the "
+                    "managed llama-server) but managed.llama_server.manage is off — give the "
+                    "entry an endpoint or let the manager run"
                 )
             if llama.manage == "auto" and "manage-llama" not in features:
                 raise ProfileError(
-                    f"embedders[0] (remote, no endpoint) needs the managed llama-server, "
+                    f"embedders[{index}] (remote, no endpoint) needs the managed llama-server, "
                     f"which the {profile} build does not compile (manage-llama) — "
                     "manage: attach (an existing server) works on any build"
                 )
@@ -525,10 +578,22 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
                 # endpoint Shrike doesn't launch owns its own pooling —
                 # accepting the knob here would be a silent no-op.
                 raise ProfileError(
-                    "embedders[0].pooling applies only when Shrike launches the server "
+                    f"embedders[{index}].pooling applies only when Shrike launches the server "
                     "(managed llama_server, manage: auto) — an external endpoint or an "
                     "attached server owns its own pooling"
                 )
+
+    # At most ONE managed llama-server backs the embedder set: a remote
+    # no-endpoint entry consumes it. Two such entries would both bind the one
+    # managed server, which is ambiguous — reject rather than silently share.
+    managed_remote_entries = sum(
+        1 for e in caps.embedders if e.runtime == "remote" and e.endpoint is None
+    )
+    if managed_remote_entries > 1:
+        raise ProfileError(
+            f"{managed_remote_entries} embedder entries are remote with no endpoint — each "
+            "would bind the single managed llama-server; give all but one an explicit endpoint"
+        )
 
     for rec in caps.recognizers:
         if rec.source == "asr":
@@ -592,9 +657,7 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
         # cross-talk rule), and attach + an explicit endpoint would be two
         # sources for one address. manage: off is a valid explicit "nothing
         # managed" declaration alongside any embedder.
-        consumed = (
-            embedder is not None and embedder.runtime == "remote" and embedder.endpoint is None
-        )
+        consumed = any(e.runtime == "remote" and e.endpoint is None for e in caps.embedders)
         if not consumed:
             raise ProfileError(
                 f"managed.llama_server (manage: {managed_llama.manage}) is declared but "
@@ -631,17 +694,19 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
     if (
         managed_llama is not None
         and managed_llama.mmprojs
-        and (embedder is None or "image" not in embedder.modalities)
+        and not any("image" in e.modalities for e in caps.embedders)
     ):
         # Projectors loaded for a text-only space are never used — a silent
-        # no-op (the cross-talk rule). The mmprojs serve the image half.
+        # no-op (the cross-talk rule). The mmprojs serve the image half. (The
+        # managed server backs the one remote-no-endpoint entry; an image
+        # modality on ANY declared space satisfies the consumer.)
         raise ProfileError(
-            "managed.llama_server.mmprojs is set but the embedder declares no image "
-            "modality — add image to the entry's modalities, or drop the projectors"
+            "managed.llama_server.mmprojs is set but no embedder declares an image "
+            "modality — add image to an entry's modalities, or drop the projectors"
         )
 
     return ResolvedProfile(
-        embedder=embedder,
+        embedders=_resolve_embedder_roles(caps.embedders),
         managed_llama=managed_llama,
         recognizers=caps.recognizers,
         warnings=tuple(warnings),
@@ -653,12 +718,14 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
 ATTACH_DEFAULT_PORT = 8373
 
 
-def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
-    """Adapt a resolved N=1 plan onto the runtime-params shape
-    ``EmbeddingRuntime`` consumes (a superset of the legacy
-    ``resolve_embedding`` dict — the ``remote`` kind plus ``endpoint``/
-    ``api_key_env`` exist only here; no flag spells them, they ride
-    ``--config``).
+def _entry_to_runtime_params(
+    e: EmbedderEntry, managed_llama: ManagedLlama | None
+) -> dict[str, Any]:
+    """Map ONE resolved embedder entry onto the runtime-params dict
+    ``EmbeddingRuntime`` consumes — the per-entry mapping shared by the N=1
+    primary accessor (:func:`plan_to_runtime_params`) and the N-dict set
+    (:func:`plan_to_runtime_params_set`). Reused verbatim per #233's scope (the
+    multi-space change is fanning OUT this mapping, not altering it).
 
     The mapping: an onnx entry keys the ort backend by its modalities
     (text → ``onnx``, text+image → ``clip``); a remote entry WITH an
@@ -666,9 +733,6 @@ def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
     backend (Shrike never spawns/stops that server); a remote entry without
     one is the managed llama-server (``manage: auto``, today's behavior).
     """
-    e = plan.embedder
-    if e is None:
-        return {"backend": None, "model": None}
     # The space's modalities flow to the backend (#501): an image space
     # composes the image half + reports image coverage.
     modalities = frozenset(e.modalities)
@@ -683,7 +747,7 @@ def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
             "modalities": modalities,
         }
     if e.runtime == "remote":
-        llama = plan.managed_llama or ManagedLlama()
+        llama = managed_llama or ManagedLlama()
         if e.endpoint is not None or llama.manage == "attach":
             endpoint = e.endpoint or f"http://127.0.0.1:{llama.port or ATTACH_DEFAULT_PORT}"
             return {
@@ -709,6 +773,29 @@ def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
             "mmprojs": list(llama.mmprojs),
         }
     raise ProfileError(f"unsupported embedder runtime {e.runtime!r} on this release")
+
+
+def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
+    """The PRIMARY embedder's runtime-params dict (the N=1 accessor) — what
+    the index/search paths' single engine consume this release. With one
+    declared embedder it is the sole space, so the dict is byte-identical to
+    the single-space era; the multi-space fan-out reads
+    :func:`plan_to_runtime_params_set`.
+    """
+    e = plan.embedder
+    if e is None:
+        return {"backend": None, "model": None}
+    return _entry_to_runtime_params(e, plan.managed_llama)
+
+
+def plan_to_runtime_params_set(plan: ResolvedProfile) -> tuple[dict[str, Any], ...]:
+    """The runtime-params dict for EVERY resolved space, in declaration order
+    (#233): the harness/``EmbeddingRuntime`` fan-out attaches one backend per
+    dict, each to its own kernel embed space. An empty plan yields an empty
+    tuple. Each dict is the same per-entry mapping :func:`plan_to_runtime_params`
+    emits for the primary — N=1 yields a 1-tuple whose sole element equals the
+    primary dict, so the single-space runtime is unchanged."""
+    return tuple(_entry_to_runtime_params(re.entry, plan.managed_llama) for re in plan.embedders)
 
 
 #: A resolved recognizer entry's runtime → the harness construction kind.
