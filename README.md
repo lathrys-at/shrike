@@ -50,7 +50,7 @@ shrike server stop
 
 ## Semantic search
 
-`shrike note search` finds notes by meaning instead of keywords. To turn it on, declare an embedder in your config file (see [Configuration](#configuration) for where the file lives), then start the server as usual. The entry answers two questions: what kinds of content you want searchable, and where the model runs.
+`shrike note search` finds notes by meaning instead of keywords. To turn it on, declare an embedder in your config file (see [Configuration](#configuration) for where the file lives), then start the server as usual. The entry says what kinds of content you want searchable and where the model runs.
 
 ### Text search with a local model
 
@@ -330,7 +330,7 @@ server:
 
 Operational settings (the collection path, host and port, log level, cache directory) also take command-line flags and environment variables (`SHRIKE_URL`, `SHRIKE_COLLECTION`); flags win, then the environment, then the file. [The CLI reference](docs/cli-reference.md) has the full list.
 
-If you configured embedding before this config shape existed, with the `embedding:` section or the embedding flags: they keep working for one more release and print a pointer to the new shape ([#523](https://github.com/lathrys-at/shrike/issues/523) is the removal).
+If you configured embedding before this config shape existed: a legacy `embedding:` section keeps working for one more release and prints a pointer to the new shape, and the old embedding flags keep working alongside it ([#523](https://github.com/lathrys-at/shrike/issues/523) is the removal). Once your file declares `embedders:`, the old flags are rejected rather than silently ignored.
 
 ## Development
 
