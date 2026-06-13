@@ -1004,11 +1004,12 @@ pub struct CollectionStatus {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageCell {
-    /// A single live space embeds both the query and target modality.
+    // A single live space embeds both the query and target modality.
     Native,
-    /// A recognizer derives text from the target into the text space.
+    // A recognizer derives text from the target into the text space.
     ViaDerivedText,
-    /// Neither — the target can't be reached from this query.
+    // Neither — the target can't be reached from this query (the default for a
+    // partial/older payload).
     #[default]
     Unavailable,
 }
