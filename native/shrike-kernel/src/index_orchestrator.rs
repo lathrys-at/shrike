@@ -105,7 +105,10 @@ pub enum WriteMode {
 /// resolvable images for a note hashes the empty-image sentinel (a stable
 /// constant), so a note that loses its last image still re-embeds (its vector
 /// must leave the image index) and a never-imaged note has a stable hash.
-pub fn note_hash_images_only(image_names: &[String], image_exists: &dyn Fn(&str) -> bool) -> String {
+pub fn note_hash_images_only(
+    image_names: &[String],
+    image_exists: &dyn Fn(&str) -> bool,
+) -> String {
     let mut present: Vec<&str> = image_names
         .iter()
         .map(String::as_str)
@@ -1545,7 +1548,13 @@ mod op_tests {
             1,
             Some("clip".into()),
             &StubEmbedder,
-            Some((&SlowEngine { name: "i", events: Arc::default() }, &AlwaysResolver)),
+            Some((
+                &SlowEngine {
+                    name: "i",
+                    events: Arc::default(),
+                },
+                &AlwaysResolver,
+            )),
             WriteMode::ImageOnly,
         ))
         .unwrap();
@@ -1554,7 +1563,13 @@ mod op_tests {
             2,
             Some("clip".into()),
             &StubEmbedder,
-            Some((&SlowEngine { name: "i", events: Arc::default() }, &AlwaysResolver)),
+            Some((
+                &SlowEngine {
+                    name: "i",
+                    events: Arc::default(),
+                },
+                &AlwaysResolver,
+            )),
             WriteMode::ImageOnly,
         ))
         .unwrap();
@@ -1565,7 +1580,13 @@ mod op_tests {
             2,
             Some("clip".into()),
             &StubEmbedder,
-            Some((&SlowEngine { name: "i", events: Arc::default() }, &AlwaysResolver)),
+            Some((
+                &SlowEngine {
+                    name: "i",
+                    events: Arc::default(),
+                },
+                &AlwaysResolver,
+            )),
             WriteMode::ImageOnly,
         ))
         .unwrap();
@@ -1578,7 +1599,10 @@ mod op_tests {
         assert_eq!(a, b, "image-only reconcile lands on the rebuild key set");
         for key in &a {
             assert!(reconciled.engine().modality_contains("image", *key));
-            assert!(!reconciled.engine().modality_contains(TEXT, *key), "no text vectors");
+            assert!(
+                !reconciled.engine().modality_contains(TEXT, *key),
+                "no text vectors"
+            );
         }
     }
 

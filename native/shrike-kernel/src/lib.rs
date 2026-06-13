@@ -798,7 +798,12 @@ impl Kernel {
     ///
     /// `index-narrow`: image items route to this ONE image-primary, never to
     /// every image-capable space.
-    fn image_only_route(&self) -> Option<(Arc<index_orchestrator::IndexOrchestrator>, Arc<EmbedService>)> {
+    fn image_only_route(
+        &self,
+    ) -> Option<(
+        Arc<index_orchestrator::IndexOrchestrator>,
+        Arc<EmbedService>,
+    )> {
         let (text_key, image) = {
             let spaces = self.embed.read().expect("embed slot poisoned");
             (
@@ -808,7 +813,7 @@ impl Kernel {
         };
         let (image_key, image_svc) = image?;
         let image_key = image_key?; // a keyless image space has no index space
-        // Same space as the text-primary (omni primary) → no separate route.
+                                    // Same space as the text-primary (omni primary) → no separate route.
         if Some(&image_key) == text_key.as_ref() {
             return None;
         }
@@ -2733,12 +2738,12 @@ mod no_cpython_smoke {
             "note_type": "Basic", "deck": "Default",
             "fields": {"Front": front, "Back": "b"}
         }]);
-        let results: Vec<serde_json::Value> =
-            serde_json::from_str(&upsert_wire(kernel, notes.to_string(), "error".into(), false).await)
-                .unwrap();
+        let results: Vec<serde_json::Value> = serde_json::from_str(
+            &upsert_wire(kernel, notes.to_string(), "error".into(), false).await,
+        )
+        .unwrap();
         results[0]["id"].as_i64().unwrap()
     }
-
 
     /// Build a kernel with a SEPARATE text-primary + image-primary CLIP, sharing
     /// a media map. Returns (kernel, dir, text, clip) — the counters live on
@@ -2791,7 +2796,10 @@ mod no_cpython_smoke {
             kernel.reindex_if_needed().await.unwrap();
 
             let nid = upsert_image_note(&kernel, "the krebs cycle <img src=\"a.png\">").await;
-            assert!(kernel.index().engine().contains(nid), "text space has the note");
+            assert!(
+                kernel.index().engine().contains(nid),
+                "text space has the note"
+            );
             let clip_orch = kernel
                 .index_set()
                 .orchestrator_for("clip-primary:v1")
@@ -2800,7 +2808,10 @@ mod no_cpython_smoke {
                 clip_orch.engine().modality_contains("image", nid),
                 "the image space holds the note's image vector"
             );
-            assert!(clip.image_calls.load(Ordering::SeqCst) >= 1, "clip embedded images");
+            assert!(
+                clip.image_calls.load(Ordering::SeqCst) >= 1,
+                "clip embedded images"
+            );
             assert_eq!(
                 clip.text_calls.load(Ordering::SeqCst),
                 0,
@@ -2854,7 +2865,13 @@ mod no_cpython_smoke {
             // Seed both spaces (text→text orch; image→clip orch ImageOnly).
             let v1 = vec![input(1, "front text", "a.png")];
             text_orch
-                .reconcile(v1.clone(), 1, text_svc.embedder.fingerprint(), &*text_svc.embedder, None)
+                .reconcile(
+                    v1.clone(),
+                    1,
+                    text_svc.embedder.fingerprint(),
+                    &*text_svc.embedder,
+                    None,
+                )
                 .await
                 .unwrap();
             clip_orch
