@@ -995,6 +995,73 @@ nothing and deleted ~1,500 lines of adaptation.
 crate, the layering rule, native end-to-end attach, `WithPolicy` +
 host-assembled identity, the batch-safety probe, and every behavioral pin.
 
+## anki retains its sync runtime; the kernel pins sync off the runtime worker (#503, June 2026)
+
+**The invariant is "sync ops never run on a runtime worker," not "one runtime
+in the process."** The tokio pivot (#374) recorded "anki's runtime is never
+instantiated — one runtime in the process," but that is *sync-conditional*:
+anki's rslib owns an internal lazy tokio runtime whose only consumers are the
+sync/AnkiWeb/AnkiHub services. Today Shrike dispatches none of them (pinned by
+the `runtime_singularity` test over the adapter's service-index table), so
+anki's runtime stays cold and the kernel's is the only one alive. But client
+sync (#33/#362) is exactly the path that *wakes* those services — once it
+lands, anki's runtime comes up and there are two runtimes per process. #503
+spiked whether to keep the literal one-runtime invariant by patching anki and
+concluded **no** — the honest, build-symmetric guarantee is the dispatch
+discipline below.
+
+**Two findings drove the decision.**
+
+1. **The anki-patch mechanism is Bazel-only, so a runtime-injection patch
+   would fork behaviour across build lanes.** anki source patches ride
+   `MODULE.bazel` `crate.annotation` (e.g. `native/patches/anki-version-bazel.patch`
+   patching anki's `src/version.rs`), which applies **only** on the Bazel
+   lane. The cargo inner loop — `scripts/build-native.sh` → `cargo build -p
+   shrike-py`, and `cargo test` — builds the *unpatched* anki checkout. A
+   patch that changed anki's runtime accessor to prefer an injected
+   `Handle` would therefore make `cargo test`/`pytest` and Bazel disagree on a
+   **correctness** invariant (which runtime runs sync). Closing that gap would
+   mean owning a `[patch.crates-io]` git fork of anki (the pyo3-log pattern) —
+   out of scope for this spike, and a standing maintenance cost on a fast-moving
+   upstream.
+
+2. **The panic hazard is kernel-side and runtime-agnostic.**
+   [`SerializedCollection`](../native/shrike-kernel/src/lib.rs) runs every
+   collection job inline as a sync closure on whichever runtime worker polls
+   the actor. anki's sync paths call `block_on`, and
+   `tokio::runtime::Handle::block_on` panics whenever it is invoked from inside
+   a runtime context — and a worker thread is such a context **regardless of
+   which runtime owns it**. So injecting the kernel's handle into anki would
+   not even remove the hazard: a sync call made directly from an actor job
+   still panics. The real fix is *where the call runs*, not *whose runtime it
+   targets*.
+
+**The discipline (the actual fix).** Kernel-side sync ops that may `block_on`
+(anki's sync services) **MUST dispatch via `spawn_blocking`** — a blocking-pool
+thread is not a runtime context, so `block_on` is legal there. This is the same
+seam the Python captures already use (`py_embedder.rs`/`py_recognizer.rs`:
+`spawn_blocking` + GIL attach), and it composes with #362's release-run-reopen
+orchestration: the actor releases the collection, the sync op rides the
+blocking pool, the reopen reclaims.
+
+**The gate is a panic-repro test, not a doc note.**
+`shrike_kernel::runtime`'s `sync_dispatch_pin` test demonstrates both facts on
+one `Handle`: `block_on` on a runtime worker thread panics (caught), and the
+same call on a `spawn_blocking` pool thread runs to completion — the only
+variable being which thread executes it. A regression that drops the
+`spawn_blocking` hop flips the success half to a panic, so the test pins the
+dispatch *path*, not the absence of a panic in one lucky run. It is
+self-contained (no anki source, a locally-built runtime so the process-global
+seam is untouched).
+
+**Rejected:** patching anki's runtime accessor to prefer an injected
+`Handle` (the #503 design's first sketch). It buys a literal one-runtime
+process but at the cost of a build-lane behavioural fork (finding 1) without
+removing the panic hazard (finding 2); the `spawn_blocking` discipline is
+fork-free, costs no anki fork, and is what actually makes sync safe. The patch
+mechanism stays reserved for source patches that are identical on both lanes by
+construction (a version string, a build flag).
+
 ## Wire-protocol versioning: name-versioned actions, one backstop constant (#392, June 2026)
 
 Decided while the exchange has one consumer (the in-process host), because it

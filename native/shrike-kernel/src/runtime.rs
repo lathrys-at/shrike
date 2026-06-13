@@ -4,10 +4,42 @@
 //! completion-backed future out via [`spawn_op`]) and never supply
 //! scheduling.
 //!
-//! anki's own lazy runtime is never instantiated on Shrike's call paths
-//! (its sole consumers are the AnkiWeb/AnkiHub sync services, which Shrike
-//! never invokes — pinned in shrike-collection), so this is the only tokio
-//! runtime that exists in the process.
+//! **anki retains its own runtime; the kernel pins sync work off the runtime
+//! worker (#503).** anki's rslib owns an internal lazy tokio runtime whose
+//! sole consumers are the sync/AnkiWeb/AnkiHub services. Today none of those
+//! is dispatched on Shrike's call paths (pinned structurally in
+//! shrike-collection's `runtime_singularity` test), so anki's runtime is not
+//! instantiated and the kernel's is the only one alive. Once client sync
+//! (#33/#362) lands, anki's runtime DOES come up — two runtimes per process.
+//! That is fine, because the invariant the kernel actually guarantees is not
+//! "one runtime" but **"a sync op never executes on a runtime worker
+//! thread"**. Two facts and the discipline they imply:
+//!
+//! anki's sync paths call `block_on`, and [`tokio::runtime::Handle::block_on`]
+//! PANICS when invoked from inside any runtime context (a worker thread is such
+//! a context — see the panic-repro test below). Which runtime owns the worker
+//! is irrelevant; the guard keys on the calling thread, not on runtime
+//! identity.
+//!
+//! [`SerializedCollection`](crate::SerializedCollection) runs every collection
+//! job inline as a sync closure on whichever runtime worker polls the actor. So
+//! a sync anki call invoked *directly* in such a job would land on a runtime
+//! worker and panic.
+//!
+//! The discipline that makes sync safe is therefore: **kernel-side sync ops
+//! that may `block_on` (anki's sync services) MUST dispatch via
+//! `spawn_blocking`** — a blocking-pool thread is NOT a runtime context, so
+//! `block_on` is legal there. This is the same pattern the Python capture seams
+//! already use (`py_embedder.rs` / `py_recognizer.rs`: `spawn_blocking` + GIL
+//! attach), and it composes with #362's release-run-reopen orchestration (the
+//! actor releases, the sync op rides the blocking pool, the reopen reclaims).
+//!
+//! The panic-repro test below pins this structurally: it demonstrates that
+//! `Handle::block_on` panics on a runtime worker and succeeds on a
+//! `spawn_blocking` pool thread — so a sync call cannot quietly land on a
+//! runtime worker without the test catching the dispatch-site regression. (See
+//! `docs/decisions.md` § "anki retains its sync runtime" for why a runtime
+//! handle-injection patch to anki was rejected in favour of this discipline.)
 //!
 //! The default is a multi-thread runtime; [`init_runtime`] lets a host (or
 //! the degenerate-mode proof test) install a custom-built one — e.g.
@@ -78,5 +110,82 @@ pub fn spawn_op<T: Send + 'static>(
     async move {
         rx.await
             .map_err(|_| NativeError::internal("kernel op task dropped without a result"))?
+    }
+}
+
+#[cfg(test)]
+mod sync_dispatch_pin {
+    //! The #503 acceptance gate: pin the SYNC-OP DISPATCH PATH structurally,
+    //! not by luck.
+    //!
+    //! anki keeps its own runtime for client sync, so two runtimes will live
+    //! in the process; the invariant the kernel guarantees is **"a sync op
+    //! that may `block_on` never executes on a runtime worker thread"**. This
+    //! test demonstrates the two facts that make the `spawn_blocking`
+    //! discipline (not luck, not a one-off no-panic run) the thing that
+    //! enforces it:
+    //!
+    //!   1. `Handle::block_on` PANICS when called on a runtime worker thread
+    //!      (the way a sync anki call would land if dispatched *directly* from
+    //!      a `SerializedCollection` job — which runs inline on a worker).
+    //!   2. The SAME `block_on`, against the SAME `Handle` and the SAME inner
+    //!      future, SUCCEEDS on a `spawn_blocking` pool thread — which is the
+    //!      mandated dispatch site (a blocking-pool thread is not a runtime
+    //!      context).
+    //!
+    //! The only variable between the two halves is *which thread* runs
+    //! `block_on`, so a regression that lets a sync call run on a runtime
+    //! worker (dropping the `spawn_blocking` hop) flips half 2 from pass to
+    //! panic — the test catches the dispatch-site change, not a probabilistic
+    //! symptom. Self-contained: no anki source, a locally-built runtime so the
+    //! process-global seam is untouched.
+
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    /// Stand-in for "a synchronous call that bottoms out in `block_on`" —
+    /// exactly the shape of anki's sync service paths, minus the anki
+    /// dependency. Returns a sentinel so the success half can assert the
+    /// call actually ran to completion (not merely that it didn't panic).
+    fn sync_call_that_blocks_on(handle: &tokio::runtime::Handle) -> u64 {
+        handle.block_on(async { 0x5031_u64 })
+    }
+
+    #[test]
+    fn block_on_panics_on_a_runtime_worker_but_rides_the_blocking_pool() {
+        // A dedicated multi-thread runtime — never the process-global seam,
+        // which other tests in this binary share.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime builds");
+        let handle = rt.handle().clone();
+
+        rt.block_on(async {
+            // ── Half 1: a runtime worker thread is a runtime context, so
+            // `block_on` MUST panic. Calling it directly inside this async
+            // block runs it on the worker polling us. Catch the unwind so the
+            // worker survives for half 2.
+            let inner = handle.clone();
+            let worker_result = catch_unwind(AssertUnwindSafe(|| sync_call_that_blocks_on(&inner)));
+            assert!(
+                worker_result.is_err(),
+                "Handle::block_on must panic on a runtime worker thread — if it \
+                 stopped panicking, the dispatch invariant can no longer be \
+                 pinned this way (revisit #503)"
+            );
+
+            // ── Half 2: the SAME call on a `spawn_blocking` pool thread — the
+            // mandated dispatch site — succeeds and returns the sentinel.
+            let pooled = handle.clone();
+            let value = tokio::task::spawn_blocking(move || sync_call_that_blocks_on(&pooled))
+                .await
+                .expect("the spawn_blocking task itself must not fail");
+            assert_eq!(
+                value, 0x5031,
+                "block_on on a blocking-pool thread must run the sync call to \
+                 completion"
+            );
+        });
     }
 }

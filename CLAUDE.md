@@ -42,10 +42,18 @@ search/batch overlap properties); independent batch futures are `try_join`ed
 by the kernel. **The action exchange is the host boundary**: the binding
 spawns each op onto the kernel runtime (`spawn_op`) and awaits a
 oneshot-backed completion future through the one-wake asyncio bridge —
-dropping it detaches observation, never aborts the work. anki's internal
-runtime is never instantiated on Shrike's call paths (its only consumers are
-the sync/AnkiWeb services Shrike never dispatches — pinned in
-shrike-collection), so the kernel's runtime is the only one in the process.
+dropping it detaches observation, never aborts the work. anki retains its own
+internal runtime for sync: its only consumers are the sync/AnkiWeb services,
+which Shrike does not dispatch today (pinned in shrike-collection), so anki's
+runtime stays cold and the kernel's is the only one alive — but client sync
+(#33/#362) wakes it, and then two runtimes coexist. The invariant the kernel
+actually guarantees is therefore not "one runtime" but **sync ops never
+execute on a runtime worker thread**: anki's sync paths call `block_on`, which
+panics from any runtime-worker thread regardless of which runtime owns it, so
+kernel-side sync ops MUST dispatch via `spawn_blocking` (a legal `block_on`
+site, the `py_embedder`/`py_recognizer` pattern). The `sync_dispatch_pin`
+panic-repro test in `shrike_kernel::runtime` pins that discipline (#503; see
+`docs/decisions.md`).
 
 ```
 CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP, server.py = the host)

@@ -9,8 +9,10 @@
 //! ingest), collection access serializes through a task-actor
 //! ([`SerializedCollection`]), and hosts adapt the *action exchange* — an op
 //! in, a completion-backed future out via [`spawn_op`] — never scheduling.
-//! (anki's own lazy runtime is never instantiated on Shrike's call paths;
-//! see [`runtime`].)
+//! (anki keeps its own runtime for sync; the kernel guarantees sync ops never
+//! run on a runtime worker thread, not that only one runtime exists — see
+//! [`runtime`] for the `spawn_blocking` discipline and its #503 panic-repro
+//! gate.)
 //!
 //! There is **no pyo3 anywhere in this dependency tree** (epic #265 convention
 //! 5, enforced by `//native:layering_check`); the no-CPython smoke test in
@@ -67,9 +69,14 @@ pub use shrike_engine_api::{
 /// Inline jobs briefly occupy whichever worker polls the actor — strictly
 /// less thread-hungry than the retired permanently-dedicated worker thread,
 /// and engine compute lives on the separate blocking pool so embeds never
-/// compete. anki's internal `block_on` exists only on sync/AnkiWeb service
-/// paths Shrike never calls (pinned in shrike-collection), so no
-/// nested-runtime hazard exists on our call paths.
+/// compete. Because jobs run inline on a runtime worker, a sync anki call
+/// that `block_on`s would panic if invoked *directly* in a job (any
+/// runtime-worker thread is a runtime context). anki's `block_on` lives only
+/// on the sync/AnkiWeb service paths, none of which Shrike dispatches today
+/// (pinned in shrike-collection); when client sync (#33/#362) lands, those
+/// sync ops MUST ride `spawn_blocking` rather than an inline job — a
+/// blocking-pool thread is a legal `block_on` site. The discipline and its
+/// panic-repro gate live in [`runtime`] (#503).
 pub struct SerializedCollection {
     core: Arc<dyn Collection>,
     /// `None` after [`SerializedCollection::shutdown`] — dropping the sender

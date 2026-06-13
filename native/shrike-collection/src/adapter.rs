@@ -707,13 +707,24 @@ fn decode_backend_error(bytes: &[u8]) -> NativeError {
     }
 }
 
-// ── runtime-singularity pin (#374 design 9) ─────────────────────────────────
+// ── runtime-singularity pin (#374 design 9; revisited #503) ──────────────────
 // anki's Backend owns a LAZY tokio runtime whose only initializer is
 // `runtime_handle()`, consumed solely by the sync/AnkiWeb/AnkiHub services.
-// Shrike never dispatches those services, so anki's runtime is NEVER
-// instantiated in this process — the kernel's owned runtime (#374) is the
-// only one. If sync support ever lands here, revisit: upstream a
-// handle-injection patch to anki, or sync via our own client on our runtime.
+// Shrike dispatches none of those services TODAY, so anki's runtime stays cold
+// and the kernel's owned runtime (#374) is the only one alive. This test pins
+// exactly that: not one of the runtime-spinning service indices appears in the
+// dispatched set.
+//
+// #503 settled what happens when sync support DOES land (#33/#362 wakes these
+// services): the invariant the kernel guarantees is NOT "one runtime" but
+// "sync ops never run on a runtime worker thread". anki's sync paths
+// `block_on`, which panics from any runtime-worker thread regardless of which
+// runtime owns it — so the fix is the `spawn_blocking` dispatch discipline in
+// `shrike_kernel::runtime` (pinned by its `sync_dispatch_pin` panic-repro
+// test), NOT a runtime-handle-injection patch to anki (rejected: the anki
+// patch mechanism is Bazel-only, so it would fork sync behaviour across build
+// lanes — see docs/decisions.md). This test stays as the today-true pin that
+// none of those services is on a Shrike call path yet.
 // (Backend dispatcher, tag 25.09.4: sync=41, ankiweb=45, ankihub=47 — none
 // may appear in the service indices above.)
 #[cfg(test)]
