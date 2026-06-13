@@ -190,6 +190,10 @@ scripts/build-native.sh && pytest tests/unit tests/native -q
                         # (CI also names the `manual` embedding halves — see test.yml)
 ```
 
+The Bazel operational guide (targets, locks, caching, the polyglot seam) is
+[`docs/build-bazel.md`](docs/build-bazel.md); the rationale is the "Bazel as
+the polyglot build system" ADR in [`docs/decisions.md`](docs/decisions.md).
+
 #### Coverage
 
 Coverage lives in its own workflow (`.github/workflows/coverage.yml`), **off the

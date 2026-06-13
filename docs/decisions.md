@@ -1025,3 +1025,69 @@ types, and the old tool keeps serving its old types for as long as it is
 offered. Since shrike-schemas types are both the exchange payloads and the
 MCP response models, the two layers stay versioned in lockstep by
 construction.
+
+## Bazel as the polyglot build system (#241, June 2026)
+
+**One hermetic, cache-first build graph instead of N build systems with
+hand-rolled CI glue.** The roadmap is explicitly polyglot — Rust compute
+crates with a PyO3 binding (shipped), Swift platform glue (shipped, #398),
+mobile (Kotlin/Swift hosts, embedded engines), a Tauri/JS frontend — and each
+of those drags in its own native toolchain that must interoperate with the
+Python core and ship as coherent artifacts. Hand-maintained per-language CI
+was already creaking when the workspace was Python + cargo; Bazel is the
+standard answer for builds that span languages: one dependency graph, one
+test invocation, content-addressed caching that makes "nothing changed →
+nothing re-runs" hold across all of it. The epic (#241, phases #242–#248)
+made Bazel the authoritative build/test/package/CI entry point at full
+parity with the pip path, and proved the cross-language seam on the real
+thing — the kernel's PyO3 extension builds hermetically (abi3-py312, no
+interpreter needed at build time), not a toy spike.
+
+**What stays pip-consumed: upstream native packages, always.** `anki`
+(bundled Rust backend), `usearch` (C++), `onnxruntime` (C++), `tokenizers`
+(Rust) are consumed as PyPI wheels via `pip.parse` against a hashed,
+universal `uv pip compile` lock (`requirements_lock.txt`;
+`tools/update-requirements.sh` regenerates). Bazel builds *our* code and
+orchestrates; it never rebuilds upstream native deps from source — that
+would trade a solved packaging problem for an unbounded toolchain one. The
+same logic gave the embedding-test externals (pinned llama-server, the
+GGUF/ONNX/CLIP fixture models) to `http_archive`/`http_file` with pinned
+sha256s: hermetic, content-addressed, cached — which *removed* the flaky
+HuggingFace-download failure mode (#83/#93) rather than relocating it.
+
+**Coexistence, then cutover — and the pip lane survives as the inner loop.**
+`pip install -e ".[dev]"` + `pytest` kept working at every step; Bazel became
+authoritative only once green everywhere. The end state is deliberate
+two-lane: the pip lane (`scripts/build-native.sh` + `pytest`) is the fast
+iteration loop — warm xdist workers, `-x`/`-s`/`pdb`, testmon — and the Bazel
+lane is what CI enforces (one `bazel test //...` invocation, #422). Releases
+cut over fully (#245/#422/#497): the platform-tagged wheels, the sdist, and
+the skill bundle are Bazel-built and version-stamped from the git tag via
+`--workspace_status_command` (hatch-vcs remains only as the pip-lane's
+version source — same tag, same PEP 440 string, two readers). Coverage is
+the one deliberate non-migration: it stays on the pip path
+(`scripts/coverage.sh`) because the integration suite's spawned server
+subprocess is invisible to `bazel coverage` (#262 tracks it).
+
+**Cache choice: free `--disk_cache` via `actions/cache`, with a named
+upgrade path.** No new account or spend: CI persists Bazel's disk cache
+(action results, including *test* results) and repository cache keyed on the
+lock files, and a daily warm-cache workflow seeds `main`'s cache scope —
+necessary because `actions/cache` entries are only restorable from the same
+branch or the default branch, and the test workflow runs on PRs only. Bazel
+9's repo-contents cache rides the same path (extracted repo directories, not
+just downloads — the fix that took a fresh runner's loading phase from
+~290s to ~6s). The known ceiling is `actions/cache`'s 10 GB/repo eviction
+budget; when it bites, the upgrade is a real remote cache (BuildBuddy free
+tier, or self-hosted `bazel-remote`) — a `--remote_cache` flag swap in one
+composite action (`.github/actions/bazel-setup`), no graph changes.
+
+**Dev bootstrap: a committed `./bazel` wrapper, no environment manager.**
+The wrapper fetches a pinned, sha-verified bazelisk, which fetches the
+pinned, sha-verified Bazel from `.bazelversion` (`tools/bazel.lock` holds
+all the hashes) — zero contributor install, and CI uses the identical entry
+point, so "works locally" and "works in CI" are the same build. nix/flox
+were rejected as overlapping Bazel's own hermeticity; an optional `.envrc`
+(direnv sugar that activates the coexistence venv) is the only environment
+nicety, and nothing requires it. See `docs/build-bazel.md` for the
+operational guide.
