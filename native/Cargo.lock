@@ -5073,6 +5073,7 @@ name = "shrike-engine-api"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "image",
  "serde",
  "serde_json",
  "shrike-ffi",

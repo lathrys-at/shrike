@@ -22,3 +22,6 @@ tokio = { version = "1", features = ["rt"] }
 serde_json = "1"
 futures = { version = "0.3", features = ["executor"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Test-only: decode the pure-Rust-encoded BMP probe images to verify they're
+# valid (production code emits raw bytes — no image dep in the leaf crate).
+image = { version = "0.25", default-features = false, features = ["bmp"] }

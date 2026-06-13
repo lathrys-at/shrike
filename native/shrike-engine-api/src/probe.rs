@@ -32,7 +32,7 @@
 //!   texts, and the host never batches larger — "proven safe" and "what we
 //!   batch" are the same size.
 
-use crate::EmbedText;
+use crate::{EmbedImages, EmbedText, MediaItem};
 use shrike_ffi::{NativeError, NativeResult};
 
 /// Tolerance for "batched == serial". Sits well above float-reduction noise
@@ -150,6 +150,159 @@ fn owned_texts() -> Vec<String> {
     BATCH_PROBE_TEXTS.iter().map(|s| s.to_string()).collect()
 }
 
+// ── vision probe set (#211) ──────────────────────────────────────────────────
+//
+// The image analogue of `BATCH_PROBE_TEXTS`. int8 vision graphs drift under
+// batching for the same reason text ones do — a per-tensor activation scale
+// over the whole batch tensor — and that drift is driven by *activation
+// magnitude*, not image count or size. So the set spans content that drives a
+// wide pixel-activation range: flat extremes (all-black, all-white, a calm
+// mid-grey anchor), saturated primaries, sharp high-frequency structure
+// (checkerboard, stripes), smooth gradients, and per-channel-distinct fills.
+// A calm anchor batched against a saturated/high-frequency neighbour is where
+// int8 vision drift is maximized — the image mirror of the text set's "calm
+// anchor + spiky batch-mate" rule. An fp graph has no activation quant, so its
+// batched-vs-serial drift is exactly 0 regardless of content, exactly as for
+// text.
+//
+// Each entry is a tiny RGB PNG built at probe time (no fixture files). The set
+// is deliberately small but heterogeneous — its *length* is also the vision
+// batching ceiling, but in practice the CLIP engine takes `min(text, vision)`
+// and the text set (64) is the larger, so this never lowers a safe pair's cap.
+
+/// How many synthetic probe images to generate (the vision batching ceiling).
+const IMAGE_PROBE_COUNT: usize = 16;
+
+/// Side length of each synthetic probe image (small — the probe only needs
+/// content variety, not resolution; the engine resizes/crops anyway).
+const IMAGE_PROBE_SIDE: u32 = 32;
+
+/// Per-pixel RGB for probe image `idx` at `(x, y)` — varied content spanning a
+/// wide activation range (see the module note above on the vision set).
+fn probe_pixel(idx: usize, x: u32, y: u32) -> [u8; 3] {
+    let s = IMAGE_PROBE_SIDE;
+    match idx {
+        0 => [0, 0, 0],       // flat black (min activation)
+        1 => [255, 255, 255], // flat white (max activation)
+        2 => [128, 128, 128], // calm mid-grey anchor
+        3 => [255, 0, 0],     // saturated red
+        4 => [0, 255, 0],     // saturated green
+        5 => [0, 0, 255],     // saturated blue
+        // High-frequency checkerboard (alternating extremes — spiky).
+        6 => {
+            let on = (x + y) % 2 == 0;
+            if on {
+                [255, 255, 255]
+            } else {
+                [0, 0, 0]
+            }
+        }
+        // Fine vertical stripes.
+        7 => {
+            if x % 2 == 0 {
+                [255, 255, 0]
+            } else {
+                [0, 0, 255]
+            }
+        }
+        // Horizontal gradient (smooth ramp across the activation range).
+        8 => {
+            let v = (x * 255 / s.max(1)) as u8;
+            [v, v, v]
+        }
+        // Vertical gradient.
+        9 => {
+            let v = (y * 255 / s.max(1)) as u8;
+            [v, v, v]
+        }
+        // Diagonal gradient, per-channel-distinct (exercises each plane apart).
+        10 => {
+            let v = ((x + y) * 255 / (2 * s).max(1)) as u8;
+            [v, 255u8.saturating_sub(v), v / 2]
+        }
+        // Quadrant split (sharp regional contrast).
+        11 => {
+            let right = x >= s / 2;
+            let bottom = y >= s / 2;
+            match (right, bottom) {
+                (false, false) => [255, 0, 0],
+                (true, false) => [0, 255, 0],
+                (false, true) => [0, 0, 255],
+                (true, true) => [255, 255, 255],
+            }
+        }
+        // Saturated magenta / cyan / yellow (secondary extremes).
+        12 => [255, 0, 255],
+        13 => [0, 255, 255],
+        14 => [255, 255, 0],
+        // Pseudo-random speckle (broadband, hashed-deterministic).
+        _ => {
+            let h = (x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503) ^ (idx as u32))
+                .wrapping_mul(2246822519);
+            [
+                (h & 0xff) as u8,
+                ((h >> 8) & 0xff) as u8,
+                ((h >> 16) & 0xff) as u8,
+            ]
+        }
+    }
+}
+
+/// One synthetic probe image, encoded as an uncompressed 24-bit BMP
+/// [`MediaItem`]. BMP is emitted in pure Rust (a fixed 54-byte header + raw
+/// BGR rows) so this contract crate stays a LEAF — no `image`/`png`
+/// dependency to *encode* the probe set. Engines decode it via the `image`
+/// crate, which reads 24-bit BMP losslessly, so the pixels the engine sees
+/// are exactly `probe_pixel`'s.
+fn probe_image(idx: usize) -> MediaItem {
+    MediaItem::from_named(&format!("probe-{idx}.bmp"), encode_bmp(idx))
+}
+
+/// Uncompressed 24-bit BMP of `IMAGE_PROBE_SIDE`² pixels from [`probe_pixel`].
+/// Bottom-up BGR rows padded to a 4-byte boundary (the BMP format) — minimal,
+/// dependency-free, and round-trips losslessly through any BMP decoder.
+fn encode_bmp(idx: usize) -> Vec<u8> {
+    let s = IMAGE_PROBE_SIDE;
+    let row_bytes = (s * 3) as usize;
+    let padding = (4 - row_bytes % 4) % 4;
+    let stride = row_bytes + padding;
+    let pixel_data = stride * s as usize;
+    let file_size = 54 + pixel_data;
+
+    let mut out = Vec::with_capacity(file_size);
+    // -- BITMAPFILEHEADER (14 bytes) --
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(file_size as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    out.extend_from_slice(&54u32.to_le_bytes()); // pixel-data offset
+                                                 // -- BITMAPINFOHEADER (40 bytes) --
+    out.extend_from_slice(&40u32.to_le_bytes()); // header size
+    out.extend_from_slice(&(s as i32).to_le_bytes()); // width
+    out.extend_from_slice(&(s as i32).to_le_bytes()); // height (+ = bottom-up)
+    out.extend_from_slice(&1u16.to_le_bytes()); // planes
+    out.extend_from_slice(&24u16.to_le_bytes()); // bits per pixel
+    out.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB (no compression)
+    out.extend_from_slice(&(pixel_data as u32).to_le_bytes()); // image size
+    out.extend_from_slice(&2835i32.to_le_bytes()); // x ppm (~72 dpi)
+    out.extend_from_slice(&2835i32.to_le_bytes()); // y ppm
+    out.extend_from_slice(&0u32.to_le_bytes()); // palette colours
+    out.extend_from_slice(&0u32.to_le_bytes()); // important colours
+                                                // -- pixel rows, bottom-up, BGR + per-row padding --
+    for y in (0..s).rev() {
+        for x in 0..s {
+            let [r, g, b] = probe_pixel(idx, x, y);
+            out.extend_from_slice(&[b, g, r]);
+        }
+        out.extend(std::iter::repeat_n(0u8, padding));
+    }
+    out
+}
+
+/// The synthetic vision probe set (BMP-encoded [`MediaItem`]s).
+fn owned_images() -> Vec<MediaItem> {
+    (0..IMAGE_PROBE_COUNT).map(probe_image).collect()
+}
+
 /// The batch size proven safe (the probe-set size) or 1 (embed serially).
 ///
 /// Embeds each probe text **alone** (the serial reference), then all in
@@ -170,10 +323,74 @@ pub fn probe_with<E: EmbedText + ?Sized>(
     attempts: usize,
 ) -> NativeResult<usize> {
     let texts = owned_texts();
+    probe_chunks(&texts, |items| engine.embed_chunk(items), tol, attempts)
+}
+
+/// Max-abs serial-vs-batched drift over the probe set — for sensitivity
+/// pins (the >10×-tolerance assertion against the real int8 fixtures).
+pub fn max_probe_drift<E: EmbedText + ?Sized>(engine: &E) -> NativeResult<f64> {
+    let texts = owned_texts();
+    let reference = serial_reference(&texts, |items| engine.embed_chunk(items))?;
+    let batched = engine.embed_chunk(&texts)?;
+    Ok(drift(&reference, &batched))
+}
+
+// ── the vision probe (#211) ──────────────────────────────────────────────────
+
+/// The image analogue of [`probe_max_safe_batch`]: the batch size proven safe
+/// for the *vision* path, or 1 (embed serially). Same tolerance discipline,
+/// same two-failure-modes split — over the synthetic [`owned_images`] set.
+///
+/// `_resolve_files` only ever loads a matched-precision text+vision pair, so a
+/// uniform export's text probe already predicts the vision path. This guards
+/// the one case it can't: a **hand-assembled mixed-precision** pair (fp text +
+/// int8 vision a user dropped on disk), where the vision graph batches
+/// non-deterministically and the text probe would wrongly clear it. A host
+/// runs both and takes `min(text_safe, vision_safe)`.
+pub fn probe_image_max_safe_batch<E: EmbedImages + ?Sized>(engine: &E) -> NativeResult<usize> {
+    probe_image_with(engine, BATCH_DRIFT_TOL, PROBE_ATTEMPTS)
+}
+
+/// [`probe_image_max_safe_batch`] with explicit tolerance/attempts (tests).
+pub fn probe_image_with<E: EmbedImages + ?Sized>(
+    engine: &E,
+    tol: f64,
+    attempts: usize,
+) -> NativeResult<usize> {
+    let images = owned_images();
+    probe_chunks(
+        &images,
+        |items| engine.embed_image_chunk(items),
+        tol,
+        attempts,
+    )
+}
+
+/// Max-abs serial-vs-batched drift over the vision probe set — the image
+/// mirror of [`max_probe_drift`], for the vision sensitivity pin.
+pub fn max_probe_image_drift<E: EmbedImages + ?Sized>(engine: &E) -> NativeResult<f64> {
+    let images = owned_images();
+    let reference = serial_reference(&images, |items| engine.embed_image_chunk(items))?;
+    let batched = engine.embed_image_chunk(&images)?;
+    Ok(drift(&reference, &batched))
+}
+
+// ── the shared comparison core (text + image) ────────────────────────────────
+
+/// The probe over any chunk-embed closure: embed `items` serially (the
+/// reference, retried up to `attempts` times — persistent failure is an
+/// `unavailable` error) and all in one batch, comparing within `tol`. Match →
+/// the set size (safe to batch that far); batch-only failure or drift → 1.
+/// The text and image entrypoints differ only in their item type and closure;
+/// this core is identical, so both paths get the same retry/degrade discipline.
+fn probe_chunks<T, F>(items: &[T], mut embed: F, tol: f64, attempts: usize) -> NativeResult<usize>
+where
+    F: FnMut(&[T]) -> NativeResult<Vec<Vec<f32>>>,
+{
     let mut reference: Option<Vec<Vec<f32>>> = None;
     let mut last_err: Option<NativeError> = None;
     for _ in 0..attempts.max(1) {
-        match serial_reference(engine, &texts) {
+        match serial_reference(items, &mut embed) {
             Ok(vectors) => {
                 reference = Some(vectors);
                 break;
@@ -189,35 +406,26 @@ pub fn probe_with<E: EmbedText + ?Sized>(
     };
     // The model can embed serially. Does it also batch deterministically? A
     // batch-only failure degrades to serial rather than erroring.
-    let Ok(batched) = engine.embed_chunk(&texts) else {
+    let Ok(batched) = embed(items) else {
         return Ok(1);
     };
     if drift(&reference, &batched) <= tol {
-        Ok(texts.len())
+        Ok(items.len())
     } else {
         Ok(1)
     }
 }
 
-/// Max-abs serial-vs-batched drift over the probe set — for sensitivity
-/// pins (the >10×-tolerance assertion against the real int8 fixtures).
-pub fn max_probe_drift<E: EmbedText + ?Sized>(engine: &E) -> NativeResult<f64> {
-    let texts = owned_texts();
-    let reference = serial_reference(engine, &texts)?;
-    let batched = engine.embed_chunk(&texts)?;
-    Ok(drift(&reference, &batched))
-}
-
-fn serial_reference<E: EmbedText + ?Sized>(
-    engine: &E,
-    texts: &[String],
-) -> NativeResult<Vec<Vec<f32>>> {
-    let mut out = Vec::with_capacity(texts.len());
-    for t in texts {
-        let mut v = engine.embed_chunk(std::slice::from_ref(t))?;
+fn serial_reference<T, F>(items: &[T], mut embed: F) -> NativeResult<Vec<Vec<f32>>>
+where
+    F: FnMut(&[T]) -> NativeResult<Vec<Vec<f32>>>,
+{
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let mut v = embed(std::slice::from_ref(item))?;
         let Some(first) = v.pop() else {
             return Err(NativeError::internal(
-                "engine returned no vector for a text",
+                "engine returned no vector for an item",
             ));
         };
         out.push(first);
@@ -327,5 +535,106 @@ mod tests {
             ..Toy::default()
         };
         assert_eq!(probe_max_safe_batch(&toy).unwrap(), 1);
+    }
+
+    // ── vision probe (#211) ──────────────────────────────────────────────
+
+    /// The image analogue of [`Toy`]: per-image vectors keyed by byte length
+    /// (the probe images differ, so serial vectors differ), optionally
+    /// batch-variant. The int8 vision drift the real fix guards against is
+    /// pinned here by the test-double pattern, exactly like the text probe.
+    struct ImageToy {
+        batch_variant: bool,
+        fail_serial: bool,
+        fail_batched: bool,
+    }
+
+    impl Default for ImageToy {
+        fn default() -> Self {
+            Self {
+                batch_variant: false,
+                fail_serial: false,
+                fail_batched: false,
+            }
+        }
+    }
+
+    impl EmbedImages for ImageToy {
+        fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>> {
+            if images.len() == 1 && self.fail_serial {
+                return Err(NativeError::unavailable("serial down"));
+            }
+            if images.len() > 1 && self.fail_batched {
+                return Err(NativeError::invalid_input("fixed batch-1 vision graph"));
+            }
+            // int8-style activation drift: a batch-mate shifts every element.
+            let shift = if self.batch_variant && images.len() > 1 {
+                0.05
+            } else {
+                0.0
+            };
+            Ok(images
+                .iter()
+                .map(|im| vec![im.bytes.len() as f32 / 100_000.0 + shift, 1.0])
+                .collect())
+        }
+    }
+
+    #[test]
+    fn image_probe_set_is_nonempty_and_decodable() {
+        let images = owned_images();
+        assert_eq!(images.len(), IMAGE_PROBE_COUNT);
+        // Every probe image is a real, decodable bitmap with the expected
+        // dimensions — the engine's decoder must be able to read it.
+        for (i, item) in images.iter().enumerate() {
+            let img = image::load_from_memory(&item.bytes)
+                .unwrap_or_else(|e| panic!("probe image {i} did not decode: {e}"));
+            assert_eq!(
+                (img.width(), img.height()),
+                (IMAGE_PROBE_SIDE, IMAGE_PROBE_SIDE),
+                "probe image {i} dimensions"
+            );
+        }
+        // The set is heterogeneous — distinct content means distinct bytes
+        // (a flat black/white pair compresses identically only if they're
+        // equal, which they aren't), so the probe maximizes batch variance.
+        let black = image::load_from_memory(&images[0].bytes).unwrap().to_rgb8();
+        let white = image::load_from_memory(&images[1].bytes).unwrap().to_rgb8();
+        assert_ne!(black.get_pixel(0, 0), white.get_pixel(0, 0));
+    }
+
+    #[test]
+    fn safe_vision_engine_probes_to_the_full_set() {
+        let toy = ImageToy::default();
+        assert_eq!(probe_image_max_safe_batch(&toy).unwrap(), IMAGE_PROBE_COUNT);
+    }
+
+    #[test]
+    fn variant_vision_engine_probes_to_serial() {
+        let toy = ImageToy {
+            batch_variant: true,
+            ..Default::default()
+        };
+        assert_eq!(probe_image_max_safe_batch(&toy).unwrap(), 1);
+        assert!(max_probe_image_drift(&toy).unwrap() > BATCH_DRIFT_TOL * 10.0);
+    }
+
+    #[test]
+    fn persistent_vision_serial_failure_is_an_error() {
+        let toy = ImageToy {
+            fail_serial: true,
+            ..Default::default()
+        };
+        let err = probe_image_with(&toy, BATCH_DRIFT_TOL, 2).unwrap_err();
+        assert!(err.to_string().contains("after 2 attempt(s)"), "{err}");
+    }
+
+    #[test]
+    fn vision_batch_only_failure_degrades_to_serial() {
+        let toy = ImageToy {
+            fail_batched: true,
+            ..Default::default()
+        };
+        assert_eq!(probe_image_max_safe_batch(&toy).unwrap(), 1);
     }
 }
