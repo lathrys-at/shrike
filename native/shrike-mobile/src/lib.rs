@@ -559,17 +559,25 @@ fn default_top_k() -> usize {
 
 // ── the remote embedder slot ────────────────────────────────────────────────
 
-/// Compose the remote-embeddings engine into the kernel's embed slot — the
-/// relay-offload path (a desktop/DIY kernel over the relay) or any
+/// Compose the remote-embeddings engine into one of the kernel's embed SPACES
+/// (#233) — the relay-offload path (a desktop/DIY kernel over the relay) or any
 /// OpenAI-compatible cloud endpoint. Mirrors `native_embedder.rs::from_remote`
 /// minus the PyO3 wrappers: `RemoteEmbedder` -> `WithPolicy`
 /// (host-assembled fingerprint/dim/safe_batch) -> `Blocking` (the one adapter
 /// onto the runtime's blocking pool) -> `Arc<dyn Embedder>`.
 ///
-/// `base_url` is required; `api_key` and `model` may be null. `fingerprint`
-/// may be null (the kernel falls back to the endpoint's own identity).
-/// `dim` of 0 means "unknown" (the engine probes). `safe_batch` of 0 is
-/// treated as 1 (serial). Returns the error envelope through `callback`;
+/// The embed slot is an ORDERED SET of spaces since #233: a Swift/Kotlin caller
+/// that wants a dedicated text space PLUS a separate platform vision space
+/// calls this **once per space** (the resolved ABI decision — one attach per
+/// space, not a batched attach). `space_key` is the space's CONTENT identity
+/// (reorder-stable, #233); two distinct keys are two distinct spaces, re-using
+/// a key REPLACES that space in place. When `space_key` is null the kernel keys
+/// off `fingerprint` (and, failing that, the endpoint's own identity), so a
+/// single-space mobile host attaches exactly as before.
+///
+/// `base_url` is required; `api_key`, `model`, `fingerprint`, and `space_key`
+/// may be null. `dim` of 0 means "unknown" (the engine probes). `safe_batch` of
+/// 0 is treated as 1 (serial). Returns the error envelope through `callback`;
 /// on success the callback receives `{"ok": null}`.
 ///
 /// # Safety
@@ -589,6 +597,7 @@ pub unsafe extern "C" fn shrike_attach_remote_embedder(
     api_key: *const c_char,
     model: *const c_char,
     fingerprint: *const c_char,
+    space_key: *const c_char,
     dim: usize,
     safe_batch: usize,
     callback: ShrikeCallback,
@@ -615,6 +624,7 @@ pub unsafe extern "C" fn shrike_attach_remote_embedder(
             let api_key = cstr_opt(api_key);
             let model = cstr_opt(model);
             let fingerprint = cstr_opt(fingerprint);
+            let space_key = cstr_opt(space_key);
 
             let result = (|| -> NativeResult<String> {
                 let engine = shrike_embed_remote::RemoteEmbedder::new(
@@ -626,13 +636,16 @@ pub unsafe extern "C" fn shrike_attach_remote_embedder(
                 )?;
                 let tuned = Arc::new(shrike_engine_api::WithPolicy::new(
                     Arc::new(engine),
-                    fingerprint,
+                    fingerprint.clone(),
                     (dim != 0).then_some(dim),
                     safe_batch,
                 ));
                 let embedder: Arc<dyn shrike_engine_api::Embedder> =
                     Arc::new(shrike_engine_api::Blocking(tuned));
-                kernel.attach_embedder(embedder, None);
+                // The explicit space key wins; otherwise the tuned engine's
+                // fingerprint (the same key `attach_embedder` would derive).
+                let key = space_key.or(fingerprint);
+                kernel.attach_embedder_space(key, embedder, None);
                 Ok("null".to_string())
             })();
             Dispatch::Now(result)

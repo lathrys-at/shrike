@@ -27,6 +27,7 @@
 
 pub mod actions;
 pub mod cache_layout;
+pub mod embed_set;
 pub mod fusion;
 pub mod index_orchestrator;
 pub mod media_fetch;
@@ -55,6 +56,11 @@ pub use runtime::{block_on, init_runtime, spawn_op};
 // the harness's purpose string onto it as `shrike_kernel::RecognitionPurpose`
 // without reaching into the `recognize` module.
 pub use recognize::RecognitionPurpose;
+
+// The embed-slot set (#233): the ordered set of embedding spaces the kernel
+// now holds in place of a single service. Re-exported so the bindings name
+// the carrier as `shrike_kernel::EmbedSpaces` without reaching into the module.
+pub use embed_set::{EmbedSpace, EmbedSpaces};
 
 // The engine contract (#342): traits live in shrike-engine-api — the kernel
 // consumes them and re-exports for downstream paths; it names no engine.
@@ -247,13 +253,16 @@ pub struct Kernel {
     orchestrator: Arc<index_orchestrator::IndexOrchestrator>,
     saver: Arc<index_orchestrator::DebouncedSaver>,
     derived: Arc<dyn DerivedStore>,
-    /// The attachable embedding service (#342's first registry slot):
-    /// swappable at runtime — the harness attaches on embedding start,
-    /// detaches on stop, and a model swap is detach + attach. Ops that need
-    /// embedding degrade (lexical-only search, unindexed-but-created upserts)
-    /// when the slot is empty, mirroring the Python host's gating. Arc so
-    /// the tag refresher shares the gate (#445).
-    embed: Arc<RwLock<Option<Arc<EmbedService>>>>,
+    /// The attachable embedding spaces (#342's first registry slot, an ordered
+    /// SET since #233): swappable at runtime — the harness attaches on
+    /// embedding start, detaches on stop, and a model swap is detach + attach.
+    /// Ops that need embedding degrade (lexical-only search,
+    /// unindexed-but-created upserts) when the set is empty, mirroring the
+    /// Python host's gating. Arc so the tag refresher shares the gate (#445).
+    /// This PR (#233) lands the carrier; the index/search paths still consume
+    /// the PRIMARY text space ([`EmbedSpaces::primary`]) so single-space stays
+    /// byte-identical — the fan-out is PR-B/C (#232/#234).
+    embed: Arc<RwLock<EmbedSpaces>>,
     /// Tag-centroid state (#178/#179): the live key→tag map for the engine's
     /// `tag.text` space + the hygiene knobs. Centroids refresh in the
     /// background after membership-relevant index ops, coalesced under
@@ -470,7 +479,7 @@ impl Kernel {
             save_delay.unwrap_or(index_orchestrator::DEFAULT_SAVE_DELAY),
             save_threshold.unwrap_or(index_orchestrator::DEFAULT_SAVE_THRESHOLD),
         );
-        let embed: Arc<RwLock<Option<Arc<EmbedService>>>> = Arc::new(RwLock::new(None));
+        let embed: Arc<RwLock<EmbedSpaces>> = Arc::new(RwLock::new(EmbedSpaces::default()));
         let tag_keys = Arc::new(tag_centroids::TagKeyMap::default());
         let tag_config = tag_centroids::TagCentroidConfig::default();
         let tag_refresh = tag_centroids::TagRefresher::new(
@@ -645,27 +654,86 @@ impl Kernel {
         }
     }
 
-    /// Attach an embedding service (embedding start / model swap). The
-    /// orchestrator flips back to ready if it was only unavailable; the
-    /// harness follows up with `reindex_if_needed` (a model change is drift).
+    /// Attach an embedding service (embedding start / model swap) — the N=1
+    /// convenience over [`attach_embedder_space`]. The space key is read from
+    /// the embedder's own fingerprint (the CONTENT fingerprint, #233), so a
+    /// re-attach of the same model replaces its space in place rather than
+    /// stacking a duplicate. The orchestrator flips back to ready if it was
+    /// only unavailable; the harness follows up with `reindex_if_needed` (a
+    /// model change is drift).
+    ///
+    /// Existing hosts/tests keep this single-embedder shape: with one declared
+    /// embedder the set holds exactly one space and [`embed_service`] returns
+    /// it, so the index/search paths stay byte-identical to the single-slot
+    /// era.
     pub fn attach_embedder(&self, embedder: Arc<dyn Embedder>, images: Option<KernelImages>) {
-        *self.embed.write().expect("embed slot poisoned") =
-            Some(Arc::new(EmbedService { embedder, images }));
+        let key = embedder.fingerprint();
+        self.attach_embedder_space(key, embedder, images);
+    }
+
+    /// Attach (or replace) the embedding space keyed by `key` (#233) — the
+    /// general by-space-key entry the harness fan-out and the bindings drive.
+    /// A space whose key matches an already-attached one is replaced in place
+    /// (a model swap that keeps the fingerprint, or a re-attach); a new key is
+    /// appended in declaration order. `None` is a keyless backend (it never
+    /// collides — each keyless attach is a fresh slot).
+    pub fn attach_embedder_space(
+        &self,
+        key: Option<String>,
+        embedder: Arc<dyn Embedder>,
+        images: Option<KernelImages>,
+    ) {
+        self.embed
+            .write()
+            .expect("embed slot poisoned")
+            .attach(key, Arc::new(EmbedService { embedder, images }));
         self.orchestrator.mark_ready_if_loaded();
     }
 
-    /// Detach the embedding service (embedding stop): flush the index (the
-    /// on-disk vectors are kept) and mark it unavailable. The collection and
-    /// the lexical search surfaces stay fully live.
+    /// Detach EVERY embedding space (embedding stop) — the N=1 convenience.
+    /// Flush the index (the on-disk vectors are kept) and mark it unavailable.
+    /// The collection and the lexical search surfaces stay fully live.
     pub fn detach_embedder(&self) {
-        *self.embed.write().expect("embed slot poisoned") = None;
+        self.embed.write().expect("embed slot poisoned").clear();
         let _ = self.orchestrator.save();
         self.orchestrator.mark_unavailable();
     }
 
-    /// The currently attached embedding service, if any.
+    /// Detach a single embedding space by key (#233). Flushes + marks the
+    /// index unavailable only when the LAST space leaves (the index serves the
+    /// primary space; while another space remains, it stays live). Returns
+    /// whether a space was removed.
+    pub fn detach_embedder_space(&self, key: &str) -> bool {
+        let (removed, now_empty) = {
+            let mut spaces = self.embed.write().expect("embed slot poisoned");
+            let removed = spaces.detach(key);
+            (removed, spaces.is_empty())
+        };
+        if now_empty {
+            let _ = self.orchestrator.save();
+            self.orchestrator.mark_unavailable();
+        }
+        removed
+    }
+
+    /// The PRIMARY text embedding space, if any — the one engine the
+    /// index/search paths consume this PR. With one declared embedder it is
+    /// the sole attached space (byte-identical to the pre-#233 single slot).
     pub fn embed_service(&self) -> Option<Arc<EmbedService>> {
-        self.embed.read().expect("embed slot poisoned").clone()
+        self.embed.read().expect("embed slot poisoned").primary()
+    }
+
+    /// The number of attached embedding spaces (#233) — status surface; the
+    /// index path consumes only the primary this PR.
+    pub fn embed_space_count(&self) -> usize {
+        self.embed.read().expect("embed slot poisoned").len()
+    }
+
+    /// Every attached embedding space's service in declaration order (#233) —
+    /// the carrier the query fan-out (PR-C) and status will read. The index
+    /// path does NOT consume this set this PR (it stays on the primary).
+    pub fn embed_spaces(&self) -> Vec<Arc<EmbedService>> {
+        self.embed.read().expect("embed slot poisoned").services()
     }
 
     /// The orchestrator (state, status, drift) — the harness's status surface.
@@ -2166,6 +2234,90 @@ mod no_cpython_smoke {
             kernel.close().await.unwrap();
             // Idempotent (#382): a second close after the actor drained is
             // already-closed, not an actor-gone error.
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    /// A second deterministic embedder with a DISTINCT fingerprint, so the
+    /// embed set keys it as a separate space from `HashEmbedder` (#233).
+    struct HashEmbedder2;
+
+    impl Embedder for HashEmbedder2 {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            Box::pin(async move { Ok(HashEmbedder::embed_sync(&texts)) })
+        }
+
+        fn fingerprint(&self) -> Option<String> {
+            Some("hash-embedder:v2".to_string())
+        }
+
+        fn dim(&self) -> Option<usize> {
+            Some(64)
+        }
+    }
+
+    #[test]
+    fn embed_set_holds_ordered_spaces_primary_is_first_text_space() {
+        // #233: the embed slot is an ordered SET keyed by CONTENT fingerprint.
+        // Attaching two distinct fingerprints yields a 2-element embed_spaces()
+        // while embed_service() still returns the PRIMARY (first text) space —
+        // the index/search paths consume exactly one engine this PR, so N=1
+        // stays byte-identical.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+
+            // N=1: the sole space is the primary; one element.
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            assert_eq!(kernel.embed_space_count(), 1);
+            assert_eq!(kernel.embed_spaces().len(), 1);
+            assert_eq!(
+                kernel.embed_service().unwrap().embedder.fingerprint().as_deref(),
+                Some("hash-embedder:v1"),
+                "the sole space is the primary"
+            );
+
+            // N=2: a distinct fingerprint is a SECOND space; the primary stays
+            // the first text space.
+            kernel.attach_embedder(Arc::new(HashEmbedder2), None);
+            assert_eq!(kernel.embed_space_count(), 2);
+            assert_eq!(kernel.embed_spaces().len(), 2);
+            assert_eq!(
+                kernel.embed_service().unwrap().embedder.fingerprint().as_deref(),
+                Some("hash-embedder:v1"),
+                "embed_service() still returns the PRIMARY (first) text space"
+            );
+
+            // Re-attaching the SAME fingerprint REPLACES in place (no growth) —
+            // a model swap that keeps its identity, not a duplicate space.
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            assert_eq!(
+                kernel.embed_space_count(),
+                2,
+                "same fingerprint replaces its space; the count is unchanged"
+            );
+
+            // By-key detach drops one space; the other (now the only, hence
+            // primary) survives.
+            assert!(kernel.detach_embedder_space("hash-embedder:v1"));
+            assert_eq!(kernel.embed_space_count(), 1);
+            assert_eq!(
+                kernel.embed_service().unwrap().embedder.fingerprint().as_deref(),
+                Some("hash-embedder:v2"),
+                "the surviving space becomes the primary"
+            );
+
+            // The N=1 whole-clear detach empties the set.
+            kernel.detach_embedder();
+            assert_eq!(kernel.embed_space_count(), 0);
+            assert!(kernel.embed_service().is_none());
+
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
         });
