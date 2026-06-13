@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_shared_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_shared_library", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -7,6 +7,35 @@ exports_files(["Cargo.toml"])
 MOBILE_SRCS = [
     "src/lib.rs",
     "src/tests.rs",
+]
+
+# The mobile feature set + dep list, shared by every target below (Bazel
+# doesn't inherit cargo's default-features, so they're pinned once here).
+MOBILE_FEATURES = [
+    "anki-core",
+    "engine-remote",
+    # Inert under Bazel for this crate (the cargo feature forwards to
+    # shrike-derived/bundled; here the derived TARGET pins `bundled` itself) —
+    # listed to mirror the cargo default set.
+    "bundled-sqlite",
+]
+
+MOBILE_DEPS = [
+    "//native/shrike-collection:shrike_collection",
+    "//native/shrike-derived:shrike_derived",
+    "//native/shrike-embed-remote:shrike_embed_remote",
+    "//native/shrike-engine-api:shrike_engine_api",
+    "//native/shrike-ffi:shrike_ffi",
+    "//native/shrike-index:shrike_index",
+    "//native/shrike-kernel:shrike_kernel",
+    "//native/shrike-schemas:shrike_schemas",
+    "//native/shrike-store-api:shrike_store_api",
+    # A hand-written rust target does NOT inherit cargo's deps, so each
+    # third-party crate is named explicitly (the lockfile-owner hazard).
+    "@crates//:serde",
+    "@crates//:serde_json",
+    "@crates//:tokio",
+    "@crates//:tracing",
 ]
 
 # The MOBILE kernel build (#504) — the second of the two builds in
@@ -26,53 +55,58 @@ MOBILE_SRCS = [
 rust_shared_library(
     name = "shrike_mobile",
     srcs = MOBILE_SRCS,
-    crate_features = [
-        "anki-core",
-        "engine-remote",
-        # Inert under Bazel for this crate (the cargo feature forwards to
-        # shrike-derived/bundled; here the derived TARGET pins `bundled`
-        # itself) — listed to mirror the cargo default set.
-        "bundled-sqlite",
-    ],
+    crate_features = MOBILE_FEATURES,
     edition = "2021",
-    deps = [
-        "//native/shrike-collection:shrike_collection",
-        "//native/shrike-derived:shrike_derived",
-        "//native/shrike-embed-remote:shrike_embed_remote",
-        "//native/shrike-engine-api:shrike_engine_api",
-        "//native/shrike-ffi:shrike_ffi",
-        "//native/shrike-index:shrike_index",
-        "//native/shrike-kernel:shrike_kernel",
-        "//native/shrike-schemas:shrike_schemas",
-        "//native/shrike-store-api:shrike_store_api",
-        # A hand-written rust_shared_library does NOT inherit cargo's deps, so
-        # each third-party crate is named explicitly (the lockfile-owner hazard).
-        "@crates//:serde",
-        "@crates//:serde_json",
-        "@crates//:tokio",
-        "@crates//:tracing",
-    ],
+    deps = MOBILE_DEPS,
 )
 
-# The slice-1 verification (#504): the open -> upsert -> search -> delete ->
-# close flow driven through the C ABI from a Rust C-caller (the HashEmbedder
-# shape, mirroring the kernel's no_cpython_smoke), the FFI panic-safety guard,
-# and the `no_libpython` link-property assertion — so a regression in the
-# action exchange or the no-CPython boundary fails the per-PR `//...` lane.
+# The slice-1 in-crate verification (#504): the open -> upsert -> search ->
+# delete -> close flow driven through the C ABI from a Rust C-caller (the
+# HashEmbedder shape, mirroring the kernel's no_cpython_smoke), the FFI
+# panic-safety guard, and the `no_libpython` link-property assertion. Runs on
+# the DEFAULT multi-thread runtime — so a regression in the action exchange or
+# the no-CPython boundary fails the per-PR `//...` lane.
 rust_test(
     name = "shrike_mobile_test",
     size = "medium",
     crate = ":shrike_mobile",
     # rust_test does NOT inherit the crate's crate_features — restate them so
     # the anki-core/engine-remote-gated entry points compile under test.
-    crate_features = [
-        "anki-core",
-        "engine-remote",
-        "bundled-sqlite",
-    ],
+    crate_features = MOBILE_FEATURES,
     # The HashEmbedder returns a futures BoxFuture (the Embedder trait shape) —
     # a dev-dependency the test crate links (cargo's [dev-dependencies]).
+    deps = ["@crates//:futures"],
+)
+
+# An rlib of the crate, so the current_thread integration test (a separate
+# test binary) can link the public C-ABI surface as a Rust dependency. The
+# cdylib above can't be a Rust `deps` target.
+rust_library(
+    name = "shrike_mobile_lib",
+    srcs = MOBILE_SRCS,
+    # The crate NAME stays `shrike_mobile` (the target name is just disambiguated
+    # from the cdylib), so the integration test's `use shrike_mobile::…` resolves.
+    crate_name = "shrike_mobile",
+    crate_features = MOBILE_FEATURES,
+    edition = "2021",
+    deps = MOBILE_DEPS,
+)
+
+# The #504 current_thread-mode gate (the joint-review fix): a SEPARATE test
+# binary (the runtime seam is process-global, so it must not share a process
+# with the multi-thread suite above) that calls `shrike_runtime_init` FIRST,
+# then drives the full open -> upsert -> search -> delete -> close flow under
+# the `current_thread` runtime + its dedicated driver thread and asserts the
+# completion callbacks ACTUALLY FIRE (with a recv timeout, so a runtime with
+# no driver fails as a timeout rather than hanging the lane).
+rust_test(
+    name = "current_thread_driver_test",
+    size = "medium",
+    srcs = ["tests/current_thread_driver.rs"],
+    crate_features = MOBILE_FEATURES,
+    edition = "2021",
     deps = [
-        "@crates//:futures",
+        ":shrike_mobile_lib",
+        "@crates//:serde_json",
     ],
 )

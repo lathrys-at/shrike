@@ -11,9 +11,14 @@
 //! ## Shape (mirrors `shrike-py`'s `async_kernel.rs`, minus Python)
 //!
 //! - [`shrike_runtime_init`] installs a `current_thread` tokio runtime via
-//!   [`shrike_kernel::init_runtime`] (the suspension-aware, single-thread
-//!   mode the iOS lifecycle wants; #393's full teardown lands in a later
-//!   slice).
+//!   [`shrike_kernel::init_runtime`] AND starts a dedicated driver thread
+//!   parked in `Runtime::block_on` for the runtime's life (the suspension-aware
+//!   single-async-thread mode the iOS lifecycle wants). The driver is
+//!   load-bearing: a `current_thread` runtime polls `spawn_op`'d tasks ONLY
+//!   while a thread drives it, so without it the async ops below would never
+//!   run and their callbacks would never fire. [`shrike_runtime_shutdown`]
+//!   stops + joins the driver at teardown (#393's fuller suspension handling
+//!   lands in a later slice).
 //! - [`shrike_open`] / [`shrike_close`] manage a kernel handle (an opaque
 //!   `Arc<Kernel>` boxed behind a raw pointer).
 //! - [`shrike_op`] dispatches one named action — its params a JSON string —
@@ -220,27 +225,96 @@ fn outcome_json(outcome: NativeResult<String>) -> String {
 
 // ── runtime ─────────────────────────────────────────────────────────────────
 
-/// Install a `current_thread` tokio runtime as the process kernel runtime.
-/// Idempotent-friendly: returns `true` if this call installed it, `false` if
-/// one was already installed (the kernel falls back to its multi-thread
-/// default on first use if this is never called — but a mobile host wants the
-/// single-thread, suspension-aware mode, so it calls this once at startup).
+/// The `current_thread` runtime's DRIVER state (#504, the joint-review fix).
+///
+/// A `current_thread` tokio runtime has no worker threads: a spawned task
+/// makes progress ONLY while some thread is parked inside
+/// [`tokio::runtime::Runtime::block_on`] driving it (tokio's documented
+/// contract — `Handle::spawn`'d tasks are suspended once `block_on` returns,
+/// and only `Runtime::block_on` drives the IO/timer drivers). Every async
+/// C-ABI op here is fire-and-forget (`spawn_op` = `handle().spawn(...)` +
+/// detach), so without a driver a `current_thread` runtime would never poll
+/// them and the completion callback would NEVER fire.
+///
+/// So `shrike_runtime_init` installs a `current_thread` runtime AND starts one
+/// dedicated OS thread parked in `shrike_kernel::block_on(park)` for the
+/// runtime's whole life — the canonical "runtime on a dedicated thread, post
+/// work via the Handle" mobile shape (one async-executing thread the host can
+/// suspend/stop deterministically, #393). `park` awaits this `Notify`; once
+/// the runtime is driven, every `spawn_op` task — and `shrike_close`'s
+/// spawned close — runs to completion. `shrike_runtime_shutdown` notifies and
+/// joins the driver.
+#[cfg(feature = "anki-core")]
+struct Driver {
+    shutdown: Arc<tokio::sync::Notify>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+#[cfg(feature = "anki-core")]
+static DRIVER: std::sync::Mutex<Option<Driver>> = std::sync::Mutex::new(None);
+
+/// Install a `current_thread` tokio runtime as the process kernel runtime AND
+/// start its driver thread. Returns `true` if this call installed it, `false`
+/// if a runtime was already installed (idempotent-friendly — a second call is
+/// a no-op `false`, never a second driver).
+///
+/// If never called, the kernel lazily installs its DEFAULT multi-thread
+/// runtime on first use (whose worker threads drive spawned tasks with no
+/// dedicated driver) — fine for a host that doesn't want the single-thread
+/// mode. A mobile host calls this once at startup for the suspension-aware
+/// single-async-thread shape, and `shrike_runtime_shutdown` at teardown.
 #[no_mangle]
 pub extern "C" fn shrike_runtime_init() -> bool {
     ffi_guard("shrike_runtime_init", false, || {
         #[cfg(feature = "anki-core")]
         {
-            match tokio::runtime::Builder::new_current_thread()
+            let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
-                Ok(rt) => shrike_kernel::init_runtime(rt).is_ok(),
-                Err(_) => false,
+                Ok(rt) => rt,
+                Err(_) => return false,
+            };
+            // Install first: a second init (or a prior lazy default) loses the
+            // race and we must NOT start a driver for a runtime we don't own.
+            if shrike_kernel::init_runtime(rt).is_err() {
+                return false;
             }
+            let shutdown = Arc::new(tokio::sync::Notify::new());
+            let park = Arc::clone(&shutdown);
+            // The dedicated driver: parked in Runtime::block_on (via the
+            // kernel's block_on, which calls it on the installed runtime) for
+            // the runtime's life, so every Handle::spawn'd op is driven.
+            let thread = std::thread::Builder::new()
+                .name("shrike-mobile-rt".to_string())
+                .spawn(move || {
+                    shrike_kernel::block_on(async move { park.notified().await });
+                })
+                .expect("the driver thread spawns");
+            *DRIVER.lock().expect("driver lock poisoned") = Some(Driver { shutdown, thread });
+            true
         }
         #[cfg(not(feature = "anki-core"))]
         {
             false
+        }
+    })
+}
+
+/// Stop the `current_thread` driver thread started by [`shrike_runtime_init`]
+/// (teardown). Notifies the park future and joins the driver; a no-op if no
+/// driver is running (the default multi-thread mode, or already shut down).
+/// After this the `current_thread` runtime is no longer driven — call only at
+/// host teardown, after every op and `shrike_close` has completed.
+#[no_mangle]
+pub extern "C" fn shrike_runtime_shutdown() {
+    ffi_guard("shrike_runtime_shutdown", (), || {
+        #[cfg(feature = "anki-core")]
+        if let Some(driver) = DRIVER.lock().expect("driver lock poisoned").take() {
+            driver.shutdown.notify_one();
+            // The park future resolves; the driver thread returns from
+            // block_on and exits. Join so teardown is deterministic.
+            let _ = driver.thread.join();
         }
     })
 }
@@ -325,8 +399,27 @@ pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
         }
         let handle = Box::from_raw(handle);
         let kernel = Arc::clone(&handle.kernel);
-        // Drive close to completion on the kernel runtime, then drop the box.
-        let _ = shrike_kernel::block_on(async move { kernel.close().await });
+        // Drive close to completion on the kernel runtime via the SPAWN +
+        // std-channel bridge (#504 driver fix): spawn the close onto the
+        // runtime (`spawn_op` — driven by the parked current_thread driver, or
+        // by the default multi-thread workers if no driver was installed) and
+        // block THIS C thread on a plain std channel for the result. This
+        // never calls `Runtime::block_on` from the C thread, so it can't
+        // contend with the driver thread's `block_on` on a current_thread
+        // runtime — the one shape that would otherwise hang. Dropping the
+        // returned future detaches our observation; the spawned close (and its
+        // std-channel send) still runs to completion (spawn_op's contract).
+        let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
+        drop(shrike_kernel::spawn_op(async move {
+            let _ = kernel.close().await;
+            let _ = tx.send(());
+            Ok(())
+        }));
+        // Block until the close ran (its actor drained). The send only fails
+        // if the spawned task was torn down without running — which spawn_op
+        // never does — so a recv error just means "proceed with teardown".
+        let _ = rx.recv();
+        // `handle` (the Box) drops here, after close completed.
     });
 }
 
