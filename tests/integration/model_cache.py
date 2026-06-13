@@ -81,6 +81,35 @@ CLIP_MODEL_FILES = {
     "preprocessor_config.json": f"{_CLIP_BASE}/preprocessor_config.json",
 }
 
+# The small multimodal embedding model for the manual #501 image-embed harness
+# (test_multimodal.py): jina-embeddings-v5-omni nano — a text GGUF + a vision
+# mmproj that embed text AND images into one 768-dim space. ~625 MB (431 MB
+# text + 194 MB vision projector). NOT used by any CI test, for two reasons:
+#   1. The model needs llama.cpp patches not upstream as of b9616 — the
+#      official/pinned llama-server segfaults on image-embedding extraction.
+#      The harness needs a binary built from jina-ai/llama.cpp `feat-v5-omni`.
+#   2. The text GGUF must be the **F16** (unquantized) variant, NOT a K-quant.
+#      The fork's encoder-combined-decode path reads the token-embedding tensor
+#      element-by-element with `ggml_get_f32_1d`, which aborts on a
+#      block-quantized type — so a K-quant (whose `token_embd.weight` is
+#      quantized) crashes the server on the first image embed. Verified on
+#      Q4_K_M and Q5_K_M (the quant jina's card recommends), both with and
+#      without `--pooling last`; F16 keeps the table readable. The harness
+#      also passes `--pooling last` (jina-v5-omni is a last-token model).
+# This entry exists so the model is fetched into the SAME cache as every other
+# fixture (and pre-seeded by scripts/fetch-multimodal-model.sh), not so CI
+# downloads it.
+MULTIMODAL_MODEL_DIR_NAME = "jina-embeddings-v5-omni-nano"
+MULTIMODAL_TEXT_NAME = "jina-embeddings-v5-omni-nano-classification-F16.gguf"
+MULTIMODAL_VISION_MMPROJ_NAME = "jina-embeddings-v5-omni-nano-classification-vision-mmproj-F16.gguf"
+_MULTIMODAL_BASE = (
+    "https://huggingface.co/jinaai/jina-embeddings-v5-omni-nano-classification-GGUF/resolve/main"
+)
+MULTIMODAL_MODEL_FILES = {
+    MULTIMODAL_TEXT_NAME: f"{_MULTIMODAL_BASE}/{MULTIMODAL_TEXT_NAME}",
+    MULTIMODAL_VISION_MMPROJ_NAME: f"{_MULTIMODAL_BASE}/{MULTIMODAL_VISION_MMPROJ_NAME}",
+}
+
 # Statuses worth retrying: HF rate-limit plus transient gateway/server errors.
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
@@ -186,3 +215,12 @@ def cached_onnx_fp32_model_dir(fallback_dir: Path) -> Path:
 def cached_clip_model_dir(fallback_dir: Path) -> Path:
     """The pinned small CLIP dir (int8 text+vision graphs, 512-dim shared space)."""
     return _cached_model_dir(fallback_dir, CLIP_MODEL_DIR_NAME, CLIP_MODEL_FILES)
+
+
+def cached_multimodal_model_dir(fallback_dir: Path) -> Path:
+    """The jina-v5-omni nano dir (text GGUF + vision mmproj) for the #501 manual
+    image-embed harness. ~625 MB; only fetched when the harness actually runs
+    (a patched llama-server is present) or via scripts/fetch-multimodal-model.sh.
+    Returns the dir; the two files are named by MULTIMODAL_TEXT_NAME /
+    MULTIMODAL_VISION_MMPROJ_NAME."""
+    return _cached_model_dir(fallback_dir, MULTIMODAL_MODEL_DIR_NAME, MULTIMODAL_MODEL_FILES)

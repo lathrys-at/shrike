@@ -53,6 +53,11 @@ def pytest_configure(config: pytest.Config) -> None:
     runfiles tree. A harmless duplicate registration on the pip path."""
     config.addinivalue_line("markers", "integration: spawns a server over HTTP")
     config.addinivalue_line("markers", "embedding: requires llama-server and a model")
+    config.addinivalue_line(
+        "markers",
+        "multimodal: manual/local-only — requires a PATCHED llama-server + a "
+        "multimodal embedding model (env-gated, never run in CI; see test_multimodal.py)",
+    )
 
 
 # -- Bazel: assemble the pinned model externals into a SHRIKE_TEST_MODEL_DIR tree -
@@ -752,6 +757,70 @@ requires_clip = pytest.mark.skipif(
     not _has_clip(),
     reason="onnxruntime/pillow not installed (pip install onnxruntime pillow)",
 )
+
+
+# -- Multimodal image-embed harness (#501) — manual, local-only ---------------
+#
+# jina-v5-omni (the only small multimodal embedding model) needs llama.cpp
+# patches that are NOT upstream as of b9616 — the official/pinned llama-server
+# segfaults during image-embedding extraction (text embeds fine). So this
+# fixture can't be pinned into CI: it needs a binary built from
+# jina-ai/llama.cpp `feat-v5-omni`. The MODEL itself rides the shared
+# test-model cache like every other fixture (scripts/fetch-multimodal-model.sh
+# pre-seeds it; the fixture fetches on demand otherwise). The one thing that
+# can't be cached/downloaded is the patched BINARY, so it stays an env var and
+# IS the gate: the harness skips everywhere it isn't set (CI always; a dev box
+# until they build the fork). See test_multimodal.py for the build + run recipe.
+MULTIMODAL_LLAMA_SERVER_ENV = "SHRIKE_MULTIMODAL_LLAMA_SERVER"
+# Optional explicit overrides for the model/projector (else the shared cache).
+MULTIMODAL_MODEL_ENV = "SHRIKE_MULTIMODAL_MODEL"
+MULTIMODAL_VISION_MMPROJ_ENV = "SHRIKE_MULTIMODAL_VISION_MMPROJ"
+
+
+def _multimodal_llama_server() -> str | None:
+    """The patched llama-server path, or None — the gate's single source of
+    truth (the model is cache-resolved, the binary must be built)."""
+    path = os.environ.get(MULTIMODAL_LLAMA_SERVER_ENV)
+    if not path or not Path(path).expanduser().exists():
+        return None
+    return str(Path(path).expanduser())
+
+
+requires_multimodal = pytest.mark.skipif(
+    _multimodal_llama_server() is None,
+    reason=(
+        f"multimodal harness needs a PATCHED llama-server via {MULTIMODAL_LLAMA_SERVER_ENV} "
+        "(jina-ai/llama.cpp feat-v5-omni; the official binary segfaults on image embeds) — "
+        "local-only, see test_multimodal.py"
+    ),
+)
+
+
+@pytest.fixture()
+def multimodal_paths() -> dict[str, str]:
+    """The patched binary (env-gated) + the model & vision mmproj (from the
+    shared test-model cache, fetched on demand or pre-seeded by
+    scripts/fetch-multimodal-model.sh). Guarded by ``requires_multimodal``, so
+    the binary is non-None whenever a consuming test runs.
+
+    The cache base is ``$SHRIKE_TEST_MODEL_DIR`` else the persistent
+    ``~/.cache/shrike-test-models`` (NOT a throwaway tmp — this 625 MB model
+    shouldn't re-download per session), matching the scripts/ convention."""
+    from tests.integration.model_cache import (
+        MULTIMODAL_TEXT_NAME,
+        MULTIMODAL_VISION_MMPROJ_NAME,
+        cached_multimodal_model_dir,
+    )
+
+    binary = _multimodal_llama_server()
+    assert binary is not None  # requires_multimodal gates every consumer
+    persistent_cache = Path.home() / ".cache" / "shrike-test-models"
+    model_dir = cached_multimodal_model_dir(persistent_cache)
+    model = os.environ.get(MULTIMODAL_MODEL_ENV) or str(model_dir / MULTIMODAL_TEXT_NAME)
+    vision = os.environ.get(MULTIMODAL_VISION_MMPROJ_ENV) or str(
+        model_dir / MULTIMODAL_VISION_MMPROJ_NAME
+    )
+    return {"llama_server": binary, "model": model, "vision_mmproj": vision}
 
 
 def _has_shrike_native() -> bool:
