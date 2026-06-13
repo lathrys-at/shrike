@@ -53,9 +53,10 @@ RECOGNITION_DESCRIBE = "vlm"
 @dataclass
 class _RecognitionEngine:
     """One attached recognition engine's harness-side state (#485): the backend
-    kind (`apple`/`describe-remote`), the lifecycle state (the same enum the
-    index/derived stores use, minus `building`), and its fingerprint when known.
-    Per-purpose so `/status` reports one row per engine."""
+    kind (`apple`/`describe-remote`), the lifecycle state (the
+    `RecognitionEngineStatus` enum — `ready`/`error` today, the schema also
+    carries `unavailable`/`building` for future use), and its fingerprint when
+    known. Per-purpose so `/status` reports one row per engine."""
 
     backend: str
     state: str = "ready"
@@ -642,13 +643,20 @@ class Harness:
     ) -> None:
         """Construct + attach the remote VLM describe engine (#433/#485) for the
         ``describe`` purpose (image→prose into the text embedding space,
-        vector-only) and launch the shared background sweep. Degrades to an
-        'error' state row on a missing build feature / dead endpoint / missing
-        key env — never kills boot."""
+        vector-only) and launch the shared background sweep. Reports an 'error'
+        state row when construction fails (a missing build feature / missing key
+        env) OR when the endpoint is unreachable at attach — never kills boot.
+
+        An unreachable endpoint still ATTACHES (the engine and its degenerate
+        fingerprint): the sweep's chunk-Err-aborts contract leaves the backlog
+        pending and a later sweep retries once the endpoint is up. We surface it
+        as 'error' rather than 'ready' so a degraded engine is visible (#485) —
+        rows minted under the degenerate fingerprint re-derive once on the next
+        restart, when model_info resolves and the fingerprint sharpens."""
         from shrike.recognition import make_describe_recognizer
 
         try:
-            backend, fingerprint = make_describe_recognizer(
+            backend, fingerprint, reachable = make_describe_recognizer(
                 endpoint, model=model, api_key_env=api_key_env, mmproj=mmproj
             )
             self.attach_recognizer(backend, RECOGNITION_DESCRIBE)
@@ -658,10 +666,20 @@ class Harness:
                 backend="describe-remote", state="error"
             )
             return
+        # Attached either way; the row state reflects whether the endpoint
+        # answered at attach (a closed port / DNS failure → 'error', visible).
+        state = "ready" if reachable else "error"
         self._recognition_engines[RECOGNITION_DESCRIBE] = _RecognitionEngine(
-            backend="describe-remote", state="ready", fingerprint=fingerprint
+            backend="describe-remote", state=state, fingerprint=fingerprint
         )
-        logger.info("Recognition backend attached: describe-remote (vlm)")
+        if reachable:
+            logger.info("Recognition backend attached: describe-remote (vlm)")
+        else:
+            logger.warning(
+                "Recognition backend attached but endpoint %s is unreachable; "
+                "reporting describe (vlm) as error until a sweep reaches it",
+                endpoint,
+            )
         self._ensure_recognition_sweep()
 
     def _ensure_recognition_sweep(self) -> None:

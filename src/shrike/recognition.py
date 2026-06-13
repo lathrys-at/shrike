@@ -67,19 +67,31 @@ def make_describe_recognizer(
     model: str | None = None,
     api_key_env: str | None = None,
     mmproj: str | None = None,
-) -> tuple[Any, str]:
+) -> tuple[Any, str, bool]:
     """Construct the remote VLM describe engine (#433/#485) for the kernel's
     ``describe`` recognition purpose — image→descriptive prose into the text
     embedding space (vector-only).
 
-    Proves connectivity (``/health`` or, failing that, ``/v1/models``) and
+    Probes connectivity (``/health`` or, failing that, ``/v1/models``) and
     composes the describe fingerprint host-side from the endpoint's model
     identity (``RemoteDescriber.compose_fingerprint`` — the crate's recipe),
     folding ``mmproj`` ONLY for a host-launched local managed server (a cloud
     endpoint passes ``None``, byte-identical to "no mmproj suffix"; the
-    ``prompt=N`` suffix is unconditional). Returns ``(engine, fingerprint)`` —
-    the constructed ``RemoteDescriber`` carrying that fingerprint, ready for
-    the native attach, plus the fingerprint string for the harness's status.
+    ``prompt=N`` suffix is unconditional). Returns ``(engine, fingerprint,
+    reachable)`` — the constructed ``RemoteDescriber`` carrying that
+    fingerprint (ready for the native attach), the fingerprint string for the
+    harness's status, and whether the endpoint answered at attach.
+
+    ``reachable`` is False when the endpoint answered NEITHER ``/health`` nor
+    ``/v1/models`` (a closed port / DNS failure). In that case the fingerprint
+    composes to a DEGENERATE ``describe:<model|unknown>:prompt=N`` (no model
+    meta), so the caller should report the engine degraded rather than ``ready``
+    (#485). The engine still attaches — the sweep's chunk-Err-aborts contract
+    leaves the backlog pending and a later sweep retries once the endpoint is
+    up. NB: rows minted under the degenerate fingerprint re-derive ONCE on the
+    next restart, when ``model_info`` resolves and the fingerprint sharpens to
+    the real model id (a recognizer-fingerprint change is drift, like a model
+    swap) — visible, bounded, self-healing.
 
     Raises ``ImportError`` when the engine isn't compiled into this build
     (so boot degrades like a missing optional dependency), ``RuntimeError``
@@ -102,17 +114,21 @@ def make_describe_recognizer(
                 "environment (secrets are referenced, never inline)"
             )
     # A probe client (no fingerprint yet) reads the endpoint's identity, then
-    # composes the fingerprint the attached engine will carry.
+    # composes the fingerprint the attached engine will carry. Either /health
+    # or a non-empty /v1/models id proves the endpoint answered at attach.
     probe = cls(endpoint, api_key=api_key, model=model)
-    if not probe.health_ok():
+    healthy = probe.health_ok()
+    if not healthy:
         # No /health (a cloud endpoint may not serve it) → fall back to
-        # model_info as the liveness signal; an unreachable endpoint yields
-        # an empty ModelInfo, which composes to describe:<model|unknown> and
-        # still attaches (the sweep's chunk-Err-aborts contract leaves the
-        # backlog pending until the endpoint comes up).
+        # /v1/models as the liveness signal.
         logger.info("describe endpoint %s has no /health; probing /v1/models", endpoint)
     model_id, meta_json = probe.model_info()
+    reachable = healthy or model_id is not None
     fingerprint: str = cls.compose_fingerprint(model_id, meta_json, model, mmproj)
-    logger.info("describe recognizer fingerprint: %s", fingerprint)
+    logger.info(
+        "describe recognizer fingerprint: %s (endpoint %s)",
+        fingerprint,
+        "reachable" if reachable else "UNREACHABLE at attach",
+    )
     engine = cls(endpoint, api_key=api_key, model=model, fingerprint=fingerprint)
-    return engine, fingerprint
+    return engine, fingerprint, reachable

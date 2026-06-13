@@ -368,45 +368,70 @@ class TestRecognition:
 
         asyncio.run(flow())
 
-    def test_start_recognition_describe_dead_endpoint_degrades_to_error_row(self, tmp_path) -> None:
-        # #485 PR1: start_recognition_describe against an unreachable endpoint
-        # lands an 'error' row keyed by the vlm source — the per-engine /status
-        # map populates without disturbing boot (the construction probes
-        # connectivity; a dead endpoint composes a degenerate fingerprint and
-        # the engine attaches, but here we point at a closed port so the probe
-        # surfaces nothing — the engine still attaches with state ready unless
-        # construction raises). The map is keyed by source either way.
+    def test_start_recognition_describe_missing_key_env_is_an_error_row(self, tmp_path) -> None:
+        # #485 PR1: a missing api_key_env raises a RuntimeError the boot path
+        # catches → an 'error' row keyed by the vlm source, with NO network
+        # probe and NO attach. The per-engine /status map populates without
+        # disturbing boot, and OCR is untouched (the vlm error adds no ocr row).
         async def flow():
             media = {"x.png": b"text"}
-            runtime = EmbeddingRuntime(model=None)
-            derived = DerivedTextStore(
-                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
-            )
-            harness = await Harness.assemble(
-                collection_path=str(tmp_path / "collection.anki2"),
-                cache_dir=str(tmp_path / "cache"),
-                runtime=runtime,
-                derived=derived,
-                cooperative=False,
-                hold_seconds=5.0,
-                media_read=media.get,
-                media_exists=lambda name: name in media,
-            )
-            await harness.boot(start_embedding=False)
+            harness = await self._describe_harness(tmp_path, media)
 
-            # A missing api_key_env is a RuntimeError the boot path catches →
-            # an 'error' row under vlm (the deterministic degrade — no network).
             harness.start_recognition_describe(
                 "http://127.0.0.1:9", api_key_env="SHRIKE_TEST_DESCRIBE_KEY_UNSET_XYZ"
             )
             status = await harness.status()
             assert status["recognition"]["vlm"]["state"] == "error"
             assert status["recognition"]["vlm"]["backend"] == "describe-remote"
-            # OCR is untouched — the vlm error doesn't add an ocr row.
             assert "ocr" not in status["recognition"]
             await harness.close()
 
         asyncio.run(flow())
+
+    def test_start_recognition_describe_unreachable_endpoint_reports_error(self, tmp_path) -> None:
+        # #485 PR1 (follow-up B): an endpoint that answers NEITHER /health nor
+        # /v1/models (a closed port) is reported as an 'error' engine row — a
+        # degraded engine must be visible, not silently 'ready'. The engine
+        # still ATTACHES (the row carries its degenerate fingerprint), so the
+        # backlog stays pending per the chunk-Err-aborts contract until a sweep
+        # reaches the endpoint.
+        async def flow():
+            media = {"x.png": b"text"}
+            harness = await self._describe_harness(tmp_path, media)
+
+            # Port 9 (discard) is closed → health_ok() False and model_info()
+            # empty → reachable False → an 'error' row that nonetheless carries
+            # a (degenerate) fingerprint, proving the engine attached.
+            harness.start_recognition_describe("http://127.0.0.1:9")
+            status = await harness.status()
+            assert status["recognition"]["vlm"]["state"] == "error"
+            assert status["recognition"]["vlm"]["backend"] == "describe-remote"
+            assert status["recognition"]["vlm"]["fingerprint"], (
+                "the engine attached with a (degenerate) fingerprint"
+            )
+            assert status["recognition"]["vlm"]["fingerprint"].endswith(":prompt=1")
+            await harness.close()
+
+        asyncio.run(flow())
+
+    @staticmethod
+    async def _describe_harness(tmp_path, media):
+        runtime = EmbeddingRuntime(model=None)
+        derived = DerivedTextStore(
+            path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
+        )
+        harness = await Harness.assemble(
+            collection_path=str(tmp_path / "collection.anki2"),
+            cache_dir=str(tmp_path / "cache"),
+            runtime=runtime,
+            derived=derived,
+            cooperative=False,
+            hold_seconds=5.0,
+            media_read=media.get,
+            media_exists=lambda name: name in media,
+        )
+        await harness.boot(start_embedding=False)
+        return harness
 
 
 class TestDedupOverOcr:
