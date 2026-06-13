@@ -348,7 +348,7 @@
           "FILE:@@//native/shrike-recognize-apple/Cargo.toml 93d0d36b463976aec4aab37f508203da791606b3f168c131c71411ce8a452b94",
           "FILE:@@//native/shrike-schemas/Cargo.toml 152c9745bd02ef5371419fb6578a2b6325e242d7f70b65c5e527bdcd132f3394",
           "FILE:@@//native/shrike-store-api/Cargo.toml 808482e49da3634feed264f14d1ce6a774061df070a6934a5f8e61bd9cf52839",
-          "FILE:@@//native/shrike-mobile/Cargo.toml a5a16c9dbc884df9e8ea3ce0b5874cf9e48733079fe6d1a674c17ddb618c3680"
+          "FILE:@@//native/shrike-mobile/Cargo.toml f35d27b1f533addb9ed448f25ef5fda6dd754d2dc53be00931b291fcdefa673f"
         ],
         "generatedRepoSpecs": {
           "crates": {

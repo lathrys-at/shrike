@@ -156,6 +156,12 @@ enum Dispatch {
 /// gets exactly one callback. The `completion` is `Copy`, but only ONE of the
 /// guard's fire (`Now`/panic) and the spawned task's fire ever runs, because
 /// `Spawned` is the body's promise that it handed the op off.
+///
+/// The sync fire (the `Now`/panic arms) ALSO runs under `catch_unwind`: the
+/// "no panic crosses the boundary" guarantee then holds structurally, not by
+/// an invariant of `fire` — a panic during the fire (in principle only the C
+/// callback, whose own `extern "C"` ABI contains it) is absorbed as a last
+/// resort. The spawned tail's fire is panic-contained by tokio's task harness.
 #[cfg(feature = "anki-core")]
 fn ffi_guard_completion(
     what: &str,
@@ -167,15 +173,27 @@ fn ffi_guard_completion(
         callback,
         user_data: UserData(user_data),
     };
-    match catch_unwind(AssertUnwindSafe(|| body(completion))) {
-        Ok(Dispatch::Now(outcome)) => completion.fire(outcome),
-        Ok(Dispatch::Spawned) => {} // the runtime task fires it
-        Err(_) => {
-            tracing::error!("panic caught at the {what} FFI boundary (reported via callback)");
-            completion.fire(Err(NativeError::internal(
-                "internal panic at the FFI boundary",
-            )));
-        }
+    // Step 1: run the body under catch_unwind to decide WHAT to fire, WITHOUT
+    // firing yet — so a body panic and a normal outcome flow to the same
+    // single fire below. `None` = the body spawned the op (the task fires);
+    // `Some(outcome)` = fire it here; a caught panic maps to `Some(internal)`.
+    let to_fire: Option<NativeResult<String>> =
+        match catch_unwind(AssertUnwindSafe(|| body(completion))) {
+            Ok(Dispatch::Now(outcome)) => Some(outcome),
+            Ok(Dispatch::Spawned) => None,
+            Err(_) => {
+                tracing::error!("panic caught at the {what} FFI boundary (reported via callback)");
+                Some(Err(NativeError::internal(
+                    "internal panic at the FFI boundary",
+                )))
+            }
+        };
+    // Step 2: fire AT MOST ONCE, under its own catch_unwind — so even a
+    // fire-time panic (in principle only the C callback, whose own extern "C"
+    // ABI contains it) can't cross this C frame, and there is no recovery
+    // fire that could double-invoke the callback.
+    if let Some(outcome) = to_fire {
+        let _ = catch_unwind(AssertUnwindSafe(|| completion.fire(outcome)));
     }
 }
 
@@ -249,7 +267,9 @@ pub struct ShrikeHandle {
 ///
 /// # Safety
 /// `collection_path` and `cache_dir` must be valid NUL-terminated C strings;
-/// `user_data` must outlive the in-flight open per the callback contract.
+/// `callback` must be a non-null function pointer (a null `extern "C" fn` is
+/// UB when invoked); `user_data` must outlive the in-flight open per the
+/// callback contract.
 #[cfg(feature = "anki-core")]
 #[no_mangle]
 pub unsafe extern "C" fn shrike_open(
@@ -292,7 +312,10 @@ pub unsafe extern "C" fn shrike_open(
 ///
 /// # Safety
 /// `handle` must be a pointer returned by [`shrike_open`] and not yet closed,
-/// or null.
+/// or null. No [`shrike_op`] / [`shrike_attach_remote_embedder`] call against
+/// this handle may still have an unfired completion when `shrike_close` runs
+/// — those ops borrow the handle's kernel, and close frees the handle. The
+/// caller owns this drain-then-close ordering.
 #[cfg(feature = "anki-core")]
 #[no_mangle]
 pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
@@ -325,9 +348,16 @@ pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
 /// the callback, never a panic.
 ///
 /// # Safety
-/// `handle` must be a live handle from [`shrike_open`]; `action` and
-/// `params_json` must be valid NUL-terminated C strings; `user_data` must
-/// outlive the in-flight op.
+/// - `handle` must be a live handle from [`shrike_open`] that is NOT
+///   concurrently or subsequently passed to [`shrike_close`] until this op's
+///   completion has fired — closing a handle with an op in flight is a
+///   use-after-free (the op borrows the handle's kernel; `shrike_close` frees
+///   the handle). The caller owns this ordering.
+/// - `action` and `params_json` must be valid NUL-terminated C strings.
+/// - `callback` must be a non-null function pointer (a null `extern "C" fn`
+///   is undefined behavior when invoked and cannot be defended against in
+///   Rust's type system).
+/// - `user_data` must outlive the in-flight op (the completion contract).
 #[cfg(feature = "anki-core")]
 #[no_mangle]
 pub unsafe extern "C" fn shrike_op(
@@ -450,9 +480,14 @@ fn default_top_k() -> usize {
 /// on success the callback receives `{"ok": null}`.
 ///
 /// # Safety
-/// `handle` must be a live handle; the string pointers must be valid
-/// NUL-terminated C strings or null where permitted; `user_data` must
-/// outlive the call.
+/// - `handle` must be a live handle from [`shrike_open`] not concurrently or
+///   subsequently passed to [`shrike_close`] until this call returns (it
+///   borrows the handle's kernel).
+/// - The string pointers must be valid NUL-terminated C strings or null where
+///   permitted.
+/// - `callback` must be a non-null function pointer (a null `extern "C" fn`
+///   is UB when invoked).
+/// - `user_data` must outlive the call (the completion contract).
 #[cfg(all(feature = "anki-core", feature = "engine-remote"))]
 #[no_mangle]
 pub unsafe extern "C" fn shrike_attach_remote_embedder(

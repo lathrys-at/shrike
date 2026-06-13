@@ -71,8 +71,12 @@ shrike-schemas = { path = "../shrike-schemas" }
 serde = "1"
 serde_json = "1"
 # The kernel owns its runtime; the binding installs a current_thread one
-# through init_runtime, so it needs the builder + the "rt" feature only.
-tokio = { version = "1", features = ["rt"] }
+# through init_runtime with enable_all(), which arms the time driver the
+# kernel's debounced index flush rides — so "time" is named explicitly here
+# (it would otherwise reach us only via feature unification through
+# shrike-kernel, making the enable_all() contract implicit). NOT
+# rt-multi-thread: mobile is deliberately single-threaded.
+tokio = { version = "1", features = ["rt", "time"] }
 tracing = "0.1"
 
 [dev-dependencies]
