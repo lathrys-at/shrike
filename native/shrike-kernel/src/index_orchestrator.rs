@@ -1485,6 +1485,103 @@ mod op_tests {
         }
     }
 
+    // ── Image-only write mode (#232) ────────────────────────────────────────
+
+    /// An EmbedInput with image refs (the image-only path's input shape).
+    fn img_input(nid: i64, text: &str, images: &[&str]) -> EmbedInput {
+        EmbedInput {
+            note_id: nid,
+            text: text.to_owned(),
+            image_names: images.iter().map(|s| s.to_string()).collect(),
+            ocr_texts: vec![],
+        }
+    }
+
+    #[test]
+    fn image_only_hash_folds_images_not_text() {
+        // The image-only hash moves iff the note's PRESENT images move — a text
+        // change is invisible to it, an image add/remove/swap changes it.
+        let exists_all = |_: &str| true;
+        let exists_none = |_: &str| false;
+
+        let a = note_hash_images_only(&["x.png".into()], &exists_all);
+        // Same images, DIFFERENT call — stable (it never reads text).
+        let a2 = note_hash_images_only(&["x.png".into()], &exists_all);
+        assert_eq!(a, a2, "same images → same hash");
+        // DIFFERENT image → different hash.
+        let b = note_hash_images_only(&["y.png".into()], &exists_all);
+        assert_ne!(a, b, "swapped image → hash moves");
+        // An UNRESOLVABLE image folds like no image (presence-aware).
+        let none = note_hash_images_only(&["x.png".into()], &exists_none);
+        let empty = note_hash_images_only(&[], &exists_all);
+        assert_eq!(none, empty, "an unresolvable image == no image");
+        // It is distinct from a text-only note_hash of the same text (namespaced).
+        let text_hash = note_hash("x.png", &[], false, &exists_none, &[]);
+        assert_ne!(a, text_hash);
+    }
+
+    #[test]
+    fn image_only_reconcile_matches_rebuild() {
+        // reconcile==rebuild on the IMAGE-ONLY path (the secondary space): an
+        // incremental image reconcile lands on the identical end state a full
+        // image-only rebuild would. Only the `image` modality is populated (no
+        // text vectors — ImageOnly skips the text embed).
+        let v1 = vec![
+            img_input(1, "t1", &["a.png"]),
+            img_input(2, "t2", &["b.png"]),
+            img_input(3, "t3", &["c.png"]),
+        ];
+        // v2: note 2's image swapped, note 3 gone, note 4 added. (Text changes on
+        // note 1 are IGNORED by the image-only hash → not re-embedded.)
+        let v2 = vec![
+            img_input(1, "t1-EDITED", &["a.png"]),
+            img_input(2, "t2", &["b2.png"]),
+            img_input(4, "t4", &["d.png"]),
+        ];
+
+        let reconciled = temp_orch();
+        block_on(reconciled.rebuild_with_mode(
+            v1,
+            1,
+            Some("clip".into()),
+            &StubEmbedder,
+            Some((&SlowEngine { name: "i", events: Arc::default() }, &AlwaysResolver)),
+            WriteMode::ImageOnly,
+        ))
+        .unwrap();
+        block_on(reconciled.reconcile_with_mode(
+            v2.clone(),
+            2,
+            Some("clip".into()),
+            &StubEmbedder,
+            Some((&SlowEngine { name: "i", events: Arc::default() }, &AlwaysResolver)),
+            WriteMode::ImageOnly,
+        ))
+        .unwrap();
+
+        let rebuilt = temp_orch();
+        block_on(rebuilt.rebuild_with_mode(
+            v2,
+            2,
+            Some("clip".into()),
+            &StubEmbedder,
+            Some((&SlowEngine { name: "i", events: Arc::default() }, &AlwaysResolver)),
+            WriteMode::ImageOnly,
+        ))
+        .unwrap();
+
+        // Same image-modality key set + vectors; NO text-modality vectors.
+        let mut a = reconciled.engine().keys();
+        let mut b = rebuilt.engine().keys();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b, "image-only reconcile lands on the rebuild key set");
+        for key in &a {
+            assert!(reconciled.engine().modality_contains("image", *key));
+            assert!(!reconciled.engine().modality_contains(TEXT, *key), "no text vectors");
+        }
+    }
+
     #[test]
     fn watermark_only_drift_advances_without_embedding() {
         let orch = temp_orch();

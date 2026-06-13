@@ -2671,6 +2671,285 @@ mod no_cpython_smoke {
         });
     }
 
+    // ── Per-space per-modality write fan-out + hashing (#232) ────────────────
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A text-primary embedder with an embed-call counter (text re-embeds).
+    struct CountingText {
+        calls: AtomicUsize,
+        fp: &'static str,
+    }
+    impl Embedder for CountingText {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok(HashEmbedder::embed_sync(&texts)) })
+        }
+        fn fingerprint(&self) -> Option<String> {
+            Some(self.fp.to_string())
+        }
+        fn dim(&self) -> Option<usize> {
+            Some(64)
+        }
+    }
+
+    /// An image-primary CLIP stand-in: a text tower (used for the QUERY in PR-C,
+    /// and as the orchestrator's text embedder — but ImageOnly mode never calls
+    /// it on the write path) plus an `embed_images` half with its own counter.
+    struct CountingClip {
+        text_calls: AtomicUsize,
+        image_calls: AtomicUsize,
+        fp: &'static str,
+    }
+    impl Embedder for CountingClip {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            self.text_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok(HashEmbedder::embed_sync(&texts)) })
+        }
+        fn fingerprint(&self) -> Option<String> {
+            Some(self.fp.to_string())
+        }
+        fn dim(&self) -> Option<usize> {
+            Some(64)
+        }
+    }
+
+    /// The image half — counts image embeds, returns a fixed-dim vector per item.
+    struct ClipImages(Arc<CountingClip>);
+    impl ImageEmbedder for ClipImages {
+        fn embed_images(
+            &self,
+            images: Vec<MediaItem>,
+        ) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            self.0.image_calls.fetch_add(1, Ordering::SeqCst);
+            let n = images.len();
+            Box::pin(async move { Ok(vec![vec![1.0f32; 8]; n]) })
+        }
+    }
+
+    /// Upsert one note carrying `<img src=NAME>` in Front; returns its id.
+    async fn upsert_image_note(kernel: &Kernel, front: &str) -> i64 {
+        let notes = serde_json::json!([{
+            "note_type": "Basic", "deck": "Default",
+            "fields": {"Front": front, "Back": "b"}
+        }]);
+        let results: Vec<serde_json::Value> =
+            serde_json::from_str(&upsert_wire(kernel, notes.to_string(), "error".into(), false).await)
+                .unwrap();
+        results[0]["id"].as_i64().unwrap()
+    }
+
+
+    /// Build a kernel with a SEPARATE text-primary + image-primary CLIP, sharing
+    /// a media map. Returns (kernel, dir, text, clip) — the counters live on
+    /// `text`/`clip`.
+    async fn two_space_kernel(
+        dir: &std::path::Path,
+        media: std::collections::HashMap<String, Vec<u8>>,
+    ) -> (Kernel, Arc<CountingText>, Arc<CountingClip>) {
+        let kernel = Kernel::open(
+            dir.join("c.anki2").to_str().unwrap(),
+            dir.join("cache").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        let text = Arc::new(CountingText {
+            calls: AtomicUsize::new(0),
+            fp: "text-primary:v1",
+        });
+        let clip = Arc::new(CountingClip {
+            text_calls: AtomicUsize::new(0),
+            image_calls: AtomicUsize::new(0),
+            fp: "clip-primary:v1",
+        });
+        // The text-primary FIRST (so it's the per-modality text primary), then
+        // the image-capable CLIP as a SEPARATE space (image primary).
+        kernel.attach_embedder(Arc::clone(&text) as Arc<dyn Embedder>, None);
+        let images: KernelImages = (
+            Box::new(ClipImages(Arc::clone(&clip))),
+            Box::new(MapResolver::new(media)),
+        );
+        kernel.attach_embedder_space(
+            Some("clip-primary:v1".into()),
+            Arc::clone(&clip) as Arc<dyn Embedder>,
+            Some(images),
+        );
+        (kernel, text, clip)
+    }
+
+    #[test]
+    fn per_space_write_routes_text_and_image_to_their_primaries() {
+        // #232: a dedicated text space + a separate CLIP image space. A note's
+        // text lands in the text space; its image lands in the CLIP space's
+        // ImageOnly index. The CLIP text tower is NEVER called on the write path
+        // (ImageOnly), and the image space holds the image vector.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let mut media = std::collections::HashMap::new();
+            media.insert("a.png".to_string(), b"image-a-bytes".to_vec());
+            let (kernel, _text, clip) = two_space_kernel(&dir, media).await;
+            kernel.reindex_if_needed().await.unwrap();
+
+            let nid = upsert_image_note(&kernel, "the krebs cycle <img src=\"a.png\">").await;
+            assert!(kernel.index().engine().contains(nid), "text space has the note");
+            let clip_orch = kernel
+                .index_set()
+                .orchestrator_for("clip-primary:v1")
+                .expect("the CLIP image space is bound");
+            assert!(
+                clip_orch.engine().modality_contains("image", nid),
+                "the image space holds the note's image vector"
+            );
+            assert!(clip.image_calls.load(Ordering::SeqCst) >= 1, "clip embedded images");
+            assert_eq!(
+                clip.text_calls.load(Ordering::SeqCst),
+                0,
+                "ImageOnly never calls the CLIP text tower on the write path"
+            );
+            // The text space's engine holds NO image-space vector for the note
+            // beyond its own (text-space image modality is unused here).
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
+    #[test]
+    fn per_space_hashing_only_re_embeds_the_changed_modality() {
+        // The load-bearing hashing property, on the RECONCILE (drift) path — the
+        // route where per-space hashing decides what re-embeds. Each space's
+        // orchestrator reconciles against ITS OWN hashes: a same-text /
+        // different-image input re-embeds the IMAGE space only; a
+        // different-text / same-image input re-embeds the TEXT space only; an
+        // unchanged input re-embeds neither. (A direct upsert always re-embeds
+        // the written note in both spaces — the hashing governs DRIFT.)
+        use index_orchestrator::{EmbedInput, WriteMode};
+
+        fn input(nid: i64, text: &str, image: &str) -> EmbedInput {
+            EmbedInput {
+                note_id: nid,
+                text: text.to_owned(),
+                image_names: vec![image.to_owned()],
+                ocr_texts: vec![],
+            }
+        }
+
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let mut media = std::collections::HashMap::new();
+            media.insert("a.png".to_string(), b"aaa".to_vec());
+            media.insert("b.png".to_string(), b"bbb".to_vec());
+            let (kernel, text, clip) = two_space_kernel(&dir, media.clone()).await;
+
+            let text_orch = kernel.index().clone();
+            let clip_orch = kernel
+                .index_set()
+                .orchestrator_for("clip-primary:v1")
+                .unwrap();
+
+            let text_svc = kernel.embed_service().unwrap();
+            let (clip_orch2, clip_svc) = kernel.image_only_route().unwrap();
+            assert!(Arc::ptr_eq(&clip_orch, &clip_orch2));
+            let (ie, res) = clip_svc.images_pair().unwrap();
+
+            // Seed both spaces (text→text orch; image→clip orch ImageOnly).
+            let v1 = vec![input(1, "front text", "a.png")];
+            text_orch
+                .reconcile(v1.clone(), 1, text_svc.embedder.fingerprint(), &*text_svc.embedder, None)
+                .await
+                .unwrap();
+            clip_orch
+                .reconcile_with_mode(
+                    v1,
+                    1,
+                    clip_svc.embedder.fingerprint(),
+                    &*clip_svc.embedder,
+                    Some((ie, res)),
+                    WriteMode::ImageOnly,
+                )
+                .await
+                .unwrap();
+            let (t0, i0) = (
+                text.calls.load(Ordering::SeqCst),
+                clip.image_calls.load(Ordering::SeqCst),
+            );
+
+            // ── PURE-IMAGE change: same text, a.png → b.png. ──
+            let (ie, res) = clip_svc.images_pair().unwrap();
+            let v_img = vec![input(1, "front text", "b.png")];
+            text_orch
+                .reconcile(
+                    v_img.clone(),
+                    2,
+                    text_svc.embedder.fingerprint(),
+                    &*text_svc.embedder,
+                    None,
+                )
+                .await
+                .unwrap();
+            clip_orch
+                .reconcile_with_mode(
+                    v_img,
+                    2,
+                    clip_svc.embedder.fingerprint(),
+                    &*clip_svc.embedder,
+                    Some((ie, res)),
+                    WriteMode::ImageOnly,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                text.calls.load(Ordering::SeqCst),
+                t0,
+                "pure-image change: the text space did NOT re-embed (text hash stable)"
+            );
+            assert!(
+                clip.image_calls.load(Ordering::SeqCst) > i0,
+                "pure-image change: the image space re-embedded (image hash moved)"
+            );
+            let (t1, i1) = (
+                text.calls.load(Ordering::SeqCst),
+                clip.image_calls.load(Ordering::SeqCst),
+            );
+
+            // ── PURE-TEXT change: edit text, keep image b.png. ──
+            let (ie, res) = clip_svc.images_pair().unwrap();
+            let v_txt = vec![input(1, "EDITED text", "b.png")];
+            text_orch
+                .reconcile(
+                    v_txt.clone(),
+                    3,
+                    text_svc.embedder.fingerprint(),
+                    &*text_svc.embedder,
+                    None,
+                )
+                .await
+                .unwrap();
+            clip_orch
+                .reconcile_with_mode(
+                    v_txt,
+                    3,
+                    clip_svc.embedder.fingerprint(),
+                    &*clip_svc.embedder,
+                    Some((ie, res)),
+                    WriteMode::ImageOnly,
+                )
+                .await
+                .unwrap();
+            assert!(
+                text.calls.load(Ordering::SeqCst) > t1,
+                "pure-text change: the text space re-embedded"
+            );
+            assert_eq!(
+                clip.image_calls.load(Ordering::SeqCst),
+                i1,
+                "pure-text change: the image space did NOT re-embed (image hash stable)"
+            );
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
     #[test]
     fn composed_kernel_serves_ops_over_injected_stores() {
         // The #389 injection seam: a kernel assembled from PRE-BUILT stores
