@@ -700,6 +700,59 @@ This composes with the gates above: the user-triggered billed passes
 self-review is the floor, not a replacement, for anything crossing those
 thresholds.
 
+### Multi-agent team development — orchestrating a milestone or issue set
+
+When the user points you at a milestone or a set of issues to develop in
+parallel, you act as **team lead**: decompose, dispatch worker agents, keep the
+architecture's boundaries intact, review, and drive to a user-gated merge — you
+orchestrate, you don't implement the issues yourself. The full operational
+playbook is maintained separately (a dedicated team-development skill); the
+load-bearing rules:
+
+- **Parallelism is the user's choice, capped sensibly at 3–6 concurrent agents
+  per wave**, sized to the set's *natural* parallelism (genuinely disjoint
+  surfaces, no inter-dependency). More ready work than the cap → run in
+  **waves**, each ending in a joint review + user-gated merge before the next
+  begins; blocked issues wait for the merge that unblocks them.
+- **Pre-flight:** read the governing design doc and fix the hard boundaries;
+  build the real dependency graph (**verify cross-stream state live with `gh`**
+  — don't trust a stale brief); assign **one owner per shared surface and one
+  lockfile owner per wave** so two concurrent agents never edit the same file.
+- **Workers** run in their own git worktree under **`bypassPermissions`** (a
+  background dev agent can't answer a permission prompt — without this mode it
+  silently stalls on the first write/network call), branch
+  `‹type›/‹issue#›-‹slug›` off `origin/main`, work in slices, run the full local
+  gate, open a PR, report **"READY FOR REVIEW"**, then **HOLD**. In team mode
+  workers do **not** run a self-review subagent and **never self-merge** —
+  review coverage is the lead's incremental review plus the joint cross-review.
+- **Coordination is two-way:** reach a worker by resuming it (via its agent id);
+  workers are **expected to ask the lead for help** — a clarification, a
+  re-partition, a blocker, a re-scope/re-delegation. A worker that stops to ask
+  is doing the right thing, not failing. Track every agent on the shared task
+  list; keep the milestone checklist current (that is the handoff).
+- **Lead incremental review (per PR, directly — not via a subagent):** as each
+  lands, review it yourself emphasizing **alignment to the plan** (matches the
+  issue/design, boundaries held, scope correct) plus a general correctness pass
+  — read the diff and verify the load-bearing claims against the actual code.
+  Hold for the joint review.
+- **Joint cross-review — the gate before any merge:** resume all the authoring
+  agents to peer-review each other's PRs **directly, grounded in their own
+  work** (never delegating the review to a subagent; a research subagent only).
+  Four axes: correctness/plan, **performance**, **security** (the joint review
+  is where performance and security get their dedicated rigorous pass, while
+  still a general code review), and **cross-PR alignment** (integration
+  conflicts invisible in any single PR, surfaced only when two merge).
+- **Consolidate → user signoff → batch merge:** fold every peer review and your
+  own into one report for the user (per-PR verdicts, must-fixes + who's fixing
+  each, required rebases, proposed merge order); **nothing merges until the
+  user's final signoff** — a hard gate; on the go, batch-merge in dependency
+  order (rebase onto latest `main` → `ci` label → `--auto --squash`), then
+  unblock the downstream work / start the next wave.
+
+This joint review is the team review **floor**; it does not replace the
+user-triggered `ultra`/cloud review or the pre-release security/performance
+audits (see *Review & audit gates* above).
+
 ### Defect workflow — follow this when you find a defect or limitation
 
 When you hit a bug, a limitation, or a missing API surface that is **out of scope
