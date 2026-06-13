@@ -30,6 +30,7 @@ pub mod cache_layout;
 pub mod embed_set;
 pub mod fusion;
 pub mod index_orchestrator;
+pub mod index_set;
 pub mod media_fetch;
 pub mod recognize;
 pub mod tag_centroids;
