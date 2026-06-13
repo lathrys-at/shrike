@@ -77,48 +77,12 @@ rust_shared_library(
     ],
 )
 
-# The lean-build CI proof (#499, the #338 "minimal profile is its own Bazel
-# target" hazard finally built): the MOBILE feature set — anki-core +
-# engine-remote + engine-apple, no ort, no managers — compiled as its own
-# cdylib so a feature-gating regression (an ungated engine reference) fails
-# the per-PR `//...` lane instead of surfacing when #504's real mobile
-# binding crate first builds. Deliberately NOT `manual`, and deliberately a
-# build-only target: nothing imports it (the Python facade rides the server
-# build; mobile has no Python).
-rust_shared_library(
-    name = "mobile_skeleton",
-    srcs = SHRIKE_PY_SRCS,
-    edition = "2021",
-    rustc_flags = SHRIKE_PY_LINK_FLAGS,
-    crate_features = [
-        "anki-core",
-        "bundled-sqlite",
-        "engine-remote",
-        "engine-apple",
-    ],
-    deps = [
-        "//native/shrike-collection:shrike_collection",
-        "//native/shrike-derived:shrike_derived",
-        "//native/shrike-embed-remote:shrike_embed_remote",
-        "//native/shrike-engine-api:shrike_engine_api",
-        "//native/shrike-ffi:shrike_ffi",
-        "//native/shrike-store-api:shrike_store_api",
-        "//native/shrike-index:shrike_index",
-        "//native/shrike-kernel:shrike_kernel",
-        "//native/shrike-recognize-apple:shrike_recognize_apple",
-        "//native/shrike-schemas:shrike_schemas",
-        "@crates//:futures",
-        "@crates//:tokio",
-        "@crates//:pyo3",
-        "@crates//:serde",
-        "@crates//:serde_json",
-        "@crates//:log",
-        "@crates//:pyo3-log",
-        "@crates//:tracing",
-        "@crates//:tracing-error",
-        "@crates//:tracing-subscriber",
-    ],
-)
+# The lean (mobile) build's CI proof now lives on its OWN crate (#504):
+# //native/shrike-mobile is the real mobile binding (the C-ABI cdylib, zero
+# pyo3), and its `rust_shared_library` + `rust_test` exercise the mobile
+# feature set (anki-core + engine-remote, no ort, no managers) on the per-PR
+# `//...` lane — the `mobile_skeleton` reuse-of-shrike-py-sources proof it
+# replaced was a placeholder until this crate existed.
 
 # Python imports `shrike_native._native` from a file literally named
 # `_native.so`; rules_rust emits lib<name>.dylib/.so, so copy it to the import

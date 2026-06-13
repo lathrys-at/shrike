@@ -5130,6 +5130,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "shrike-mobile"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "shrike-collection",
+ "shrike-derived",
+ "shrike-embed-remote",
+ "shrike-engine-api",
+ "shrike-ffi",
+ "shrike-kernel",
+ "shrike-recognize-apple",
+ "shrike-schemas",
+ "shrike-store-api",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "shrike-native-demo"
 version = "0.0.0"
 dependencies = [

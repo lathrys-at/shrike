@@ -21,6 +21,7 @@ members = [
     "shrike-index",
     "shrike-kernel",
     "shrike-llama-server",
+    "shrike-mobile",
     "shrike-py",
     "shrike-recognize-apple",
     "shrike-schemas",

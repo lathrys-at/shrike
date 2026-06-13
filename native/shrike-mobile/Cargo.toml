@@ -1,0 +1,81 @@
+# The Shrike MOBILE binding crate (#504): the action exchange over a C ABI —
+# the principled successor to the deleted shrike-cabi, and the second of the
+# two kernel builds (docs/distribution.md's build matrix). Sibling of
+# shrike-py, but it sees ZERO pyo3: a native Swift/Kotlin app embeds the
+# kernel in-process and drives the action exchange with C completion
+# callbacks, so no CPython links into the artifact (pinned by the
+# `no_libpython` link-property test, mirroring the kernel's no_cpython_smoke).
+#
+# Feature set = the mobile column of the matrix: anki-core + engine-remote
+# (relay offload) + the platform engines (engine-apple/engine-android),
+# never engine-ort and never the managers. A capability not compiled in is a
+# config error naming the profile; a declared-but-failed one degrades.
+[package]
+name = "shrike-mobile"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The Shrike mobile binding crate — the action exchange over a C ABI (#504). No CPython."
+
+[lib]
+name = "shrike_mobile"
+# cdylib: the xcframework/AAR artifact. staticlib: static linking into an iOS
+# app. rlib: so the in-crate C-ABI smoke test (a Rust C-caller) can link the
+# functions. The no_libpython link-property test asserts none of these carry
+# a libpython reference.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+# default = the MOBILE set (docs/distribution.md's build matrix): anki-core +
+# engine-remote + bundled SQLite. The platform engines are declared below and
+# gated correctly, but their real attach is a later slice (#504 is sliced),
+# so they are NOT default-on here — a slice that wires the platform glue flips
+# them on once the engine-apple/-android attach path lands. NO engine-ort,
+# NO managers (no manage-llama) — the matrix's hard boundary.
+default = ["anki-core", "engine-remote", "bundled-sqlite"]
+# Bundled SQLite (FTS5 + trigram) forwarded to shrike-derived, mirroring the
+# server build — the platform SQLite is not assumed present on every device.
+bundled-sqlite = ["shrike-derived/bundled"]
+# The anki collection core + kernel binding. Always on for any usable mobile
+# build (the app owns a sandboxed collection); still a named feature so a
+# compute-only shape stays expressible, exactly like the server build.
+anki-core = ["dep:shrike-collection", "dep:shrike-kernel", "dep:shrike-store-api"]
+# Embeddings over any OpenAI-compatible endpoint — the relay-offload path
+# (the mobile app subordinates to a desktop/DIY kernel over the relay) and
+# any cloud endpoint with an api_key. This is the ONLY embedding runtime in
+# the mobile build: no in-process ort.
+engine-remote = ["dep:shrike-embed-remote"]
+# Platform recognition engines: Apple Vision OCR (mobile/macOS). Declared and
+# gated now; the real attach (composing the engine into the recognize slot) is
+# a later #504 slice — the gate is wired so a future flip is a feature change,
+# not a structural one. Off macOS the engine is its own unavailable stub.
+engine-apple = ["dep:shrike-recognize-apple"]
+# Android platform engines — a placeholder gate (no crate yet; #428's engine
+# lands behind it in a later slice). Wired now so the matrix column is
+# complete and a future crate slots in without a structural change.
+engine-android = []
+
+[dependencies]
+# The kernel + its stores. NO pyo3 anywhere in this tree (the layering check
+# excludes this crate from PYO3_ALLOWED — that exclusion is the boundary).
+shrike-kernel = { path = "../shrike-kernel", optional = true }
+shrike-collection = { path = "../shrike-collection", optional = true }
+shrike-store-api = { workspace = true, optional = true }
+shrike-derived = { path = "../shrike-derived", default-features = false }
+shrike-engine-api = { path = "../shrike-engine-api" }
+shrike-embed-remote = { path = "../shrike-embed-remote", optional = true }
+shrike-recognize-apple = { path = "../shrike-recognize-apple", optional = true }
+shrike-ffi = { workspace = true }
+shrike-schemas = { path = "../shrike-schemas" }
+serde = "1"
+serde_json = "1"
+# The kernel owns its runtime; the binding installs a current_thread one
+# through init_runtime, so it needs the builder + the "rt" feature only.
+tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# The in-crate C-ABI smoke implements the Embedder trait (a HashEmbedder, the
+# no_cpython_smoke shape) which returns a futures BoxFuture.
+futures = "0.3"
