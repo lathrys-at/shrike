@@ -67,40 +67,59 @@ _DERIVED_TEXT_SOURCES: dict[str, frozenset[str]] = {
 
 
 def _coverage_matrix(
-    served: frozenset[str], ready_recognizers: frozenset[str]
+    served: frozenset[str],
+    ready_recognizers: frozenset[str],
+    spaces: Sequence[frozenset[str]] | None = None,
 ) -> dict[str, dict[str, str]]:
     """Build the cross-modal coverage matrix (#235): query-modality →
     target-modality → ``native`` | ``via_derived_text`` | ``unavailable``.
 
-    ``served`` is the union of modalities the live embedding spaces embed (one
-    space today; the union is forward-compatible with #229's multi-space).
+    ``served`` is the UNION of modalities the live embedding spaces embed — it
+    governs reachability (whether a query modality is embeddable at all, and
+    whether a text space exists to derive into). ``spaces`` is the PER-SPACE
+    breakdown (#229/#235): one ``frozenset`` per live embedding space, used for
+    the ``native`` cell, because *native* means **one single space embeds BOTH**
+    modalities — two DISJOINT single-modality spaces (a dedicated text space + a
+    separate image-only space) must NOT read text↔image native off the union.
+    ``spaces=None`` treats ``served`` as one implicit space (the N≤1 / single-
+    backend case), so the cell reduces to ``q in served and t in served`` — the
+    pre-#235 behaviour, byte-identical.
+
     ``ready_recognizers`` is the set of recognition sources currently attached
     AND ready (``ocr``/``vlm``/``asr`` — an errored or unattached engine doesn't
     derive anything, so it doesn't light a cell).
 
     Per pair (query ``q``, target ``t``):
 
-    - ``native`` when a single live space embeds BOTH ``q`` and ``t`` — today
-      that's ``q in served and t in served`` (≤1 space, so any two modalities it
-      serves share that space). A text query reaches text natively whenever a
-      text space is up; a CLIP/omni space additionally makes text↔image native.
-    - ``via_derived_text`` when ``q`` can reach the TEXT space (``q`` is
-      embeddable — ``q in served`` — and a text space exists, ``"text" in
-      served``) and a ready recognizer derives text from ``t`` into that space.
-      The derived text is what's searched, so it's strictly weaker than native;
-      native therefore wins when both hold.
+    - ``native`` when SOME single live space embeds BOTH ``q`` and ``t``. A
+      joint CLIP/omni space → text↔image native; a dedicated-text + separate-CLIP
+      deployment → text↔image native *via the CLIP space* (it embeds both),
+      while text↔text is native via the dedicated text space; two disjoint
+      single-modality spaces are native only on their own diagonal.
+    - ``via_derived_text`` when ``q`` can reach the TEXT space (``q in served``
+      and ``"text" in served``) and a ready recognizer derives text from ``t``
+      into that space. Strictly weaker than native; native wins when both hold.
     - ``unavailable`` otherwise.
 
-    Degrades sanely: embedding down → ``served`` empty → every cell
-    ``unavailable``; a text-only space with no recognizers → only text→text is
-    ``native``, every media target ``unavailable``.
+    Degrades sanely: embedding down → ``served`` empty (``spaces`` empty/None) →
+    every cell ``unavailable``; a text-only space with no recognizers → only
+    text→text is ``native``, every media target ``unavailable``.
     """
+    # The per-space sets for the `native` cell. None → the union is one implicit
+    # space (N≤1 / single-backend → byte-identical to the pre-#235 union check).
+    per_space: tuple[frozenset[str], ...] = (
+        tuple(spaces) if spaces is not None else (served,)
+    )
+
+    def native(q: str, t: str) -> bool:
+        return any(q in s and t in s for s in per_space)
+
     text_space_up = "text" in served
     matrix: dict[str, dict[str, str]] = {}
     for q in MODALITIES:
         row: dict[str, str] = {}
         for t in MODALITIES:
-            if q in served and t in served:
+            if native(q, t):
                 row[t] = "native"
             elif (
                 q in served
@@ -502,16 +521,20 @@ class Harness:
         # live embedding spaces (one today; the union is forward-compatible) and
         # the attached, ready recognizers. All-`unavailable` when embedding is
         # down, so the shape is stable for clients.
-        backend = self.runtime.backend
-        served = (
-            frozenset(backend.modalities)
-            if backend is not None and backend.running
-            else frozenset()
-        )
+        # Per-space modality sets (#235): the primary runtime + every live
+        # secondary space. `native` is computed per-space (one space embeds
+        # both modalities), while `served` (their union) governs reachability.
+        # Empty when embedding is down → every cell unavailable.
+        per_space: list[frozenset[str]] = [
+            frozenset(rt.backend.modalities)
+            for rt in (self.runtime, *self.secondary_runtimes)
+            if rt.backend is not None and rt.backend.running
+        ]
+        served = frozenset().union(*per_space) if per_space else frozenset()
         ready_recognizers = frozenset(
             source for source, eng in self._recognition_engines.items() if eng.state == "ready"
         )
-        status["coverage"] = _coverage_matrix(served, ready_recognizers)
+        status["coverage"] = _coverage_matrix(served, ready_recognizers, per_space)
         return status
 
     def _index_status(self) -> dict[str, Any]:

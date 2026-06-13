@@ -100,3 +100,60 @@ def test_matrix_validates_against_schema() -> None:
     model = CoverageMatrix.model_validate(matrix)
     assert model.text.image == CoverageCell.NATIVE
     assert model.text.audio == CoverageCell.VIA_DERIVED_TEXT
+
+
+# ── Per-space `native` cell (#229/#235 multi-space) ──────────────────────────
+
+
+def test_dedicated_text_plus_separate_clip_text_image_native_via_clip() -> None:
+    # The no-omni deployment: a dedicated TEXT space + a separate CLIP space
+    # (text+image). text↔image is native — via the CLIP space, which embeds
+    # BOTH — and text↔text is native via either. The union {text,image} alone
+    # would (correctly here) say native, but the PER-SPACE check is what makes
+    # it honest: it's native because ONE space (the CLIP) embeds both.
+    spaces = [frozenset({"text"}), frozenset({"text", "image"})]
+    served = frozenset({"text", "image"})
+    matrix = _coverage_matrix(served, frozenset(), spaces)
+    assert matrix["text"] == {"text": NATIVE, "image": NATIVE, "audio": NONE}
+    assert matrix["image"] == {"text": NATIVE, "image": NATIVE, "audio": NONE}
+
+
+def test_two_disjoint_single_modality_spaces_are_not_cross_native() -> None:
+    # THE bug the per-space cell fixes: a TEXT-only space + an IMAGE-only space
+    # (two disjoint single-modality spaces). The union is {text,image}, but NO
+    # single space embeds both — so text↔image is NOT native (it's unavailable
+    # without a recognizer). Each is native only on its own diagonal.
+    spaces = [frozenset({"text"}), frozenset({"image"})]
+    served = frozenset({"text", "image"})
+    matrix = _coverage_matrix(served, frozenset(), spaces)
+    assert matrix["text"]["text"] == NATIVE
+    assert matrix["image"]["image"] == NATIVE
+    # The cross cells are NOT native (no single space spans both).
+    assert matrix["text"]["image"] == NONE
+    assert matrix["image"]["text"] == NONE
+
+
+def test_two_disjoint_spaces_cross_via_derived_text_with_ocr() -> None:
+    # The same two disjoint spaces + OCR: text↔image is now reachable
+    # via_derived_text (OCR derives image text into the text space), NOT native.
+    spaces = [frozenset({"text"}), frozenset({"image"})]
+    served = frozenset({"text", "image"})
+    matrix = _coverage_matrix(served, frozenset({"ocr"}), spaces)
+    assert matrix["text"]["image"] == DERIVED
+    # image→text stays native-free but the image query reaches text natively?
+    # No: image and text live in different spaces, so image→text is not native.
+    assert matrix["image"]["text"] == NONE
+
+
+def test_per_space_reduces_to_union_for_a_single_space() -> None:
+    # N=1 byte-identical: passing one space is identical to the union fallback
+    # (spaces=None) the pre-#235 tests use.
+    one = frozenset({"text", "image"})
+    assert _coverage_matrix(one, frozenset({"ocr"}), [one]) == _coverage_matrix(
+        one, frozenset({"ocr"})
+    )
+
+
+def test_empty_spaces_list_all_unavailable() -> None:
+    # Embedding down (no live space) → every cell unavailable, recognizers or not.
+    assert _coverage_matrix(frozenset(), frozenset({"ocr", "asr"}), []) == _all_unavailable()
