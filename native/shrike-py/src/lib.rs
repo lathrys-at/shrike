@@ -1009,6 +1009,13 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         "BATCH_PROBE_TEXTS",
         shrike_engine_api::probe::BATCH_PROBE_TEXTS.to_vec(),
     )?;
+    // The vision probe set (#211): the same canonical synthetic images the
+    // native vision probe embeds, so the Python CLIP host probes the vision
+    // path against the identical set (mirrors BATCH_PROBE_TEXTS).
+    m.add(
+        "BATCH_PROBE_IMAGES",
+        shrike_engine_api::probe::batch_probe_images(),
+    )?;
     m.add("BATCH_DRIFT_TOL", shrike_engine_api::probe::BATCH_DRIFT_TOL)?;
     m.add("NativeInputError", py.get_type::<NativeInputError>())?;
     m.add(

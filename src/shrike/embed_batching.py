@@ -46,8 +46,17 @@ BATCH_DRIFT_TOL: float = shrike_native.BATCH_DRIFT_TOL
 
 BATCH_PROBE_TEXTS: list[str] = list(shrike_native.BATCH_PROBE_TEXTS)
 
+# The vision probe set (#211): the same canonical synthetic images the native
+# vision probe embeds — varied content for a wide pixel-activation range, the
+# image analogue of BATCH_PROBE_TEXTS. Used to probe a CLIP vision graph for
+# batch-safety independently of the text graph (a mixed-precision pair).
+BATCH_PROBE_IMAGES: list[bytes] = list(shrike_native.BATCH_PROBE_IMAGES)
+
 # Embeds a list of texts as a single batch, returning one vector per input.
 EmbedChunk = Callable[[list[str]], list[list[float]]]
+
+# Embeds a list of encoded image bytes as a single batch, one vector per input.
+EmbedImageChunk = Callable[[list[bytes]], list[list[float]]]
 
 # How many times to (re)run the probe before giving up. The probe issues many embed calls
 # (a serial reference + one batch); a single transient failure shouldn't condemn a session
@@ -82,13 +91,52 @@ def probe_max_safe_batch(
     serially.
     """
     texts = list(probe_texts if probe_texts is not None else BATCH_PROBE_TEXTS)
-    if len(texts) < 2:
+    return _probe_items(texts, embed_chunk, tol=tol, attempts=attempts)
+
+
+def probe_image_max_safe_batch(
+    embed_image_chunk: EmbedImageChunk,
+    *,
+    tol: float = BATCH_DRIFT_TOL,
+    probe_images: Sequence[bytes] | None = None,
+    attempts: int = PROBE_ATTEMPTS,
+) -> int:
+    """The image analogue of :func:`probe_max_safe_batch` — probe a CLIP **vision**
+    graph for batch-safety, returning the batch size proven safe (the probe-set
+    size) or 1 (embed serially).
+
+    Same discipline as the text probe (serial reference vs one batch, compared
+    within *tol*; the two failure modes kept distinct), over the synthetic
+    :data:`BATCH_PROBE_IMAGES` set. A uniform CLIP export's text probe already
+    predicts the vision path, so this exists for the one case it can't: a
+    hand-assembled **mixed-precision** pair (fp text + int8 vision), where the
+    vision graph batches non-deterministically and the text probe would wrongly
+    clear it. The CLIP host runs both and takes ``min(text_safe, vision_safe)``.
+    """
+    images = list(probe_images if probe_images is not None else BATCH_PROBE_IMAGES)
+    return _probe_items(images, embed_image_chunk, tol=tol, attempts=attempts)
+
+
+def _probe_items(
+    items: Sequence[object],
+    embed_chunk: Callable[[list], list[list[float]]],
+    *,
+    tol: float,
+    attempts: int,
+) -> int:
+    """The shared probe core: embed *items* serially (the reference, retried up
+    to *attempts* times — a persistent failure raises :class:`ProbeError`) and
+    all in one batch, comparing within *tol*. Match → the set size; batch-only
+    failure or drift → 1. The text and image entrypoints differ only in their
+    item type and embed callable; this core is identical for both."""
+    seq = list(items)
+    if len(seq) < 2:
         return 1
     reference: np.ndarray | None = None
     last_exc: Exception | None = None
     for _ in range(max(1, attempts)):
         try:
-            reference = np.asarray([embed_chunk([t])[0] for t in texts], dtype=np.float64)
+            reference = np.asarray([embed_chunk([item])[0] for item in seq], dtype=np.float64)
             break
         except Exception as e:  # noqa: BLE001 — retry the serial reference, then surface
             last_exc = e
@@ -97,11 +145,11 @@ def probe_max_safe_batch(
     # The model can embed serially. Does it also batch deterministically? A batch-only
     # failure (e.g. a fixed batch-1 graph) degrades to serial rather than erroring.
     try:
-        batched = np.asarray(embed_chunk(texts), dtype=np.float64)
+        batched = np.asarray(embed_chunk(seq), dtype=np.float64)
     except Exception:  # noqa: BLE001 — can embed serially but not batched → serial
         return 1
     drift = float(np.max(np.abs(reference - batched)))
-    return len(texts) if drift <= tol else 1
+    return len(seq) if drift <= tol else 1
 
 
 def max_probe_drift(

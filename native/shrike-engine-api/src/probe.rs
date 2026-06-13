@@ -165,13 +165,21 @@ fn owned_texts() -> Vec<String> {
 // batched-vs-serial drift is exactly 0 regardless of content, exactly as for
 // text.
 //
-// Each entry is a tiny RGB PNG built at probe time (no fixture files). The set
-// is deliberately small but heterogeneous — its *length* is also the vision
-// batching ceiling, but in practice the CLIP engine takes `min(text, vision)`
-// and the text set (64) is the larger, so this never lowers a safe pair's cap.
+// Each entry is a tiny RGB image built at probe time (no fixture files),
+// encoded as an uncompressed BMP in pure Rust so this leaf crate gains no
+// image-encode dependency. The set is heterogeneous and its *length* is the
+// vision batching ceiling — sized to match the text set (64) so the CLIP
+// engine's `min(text, vision)` never lowers a uniform-safe pair's batch (both
+// probe to 64), collapsing to 1 only when a path is genuinely batch-variant.
 
 /// How many synthetic probe images to generate (the vision batching ceiling).
-const IMAGE_PROBE_COUNT: usize = 16;
+/// Matched to the text set size (64) so a uniform-safe CLIP pair probes both
+/// paths to the *same* ceiling — `min(text, vision)` then never lowers a safe
+/// pair's batch, and collapses to 1 only when one path is genuinely variant.
+/// The first ~15 indices are distinct hand-designed extremes; the rest are
+/// hashed-deterministic broadband speckle (the `_` branch of `probe_pixel`),
+/// each a distinct image, so the set stays heterogeneous to the full length.
+const IMAGE_PROBE_COUNT: usize = 64;
 
 /// Side length of each synthetic probe image (small — the probe only needs
 /// content variety, not resolution; the engine resizes/crops anyway).
@@ -301,6 +309,14 @@ fn encode_bmp(idx: usize) -> Vec<u8> {
 /// The synthetic vision probe set (BMP-encoded [`MediaItem`]s).
 fn owned_images() -> Vec<MediaItem> {
     (0..IMAGE_PROBE_COUNT).map(probe_image).collect()
+}
+
+/// The synthetic vision probe set as raw encoded bytes — the canonical set the
+/// Python host sources (mirroring `BATCH_PROBE_TEXTS`), so native and Python
+/// hosts probe the *same* images. One BMP per entry; decoders read them
+/// losslessly.
+pub fn batch_probe_images() -> Vec<Vec<u8>> {
+    (0..IMAGE_PROBE_COUNT).map(encode_bmp).collect()
 }
 
 /// The batch size proven safe (the probe-set size) or 1 (embed serially).
@@ -581,6 +597,14 @@ mod tests {
     }
 
     #[test]
+    fn image_probe_set_matches_the_text_ceiling() {
+        // Sized to the text set so a uniform-safe pair's min(text, vision)
+        // doesn't lower the batch (#211).
+        assert_eq!(IMAGE_PROBE_COUNT, BATCH_PROBE_TEXTS.len());
+        assert_eq!(batch_probe_images().len(), IMAGE_PROBE_COUNT);
+    }
+
+    #[test]
     fn image_probe_set_is_nonempty_and_decodable() {
         let images = owned_images();
         assert_eq!(images.len(), IMAGE_PROBE_COUNT);
@@ -595,12 +619,16 @@ mod tests {
                 "probe image {i} dimensions"
             );
         }
-        // The set is heterogeneous — distinct content means distinct bytes
-        // (a flat black/white pair compresses identically only if they're
-        // equal, which they aren't), so the probe maximizes batch variance.
-        let black = image::load_from_memory(&images[0].bytes).unwrap().to_rgb8();
-        let white = image::load_from_memory(&images[1].bytes).unwrap().to_rgb8();
-        assert_ne!(black.get_pixel(0, 0), white.get_pixel(0, 0));
+        // The set is heterogeneous — every image's content is distinct
+        // (including the hashed-speckle tail), so each contributes its own
+        // activation profile and the probe maximizes batch variance.
+        let mut seen = std::collections::HashSet::new();
+        for item in &images {
+            assert!(
+                seen.insert(item.bytes.clone()),
+                "probe images must all differ"
+            );
+        }
     }
 
     #[test]
