@@ -329,6 +329,17 @@ class AsyncKernel:
         unused_media: bool = True,
         dry_run: bool = True,
     ) -> Future[str]: ...
+    def export_package(
+        self,
+        out_path: str,
+        format: str,
+        scope_kind: str,
+        deck: str | None = None,
+        note_ids: list[int] | None = None,
+        with_scheduling: bool = False,
+        with_media: bool = True,
+        legacy: bool = False,
+    ) -> Future[str]: ...
     def update_note_tags(
         self,
         note_ids: list[int],

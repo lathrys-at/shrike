@@ -22,8 +22,8 @@
 mod collection;
 
 pub use collection::{
-    Collection, CreateOutcome, DuplicatePolicy, OwnedFieldRow, PreparedMedia, PreparedMediaSource,
-    ServiceNote,
+    Collection, CreateOutcome, DuplicatePolicy, ExportOutcome, ExportRequest, ExportScope,
+    OwnedFieldRow, PackageFormat, PreparedMedia, PreparedMediaSource, ServiceNote,
 };
 
 use shrike_ffi::NativeResult;

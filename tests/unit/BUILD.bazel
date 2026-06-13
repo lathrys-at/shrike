@@ -91,6 +91,8 @@ _INDEX = ["test_index_policy.py"]
 
 _CACHE_LAYOUT = ["test_cache_layout.py"]
 
+_PATHSAFETY = ["test_pathsafety.py"]
+
 _DERIVED = [
     "test_derived.py",
     "test_derived_native.py",
@@ -226,6 +228,16 @@ pytest_test(
 )
 
 pytest_test(
+    name = "pathsafety",
+    srcs = _PATHSAFETY,
+    xdist = None,
+    deps = [
+        ":conftest",
+        "//src/shrike:pathsafety",
+    ],
+)
+
+pytest_test(
     name = "derived",
     srcs = _DERIVED,
     xdist = None,
@@ -316,7 +328,8 @@ pytest_test(
 # Analysis-time completeness guard: every test_*.py must be named in exactly
 # one cluster (or _PIP_ONLY). A forgotten file fails the build loudly here
 # instead of silently never running under Bazel.
-_ASSIGNED = _PIP_ONLY + _CORE + _CLIENT + _DAEMON + _LOG + _INDEX + _CACHE_LAYOUT + _DERIVED + \
+_ASSIGNED = _PIP_ONLY + _CORE + _CLIENT + _DAEMON + _LOG + _INDEX + _CACHE_LAYOUT + \
+            _PATHSAFETY + _DERIVED + \
             _EMBED_HELPERS + _EMBEDDING + _ACTIONS + _TOOLS + \
             _SERVER + _CONFIG + _CLI
 

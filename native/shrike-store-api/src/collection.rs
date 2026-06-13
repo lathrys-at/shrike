@@ -85,6 +85,47 @@ pub enum PreparedMediaSource {
     Failed { error: String },
 }
 
+/// The package format an export writes (#71). `.apkg` is the scoped,
+/// shareable note package; `.colpkg` is a whole-collection backup (no scope).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageFormat {
+    Apkg,
+    Colpkg,
+}
+
+/// What an export covers (#71): the whole collection, one deck (by the
+/// deck-ref convention — name / numeric id / `#id`), or an explicit note set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportScope {
+    Whole,
+    Deck(String),
+    Notes(Vec<i64>),
+}
+
+/// One export request, resolved at the op layer (#71). The host has already
+/// gated `out_path` (the path-safety check) before this reaches the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportRequest {
+    pub out_path: String,
+    pub format: PackageFormat,
+    pub scope: ExportScope,
+    /// Include review/scheduling data (and, bound to it, deck configs). Ignored
+    /// for `.colpkg` (a full backup always carries its scheduling).
+    pub with_scheduling: bool,
+    /// Bundle referenced media into the package.
+    pub with_media: bool,
+    /// Emit the legacy (pre-2.1.50) package format. Default false.
+    pub legacy: bool,
+}
+
+/// The export outcome (#71): notes written + the on-disk path the package
+/// landed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportOutcome {
+    pub note_count: u32,
+    pub out_path: String,
+}
+
 /// The collection store — Shrike's op layer over the note/deck/media state
 /// of record. The canonical impl wraps anki via its protobuf service layer;
 /// a remote impl proxies the same ops to a server that does.
@@ -283,4 +324,9 @@ pub trait Collection: Send + Sync {
         unused_media: bool,
         dry_run: bool,
     ) -> NativeResult<(CollectionPruneResponse, Vec<i64>)>;
+    /// Export the collection (or a scope of it) to an Anki package (#71).
+    /// Read-only on the data; holds the collection for the package write, so
+    /// the kernel runs it on the actor like every other op. The caller has
+    /// already gated `out_path`.
+    fn export_package(&self, request: &ExportRequest) -> NativeResult<ExportOutcome>;
 }

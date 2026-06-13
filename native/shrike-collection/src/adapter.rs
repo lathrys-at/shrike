@@ -41,6 +41,9 @@ const SVC_NOTETYPES: u32 = 23;
 const SVC_NOTES: u32 = 25;
 const SVC_CARD_RENDERING: u32 = 27;
 const SVC_SEARCH: u32 = 29;
+// import_export (#71/#72). NOT a runtime-spinning service: its export/import
+// methods are `with_col` calls (no sync/network), so dispatching it is safe.
+const SVC_IMPORT_EXPORT: u32 = 37;
 const SVC_MEDIA: u32 = 39;
 const SVC_TAGS: u32 = 43;
 
@@ -86,6 +89,14 @@ const CARD_RENDERING_GET_EMPTY_CARDS: u32 = 5;
 
 const SEARCH_SEARCH_NOTES: u32 = 2;
 const SEARCH_FIND_AND_REPLACE: u32 = 5;
+
+// import_export methods (the MERGED backend dispatcher, tag 25.09.4): the
+// backend-level methods come first (ImportCollectionPackage=0,
+// ExportCollectionPackage=1), then the collection-level ones renumbered after
+// (ImportAnkiPackage=2, GetPresets=3, ExportAnkiPackage=4, …). #71 uses the two
+// export methods; #72 will add the two import ones.
+const IMPORT_EXPORT_EXPORT_COLLECTION_PACKAGE: u32 = 1;
+const IMPORT_EXPORT_EXPORT_ANKI_PACKAGE: u32 = 4;
 
 const MEDIA_CHECK_MEDIA: u32 = 0;
 const MEDIA_ADD_MEDIA_FILE: u32 = 1;
@@ -530,6 +541,61 @@ impl ServiceAdapter {
         )
     }
 
+    // ── import/export (#71) ────────────────────────────────────────────────
+
+    /// Export an `.apkg` (the modern Rust exporter, `ExportAnkiPackage`):
+    /// whole-collection or deck/note-scoped, with optional scheduling/media.
+    /// Returns the exported note count (anki's `generic.UInt32`). The
+    /// collection is held for the whole `with_col` export — the caller routes
+    /// this through the collection actor so it serializes like every write.
+    pub fn export_anki_package(
+        &self,
+        out_path: &str,
+        with_scheduling: bool,
+        with_media: bool,
+        legacy: bool,
+        limit: anki_proto::import_export::ExportLimit,
+    ) -> NativeResult<u32> {
+        let req = anki_proto::import_export::ExportAnkiPackageRequest {
+            out_path: out_path.to_string(),
+            options: Some(anki_proto::import_export::ExportAnkiPackageOptions {
+                with_scheduling,
+                // Deck configs ride with scheduling — they are meaningless
+                // without it (an apkg with no review data has no use for the
+                // deck's scheduling config), so we bind them together rather
+                // than expose a second knob that only matters when the first is on.
+                with_deck_configs: with_scheduling,
+                with_media,
+                legacy,
+            }),
+            limit: Some(limit),
+        };
+        let resp: anki_proto::generic::UInt32 =
+            self.call(SVC_IMPORT_EXPORT, IMPORT_EXPORT_EXPORT_ANKI_PACKAGE, &req)?;
+        Ok(resp.val)
+    }
+
+    /// Export a `.colpkg` (whole-collection backup, `ExportCollectionPackage`).
+    /// No scoping — a colpkg is the entire collection. Optionally includes media.
+    pub fn export_collection_package(
+        &self,
+        out_path: &str,
+        include_media: bool,
+        legacy: bool,
+    ) -> NativeResult<()> {
+        let req = anki_proto::import_export::ExportCollectionPackageRequest {
+            out_path: out_path.to_string(),
+            include_media,
+            legacy,
+        };
+        let _: anki_proto::generic::Empty = self.call(
+            SVC_IMPORT_EXPORT,
+            IMPORT_EXPORT_EXPORT_COLLECTION_PACKAGE,
+            &req,
+        )?;
+        Ok(())
+    }
+
     // ── maintenance ──────────────────────────────────────────────────────────
 
     pub fn get_empty_cards(&self) -> NativeResult<anki_proto::card_rendering::EmptyCardsReport> {
@@ -746,6 +812,7 @@ mod runtime_singularity {
             super::SVC_NOTES,
             super::SVC_CARD_RENDERING,
             super::SVC_SEARCH,
+            super::SVC_IMPORT_EXPORT,
             super::SVC_MEDIA,
             super::SVC_TAGS,
         ];

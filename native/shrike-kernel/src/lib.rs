@@ -57,6 +57,11 @@ pub use shrike_engine_api::{
     Embedder, ImageEmbedder, ImageResolver, Locator, MediaItem, Recognition, Recognizer, Segment,
 };
 
+// The export request/scope/format types (#71): the store contract's, re-exported
+// so the pyo3 binding constructs them as `shrike_kernel::*` without reaching
+// past the kernel into the store-api crate.
+pub use shrike_store_api::{ExportOutcome, ExportRequest, ExportScope, PackageFormat};
+
 /// The collection as a task-actor (#374): every access is one job sent to a
 /// single spawned task that runs them **inline, sequentially** — FIFO
 /// serialization by construction, no thread affinity (the task owns the
@@ -1446,6 +1451,42 @@ impl Kernel {
     /// Read-only media diagnostics.
     pub async fn media_check(&self) -> NativeResult<shrike_schemas::CollectionCheckResponse> {
         self.collection.run(move |core| core.media_check()).await?
+    }
+
+    /// Export the collection (or a scope of it) to an Anki package (#71).
+    ///
+    /// Read-only on the collection's data, but it holds the collection for the
+    /// whole package write — so it rides the collection task-actor (serializing
+    /// against other ops on this collection, exactly like a write; export is
+    /// exclusive by nature). The host has already gated `out_path` (the
+    /// path-safety check); the kernel trusts it and performs the anki export.
+    /// `out_path` extension picks the format isn't done here — the host passes
+    /// an explicit [`PackageFormat`] so the kernel never guesses.
+    pub async fn export_package(
+        &self,
+        out_path: String,
+        format: shrike_collection::PackageFormat,
+        scope: shrike_collection::ExportScope,
+        with_scheduling: bool,
+        with_media: bool,
+        legacy: bool,
+    ) -> NativeResult<shrike_schemas::ExportPackageResult> {
+        let req = shrike_collection::ExportRequest {
+            out_path,
+            format,
+            scope,
+            with_scheduling,
+            with_media,
+            legacy,
+        };
+        let outcome = self
+            .collection
+            .run(move |core| core.export_package(&req))
+            .await??;
+        Ok(shrike_schemas::ExportPackageResult {
+            note_count: outcome.note_count,
+            out_path: outcome.out_path,
+        })
     }
 
     /// The #89 prune with its maintenance tail (the host's old post-apply

@@ -19,6 +19,7 @@
 
 mod adapter;
 pub mod embed_text;
+mod export;
 mod media;
 mod note_types;
 mod read;
@@ -31,8 +32,8 @@ use shrike_ffi::{NativeError, NativeResult};
 // Canonical homes moved to the store contract (#389); re-exported so the
 // pre-trait import paths keep working.
 pub use shrike_store_api::{
-    Collection, CreateOutcome, DuplicatePolicy, OwnedFieldRow, PreparedMedia, PreparedMediaSource,
-    ServiceNote,
+    Collection, CreateOutcome, DuplicatePolicy, ExportOutcome, ExportRequest, ExportScope,
+    OwnedFieldRow, PackageFormat, PreparedMedia, PreparedMediaSource, ServiceNote,
 };
 
 /// Shrike's collection core, slice-1 vertical. One instance owns one open
@@ -260,7 +261,7 @@ impl CollectionCore {
 #[allow(clippy::use_self)]
 mod contract {
     use super::{CollectionCore, CreateOutcome, DuplicatePolicy, NativeResult};
-    use crate::{OwnedFieldRow, PreparedMedia, ServiceNote};
+    use crate::{ExportOutcome, ExportRequest, OwnedFieldRow, PreparedMedia, ServiceNote};
     use serde_json::Value;
     use shrike_schemas::{
         CollectionCheckResponse, CollectionInfo, CollectionPruneResponse, DeckInput,
@@ -569,6 +570,9 @@ mod contract {
                 unused_media,
                 dry_run,
             )
+        }
+        fn export_package(&self, request: &ExportRequest) -> NativeResult<ExportOutcome> {
+            Self::export_package(self, request)
         }
     }
 }
@@ -1768,6 +1772,29 @@ mod tests {
         core.media_check().unwrap();
         core.delete_media(&["drive.png".to_string()]).unwrap();
         core.prune(true, true, true, true, false).unwrap();
+
+        // Export (#71): a scoped .apkg (ExportAnkiPackage) and a whole-
+        // collection .colpkg (ExportCollectionPackage) — so both import_export
+        // method constants dispatch. The colpkg consumes+reopens the
+        // collection internally, so it goes last; the apkg leaves it open.
+        core.export_package(&ExportRequest {
+            out_path: dir.join("drive.apkg").to_str().unwrap().to_string(),
+            format: PackageFormat::Apkg,
+            scope: ExportScope::Whole,
+            with_scheduling: false,
+            with_media: true,
+            legacy: false,
+        })
+        .unwrap();
+        core.export_package(&ExportRequest {
+            out_path: dir.join("drive.colpkg").to_str().unwrap().to_string(),
+            format: PackageFormat::Colpkg,
+            scope: ExportScope::Whole,
+            with_scheduling: false,
+            with_media: true,
+            legacy: false,
+        })
+        .unwrap();
 
         core.delete_notes(&[id_a]).unwrap();
         core.close().unwrap();

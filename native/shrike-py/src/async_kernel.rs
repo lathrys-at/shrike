@@ -445,6 +445,58 @@ impl AsyncKernel {
         })
     }
 
+    /// Export the collection (or a scope of it) to an Anki package (#71).
+    /// `format` is "apkg" | "colpkg"; `scope_kind` is "whole" | "deck" |
+    /// "notes" (with `deck`/`note_ids` supplying the scope payload). The host
+    /// has already gated `out_path` (the path-safety check). Returns the
+    /// `ExportPackageResult` JSON (note_count + the on-disk path).
+    #[pyo3(signature = (out_path, format, scope_kind, deck=None, note_ids=None, with_scheduling=false, with_media=true, legacy=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn export_package<'py>(
+        &self,
+        py: Python<'py>,
+        out_path: String,
+        format: String,
+        scope_kind: String,
+        deck: Option<String>,
+        note_ids: Option<Vec<i64>>,
+        with_scheduling: bool,
+        with_media: bool,
+        legacy: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use shrike_kernel::{ExportScope, PackageFormat};
+        let format = match format.as_str() {
+            "apkg" => PackageFormat::Apkg,
+            "colpkg" => PackageFormat::Colpkg,
+            other => {
+                return Err(crate::to_py_err(shrike_ffi::NativeError::invalid_input(
+                    format!("format must be apkg/colpkg (got {other:?})"),
+                )))
+            }
+        };
+        let scope = match scope_kind.as_str() {
+            "whole" => ExportScope::Whole,
+            "deck" => ExportScope::Deck(deck.ok_or_else(|| {
+                crate::to_py_err(shrike_ffi::NativeError::invalid_input(
+                    "deck scope needs a deck reference",
+                ))
+            })?),
+            "notes" => ExportScope::Notes(note_ids.unwrap_or_default()),
+            other => {
+                return Err(crate::to_py_err(shrike_ffi::NativeError::invalid_input(
+                    format!("scope_kind must be whole/deck/notes (got {other:?})"),
+                )))
+            }
+        };
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let result = kernel
+                .export_package(out_path, format, scope, with_scheduling, with_media, legacy)
+                .await?;
+            crate::kernel_actions::wire(&result)
+        })
+    }
+
     // ── tag + deck ops (#391 re-home, long-tail group 2) ────────────────────
 
     /// Edit tags on a note set (`set_tags` full-replace XOR add/remove);

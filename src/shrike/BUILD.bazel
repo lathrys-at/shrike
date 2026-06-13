@@ -68,6 +68,16 @@ py_library(
     deps = [":pkg"],
 )
 
+# Shared server-local path-safety mechanism (#71): the capability-agnostic
+# helpers store_media (#164/#170), export (#71), and import (#72) all gate
+# through. Leaf — stdlib only.
+py_library(
+    name = "pathsafety",
+    srcs = ["pathsafety.py"],
+    imports = [".."],
+    deps = [":pkg"],
+)
+
 py_library(
     name = "cache_layout",
     srcs = ["cache_layout.py"],
@@ -322,6 +332,7 @@ py_library(
         ":harness",
         ":log",
         ":paths",
+        ":pathsafety",  # server-local path-safety helpers (#71)
         ":pkg",
         ":profiles",
         ":schemas",
@@ -384,6 +395,7 @@ py_library(
         ":index",
         ":log",
         ":paths",
+        ":pathsafety",
         ":pkg",
         ":profiles",
         ":recognition",

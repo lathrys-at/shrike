@@ -52,6 +52,7 @@ UNIONS: dict[str, str] = {
     "EmbeddingStartResponse": "status",
     "EmbeddingStopResponse": "status",
     "StopResponse": "stopped",
+    "ExportPackageResponse": "delivery",
 }
 
 # Pydantic models that are union *variants* (covered through their union's
@@ -105,6 +106,9 @@ VARIANT_OR_LOCAL = {
     "EmbeddingNotRunning",
     "StopSucceeded",
     "StopFailed",
+    # ExportPackageResponse (#71)
+    "ExportPackagePath",
+    "ExportPackageUrl",
 }
 
 
@@ -445,6 +449,28 @@ ROUNDTRIP_CASES: list[tuple[str, dict]] = [
     (
         "CollectionStatus",
         {"name": "<default>", "path": "/c.anki2", "registered": False},
+    ),
+    # Export to an Anki package (#71).
+    ("ExportPackageResult", {"note_count": 42, "out_path": "/tmp/deck.apkg"}),
+    (
+        "ExportPackageResponse",
+        {
+            "delivery": "path",
+            "note_count": 42,
+            "bytes": 10240,
+            "format": "apkg",
+            "path": "/exports/deck.apkg",
+        },
+    ),
+    (
+        "ExportPackageResponse",
+        {
+            "delivery": "url",
+            "note_count": 7,
+            "bytes": 2048,
+            "format": "colpkg",
+            "url": "http://127.0.0.1:8372/export/abc123",
+        },
     ),
 ]
 

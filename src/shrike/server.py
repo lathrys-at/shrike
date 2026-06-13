@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import contextlib
 import functools
-import ipaddress
 import logging
 import os
 import signal
@@ -42,6 +41,11 @@ from shrike.harness import CollectionManager, Harness, HarnessParams, KernelConf
 # unchanged.
 from shrike.log import configure_logging
 from shrike.paths import cache_dir, state_dir
+from shrike.pathsafety import (
+    is_loopback,
+    server_is_purely_local,
+    validate_path_root,
+)
 from shrike.schemas import WIRE_PROTOCOL_VERSION, ActionError, ActionErrorCode
 from shrike.tools import ToolInputError, register_tools
 
@@ -111,16 +115,6 @@ def _positive_int(raw: str) -> int:
     return value
 
 
-def _is_loopback(host: str) -> bool:
-    """True if *host* names the loopback interface (so binding is browser-safe)."""
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host.strip("[]")).is_loopback
-    except ValueError:
-        return False
-
-
 def _build_transport_security(
     host: str,
     *,
@@ -177,47 +171,14 @@ def _build_transport_security(
     )
 
 
-def _server_is_purely_local(
-    host: str,
-    *,
-    allow_remote: bool,
-    no_dns_rebinding_protection: bool,
-    allowed_hosts: list[str] | None,
-    allowed_origins: list[str] | None,
-) -> bool:
-    """Whether the server is in its default, purely-local configuration (#164).
-
-    Gates the server-local ``path`` input to ``store_media``: only when the bind
-    is loopback, ``--allow-remote`` is off, the DNS-rebinding guard is on, and no
-    extra ``--allowed-host``/``--allowed-origin`` was added. Any of those signals
-    possible remote traffic — and crucially, behind a same-host reverse proxy /
-    tailnet (``--no-dns-rebinding-protection`` or an added allow-list) the loopback
-    peer is the proxy, not the real (remote) client — so server-local file reads
-    must stay disabled there.
-    """
-    return (
-        _is_loopback(host)
-        and not allow_remote
-        and not no_dns_rebinding_protection
-        and not allowed_hosts
-        and not allowed_origins
-    )
-
-
-def _validate_media_path_root(raw: str) -> str:
-    """Canonicalize and validate ``--media-path-root`` at startup (#170), or raise.
-
-    Returns the resolved absolute real path (symlinks collapsed) used for the
-    store_media containment check. Rejects the filesystem root (``dirname(p) == p``
-    is true for ``/``, a Windows drive root, etc. — confining to ``/`` is no
-    confinement) and a root that isn't an existing directory (so it can't 'refuse
-    everything' or spring into existence later)."""
-    resolved = os.path.realpath(os.path.expanduser(raw))
-    if os.path.dirname(resolved) == resolved:
-        raise ValueError(f"refusing the filesystem root '{resolved}' (confines nothing)")
-    if not os.path.isdir(resolved):
-        raise ValueError(f"'{raw}' is not an existing directory")
-    return resolved
+# The server-local path-safety mechanism is shared across capabilities
+# (store_media #164/#170, export #71, import #72) — the generic helpers live in
+# shrike.pathsafety. These module-level aliases keep the historical server.py
+# names that existing call sites and tests import; the per-capability *policy*
+# (which root list, which gate) stays at the call sites.
+_is_loopback = is_loopback
+_server_is_purely_local = server_is_purely_local
+_validate_media_path_root = validate_path_root
 
 
 def create_mcp(

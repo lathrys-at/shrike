@@ -1078,6 +1078,43 @@ pub struct ListProfilesResponse {
     pub default: Option<String>,
 }
 
+/// The kernel's export-op outcome (#71): the count of notes written and the
+/// on-disk path the package landed at. Internal wire — the kernel op returns
+/// this; the host action wraps it into [`ExportPackageResponse`] (adding the
+/// download `url` / `bytes`, which the kernel doesn't know about).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ExportPackageResult {
+    pub note_count: u32,
+    pub out_path: String,
+}
+
+/// The export tool's response (#71): the package the export produced, handed
+/// back as a server-local `path` (when the operator opted into a contained
+/// `output_path`) OR a downloadable `url` (the default — the server wrote a
+/// temp file; never base64, mirroring `fetch_media`). Discriminated on
+/// `delivery` so a client can't read a `path` that isn't there.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "delivery", rename_all = "snake_case")]
+pub enum ExportPackageResponse {
+    /// The server wrote the package to a contained server-local path; the
+    /// caller (sharing the disk) reads it there.
+    Path {
+        note_count: u32,
+        bytes: u64,
+        /// "apkg" or "colpkg".
+        format: String,
+        path: String,
+    },
+    /// The server wrote a temp package and serves it at `url` (GET it; the
+    /// temp file is reaped after download / on a TTL / at shutdown).
+    Url {
+        note_count: u32,
+        bytes: u64,
+        format: String,
+        url: String,
+    },
+}
+
 /// Discriminated on the bool `stopped` (string tags only in serde, so this is
 /// an untagged union whose variants self-select via the literal-bool types).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1279,6 +1316,8 @@ catalog![
     ("ActionError", ActionError),
     ("ProfileEntry", ProfileEntry),
     ("ListProfilesResponse", ListProfilesResponse),
+    ("ExportPackageResult", ExportPackageResult),
+    ("ExportPackageResponse", ExportPackageResponse),
 ];
 
 #[cfg(test)]

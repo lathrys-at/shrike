@@ -1257,3 +1257,45 @@ class ListProfilesResponse(BaseModel):
 
     profiles: list[ProfileEntry] = Field(default_factory=list)
     default: str | None = None
+
+
+# -- export to an Anki package (#71) -----------------------------------------
+# `export_package` writes a .apkg/.colpkg. The kernel op returns the
+# ExportPackageResult (note_count + the on-disk path it wrote); the host action
+# wraps it into ExportPackageResponse, adding `bytes`/`format` and — for the
+# default no-output_path case — a download `url` instead of a server-local
+# `path`. Both shapes are canonical in shrike-schemas; these mirror them (the
+# contract test pins the pair).
+class ExportPackageResult(BaseModel):
+    """The kernel export-op outcome: notes written + the path the package
+    landed at. Internal wire — the host action wraps it for the tool response."""
+
+    note_count: int
+    out_path: str
+
+
+# The tool response is a discriminated union on ``delivery`` (the house style:
+# make illegal states unrepresentable — a client never reads a ``path`` that
+# isn't there, or a ``url`` that wasn't produced). ``path`` when the operator
+# opted into a contained server-local ``output_path``; ``url`` (the default)
+# when the server wrote a temp package it serves over HTTP — never base64,
+# mirroring fetch_media's "GET the url for the bytes".
+class ExportPackagePath(BaseModel):
+    delivery: Literal["path"]
+    note_count: int
+    bytes: int
+    format: str  # "apkg" | "colpkg"
+    path: str
+
+
+class ExportPackageUrl(BaseModel):
+    delivery: Literal["url"]
+    note_count: int
+    bytes: int
+    format: str
+    url: str
+
+
+ExportPackageResponse = Annotated[
+    ExportPackagePath | ExportPackageUrl, Field(discriminator="delivery")
+]
