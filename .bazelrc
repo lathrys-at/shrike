@@ -14,16 +14,4 @@ test --test_output=errors
 # on a version change, since it lands in stable-status.txt.
 build --workspace_status_command=tools/workspace_status.sh
 
-# Auto-apply the host-OS config below (build:linux on linux, etc.).
-common --enable_platform_specific_config
-
-# #417: on aarch64-linux, cxx's C++ object (cxx_cc, via usearch) references
-# GCC's outline-atomics helpers (__aarch64_ldadd4_acq_rel, …), which live in
-# the STATIC libgcc.a — and the rustc-driven link (-nodefaultlibs + -lgcc_s,
-# the shared lib only) never supplies them, so every target linking cxx fails
-# on the arm lane. Appending -lgcc resolves them; trailing position is right
-# for a static archive, and on linux x64 it's inert (no outline atomics).
-# rules_rust forwards --linkopt into rustc links as --codegen=link-arg.
-build:linux --linkopt=-lgcc
-
 try-import %workspace%/.bazelrc.user

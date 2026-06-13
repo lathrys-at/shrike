@@ -102,6 +102,20 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = ["//native/patches:usearch-bazel-cxxbridge-symlink.patch"],
 )
+# cxx's C++ object (cxx_cc) needs GCC's STATIC libgcc.a on aarch64-linux (the
+# outline-atomics helpers, #417); the shim dep appends a linux-only -lgcc to
+# the link AFTER -lcxx_cc — gold resolves archives left to right, so position
+# is the whole fix (a global --linkopt lands too early and resolves nothing).
+crate.annotation(
+    crate = "cxx",
+    # REPLACES the metadata-supplied deps, so :cxx_cc (the crate's own C++
+    # runtime, normally injected by its [package.metadata.bazel]) must be
+    # restated alongside the shim.
+    deps = [
+        ":cxx_cc",
+        "@@//native/patches:libgcc_shim",
+    ],
+)
 # The anki tree under Bazel (#278 cutover): both anki build scripts run off
 # the CHECKED-IN pinned protobuf descriptor set (//native/third_party/anki,
 # refreshed by scripts/update-anki-descriptors.sh on tag bumps, tripwire-tested
