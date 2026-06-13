@@ -75,6 +75,16 @@ py_library(
     deps = [":pkg"],
 )
 
+# The collection/profile registry (#66): a name -> collection-path mapping
+# persisted in config.yml. Leaf — stdlib only. Distinct from :profiles (the
+# capability/build profiles); they share the word, nothing else.
+py_library(
+    name = "registry",
+    srcs = ["registry.py"],
+    imports = [".."],
+    deps = [":pkg"],
+)
+
 py_library(
     name = "embed_text",
     srcs = ["embed_text.py"],
@@ -272,6 +282,7 @@ py_library(
         ":paths",
         ":pkg",
         ":profiles",
+        ":registry",  # config.py lazily writes the profiles: section via the registry model
         ":schemas",
         "//native/shrike-py:shrike_native",
         requirement("click"),
@@ -327,6 +338,7 @@ py_library(
         ":log",
         ":pkg",
         ":profiles",
+        ":registry",  # cli/profile_cmd.py
         ":schemas",
         ":server",
         requirement("click"),
@@ -360,6 +372,7 @@ py_library(
         ":pkg",
         ":profiles",
         ":recognition",
+        ":registry",
         ":schemas",
         ":search_fusion",
         ":server",

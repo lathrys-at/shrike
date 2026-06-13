@@ -66,6 +66,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "save_delay": None,
         "save_threshold": None,
     },
+    # The collection/profile registry (#66): a name -> collection-path mapping
+    # (any .anki2 path), plus the active-default name. ``entries`` is an ordered
+    # list; ``default`` names one of them (or is None). Empty by default; the
+    # ``shrike profile`` commands manage it. See shrike.registry.
+    "profiles": {
+        "entries": [],
+        "default": None,
+    },
     "logging": {
         "dir": str(_default_log_dir()),
         "level": "info",
@@ -161,6 +169,16 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
     idx_out = {k: idx[k] for k in ("save_delay", "save_threshold") if idx.get(k) is not None}
     if idx_out:
         output["index"] = idx_out
+
+    # The collection/profile registry (#66): persisted only when non-empty, via
+    # the registry model so the on-disk shape stays the single round-trip
+    # contract (ordered entries + the active-default name; optional per-profile
+    # fields emitted only when set).
+    from shrike.registry import Registry
+
+    profiles_out = Registry.from_config(config).to_config_section()
+    if profiles_out:
+        output["profiles"] = profiles_out
 
     # The v2 capability sections (#498) pass through verbatim — structured,
     # user-managed config; --save-config must never drop or rewrite them.
@@ -683,12 +701,16 @@ def _deep_copy_defaults() -> dict[str, Any]:
     embedding_defaults = dict(DEFAULT_CONFIG["embedding"])  # type: ignore[arg-type]
     # Fresh list so a caller mutating extra_args can't poison the module default.
     embedding_defaults["extra_args"] = list(embedding_defaults.get("extra_args", []))
+    profiles_defaults = dict(DEFAULT_CONFIG["profiles"])  # type: ignore[arg-type]
+    # Fresh list so a loaded registry's entries can't poison the module default.
+    profiles_defaults["entries"] = list(profiles_defaults.get("entries", []))
     return {
         "collection": DEFAULT_CONFIG["collection"],
         "cache_dir": DEFAULT_CONFIG["cache_dir"],
         "server": dict(DEFAULT_CONFIG["server"]),  # type: ignore[arg-type]
         "embedding": embedding_defaults,
         "index": dict(DEFAULT_CONFIG["index"]),  # type: ignore[arg-type]
+        "profiles": profiles_defaults,
         "logging": logging_defaults,
     }
 

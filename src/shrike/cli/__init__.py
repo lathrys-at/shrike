@@ -26,6 +26,7 @@ _LAZY_COMMANDS: dict[str, str] = {
     "info": "shrike.cli.info_cmd:info",
     "media": "shrike.cli.media_cmd:media",
     "note": "shrike.cli.note_cmd:note",
+    "profile": "shrike.cli.profile_cmd:profile",
     "server": "shrike.cli.server_cmd:server",
     "tag": "shrike.cli.tag_cmd:tag",
     "type": "shrike.cli.type_cmd:type_group",
