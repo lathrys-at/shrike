@@ -521,6 +521,41 @@ use shrike_store_api::{DerivedStore, VectorIndex};
 /// One source's per-modality semantic rankings (`search_by_modality`'s row).
 type ModalityHits = std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>;
 
+/// One SECONDARY embedding space's already-embedded + already-searched semantic
+/// results, fed into cross-space fusion (#234). The PRIMARY text space's hits
+/// ride the existing `vectors`/`index` path (unchanged, host-supplied); each
+/// secondary text-capable space embeds the query with ITS OWN model and
+/// searches ITS OWN engine at the kernel level, then hands the per-source rows
+/// here as data — so `search_notes` stays the pure fusion assembly and never
+/// holds N engines.
+///
+/// Empty `cross_space` (the N=1 / single-space case) → the rankings vector fed
+/// to `rrf_fuse` is EXACTLY the per-modality set today, so the fused output is
+/// byte-identical.
+#[derive(Debug, Clone)]
+pub struct SpaceSemantic {
+    /// The space's CONTENT fingerprint — surfaced in per-space provenance
+    /// (#182) only when N≥2 (vacuous/absent at N=1).
+    pub space_key: String,
+    /// One entry per search source, in `sources` order.
+    pub per_source: Vec<SpaceSourceHits>,
+}
+
+/// One secondary space's per-source search result: its per-modality hits plus
+/// the raw best query→match cosine the RELATIVE activation gate (#234) reads
+/// BEFORE RRF strips magnitude.
+#[derive(Debug, Clone, Default)]
+pub struct SpaceSourceHits {
+    /// This space's `search_by_modality` row for the source (its own engine,
+    /// its own query embedding).
+    pub modality_hits: ModalityHits,
+    /// The space's best query→match cosine for this source (`1 - rank-1
+    /// distance`, over the NOTE-item modalities). `None` = the space returned
+    /// no hits. The relative gate fires this space only when this clears the
+    /// PRIMARY text space's best query cosine for the same source.
+    pub best_query_cosine: Option<f64>,
+}
+
 /// Anki search-language specials, escaped for the `"*text*"` wildcard
 /// pre-filter (mirrors `collection._escape_anki_text`).
 fn escape_anki_text(text: &str) -> String {
@@ -633,6 +668,19 @@ pub struct SearchArgs {
     /// stored for provenance + reconcile but never surfaced on a lexical
     /// query. EMPTY (the default) = nothing hidden, the pre-#485 behaviour.
     pub hidden_lexical_sources: Vec<String>,
+    /// SECONDARY embedding spaces' semantic results for cross-space fusion
+    /// (#234), one per space, each already embedded + searched at the kernel
+    /// level. EMPTY (the default) is the N=1 / single-space case — the rankings
+    /// fed to `rrf_fuse` are then EXACTLY today's per-modality set, so the fused
+    /// output is byte-identical. Non-empty appends each space's gated `image`
+    /// ranking (the relative activation gate, below).
+    pub cross_space: Vec<SpaceSemantic>,
+    /// Disable the cross-space relative activation gate (#234) — the NEGATIVE
+    /// CONTROL only. `false` (the default) keeps the mandatory gate on; `true`
+    /// fires every secondary space's image ranking ungated, which the eval
+    /// showed floods text queries and regresses text recall (the load-bearing
+    /// 0.08-vs-1.00 separation a test pins). Never set in production.
+    pub disable_cross_space_gate: bool,
 }
 
 /// Insertion-ordered candidate cache: Python dict iteration order is part of
@@ -707,6 +755,33 @@ fn read_notes_batch(
             HashMap::new()
         }
     }
+}
+
+/// The fusion signal name for a SECONDARY vision space's image ranking (#234):
+/// `image#<space-key>`. Distinct per space so provenance identifies which
+/// vision space surfaced a note and each space fuses as its own RRF signal
+/// (the canonical `search_weights` has no entry → `rrf_fuse` defaults its weight
+/// to 1.0, the eval's equal weighting). Never collides with the primary's plain
+/// `image` signal, so N=1 (no secondary) emits exactly today's signal set.
+pub fn cross_space_signal(space_key: &str) -> String {
+    format!("image#{space_key}")
+}
+
+/// The best (highest) query→match cosine across a space's NOTE-item modalities
+/// for one source — `1 - rank-1 distance`, maxed over `text`/`image` (#234). The
+/// relative cross-space activation gate compares a vision space's value to the
+/// dedicated text space's value for the same query. `None` when the space
+/// returned no note-item hits. The rank-1 distance is the smallest (the engine
+/// returns distance-ascending), so this reads `[0]`.
+///
+/// Public so the kernel's cross-space fan-out captures each SECONDARY space's
+/// value as it searches (the gate input rides into `SpaceSourceHits`).
+pub fn best_query_cosine_of(hits: &std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>) -> Option<f64> {
+    crate::NOTE_MODALITIES
+        .iter()
+        .filter_map(|m| hits.get(*m).and_then(|(_, dists)| dists.first()))
+        .map(|d| 1.0 - f64::from(*d))
+        .fold(None, |acc, c| Some(acc.map_or(c, |a: f64| a.max(c))))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1124,13 +1199,83 @@ pub fn search_notes(
             fuzzy_evidence.retain(|nid, _| !exact_set.contains(nid));
         }
 
-        let rankings: Vec<(String, Vec<i64>)> = vec![
+        let mut rankings: Vec<(String, Vec<i64>)> = vec![
             ("text".into(), ranking_text),
             ("image".into(), ranking_image),
             ("tag".into(), ranking_tag),
             ("exact".into(), exact_ids),
             ("fuzzy".into(), ranking_fuzzy),
         ];
+
+        // ── Cross-space fusion (#234) ────────────────────────────────────────
+        // Each SECONDARY text-capable space contributes its own gated `image`
+        // ranking. EMPTY cross_space (N=1) → this whole block is a no-op and the
+        // rankings vector above is byte-identical to today, so `rrf_fuse` gets
+        // identical inputs. The relative activation gate (the eval's mandatory
+        // finding) fires a vision space ONLY when its best query→match cosine
+        // clears the PRIMARY text space's best for this same source.
+        if !args.cross_space.is_empty() {
+            // The primary text space's best query cosine (the gate's reference).
+            // The primary's hits are `modality_hits` (this source's row).
+            let primary_best = best_query_cosine_of(modality_hits);
+            for space in &args.cross_space {
+                let Some(shits) = space.per_source.get(i) else {
+                    continue;
+                };
+                // The relative gate (default): the vision space fires only when
+                // its best query cosine ≥ the primary text space's. With the
+                // gate disabled (the negative control), every space fires.
+                let gate_open = args.disable_cross_space_gate
+                    || match (shits.best_query_cosine, primary_best) {
+                        (Some(v), Some(p)) => v >= p,
+                        // No primary text reference → nothing to gate against;
+                        // admit the space (degenerate, lexical-only primary).
+                        (Some(_), None) => true,
+                        // The space itself returned no hits → nothing to add.
+                        (None, _) => false,
+                    };
+                if !gate_open {
+                    continue;
+                }
+                let (sk, sd) = shits
+                    .modality_hits
+                    .get("image")
+                    .map(|(k, d)| (k.as_slice(), d.as_slice()))
+                    .unwrap_or((&[], &[]));
+                if sk.is_empty() {
+                    continue;
+                }
+                let mut space_score: HashMap<i64, f64> = HashMap::new();
+                let ranking_space_image = rank_modality(
+                    core,
+                    sk,
+                    sd,
+                    &mut note_data,
+                    &mut space_score,
+                    &exclude,
+                    args,
+                    false,
+                );
+                if ranking_space_image.is_empty() {
+                    continue;
+                }
+                // Fold the space's image cosines into the displayed semantic
+                // `score` (max-over-items, exactly like the primary image).
+                for (nid, isim) in &space_score {
+                    let entry = sem_score.entry(*nid).or_insert(*isim);
+                    if *isim > *entry {
+                        *entry = *isim;
+                    }
+                }
+                // A DISTINCT signal name per space so provenance (#182)
+                // identifies which vision space surfaced the note, and each
+                // space fuses as its own RRF signal (weight defaults to 1.0 —
+                // the eval's equal weighting). `image#<key>` reads as "the image
+                // modality of space <key>".
+                rankings.push((cross_space_signal(&space.space_key), ranking_space_image));
+            }
+        }
+
         // Host-supplied weights override; empty means the kernel's canonical
         // set (#388 — the one source of truth in `fusion`).
         let weights = if args.weights.is_empty() {

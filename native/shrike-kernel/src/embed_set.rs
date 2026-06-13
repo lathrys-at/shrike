@@ -141,6 +141,22 @@ impl EmbedSpaces {
             .collect()
     }
 
+    /// The SECONDARY text-capable spaces — every text-capable space AFTER the
+    /// primary (the first text-capable one) — as `(key, service)` pairs (#234).
+    /// The cross-space query fan-out embeds the query into each of these and
+    /// searches its own index space (matched by `key`); the primary rides the
+    /// existing single-engine path. A space with no key (`None`) is skipped — it
+    /// has no keyed index space to pair with, so it can't contribute a
+    /// cross-space ranking. EMPTY in the N=1 case → no cross-space fan-out.
+    pub fn secondary_text_capable_keyed(&self) -> Vec<(String, Arc<EmbedService>)> {
+        self.spaces
+            .iter()
+            .filter(|s| s.text_capable())
+            .skip(1) // the first text-capable space is the primary
+            .filter_map(|s| s.key.clone().map(|k| (k, Arc::clone(&s.service))))
+            .collect()
+    }
+
     /// The number of attached spaces.
     pub fn len(&self) -> usize {
         self.spaces.len()

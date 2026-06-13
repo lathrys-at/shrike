@@ -778,6 +778,64 @@ impl Kernel {
         self.embed.read().expect("embed slot poisoned").services()
     }
 
+    /// The SECONDARY text-capable embedding spaces as `(key, service)` pairs
+    /// (#234) — the cross-space query fan-out embeds the query into each and
+    /// searches its own index space. EMPTY in the N=1 / single-space case.
+    pub fn secondary_embed_spaces(&self) -> Vec<(String, Arc<EmbedService>)> {
+        self.embed
+            .read()
+            .expect("embed slot poisoned")
+            .secondary_text_capable_keyed()
+    }
+
+    /// Embed `source_texts` into every SECONDARY text-capable space and search
+    /// each space's own index engine, producing the cross-space semantic inputs
+    /// `actions::search_notes` fuses (#234). Each secondary space embeds the
+    /// query with ITS OWN model and searches ITS OWN engine (`search_by_modality`
+    /// over the note-item modalities), and the per-source best query cosine is
+    /// captured for the relative activation gate. EMPTY when there are no
+    /// secondary spaces (the N=1 case) — the caller then runs exactly today's
+    /// single-space path. `fetch_k` is the per-space rank cap.
+    pub async fn build_cross_space(
+        &self,
+        source_texts: &[String],
+        fetch_k: usize,
+    ) -> NativeResult<Vec<actions::SpaceSemantic>> {
+        let secondaries = self.secondary_embed_spaces();
+        if secondaries.is_empty() || source_texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let note_spaces: Vec<String> = NOTE_MODALITIES.iter().map(|m| m.to_string()).collect();
+        let mut out: Vec<actions::SpaceSemantic> = Vec::new();
+        for (key, svc) in secondaries {
+            // The space must have a materialized index engine (bound at attach).
+            let Some(orch) = self.index_set.orchestrator_for(&key) else {
+                continue;
+            };
+            // Embed every source with THIS space's model, then rank per modality
+            // on THIS space's engine.
+            let qvectors = svc.embedder.embed(source_texts.to_vec()).await?;
+            let engine = orch.engine_arc();
+            let rows =
+                engine.search_by_modality(&qvectors, fetch_k, Some(&note_spaces))?;
+            let per_source: Vec<actions::SpaceSourceHits> = rows
+                .into_iter()
+                .map(|modality_hits| {
+                    let best_query_cosine = actions::best_query_cosine_of(&modality_hits);
+                    actions::SpaceSourceHits {
+                        modality_hits,
+                        best_query_cosine,
+                    }
+                })
+                .collect();
+            out.push(actions::SpaceSemantic {
+                space_key: key,
+                per_source,
+            });
+        }
+        Ok(out)
+    }
+
     /// The PRIMARY orchestrator (state, status, drift) — the harness's status
     /// surface and the one engine the index/search paths consume this PR
     /// (#232). With one declared embedder it is the sole space at the base dir,
@@ -2009,20 +2067,34 @@ impl Kernel {
                 text: query.to_string(),
                 is_query: true,
             }];
-            // PR-B: search consumes the PRIMARY space's engine (the cross-space
-            // fusion is PR-C). A pure field-access swap — byte-identical for
-            // N=1, and the search/fusion LOGIC is untouched.
+            // The PRIMARY space's engine carries the host-supplied query
+            // vectors + the lexical/tag signals; cross-space fusion (#234) adds
+            // each SECONDARY text-capable space's gated image ranking. With one
+            // space `cross_space` is empty → byte-identical to the single-space
+            // path. `index_size` sums across every space (#234).
             let primary = self.index_set.primary();
+            let cross_space = if semantic {
+                self.build_cross_space(&[query.to_string()], top_k).await?
+            } else {
+                Vec::new()
+            };
+            let index_size: usize = self
+                .index_set
+                .all_orchestrators()
+                .iter()
+                .map(|o| o.engine().size())
+                .sum();
             let args = actions::SearchArgs {
                 top_k,
                 threshold: 0.0,
                 weights: BTreeMap::new(), // empty = the canonical fusion set
                 semantic,
-                index_size: primary.engine().size(),
+                index_size,
                 hidden_lexical_sources: Self::hidden_lexical_sources()
                     .into_iter()
                     .map(str::to_string)
                     .collect(),
+                cross_space,
                 ..Default::default()
             };
             let engine = primary.engine_arc();
