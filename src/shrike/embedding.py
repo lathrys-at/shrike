@@ -143,8 +143,14 @@ class LlamaServerBackend:
         self._remote = shrike_native.RemoteEmbedder(self._base_url, model=self._model_name)
 
         # An image entry must have actually loaded a vision mmproj (#501) —
-        # fail fast at boot, not at the first image embed in a sweep.
+        # fail fast at boot, not at the first image embed in a sweep. Unlike
+        # the probe below (which degrades in place), this re-raises, so it must
+        # stop the spawned child first — a degraded boot has no future start()
+        # to reap the orphan, and it would hold its port + VRAM for the
+        # daemon's life otherwise.
         if IMAGE in self._modalities and not self._remote.vision_capable():
+            self._manager.stop()
+            self._remote = None
             raise RuntimeError(
                 "embedder declares image modality but the managed llama-server did not load "
                 "a vision projector — set managed.llama_server.mmprojs to the model's vision "
@@ -287,12 +293,22 @@ class LlamaServerBackend:
         if passthrough:
             base = f"{base}:args={' '.join(passthrough)}"
         # The mmproj set is vector-affecting (#501): a different projector
-        # produces different image vectors, so changing it must rebuild. By
-        # basename (sorted) — the projector identity, not its path; omitted
-        # when none, so a text-only index built before this matches unchanged.
+        # produces different image vectors, so changing it must rebuild. The
+        # text model's `/v1/models` meta says nothing about the projector, so
+        # this is the only thing distinguishing two omni configs on the same
+        # text model. Folded as name:size (sorted) — size disambiguates two
+        # different projectors sharing a basename, matching the `file:`
+        # fallback's convention. Omitted when none, so a text-only index built
+        # before this matches unchanged.
         if self._mmprojs:
-            names = " ".join(sorted(Path(p).name for p in self._mmprojs))
-            base = f"{base}:mmproj={names}"
+            parts = []
+            for p in self._mmprojs:
+                try:
+                    size = Path(p).stat().st_size
+                except OSError:
+                    size = -1
+                parts.append(f"{Path(p).name}:{size}")
+            base = f"{base}:mmproj={' '.join(sorted(parts))}"
         return f"{base}:textprep={EMBED_TEXT_VERSION}"
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
