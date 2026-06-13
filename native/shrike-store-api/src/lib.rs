@@ -23,7 +23,8 @@ mod collection;
 
 pub use collection::{
     Collection, CreateOutcome, DuplicatePolicy, ExportOutcome, ExportRequest, ExportScope,
-    OwnedFieldRow, PackageFormat, PreparedMedia, PreparedMediaSource, ServiceNote,
+    ImportOptions, ImportSummary, ImportUpdateCondition, OwnedFieldRow, PackageFormat,
+    PreparedMedia, PreparedMediaSource, ServiceNote,
 };
 
 use shrike_ffi::NativeResult;

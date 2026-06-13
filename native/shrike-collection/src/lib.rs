@@ -33,7 +33,8 @@ use shrike_ffi::{NativeError, NativeResult};
 // pre-trait import paths keep working.
 pub use shrike_store_api::{
     Collection, CreateOutcome, DuplicatePolicy, ExportOutcome, ExportRequest, ExportScope,
-    OwnedFieldRow, PackageFormat, PreparedMedia, PreparedMediaSource, ServiceNote,
+    ImportOptions, ImportSummary, ImportUpdateCondition, OwnedFieldRow, PackageFormat,
+    PreparedMedia, PreparedMediaSource, ServiceNote,
 };
 
 /// Shrike's collection core, slice-1 vertical. One instance owns one open
@@ -409,6 +410,13 @@ mod contract {
             dry_run: bool,
         ) -> NativeResult<Vec<UpsertNoteResult>> {
             Self::upsert_notes(self, notes, policy, dry_run)
+        }
+        fn import_package(
+            &self,
+            package_path: &str,
+            options: shrike_store_api::ImportOptions,
+        ) -> NativeResult<shrike_store_api::ImportSummary> {
+            Self::import_package(self, package_path, options)
         }
         fn find_replace_notes(
             &self,
@@ -1907,7 +1915,7 @@ mod tests {
         core.prune(true, true, true, true, false).unwrap();
 
         // Export (#71): a scoped .apkg (ExportAnkiPackage) and a whole-
-        // collection .colpkg (ExportCollectionPackage) — so both import_export
+        // collection .colpkg (ExportCollectionPackage) — so both export
         // method constants dispatch. The colpkg consumes+reopens the
         // collection internally, so it goes last; the apkg leaves it open.
         core.export_package(&ExportRequest {
@@ -1919,6 +1927,17 @@ mod tests {
             legacy: false,
         })
         .unwrap();
+        // Import (#72): dispatch the import RPC so its method constant is
+        // covered. A nonexistent package errors AFTER the dispatch is recorded
+        // (record_dispatch precedes run_service_method in `call`), so the
+        // tripwire is satisfied; real import correctness is covered end-to-end
+        // by the Python native drift test (which builds a real .apkg fixture
+        // via the anki test oracle). Runs while the collection is open (the
+        // apkg export above left it open; the colpkg below consumes it last).
+        let _ = core.import_package(
+            "/nonexistent-shrike-import-tripwire.apkg",
+            shrike_store_api::ImportOptions::default(),
+        );
         core.export_package(&ExportRequest {
             out_path: dir.join("drive.colpkg").to_str().unwrap().to_string(),
             format: PackageFormat::Colpkg,

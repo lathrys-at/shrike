@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 
-use shrike_collection::{CreateOutcome, DuplicatePolicy};
+use shrike_collection::{CreateOutcome, DuplicatePolicy, ImportOptions, ImportUpdateCondition};
 use shrike_ffi::NativeResult;
 use shrike_kernel::{Kernel, NoteSpec, SerializedCollection};
 
@@ -326,6 +326,36 @@ impl AsyncKernel {
     ) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
         kernel_op(py, async move { kernel.forget_notes(note_ids).await })
+    }
+
+    /// Import an .apkg/.colpkg (#72) — awaitable. MUTATES the collection and
+    /// reconciles the index (the drift tail is kernel-side). The conflict
+    /// conditions arrive as strings (`if_newer`/`always`/`never`); returns
+    /// `(summary_json, reindexed)` — the per-bucket counts JSON and whether the
+    /// index reconciled. The derived-store rebuild is the harness's follow-up.
+    #[pyo3(signature = (
+        package_path, update_notes, update_notetypes, with_scheduling, merge_notetypes
+    ))]
+    fn import_package<'py>(
+        &self,
+        py: Python<'py>,
+        package_path: String,
+        update_notes: String,
+        update_notetypes: String,
+        with_scheduling: bool,
+        merge_notetypes: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = ImportOptions {
+            update_notes: ImportUpdateCondition::parse(&update_notes).map_err(crate::to_py_err)?,
+            update_notetypes: ImportUpdateCondition::parse(&update_notetypes)
+                .map_err(crate::to_py_err)?,
+            with_scheduling,
+            merge_notetypes,
+        };
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            kernel.import_package(package_path, options).await
+        })
     }
 
     /// Advance the watermarks after a metadata-only change (tags/decks/
