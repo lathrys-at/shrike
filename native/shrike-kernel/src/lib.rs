@@ -251,8 +251,14 @@ pub struct Kernel {
     /// Arc so the tag refresher's background task can read through the
     /// actor without holding the kernel itself (#445).
     collection: Arc<SerializedCollection>,
-    orchestrator: Arc<index_orchestrator::IndexOrchestrator>,
-    saver: Arc<index_orchestrator::DebouncedSaver>,
+    /// The N-space index coordinator (#232): one orchestrator+saver per
+    /// embedding space, keyed by content fingerprint. The PRIMARY space lives
+    /// at the base index dir directly (the in-place migration rule), so a
+    /// single-space deployment is byte-identical to the pre-#232 single
+    /// orchestrator. The index/search paths consume [`IndexSet::primary`] this
+    /// PR; removal + the watermark advance fan out to every space (#232's data
+    /// layer; the search fan-out is PR-C).
+    index_set: Arc<index_set::IndexSet>,
     derived: Arc<dyn DerivedStore>,
     /// The attachable embedding spaces (#342's first registry slot, an ordered
     /// SET since #233): swappable at runtime — the harness attaches on
@@ -470,31 +476,44 @@ impl Kernel {
             .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
         std::fs::create_dir_all(&index_layout.dir)
             .map_err(|e| NativeError::internal(format!("index dir: {e}")))?;
-        let orchestrator = Arc::new(index_orchestrator::IndexOrchestrator::open_owned(
+        // The N-space index coordinator (#232): the PRIMARY space is the engine
+        // built/injected above, opened at the base index dir DIRECTLY (no
+        // subdir → the in-place migration rule, byte-identical to pre-#232).
+        // Its modalities are the engine's own (NOTE_MODALITIES + tag.text for an
+        // opened kernel; the injected engine's for the compose seam). Secondary
+        // spaces are built by the factory over their own modalities.
+        let primary_modalities = engine.modality_names();
+        let engine_factory: index_set::EngineFactory = Arc::new(|mods: &[String]| {
+            let e: Arc<dyn VectorIndex> = Arc::new(MultiModalIndex::new(mods.to_vec())?);
+            Ok(e)
+        });
+        let index_set = index_set::IndexSet::open(
             index_layout.dir,
-            engine,
             index_layout.owner,
-        ));
-        let saver = index_orchestrator::DebouncedSaver::new(
-            Arc::clone(&orchestrator),
+            engine,
+            primary_modalities,
             save_delay.unwrap_or(index_orchestrator::DEFAULT_SAVE_DELAY),
             save_threshold.unwrap_or(index_orchestrator::DEFAULT_SAVE_THRESHOLD),
-        );
+            engine_factory,
+        )?;
         let embed: Arc<RwLock<EmbedSpaces>> = Arc::new(RwLock::new(EmbedSpaces::default()));
         let tag_keys = Arc::new(tag_centroids::TagKeyMap::default());
         let tag_config = tag_centroids::TagCentroidConfig::default();
+        // Tag centroids bind to the PRIMARY/dedicated text space's engine +
+        // saver (#232): a pure function of THAT space's text vectors, never
+        // fanned out. The primary's engine/saver Arcs are fixed for the kernel's
+        // life (only secondaries are ever added), so these stay valid.
         let tag_refresh = tag_centroids::TagRefresher::new(
             Arc::clone(&collection),
-            orchestrator.engine_arc(),
+            index_set.tag_engine(),
             Arc::clone(&tag_keys),
             tag_config.clone(),
-            Arc::clone(&saver),
+            index_set.primary_saver(),
             Arc::clone(&embed),
         );
         Ok(Self {
             collection,
-            orchestrator,
-            saver,
+            index_set,
             derived,
             embed,
             tag_keys,
@@ -636,14 +655,18 @@ impl Kernel {
                 Ok((rows, total))
             })
             .await??;
+        // Tag centroids are a pure function of the PRIMARY text space's vectors
+        // (#232) — recompute against its engine, request its saver (tag.text
+        // lives only in the primary; never fanned out).
+        let tag_engine = self.index_set.tag_engine();
         let built = tag_centroids::recompute(
-            self.orchestrator.engine(),
+            &*tag_engine,
             &rows,
             total,
             &self.tag_config,
             &self.tag_keys,
         )?;
-        self.saver.request_save();
+        self.index_set.primary_saver().request_save();
         Ok(built)
     }
 
@@ -684,11 +707,28 @@ impl Kernel {
         embedder: Arc<dyn Embedder>,
         images: Option<KernelImages>,
     ) {
+        let has_images = images.is_some();
         self.embed
             .write()
             .expect("embed slot poisoned")
-            .attach(key, Arc::new(EmbedService { embedder, images }));
-        self.orchestrator.mark_ready_if_loaded();
+            .attach(key.clone(), Arc::new(EmbedService { embedder, images }));
+        // Lockstep with the index set (#232): bind this embedding space's key to
+        // an index space. The FIRST keyed attach claims the un-keyed PRIMARY
+        // index space (no new dir → in-place migration); a NEW key materializes
+        // a secondary orchestrator. A keyless backend (`None`) leaves the index
+        // set on the primary (the degenerate single-space path). The index/
+        // search path still consumes the primary this PR.
+        if let Some(key) = key.as_deref() {
+            let modalities: Vec<String> = if has_images {
+                NOTE_MODALITIES.iter().map(|m| m.to_string()).collect()
+            } else {
+                vec![NOTE_MODALITIES[0].to_string()]
+            };
+            if let Err(e) = self.index_set.bind_space(key, &modalities) {
+                tracing::warn!(error = ?e, %key, "binding index space failed; serving on the primary");
+            }
+        }
+        self.index_set.primary().mark_ready_if_loaded();
     }
 
     /// Detach EVERY embedding space (embedding stop) — the N=1 convenience.
@@ -696,8 +736,12 @@ impl Kernel {
     /// The collection and the lexical search surfaces stay fully live.
     pub fn detach_embedder(&self) {
         self.embed.write().expect("embed slot poisoned").clear();
-        let _ = self.orchestrator.save();
-        self.orchestrator.mark_unavailable();
+        // Flush every space's index, then mark the primary (the served index)
+        // unavailable (#232). Secondary on-disk vectors are likewise kept.
+        for orch in self.index_set.all_orchestrators() {
+            let _ = orch.save();
+        }
+        self.index_set.primary().mark_unavailable();
     }
 
     /// Detach a single embedding space by key (#233). Flushes + marks the
@@ -711,8 +755,10 @@ impl Kernel {
             (removed, spaces.is_empty())
         };
         if now_empty {
-            let _ = self.orchestrator.save();
-            self.orchestrator.mark_unavailable();
+            for orch in self.index_set.all_orchestrators() {
+                let _ = orch.save();
+            }
+            self.index_set.primary().mark_unavailable();
         }
         removed
     }
@@ -737,9 +783,18 @@ impl Kernel {
         self.embed.read().expect("embed slot poisoned").services()
     }
 
-    /// The orchestrator (state, status, drift) — the harness's status surface.
-    pub fn index(&self) -> &index_orchestrator::IndexOrchestrator {
-        &self.orchestrator
+    /// The PRIMARY orchestrator (state, status, drift) — the harness's status
+    /// surface and the one engine the index/search paths consume this PR
+    /// (#232). With one declared embedder it is the sole space at the base dir,
+    /// so the wire status + persistence are byte-identical to pre-#232.
+    pub fn index(&self) -> Arc<index_orchestrator::IndexOrchestrator> {
+        self.index_set.primary()
+    }
+
+    /// The N-space index coordinator (#232) — removal + the watermark advance
+    /// fan out across it; the search fan-out is PR-C.
+    pub fn index_set(&self) -> &index_set::IndexSet {
+        &self.index_set
     }
 
     /// The serialized collection — the harness's seam for sharing the core
@@ -759,12 +814,14 @@ impl Kernel {
         let Some(svc) = self.embed_service() else {
             return Ok(false); // no embedder → nothing to (re)index
         };
+        // PR-B: the index path consumes the PRIMARY space's orchestrator + the
+        // primary embedder (the per-space reconcile fan-out is PR-C). Per-space
+        // drift is keyed on the primary's own model_id, so a model swap on the
+        // primary drifts only it — byte-identical to the single-space path.
+        let orch = self.index_set.primary();
         let col_mod = self.col_mod().await?;
         let model_id = svc.embedder.fingerprint();
-        if !self
-            .orchestrator
-            .check_drift(col_mod, model_id.as_deref(), svc.images.is_some())
-        {
+        if !orch.check_drift(col_mod, model_id.as_deref(), svc.images.is_some()) {
             return Ok(false);
         }
         let raw = self
@@ -776,15 +833,13 @@ impl Kernel {
             .await??;
         if raw.is_empty() {
             if let Some(dim) = svc.embedder.dim() {
-                self.orchestrator
-                    .materialize_empty(dim, col_mod, model_id.as_deref());
+                orch.materialize_empty(dim, col_mod, model_id.as_deref());
             }
             self.refresh_tags_best_effort().await;
             return Ok(true);
         }
         let inputs = self.compose_embed_inputs(raw, None);
-        self.orchestrator
-            .reconcile(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
+        orch.reconcile(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
             .await?;
         self.refresh_tags_best_effort().await;
         Ok(true)
@@ -811,7 +866,8 @@ impl Kernel {
             .await??;
         let inputs = self.compose_embed_inputs(raw, None);
         let total = inputs.len();
-        self.orchestrator
+        self.index_set
+            .primary()
             .rebuild(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
             .await?;
         self.refresh_tags_best_effort().await;
@@ -1299,7 +1355,10 @@ impl Kernel {
         let svc = self.embed_service();
         if let Some(svc) = &svc {
             let inputs = self.compose_embed_inputs(raw_inputs, Some(written));
-            self.orchestrator
+            // PR-B: the item-write path indexes into the PRIMARY space (the
+            // per-modality-primary fan-out is PR-C). Byte-identical for N=1.
+            self.index_set
+                .primary()
                 .add(&inputs, &*svc.embedder, svc.images_pair())
                 .await?;
         }
@@ -1369,8 +1428,12 @@ impl Kernel {
         let col_mod = self.collection.run(|core| core.col_mod()).await??;
         self.derived.set_col_mod(col_mod)?;
         if index_maintained {
-            self.orchestrator.set_col_mod(col_mod);
-            self.saver.request_save();
+            // Fan out the watermark + save request to EVERY index space (#232):
+            // a maintained write advances each space's own col_mod and arms its
+            // saver. With one space this is the single set_col_mod + request,
+            // byte-identical to pre-#232.
+            self.index_set.set_col_mod_all(col_mod);
+            self.index_set.request_save_all();
         }
         Ok(())
     }
@@ -1460,7 +1523,9 @@ impl Kernel {
     /// The sidecar tail shared by every note-deletion shape (#382): drop the
     /// notes' vectors + derived rows, advance the watermarks, refresh tags.
     async fn drop_note_sidecars(&self, note_ids: &[i64]) -> NativeResult<()> {
-        self.orchestrator.remove(note_ids)?;
+        // Removal fans out to EVERY index space (#232): a deleted note leaves
+        // all indexes. With one space this is the single remove, byte-identical.
+        self.index_set.remove_all(note_ids)?;
         self.derived.remove(note_ids, None)?;
         self.advance_watermarks(self.embed_service().is_some())
             .await?;
@@ -1949,19 +2014,23 @@ impl Kernel {
                 text: query.to_string(),
                 is_query: true,
             }];
+            // PR-B: search consumes the PRIMARY space's engine (the cross-space
+            // fusion is PR-C). A pure field-access swap — byte-identical for
+            // N=1, and the search/fusion LOGIC is untouched.
+            let primary = self.index_set.primary();
             let args = actions::SearchArgs {
                 top_k,
                 threshold: 0.0,
                 weights: BTreeMap::new(), // empty = the canonical fusion set
                 semantic,
-                index_size: self.orchestrator.engine().size(),
+                index_size: primary.engine().size(),
                 hidden_lexical_sources: Self::hidden_lexical_sources()
                     .into_iter()
                     .map(str::to_string)
                     .collect(),
                 ..Default::default()
             };
-            let engine = self.orchestrator.engine_arc();
+            let engine = primary.engine_arc();
             let derived = Arc::clone(&self.derived);
             let tag_keys = Arc::clone(&self.tag_keys);
             let groups = self
@@ -2801,8 +2870,11 @@ mod no_cpython_smoke {
                 Some("bio"),
                 "hierarchy rolls up"
             );
-            let engine = kernel.index().engine();
-            assert!(engine.modality_get(TAG_TEXT_SPACE, cell_key).is_some());
+            let index = kernel.index();
+            assert!(index
+                .engine()
+                .modality_get(TAG_TEXT_SPACE, cell_key)
+                .is_some());
 
             // A note search never surfaces a tag key.
             let hits = kernel.search("note number", 20).await.unwrap();
