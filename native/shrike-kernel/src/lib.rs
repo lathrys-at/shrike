@@ -1121,6 +1121,20 @@ impl Kernel {
         for ((note_id, name), recognition) in sent.iter().zip(recognitions.iter()) {
             match self.recognition_gate.judge(recognition) {
                 recognize::GateOutcome::Drop => {
+                    // The below-gate marker is ALSO the negative cache for a
+                    // per-item PERMANENT failure (#485): an engine converts a
+                    // 4xx-class rejection (this image is oversized/unsupported)
+                    // into the empty recognition (`text="", confidence=0.0`),
+                    // which gates as Drop here — so a permanently-failed item is
+                    // judged once and not re-offered every sweep (expensive
+                    // against a paid endpoint), and clears on a fingerprint
+                    // change exactly like a stored row re-derives. This is
+                    // deliberately the SAME path as a genuine below-substance
+                    // drop (no sibling `failed` table): behaviour is identical
+                    // and no consumer needs the diagnostic split. NB an
+                    // ENDPOINT-level failure (transport/auth/exhausted retries)
+                    // never reaches here — it Err's the chunk above, before any
+                    // persist, leaving the whole backlog pending.
                     gated.push((*note_id, name.clone()));
                     continue;
                 }
@@ -3701,6 +3715,264 @@ mod no_cpython_smoke {
                 .close()
                 .await
                 .unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    /// A describe recognizer that returns the EMPTY recognition (`"", 0.0`) for
+    /// any item whose bytes contain a sentinel marker — the per-item PERMANENT-
+    /// failure shape (a 4xx the engine converts to the empty recognition) — and
+    /// real prose for any other. (MediaItem carries no name, so the stub keys
+    /// on the bytes, exactly as a real endpoint keys on the response for THAT
+    /// image.) Counts items seen so a test can prove the failed item is NOT
+    /// re-offered. Controllable fingerprint (the engine-upgrade retry).
+    struct PerItemFailingDescribe {
+        fail_marker: Vec<u8>,
+        prose: String,
+        fingerprint: std::sync::Mutex<String>,
+        items_seen: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Recognizer for PerItemFailingDescribe {
+        fn recognize(
+            &self,
+            items: Vec<MediaItem>,
+        ) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
+            self.items_seen
+                .fetch_add(items.len(), std::sync::atomic::Ordering::SeqCst);
+            let fail = self.fail_marker.clone();
+            let prose = self.prose.clone();
+            Box::pin(async move {
+                Ok(items
+                    .iter()
+                    .map(|m| {
+                        // The condemned item yields the empty recognition
+                        // exactly like a 4xx in shrike-describe-remote.
+                        if m.bytes.windows(fail.len()).any(|w| w == fail.as_slice()) {
+                            Recognition {
+                                text: String::new(),
+                                confidence: 0.0,
+                                segments: Vec::new(),
+                            }
+                        } else {
+                            Recognition {
+                                text: prose.clone(),
+                                confidence: 1.0,
+                                segments: Vec::new(),
+                            }
+                        }
+                    })
+                    .collect())
+            })
+        }
+
+        fn fingerprint(&self) -> Option<String> {
+            Some(self.fingerprint.lock().unwrap().clone())
+        }
+    }
+
+    #[test]
+    fn per_item_permanent_failure_is_negative_cached_and_retried_on_fingerprint_change() {
+        // #485 PR2 item 4: a per-item PERMANENT failure (a 4xx the engine turns
+        // into the empty recognition) is judged ONCE — gated under the vlm
+        // source so it is not re-offered every sweep (expensive against a paid
+        // endpoint) — and re-tried only after a describe fingerprint change
+        // (clear_gated(vlm)), exactly like a stored row re-derives. Pins the
+        // 4xx negative-cache path explicitly (the existing gated test covers
+        // only the below-substance drop).
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            // One note, two images: one the endpoint 4xx-rejects, one it
+            // describes fine — so the failed item and a healthy item share a
+            // sweep (proving the failure doesn't sink the batch).
+            let notes = vec![serde_json::json!({"note_type": "Basic", "deck": "Default",
+                "fields": {"Front":
+                    "<img src=\"bad.png\"> <img src=\"good.png\">", "Back": "b"}})];
+            upsert_wire(
+                &kernel,
+                serde_json::json!(notes).to_string(),
+                "error".to_string(),
+                false,
+            )
+            .await;
+
+            let mut media = std::collections::HashMap::new();
+            // The condemned image's bytes carry the "oversized" sentinel; the
+            // healthy one does not.
+            media.insert("bad.png".to_string(), b"opaque oversized bytes".to_vec());
+            media.insert("good.png".to_string(), b"opaque ok bytes".to_vec());
+            let items_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let recognizer = Arc::new(PerItemFailingDescribe {
+                fail_marker: b"oversized".to_vec(),
+                prose: "a clear photograph of rolling green hills under a blue sky".to_string(),
+                fingerprint: std::sync::Mutex::new("describe:v1".to_string()),
+                items_seen: Arc::clone(&items_seen),
+            });
+            kernel.attach_recognizer_with(
+                recognize::RecognitionPurpose::Describe,
+                recognizer.clone(),
+                Arc::new(MapResolver::new(media)),
+            );
+            let seen = || items_seen.load(std::sync::atomic::Ordering::SeqCst);
+
+            // Sweep 1: both images recognized; the good one stored, the failed
+            // one gated (Drop) — nothing remains.
+            let report = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(
+                report,
+                recognize::SweepReport::Ran {
+                    recognized: 2,
+                    stored: 1,
+                    remaining: 0
+                }
+            );
+            assert_eq!(seen(), 2);
+
+            // Sweep 2: idle — the 4xx'd item is DONE (negative-cached), NOT
+            // re-offered. The recognizer is never called again.
+            let again = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(again, recognize::SweepReport::Idle);
+            assert_eq!(
+                seen(),
+                2,
+                "the 4xx'd item must not be re-offered each sweep"
+            );
+
+            // The describe prose still mints a VectorOnly vector (the healthy
+            // item) — the failure didn't regress describe routing.
+            let sem = kernel
+                .search("rolling green hills blue sky", 5)
+                .await
+                .unwrap();
+            assert!(
+                sem.iter()
+                    .any(|h| h.signals.iter().any(|(s, _)| s == "text")),
+                "the good describe vector is searchable"
+            );
+
+            // Engine upgrade: a fingerprint change clears the vlm markers, so
+            // the previously-failed item RE-ENTERS the pending set (the new
+            // engine may handle what the old rejected) — both re-offered.
+            *recognizer.fingerprint.lock().unwrap() = "describe:v2".to_string();
+            let retried = kernel.recognize_pending(10).await.unwrap();
+            assert!(
+                matches!(retried, recognize::SweepReport::Ran { recognized: 2, .. }),
+                "a fingerprint change re-tries the negative-cached item: {retried:?}"
+            );
+            assert_eq!(
+                seen(),
+                4,
+                "both items re-offered after the fingerprint change"
+            );
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    /// A describe recognizer whose CHUNK fails (an endpoint/transport error) —
+    /// the load-bearing contrast with the per-item failure: the whole chunk
+    /// Err's, so nothing is persisted or gated and the backlog stays pending.
+    struct ChunkErroringDescribe;
+
+    impl Recognizer for ChunkErroringDescribe {
+        fn recognize(
+            &self,
+            _items: Vec<MediaItem>,
+        ) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
+            Box::pin(async move {
+                Err(NativeError::unavailable(
+                    "describe request failed: connection refused".to_string(),
+                ))
+            })
+        }
+
+        fn fingerprint(&self) -> Option<String> {
+            Some("describe:down:v1".to_string())
+        }
+    }
+
+    #[test]
+    fn endpoint_level_failure_does_not_negative_cache_and_leaves_backlog_pending() {
+        // #485 PR2 item 4 boundary: an ENDPOINT-level failure (transport/auth/
+        // exhausted retries) must NOT gate the item — it Err's the chunk before
+        // any persist or fingerprint advance, so the backlog stays pending and
+        // a later sweep (once the endpoint is up) retries. The negative cache
+        // is for per-item PERMANENT failures only.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            let notes = vec![serde_json::json!({"note_type": "Basic", "deck": "Default",
+                "fields": {"Front": "<img src=\"photo.png\">", "Back": "b"}})];
+            upsert_wire(
+                &kernel,
+                serde_json::json!(notes).to_string(),
+                "error".to_string(),
+                false,
+            )
+            .await;
+
+            let mut media = std::collections::HashMap::new();
+            media.insert("photo.png".to_string(), b"opaque bytes".to_vec());
+            kernel.attach_recognizer_with(
+                recognize::RecognitionPurpose::Describe,
+                Arc::new(ChunkErroringDescribe),
+                Arc::new(MapResolver::new(media)),
+            );
+
+            // The sweep aborts with the chunk Err — nothing gated, nothing
+            // stored. The describe fingerprint meta is NOT advanced.
+            let err = kernel.recognize_pending(10).await.unwrap_err();
+            assert!(
+                err.to_string().contains("describe request failed"),
+                "the endpoint error propagates: {err}"
+            );
+
+            // Swap in a working engine with the SAME fingerprint (the endpoint
+            // came back up): the item is STILL pending — it was never gated —
+            // so it recognizes now. A negative cache would have wrongly skipped
+            // it.
+            kernel.attach_recognizer_with(
+                recognize::RecognitionPurpose::Describe,
+                Arc::new(ProseRecognizer::new(
+                    "a recovered description of the photo",
+                    "describe:down:v1",
+                )),
+                Arc::new(MapResolver::new({
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("photo.png".to_string(), b"opaque bytes".to_vec());
+                    m
+                })),
+            );
+            let report = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(
+                report,
+                recognize::SweepReport::Ran {
+                    recognized: 1,
+                    stored: 1,
+                    remaining: 0
+                },
+                "the un-gated item was still pending and recognized on recovery"
+            );
+
+            kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
         });
     }
