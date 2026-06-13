@@ -137,10 +137,16 @@ SearchCall = Callable[..., Awaitable[dict[str, Any]]]
 
 @dataclass
 class InProcessSearch:
-    """The assembled harness + the real-action search driver."""
+    """The assembled harness + the real-action search driver.
+
+    ``backend`` is the PRIMARY (query-embedding) backend — a :class:`StubEmbedder`
+    for the deterministic classes or a real text backend (``OnnxBackend``) for
+    the manual real-model suite; ``None`` is the embedding-down case. It governs
+    whether :meth:`finalize` rebuilds the vector index and is what
+    ``KernelIndexView`` embeds queries with."""
 
     harness: Harness
-    backend: StubEmbedder | None
+    backend: Any
     mcp: Any
     media: dict[str, bytes]
 
@@ -262,3 +268,81 @@ async def build_harness(
     mcp = FastMCP("search-quality")
     register_tools(mcp, harness.wrapper, index=view, kernel=harness.kernel, derived=harness.derived)
     return InProcessSearch(harness=harness, backend=backend, mcp=mcp, media=media_map)
+
+
+def _attach_real(
+    kernel: Any,
+    backend: Any,
+    *,
+    media_read: Any = None,
+    media_exists: Any = None,
+    space_key: str | None = None,
+) -> None:
+    """Attach a REAL backend (or a stub) to a kernel embed space, exactly like
+    ``Harness._attach``: a backend with ``native_embedder()`` (every production
+    onnx/clip facade) hands over its native composition; one without is captured.
+    The native path is what proves the real multi-space loop end-to-end."""
+    native = getattr(backend, "native_embedder", None)
+    embedder = native() if callable(native) else shrike_native.PyEmbedder.capture(backend)
+    kernel.attach_embedder(embedder, media_read, media_exists, space_key=space_key)
+
+
+async def build_harness_real(
+    tmp_path: Path,
+    *,
+    text_backend: Any,
+    clip_backend: Any | None = None,
+    clip_space_key: str = "clip",
+    media: Mapping[str, bytes] | None = None,
+) -> InProcessSearch:
+    """Assemble a harness with REAL backends for the manual suite (#559 PR2).
+
+    Attaches ``text_backend`` as the primary (query-embedding) space and, when
+    given, ``clip_backend`` as a SEPARATE CLIP space (its own key + the image
+    resolver, so a note's images land in the CLIP space's ImageOnly index). This
+    is the real 2-space loop #229 enables: the production ``search_notes`` action
+    auto-threads ``build_cross_space_json`` so the secondary CLIP space is
+    searched and gated end-to-end — no manual cross-space wiring.
+
+    Both backends must already be ``start()``-ed (their native engines loaded).
+    Returns the :class:`InProcessSearch` driver over the REAL ``search_notes``."""
+    from types import SimpleNamespace
+
+    from mcp.server.fastmcp import FastMCP
+
+    from shrike.tools import register_tools
+
+    media_map: dict[str, bytes] = dict(media or {})
+    runtime = EmbeddingRuntime(model=None)
+    derived = DerivedTextStore(
+        path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
+    )
+    harness = await Harness.assemble(
+        collection_path=str(tmp_path / "collection.anki2"),
+        cache_dir=str(tmp_path / "cache"),
+        runtime=runtime,
+        derived=derived,
+        cooperative=False,
+        hold_seconds=5.0,
+        media_read=media_map.get,
+        media_exists=lambda name: name in media_map,
+    )
+    await harness.boot(start_embedding=False)
+    # Text-primary FIRST (no key → keys off its own fingerprint), then the
+    # separate CLIP space with the media resolver. Mirrors the production
+    # dedicated-text + separate-CLIP attach order (TestLiveTwoSpaceEndToEnd).
+    _attach_real(harness.kernel, text_backend)
+    if clip_backend is not None:
+        _attach_real(
+            harness.kernel,
+            clip_backend,
+            media_read=media_map.get,
+            media_exists=lambda name: name in media_map,
+            space_key=clip_space_key,
+        )
+    await harness.kernel.reindex_if_needed()
+
+    view = KernelIndexView(harness.kernel, SimpleNamespace(backend=text_backend))  # type: ignore[arg-type]
+    mcp = FastMCP("search-quality-real")
+    register_tools(mcp, harness.wrapper, index=view, kernel=harness.kernel, derived=harness.derived)
+    return InProcessSearch(harness=harness, backend=text_backend, mcp=mcp, media=media_map)

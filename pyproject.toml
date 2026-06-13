@@ -95,6 +95,7 @@ asyncio_mode = "auto"
 markers = [
     "integration: tests that start a server and make HTTP requests",
     "embedding: tests that require llama-server and a GGUF model",
+    "search_quality: manual/local-only adversarial recall+precision suite (env-gated on SHRIKE_SEARCH_QUALITY=1, never run in CI; see test_search_quality.py)",
 ]
 
 [tool.coverage.run]

@@ -43,15 +43,16 @@ fi
 
 export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
 
-# Combined `-n auto` run over both suites, matching CI. `-m "not embedding"` keeps
-# the embedding-gated tests out (they need a local llama-server and aren't part of
-# the measured number). The .pth fires for each xdist worker and each spawned
-# server, so `coverage combine` merges everything to one total.
+# Combined `-n auto` run over both suites, matching CI. `-m "not embedding and not
+# search_quality"` keeps the embedding-gated AND the manual search-quality tests out
+# (they need local models / a downloaded Commons corpus and aren't part of the
+# measured number). The .pth fires for each xdist worker and each spawned server, so
+# `coverage combine` merges everything to one total.
 coverage erase
 # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) treats an EMPTY array as
 # unbound under `set -u`, so a bare "${pytest_args[@]}" aborts a no-arg run.
 coverage run --parallel-mode -m pytest tests/unit tests/integration tests/native \
-  -q -m "not embedding" -n auto ${pytest_args[@]+"${pytest_args[@]}"}
+  -q -m "not embedding and not search_quality" -n auto ${pytest_args[@]+"${pytest_args[@]}"}
 coverage combine
 
 if [ "$want_html" -eq 1 ]; then

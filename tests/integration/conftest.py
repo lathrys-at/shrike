@@ -58,6 +58,12 @@ def pytest_configure(config: pytest.Config) -> None:
         "multimodal: manual/local-only — requires a PATCHED llama-server + a "
         "multimodal embedding model (env-gated, never run in CI; see test_multimodal.py)",
     )
+    config.addinivalue_line(
+        "markers",
+        "search_quality: manual/local-only — the adversarial recall+precision suite "
+        "over the real Commons corpus + CLIP (env-gated on SHRIKE_SEARCH_QUALITY=1, "
+        "never run in CI; see test_search_quality.py)",
+    )
 
 
 # -- Bazel: assemble the pinned model externals into a SHRIKE_TEST_MODEL_DIR tree -
@@ -792,6 +798,27 @@ requires_multimodal = pytest.mark.skipif(
         f"multimodal harness needs a PATCHED llama-server via {MULTIMODAL_LLAMA_SERVER_ENV} "
         "(jina-ai/llama.cpp feat-v5-omni; the official binary segfaults on image embeds) — "
         "local-only, see test_multimodal.py"
+    ),
+)
+
+
+# -- Search-quality adversarial suite (#559) — manual, local-only -------------
+#
+# The real-model recall+precision suite downloads a ~30-image Wikimedia Commons
+# corpus and runs real CLIP — too heavy/non-hermetic for CI and the assets are
+# user-downloaded at run time (not redistributed). It's gated three ways
+# (mirroring the embedding tests): this env skip (belt-and-suspenders — every
+# test SKIPS not FAILS even if selection leaks), the Bazel `manual` target +
+# the :integration glob-exclude (so `//...` never names it), and the coverage
+# `-m "not ... search_quality"`. Set SHRIKE_SEARCH_QUALITY=1 to opt in.
+SEARCH_QUALITY_ENV = "SHRIKE_SEARCH_QUALITY"
+
+requires_search_quality = pytest.mark.skipif(
+    os.environ.get(SEARCH_QUALITY_ENV) != "1",
+    reason=(
+        f"the adversarial search-quality suite is manual/local-only — set "
+        f"{SEARCH_QUALITY_ENV}=1 to opt in (downloads a real Commons corpus + runs "
+        "CLIP; never run in CI). See test_search_quality.py."
     ),
 )
 

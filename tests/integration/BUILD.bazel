@@ -80,15 +80,21 @@ _EMBEDDING_BACKENDS = [
     "test_onnx_models.py",
 ]
 
+# The manual adversarial search-quality suite (#559): real CLIP + a downloaded
+# Wikimedia Commons corpus, env-gated and NEVER named on a CI command line.
+# Excluded from the :integration glob below so `bazel test //...` skips it.
+_SEARCH_QUALITY = ["test_search_quality.py"]
+
 # Non-embedding integration: one aggregate target, `-n auto` (xdist), mirroring the
 # pip `pytest tests/integration -n auto` lane — import + server-spawn cost amortized.
-# Glob-partitioned: everything that isn't an embedding half runs here.
+# Glob-partitioned: everything that isn't an embedding half OR the manual
+# search-quality suite runs here.
 pytest_test(
     name = "integration",
     size = "large",
     srcs = glob(
         ["test_*.py"],
-        exclude = _EMBEDDING_CORE + _EMBEDDING_BACKENDS,
+        exclude = _EMBEDDING_CORE + _EMBEDDING_BACKENDS + _SEARCH_QUALITY,
     ),
     deps = [":conftest"],
 )
@@ -153,6 +159,37 @@ pytest_test(
         "@model_minilm_tokenizer//file",
         "@model_roberta_int8_onnx//file",
         "@model_roberta_tokenizer//file",
+    ],
+)
+
+# The manual adversarial search-quality suite (#559) — `manual`, NEVER named on
+# a CI command line (unlike the embedding halves, which the unified lane runs).
+# `bazel test //...` skips it twice over: the :integration glob excludes it AND
+# `manual` keeps `//...` from building it. It needs the CLIP + MiniLM ONNX
+# externals (the real 2-space proof) and the in-process search-quality support
+# (the shared metric engine + the Commons resolver + corpus). Run it explicitly:
+#   SHRIKE_SEARCH_QUALITY=1 bazel test //tests/integration:search_quality
+pytest_test(
+    name = "search_quality",
+    size = "large",
+    srcs = _SEARCH_QUALITY,
+    tags = ["manual"],
+    xdist = None,
+    deps = [
+        ":conftest",
+        "//tests/search_quality",
+        "//tests/search_quality:inprocess",
+        requirement("onnxruntime"),
+        requirement("pillow"),
+        requirement("tokenizers"),
+    ],
+    data = [
+        "@model_clip_preprocessor//file",
+        "@model_clip_text_onnx//file",
+        "@model_clip_tokenizer//file",
+        "@model_clip_vision_onnx//file",
+        "@model_minilm_int8_onnx//file",
+        "@model_minilm_tokenizer//file",
     ],
 )
 
