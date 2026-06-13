@@ -290,7 +290,38 @@ fn space_subdir(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index_orchestrator::EmbedInput;
+    use crate::Embedder;
+    use futures::future::BoxFuture;
     use shrike_index::MultiModalIndex;
+
+    /// A deterministic stub embedder (text → a 4-d vector keyed on a byte of the
+    /// text hash) — enough to drive reconcile/rebuild for the per-space property.
+    struct StubEmbedder;
+    impl Embedder for StubEmbedder {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            Box::pin(async move {
+                Ok(texts
+                    .iter()
+                    .map(|t| {
+                        let h = crate::index_orchestrator::hash_text(t);
+                        let b = u8::from_str_radix(&h[..2], 16).unwrap() as f32 / 255.0;
+                        let n = (b * b + 1.0).sqrt();
+                        vec![b / n, 1.0 / n, 0.0, 0.0]
+                    })
+                    .collect())
+            })
+        }
+    }
+
+    fn input(nid: i64, text: &str) -> EmbedInput {
+        EmbedInput {
+            note_id: nid,
+            text: text.to_owned(),
+            image_names: vec![],
+            ocr_texts: vec![],
+        }
+    }
 
     fn factory() -> EngineFactory {
         Arc::new(|mods: &[String]| {
@@ -392,5 +423,92 @@ mod tests {
         assert!(set.orchestrator_for("space:missing").is_none());
         assert_eq!(set.all_orchestrators().len(), 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reconcile_equals_rebuild_on_a_secondary_space() {
+        // The pinned reconcile==rebuild property, run PER SPACE (#232): a
+        // SECONDARY space's orchestrator is a fully-independent IndexOrchestrator
+        // with its own dir/drift/hashes, so an incremental reconcile on it lands
+        // on the identical end state a full rebuild would — exactly the property
+        // index_orchestrator.rs pins on the primary type, here proven on a space
+        // the coordinator materialized.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let set = open_set(&dir);
+            set.bind_space("space:a", &["text".into()]).unwrap(); // claim primary
+            let secondary = set.bind_space("space:b", &["text".into()]).unwrap();
+
+            let v1 = vec![input(1, "one"), input(2, "two"), input(3, "three")];
+            let v2 = vec![input(1, "one"), input(2, "two EDITED"), input(4, "four")];
+
+            // Reconcile path on the secondary.
+            secondary
+                .rebuild(v1, 1, Some("m".into()), &StubEmbedder, None)
+                .await
+                .unwrap();
+            secondary
+                .reconcile(v2.clone(), 2, Some("m".into()), &StubEmbedder, None)
+                .await
+                .unwrap();
+
+            // A fresh full rebuild over v2, in its own dir.
+            let fresh = open_set(&dir.join("fresh"));
+            let rebuilt = fresh.primary();
+            rebuilt
+                .rebuild(v2, 2, Some("m".into()), &StubEmbedder, None)
+                .await
+                .unwrap();
+
+            assert_eq!(secondary.engine().size(), rebuilt.engine().size());
+            let mut a = secondary.engine().keys();
+            let mut b = rebuilt.engine().keys();
+            a.sort_unstable();
+            b.sort_unstable();
+            assert_eq!(a, b, "reconcile lands on the rebuild key set, per space");
+            for key in a {
+                assert_eq!(secondary.engine().get(key), rebuilt.engine().get(key));
+            }
+            std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
+    #[test]
+    fn remove_all_and_set_col_mod_all_fan_out_to_every_space() {
+        // The fan-out the kernel's delete + watermark-advance ride (#232): each
+        // touches EVERY space. set_col_mod_all advances both watermarks; a
+        // remove_all on a note present in both leaves both.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let set = open_set(&dir);
+            let primary = set.bind_space("space:a", &["text".into()]).unwrap();
+            let secondary = set.bind_space("space:b", &["text".into()]).unwrap();
+
+            for orch in [&primary, &secondary] {
+                orch.rebuild(
+                    vec![input(10, "ten"), input(11, "eleven")],
+                    5,
+                    Some("m".into()),
+                    &StubEmbedder,
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            assert!(primary.engine().contains(10) && secondary.engine().contains(10));
+
+            // Watermark fan-out: both spaces advance.
+            set.set_col_mod_all(9);
+            assert_eq!(primary.col_mod(), Some(9));
+            assert_eq!(secondary.col_mod(), Some(9));
+
+            // Removal fan-out: the note leaves BOTH spaces.
+            set.remove_all(&[10]).unwrap();
+            assert!(!primary.engine().contains(10));
+            assert!(!secondary.engine().contains(10));
+            // The untouched note stays in both.
+            assert!(primary.engine().contains(11) && secondary.engine().contains(11));
+            std::fs::remove_dir_all(&dir).ok();
+        });
     }
 }

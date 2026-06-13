@@ -2409,6 +2409,96 @@ mod no_cpython_smoke {
     }
 
     #[test]
+    fn index_set_binds_spaces_in_lockstep_primary_in_place() {
+        // #232: attaching two distinct-fingerprint embedders materializes TWO
+        // index spaces in lockstep with the embed set. The PRIMARY index space
+        // lives at the base index dir DIRECTLY (the in-place-no-subdir migration
+        // rule → zero rebuild for existing users); the secondary gets a subdir.
+        // The index/search path still consumes the primary this PR.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let cache = dir.join("cache");
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                cache.to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+
+            // Before any embedder: the index set holds exactly the PRIMARY,
+            // un-bound, at the base dir (byte-identical to pre-#232).
+            assert_eq!(kernel.index_set().len(), 1);
+            let primary_dir = kernel.index().dir.clone();
+            // The base index dir is the per-collection namespaced dir, NOT a
+            // space subdir of it.
+            assert!(primary_dir.exists());
+
+            // First embedder claims the primary in place — no new space, no
+            // subdir (the migration rule).
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            assert_eq!(kernel.index_set().len(), 1, "first attach claims primary");
+            assert_eq!(
+                kernel.index().dir,
+                primary_dir,
+                "primary still at the base dir (no subdir → zero rebuild)"
+            );
+
+            // Second distinct embedder → a SECOND index space in a subdir.
+            kernel.attach_embedder(Arc::new(HashEmbedder2), None);
+            assert_eq!(kernel.index_set().len(), 2, "second attach is a new space");
+            let secondary = kernel
+                .index_set()
+                .orchestrator_for("hash-embedder:v2")
+                .expect("the secondary space is bound by its fingerprint");
+            assert_ne!(secondary.dir, primary_dir, "secondary is NOT the base dir");
+            assert!(
+                secondary.dir.starts_with(&primary_dir),
+                "secondary lives in a subdir UNDER the base dir"
+            );
+            // The primary stays the served index (the v1 space).
+            assert_eq!(kernel.index().dir, primary_dir);
+
+            // The end-to-end index path still works (primary-only this PR): a
+            // note created with both spaces attached embeds + is searchable.
+            kernel.reindex_if_needed().await.unwrap();
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+            let CreateOutcome::Created(nid) = kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["paris is the capital of france".into(), "geo".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("create")
+            };
+            let hits = kernel.search("capital of france", 5).await.unwrap();
+            assert_eq!(hits[0].note_id, nid);
+            assert!(
+                hits[0].signals.iter().any(|(s, _)| s == "text"),
+                "the primary text space's semantic signal contributes"
+            );
+            // The primary index holds the note.
+            assert!(kernel.index().engine().contains(nid));
+
+            // Removal fans out to EVERY space (#232) — no error on the empty
+            // secondary, and the primary drops the note.
+            kernel.delete_notes(vec![nid]).await.unwrap();
+            assert!(!kernel.index().engine().contains(nid));
+            assert!(
+                !secondary.engine().contains(nid),
+                "removal fanned out to the secondary too"
+            );
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
     fn composed_kernel_serves_ops_over_injected_stores() {
         // The #389 injection seam: a kernel assembled from PRE-BUILT stores
         // (the deployment ladder's composition point) behaves like an opened
