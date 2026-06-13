@@ -88,6 +88,12 @@ crate.from_cargo(
         "//native/shrike-schemas:Cargo.toml",
     ],
 )
+# Temporary: `@crates//:pyo3-log` resolves to the fork pinned by the
+# `[patch.crates-io]` in //native:Cargo.toml (lathrys-at/pyo3-log = v0.13.3 with
+# a widened pyo3 bound) — the crates.io release caps pyo3 at `<0.29`, blocking
+# the RUSTSEC-2026-0176/-0177 bump. crate_universe vendors the git rev, pinned
+# by its immutable commit SHA in MODULE.bazel.lock. Drop the patch once upstream
+# ships a 0.29-compatible pyo3-log (Cleanup milestone, #519).
 # usearch's cxx_build leaves OUT_DIR symlinks into the ephemeral build sandbox,
 # which Bazel's output-tree validation rejects as dangling; the patch
 # materializes/drops them (no behaviour change under plain cargo).
