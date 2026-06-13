@@ -17,6 +17,7 @@ import json
 import logging
 import os
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -275,10 +276,19 @@ class Harness:
         media_read: Any,
         media_exists: Any,
         owns_runtime: bool = True,
+        secondary_runtimes: Sequence[EmbeddingRuntime] | None = None,
     ) -> None:
         self.kernel = kernel
         self.wrapper = wrapper
         self.runtime = runtime
+        # Additional embedding spaces (#233): the SECONDARY runtimes, attached
+        # to their own kernel embed-space keys alongside the primary. Empty in
+        # the N=1 case (the default), so single-space behaviour — and every
+        # on-disk artifact + the index/search path, which consume only the
+        # PRIMARY space this PR — is byte-identical. The fan-out (an N-per-space
+        # index + cross-space fusion) is PR-B/C; here the secondaries are
+        # attached + reconciled but the index path still reads the primary.
+        self.secondary_runtimes: list[EmbeddingRuntime] = list(secondary_runtimes or [])
         self.derived = derived
         self._media_read = media_read
         self._media_exists = media_exists
@@ -319,6 +329,7 @@ class Harness:
         index_save_delay: float | None = None,
         index_save_threshold: int | None = None,
         owns_runtime: bool = True,
+        secondary_runtimes: Sequence[EmbeddingRuntime] | None = None,
     ) -> Harness:
         """Open the kernel on the running loop. Scheduling is the kernel's
         own (#374 — the owned tokio runtime spawns the collection actor);
@@ -326,7 +337,9 @@ class Harness:
         ``index_save_*`` tuning reaches the kernel's debounced saver
         (#355 item 2); ``None`` keeps the built-in defaults. ``owns_runtime``
         is False for a per-collection harness sharing one embedding runtime
-        (#68) — then close() leaves the shared runtime running."""
+        (#68) — then close() leaves the shared runtime running.
+        ``secondary_runtimes`` are the additional embedding spaces (#233);
+        empty (the default) is the byte-identical N=1 case."""
         kernel = await shrike_native.async_kernel_open(
             collection_path,
             cache_dir,
@@ -344,6 +357,7 @@ class Harness:
             media_read=media_read,
             media_exists=media_exists,
             owns_runtime=owns_runtime,
+            secondary_runtimes=secondary_runtimes,
         )
 
     # -- boot ------------------------------------------------------------------
@@ -571,12 +585,50 @@ class Harness:
         except (ValueError, ImportError) as e:
             raise KernelConfigError(str(e)) from e
         self._attach(backend)
+        # Fan out the secondary spaces (#233): each is its own kernel embed
+        # space, attached by its content-fingerprint key. A secondary that
+        # fails to start degrades ONLY its space — never the primary, which is
+        # already attached and serving the index/search path this PR.
+        await self._attach_secondaries(overrides)
         self._spawn_bg(self._drive_boot_reindex())
         return {
             "status": "started",
             "embedding": await asyncio.to_thread(self.runtime.health),
             "index": self._index_status(),
         }
+
+    async def _attach_secondaries(self, overrides: dict[str, Any]) -> None:
+        """Start + attach every SECONDARY embedding space (#233), best-effort:
+        a space that fails to start (bad model, missing dep, unreachable
+        endpoint) is logged and skipped — only that space degrades, the rest
+        (and the primary) stay live. No-op in the N=1 case (no secondaries)."""
+        for rt in self.secondary_runtimes:
+            if rt.running:
+                continue
+            try:
+                backend = await asyncio.to_thread(lambda rt=rt: rt.start(**overrides))
+            except (ValueError, ImportError, FileNotFoundError, RuntimeError, OSError) as e:
+                logger.error(
+                    "Secondary embedding space (%s) failed to start: %s — "
+                    "that space is degraded; other spaces stay live",
+                    rt.backend_kind,
+                    e,
+                )
+                continue
+            self._attach(backend, space_key=self._space_key_for(rt))
+
+    @staticmethod
+    def _space_key_for(rt: EmbeddingRuntime) -> str | None:
+        """A secondary space's explicit key (#233): the started backend's model
+        fingerprint (the CONTENT fingerprint, reorder-stable). ``None`` lets the
+        kernel fall back to the embedder's own fingerprint — identical, since
+        the backend carries it; the explicit pass keeps the harness in control
+        of the space identity."""
+        backend = rt.backend
+        if backend is None:
+            return None
+        fp = getattr(backend, "model_fingerprint", None)
+        return fp() if callable(fp) else None
 
     async def attach_shared_embedder(self) -> None:
         """Attach an ALREADY-RUNNING shared embedding runtime's backend to this
@@ -593,15 +645,20 @@ class Harness:
         self._attach(backend)
         self._spawn_bg(self._drive_boot_reindex())
 
-    def _attach(self, backend: EmbedderBackend) -> None:
-        """Attach the backend to the kernel's embed slot (#342). A backend
+    def _attach(self, backend: EmbedderBackend, *, space_key: str | None = None) -> None:
+        """Attach the backend to a kernel embed SPACE (#342/#233). A backend
         exposing ``native_embedder()`` (the onnx/clip/llama facades — every
         production backend) hands over a native composition — kernel embeds
         then never re-enter Python; a custom/test backend without one is
-        captured behind the PyEmbedder dispatch seam."""
+        captured behind the PyEmbedder dispatch seam. ``space_key`` pins the
+        space identity (#233); ``None`` (the primary / N=1 case) lets the kernel
+        key off the embedder's own fingerprint — byte-identical to the
+        single-slot attach."""
         native = getattr(backend, "native_embedder", None)
         embedder = native() if callable(native) else shrike_native.PyEmbedder.capture(backend)
-        self.kernel.attach_embedder(embedder, self._media_read, self._media_exists)
+        self.kernel.attach_embedder(
+            embedder, self._media_read, self._media_exists, space_key=space_key
+        )
 
     def attach_recognizer(self, backend: Any, purpose: str = RECOGNITION_OCR) -> None:
         """Attach an OCR/describe backend (#228/#485) for a recognition
@@ -799,10 +856,14 @@ class Harness:
 
     async def stop_embedding(self) -> dict[str, Any]:
         """Detach + stop the embedding service (``POST /embedding/stop``)."""
-        if not self.runtime.running:
+        if not self.runtime.running and not any(rt.running for rt in self.secondary_runtimes):
             return {"status": "not_running"}
-        self.kernel.detach_embedder()  # flushes the index, marks unavailable
+        self.kernel.detach_embedder()  # clears every space, flushes, unavailable
         await asyncio.to_thread(self.runtime.stop)
+        # Stop the secondary spaces' runtimes too (#233) — detach already
+        # cleared their kernel slots; this releases their backend resources.
+        for rt in self.secondary_runtimes:
+            await asyncio.to_thread(rt.stop)
         return {"status": "stopped", "index": self._index_status()}
 
     # -- lifecycle ----------------------------------------------------------------
@@ -830,6 +891,10 @@ class Harness:
         self.derived.close()
         if self.owns_runtime:
             await asyncio.to_thread(self.runtime.stop)
+            # Stop the secondary spaces' runtimes too (#233) — owned alongside
+            # the primary; a shared (#68) harness leaves them to the owner.
+            for rt in self.secondary_runtimes:
+                await asyncio.to_thread(rt.stop)
         self.wrapper.close()
         # kernel.close drains the collection actor (#374): nothing in flight
         # when this returns — the interpreter-teardown guard.

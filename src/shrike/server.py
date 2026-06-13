@@ -929,6 +929,10 @@ def main() -> None:
     # (no --config) path uses the --ocr-backend flag instead and leaves this
     # empty; a v2 config fills it from the resolved profile.
     recognizer_boot_plans: tuple[Any, ...] = ()
+    # The SECONDARY embedding spaces' runtime params (#233): the 2nd+ entries of
+    # a multi-space v2 config. Empty for the legacy/flag path and the N=1 case,
+    # so the single-space boot is byte-identical (no secondary runtime built).
+    secondary_param_sets: tuple[dict[str, Any], ...] = ()
     if args.config:
         # The daemon resolves the v2 capability sections itself (#498):
         # structured entries (remote endpoints, api_key_env) have no flag
@@ -963,6 +967,7 @@ def main() -> None:
             ProfileError,
             parse_capabilities,
             plan_to_runtime_params,
+            plan_to_runtime_params_set,
             recognizer_plans,
             resolve_profile,
         )
@@ -977,12 +982,20 @@ def main() -> None:
         # The resolved recognizers (#485): describe (and, post-#502, remote OCR)
         # ride the v2 config — no flag spelling, so they reach boot from here.
         recognizer_boot_plans = recognizer_plans(plan)
-        v2_params = plan_to_runtime_params(plan)
-        for key in ("model", "llama_server"):
-            if v2_params.get(key):
-                v2_params[key] = os.path.expanduser(str(v2_params[key]))
-        if v2_params.get("mmprojs"):
-            v2_params["mmprojs"] = [os.path.expanduser(str(p)) for p in v2_params["mmprojs"]]
+        all_param_sets = plan_to_runtime_params_set(plan)
+
+        def _expand_paths(params: dict[str, Any]) -> dict[str, Any]:
+            for key in ("model", "llama_server"):
+                if params.get(key):
+                    params[key] = os.path.expanduser(str(params[key]))
+            if params.get("mmprojs"):
+                params["mmprojs"] = [os.path.expanduser(str(p)) for p in params["mmprojs"]]
+            return params
+
+        # The PRIMARY space drives the index/search path (byte-identical N=1);
+        # the 2nd+ entries become SECONDARY spaces (#233), each its own runtime.
+        v2_params = _expand_paths(plan_to_runtime_params(plan))
+        secondary_param_sets = tuple(_expand_paths(dict(p)) for p in all_param_sets[1:])
         emb_params.update({k: v for k, v in v2_params.items() if v is not None})
         emb_params["backend"] = v2_params.get("backend") or DEFAULT_BACKEND
         logger.info(
@@ -992,30 +1005,46 @@ def main() -> None:
             emb_params.get("model"),
             emb_params.get("endpoint"),
         )
-    runtime = EmbeddingRuntime(
-        backend=emb_params["backend"],
-        model=emb_params["model"],
-        host="127.0.0.1",
-        port=emb_params.get("port") or 8373,
-        log_dir=log_dir,
-        context_size=emb_params.get("context_size"),
-        threads=emb_params.get("threads"),
-        gpu_layers=emb_params.get("gpu_layers"),
-        pooling=emb_params.get("pooling"),
-        extra_args=emb_params.get("extra_args"),
-        llama_server=emb_params.get("llama_server"),
-        pid_file=resolved_state_dir / "embedding.pid",
-        onnx_providers=emb_params.get("onnx_providers"),
-        batch_size=emb_params.get("batch_size"),
-        endpoint=emb_params.get("endpoint"),
-        api_key_env=emb_params.get("api_key_env"),
-        **(
-            {"modalities": emb_params["modalities"]}
-            if emb_params.get("modalities") is not None
-            else {}
-        ),
-        **({"mmprojs": emb_params["mmprojs"]} if emb_params.get("mmprojs") is not None else {}),
-    )
+    def _runtime_from_params(
+        params: dict[str, Any], *, pid_file: Path | None
+    ) -> EmbeddingRuntime:
+        return EmbeddingRuntime(
+            backend=params["backend"],
+            model=params["model"],
+            host="127.0.0.1",
+            port=params.get("port") or 8373,
+            log_dir=log_dir,
+            context_size=params.get("context_size"),
+            threads=params.get("threads"),
+            gpu_layers=params.get("gpu_layers"),
+            pooling=params.get("pooling"),
+            extra_args=params.get("extra_args"),
+            llama_server=params.get("llama_server"),
+            pid_file=pid_file,
+            onnx_providers=params.get("onnx_providers"),
+            batch_size=params.get("batch_size"),
+            endpoint=params.get("endpoint"),
+            api_key_env=params.get("api_key_env"),
+            **(
+                {"modalities": params["modalities"]}
+                if params.get("modalities") is not None
+                else {}
+            ),
+            **({"mmprojs": params["mmprojs"]} if params.get("mmprojs") is not None else {}),
+        )
+
+    runtime = _runtime_from_params(emb_params, pid_file=resolved_state_dir / "embedding.pid")
+    # The SECONDARY embedding spaces (#233): each 2nd+ v2 entry is its own
+    # runtime, attached to its own kernel embed space. Each needs a default
+    # backend kind (a None backend is the no-embedder shape, which secondaries
+    # never are). Only a MANAGED llama-server secondary writes a pid file, and
+    # it would collide with the primary's, so secondaries get none (the in-
+    # process onnx/clip and remote backends — the multi-space shapes — have no
+    # subprocess to reap). Empty for the N=1 / legacy path → byte-identical.
+    secondary_runtimes = [
+        _runtime_from_params({**p, "backend": p.get("backend") or DEFAULT_BACKEND}, pid_file=None)
+        for p in secondary_param_sets
+    ]
 
     # The derived-text store (FTS5 trigram sidecar) — engine factory injected
     # here, like the index engine (the harness owns assembly, #278 C5). The
@@ -1192,6 +1221,7 @@ def main() -> None:
             media_exists=_img_exists,
             index_save_delay=args.index_save_delay,
             index_save_threshold=args.index_save_threshold,
+            secondary_runtimes=secondary_runtimes,
         )
         # Embedding starts at boot when anything configures it: a model (flag
         # or config entry) OR a bare endpoint (#498 — a remote/attach entry's

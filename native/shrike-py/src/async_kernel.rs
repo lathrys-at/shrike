@@ -256,6 +256,12 @@ impl AsyncKernel {
         })
     }
 
+    /// The number of attached embedding spaces (#233) — the multi-space status
+    /// surface. The index/search path still consumes only the primary this PR.
+    fn embed_space_count(&self, py: Python<'_>) -> usize {
+        py.detach(|| self.inner.embed_space_count())
+    }
+
     /// Attach the OCR recognition service (#228, the second #342 slot) — the
     /// OCR-defaulting convenience over [`attach_recognizer_with`] (#485):
     /// existing hosts/tests keep the single-arg shape and target the OCR

@@ -16,6 +16,7 @@ from shrike.profiles import (
     ProfileError,
     parse_capabilities,
     plan_to_runtime_params,
+    plan_to_runtime_params_set,
     recognizer_plans,
     resolve_profile,
 )
@@ -289,16 +290,32 @@ class TestLegacyMigration:
 
 
 class TestResolve:
-    def test_multi_space_is_a_named_error_until_229(self):
-        # text + CLIP as TWO entries = two vector spaces — the #229 substrate.
+    def test_multi_space_resolves_to_an_ordered_set_with_primary_roles(self):
+        # text + CLIP as TWO entries = two vector spaces (#233 — the multi-space
+        # substrate, no longer a #229 reject). Both resolve; the per-modality
+        # PRIMARY is the FIRST declaring entry (text → entry 0; image → entry 1,
+        # the first to carry it).
         config = {
             "embedders": [
                 {"modalities": ["text"], "runtime": "onnx", "model": "a"},
                 {"modalities": ["text", "image"], "runtime": "onnx", "model": "b"},
             ]
         }
-        with pytest.raises(ProfileError, match="#229"):
-            _resolve(config)
+        plan = _resolve(config)
+        assert len(plan.embedders) == 2
+        # The back-compat .embedder accessor returns the PRIMARY (first) entry.
+        assert plan.embedder is not None and plan.embedder.model == "a"
+        text_space, clip_space = plan.embedders
+        assert text_space.primary_modalities == frozenset({"text"})
+        assert text_space.text_capable
+        # entry 1 is primary only for image — text was already claimed by entry 0.
+        assert clip_space.primary_modalities == frozenset({"image"})
+        assert clip_space.text_capable
+        # plan_to_runtime_params (the N=1 accessor) keys off the primary.
+        assert plan_to_runtime_params(plan)["backend"] == "onnx"
+        # The N-dict set emits one dict per space, in declaration order.
+        dicts = plan_to_runtime_params_set(plan)
+        assert [d["backend"] for d in dicts] == ["onnx", "clip"]
 
     def test_platform_embedder_on_server_names_the_profile(self):
         config = {"embedders": [{"modalities": ["text"], "runtime": "platform"}]}
@@ -637,7 +654,7 @@ class TestMultimodalRemote:
             "embedders": [{"modalities": ["text"], "runtime": "remote", "model": "m.gguf"}],
             "managed": {"llama_server": {"manage": "auto", "mmprojs": ["~/v.mmproj"]}},
         }
-        with pytest.raises(ProfileError, match="declares no image modality"):
+        with pytest.raises(ProfileError, match="no embedder declares an image modality"):
             _resolve(config)
 
     def test_attach_rejects_mmprojs(self):
@@ -655,3 +672,92 @@ class TestMultimodalRemote:
         params = plan_to_runtime_params(_resolve(config))
         assert params["backend"] == "clip"
         assert params["modalities"] == frozenset({"text", "image"})
+
+
+# ── Multi-space embedding (#233 — the substrate's config half) ────────────────
+
+
+class TestMultiSpace:
+    def test_text_onnx_plus_clip_resolves_to_two_spaces(self):
+        # The eval's canonical config (MiniLM text + a CLIP fixture) — a
+        # dedicated text space PLUS a separate joint text↔image space. It
+        # resolves WITHOUT a ProfileError (the #229 reject is gone), and
+        # plan_to_runtime_params_set emits the two backend dicts.
+        config = {
+            "embedders": [
+                {"modalities": ["text"], "runtime": "onnx", "model": "~/minilm"},
+                {"modalities": ["text", "image"], "runtime": "onnx", "model": "~/clip"},
+            ]
+        }
+        plan = _resolve(config)
+        assert len(plan.embedders) == 2
+        dicts = plan_to_runtime_params_set(plan)
+        assert len(dicts) == 2
+        assert [d["backend"] for d in dicts] == ["onnx", "clip"]
+        assert dicts[1]["modalities"] == frozenset({"text", "image"})
+        # The set's first dict equals the primary accessor's dict — N=1 stays
+        # byte-identical because the primary is just the first space.
+        assert dicts[0] == plan_to_runtime_params(plan)
+
+    def test_single_space_set_is_a_one_tuple_equal_to_the_primary(self):
+        # N=1: the set is a 1-tuple whose sole element equals the primary dict,
+        # so the single-space runtime is unchanged.
+        config = {"embedders": [{"modalities": ["text"], "runtime": "onnx", "model": "~/m"}]}
+        plan = _resolve(config)
+        dicts = plan_to_runtime_params_set(plan)
+        assert len(dicts) == 1
+        assert dicts[0] == plan_to_runtime_params(plan)
+
+    def test_no_embedder_set_is_empty(self):
+        plan = _resolve({"embedders": []})
+        assert plan.embedders == ()
+        assert plan_to_runtime_params_set(plan) == ()
+
+    def test_per_modality_primary_is_the_first_declaring_space(self):
+        # Two CLIP-ish spaces: the first claims text+image; the second declares
+        # image too but is primary for NOTHING (both its modalities are already
+        # claimed). The role mirrors the kernel's insertion-order primary.
+        config = {
+            "embedders": [
+                {"modalities": ["text", "image"], "runtime": "onnx", "model": "~/a"},
+                {"modalities": ["image"], "runtime": "onnx", "model": "~/b"},
+            ]
+        }
+        plan = _resolve(config)
+        a, b = plan.embedders
+        assert a.primary_modalities == frozenset({"text", "image"})
+        assert b.primary_modalities == frozenset()
+
+    def test_two_managed_remote_no_endpoint_entries_are_rejected(self):
+        # At most one entry may bind the single managed llama-server (a remote
+        # entry with no endpoint). Two is ambiguous → a named error.
+        config = {
+            "embedders": [
+                {"modalities": ["text"], "runtime": "remote", "model": "a.gguf"},
+                {"modalities": ["text"], "runtime": "remote", "model": "b.gguf"},
+            ],
+            "managed": {"llama_server": {"manage": "auto"}},
+        }
+        with pytest.raises(ProfileError, match="bind the single managed llama-server"):
+            _resolve(config)
+
+    def test_text_onnx_plus_remote_endpoint_space_resolves(self):
+        # A dedicated local text space + a separate remote (endpoint) space —
+        # the no-omni deployment shape the epic targets. Both resolve; the set
+        # carries both backend dicts.
+        config = {
+            "embedders": [
+                {"modalities": ["text"], "runtime": "onnx", "model": "~/minilm"},
+                {
+                    "modalities": ["text", "image"],
+                    "runtime": "remote",
+                    "model": "clip-1",
+                    "endpoint": "https://api.example.com/v1",
+                    "api_key_env": "EXAMPLE_API_KEY",
+                },
+            ]
+        }
+        plan = _resolve(config)
+        dicts = plan_to_runtime_params_set(plan)
+        assert [d["backend"] for d in dicts] == ["onnx", "remote"]
+        assert dicts[1]["endpoint"] == "https://api.example.com/v1"
