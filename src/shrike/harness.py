@@ -356,6 +356,19 @@ class Harness:
 
     # -- status ------------------------------------------------------------------
 
+    def collection_status(self) -> dict[str, Any]:
+        """The cheap per-collection status fields for a multi-collection row
+        (#68): held (the cooperative-lock state), the index state, and the last
+        col_mod the index saw. No embedding health probe (that's the default
+        collection's full ``status()`` job) — this is a fan-out over every
+        assembled collection, so it stays a pure in-memory read."""
+        idx = self._index_status()
+        return {
+            "held": self.wrapper.is_open,
+            "index_state": idx.get("state"),
+            "col_mod": idx.get("col_mod"),
+        }
+
     async def status(self) -> dict[str, Any]:
         """The core status block — everything in ``/status`` minus host concerns."""
         # health() may probe llama-server over HTTP — off the loop.
@@ -873,6 +886,67 @@ class CollectionManager:
             kernel=harness.kernel,
             dedup_stats=harness.dedup_stats,
         )
+
+    def status_rows(self) -> list[dict[str, Any]]:
+        """One status row per KNOWN collection (#68 S3): the daemon's boot/
+        default collection plus every registered profile, deduped by
+        path-namespace (a registered profile that IS the boot collection shows
+        once). An assembled collection contributes its live held/index/col_mod;
+        a registered-but-never-routed one is ``active=False`` with no index
+        figures yet (nothing has been opened to read them from).
+
+        The top-level ``/status`` embedding/index/derived fields describe the
+        DEFAULT collection (which the operational routes act on); these rows are
+        the per-collection view tool calls route across."""
+        registry = self.registry()
+        # The routing default `resolve(None)` picks (registry default, else the
+        # boot collection) — marked `is_default` on whichever row matches it.
+        _, default_path = self.resolve(None)
+        default_ns = cache_layout.index_namespace(default_path)
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def _add(name: str, path: str, registered: bool) -> None:
+            ns = cache_layout.index_namespace(path)
+            if ns in seen:
+                return
+            seen.add(ns)
+            row: dict[str, Any] = {
+                "name": name,
+                "path": path,
+                "registered": registered,
+                "is_default": ns == default_ns,
+                "active": False,
+                # Uniform shape: an unassembled collection has no live figures
+                # (nothing opened to read them from), so these stay None.
+                "held": None,
+                "index_state": None,
+                "col_mod": None,
+            }
+            # An assembled harness (keyed by name) contributes live figures.
+            harness = self._harnesses.get(name)
+            if harness is not None:
+                row["active"] = True
+                row.update(harness.collection_status())
+            rows.append(row)
+
+        # The daemon's boot collection ALWAYS gets a row (it's assembled and
+        # physically open), named by the registry if it matches a profile.
+        boot_profile_name = self._key_for_path(self._default_path)
+        _add(
+            name=boot_profile_name or self.DEFAULT_KEY,
+            path=self._default_path,
+            registered=boot_profile_name is not None,
+        )
+        # Then every registered profile (deduped by namespace against the boot
+        # collection — a registered boot collection shows once, by its name).
+        for profile in registry.profiles:
+            _add(
+                name=profile.name,
+                path=os.path.abspath(os.path.expanduser(profile.path)),
+                registered=True,
+            )
+        return rows
 
     # -- status + lifecycle ---------------------------------------------------
 

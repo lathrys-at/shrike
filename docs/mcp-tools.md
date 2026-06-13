@@ -6,6 +6,8 @@ This document is the human-readable reference. The machine-readable schema each 
 
 Notes in Anki have a **note type** that defines their fields (e.g., a "Basic" note type has "Front" and "Back" fields; a "Cloze" note type has "Text" and "Extra"). A note type also defines **card templates** (HTML templates that control how cards are rendered) and **CSS styling** shared across all its cards. A single note produces one or more cards depending on its note type. Notes belong to a **deck** and can have **tags**.
 
+**Multi-collection routing.** One daemon can serve several collections. Every tool below (except `list_profiles`) accepts an optional `collection` parameter naming a registered profile (see `list_profiles`); omit it to use the active default. Each collection is opened on demand with its own index. Use `list_profiles` to discover the registered names. (The operational endpoints — embedding start/stop, index rebuild/save, recognition, reload — act on the daemon's default collection; only tool calls route per `collection`.)
+
 ---
 
 ## `collection_info`

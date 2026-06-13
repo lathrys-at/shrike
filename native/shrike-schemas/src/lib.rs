@@ -943,6 +943,26 @@ pub struct DedupStats {
     pub buckets: Vec<i64>,
 }
 
+/// One collection's state in a multi-collection daemon's `/status` (#68): a row
+/// per known collection (the boot/default plus every registered profile). The
+/// per-collection mirror of `shrike.schemas.CollectionStatus`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct CollectionStatus {
+    pub name: String,
+    pub path: String,
+    pub registered: bool,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub held: Option<bool>,
+    #[serde(default)]
+    pub index_state: Option<String>,
+    #[serde(default)]
+    pub col_mod: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ServerStatus {
     #[serde(default)]
@@ -977,6 +997,12 @@ pub struct ServerStatus {
     /// embedding space serves it. None on payloads from older servers.
     #[serde(default)]
     pub coverage: Option<std::collections::BTreeMap<String, bool>>,
+    /// Multi-collection routing (#68): one row per known collection (the
+    /// boot/default plus every registered profile). None on a single-collection
+    /// server / older payloads; the top-level fields describe the default
+    /// collection (which the operational routes act on).
+    #[serde(default)]
+    pub collections: Option<Vec<CollectionStatus>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1241,6 +1267,7 @@ catalog![
     ("DedupStats", DedupStats),
     ("RecognitionStatus", RecognitionStatus),
     ("DerivedStatus", DerivedStatus),
+    ("CollectionStatus", CollectionStatus),
     ("ServerStatus", ServerStatus),
     ("IndexRebuildResponse", IndexRebuildResponse),
     ("IndexSaveResponse", IndexSaveResponse),

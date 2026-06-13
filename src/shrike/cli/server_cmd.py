@@ -134,6 +134,41 @@ def _render_status(status: ServerStatus) -> None:
             ", ".join(served) if served else "[dim]none (embedding off)[/dim]",
         )
 
+    # Multi-collection routing (#68): per-collection rows. The figures above
+    # (embedding/index/derived) are the DEFAULT collection's — the one the
+    # operational commands (embedding/index/recognition, collection reload) act
+    # on; tool calls route per --profile. Shown only when more than one
+    # collection is known.
+    if status.collections:
+        output.section("Collections")
+        rows = []
+        for c in status.collections:
+            marker = "[green]*[/green]" if c.is_default else " "
+            if not c.active:
+                state = "[dim]idle (not opened)[/dim]"
+            elif c.held is False:
+                state = "[dim]released (idle)[/dim]"
+            else:
+                state = "[green]open[/green]"
+            idx_state = c.index_state or "[dim]-[/dim]"
+            tags = []
+            if not c.registered:
+                tags.append("[dim](boot)[/dim]")
+            rows.append(
+                [
+                    marker,
+                    f"[cyan]{c.name}[/cyan] {' '.join(tags)}".rstrip(),
+                    state,
+                    f"index: {idx_state}",
+                    f"[cyan]{c.path}[/cyan]",
+                ]
+            )
+        output.table(["", "Profile", "Lock", "Index", "Collection"], rows)
+        output.console.print(
+            "[dim]* active default — operational commands act on it; "
+            "route a tool call elsewhere with [/dim][cyan]--profile[/cyan][dim].[/dim]"
+        )
+
 
 def _wait_for_server(
     url: str, timeout: float = 15.0, *, show_spinner: bool = True

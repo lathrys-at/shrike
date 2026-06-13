@@ -1011,6 +1011,31 @@ class DedupStats(BaseModel):
     buckets: list[int] = []
 
 
+class CollectionStatus(BaseModel):
+    """One collection's state in a multi-collection daemon's ``/status`` (#68).
+
+    A row per known collection: the daemon's boot/default collection plus every
+    registered profile. ``name`` is the routing handle (the registry profile
+    name, or a sentinel for an unregistered boot collection); ``is_default``
+    marks the active default the operational routes act on and a bare call
+    resolves to. ``registered`` is whether it's in the profile registry;
+    ``active`` is whether a harness is currently assembled for it (lazily, on
+    first route — so a registered-but-never-routed collection is
+    ``active=False``). ``held`` is whether it currently holds its collection
+    lock (cooperative mode releases when idle; ``None`` when not assembled).
+    ``index_state``/``col_mod`` describe its namespaced index (``None`` when not
+    assembled — nothing has been opened to read them from)."""
+
+    name: str
+    path: str
+    registered: bool
+    is_default: bool = False
+    active: bool = False
+    held: bool | None = None
+    index_state: str | None = None
+    col_mod: int | None = None
+
+
 class ServerStatus(BaseModel):
     """A responding server's self-report from ``GET /status``.
 
@@ -1055,6 +1080,13 @@ class ServerStatus(BaseModel):
     # up where True). Today at most one space (#229 adds more); None on
     # payloads from older servers.
     coverage: dict[str, bool] | None = None
+    # Multi-collection routing (#68): one row per known collection — the
+    # daemon's boot/default collection plus every registered profile — with its
+    # held/index/col_mod state. None on a single-collection server / older
+    # payloads (the top-level embedding/index/derived/collection_held fields
+    # describe the DEFAULT collection, which the operational routes act on; tool
+    # calls route per-selector). The top-level fields stay for back-compat.
+    collections: list[CollectionStatus] | None = None
 
 
 # -- custom-endpoint responses (discriminated on `status`) -------------------

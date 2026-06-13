@@ -252,6 +252,7 @@ def _register_custom_routes(
     security: TransportSecuritySettings | None,
     request_shutdown: Callable[[], None],
     action_tools: dict[str, Tool] | None = None,
+    manager: CollectionManager | None = None,
 ) -> None:
     """Register custom HTTP endpoints on the server.
 
@@ -354,8 +355,19 @@ def _register_custom_routes(
                     status["uptime"] = f"{seconds}s"
 
         # The core status block (embedding/index/derived/locking); health()
-        # probes llama-server over HTTP off the loop inside.
+        # probes llama-server over HTTP off the loop inside. These top-level
+        # fields describe the DEFAULT collection (which the operational routes
+        # act on).
         status.update(await harness.status())
+
+        # Per-collection rows (#68): the boot/default collection plus every
+        # registered profile, with each one's held/index/col_mod. Only emitted
+        # when the manager knows of more than the single boot collection, so a
+        # single-collection daemon's payload is unchanged.
+        if manager is not None:
+            rows = manager.status_rows()
+            if len(rows) > 1:
+                status["collections"] = rows
 
         return JSONResponse(status)
 
@@ -1210,6 +1222,7 @@ def main() -> None:
             security=transport_security,
             request_shutdown=_request_shutdown,
             action_tools=action_tools,
+            manager=manager,
         )
 
         logger.info(

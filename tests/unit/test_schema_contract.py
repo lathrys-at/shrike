@@ -428,6 +428,24 @@ ROUNDTRIP_CASES: list[tuple[str, dict]] = [
         },
     ),
     ("ListProfilesResponse", {"profiles": [], "default": None}),
+    # Per-collection status rows (#68).
+    (
+        "CollectionStatus",
+        {
+            "name": "work",
+            "path": "/decks/work.anki2",
+            "registered": True,
+            "is_default": True,
+            "active": True,
+            "held": False,
+            "index_state": "ready",
+            "col_mod": 42,
+        },
+    ),
+    (
+        "CollectionStatus",
+        {"name": "<default>", "path": "/c.anki2", "registered": False},
+    ),
 ]
 
 

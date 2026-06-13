@@ -230,6 +230,83 @@ class TestLazyAssemblyAndIsolation:
         asyncio.run(flow())
 
 
+class TestStatusRows:
+    def test_default_only_single_row(self, tmp_path) -> None:
+        async def flow():
+            runtime = EmbeddingRuntime(model=None)
+            default = await _default_harness(
+                tmp_path / "cache", tmp_path / "default.anki2", runtime
+            )
+            mgr = _manager(tmp_path, tmp_path / "config.yml", default, runtime)
+            rows = mgr.status_rows()
+            assert len(rows) == 1
+            row = rows[0]
+            assert row["is_default"] is True
+            assert row["active"] is True  # the boot harness is assembled
+            assert row["registered"] is False  # not a registered profile
+            assert row["index_state"] is not None  # an assembled harness reports it
+            await mgr.close()
+
+        asyncio.run(flow())
+
+    def test_registered_unrouted_collection_is_inactive_row(self, tmp_path) -> None:
+        async def flow():
+            cfg = tmp_path / "config.yml"
+            _write_registry(cfg, [("other", tmp_path / "other.anki2")])
+            runtime = EmbeddingRuntime(model=None)
+            default = await _default_harness(
+                tmp_path / "cache", tmp_path / "default.anki2", runtime
+            )
+            mgr = _manager(tmp_path, cfg, default, runtime)
+            rows = {r["name"]: r for r in mgr.status_rows()}
+            # The boot collection + the registered (but never-routed) "other".
+            assert set(rows) == {mgr.DEFAULT_KEY, "other"}
+            assert rows["other"]["registered"] is True
+            assert rows["other"]["active"] is False  # never routed → not assembled
+            assert rows["other"]["held"] is None
+            assert rows["other"]["index_state"] is None
+            await mgr.close()
+
+        asyncio.run(flow())
+
+    def test_routed_collection_becomes_active_row(self, tmp_path) -> None:
+        async def flow():
+            cfg = tmp_path / "config.yml"
+            _write_registry(cfg, [("other", tmp_path / "other.anki2")])
+            runtime = EmbeddingRuntime(model=None)
+            default = await _default_harness(
+                tmp_path / "cache", tmp_path / "default.anki2", runtime
+            )
+            mgr = _manager(tmp_path, cfg, default, runtime)
+            await mgr.harness_for("other")  # route → assemble
+            rows = {r["name"]: r for r in mgr.status_rows()}
+            assert rows["other"]["active"] is True
+            assert rows["other"]["index_state"] is not None
+            await mgr.close()
+
+        asyncio.run(flow())
+
+    def test_boot_collection_that_is_a_registered_profile_dedupes(self, tmp_path) -> None:
+        async def flow():
+            cfg = tmp_path / "config.yml"
+            # The boot collection IS registered as "primary" and is the default.
+            _write_registry(cfg, [("primary", tmp_path / "default.anki2")], default="primary")
+            runtime = EmbeddingRuntime(model=None)
+            default = await _default_harness(
+                tmp_path / "cache", tmp_path / "default.anki2", runtime
+            )
+            mgr = _manager(tmp_path, cfg, default, runtime)
+            rows = mgr.status_rows()
+            # One row (deduped by namespace), named by the registry, default+active.
+            assert len(rows) == 1
+            assert rows[0]["name"] == "primary"
+            assert rows[0]["registered"] is True
+            assert rows[0]["is_default"] is True
+            await mgr.close()
+
+        asyncio.run(flow())
+
+
 class TestLiveRegistryView:
     def test_register_then_route_in_one_session(self, tmp_path) -> None:
         # Contract #2: the registry is a live view — a profile added to the
