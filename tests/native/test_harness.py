@@ -59,8 +59,9 @@ class TestHarness:
             assert status["embedding"]["state"] == "not_configured"
             assert status["index"]["state"] == "unavailable"
             assert status["locking"] == "permanent"
-            # Recognition is off until a backend is configured (#228).
-            assert status["recognition"] == {"state": "unavailable", "backend": None}
+            # Recognition is off until a backend is configured (#228/#485): the
+            # keyed-by-source map is empty (distinct from attached-but-errored).
+            assert status["recognition"] == {}
             # The coverage matrix (#498/#235): shape-stable, all-False with
             # embedding down — no modality is semantically searchable.
             assert status["coverage"] == {"text": False, "image": False, "audio": False}
@@ -360,7 +361,9 @@ class TestRecognition:
 
             harness.start_recognition("nope")
             status = await harness.status()
-            assert status["recognition"]["state"] == "error"
+            # An unknown OCR kind lands an 'error' row under the ocr source
+            # (#485): the engine is attached-but-errored, not absent.
+            assert status["recognition"]["ocr"]["state"] == "error"
             await harness.close()
 
         asyncio.run(flow())

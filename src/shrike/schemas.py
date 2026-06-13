@@ -1010,17 +1010,18 @@ class DerivedStatus(BaseModel):
     col_mod: int | None = None
 
 
-class RecognitionStatus(BaseModel):
-    """The recognition (OCR/ASR) service's self-report (#228/#221).
+class RecognitionEngineStatus(BaseModel):
+    """One attached recognition engine's self-report (#228/#485).
 
-    A flat shape like ``DerivedStatus``: ``state`` is ``unavailable`` (no backend
-    configured), ``ready`` (attached, sweeping/idle), or ``error`` (the backend's
-    dependency is missing or a sweep failed). ``backend`` is the kind (``apple``)
-    when one is attached. Defaulted so older payloads validate.
+    ``state`` is ``ready`` (attached, sweeping/idle) or ``error`` (the engine's
+    dependency is missing or a sweep failed) — the same lifecycle enum the
+    index/derived stores use. ``backend`` is the construction kind (``apple``,
+    ``describe-remote``); ``fingerprint`` is the engine identity when known.
     """
 
-    state: Literal["unavailable", "ready", "error"] = "unavailable"
+    state: Literal["unavailable", "building", "ready", "error"] = "ready"
     backend: str | None = None
+    fingerprint: str | None = None
 
 
 class DedupStats(BaseModel):
@@ -1098,8 +1099,12 @@ class ServerStatus(BaseModel):
     # Dedup best-match statistics (#207) — None until the first upsert with
     # neighbors runs (and on payloads from older servers).
     dedup: DedupStats | None = None
-    # Recognition (OCR/ASR) state (#228) — defaulted so older payloads validate.
-    recognition: RecognitionStatus = RecognitionStatus()
+    # Per-engine recognition state (#228/#485): a map keyed by source
+    # (``ocr``/``vlm``), each row {state, backend, fingerprint}. An EMPTY map
+    # means nothing is attached — distinct from an attached-but-errored engine,
+    # which is a present row with state=error. Defaulted (empty) so older
+    # payloads validate.
+    recognition: dict[str, RecognitionEngineStatus] = {}
     # The modality coverage matrix (#498/#235): for each modality, whether a
     # live embedding space serves it (search by that modality's content lights
     # up where True). Today at most one space (#229 adds more); None on

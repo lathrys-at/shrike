@@ -43,6 +43,25 @@ class KernelConfigError(Exception):
     """A caller-actionable configuration error (the HTTP host maps it to a 400)."""
 
 
+# The kernel source string each recognition purpose lands under (#485) — the
+# routing key the harness passes to `attach_recognizer_with`, also the `/status`
+# map key. OCR's is unchanged (`"ocr"`).
+RECOGNITION_OCR = "ocr"
+RECOGNITION_DESCRIBE = "vlm"
+
+
+@dataclass
+class _RecognitionEngine:
+    """One attached recognition engine's harness-side state (#485): the backend
+    kind (`apple`/`describe-remote`), the lifecycle state (the same enum the
+    index/derived stores use, minus `building`), and its fingerprint when known.
+    Per-purpose so `/status` reports one row per engine."""
+
+    backend: str
+    state: str = "ready"
+    fingerprint: str | None = None
+
+
 class DedupStatsRecorder:
     """Rolling dedup best-match statistics (#207): one sample per upsert
     draft note — the best SEMANTIC neighbor cosine, or a no-match tick.
@@ -211,10 +230,14 @@ class Harness:
         # Background maintenance tasks (#471): tracked so close() drains them
         # (no destroyed-pending teardown) and tests can settle deterministically.
         self._bg_tasks: set[asyncio.Task[Any]] = set()
-        # Recognition (#228/#221): the attached OCR/ASR backend kind + state,
-        # and the background sweep task. None until start_recognition runs.
-        self._recognition_kind: str | None = None
-        self._recognition_state: str = "unavailable"
+        # Recognition (#228/#221/#485): per-purpose engine state, keyed by the
+        # kernel source string (`"ocr"`/`"vlm"`). Empty = nothing attached (a
+        # distinct, representable state from "attached but errored"). Each row
+        # carries its backend kind, state, and (when known) fingerprint for
+        # per-engine `/status`. One shared background sweep task drives every
+        # attached purpose (the kernel's `recognize_pending` sweeps all of them
+        # per batch); tracked so close() drains it.
+        self._recognition_engines: dict[str, _RecognitionEngine] = {}
         self._recognition_task: asyncio.Task[Any] | None = None
 
     @classmethod
@@ -382,9 +405,16 @@ class Harness:
         }
         if (dedup := self.dedup_stats.snapshot()) is not None:
             status["dedup"] = dedup
+        # Per-engine recognition status (#485): a map keyed by source — one row
+        # per attached purpose, each {state, backend, fingerprint}. An empty map
+        # is "nothing attached" (distinct from an attached-but-errored engine).
         status["recognition"] = {
-            "state": self._recognition_state,
-            "backend": self._recognition_kind,
+            source: {
+                "state": eng.state,
+                "backend": eng.backend,
+                "fingerprint": eng.fingerprint,
+            }
+            for source, eng in self._recognition_engines.items()
         }
         # The modality coverage matrix (#498/#235): which modalities a live
         # space serves. One space today (#229 adds more — this stays the
@@ -503,27 +533,35 @@ class Harness:
         embedder = native() if callable(native) else shrike_native.PyEmbedder.capture(backend)
         self.kernel.attach_embedder(embedder, self._media_read, self._media_exists)
 
-    def attach_recognizer(self, backend: Any) -> None:
-        """Attach an OCR/ASR backend (#228) — the second #342 slot. A native
-        engine (``shrike_native.AppleVisionRecognizer``, present only in
-        engine-apple builds — the mobile set, never the server build) goes to
-        the kernel directly — recognition then never re-enters Python; any
-        other object satisfying the RecognizerBackend contract (a blocking
-        ``recognize(items: list[bytes]) -> list[tuple[str, float, str]]``
-        plus ``model_fingerprint()``) is captured behind the PyRecognizer
-        dispatch seam. Must run on the event loop (both paths grab the
-        running loop)."""
+    def attach_recognizer(self, backend: Any, purpose: str = RECOGNITION_OCR) -> None:
+        """Attach an OCR/describe backend (#228/#485) for a recognition
+        ``purpose`` (the kernel source — ``"ocr"`` / ``"vlm"``) — the second
+        #342 slot, now keyed by purpose. A native engine
+        (``AppleVisionRecognizer`` in engine-apple builds, ``RemoteDescriber``
+        in engine-remote builds) goes to the kernel directly — recognition
+        then never re-enters Python; any other object satisfying the
+        RecognizerBackend contract (a blocking ``recognize(items)`` plus
+        ``model_fingerprint()``) is captured behind the PyRecognizer dispatch
+        seam. Must run on the event loop (both paths grab the running loop)."""
         if self._media_read is None or self._media_exists is None:
             raise KernelConfigError("recognition needs media access (media_read/media_exists)")
         native_cls = getattr(shrike_native, "AppleVisionRecognizer", None)
-        if native_cls is not None and isinstance(backend, native_cls):
-            recognizer: Any = backend
-        else:
-            recognizer = shrike_native.Recognizer.capture(backend)
-        self.kernel.attach_recognizer(recognizer, self._media_read, self._media_exists)
+        describe_cls = getattr(shrike_native, "RemoteDescriber", None)
+        is_native = (native_cls is not None and isinstance(backend, native_cls)) or (
+            describe_cls is not None and isinstance(backend, describe_cls)
+        )
+        recognizer: Any = backend if is_native else shrike_native.Recognizer.capture(backend)
+        self.kernel.attach_recognizer_with(
+            purpose, recognizer, self._media_read, self._media_exists
+        )
 
-    def detach_recognizer(self) -> None:
-        self.kernel.detach_recognizer()
+    def detach_recognizer(self, purpose: str | None = None) -> None:
+        """Detach a recognition engine. ``purpose=None`` detaches OCR (the
+        back-compat default); a source string detaches that purpose (#485)."""
+        if purpose is None or purpose == RECOGNITION_OCR:
+            self.kernel.detach_recognizer()
+        else:
+            self.kernel.detach_recognizer_for(purpose)
 
     async def recognition_sweep(
         self, batch_size: int = 8, max_batches: int | None = None
@@ -571,46 +609,105 @@ class Harness:
                 return report
 
     def start_recognition(self, kind: str) -> None:
-        """Construct + attach an OCR/ASR backend by kind (#221) and launch a
-        background sweep. Degrades to 'error' state on a missing dependency
-        (the extra isn't installed) or an unknown kind — never kills boot."""
+        """Construct + attach an OCR backend by kind (#221) and launch a
+        background sweep. Degrades to an 'error' state row on a missing
+        dependency (the engine isn't compiled in) or an unknown kind — never
+        kills boot. Byte-identical OCR path to before #485 (the OCR purpose,
+        the legacy ``--ocr-backend`` flow)."""
         from shrike.recognition import make_recognizer
 
         try:
             backend = make_recognizer(kind)
-            self.attach_recognizer(backend)
+            fingerprint = backend.model_fingerprint()
+            self.attach_recognizer(backend, RECOGNITION_OCR)
         except (ImportError, ValueError, KernelConfigError) as e:
             logger.error("Recognition backend %r unavailable: %s", kind, e)
-            self._recognition_state = "error"
+            self._recognition_engines[RECOGNITION_OCR] = _RecognitionEngine(
+                backend=kind, state="error"
+            )
             return
-        self._recognition_kind = kind
-        self._recognition_state = "ready"
-        logger.info("Recognition backend attached: %s", kind)
-        # Tracked (#471): the sweep joins the background drain — close()
-        # cancels-and-awaits it like every other maintenance task, so a
-        # mid-sweep teardown never leaves a destroyed-pending task.
+        self._recognition_engines[RECOGNITION_OCR] = _RecognitionEngine(
+            backend=kind, state="ready", fingerprint=fingerprint
+        )
+        logger.info("Recognition backend attached: %s (ocr)", kind)
+        self._ensure_recognition_sweep()
+
+    def start_recognition_describe(
+        self,
+        endpoint: str,
+        *,
+        model: str | None = None,
+        api_key_env: str | None = None,
+        mmproj: str | None = None,
+    ) -> None:
+        """Construct + attach the remote VLM describe engine (#433/#485) for the
+        ``describe`` purpose (image→prose into the text embedding space,
+        vector-only) and launch the shared background sweep. Degrades to an
+        'error' state row on a missing build feature / dead endpoint / missing
+        key env — never kills boot."""
+        from shrike.recognition import make_describe_recognizer
+
+        try:
+            backend = make_describe_recognizer(
+                endpoint, model=model, api_key_env=api_key_env, mmproj=mmproj
+            )
+            fingerprint = shrike_native.RemoteDescriber.compose_fingerprint(
+                *backend.model_info(), model, mmproj
+            )
+            self.attach_recognizer(backend, RECOGNITION_DESCRIBE)
+        except (ImportError, ValueError, RuntimeError, KernelConfigError) as e:
+            logger.error("Describe recognizer unavailable: %s", e)
+            self._recognition_engines[RECOGNITION_DESCRIBE] = _RecognitionEngine(
+                backend="describe-remote", state="error"
+            )
+            return
+        self._recognition_engines[RECOGNITION_DESCRIBE] = _RecognitionEngine(
+            backend="describe-remote", state="ready", fingerprint=fingerprint
+        )
+        logger.info("Recognition backend attached: describe-remote (vlm)")
+        self._ensure_recognition_sweep()
+
+    def _ensure_recognition_sweep(self) -> None:
+        """Launch the shared background sweep task if one isn't already running
+        (#485). The kernel's ``recognize_pending`` sweeps EVERY attached purpose
+        per batch, so one driver serves all engines. Tracked (#471): close()
+        cancels-and-awaits it like every other maintenance task, so a mid-sweep
+        teardown never leaves a destroyed-pending task."""
+        if self._recognition_task is not None and not self._recognition_task.done():
+            return
         self._recognition_task = self._spawn_bg(self._drive_recognition())
 
     async def _drive_recognition(self) -> None:
         """Background recognition: sweep to completion, off the request path.
-        A failure marks the state without disturbing the rest of the server."""
+        A failure marks every attached engine's state without disturbing the
+        rest of the server."""
         try:
             await self.recognition_sweep()
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.warning("Recognition sweep failed", exc_info=True)
-            self._recognition_state = "error"
+            for eng in self._recognition_engines.values():
+                eng.state = "error"
 
-    def stop_recognition(self) -> None:
-        """Detach the recognizer and cancel any running sweep."""
-        if self._recognition_task is not None and not self._recognition_task.done():
-            self._recognition_task.cancel()
-        self._recognition_task = None
-        with contextlib.suppress(Exception):
-            self.detach_recognizer()
-        self._recognition_kind = None
-        self._recognition_state = "unavailable"
+    def stop_recognition(self, purpose: str | None = None) -> None:
+        """Detach a recognition engine (or all) and cancel the sweep. With
+        ``purpose=None`` every engine is detached (the boot/teardown path);
+        a source string detaches just that purpose (#485). The shared sweep
+        task is cancelled whenever no engine remains."""
+        sources = (
+            list(self._recognition_engines)
+            if purpose is None
+            else [purpose] * (purpose in self._recognition_engines)
+        )
+        for source in sources:
+            with contextlib.suppress(Exception):
+                self.detach_recognizer(source)
+            self._recognition_engines.pop(source, None)
+        if not self._recognition_engines:
+            if self._recognition_task is not None and not self._recognition_task.done():
+                self._recognition_task.cancel()
+            self._recognition_task = None
 
     async def _drive_boot_reindex(self) -> None:
         if await self.kernel.reindex_if_needed():

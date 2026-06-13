@@ -925,6 +925,10 @@ def main() -> None:
         "modalities": None,
         "mmprojs": None,
     }
+    # The v2 recognizers: a list of harness-ready plans (#485). The legacy
+    # (no --config) path uses the --ocr-backend flag instead and leaves this
+    # empty; a v2 config fills it from the resolved profile.
+    recognizer_boot_plans: tuple[Any, ...] = ()
     if args.config:
         # The daemon resolves the v2 capability sections itself (#498):
         # structured entries (remote endpoints, api_key_env) have no flag
@@ -959,6 +963,7 @@ def main() -> None:
             ProfileError,
             parse_capabilities,
             plan_to_runtime_params,
+            recognizer_plans,
             resolve_profile,
         )
 
@@ -969,6 +974,9 @@ def main() -> None:
             parser.error(str(e))
         for warning in plan.warnings:
             logger.warning("%s", warning)
+        # The resolved recognizers (#485): describe (and, post-#502, remote OCR)
+        # ride the v2 config — no flag spelling, so they reach boot from here.
+        recognizer_boot_plans = recognizer_plans(plan)
         v2_params = plan_to_runtime_params(plan)
         for key in ("model", "llama_server"):
             if v2_params.get(key):
@@ -1191,11 +1199,26 @@ def main() -> None:
         embedding_configured = bool(emb_params.get("model") or emb_params.get("endpoint"))
         await harness.boot(start_embedding=embedding_configured and not args.no_embedding)
 
-        # Recognition (#228/#221): attach the OCR backend and sweep in the
-        # background. Off unless --ocr-backend is set; a missing extra degrades
-        # to an 'error' state without disturbing the rest of the server.
+        # Recognition (#228/#221/#485): attach recognizers and sweep in the
+        # background. Off unless configured; a dead endpoint / missing engine
+        # degrades to an 'error' state row without disturbing the rest of the
+        # server. The legacy --ocr-backend flag still drives OCR directly; the
+        # v2 recognizers: config (describe today, remote OCR post-#502) drives
+        # the rest from the resolved profile.
         if args.ocr_backend:
             harness.start_recognition(args.ocr_backend)
+        for rec in recognizer_boot_plans:
+            if rec.kind == "describe-remote":
+                assert rec.endpoint is not None  # resolve_profile guarantees it
+                harness.start_recognition_describe(
+                    rec.endpoint,
+                    model=rec.model,
+                    api_key_env=rec.api_key_env,
+                )
+            elif rec.kind == "apple":
+                harness.start_recognition("apple")
+            else:  # pragma: no cover — resolve_profile rejects unknown kinds
+                logger.warning("Unsupported recognizer kind %r; skipping", rec.kind)
 
         # Multi-collection routing (#68): the manager wraps the boot harness as
         # the default collection and lazily assembles a per-collection harness

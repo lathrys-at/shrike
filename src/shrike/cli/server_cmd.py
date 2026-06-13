@@ -119,12 +119,21 @@ def _render_status(status: ServerStatus) -> None:
     if der.fts5 and der.col_mod is not None:
         output.kv("Collection mod", str(der.col_mod), indent=2)
 
-    # Recognition (#228): OCR/ASR over note media. Shown only when configured.
-    rec = status.recognition
-    if rec.state == "ready":
-        output.kv("Recognition", f"[green]ready[/green] ([cyan]{rec.backend}[/cyan])")
-    elif rec.state == "error":
-        output.kv("Recognition", "[red]error[/red]")
+    # Recognition (#228/#485): one row per attached engine, keyed by source
+    # (ocr/vlm). An empty map = nothing attached (shown as a clean "none");
+    # each engine renders its own state + backend.
+    if status.recognition:
+        for source in sorted(status.recognition):
+            eng = status.recognition[source]
+            label = f"Recognition ({source})"
+            if eng.state == "ready":
+                output.kv(label, f"[green]ready[/green] ([cyan]{eng.backend}[/cyan])")
+            elif eng.state == "error":
+                output.kv(label, f"[red]error[/red] ([cyan]{eng.backend}[/cyan])")
+            else:
+                output.kv(label, f"[dim]{eng.state}[/dim]")
+    else:
+        output.kv("Recognition", "[dim]none (no recognizer attached)[/dim]")
 
     # The modality coverage matrix (#498/#235): what semantic search can reach.
     if status.coverage is not None:
