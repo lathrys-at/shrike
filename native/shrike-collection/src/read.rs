@@ -210,7 +210,9 @@ impl CollectionCore {
     /// [`Self::note_sound_refs`] (#485): `probe` is the ASCII-lowered marker
     /// the SQL `instr` pre-filter looks for, `extract` the per-field ref
     /// extractor (whose own byte probe matches `probe` exactly, so the filter
-    /// can never skip a note the extractor would return refs for).
+    /// can never skip a note the extractor would return refs for). `probe` is
+    /// interpolated into the SQL text, so it MUST be a trusted compile-time
+    /// literal (both callers pass one) — never caller- or user-supplied input.
     fn note_media_refs_filtered(
         &self,
         probe: &str,
