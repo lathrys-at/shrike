@@ -22,5 +22,10 @@ rust_test(
     name = "shrike_engine_api_test",
     size = "small",
     crate = ":shrike_engine_api",
-    deps = ["@crates//:serde_json"],
+    deps = [
+        # Test-only: decode the pure-Rust BMP probe images to verify validity
+        # (#211; production code emits raw bytes — no image dep in the leaf).
+        "@crates//:image",
+        "@crates//:serde_json",
+    ],
 )
