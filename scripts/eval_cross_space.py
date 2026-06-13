@@ -172,8 +172,15 @@ class Space:
     def _matrix(self) -> tuple[np.ndarray, np.ndarray]:
         return np.asarray(self._ids, dtype=np.int64), _normalize(np.asarray(self._vecs))
 
-    def rank(self, query: np.ndarray) -> list[int]:
-        """note_ids best-first for one query vector, max-over-items per note."""
+    def rank(self, query: np.ndarray, cap: int | None = None) -> list[int]:
+        """note_ids best-first for one query vector, max-over-items per note.
+
+        ``cap`` truncates to the top-N candidates — a per-space RANK CAP. The kernel's index search
+        is always bounded (it asks USearch for top-N, not the whole corpus), so fusing UN-capped
+        full-corpus rankings would be degenerate: a signal that lists every note contributes a tiny
+        RRF weight to all of them, and a note appearing across more signals wins regardless of where.
+        A realistic cap is what lets RRF discriminate — and the cap is itself a tuning parameter.
+        """
         ids, mat = self._matrix()
         q = _normalize(query.reshape(1, -1))[0]
         sims = mat @ q  # cosine per item
@@ -181,7 +188,8 @@ class Space:
         for nid, s in zip(ids.tolist(), sims.tolist(), strict=True):
             if nid not in best or s > best[nid]:
                 best[nid] = s
-        return [nid for nid, _ in sorted(best.items(), key=lambda kv: -kv[1])]
+        ordered = [nid for nid, _ in sorted(best.items(), key=lambda kv: -kv[1])]
+        return ordered[:cap] if cap else ordered
 
     def best_score(self, query: np.ndarray) -> float:
         """The single best cosine over all items — used for the cross-space activation probe."""
@@ -217,7 +225,32 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("-k", type=int, default=5)
     ap.add_argument("--rrf-k", type=int, default=60, help="RRF dampening constant (default 60)")
+    ap.add_argument(
+        "--rank-cap",
+        type=int,
+        default=10,
+        help="per-space top-N candidate cap fed into RRF (the kernel always bounds search; default 10)",
+    )
+    ap.add_argument(
+        "--gate-margin",
+        type=float,
+        default=2.0,
+        help=(
+            "cross-space image-gate margin in std-devs: fire the CLIP-image signal only when its "
+            "best cosine for the query clears mean+margin·std of its OFF-topic (text-target) "
+            "best-cosine distribution — the #201b activation gate lifted across spaces (default 2.0)"
+        ),
+    )
     ap.add_argument("--refresh", action="store_true", help="re-resolve images (ignore pins/cache)")
+    ap.add_argument(
+        "--blind-image-bodies",
+        action="store_true",
+        help=(
+            "Replace image notes' (leaky) label text with answer-independent filler, so an "
+            "image-target query can ONLY be answered by the image vector — isolates the pure "
+            "cross-space image signal from the semantic leak the labels carry (#193 caveat)."
+        ),
+    )
     args = ap.parse_args()
 
     os.environ.setdefault(
@@ -288,7 +321,12 @@ def main() -> None:
     for n in text_notes:
         all_text_bodies[n["id"]] = n["text"]
     for n in img_notes:
-        all_text_bodies[n["id"]] = n["text"]  # the leaky-label body (e.g. "Cardiovascular figure")
+        # The label leaks the topic *semantically* even though it never names the answer (#193). With
+        # --blind-image-bodies we swap in answer-independent filler so the ONLY route to an image
+        # note is its image vector — the clean isolation of the cross-space image signal.
+        all_text_bodies[n["id"]] = (
+            f"study flashcard {n['id']}" if args.blind_image_bodies else n["text"]
+        )
 
     corpus_ids = list(all_text_bodies.keys())
     bodies = [all_text_bodies[i] for i in corpus_ids]
@@ -310,78 +348,123 @@ def main() -> None:
     clip_text_q = {i: v for i, v in zip(text_q, clip_text(list(text_q.values())), strict=True)}
     clip_image_q = {i: v for i, v in zip(image_q, clip_text(list(image_q.values())), strict=True)}
 
-    # ---- (a) text-only baseline: ONE MiniLM index of note bodies. ----
-    sp_text = Space("text")
+    # Three per-space rankers, each ranked in ITS OWN space (the key to dodging the CLIP modality
+    # gap — #201a's per-modality sub-index split, lifted to the cross-space case):
+    #   sp_mini       — the dedicated text embedder (MiniLM) over note bodies.
+    #   sp_clip_text  — the CLIP text tower over note bodies.
+    #   sp_clip_image — the CLIP image tower over image vectors ONLY (no text vectors to bury it).
+    sp_mini = Space("mini_text")
     for i in corpus_ids:
-        sp_text.add(i, mini_body[i])
-
-    # ---- (b) single CLIP shared space: text bodies + image vectors in ONE CLIP index. ----
-    sp_clip = Space("clip")
+        sp_mini.add(i, mini_body[i])
+    sp_clip_text = Space("clip_text")
     for i in corpus_ids:
-        sp_clip.add(i, clip_body[i])
+        sp_clip_text.add(i, clip_body[i])
+    sp_clip_image = Space("clip_image")
     for i, v in img_vecs.items():
-        sp_clip.add(i, v)
+        sp_clip_image.add(i, v)
 
-    # ---- (c) cross-space: the text space (a) AND a CLIP space holding text+image, RRF-fused. ----
-    #    Two SEPARATE spaces. Per query we rank each independently, then fuse the two rankings.
-    #    The CLIP space here carries BOTH its text bodies and its image vectors (so it can answer an
-    #    image-target query); the text space is MiniLM-only. This is the "dedicated text embedder +
-    #    CLIP" shape from #229/#232-#234.
-    sp_clip_full = sp_clip  # identical contents — reuse
+    # (b) single CLIP shared space: text bodies AND image vectors POOLED into ONE max-over-items
+    #     cosine ranking — the literal one-omni-index shape (#532/#533). This is where the modality
+    #     gap bites: a text-query→image-vector cosine (~0.32) loses rank to a text-query→text-body
+    #     cosine (~0.6), so image vectors only ever surface additively, never rank-1.
+    sp_clip_pooled = Space("clip_pooled")
+    for i in corpus_ids:
+        sp_clip_pooled.add(i, clip_body[i])
+    for i, v in img_vecs.items():
+        sp_clip_pooled.add(i, v)
 
-    rrf_weights = {"text": 1.0, "clip": 1.0}
-
-    def fuse_two(text_rank: list[int], clip_rank: list[int]) -> list[int]:
-        hits = rrf_fuse(
-            {"text": text_rank, "clip": clip_rank}, weights=rrf_weights, k=args.rrf_k
-        )
+    def fuse(rankings: dict[str, list[int]], weights: dict[str, float]) -> list[int]:
+        hits = rrf_fuse(rankings, weights=weights, k=args.rrf_k)
         return [h.note_id for h in hits]
 
-    # Run all three conditions over both query sets.
-    def run(query_vecs_mini: dict, query_vecs_clip: dict) -> dict[str, list[list[int]]]:
-        a_rank, b_rank, c_rank = [], [], []
-        for qid in query_vecs_mini:
-            tr = sp_text.rank(query_vecs_mini[qid])
-            cr = sp_clip.rank(query_vecs_clip[qid])
-            cr_full = sp_clip_full.rank(query_vecs_clip[qid])
-            a_rank.append(tr)
-            b_rank.append(cr)
-            c_rank.append(fuse_two(tr, cr_full))
-        return {"a": a_rank, "b": b_rank, "c": c_rank}
+    cap = args.rank_cap
 
-    text_target = run(mini_text_q, clip_text_q)
-    image_target = run(mini_image_q, clip_image_q)
+    # Run all conditions over one query set (one mini-query-vec + one clip-query-vec per id).
+    def run(query_mini: dict, query_clip: dict) -> dict[str, list[list[int]]]:
+        out: dict[str, list[list[int]]] = {"a": [], "b": [], "c": [], "c_gate": []}
+        for qid in query_mini:
+            qm, qc = query_mini[qid], query_clip[qid]
+            mini_r = sp_mini.rank(qm, cap)
+            ctext_r = sp_clip_text.rank(qc, cap)
+            cimg_r = sp_clip_image.rank(qc, cap)
+            pooled_r = sp_clip_pooled.rank(qc)  # (b) is a single ranking, no per-space cap needed
+
+            # (a) text-only baseline.
+            out["a"].append(mini_r)
+            # (b) single CLIP shared (pooled) space.
+            out["b"].append(pooled_r)
+            # (c) cross-space FUSED: the dedicated text embedder + the CLIP-image space as SEPARATE
+            #     RRF signals, each ranked in its own space. (We also fold the CLIP text tower in as
+            #     a third signal — it costs nothing and is what the kernel would actually run.)
+            out["c"].append(
+                fuse(
+                    {"text": mini_r, "clip_text": ctext_r, "clip_image": cimg_r},
+                    {"text": 1.0, "clip_text": 1.0, "clip_image": 1.0},
+                )
+            )
+            # (c+gate) the same, but the CLIP-image signal is GATED OUT unless its best cosine for
+            #     this query clears the off-topic floor (the cross-space analogue of #201b). Stops a
+            #     text-target query from ever having weak image vectors injected into its fusion.
+            sigs = {"text": mini_r, "clip_text": ctext_r}
+            wts = {"text": 1.0, "clip_text": 1.0}
+            if sp_clip_image.best_score(qc) >= image_gate:
+                sigs["clip_image"] = cimg_r
+                wts["clip_image"] = 1.0
+            out["c_gate"].append(fuse(sigs, wts))
+        return out
+
     text_expect = list(text_q.keys())
     image_expect = list(image_q.keys())
 
+    # The cross-space activation gate threshold (#201b analogue): mean + margin·std of the CLIP image
+    # space's best cosine over OFF-topic (text-target) queries — i.e. how strongly image vectors fire
+    # when the answer is NOT an image. Anything below this is "the image space didn't really match".
+    off_scores = np.array([sp_clip_image.best_score(clip_text_q[i]) for i in text_q])
+    image_gate = float(off_scores.mean() + args.gate_margin * off_scores.std())
+
+    text_target = run(mini_text_q, clip_text_q)
+    image_target = run(mini_image_q, clip_image_q)
+
     k = args.k
-    print(f"\n=== CROSS-SPACE EVAL (corpus={len(corpus_ids)} notes, rrf_k={args.rrf_k}) ===")
+    label = " [BLIND image bodies]" if args.blind_image_bodies else " [leaky labels]"
+    print(
+        f"\n=== CROSS-SPACE EVAL (corpus={len(corpus_ids)} notes, rrf_k={args.rrf_k}, "
+        f"rank_cap={cap}, image_gate={image_gate:.3f}){label} ==="
+    )
     print(f"\n--- text-target queries ({len(text_expect)}: answer in a TEXT note) ---")
     print(fmt("(a) text-only [MiniLM]", metrics(text_target["a"], text_expect, k), k))
-    print(fmt("(b) single CLIP shared space", metrics(text_target["b"], text_expect, k), k))
+    print(fmt("(b) single CLIP pooled space", metrics(text_target["b"], text_expect, k), k))
     print(fmt("(c) cross-space RRF fused", metrics(text_target["c"], text_expect, k), k))
+    print(fmt("(c+gate) cross-space + img gate", metrics(text_target["c_gate"], text_expect, k), k))
 
     print(f"\n--- image-target queries ({len(image_expect)}: answer in the IMAGE) ---")
     print(fmt("(a) text-only [MiniLM]", metrics(image_target["a"], image_expect, k), k))
-    print(fmt("(b) single CLIP shared space", metrics(image_target["b"], image_expect, k), k))
+    print(fmt("(b) single CLIP pooled space", metrics(image_target["b"], image_expect, k), k))
     print(fmt("(c) cross-space RRF fused", metrics(image_target["c"], image_expect, k), k))
+    print(fmt("(c+gate) cross-space + img gate", metrics(image_target["c_gate"], image_expect, k), k))
 
-    # ---- activation diagnostic: does CLIP fire spuriously on text-target queries? ----
+    # ---- isolating control: CLIP image-only retrieval (images-only corpus, no text vectors) ----
+    # Proves the image signal IS present in the small CLIP (the #193 finding) — so any image-recall
+    # collapse above is a RANKING/fusion artifact (the modality gap), not a dead image tower.
+    iso = []
+    for qid in image_q:
+        ranking = sp_clip_image.rank(clip_image_q[qid])  # only image vectors live in this space
+        iso.append(ranking)
+    print("\n--- isolating control: CLIP IMAGE-ONLY space (image vectors only) ---")
+    print(fmt("image-only retrieval", metrics(iso, image_expect, k), k))
+
+    # ---- activation diagnostic: does the CLIP image space fire spuriously on text-target queries? ----
     # The #201b intra-modal gate floors a non-text modality. Across SPACES the analogue is: does the
-    # CLIP image sub-space's best score for a text-target query (where the right answer is a TEXT
-    # note, NOT an image) sit ABOVE or BELOW its best score for an image-target query? If text-target
-    # queries routinely light up image vectors as strongly as image-target ones, a cross-space gate
-    # is NEEDED; if image vectors only fire for genuinely image-relevant queries, RRF alone suffices.
-    img_space = Space("img")
-    for i, v in img_vecs.items():
-        img_space.add(i, v)
-    on_topic = [img_space.best_score(clip_image_q[i]) for i in image_q]
-    off_topic = [img_space.best_score(clip_text_q[i]) for i in text_q]
-    print("\n--- cross-space activation diagnostic (CLIP image sub-space best-cosine) ---")
-    print(f"  image-target queries (on-topic): mean={np.mean(on_topic):.3f}  std={np.std(on_topic):.3f}")
+    # CLIP image space's best score for a text-target query (right answer is a TEXT note, NOT an image)
+    # sit BELOW its best score for an image-target query? If image vectors fire as strongly off-topic
+    # as on-topic, a cross-space gate is NEEDED; clean separation means RRF alone could suffice.
+    on_topic = [sp_clip_image.best_score(clip_image_q[i]) for i in image_q]
+    off_topic = [sp_clip_image.best_score(clip_text_q[i]) for i in text_q]
+    print("\n--- cross-space activation diagnostic (CLIP image space best-cosine) ---")
+    print(f"  image-target queries (on-topic):  mean={np.mean(on_topic):.3f}  std={np.std(on_topic):.3f}")
     print(f"  text-target  queries (off-topic): mean={np.mean(off_topic):.3f}  std={np.std(off_topic):.3f}")
-    sep = np.mean(on_topic) - np.mean(off_topic)
-    print(f"  separation (on - off): {sep:+.3f}  ({'separable' if sep > 0.02 else 'NOT separable'})")
+    sep = float(np.mean(on_topic) - np.mean(off_topic))
+    print(f"  separation (on - off): {sep:+.3f}  (gate threshold mean+1·std = {image_gate:.3f})")
 
     print("\nDone.")
 
