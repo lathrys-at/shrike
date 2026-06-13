@@ -529,6 +529,21 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
         )
 
     managed_llama = caps.managed_llama
+    if managed_llama is not None and managed_llama.manage in ("auto", "attach"):
+        # The managed llama-server exists to serve a remote entry without an
+        # endpoint — a section nothing consumes would be a silent no-op (the
+        # cross-talk rule), and attach + an explicit endpoint would be two
+        # sources for one address. manage: off is a valid explicit "nothing
+        # managed" declaration alongside any embedder.
+        consumed = (
+            embedder is not None and embedder.runtime == "remote" and embedder.endpoint is None
+        )
+        if not consumed:
+            raise ProfileError(
+                f"managed.llama_server (manage: {managed_llama.manage}) is declared but "
+                "nothing consumes it — it serves an embedders: entry with runtime: remote "
+                "and no endpoint; remove the section or set manage: off"
+            )
     if (
         managed_llama is not None
         and managed_llama.manage == "attach"

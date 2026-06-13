@@ -762,7 +762,14 @@ def main() -> None:
             for name, value in (
                 ("--embedding-backend", args.embedding_backend),
                 ("--embedding-model", args.embedding_model),
+                ("--embedding-port", args.embedding_port),
                 ("--embedding-pooling", args.embedding_pooling),
+                ("--embedding-context-size", args.embedding_context_size),
+                ("--embedding-threads", args.embedding_threads),
+                ("--embedding-gpu-layers", args.embedding_gpu_layers),
+                ("--embedding-arg", args.embedding_arg),
+                ("--embedding-onnx-provider", args.embedding_onnx_provider),
+                ("--embedding-batch-size", args.embedding_batch_size),
                 ("--llama-server", args.llama_server),
                 ("--ocr-backend", args.ocr_backend),
             )

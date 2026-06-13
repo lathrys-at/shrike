@@ -521,3 +521,32 @@ class TestLegacyBridge:
             assert bridged[key] == expected
         assert bridged["extra_args"] == ["--flash-attn"]
         assert bridged["model"] == "~/m.gguf"
+
+
+class TestManagedConsumption:
+    """managed.llama_server must be consumed by a remote entry (the
+    no-silent-noop rule) — manage: off is a valid explicit declaration."""
+
+    def test_unconsumed_managed_auto_is_an_error(self):
+        config = {
+            "embedders": [{"modalities": ["text"], "runtime": "onnx", "model": "m"}],
+            "managed": {"llama_server": {"manage": "auto"}},
+        }
+        with pytest.raises(ProfileError, match="nothing consumes it"):
+            _resolve(config)
+
+    def test_attach_plus_explicit_endpoint_is_an_error(self):
+        config = {
+            "embedders": [{"modalities": ["text"], "runtime": "remote", "endpoint": "http://e/v1"}],
+            "managed": {"llama_server": {"manage": "attach"}},
+        }
+        with pytest.raises(ProfileError, match="nothing consumes it"):
+            _resolve(config)
+
+    def test_manage_off_is_fine_alongside_any_entry(self):
+        config = {
+            "embedders": [{"modalities": ["text"], "runtime": "onnx", "model": "m"}],
+            "managed": {"llama_server": {"manage": "off"}},
+        }
+        plan = _resolve(config)
+        assert plan.embedder is not None and plan.embedder.runtime == "onnx"

@@ -23,7 +23,7 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
   provider (the API key is referenced by env-var name via `api_key_env`,
   never written in the config), a server on your tailnet, or a llama-server
   another process owns via `managed.llama_server.manage: attach` (Shrike
-  health-checks and uses it, but never starts, restarts, or stops it).
+  verifies it answers and uses it, but never starts, restarts, or stops it).
   `manage: auto` keeps today's spawn-and-own behavior.
 
 ### Removed
