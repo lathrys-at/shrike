@@ -121,6 +121,16 @@ DEDUP_NEIGHBOR_THRESHOLD = 0.6
 # (a text-only or pre-#201b index) yield no floor, so the gate is simply off.
 ACTIVATION_MARGIN = 1.0
 
+# The per-call collection selector (#68 routing). Every routable tool carries
+# this optional param; it names a registered profile to operate on, defaulting
+# to the active profile (and, with none set, the daemon's boot collection). The
+# shared description keeps the wire contract uniform across the 24 tools.
+COLLECTION_SELECTOR_DESCRIPTION = (
+    "Which collection to operate on, by registered profile name (see "
+    "list_profiles). Omit to use the active default collection. On a "
+    "single-collection server, omit it."
+)
+
 
 class ToolInputError(Exception):
     """A tool was called with invalid arguments.
@@ -132,11 +142,49 @@ class ToolInputError(Exception):
 
 
 @dataclass(frozen=True)
+class CollectionBundle:
+    """The per-collection handles an action operates on (#68 routing).
+
+    A selector resolves to exactly one of these — the right collection's
+    wrapper + kernel + search-index view + derived store + dedup recorder. In
+    single-collection / standalone / test contexts there is one bundle (the
+    boot collection); in multi-collection mode the resolver returns the bundle
+    for the routed collection. Frozen + per-call, so concurrent callers to
+    different collections never share mutable state (``stateless_http``-safe).
+    """
+
+    wrapper: CollectionWrapper
+    index: Any | None = None
+    derived: DerivedTextStore | None = None
+    kernel: Any | None = None
+    dedup_stats: Any | None = None
+
+    def unpack(self) -> tuple[Any, Any, Any, Any, Any]:
+        """``(wrapper, index, kernel, derived, dedup_stats)`` — the order the
+        action bodies bind their per-call locals in.
+
+        Typed ``Any`` (not ``... | None``) so the bound locals match what the
+        action bodies expect: ``kernel``/``wrapper`` are always present (the
+        kernel is required — ``build_actions`` rejects a None context kernel),
+        and ``index``/``derived``/``dedup_stats`` are duck-typed handles the
+        bodies guard with explicit ``is None`` checks at runtime — exactly the
+        ``Any`` shape the pre-#68 closure locals had."""
+        return (self.wrapper, self.index, self.kernel, self.derived, self.dedup_stats)
+
+
+@dataclass(frozen=True)
 class ActionContext:
     """What action implementations see of the server — the kernel's surface.
 
     One context object instead of loose closures over wrapper/index/kernel
     (#225): the registry can be built against any host that assembles these.
+
+    Routing (#68): an action resolves its per-call :class:`CollectionBundle`
+    from the ``collection`` selector via :attr:`resolver` (async — lazy
+    assembly may await). When no resolver is set (standalone / tests /
+    single-collection), the fixed ``wrapper``/``index``/``kernel``/``derived``/
+    ``dedup_stats`` ARE the one bundle, and a selector is rejected (nothing to
+    route to). The resolver, when present, is the multi-collection manager.
     """
 
     wrapper: CollectionWrapper
@@ -158,9 +206,12 @@ class ActionContext:
     media_base_url: str | None = None
     # The collection/profile registry (#66) — a Registry snapshot for the
     # read-only `list_profiles` enumeration. None disables the action's data
-    # (an empty registry) without removing the action. Selection-as-routing is
-    # the capstone (#68); this carries only what enumeration needs.
+    # (an empty registry) without removing the action.
     registry: Any | None = None
+    # The per-call collection router (#68): an async callable
+    # ``selector -> CollectionBundle``. None → single-collection mode (the
+    # fixed handles above are the only bundle; a non-None selector is an error).
+    resolver: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -192,6 +243,11 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
 
     # Unpack once: the action bodies below read these exactly as the old
     # closure-over-params register_tools did, so they move here verbatim.
+    # In single-collection mode these ARE the one bundle; in multi-collection
+    # mode each routable action rebinds wrapper/index/kernel/derived/dedup_stats
+    # PER CALL from the resolved bundle (`wrapper, index, kernel, derived,
+    # dedup_stats = (await _route(collection)).unpack()`) — the rest of each
+    # body is unchanged.
     wrapper = ctx.wrapper
     index = ctx.index
     derived = ctx.derived
@@ -201,6 +257,37 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
     server_path_roots = ctx.server_path_roots
     media_base_url = ctx.media_base_url
     registry = ctx.registry
+    resolver = ctx.resolver
+
+    # The single-collection bundle: the fixed handles, used when no resolver is
+    # set (standalone / tests) or a routable action gets no selector and the
+    # resolver returns the default. Built once; immutable.
+    _default_bundle = CollectionBundle(
+        wrapper=wrapper, index=index, derived=derived, kernel=kernel, dedup_stats=dedup_stats
+    )
+
+    async def _route(selector: str | None) -> CollectionBundle:
+        """Resolve the per-call collection bundle (#68).
+
+        No resolver → single-collection mode: a selector is a caller error
+        (there is nothing to route to); None yields the one fixed bundle. With
+        a resolver, it owns resolution (selector → registry → default → the
+        boot collection) and lazy assembly; an unknown selector surfaces as a
+        ``ToolInputError`` so the caller sees a clean rejection.
+        """
+        if resolver is None:
+            if selector is not None:
+                raise ToolInputError(
+                    f"collection routing is not enabled on this server (selector {selector!r})"
+                )
+            return _default_bundle
+        try:
+            bundle: CollectionBundle = await resolver(selector)
+        except ToolInputError:
+            raise
+        except Exception as e:  # the manager's RoutingError → a clean input error
+            raise ToolInputError(str(e)) from e
+        return bundle
 
     actions: list[ActionDef] = []
 
@@ -245,6 +332,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 ),
             ),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> CollectionInfo:
         """Get the structure and summary statistics of the Anki collection.
 
@@ -261,6 +351,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         type (standard/cloze) but not full template HTML or CSS — use
         `note_type_details` to request full definitions for specific note
         types when you need to inspect or author templates."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         include_list: list[str] = [str(s) for s in include] if include else []
         logger.debug("collection_info sections=%s", ",".join(include_list or ["summary"]))
         # Re-homed (#331): the whole body runs in shrike_kernel::actions, on
@@ -349,6 +440,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         limit: Annotated[
             int, Field(ge=1, le=200, description="Maximum notes to return. Default 50.")
         ] = 50,
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> ListNotesResponse:
         """Retrieve notes matching structured filters.
 
@@ -363,6 +457,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         are ANDed together. Use `fields: "meta"` to return only metadata for
         large result sets. The response includes `total` (full match count);
         if more notes matched than `limit` allows, narrow your filters."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         if not any([ids, deck, tags, note_type, modified_since]):
             raise ToolInputError(
                 "At least one filter (ids, deck, tags, note_type,"
@@ -430,6 +525,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         limit: Annotated[
             int, Field(ge=1, le=200, description="Maximum notes to return. Default 50.")
         ] = 50,
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> ListNotesResponse:
         """Find notes with a raw Anki search expression.
 
@@ -443,6 +541,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         filters use list_notes. Returns the same note shape as list_notes, with
         `total` the full match count before `limit`. An invalid expression is
         reported as an input error."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("collection_query %r fields=%s limit=%d", query, fields, limit)
         try:
             # Re-homed (#331): the whole body runs in shrike_kernel::actions.
@@ -538,6 +637,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 ),
             ),
         ] = None,
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> SearchResponse:
         """Search the collection by meaning and by exact text in one call.
 
@@ -557,6 +659,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
 
         Use this for conceptual queries keyword search can't handle and for
         finding exact wording. At least one of `queries` or `ids` is required."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         if not queries and not ids:
             raise ToolInputError("At least one of queries or ids must be provided.")
 
@@ -761,6 +864,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 ),
             ),
         ] = False,
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> UpsertNotesResponse:
         """Create or update notes in bulk (1-100 per call).
 
@@ -801,6 +907,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         neighbor data afterward with search_notes(ids=[<note id>]) — it embeds
         the same note text against the same index, so the result is identical
         to what would have been attached here."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         creates = sum(1 for n in notes if n.id is None)
         updates = len(notes) - creates
         logger.debug(
@@ -964,6 +1071,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 description="Array of note type definitions to create or update.",
             ),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> UpsertNoteTypesResponse:
         """Create or update note type definitions (1-10 per call).
 
@@ -991,6 +1101,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         non-trailing remove — is rejected (it would silently mislabel note
         data); use update_note_type_fields (reposition / add / remove / rename)
         for those."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         names = [nt.name or f"id={nt.id}" for nt in note_types]
         logger.debug("upsert_note_types count=%d names=%s", len(note_types), ", ".join(names))
 
@@ -1019,6 +1130,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 description="Field operations to apply, in order.",
             ),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> UpdateNoteTypeFieldsResponse:
         """Edit a note type's fields by name, preserving note data.
 
@@ -1041,6 +1155,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         these operations are addressed by field name and can truly move, insert,
         or remove a non-trailing field. Returns the resulting ordered field
         names."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("update_note_type_fields %r ops=%d", note_type, len(operations))
         op_dicts = [op.model_dump(exclude_none=True) for op in operations]
         try:
@@ -1065,6 +1180,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 description="Card-template operations to apply, in order.",
             ),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> UpdateNoteTypeTemplatesResponse:
         """Edit a note type's card templates by name, preserving cards.
 
@@ -1088,6 +1206,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         insert, or remove a non-trailing template. To change a template's
         front/back HTML in place, use upsert_note_types. Returns the resulting
         ordered template names."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("update_note_type_templates %r ops=%d", note_type, len(operations))
         op_dicts = [op.model_dump(exclude_none=True) for op in operations]
         try:
@@ -1131,6 +1250,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             bool,
             Field(description="Case-sensitive match. Default true — template/CSS text is code."),
         ] = True,
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> FindReplaceNoteTypesResponse:
         """Find and replace text inside one note type's templates and CSS.
 
@@ -1152,6 +1274,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         For renaming a *field* itself (and migrating note data), use
         update_note_type_fields; this tool only rewrites the template text that
         references fields."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         if not (front or back or css):
             raise ToolInputError("Enable at least one of `front`, `back`, or `css`.")
         logger.debug(
@@ -1199,6 +1322,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 description="Per-field metadata updates, addressed by field name.",
             ),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> UpdateNoteTypeFieldMetadataResponse:
         """Set a note type's per-field editor metadata: font, size, description.
 
@@ -1212,6 +1338,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         Read the current values from collection_info's note type details
         (`note_type_details`), which include each field's font/size/description.
         To change which fields exist or their order, use update_note_type_fields."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("update_note_type_field_metadata %r fields=%d", note_type, len(fields))
         updates = [f.model_dump(exclude_none=True) for f in fields]
         # Re-homed (#391): the kernel op carries the watermark tail (editor
@@ -1235,11 +1362,15 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 description="Note IDs to delete. Their cards are deleted too.",
             ),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> DeleteNotesResponse:
         """Permanently delete notes and all their associated cards.
 
         This cannot be undone. Use list_notes or search_notes first to
         verify which notes will be deleted."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("delete_notes requested=%d", len(ids))
         result = await wrapper.delete_notes(ids)
         note_outcome(f"{len(result['deleted'])} deleted, {len(result['not_found'])} not found")
@@ -1297,6 +1428,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 "Default false (applies the edit)."
             ),
         ] = False,
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> FindReplaceResponse:
         """Find and replace text across the fields of a scoped set of notes.
 
@@ -1312,6 +1446,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         edit is undoable in Anki. For literal searches the dry-run preview matches
         the apply exactly; for regex the preview is a best-effort sample and the
         apply is authoritative."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         if not any([deck, tags, note_type, ids]):
             raise ToolInputError("A scope is required: deck, tags, note_type, or ids.")
 
@@ -1394,6 +1529,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 )
             ),
         ] = False,
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> MigrateNoteTypeResponse:
         """Change a set of notes from one note type to another.
 
@@ -1410,6 +1548,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         explicit — unknown field names, or two source fields mapping to one
         target, are errors rather than guesses. Use `dry_run` to preview the drops
         first. To create or edit notes without changing type, use upsert_notes."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug(
             "migrate_note_type notes=%d -> %s dry_run=%s",
             len(note_ids),
@@ -1448,11 +1587,15 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 description="Note type IDs to delete. Fails for any note type still in use.",
             ),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> DeleteNoteTypesResponse:
         """Delete note type definitions by ID.
 
         A note type can only be deleted if no notes currently use it.
         Check use counts via collection_info first."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("delete_note_types requested=%d", len(ids))
         result = json.loads(await kernel.delete_note_types(ids))
         statuses: dict[str, int] = {}
@@ -1490,6 +1633,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             list[str],
             Field(default_factory=list, description="Tags to remove, leaving other tags intact."),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> UpdateNoteTagsResponse:
         """Edit tags on a set of notes (1-1000 per call).
 
@@ -1505,6 +1651,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
 
         Returns the number of notes the operation applied to and any requested
         IDs that were not found."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         set_mode = set is not None
         addremove_mode = bool(add or remove)
         if set_mode and addremove_mode:
@@ -1538,6 +1685,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 ),
             ),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> RenameTagResponse:
         """Rename a tag, collection-wide or on a set of notes.
 
@@ -1547,6 +1697,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         — renaming "jp" never touches "jp-verbs".
 
         Returns the number of notes whose tags changed."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         if old == new:
             raise ToolInputError("`old` and `new` tags are identical — nothing to rename.")
         logger.debug("rename_tag %r -> %r (scope=%d notes)", old, new, len(note_ids))
@@ -1598,6 +1749,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 )
             ),
         ] = True,
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> CollectionPruneResponse:
         """Clean up the collection: unused tags, empty notes, empty cards, unused media.
 
@@ -1618,6 +1772,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         or audio clip is never removed. On apply, empty notes are removed first,
         then empty cards, then unused tags, then unused media (so tags and media
         freed by the deletions are cleared in the same call)."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         # No selection means "prune everything".
         if not (unused_tags or empty_notes or empty_cards or unused_media):
             unused_tags = empty_notes = empty_cards = unused_media = True
@@ -1658,6 +1813,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 "`url`, or a server-local `path`.",
             ),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> StoreMediaResponse:
         """Store media files in the collection's media folder (1-10 per call).
 
@@ -1682,6 +1840,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         the stored `filename` may differ from what you asked for — always reference
         the returned name. Per-item errors (bad base64, unfetchable URL, disabled
         or out-of-root path, oversize) are reported per item and don't sink the batch."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("store_media count=%d", len(items))
         # Re-homed (#391): the kernel prepares byte sources concurrently on
         # its blocking pool and writes the batch as one collection job.
@@ -1707,6 +1866,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             list[str],
             Field(min_length=1, max_length=10, description="Media filenames to look up (1-10)."),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> FetchMediaResponse:
         """Locate media files in the collection's media folder (1-10 per call).
 
@@ -1717,6 +1879,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         bytes, GET the `url`** with your download/fetch tool, or read `path` if you
         share the server's disk. Every `found` file reports `url`, `path`, `mime`,
         and `size_bytes`."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("fetch_media count=%d", len(filenames))
         results = json.loads(await kernel.fetch_media(filenames))
         for r in results:
@@ -1740,6 +1903,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 ge=1, le=1000, description="Maximum filenames to return (the total still counts)."
             ),
         ] = 100,
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> ListMediaResponse:
         """List filenames in the collection's media folder, and report its path.
 
@@ -1747,6 +1913,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         matching files; `files` is capped at `limit` (each with its `url`, `mime`,
         and `size_bytes`). `media_dir` is the absolute media-folder path; fetch any
         file's bytes by GETting its `url` (the server's `GET /media/<name>`)."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("list_media pattern=%s limit=%d", pattern, limit)
         result = json.loads(await kernel.list_media(pattern, limit))
         for f in result["files"]:
@@ -1760,6 +1927,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             list[str],
             Field(min_length=1, max_length=1000, description="Media filenames to delete."),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> DeleteMediaResponse:
         """Delete media files by name, moving them to Anki's media trash.
 
@@ -1768,13 +1938,18 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         will leave a broken `<img>`/`[sound:]` — use collection_check to find
         unreferenced ('unused') media first. Returns `deleted` and `not_found`
         name lists; a missing file is skipped, not an error."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("delete_media requested=%d", len(filenames))
         result = json.loads(await kernel.delete_media(filenames))
         note_outcome(f"{len(result['deleted'])} deleted, {len(result['not_found'])} not found")
         return DeleteMediaResponse.model_validate(result)
 
     @_action
-    async def collection_check() -> CollectionCheckResponse:
+    async def collection_check(
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
+    ) -> CollectionCheckResponse:
         """Report collection media-integrity issues (read-only, the sibling of collection_prune).
 
         Runs Anki's media check and returns `unused` (media files on disk that no
@@ -1782,6 +1957,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         (filenames referenced by notes but absent from the media folder),
         `missing_media_notes` (the note IDs with such references), and `have_trash`
         (whether Anki's media trash holds anything). Nothing is modified."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("collection_check")
         result = json.loads(await kernel.media_check())
         note_outcome(
@@ -1800,6 +1976,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 description="Array of deck objects to create or rename.",
             ),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> UpsertDecksResponse:
         """Create or rename decks in bulk (1-100 per call).
 
@@ -1815,6 +1994,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         deck `id` and `name`. Use this to set up deck structure before adding
         notes, or to reorganize the hierarchy. To delete a deck, empty it first
         (move its notes elsewhere) then call delete_decks."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         creates = sum(1 for d in decks if d.id is None)
         logger.debug("upsert_decks count=%d (renames=%d)", len(decks), len(decks) - creates)
 
@@ -1842,6 +2022,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 "empty (see below).",
             ),
         ],
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
     ) -> DeleteDecksResponse:
         """Delete decks by name — only if they are already empty.
 
@@ -1853,6 +2036,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
 
         Returns `deleted`, `not_found`, and `not_empty` name lists; a non-empty
         or missing deck is skipped, not an error."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("delete_decks requested=%d", len(decks))
         # Re-homed (#391): the kernel op carries the watermark tail.
         result = DeleteDecksResponse.model_validate_json(await kernel.delete_decks(decks))

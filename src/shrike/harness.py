@@ -854,6 +854,26 @@ class CollectionManager:
         await harness.attach_shared_embedder()
         return harness
 
+    async def resolve_bundle(self, selector: str | None) -> Any:
+        """The per-call action bundle for ``selector`` (#68 — the resolver
+        ``register_tools`` is handed).
+
+        Routes to the selector's harness (lazily assembling it) and hands back
+        its ``CollectionBundle`` (wrapper + index view + kernel + derived +
+        dedup recorder) — exactly the handles an action operates on. A
+        :class:`RoutingError` (unknown selector) propagates to the action
+        layer, which maps it to a clean ``ToolInputError``."""
+        from shrike.actions import CollectionBundle
+
+        harness = await self.harness_for(selector)
+        return CollectionBundle(
+            wrapper=harness.wrapper,
+            index=harness.index_view,
+            derived=harness.derived,
+            kernel=harness.kernel,
+            dedup_stats=harness.dedup_stats,
+        )
+
     # -- status + lifecycle ---------------------------------------------------
 
     def active_keys(self) -> list[str]:

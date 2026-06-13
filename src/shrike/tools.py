@@ -48,6 +48,7 @@ def register_tools(
     server_path_roots: list[str] | None = None,
     media_base_url: str | None = None,
     registry: Any | None = None,
+    resolver: Any | None = None,
 ) -> dict[str, Tool]:
     """Build the action registry against this server's context and bind it to MCP.
 
@@ -55,7 +56,9 @@ def register_tools(
     the maintained kernel ops, and ``index`` carries the search-facing
     ``KernelIndexView`` (or None when embedding is unconfigured). ``registry``
     is the collection/profile registry snapshot (#66) the ``list_profiles``
-    enumeration reads; None means an empty registry.
+    enumeration reads; None means an empty registry. ``resolver`` is the
+    per-call collection router (#68): an async ``selector -> CollectionBundle``;
+    None keeps single-collection mode (the fixed handles are the one bundle).
 
     Returns the ``name -> Tool`` map for the actions-over-HTTP edge (#505), built
     from the *same* action registry as the MCP binding — so the host can register
@@ -71,6 +74,7 @@ def register_tools(
         server_path_roots=server_path_roots,
         media_base_url=media_base_url,
         registry=registry,
+        resolver=resolver,
     )
     actions = build_actions(context)
     register_actions(mcp, actions)

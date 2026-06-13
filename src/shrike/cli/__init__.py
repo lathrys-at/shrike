@@ -80,6 +80,18 @@ class ShrikeGroup(click.Group):
     help="Server URL (overrides config). [env: SHRIKE_URL]",
 )
 @click.option(
+    "--profile",
+    "--collection",
+    "profile",
+    envvar="SHRIKE_PROFILE",
+    default=None,
+    help=(
+        "Route commands to this registered collection profile (see "
+        "'shrike profile list'). Defaults to the active profile. "
+        "[env: SHRIKE_PROFILE]"
+    ),
+)
+@click.option(
     "--json",
     "json_output",
     is_flag=True,
@@ -96,6 +108,7 @@ def cli(
     ctx: click.Context,
     config_path: Path,
     url: str | None,
+    profile: str | None,
     json_output: bool,
     pretty: bool,
 ) -> None:
@@ -139,7 +152,10 @@ def cli(
     ctx.obj["config_path"] = config_path
     ctx.obj["url"] = server_url
     ctx.obj["json"] = json_output
-    ctx.obj["client"] = ShrikeClient(server_url, spec=spec)
+    ctx.obj["profile"] = profile
+    # The client injects --profile/--collection into every routed tool call (#68);
+    # None uses the server's active default.
+    ctx.obj["client"] = ShrikeClient(server_url, spec=spec, collection=profile)
 
     from shrike.cli import output
 

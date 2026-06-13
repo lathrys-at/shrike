@@ -176,6 +176,7 @@ class ShrikeClient:
         *,
         spec: ServerSpec | None = None,
         autostart: bool = True,
+        collection: str | None = None,
     ) -> None:
         self.url = url
         self.spec = spec
@@ -183,6 +184,13 @@ class ShrikeClient:
         self._request_id = 0
         self._autostarted = False
         self._http = httpx.Client()
+        # The per-call collection selector (#68): injected into every tool
+        # call's arguments (as `collection`) when set, so the CLI's
+        # --collection/--profile routes without each typed method carrying the
+        # param. None → the server's active default. An explicit `collection`
+        # already in a call's arguments wins (the escape hatch / a future
+        # per-call override).
+        self.collection = collection
 
     @property
     def _base_url(self) -> str:
@@ -226,11 +234,17 @@ class ShrikeClient:
             ServerUnreachableError: the server could not be reached.
         """
         self._request_id += 1
+        args = dict(arguments or {})
+        # Inject the client-wide collection selector (#68) unless the call
+        # already specified one. `list_profiles` is registry-level (no routing)
+        # so it takes no selector — skip it.
+        if self.collection is not None and tool_name != "list_profiles":
+            args.setdefault("collection", self.collection)
         payload = {
             "jsonrpc": "2.0",
             "id": self._request_id,
             "method": "tools/call",
-            "params": {"name": tool_name, "arguments": arguments or {}},
+            "params": {"name": tool_name, "arguments": args},
         }
         resp = self._post_mcp(payload)
         self._raise_for_status(resp)

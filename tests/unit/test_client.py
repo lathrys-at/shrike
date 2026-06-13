@@ -24,6 +24,55 @@ def _resp(status: int = 200, json_body: dict | None = None) -> MagicMock:
     return r
 
 
+def _capture_post(body: dict):
+    """A patched httpx.Client.post that records the JSON payload it was sent."""
+    captured: dict = {}
+
+    def _post(self, url, *, json, **kwargs):  # noqa: ANN001, A002
+        captured.update(json)
+        return _resp(200, body)
+
+    return _post, captured
+
+
+class TestSelectorInjection:
+    """#68: the client injects its --profile/--collection selector into every
+    routed tool call's arguments; list_profiles (registry-level) is exempt."""
+
+    def test_selector_injected_into_arguments(self) -> None:
+        c = ShrikeClient("http://x:1/mcp", autostart=False, collection="work")
+        body = {"result": {"structuredContent": {}}}
+        post, captured = _capture_post(body)
+        with patch("httpx.Client.post", post):
+            c._call("collection_info", {"include": ["summary"]})
+        assert captured["params"]["arguments"]["collection"] == "work"
+        assert captured["params"]["arguments"]["include"] == ["summary"]
+
+    def test_no_selector_leaves_arguments_untouched(self) -> None:
+        c = ShrikeClient("http://x:1/mcp", autostart=False)  # collection=None
+        body = {"result": {"structuredContent": {}}}
+        post, captured = _capture_post(body)
+        with patch("httpx.Client.post", post):
+            c._call("collection_info", {})
+        assert "collection" not in captured["params"]["arguments"]
+
+    def test_explicit_call_collection_wins(self) -> None:
+        c = ShrikeClient("http://x:1/mcp", autostart=False, collection="work")
+        body = {"result": {"structuredContent": {}}}
+        post, captured = _capture_post(body)
+        with patch("httpx.Client.post", post):
+            c._call("collection_info", {"collection": "override"})
+        assert captured["params"]["arguments"]["collection"] == "override"
+
+    def test_list_profiles_is_exempt(self) -> None:
+        c = ShrikeClient("http://x:1/mcp", autostart=False, collection="work")
+        body = {"result": {"structuredContent": {}}}
+        post, captured = _capture_post(body)
+        with patch("httpx.Client.post", post):
+            c._call("list_profiles", {})
+        assert "collection" not in captured["params"]["arguments"]
+
+
 class TestCall:
     def test_success_returns_content(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)

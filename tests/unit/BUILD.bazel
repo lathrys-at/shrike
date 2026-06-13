@@ -132,6 +132,7 @@ _TOOLS = [
     "test_tools_migrate.py",
     "test_tools_prune.py",
     "test_tools_query.py",
+    "test_tools_routing.py",
     "test_tools_search.py",
     "test_tools_tags.py",
 ]
@@ -160,6 +161,7 @@ _CLI = [
     "test_cli_note_replace.py",
     "test_cli_note_tag.py",
     "test_cli_profile.py",
+    "test_cli_routing.py",
     "test_cli_server.py",
     "test_cli_type_info_output.py",
     "test_note_cmd.py",

@@ -1190,6 +1190,9 @@ def main() -> None:
             server_path_roots=server_path_roots,
             media_base_url=media_base_url,
             registry=profile_registry,
+            # Per-call collection routing (#68 S2): the manager resolves a
+            # selector to the right collection's bundle, lazily assembling it.
+            resolver=manager.resolve_bundle,
         )
         # The uvicorn Server is created after route registration, so the
         # /shutdown route reaches it through this late-bound holder (#344).
