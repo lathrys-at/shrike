@@ -50,9 +50,13 @@ def import_cmd(
 ) -> None:
     """Import an Anki package into the collection.
 
+    This MERGES the package's notes into your collection (added or updated) — it
+    is not a destructive restore, and your collection is never replaced, even
+    for a .colpkg (its notes are merged in like an .apkg's).
+
     PATH is read by the **server** from its own filesystem, so the operator must
     have enabled it with --import-path-root (on a purely-local daemon) containing
-    the file — import overwrites collection data, so it uses its own root,
+    the file — import writes into the collection, so it uses its own root,
     separate from media's. A relative PATH is resolved against your current
     directory before being sent.
 

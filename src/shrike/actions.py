@@ -2188,7 +2188,10 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
     ) -> ImportPackageResponse:
         """Import an Anki package (.apkg/.colpkg) into the collection.
 
-        Pulls a shared deck or a backup into the collection, via anki's importer.
+        Pulls a shared deck (or the notes from a backup) into the collection, via
+        anki's importer. This is a **merge**, NOT a destructive restore: notes are
+        added or updated alongside what's already there — your collection is never
+        replaced, even for a `.colpkg` (its notes are merged in like an `.apkg`'s).
         Returns per-bucket counts (notes added/updated/duplicate/conflicting/…) —
         see the response fields. The conflict behaviour is governed by
         `update_notes`/`update_notetypes` (default: update a same-GUID note only
@@ -2198,7 +2201,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         The `path` is read from the **server's** filesystem and is **off by
         default**: it is honored only when the operator configured an
         `--import-path-root` (on a purely-local daemon) containing the file —
-        import overwrites collection data, so it gets its own root distinct from
+        import writes into the collection, so it gets its own root distinct from
         media's. Importing mutates the collection, so the search index is
         reconciled afterward (`reindexed` reports whether that ran)."""
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()

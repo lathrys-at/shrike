@@ -703,6 +703,43 @@ None.
 
 ---
 
+## `import_package`
+
+Import an Anki package (`.apkg`/`.colpkg`) into the collection — the anki-connect `importPackage` equivalent. This **merges** the package's notes into your collection (notes are added or updated); it is **not** a destructive restore, and your collection is never replaced — even a `.colpkg` has its notes merged in like an `.apkg`'s.
+
+A same-GUID note is updated according to `update_notes` (default: only when the imported note is newer); brand-new notes always add. Scheduling is not imported by default. Importing mutates the collection, so the search index is reconciled afterward.
+
+The `path` is read from the **server's** filesystem and is **off by default**: it is honored only when the operator configured an `--import-path-root` (on a purely-local daemon) containing the file. Import writes into the collection, so it uses its own root, distinct from `store_media`'s `--media-path-root`.
+
+### Parameters
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `path` | `string` | yes | Server-local path to the `.apkg`/`.colpkg`. Honored only within a configured `--import-path-root`. |
+| `update_notes` | `string` | no | Same-GUID conflict handling: `"if_newer"` (default), `"always"`, or `"never"`. New notes always add. |
+| `update_notetypes` | `string` | no | Same condition for note types. Default `"if_newer"`. |
+| `with_scheduling` | `boolean` | no | Import review scheduling (due dates, intervals). Default `false`. |
+| `merge_notetypes` | `boolean` | no | Merge imported note types into existing ones by name. Default `false`. |
+
+### Response
+
+```jsonc
+{
+  "new": 12,                 // notes added
+  "updated": 3,              // same-GUID notes refreshed
+  "duplicate": 1,            // matched an existing note, skipped
+  "conflicting": 0,          // could not be merged
+  "first_field_match": 0,    // matched an existing note by first field
+  "missing_notetype": 0,     // note type could not be resolved
+  "missing_deck": 0,         // deck could not be resolved
+  "empty_first_field": 0,    // rejected as empty
+  "found_notes": 16,         // total notes in the package
+  "reindexed": true          // whether the import triggered an index reconcile
+}
+```
+
+---
+
 ## `store_media`
 
 Store media files in the collection's media folder (1–10 per call) — the write path for authoring cards with images or audio. Each item provides exactly one source: base64 `data` (which **requires** a `filename` with an extension, since the bytes alone don't say what the file is), a `url` the server fetches (filename derived from the URL or its `Content-Type` if you omit it), or a server-local `path` (see below). After storing, reference the returned `filename` in a note field (`<img src="NAME">` or `[sound:NAME]`).
