@@ -38,7 +38,6 @@ from shrike.embedding import BACKEND_ALIASES, SUPPORTED_BACKENDS
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
 from shrike.schemas import CoverageCell, CoverageMatrix, CoverageRow, ServerStatus
 
-
 # The cross-modal coverage cells, styled for the status table (#235): native is
 # the strong (green) form, via-derived-text the weaker (yellow) reachability,
 # unavailable a dim dash so the matrix reads at a glance.

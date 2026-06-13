@@ -494,9 +494,7 @@ class Harness:
             else frozenset()
         )
         ready_recognizers = frozenset(
-            source
-            for source, eng in self._recognition_engines.items()
-            if eng.state == "ready"
+            source for source, eng in self._recognition_engines.items() if eng.state == "ready"
         )
         status["coverage"] = _coverage_matrix(served, ready_recognizers)
         return status
