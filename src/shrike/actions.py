@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -35,6 +36,7 @@ from shrike.collection import (
 )
 from shrike.derived import DerivedTextStore
 from shrike.index import IndexState, activation_floor
+from shrike.pathsafety import output_path_within_any_root
 from shrike.schemas import (
     CollectionCheckResponse,
     CollectionInfo,
@@ -44,6 +46,9 @@ from shrike.schemas import (
     DeleteMediaResponse,
     DeleteNotesResponse,
     DeleteNoteTypesResponse,
+    ExportPackagePath,
+    ExportPackageResponse,
+    ExportPackageUrl,
     FetchMediaResponse,
     FieldMetadataInput,
     FieldOp,
@@ -204,6 +209,16 @@ class ActionContext:
     allow_private_fetch: bool = False
     server_path_roots: list[str] | None = None
     media_base_url: str | None = None
+    # Export (#71): the operator-allowed server-local OUTPUT roots (the
+    # --export-path-root capability, write counterpart of server_path_roots),
+    # the download store (server-named temp packages → tokens), and whether the
+    # server is purely-local (the second gate on a server-local output_path,
+    # exactly like store_media's path source). All None/empty → export still
+    # works via the download url; only the opt-in server-local output_path is
+    # gated off.
+    export_path_roots: list[str] | None = None
+    export_store: Any | None = None
+    server_purely_local: bool = False
     # The collection/profile registry (#66) — a Registry snapshot for the
     # read-only `list_profiles` enumeration. None disables the action's data
     # (an empty registry) without removing the action.
@@ -229,7 +244,7 @@ class ActionDef:
 
 
 def build_actions(ctx: ActionContext) -> list[ActionDef]:
-    """Build the full action registry against one context (25 actions)."""
+    """Build the full action registry against one context (26 actions)."""
     from urllib.parse import quote
 
     if ctx.kernel is None:
@@ -256,6 +271,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
     allow_private_fetch = ctx.allow_private_fetch
     server_path_roots = ctx.server_path_roots
     media_base_url = ctx.media_base_url
+    export_path_roots = ctx.export_path_roots or []
+    export_store = ctx.export_store
+    server_purely_local = ctx.server_purely_local
     registry = ctx.registry
     resolver = ctx.resolver
 
@@ -385,6 +403,156 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 for p in entries
             ],
             default=default,
+        )
+
+    @_action
+    async def export_package(
+        *,
+        deck: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Export only this deck (by name, numeric id, or #id). Omit for the whole "
+                    "collection. Mutually exclusive with `note_ids`."
+                ),
+            ),
+        ] = None,
+        note_ids: Annotated[
+            list[int],
+            Field(
+                default_factory=list,
+                description="Export only these notes (by id). Mutually exclusive with `deck`.",
+            ),
+        ],
+        format: Annotated[
+            str,
+            Field(
+                description=(
+                    "'apkg' (a shareable note package, scopable) or 'colpkg' (a whole-collection "
+                    "backup — cannot be scoped). Default 'apkg'."
+                ),
+            ),
+        ] = "apkg",
+        include_scheduling: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Include review/scheduling data (and deck options). Default false — a "
+                    "shareable package usually omits the exporter's review history."
+                )
+            ),
+        ] = False,
+        include_media: Annotated[
+            bool,
+            Field(description="Bundle referenced media files into the package. Default true."),
+        ] = True,
+        output_path: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Write the package to this server-local path instead of returning a download "
+                    "URL. Honored only on a purely-local server with the path inside an operator-"
+                    "allowed --export-path-root; otherwise an error. Omit (the default) to get a "
+                    "download `url`."
+                ),
+            ),
+        ] = None,
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
+    ) -> ExportPackageResponse:
+        """Export the collection (or a deck/note selection) to an Anki package.
+
+        Writes a `.apkg` (a shareable, scopable note package) or a `.colpkg`
+        (a whole-collection backup — scoping is rejected). Scope to one `deck`
+        or a set of `note_ids` (not both); omit both for the whole collection.
+        `include_scheduling` carries review data + deck options; `include_media`
+        bundles referenced files.
+
+        By default the server writes the package to a temporary file and returns
+        a download `url` — GET it to retrieve the bytes (never base64). On a
+        purely-local server you may instead set `output_path` to a server-local
+        file inside an operator-allowed export root; the response then carries
+        that `path`. Use this for backups, sharing a deck, or moving a
+        collection between machines."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
+        # Scope: deck XOR note_ids XOR whole.
+        if deck is not None and note_ids:
+            raise ToolInputError("Provide at most one of `deck` or `note_ids`, not both.")
+        fmt = format.strip().lower()
+        if fmt not in ("apkg", "colpkg"):
+            raise ToolInputError("`format` must be 'apkg' or 'colpkg'.")
+        if fmt == "colpkg" and (deck is not None or note_ids):
+            raise ToolInputError(
+                "A .colpkg is a whole-collection backup and cannot be scoped — "
+                "use format='apkg' to export a deck or notes."
+            )
+        if deck is not None:
+            scope_kind, scope_deck, scope_notes = "deck", deck, None
+        elif note_ids:
+            scope_kind, scope_deck, scope_notes = "notes", None, note_ids
+        else:
+            scope_kind, scope_deck, scope_notes = "whole", None, None
+        logger.debug("export_package format=%s scope=%s output=%s", fmt, scope_kind, output_path)
+
+        suffix = f".{fmt}"
+
+        async def _run(target: str) -> Any:
+            return json.loads(
+                await kernel.export_package(
+                    target,
+                    fmt,
+                    scope_kind,
+                    scope_deck,
+                    scope_notes,
+                    with_scheduling=include_scheduling,
+                    with_media=include_media,
+                    legacy=False,  # always the modern format (#71 decision)
+                )
+            )
+
+        if output_path is not None:
+            # Server-local output (off by default): gated exactly like
+            # store_media's `path` — purely-local AND contained in an
+            # operator-allowed export root (the WRITE gate: realpaths the parent,
+            # catching ../symlinked-parent escapes; the kernel's temp+rename then
+            # closes a symlinked-basename redirect).
+            if not (
+                server_purely_local and output_path_within_any_root(output_path, export_path_roots)
+            ):
+                raise ToolInputError(
+                    "output_path is not permitted: the server must be purely-local and the path "
+                    "must be inside an --export-path-root. Omit output_path to receive a "
+                    "download url instead."
+                )
+            result = await _run(output_path)
+            note_outcome(f"{result['note_count']} notes -> {output_path}")
+            return ExportPackagePath(
+                delivery="path",
+                note_count=int(result["note_count"]),
+                bytes=os.path.getsize(result["out_path"]),
+                format=fmt,
+                path=result["out_path"],
+            )
+
+        # Default: write a server-named temp under the cache dir and hand back a
+        # download url (never bytes). Requires the host to have wired an export
+        # store + a base url (a running HTTP server).
+        if export_store is None or not media_base_url:
+            raise ToolInputError(
+                "download-url export is unavailable here; pass output_path with a configured "
+                "--export-path-root, or run against an HTTP server."
+            )
+        token, temp_path = export_store.new_temp_path(suffix=suffix)
+        result = await _run(temp_path)
+        export_store.register(token, result["out_path"], fmt)
+        note_outcome(f"{result['note_count']} notes -> url:{token[:8]}…")
+        return ExportPackageUrl(
+            delivery="url",
+            note_count=int(result["note_count"]),
+            bytes=os.path.getsize(result["out_path"]),
+            format=fmt,
+            url=f"{media_base_url}/export/{quote(token)}",
         )
 
     @_action

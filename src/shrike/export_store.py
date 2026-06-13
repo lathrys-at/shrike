@@ -1,0 +1,128 @@
+"""The export download store (#71): server-named temp packages + their tokens.
+
+The default export delivery (no server-local ``output_path``) writes the
+package to a temp file under the cache dir and hands the caller a one-shot
+download ``url`` — never base64 (mirroring ``fetch_media``). This module owns
+that temp file's lifecycle: mint an unguessable token, map it to the on-disk
+temp path, and **reap** the file on download, on a TTL sweep, and at shutdown,
+so collection-bearing temp files never leak.
+
+The token is the capability: a ``secrets.token_urlsafe`` value, not a sequential
+id, so a guessing client can't enumerate other callers' exports. The
+``GET /export/{token}`` route (behind the same ``_guard`` Host/Origin check as
+``/media``) resolves the token here, streams the file, then asks this store to
+reap it (one-shot).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import secrets
+import threading
+import time
+from dataclasses import dataclass
+
+logger = logging.getLogger("shrike.export")
+
+# How long a minted export stays downloadable before the TTL sweep reaps it
+# (the caller is expected to GET it promptly; this bounds the leak window for a
+# client that mints then never downloads).
+DEFAULT_TTL_SECONDS = 3600.0
+
+# The temp subdir under the cache dir that holds pending download packages.
+EXPORT_SUBDIR = "exports"
+
+
+@dataclass
+class _Pending:
+    path: str
+    format: str
+    created: float
+
+
+class ExportStore:
+    """Tracks server-named export temp files awaiting download (#71).
+
+    Thread-safe (a plain lock around the small map): the action mints on the
+    event loop, the route resolves+reaps possibly on a worker thread. The temp
+    files live under ``<cache_dir>/exports/``; a token maps to one file.
+    """
+
+    def __init__(self, cache_dir: str, *, ttl_seconds: float = DEFAULT_TTL_SECONDS) -> None:
+        self._dir = os.path.join(cache_dir, EXPORT_SUBDIR)
+        self._ttl = ttl_seconds
+        self._lock = threading.Lock()
+        self._pending: dict[str, _Pending] = {}
+
+    @property
+    def dir(self) -> str:
+        """The export temp directory (created lazily by :meth:`new_temp_path`)."""
+        return self._dir
+
+    def new_temp_path(self, *, suffix: str) -> tuple[str, str]:
+        """Mint a (token, temp_path) for a pending export. The path is a
+        server-generated name under the export dir (never caller-influenced);
+        ``suffix`` is the package extension ('.apkg'/'.colpkg'). The token is
+        registered only once the file is written (see :meth:`register`)."""
+        os.makedirs(self._dir, exist_ok=True)
+        token = secrets.token_urlsafe(24)
+        path = os.path.join(self._dir, f"{token}{suffix}")
+        return token, path
+
+    def register(self, token: str, path: str, fmt: str) -> None:
+        """Record a written export so its token resolves for download. Sweeps
+        expired entries first so the map can't grow unbounded under a client
+        that mints-but-never-downloads."""
+        self._sweep_expired()
+        with self._lock:
+            self._pending[token] = _Pending(path=path, format=fmt, created=time.monotonic())
+
+    def resolve(self, token: str) -> str | None:
+        """The on-disk path for a token, or None (unknown/expired/reaped). Does
+        NOT reap — the route reaps after a successful stream (so a failed GET
+        can be retried within the TTL)."""
+        self._sweep_expired()
+        with self._lock:
+            pending = self._pending.get(token)
+        if pending is None:
+            return None
+        if not os.path.isfile(pending.path):
+            # The file vanished (manual delete / a prior reap) — drop the entry.
+            with self._lock:
+                self._pending.pop(token, None)
+            return None
+        return pending.path
+
+    def reap(self, token: str) -> None:
+        """Remove a token's temp file and entry (one-shot, after download)."""
+        with self._lock:
+            pending = self._pending.pop(token, None)
+        if pending is not None:
+            self._remove(pending.path)
+
+    def _sweep_expired(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            expired = [t for t, p in self._pending.items() if now - p.created > self._ttl]
+            paths = [self._pending.pop(t).path for t in expired]
+        for path in paths:
+            self._remove(path)
+
+    def close(self) -> None:
+        """Reap every pending export (shutdown) — no collection-bearing temp
+        file is left behind."""
+        with self._lock:
+            paths = [p.path for p in self._pending.values()]
+            self._pending.clear()
+        for path in paths:
+            self._remove(path)
+
+    @staticmethod
+    def _remove(path: str) -> None:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("could not reap export temp %s", path, exc_info=True)

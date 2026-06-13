@@ -78,6 +78,15 @@ py_library(
     deps = [":pkg"],
 )
 
+# The export download store (#71): server-named temp packages + their one-shot
+# download tokens, reaped on download/TTL/shutdown. Leaf — stdlib only.
+py_library(
+    name = "export_store",
+    srcs = ["export_store.py"],
+    imports = [".."],
+    deps = [":pkg"],
+)
+
 py_library(
     name = "cache_layout",
     srcs = ["cache_layout.py"],
@@ -263,6 +272,7 @@ py_library(
         ":collection",
         ":derived",
         ":index",
+        ":pathsafety",  # export_package's server-local output gate (#71)
         ":pkg",
         ":schemas",
         "//native/shrike-py:shrike_native",
@@ -329,6 +339,7 @@ py_library(
         ":daemon",
         ":derived",
         ":embedding",
+        ":export_store",  # the export download store (#71)
         ":harness",
         ":log",
         ":paths",
@@ -391,6 +402,7 @@ py_library(
         ":embedding",
         ":embedding_base",
         ":errors",
+        ":export_store",
         ":harness",
         ":index",
         ":log",

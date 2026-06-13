@@ -1394,6 +1394,70 @@ mod tests {
     }
 
     #[test]
+    fn export_writes_through_a_planted_basename_symlink_safely() {
+        // Shared-host hazard (#71 security): another user plants a symlink at
+        // the export basename pointing OUTSIDE the root. The temp+atomic-rename
+        // write must REPLACE that symlink with the real package, never follow
+        // it (which would redirect the operator-privileged write to the target).
+        let (core, dir) = temp_core();
+        core.create_note(
+            core.notetype_id("Basic").unwrap(),
+            DEFAULT_DECK,
+            &["front".into(), "back".into()],
+            &[],
+            DuplicatePolicy::Error,
+        )
+        .unwrap();
+
+        // The "victim" file the symlink points at — it must stay untouched.
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, b"do not overwrite me").unwrap();
+        let out = dir.join("export.apkg");
+        std::os::unix::fs::symlink(&victim, &out).unwrap();
+        assert!(std::fs::symlink_metadata(&out)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        core.export_package(&ExportRequest {
+            out_path: out.to_str().unwrap().to_string(),
+            format: PackageFormat::Apkg,
+            scope: ExportScope::Whole,
+            with_scheduling: false,
+            with_media: true,
+            legacy: false,
+        })
+        .unwrap();
+
+        // The victim is intact (the write did NOT follow the symlink)...
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not overwrite me");
+        // ...and the export path is now a REAL file (the symlink was replaced),
+        // a valid non-empty package.
+        assert!(!std::fs::symlink_metadata(&out)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::metadata(&out).unwrap().len() > 0);
+        // No staging temp left behind in the dir.
+        let leftover: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".shrike-export-")
+            })
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "export temp not cleaned up: {leftover:?}"
+        );
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn busy_surface_release_reopen() {
         // The #64/#65 contention story: a second holder makes reopen BUSY;
         // releasing hands the lock over; reopening after the holder leaves

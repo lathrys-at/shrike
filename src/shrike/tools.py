@@ -47,6 +47,9 @@ def register_tools(
     allow_private_fetch: bool = False,
     server_path_roots: list[str] | None = None,
     media_base_url: str | None = None,
+    export_path_roots: list[str] | None = None,
+    export_store: Any | None = None,
+    server_purely_local: bool = False,
     registry: Any | None = None,
     resolver: Any | None = None,
 ) -> dict[str, Tool]:
@@ -73,6 +76,9 @@ def register_tools(
         allow_private_fetch=allow_private_fetch,
         server_path_roots=server_path_roots,
         media_base_url=media_base_url,
+        export_path_roots=export_path_roots,
+        export_store=export_store,
+        server_purely_local=server_purely_local,
         registry=registry,
         resolver=resolver,
     )

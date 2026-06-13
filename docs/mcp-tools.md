@@ -972,3 +972,57 @@ Permanently delete note type definitions. A note type can only be deleted if no 
   ]
 }
 ```
+
+---
+
+## `export_package`
+
+Export the collection — or a deck or note selection — to an Anki package. Writes a `.apkg` (a shareable, scopable note package) or a `.colpkg` (a whole-collection backup; scoping is rejected). Use this for backups, sharing a deck, or moving a collection between machines.
+
+By default the server writes the package to a temporary file and returns a download `url` — GET it to retrieve the bytes (the package is never returned inline / as base64, the same model as `fetch_media`). The URL is single-use: the temp file is reaped after the download (and on a TTL / at shutdown). On a purely-local server the operator may instead allow a server-local `output_path` (see below), and the response then carries that `path`.
+
+### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `deck` | string | No | Export only this deck (name, numeric id, or `#id`). Mutually exclusive with `note_ids`. |
+| `note_ids` | array of int | No | Export only these notes. Mutually exclusive with `deck`. |
+| `format` | string | No | `"apkg"` (default; scopable) or `"colpkg"` (whole-collection backup — cannot be scoped). |
+| `include_scheduling` | bool | No | Include review/scheduling data and deck options. Default `false`. |
+| `include_media` | bool | No | Bundle referenced media files into the package. Default `true`. |
+| `output_path` | string | No | Write to this server-local path instead of returning a download URL. Honored only on a purely-local server with the path inside an operator-allowed `--export-path-root`; otherwise an error. |
+| `collection` | string | No | The profile to operate on (see `list_profiles`); omit for the active default. |
+
+Omit both `deck` and `note_ids` to export the whole collection. A `.colpkg` with a scope is an error.
+
+### Response
+
+A discriminated union on `delivery`. The default (no `output_path`) returns a download URL:
+
+```jsonc
+{
+  "delivery": "url",
+  "note_count": 42,
+  "bytes": 1048576,
+  "format": "apkg",
+  // GET this for the package bytes; single-use (reaped after download)
+  "url": "http://127.0.0.1:8372/export/8Xq...token"
+}
+```
+
+With a permitted `output_path`, the server wrote the file itself:
+
+```jsonc
+{
+  "delivery": "path",
+  "note_count": 42,
+  "bytes": 1048576,
+  "format": "colpkg",
+  // where the server wrote it (you share the server's disk)
+  "path": "/srv/exports/backup.colpkg"
+}
+```
+
+### Server-local output (`output_path`)
+
+Like `store_media`'s server-local `path`, this is **off by default** and a security-relevant capability (an operator-privileged file write). It is honored only when **both** hold: the server is purely-local (loopback bind, no `--allow-remote`, the DNS-rebinding guard on, no added `--allowed-host`/`--allowed-origin`), and the path resolves inside one of the operator's `--export-path-root DIR` (repeatable; env `SHRIKE_EXPORT_PATH_ROOTS`, `os.pathsep`-separated). This is a **write** capability distinct from `--media-path-root`'s read — it has its own flag. The write is symlink-safe: the server exports to a temp name inside the target's directory and atomically renames it onto the requested name (so a pre-existing symlink at that name is replaced, not followed). Anything else → an error; export still works via the download URL.

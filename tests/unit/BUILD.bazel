@@ -128,6 +128,7 @@ _TOOLS = [
     "test_tool_logging.py",
     "test_tools_busy.py",
     "test_tools_decks.py",
+    "test_tools_export.py",
     "test_tools_field_metadata.py",
     "test_tools_find_replace.py",
     "test_tools_find_replace_models.py",
@@ -157,6 +158,7 @@ _CLI = [
     "test_cli_collection_prune.py",
     "test_cli_collection_query.py",
     "test_cli_deck.py",
+    "test_cli_export.py",
     "test_cli_index_embedding.py",
     "test_cli_json_output.py",
     "test_cli_migrate_type.py",
@@ -286,6 +288,7 @@ pytest_test(
     srcs = _TOOLS,
     deps = [
         ":conftest",
+        "//src/shrike:export_store",  # test_tools_export builds an ExportStore (#71)
         "//src/shrike:harness",
         "//src/shrike:index",
         "//src/shrike:recognition",

@@ -53,6 +53,7 @@ from shrike.schemas import (
     EmbeddingStartResponse,
     EmbeddingStatus,
     EmbeddingStopResponse,
+    ExportPackageResponse,
     FetchMediaResponse,
     FieldMetadataInput,
     FieldOp,
@@ -91,6 +92,7 @@ _INDEX_SAVE_ADAPTER: TypeAdapter[IndexSaveResponse] = TypeAdapter(IndexSaveRespo
 _EMBEDDING_START_ADAPTER: TypeAdapter[EmbeddingStartResponse] = TypeAdapter(EmbeddingStartResponse)
 _EMBEDDING_STOP_ADAPTER: TypeAdapter[EmbeddingStopResponse] = TypeAdapter(EmbeddingStopResponse)
 _STOP_ADAPTER: TypeAdapter[StopResponse] = TypeAdapter(StopResponse)
+_EXPORT_ADAPTER: TypeAdapter[ExportPackageResponse] = TypeAdapter(ExportPackageResponse)
 
 # Re-exported so ``from shrike.client import ShrikeError`` (and the subclasses)
 # keeps working now that the hierarchy lives in the dependency-light
@@ -601,6 +603,48 @@ class ShrikeClient:
         from urllib.parse import quote
 
         url = f"{self._base_url}/media/{quote(filename)}"
+        resp = self._http.get(url)
+        if resp.status_code != 200:
+            raise ServerHTTPError(resp.status_code, f"GET {url} returned {resp.status_code}")
+        return resp.content
+
+    def export_package(
+        self,
+        *,
+        deck: str | None = None,
+        note_ids: Sequence[int] | None = None,
+        format: str = "apkg",
+        include_scheduling: bool = False,
+        include_media: bool = True,
+        output_path: str | None = None,
+    ) -> ExportPackageResponse:
+        """Export the collection (or a deck/note selection) to an Anki package.
+
+        Returns either a ``path`` (server-local output, opt-in) or a ``url`` (the
+        default — GET it via :meth:`download_export` for the bytes)."""
+        args: dict[str, Any] = {
+            "format": format,
+            "include_scheduling": include_scheduling,
+            "include_media": include_media,
+        }
+        if deck is not None:
+            args["deck"] = deck
+        if note_ids:
+            args["note_ids"] = list(note_ids)
+        if output_path is not None:
+            args["output_path"] = output_path
+        raw = self._call("export_package", args)
+        # A union (non-object-root) return is wrapped by FastMCP under a
+        # `result` key in structuredContent; the flat-model tools aren't.
+        payload = raw["result"] if isinstance(raw.get("result"), dict) else raw
+        return _EXPORT_ADAPTER.validate_python(payload)
+
+    def download_export(self, url: str) -> bytes:
+        """Download a pending export package's bytes from its one-shot ``url``.
+
+        The server reaps the temp file after this succeeds, so the URL is
+        single-use. Raises ServerHTTPError on a non-200 (e.g. 404 if the token
+        already expired / was downloaded)."""
         resp = self._http.get(url)
         if resp.status_code != 200:
             raise ServerHTTPError(resp.status_code, f"GET {url} returned {resp.status_code}")

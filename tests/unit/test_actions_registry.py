@@ -15,6 +15,7 @@ from shrike.actions import ActionContext, build_actions
 EXPECTED_ACTIONS = {
     "collection_info",
     "list_profiles",
+    "export_package",
     "list_notes",
     "search_notes",
     "collection_query",
@@ -44,7 +45,7 @@ EXPECTED_ACTIONS = {
 def test_registry_carries_the_full_tool_surface(kharness) -> None:
     actions = build_actions(ActionContext(wrapper=kharness.wrapper, kernel=kharness.kernel))
     assert {a.name for a in actions} == EXPECTED_ACTIONS
-    assert len(actions) == 25
+    assert len(actions) == 26
 
 
 def test_actions_are_translation_ready(kharness) -> None:

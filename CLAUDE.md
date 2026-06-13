@@ -82,12 +82,15 @@ src/shrike/                       # Python package (src layout) — the harness 
 ├── recognition.py                # RecognizerBackend protocol + make_recognizer (OCR; native engine)
 ├── index.py                      # IndexState + activation_floor (host-side index policy; index lives in kernel)
 ├── derived.py                    # DerivedTextStore — FTS5 facade (read paths; kernel ingests in server mode)
+├── pathsafety.py                 # Shared server-local path-safety gate (store_media #164, export #71, import #72)
+├── export_store.py               # Export download store: server-named temp packages + one-shot tokens (#71)
 └── cli/
     ├── __init__.py               # Root Click group, global options (--config, --url, --json, --pretty)
     ├── client.py                 # Re-export shim → shrike.client (keeps imports working)
     ├── config.py                 # YAML config loading/saving
     ├── completion_cmd.py         # shrike completion {bash,zsh,fish}
     ├── embedding_cmd.py          # shrike embedding status/start/stop
+    ├── export_cmd.py             # shrike export (.apkg/.colpkg; download or --server-path)
     ├── index_cmd.py              # shrike index rebuild/status
     ├── server_cmd.py             # shrike server start/stop/status/logs (daemon management)
     ├── info_cmd.py               # shrike info
@@ -265,7 +268,7 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 
 **OAuth is required for native connectors (deferred).** Claude Desktop / claude.ai *URL connectors* require OAuth 2.1 + Dynamic Client Registration and fail against an unauthenticated endpoint, so the "behind a reverse proxy / on a VPN as a connector" story depends on implementing MCP server auth (`mcp.server.auth`, OAuth 2.0 + PKCE) — intentionally not started. Until then a native client reaches Shrike through the **`mcp-remote` stdio bridge** (`npx mcp-remote http://127.0.0.1:8372/mcp --allow-http --transport http-only`), which connects without auth because Shrike demands none.
 
-### MCP tools (24 total)
+### MCP tools (26 total)
 
 | Tool | Status | Purpose |
 |------|--------|---------|
@@ -293,6 +296,8 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`, `
 | `fetch_media` | Working | Locate media (1-10); per-item `found`(url+path+mime+size)/`missing` union — **never returns bytes** (GET the `url`) |
 | `list_media` | Working | List media filenames (+ `media_dir`), optional glob `pattern`; each with `url`/`mime`/`size_bytes` |
 | `delete_media` | Working | Delete media by name → Anki's recoverable trash (no ref-check); `deleted`/`not_found` |
+| `list_profiles` | Working | Enumerate the collection/profile registry (#66): each profile's `name`/`path`, the active default; read-only |
+| `export_package` | Working | Export the collection (or a deck/`note_ids`) to an `.apkg`/`.colpkg` (#71); returns a download `url` (GET it; never base64) or a gated server-local `path` |
 
 **Duplicate handling lives *inside* `upsert_notes`, not in a separate pre-check.** Before each new note is written, Anki's own add-note validation (`note.fields_check()`, via `CollectionWrapper._check_new_note`) runs. A first-field duplicate (same first field as an existing note of that type — Anki's rule, collection-wide and **deck-independent**) is governed by `on_duplicate`: `error` (**default** — reported, not written), `skip` (`status: skipped`), or `allow` (written anyway). Structurally invalid notes — empty first field, broken cloze — are *always* reported as errors with a `reason` regardless of policy, and never written. `dry_run: true` runs the same validation but writes nothing (every result `ok`/`skipped`/`error`, response echoes `dry_run: true`). The per-item result union (`UpsertNoteResult` in `schemas.py`) has four `status`-discriminated variants (`UpsertNoteOk`/`UpsertNoteValidated`/`UpsertNoteSkipped`/`UpsertNoteError`; `.reason` is the machine-readable `NoteValidationReason`). This is Anki's *exact* first-field rule, distinct from the *semantic* near-duplicate signal the returned `neighbors` provide. **A standalone `canAddNotes`-style tool was rejected** (racy check-then-write, only actionable by a follow-up call — see `docs/decisions.md`). Validation applies to **creates**; updates are validated for existence/fields but not duplicate/empty. `dry_run` does not catch intra-batch duplicates (it writes nothing, so two identical new notes both validate clean — a real run catches the second).
 
@@ -327,7 +332,7 @@ Input bounds (e.g. `limit` 1–200, `top_k` 1–50, batch sizes ≤100/≤10) ar
 The CLI uses Click with rich for output formatting. Command hierarchy:
 
 ```
-shrike [--config PATH] [--url URL] [--json] [--pretty/--no-pretty]
+shrike [--config PATH] [--url URL] [--profile/--collection NAME] [--json] [--pretty/--no-pretty]
 ├── server start|stop|status|logs
 ├── info [--types] [--decks] [--tags] [--stats] [--type-details NAME]
 ├── note list|show|create|update|tag|delete|search|replace|migrate-type
@@ -335,6 +340,8 @@ shrike [--config PATH] [--url URL] [--json] [--pretty/--no-pretty]
 ├── tag rename
 ├── type list|show|create|update|delete
 ├── media store|fetch|list|delete
+├── profile add|remove|default|list
+├── export [DEST] [--deck|--note-id] [--format] [--server-path]
 ├── collection query|prune|check|reload
 ├── index rebuild|status|save
 └── embedding status|start|stop

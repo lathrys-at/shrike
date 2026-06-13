@@ -25,16 +25,70 @@ impl CollectionCore {
     /// has already gated the path (the host's path-safety check); this trusts
     /// it and performs the anki export. `.colpkg` rejects any non-whole scope —
     /// it is a whole-collection backup by definition.
+    ///
+    /// **Symlink-safe write.** anki's exporters write to the exact path handed
+    /// in, following a symlink at that path. On a shared-host export root
+    /// another user could plant `out.apkg → /etc/passwd` and redirect this
+    /// operator-privileged write outside the root (the host's parent-dir gate
+    /// catches a symlinked *parent*, not a symlinked *basename*). So we never
+    /// hand anki the requested path: we export to a **server-generated temp
+    /// name inside the same parent dir** (which we create, so it can't be a
+    /// symlink) and then atomically `rename` it onto the requested basename.
+    /// `rename` replaces the directory entry without following a symlink at the
+    /// target — a planted `out.apkg` symlink is replaced by the real file, not
+    /// written through — and the swap is crash-safe (no torn package at the
+    /// final path).
     pub fn export_package(&self, req: &ExportRequest) -> NativeResult<ExportOutcome> {
         self.ensure_open()?;
+        if matches!(req.format, PackageFormat::Colpkg) && !matches!(req.scope, ExportScope::Whole) {
+            return Err(NativeError::invalid_input(
+                "a .colpkg is a whole-collection backup and cannot be scoped to a \
+                 deck or notes — export a .apkg for a subset, or drop the scope",
+            ));
+        }
+        let final_path = std::path::Path::new(&req.out_path);
+        let parent = final_path.parent().ok_or_else(|| {
+            NativeError::invalid_input(format!("export path has no parent dir: {:?}", req.out_path))
+        })?;
+        // The parent must exist (the host gate already required it). Create it
+        // defensively so the temp write below can't fail on a missing dir.
+        std::fs::create_dir_all(parent)
+            .map_err(|e| NativeError::internal(format!("export parent dir: {e}")))?;
+        let temp_path = self.export_temp_path(parent);
+        let temp_str = temp_path.to_str().ok_or_else(|| {
+            NativeError::internal(format!(
+                "non-UTF-8 export temp path: {}",
+                temp_path.display()
+            ))
+        })?;
+
+        // Export to the server-controlled temp name, then atomically rename
+        // onto the requested basename. On any failure the temp file is cleaned
+        // up so a half-written package never lingers in the operator's root.
+        let result = self.export_to(req, temp_str);
+        match result {
+            Ok(note_count) => {
+                std::fs::rename(&temp_path, final_path).map_err(|e| {
+                    let _ = std::fs::remove_file(&temp_path);
+                    NativeError::internal(format!("finalize export ({}): {e}", req.out_path))
+                })?;
+                Ok(ExportOutcome {
+                    note_count,
+                    out_path: req.out_path.clone(),
+                })
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp_path);
+                Err(e)
+            }
+        }
+    }
+
+    /// Run the anki export to `out` (already a server-controlled temp path),
+    /// dispatching on format. Returns the exported note count.
+    fn export_to(&self, req: &ExportRequest, out: &str) -> NativeResult<u32> {
         match req.format {
             PackageFormat::Colpkg => {
-                if !matches!(req.scope, ExportScope::Whole) {
-                    return Err(NativeError::invalid_input(
-                        "a .colpkg is a whole-collection backup and cannot be scoped to a \
-                         deck or notes — export a .apkg for a subset, or drop the scope",
-                    ));
-                }
                 // anki's colpkg exporter reads the media folder unconditionally
                 // (it walks it to build the package's media map), and errors if
                 // it's absent. A real anki profile always has the folder; ours
@@ -51,37 +105,38 @@ impl CollectionCore {
                 // (`guard.take()`), leaving the backend with none, so a read
                 // after would hit CollectionNotOpen.
                 let note_count = self.adapter.search_notes("")?.len() as u32;
-                self.adapter.export_collection_package(
-                    &req.out_path,
-                    req.with_media,
-                    req.legacy,
-                )?;
+                self.adapter
+                    .export_collection_package(out, req.with_media, req.legacy)?;
                 // Re-open: the colpkg export took the collection out of the
                 // backend, so the next op on this core must find it open again
                 // (our cooperative-lock `released` flag is untouched by anki's
                 // internal take, so `ensure_open` wouldn't re-acquire — reopen
                 // explicitly).
                 self.reopen()?;
-                Ok(ExportOutcome {
-                    note_count,
-                    out_path: req.out_path.clone(),
-                })
+                Ok(note_count)
             }
             PackageFormat::Apkg => {
                 let limit = self.resolve_export_limit(&req.scope)?;
-                let note_count = self.adapter.export_anki_package(
-                    &req.out_path,
+                self.adapter.export_anki_package(
+                    out,
                     req.with_scheduling,
                     req.with_media,
                     req.legacy,
                     limit,
-                )?;
-                Ok(ExportOutcome {
-                    note_count,
-                    out_path: req.out_path.clone(),
-                })
+                )
             }
         }
+    }
+
+    /// A unique, server-generated temp path inside `parent` (never a symlink —
+    /// we create the name). PID + a process-monotonic counter keeps it unique
+    /// across concurrent exports without a rng dependency; the `.tmp` suffix
+    /// and `.shrike-export-` prefix mark it as ours for any debugging eye.
+    fn export_temp_path(&self, parent: &std::path::Path) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        parent.join(format!(".shrike-export-{}-{}.tmp", std::process::id(), n))
     }
 
     /// Map an [`ExportScope`] to anki's `ExportLimit` oneof. A deck ref resolves
