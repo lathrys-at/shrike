@@ -78,6 +78,47 @@ pub fn note_hash(
     hash_text(&text_part)
 }
 
+/// What a space embeds + hashes on the write path (#232's per-modality-primary
+/// routing). The existing `add`/`reconcile`/`rebuild` default to
+/// [`WriteMode::TextAndImage`] (byte-identical to pre-#232: text always, image
+/// when the space carries an image pair); a SECONDARY image-primary space uses
+/// [`WriteMode::ImageOnly`] so it stores only image vectors and hashes only its
+/// image refs — a pure-text edit then never re-embeds it, and the dedicated
+/// text space's stored vectors are the only text vectors (no waste, no
+/// double-index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteMode {
+    /// Embed text (+ image when an image pair is supplied) and fold both into
+    /// the per-note hash. The N=1 / omni-primary / dedicated-text-primary path
+    /// — byte-identical to the single-orchestrator era.
+    TextAndImage,
+    /// Embed ONLY images, store ONLY image vectors, and hash ONLY the present
+    /// image refs (#232). The image-primary SECONDARY space's path: a pure-text
+    /// edit leaves its hash unchanged (no spurious re-embed); an image
+    /// add/remove/swap re-embeds it.
+    ImageOnly,
+}
+
+/// The per-note change fingerprint for an [`WriteMode::ImageOnly`] space (#232):
+/// folds ONLY the present-and-resolvable image refs — no text, no OCR — so the
+/// hash moves iff the note's images do. An image-primary space with no
+/// resolvable images for a note hashes the empty-image sentinel (a stable
+/// constant), so a note that loses its last image still re-embeds (its vector
+/// must leave the image index) and a never-imaged note has a stable hash.
+pub fn note_hash_images_only(image_names: &[String], image_exists: &dyn Fn(&str) -> bool) -> String {
+    let mut present: Vec<&str> = image_names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| image_exists(n))
+        .collect();
+    present.sort_unstable();
+    // A distinct namespace prefix so an image-only hash never collides with a
+    // text hash of the same bytes (defensive; the two live in separate spaces'
+    // sidecars anyway).
+    let joined = format!("\u{1f}img\u{1f}{}", present.join("\u{1f}"));
+    hash_text(&joined)
+}
+
 /// `index.meta.json` — the exact shape the Python orchestrator wrote, plus the
 /// owning-collection identity (#67).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -799,16 +840,23 @@ impl IndexOrchestrator {
         &self,
         input: &EmbedInput,
         images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+        mode: WriteMode,
     ) -> String {
-        let embeds_images = images.is_some();
         let exists = |name: &str| images.map(|(_, r)| r.exists(name)).unwrap_or(false);
-        note_hash(
-            &input.text,
-            &input.image_names,
-            embeds_images,
-            &exists,
-            &input.ocr_texts,
-        )
+        match mode {
+            // Image-only (#232): fold ONLY the present image refs — text edits
+            // don't move it. (An ImageOnly space always carries an image pair.)
+            WriteMode::ImageOnly => note_hash_images_only(&input.image_names, &exists),
+            // Text (+image when paired): the existing media-aware hash — at N=1
+            // this is byte-identical to pre-#232.
+            WriteMode::TextAndImage => note_hash(
+                &input.text,
+                &input.image_names,
+                images.is_some(),
+                &exists,
+                &input.ocr_texts,
+            ),
+        }
     }
 
     /// Embed and (replace-)add notes — text vectors always; one vector per
@@ -827,7 +875,21 @@ impl IndexOrchestrator {
         embedder: &dyn Embedder,
         images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
     ) -> NativeResult<usize> {
-        self.apply(inputs, embedder, images, true).await
+        self.add_with_mode(inputs, embedder, images, WriteMode::TextAndImage)
+            .await
+    }
+
+    /// [`Self::add`] with an explicit [`WriteMode`] (#232): the image-primary
+    /// secondary space uses [`WriteMode::ImageOnly`] to store only image vectors
+    /// + hash only image refs. `TextAndImage` is the byte-identical default.
+    pub async fn add_with_mode(
+        &self,
+        inputs: &[EmbedInput],
+        embedder: &dyn Embedder,
+        images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+        mode: WriteMode,
+    ) -> NativeResult<usize> {
+        self.apply(inputs, embedder, images, true, mode).await
     }
 
     /// The shared embed→engine pipeline behind [`Self::add`] (replace
@@ -839,13 +901,13 @@ impl IndexOrchestrator {
         embedder: &dyn Embedder,
         images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
         replace: bool,
+        mode: WriteMode,
     ) -> NativeResult<usize> {
         if inputs.is_empty() {
             return Ok(0);
         }
         let mut added = 0usize;
         for batch in inputs.chunks(BATCH_SIZE) {
-            let texts: Vec<String> = batch.iter().map(|i| i.text.clone()).collect();
             let keys: Vec<i64> = batch.iter().map(|i| i.note_id).collect();
 
             // Image bytes, read lazily (only for notes being added) — keys
@@ -863,33 +925,6 @@ impl IndexOrchestrator {
                 }
             }
 
-            // Recognized-text vectors (#199/#228): each vector-worthy OCR/ASR
-            // text embeds via the SAME text encoder, landing in the text
-            // region with no modality gap, keyed by its note — so the
-            // per-modality ranking is max-over-items for free.
-            let mut ocr_keys: Vec<i64> = Vec::new();
-            let mut ocr_texts: Vec<String> = Vec::new();
-            for input in batch {
-                for t in &input.ocr_texts {
-                    ocr_keys.push(input.note_id);
-                    ocr_texts.push(t.clone());
-                }
-            }
-
-            // The batch's engine work is independent — text, recognized-text,
-            // and image vectors share no ordering — so all futures are built
-            // BEFORE any await and joined. The kernel only states the
-            // independence; whether they truly overlap is the host's lane
-            // assignment (two engines on one GPU share a narrow lane, a
-            // remote engine gets a wide one).
-            let text_fut = embedder.embed(texts);
-            let ocr_fut = async {
-                if ocr_texts.is_empty() {
-                    Ok(Vec::new())
-                } else {
-                    embedder.embed(ocr_texts).await
-                }
-            };
             let image_fut = async {
                 match images {
                     Some((image_embedder, _)) if !items.is_empty() => {
@@ -898,27 +933,80 @@ impl IndexOrchestrator {
                     _ => Ok(Vec::new()),
                 }
             };
-            let (vectors, ocr_vectors, image_vectors) =
-                futures::try_join!(text_fut, ocr_fut, image_fut)?;
-            let ndim = vectors.first().map(Vec::len).unwrap_or(0);
-            if ndim == 0 {
-                return Err(NativeError::internal("embedder returned empty vectors"));
-            }
 
-            self.engine.ensure(TEXT, ndim)?;
-            // Replace semantics: drop a re-added note's existing vectors
-            // first (skipped during rebuild — the index was just cleared).
-            if replace {
-                let _ = self.engine.remove(&keys)?;
-            }
-            self.engine.add(TEXT, &keys, &vectors)?;
-            if !ocr_keys.is_empty() {
-                self.engine.add(TEXT, &ocr_keys, &ocr_vectors)?;
-            }
-            if !image_keys.is_empty() {
-                let image_ndim = image_vectors.first().map(Vec::len).unwrap_or(0);
-                self.engine.ensure("image", image_ndim)?;
-                self.engine.add("image", &image_keys, &image_vectors)?;
+            match mode {
+                // ── Image-only (#232): embed + store ONLY image vectors. The
+                // text/OCR halves are skipped entirely — a secondary CLIP space
+                // never holds text vectors (PR-C reads only its image ranking).
+                WriteMode::ImageOnly => {
+                    let image_vectors = image_fut.await?;
+                    // Replace: drop the note's prior vectors (all modalities)
+                    // before re-adding (skipped during rebuild — just cleared).
+                    if replace {
+                        let _ = self.engine.remove(&keys)?;
+                    }
+                    if !image_keys.is_empty() {
+                        let image_ndim = image_vectors.first().map(Vec::len).unwrap_or(0);
+                        if image_ndim == 0 {
+                            return Err(NativeError::internal(
+                                "image embedder returned empty vectors",
+                            ));
+                        }
+                        self.engine.ensure("image", image_ndim)?;
+                        self.engine.add("image", &image_keys, &image_vectors)?;
+                    }
+                    // A note with no resolvable image adds nothing — but its
+                    // hash still records (it's pending=current for reconcile).
+                }
+                // ── Text (+image when paired): the existing pipeline, verbatim
+                // for N=1 / the text-or-omni primary.
+                WriteMode::TextAndImage => {
+                    let texts: Vec<String> = batch.iter().map(|i| i.text.clone()).collect();
+                    // Recognized-text vectors (#199/#228): each vector-worthy
+                    // OCR/ASR text embeds via the SAME text encoder, landing in
+                    // the text region with no modality gap, keyed by its note.
+                    let mut ocr_keys: Vec<i64> = Vec::new();
+                    let mut ocr_texts: Vec<String> = Vec::new();
+                    for input in batch {
+                        for t in &input.ocr_texts {
+                            ocr_keys.push(input.note_id);
+                            ocr_texts.push(t.clone());
+                        }
+                    }
+                    // The batch's engine work is independent — text,
+                    // recognized-text, and image vectors share no ordering — so
+                    // all futures are built BEFORE any await and joined.
+                    let text_fut = embedder.embed(texts);
+                    let ocr_fut = async {
+                        if ocr_texts.is_empty() {
+                            Ok(Vec::new())
+                        } else {
+                            embedder.embed(ocr_texts).await
+                        }
+                    };
+                    let (vectors, ocr_vectors, image_vectors) =
+                        futures::try_join!(text_fut, ocr_fut, image_fut)?;
+                    let ndim = vectors.first().map(Vec::len).unwrap_or(0);
+                    if ndim == 0 {
+                        return Err(NativeError::internal("embedder returned empty vectors"));
+                    }
+
+                    self.engine.ensure(TEXT, ndim)?;
+                    // Replace semantics: drop a re-added note's existing vectors
+                    // first (skipped during rebuild — the index was just cleared).
+                    if replace {
+                        let _ = self.engine.remove(&keys)?;
+                    }
+                    self.engine.add(TEXT, &keys, &vectors)?;
+                    if !ocr_keys.is_empty() {
+                        self.engine.add(TEXT, &ocr_keys, &ocr_vectors)?;
+                    }
+                    if !image_keys.is_empty() {
+                        let image_ndim = image_vectors.first().map(Vec::len).unwrap_or(0);
+                        self.engine.ensure("image", image_ndim)?;
+                        self.engine.add("image", &image_keys, &image_vectors)?;
+                    }
+                }
             }
 
             // Hash OUTSIDE the lock: the resolver's `exists` may be a harness
@@ -926,7 +1014,7 @@ impl IndexOrchestrator {
             // foreign code under the orchestrator mutex.
             let new_hashes: Vec<(i64, String)> = batch
                 .iter()
-                .map(|input| (input.note_id, self.hash_for(input, images)))
+                .map(|input| (input.note_id, self.hash_for(input, images, mode)))
                 .collect();
             let mut shared = self.shared.lock().expect("orchestrator poisoned");
             if let Some(hashes) = shared.note_hashes.as_mut() {
@@ -983,6 +1071,29 @@ impl IndexOrchestrator {
         embedder: &dyn Embedder,
         images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
     ) -> NativeResult<()> {
+        self.rebuild_with_mode(
+            inputs,
+            col_mod,
+            model_id,
+            embedder,
+            images,
+            WriteMode::TextAndImage,
+        )
+        .await
+    }
+
+    /// [`Self::rebuild`] with an explicit [`WriteMode`] (#232): an image-primary
+    /// secondary space rebuilds in `ImageOnly` mode (only image vectors land).
+    /// `TextAndImage` is the byte-identical default.
+    pub async fn rebuild_with_mode(
+        &self,
+        inputs: Vec<EmbedInput>,
+        col_mod: i64,
+        model_id: Option<String>,
+        embedder: &dyn Embedder,
+        images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+        mode: WriteMode,
+    ) -> NativeResult<()> {
         let total = inputs.len() as u64;
         {
             let mut shared = self.shared.lock().expect("orchestrator poisoned");
@@ -1001,7 +1112,7 @@ impl IndexOrchestrator {
             // `apply`); `replace = false` skips the per-batch removes that
             // would otherwise run against the just-cleared index (#395).
             for batch in inputs.chunks(BATCH_SIZE) {
-                self.apply(batch, embedder, images, false).await?;
+                self.apply(batch, embedder, images, false, mode).await?;
                 indexed += batch.len() as u64;
                 self.shared
                     .lock()
@@ -1042,13 +1153,37 @@ impl IndexOrchestrator {
         embedder: &dyn Embedder,
         images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
     ) -> NativeResult<()> {
+        self.reconcile_with_mode(
+            inputs,
+            col_mod,
+            model_id,
+            embedder,
+            images,
+            WriteMode::TextAndImage,
+        )
+        .await
+    }
+
+    /// [`Self::reconcile`] with an explicit [`WriteMode`] (#232): an
+    /// image-primary secondary space reconciles in `ImageOnly` mode (its hash
+    /// folds image refs only, so a text edit is a no-op for it). `TextAndImage`
+    /// is the byte-identical default.
+    pub async fn reconcile_with_mode(
+        &self,
+        inputs: Vec<EmbedInput>,
+        col_mod: i64,
+        model_id: Option<String>,
+        embedder: &dyn Embedder,
+        images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+        mode: WriteMode,
+    ) -> NativeResult<()> {
         let new_hashes: BTreeMap<i64, String> = inputs
             .iter()
-            .map(|i| (i.note_id, self.hash_for(i, images)))
+            .map(|i| (i.note_id, self.hash_for(i, images, mode)))
             .collect();
         let Some((to_embed, to_remove)) = self.reconcile_diff(&new_hashes) else {
             return self
-                .rebuild(inputs, col_mod, model_id, embedder, images)
+                .rebuild_with_mode(inputs, col_mod, model_id, embedder, images, mode)
                 .await;
         };
         if to_embed.is_empty() && to_remove.is_empty() {
@@ -1073,7 +1208,7 @@ impl IndexOrchestrator {
                 .into_iter()
                 .filter(|i| embed_set.contains(&i.note_id))
                 .collect();
-            self.add(&changed, embedder, images).await?;
+            self.add_with_mode(&changed, embedder, images, mode).await?;
             {
                 let mut shared = self.shared.lock().expect("orchestrator poisoned");
                 shared.note_hashes = Some(new_hashes);
