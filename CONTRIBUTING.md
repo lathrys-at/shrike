@@ -156,6 +156,16 @@ scripts/build-native.sh && pytest tests/unit tests/native -q
 ./bazel test //...     # the authoritative CI lane
 ```
 
+Development is deliberately two-lane: iterate on the **pip lane** (the venv,
+`scripts/build-native.sh`, `pytest` with its debugging affordances), and let
+the **Bazel lane** be the proof — CI runs one `bazel test` invocation over the
+whole graph, and releases are Bazel-built. The committed `./bazel` wrapper
+bootstraps the pinned toolchain (no install). [`docs/build-bazel.md`](docs/build-bazel.md)
+covers the targets, regenerating the dependency locks, and how caching works;
+the design rationale is the Bazel ADR in [`docs/decisions.md`](docs/decisions.md).
+An optional `.envrc` auto-activates the venv if you use direnv — nothing
+requires it.
+
 `scripts/coverage.sh` runs the coverage measurement locally and enforces the
 `fail_under` target (the per-PR CI lane runs tests *without* the tracer for speed,
 and CI only ever *reports* coverage — rc PRs + 3x/week on `main` — it never gates on
