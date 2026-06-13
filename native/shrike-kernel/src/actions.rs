@@ -776,7 +776,9 @@ pub fn cross_space_signal(space_key: &str) -> String {
 ///
 /// Public so the kernel's cross-space fan-out captures each SECONDARY space's
 /// value as it searches (the gate input rides into `SpaceSourceHits`).
-pub fn best_query_cosine_of(hits: &std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>) -> Option<f64> {
+pub fn best_query_cosine_of(
+    hits: &std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>,
+) -> Option<f64> {
     crate::NOTE_MODALITIES
         .iter()
         .filter_map(|m| hits.get(*m).and_then(|(_, dists)| dists.first()))
@@ -1670,7 +1672,9 @@ mod search_tests {
 
         let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
         // The query matches the text-target strongly (cos 0.9) in the primary.
-        index.add("text", &[text_target], &[at_distance(0.1)]).unwrap();
+        index
+            .add("text", &[text_target], &[at_distance(0.1)])
+            .unwrap();
 
         // BASELINE: text-only (no cross-space) — the text note is rank-1.
         let groups = search_notes(
@@ -1725,13 +1729,18 @@ mod search_tests {
         // prevent exactly this; turning it off reproduces the regression.
         let (dir, core) = temp_collection();
         let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
-        let off_topic_image =
-            add_note(&core, "an unrelated diagram whose content is in its image", "img");
+        let off_topic_image = add_note(
+            &core,
+            "an unrelated diagram whose content is in its image",
+            "img",
+        );
 
         let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
         // Primary: the text-target matches STRONGLY (cos 0.8) — the correct
         // rank-1 for this text query.
-        index.add("text", &[text_target], &[at_distance(0.2)]).unwrap();
+        index
+            .add("text", &[text_target], &[at_distance(0.2)])
+            .unwrap();
 
         // Two always-on vision spaces, each surfacing the OFF-TOPIC image note
         // at a vision cosine (0.7) BELOW the text-target's (0.8) — so the
@@ -1792,7 +1801,10 @@ mod search_tests {
             "gated: the text-target is rank-1 again (the gate closed the off-topic vision spaces)"
         );
         assert!(
-            !gated[0].matches.iter().any(|m| m.note.id == off_topic_image),
+            !gated[0]
+                .matches
+                .iter()
+                .any(|m| m.note.id == off_topic_image),
             "gated: the off-topic image note is kept out (vision < text → closed)"
         );
         core.close().unwrap();
@@ -1814,7 +1826,9 @@ mod search_tests {
         let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
         // Primary text: only a WEAK match (cos 0.55), and the image note has no
         // text vector at all → text-only would surface only weak_text.
-        index.add("text", &[weak_text], &[at_distance(0.45)]).unwrap();
+        index
+            .add("text", &[weak_text], &[at_distance(0.45)])
+            .unwrap();
 
         // Without cross-space: the image note is absent.
         let baseline = search_notes(
@@ -1996,4 +2010,3 @@ mod neighbor_tests {
         std::fs::remove_dir_all(dir).ok();
     }
 }
-

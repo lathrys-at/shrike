@@ -816,8 +816,7 @@ impl Kernel {
             // on THIS space's engine.
             let qvectors = svc.embedder.embed(source_texts.to_vec()).await?;
             let engine = orch.engine_arc();
-            let rows =
-                engine.search_by_modality(&qvectors, fetch_k, Some(&note_spaces))?;
+            let rows = engine.search_by_modality(&qvectors, fetch_k, Some(&note_spaces))?;
             let per_source: Vec<actions::SpaceSourceHits> = rows
                 .into_iter()
                 .map(|modality_hits| {
