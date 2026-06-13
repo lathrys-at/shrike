@@ -19,3 +19,6 @@ tracing = "0.1"
 # SYNCHRONOUS client — no tokio, no runtime (the workspace's pinned
 # runtime-less HTTP precedent, same as shrike-collection's media fetch).
 ureq = { version = "2", features = ["json"] }
+# Media payloads for llama.cpp's native multimodal /embeddings dialect (#501)
+# ride as base64 strings, same as shrike-describe-remote's chat images.
+base64 = "0.22"

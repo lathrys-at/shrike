@@ -5,16 +5,28 @@
 //! adapter moves each request onto the runtime's blocking pool and network
 //! calls never block a runtime worker.
 //!
+//! Since #501 it also speaks llama.cpp's NATIVE multimodal dialect for
+//! [`EmbedImages`]: `GET /props` advertises the loaded model's modalities
+//! and the per-process `media_marker` (randomized each server start — it
+//! must be read, never assumed), and media embeds ride
+//! `POST /embeddings` with `{"content": {"prompt_string": <marker>,
+//! "multimodal_data": ["<base64>"]}}` — NOT the OpenAI `/v1/embeddings`
+//! shape, which stays the text path on every endpoint. The dialect is
+//! probe-gated: an endpoint without `/props` (a cloud API) simply has no
+//! media path, and a llama-server without the right mmproj refuses cleanly
+//! before any payload is sent.
+//!
 //! Scope discipline: this crate **talks to an endpoint**, nothing else.
 //! Launching/managing a llama-server subprocess is a different concern
 //! (`shrike-llama-server`); fingerprint *assembly* (the `pool=`/`args=`/
 //! `textprep=` policy suffixes) stays host-side — this crate only serves the
-//! raw identity ingredients (`/v1/models` id + meta).
+//! raw identity ingredients (`/v1/models` id + meta, `/props` capabilities).
 
 use std::time::Duration;
 
+use base64::Engine as _;
 use serde::Deserialize;
-use shrike_engine_api::EmbedText;
+use shrike_engine_api::{EmbedImages, EmbedText, MediaItem};
 use shrike_ffi::{NativeError, NativeResult};
 
 /// Per-request ceiling, matching the Python backend's httpx timeout.
@@ -94,6 +106,17 @@ pub struct ModelInfo {
     pub meta: serde_json::Map<String, serde_json::Value>,
 }
 
+/// llama.cpp server capabilities from `GET /props` (#501): which modalities
+/// the loaded model serves (an mmproj per modality), and the per-process
+/// `media_marker` a multimodal prompt references. The marker is randomized
+/// at every server start, so it is read here, never assumed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LlamaProps {
+    pub vision: bool,
+    pub audio: bool,
+    pub media_marker: Option<String>,
+}
+
 impl RemoteEmbedder {
     /// Construction validates the API key — it is interpolated into the
     /// `Authorization` header, so a control character (a pasted key with a
@@ -136,6 +159,29 @@ impl RemoteEmbedder {
             .unwrap_or(false)
     }
 
+    /// llama.cpp's `GET /props` capabilities, or `None` when the endpoint
+    /// doesn't serve the route (a cloud API, an old build) — which means
+    /// "no native multimodal dialect here", never an error.
+    pub fn props(&self) -> Option<LlamaProps> {
+        let resp = self.request("GET", "/props", META_TIMEOUT).call().ok()?;
+        let body = resp.into_json::<serde_json::Value>().ok()?;
+        let modalities = body.get("modalities")?;
+        Some(LlamaProps {
+            vision: modalities
+                .get("vision")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            audio: modalities
+                .get("audio")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            media_marker: body
+                .get("media_marker")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        })
+    }
+
     /// The first `/v1/models` entry's id + meta (empty on any failure or
     /// shape mismatch — identity falls back to host config, never errors).
     pub fn model_info(&self) -> ModelInfo {
@@ -162,46 +208,54 @@ impl RemoteEmbedder {
     }
 }
 
-impl EmbedText for RemoteEmbedder {
-    /// One `POST /v1/embeddings` request per chunk. Vectors are ordered by
-    /// the response's own `index` rather than positional order — a cheap
-    /// guard that survives a backend that doesn't preserve order (each note
-    /// would otherwise silently get a batch-mate's vector).
-    fn embed_chunk(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-        let span = tracing::debug_span!("embed.remote_chunk", batch = texts.len());
-        let _enter = span.enter();
-        let mut payload = serde_json::json!({ "input": texts });
-        if let Some(model) = &self.model {
-            payload["model"] = serde_json::Value::String(model.clone());
-        }
+impl RemoteEmbedder {
+    /// The bounded-retry POST both dialects share. A refused/failed request
+    /// is a service-availability problem (down, mid-restart, auth rejected),
+    /// not an engine bug. 429/5xx and transport failures are transient →
+    /// bounded retry; any other status fails immediately. A terminal status
+    /// error appends the server's own `error.message` when the body carries
+    /// one (llama.cpp's "model does not support multimodal requests", a
+    /// cloud API's auth detail) — the actionable half of the failure.
+    fn post_json_with_retry(
+        &self,
+        path: &str,
+        payload: &serde_json::Value,
+    ) -> NativeResult<ureq::Response> {
         let mut attempt = 1u32;
-        let resp = loop {
-            let err = match self
-                .request("POST", "/v1/embeddings", EMBED_TIMEOUT)
-                .send_json(&payload)
-            {
-                Ok(resp) => break resp,
+        loop {
+            let err = match self.request("POST", path, EMBED_TIMEOUT).send_json(payload) {
+                Ok(resp) => return Ok(resp),
                 Err(e) => e,
             };
-            // A refused/failed request is a service-availability problem
-            // (down, mid-restart, auth rejected), not an engine bug. 429/5xx
-            // and transport failures are transient → bounded retry; any
-            // other status fails immediately.
             let transient = match &err {
                 ureq::Error::Status(code, _) => retryable_status(*code),
                 ureq::Error::Transport(_) => true,
             };
-            if !transient {
+            if !transient || attempt >= EMBED_ATTEMPTS {
+                let attempts = if transient {
+                    format!(" after {EMBED_ATTEMPTS} attempt(s)")
+                } else {
+                    String::new()
+                };
+                let detail = match err {
+                    ureq::Error::Status(code, resp) => {
+                        let msg = resp
+                            .into_json::<serde_json::Value>()
+                            .ok()
+                            .and_then(|b| {
+                                b.get("error")?.get("message")?.as_str().map(String::from)
+                            })
+                            .unwrap_or_default();
+                        if msg.is_empty() {
+                            format!("status {code}")
+                        } else {
+                            format!("status {code}: {msg}")
+                        }
+                    }
+                    ureq::Error::Transport(t) => t.to_string(),
+                };
                 return Err(NativeError::unavailable(format!(
-                    "embeddings request failed: {err}"
-                )));
-            }
-            if attempt >= EMBED_ATTEMPTS {
-                return Err(NativeError::unavailable(format!(
-                    "embeddings request failed after {EMBED_ATTEMPTS} attempt(s): {err}"
+                    "embeddings request failed{attempts}: {detail}"
                 )));
             }
             let delay = match &err {
@@ -219,7 +273,26 @@ impl EmbedText for RemoteEmbedder {
             );
             std::thread::sleep(delay);
             attempt += 1;
-        };
+        }
+    }
+}
+
+impl EmbedText for RemoteEmbedder {
+    /// One `POST /v1/embeddings` request per chunk. Vectors are ordered by
+    /// the response's own `index` rather than positional order — a cheap
+    /// guard that survives a backend that doesn't preserve order (each note
+    /// would otherwise silently get a batch-mate's vector).
+    fn embed_chunk(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let span = tracing::debug_span!("embed.remote_chunk", batch = texts.len());
+        let _enter = span.enter();
+        let mut payload = serde_json::json!({ "input": texts });
+        if let Some(model) = &self.model {
+            payload["model"] = serde_json::Value::String(model.clone());
+        }
+        let resp = self.post_json_with_retry("/v1/embeddings", &payload)?;
         let body: EmbeddingsResponse = resp
             .into_json()
             .map_err(|e| NativeError::internal(format!("malformed embeddings response: {e}")))?;
@@ -244,6 +317,75 @@ impl EmbedText for RemoteEmbedder {
             )));
         }
         Ok(items.into_iter().map(|d| d.embedding).collect())
+    }
+}
+
+/// llama.cpp's NATIVE `/embeddings` response: a bare array, each item's
+/// `embedding` nested one level deeper than the OpenAI shape (a list of
+/// pooled vectors, one per sequence — one sequence per request here).
+#[derive(Deserialize)]
+struct NativeEmbeddingItem {
+    embedding: Vec<Vec<f32>>,
+}
+
+impl EmbedImages for RemoteEmbedder {
+    /// One native `/embeddings` request **per item** (#501): media payloads
+    /// are orders of magnitude heavier than text, so per-item requests keep
+    /// the retry/backoff semantics simple and attribute a failure to the
+    /// exact image. Capability-gated up front — a model without the vision
+    /// mmproj refuses here with the actionable error instead of paying the
+    /// payload upload and the server's own 500.
+    fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>> {
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+        let span = tracing::debug_span!("embed.remote_media_chunk", batch = images.len());
+        let _enter = span.enter();
+        let props = self.props().ok_or_else(|| {
+            NativeError::unavailable(
+                "endpoint does not serve llama.cpp's /props — image embeddings need its \
+                 native multimodal dialect (an OpenAI-style endpoint has no media path)",
+            )
+        })?;
+        if !props.vision {
+            return Err(NativeError::unavailable(
+                "the loaded model does not serve image embeddings — llama-server needs the \
+                 model's vision mmproj loaded (--mmproj; managed.llama_server in config)",
+            ));
+        }
+        let marker = props.media_marker.ok_or_else(|| {
+            NativeError::internal("/props advertises vision but carries no media_marker")
+        })?;
+        images
+            .iter()
+            .map(|item| self.embed_one_media(&marker, item))
+            .collect()
+    }
+}
+
+impl RemoteEmbedder {
+    fn embed_one_media(&self, marker: &str, item: &MediaItem) -> NativeResult<Vec<f32>> {
+        let payload = serde_json::json!({
+            "content": {
+                "prompt_string": marker,
+                "multimodal_data": [base64::engine::general_purpose::STANDARD.encode(&item.bytes)],
+            }
+        });
+        let resp = self.post_json_with_retry("/embeddings", &payload)?;
+        let mut body: Vec<NativeEmbeddingItem> = resp.into_json().map_err(|e| {
+            NativeError::internal(format!("malformed native embeddings response: {e}"))
+        })?;
+        let vector = body
+            .pop()
+            .and_then(|item| item.embedding.into_iter().next())
+            .ok_or_else(|| NativeError::internal("native embeddings response carried no vector"))?;
+        if !body.is_empty() {
+            return Err(NativeError::internal(format!(
+                "native embeddings response carried {} items for one input",
+                body.len() + 1
+            )));
+        }
+        Ok(vector)
     }
 }
 
@@ -497,5 +639,94 @@ mod tests {
             .embed_chunk(&[])
             .unwrap();
         assert!(out.is_empty());
+    }
+    // ── The llama.cpp native multimodal dialect (#501) ──────────────────────
+
+    const PROPS_MM: &str =
+        r#"{"modalities":{"vision":true,"audio":false},"media_marker":"<__media_X__>"}"#;
+    const PROPS_TEXT_ONLY: &str =
+        r#"{"modalities":{"vision":false,"audio":false},"media_marker":"<__media_X__>"}"#;
+
+    #[test]
+    fn props_parses_modalities_and_marker_and_defaults_none() {
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", PROPS_MM.to_string());
+        let props = engine(url, None, None).props().unwrap();
+        assert!(props.vision && !props.audio);
+        assert_eq!(props.media_marker.as_deref(), Some("<__media_X__>"));
+        // No /props at all (connection refused) → None, not an error.
+        assert!(engine("http://127.0.0.1:9".into(), None, None)
+            .props()
+            .is_none());
+    }
+
+    #[test]
+    fn image_chunk_rides_the_native_dialect() {
+        // /props first, then one native /embeddings per item; the request
+        // must carry the SERVER'S marker and the item's base64 bytes, and
+        // the nested [[...]] vector unwraps to one f32 vector per item.
+        let native = r#"[{"index":0,"embedding":[[1.0,2.0,3.0]]}]"#;
+        let (url, rx) = canned_server(vec![
+            ("HTTP/1.1 200 OK", PROPS_MM.to_string()),
+            ("HTTP/1.1 200 OK", native.to_string()),
+        ]);
+        let out = engine(url, None, None)
+            .embed_image_chunk(&[MediaItem::untyped(b"pngbytes".to_vec())])
+            .unwrap();
+        assert_eq!(out, vec![vec![1.0, 2.0, 3.0]]);
+        let props_req = rx.recv().unwrap();
+        assert!(props_req.starts_with("GET /props"), "{props_req}");
+        let embed_req = rx.recv().unwrap();
+        assert!(embed_req.starts_with("POST /embeddings "), "{embed_req}");
+        assert!(
+            embed_req.contains(r#""prompt_string":"<__media_X__>""#),
+            "server marker echoed: {embed_req}"
+        );
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"pngbytes");
+        assert!(
+            embed_req.contains(&format!(r#""multimodal_data":["{b64}"]"#)),
+            "base64 payload: {embed_req}"
+        );
+    }
+
+    #[test]
+    fn text_only_model_refuses_before_any_payload() {
+        // /props says vision:false → the error names the mmproj fix and NO
+        // embed request reaches the server (only the one canned response is
+        // consumed; a second request would hang on the closed listener, so
+        // the immediate error itself is the proof).
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", PROPS_TEXT_ONLY.to_string());
+        let err = engine(url, None, None)
+            .embed_image_chunk(&[MediaItem::untyped(vec![1])])
+            .unwrap_err();
+        assert!(err.to_string().contains("mmproj"), "{err}");
+    }
+
+    #[test]
+    fn endpoint_without_props_has_no_media_path() {
+        let err = engine("http://127.0.0.1:9".into(), None, None)
+            .embed_image_chunk(&[MediaItem::untyped(vec![1])])
+            .unwrap_err();
+        assert!(err.to_string().contains("/props"), "{err}");
+    }
+
+    #[test]
+    fn server_error_message_is_surfaced() {
+        // The terminal error carries llama.cpp's own message (after the
+        // bounded retries — 500 is transient by policy).
+        let body = r#"{"error":{"code":500,"message":"Multimodal data provided, but model does not support multimodal requests.","type":"server_error"}}"#;
+        let (url, _rx) = canned_server(vec![
+            ("HTTP/1.1 200 OK", PROPS_MM.to_string()),
+            ("HTTP/1.1 500 Internal Server Error", body.to_string()),
+            ("HTTP/1.1 500 Internal Server Error", body.to_string()),
+            ("HTTP/1.1 500 Internal Server Error", body.to_string()),
+        ]);
+        let err = engine(url, None, None)
+            .embed_image_chunk(&[MediaItem::untyped(vec![1])])
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not support multimodal requests"),
+            "{err}"
+        );
     }
 }

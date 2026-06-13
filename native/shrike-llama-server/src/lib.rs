@@ -71,8 +71,11 @@ pub struct LlamaServerManager {
     /// Serve embeddings (the default) or chat — a describe/vision server
     /// (#433) is a *chat* server and must not pass `--embeddings`.
     embeddings: bool,
-    /// Multimodal projector (`--mmproj`) for a vision chat server.
-    mmproj: Option<String>,
+    /// Multimodal projector(s) (`--mmproj`, repeatable): one for a vision
+    /// chat server (#433); one per modality for a multimodal *embeddings*
+    /// server (#501 — jina-v5-omni ships separate vision/audio mmprojs,
+    /// loaded together for both).
+    mmprojs: Vec<String>,
     /// The observed child PID, shared with non-blocking observers: a host
     /// status path must NEVER contend with the lifecycle lock a 30s
     /// health-wait holds (the Python facade's `running` was a lock-free
@@ -171,7 +174,7 @@ impl LlamaServerManager {
             child: None,
             base_url,
             embeddings: true,
-            mmproj: None,
+            mmprojs: Vec::new(),
             pid_cell: std::sync::Arc::default(),
         }
     }
@@ -184,7 +187,16 @@ impl LlamaServerManager {
     /// `context_size` — image tokens are expensive.
     pub fn chat_mode(mut self, mmproj: Option<String>) -> Self {
         self.embeddings = false;
-        self.mmproj = mmproj;
+        self.mmprojs = mmproj.into_iter().collect();
+        self
+    }
+
+    /// Load multimodal projector(s) on an *embeddings* server (#501): the
+    /// shape behind a multimodal `embedders:` entry served by the managed
+    /// llama-server. Repeatable because per-modality mmprojs load together
+    /// (vision + audio for an omni model). Keeps `--embeddings` on.
+    pub fn with_mmprojs(mut self, mmprojs: Vec<String>) -> Self {
+        self.mmprojs = mmprojs;
         self
     }
 
@@ -294,7 +306,7 @@ impl LlamaServerManager {
         if self.embeddings {
             cmd.push("--embeddings".into());
         }
-        if let Some(mmproj) = &self.mmproj {
+        for mmproj in &self.mmprojs {
             cmd.extend(["--mmproj".into(), mmproj.clone()]);
         }
         if let Some(n) = self.cfg.context_size {
@@ -621,6 +633,28 @@ mod tests {
         let cmd = manager(&[]).build_command("/bin/llama-server");
         assert!(cmd.contains(&"--embeddings".to_string()));
         assert!(!cmd.contains(&"--mmproj".to_string()));
+    }
+
+    #[test]
+    fn embeddings_mode_emits_repeatable_mmprojs() {
+        // The #501 omni shape: per-modality projectors load together on an
+        // EMBEDDINGS server — `--embeddings` stays on, one `--mmproj` each,
+        // in declaration order.
+        let m = manager(&[]).with_mmprojs(vec![
+            "/models/vision.mmproj.gguf".into(),
+            "/models/audio.mmproj.gguf".into(),
+        ]);
+        let cmd = m.build_command("/bin/llama-server");
+        assert!(cmd.contains(&"--embeddings".to_string()), "{cmd:?}");
+        let positions: Vec<usize> = cmd
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| *t == "--mmproj")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(positions.len(), 2, "{cmd:?}");
+        assert_eq!(cmd[positions[0] + 1], "/models/vision.mmproj.gguf");
+        assert_eq!(cmd[positions[1] + 1], "/models/audio.mmproj.gguf");
     }
 
     #[test]
