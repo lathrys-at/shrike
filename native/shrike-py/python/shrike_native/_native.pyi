@@ -116,6 +116,7 @@ def rrf_fuse(
     k: int = 60,
     priority_signals: list[str] = ...,
 ) -> list[tuple[int, float, list[tuple[str, int]]]]: ...
+def index_namespace(collection_path: str) -> str: ...
 
 @final
 class OnnxTextEmbedder:

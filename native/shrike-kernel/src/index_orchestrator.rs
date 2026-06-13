@@ -78,7 +78,8 @@ pub fn note_hash(
     hash_text(&text_part)
 }
 
-/// `index.meta.json` — the exact shape the Python orchestrator wrote.
+/// `index.meta.json` — the exact shape the Python orchestrator wrote, plus the
+/// owning-collection identity (#67).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexMeta {
     pub ndim: i64,
@@ -89,6 +90,14 @@ pub struct IndexMeta {
     /// Marker absent → pre-#201a (v1) single-index layout.
     #[serde(default = "default_schema_v1")]
     pub schema: i64,
+    /// The owning collection's path-derived identity (#67): the canonicalized
+    /// collection path. Recorded so a mismatched/moved cache (the index dir
+    /// belongs to a different collection) is detected and rebuilt rather than
+    /// silently reused. Absent → a pre-#67 index (loaded as-is; the next save
+    /// stamps the owner). Serialized last and skipped when absent so a text-
+    /// only index built before #67 round-trips byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
     /// Presence (even empty) records that calibration ran (one-shot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation: Option<BTreeMap<String, BTreeMap<String, f64>>>,
@@ -96,6 +105,14 @@ pub struct IndexMeta {
 
 fn default_schema_v1() -> i64 {
     1
+}
+
+/// Whether a recorded owner conflicts with the expected one (#67). A conflict
+/// is only when BOTH are known and they differ — an absent expected owner (the
+/// injection seam) never conflicts, and an absent recorded owner (a pre-#67
+/// index) is adopted, never rejected.
+fn owner_mismatch(expected: Option<&str>, recorded: Option<&str>) -> bool {
+    matches!((expected, recorded), (Some(e), Some(r)) if e != r)
 }
 
 /// Write via a same-directory `.tmp` + rename — atomic on one filesystem, so
@@ -144,6 +161,11 @@ struct Shared {
     col_mod: Option<i64>,
     model_id: Option<String>,
     schema: i64,
+    /// The owning collection's identity (#67), written into the meta so a
+    /// moved/mismatched cache is detected. `None` only on the injection seam
+    /// (a `compose`d kernel has no collection path) — then nothing is stamped
+    /// and ownership is unenforced, exactly as before #67.
+    owner: Option<String>,
     activation: Option<BTreeMap<String, BTreeMap<String, f64>>>,
     /// note_id → embedding-text fingerprint; `None` = no per-note state (an
     /// old or never-built index) → the next reconcile full-rebuilds.
@@ -172,12 +194,28 @@ impl IndexOrchestrator {
     /// hashes → `None` (rebuild-on-reconcile); engine restore failure clears
     /// both so drift forces a full rebuild).
     pub fn open(dir: impl Into<PathBuf>, engine: Arc<dyn VectorIndex>) -> Self {
+        Self::open_owned(dir, engine, None)
+    }
+
+    /// [`Self::open`] recording the owning collection's identity (#67). On load
+    /// a meta whose recorded owner differs from `owner` is a foreign/moved
+    /// cache: the index is left unloaded (stamps cleared) so the next drift
+    /// check rebuilds it for this collection, never silently serving another
+    /// collection's vectors. A meta with no owner (a pre-#67 index) loads as-is
+    /// and the next save stamps `owner` in. `owner = None` (the injection seam)
+    /// disables the check entirely.
+    pub fn open_owned(
+        dir: impl Into<PathBuf>,
+        engine: Arc<dyn VectorIndex>,
+        owner: Option<String>,
+    ) -> Self {
         let dir = dir.into();
         let mut shared = Shared {
             state: OrchestratorState::Unavailable,
             col_mod: None,
             model_id: None,
             schema: INDEX_SCHEMA_VERSION,
+            owner: owner.clone(),
             activation: None,
             note_hashes: None,
             build_progress: (0, 0),
@@ -191,6 +229,17 @@ impl IndexOrchestrator {
                 .map_err(|e| e.to_string())
                 .and_then(|s| serde_json::from_str::<IndexMeta>(&s).map_err(|e| e.to_string()))
             {
+                Ok(meta) if owner_mismatch(owner.as_deref(), meta.collection.as_deref()) => {
+                    // A different collection owns this index dir — refuse it.
+                    // Leaving `shared` at its unloaded defaults means the next
+                    // drift check sees "no index" and rebuilds for us.
+                    tracing::warn!(
+                        path = %meta_path.display(),
+                        recorded = ?meta.collection,
+                        expected = ?owner,
+                        "index belongs to a different collection; ignoring (will rebuild)"
+                    );
+                }
                 Ok(meta) => {
                     shared.col_mod = meta.col_mod;
                     shared.model_id = meta.model_id;
@@ -395,6 +444,7 @@ impl IndexOrchestrator {
                 col_mod: shared.col_mod,
                 model_id: shared.model_id.clone(),
                 schema: shared.schema,
+                collection: shared.owner.clone(),
                 activation: shared.activation.clone(),
             };
             (hashes_json, meta)
@@ -442,6 +492,7 @@ impl IndexOrchestrator {
                 col_mod: shared.col_mod,
                 model_id: shared.model_id.clone(),
                 schema: shared.schema,
+                collection: shared.owner.clone(),
                 activation: shared.activation.clone(),
             }
         };
@@ -1357,5 +1408,115 @@ mod op_tests {
         // Later notes index incrementally (the #148 behaviour).
         block_on(orch.add(&[input(1, "late")], &StubEmbedder, None)).unwrap();
         assert_eq!(orch.engine().size(), 1);
+    }
+
+    fn temp_dir_unique() -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "shrike-orch-owner-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+
+    fn engine() -> Arc<MultiModalIndex> {
+        Arc::new(MultiModalIndex::new(vec![TEXT.to_owned(), "image".to_owned()]).unwrap())
+    }
+
+    #[test]
+    fn owner_is_recorded_in_meta_and_reloads_under_the_same_owner() {
+        // #67: a built index stamps its owner; a reopen under the SAME owner
+        // loads it (no drift), so the path-keyed namespacing costs the rightful
+        // collection nothing.
+        let dir = temp_dir_unique();
+        let owner = Some("/coll/a.anki2".to_owned());
+        let orch = IndexOrchestrator::open_owned(&dir, engine(), owner.clone());
+        block_on(orch.rebuild(
+            vec![input(1, "alpha")],
+            7,
+            Some("m".into()),
+            &StubEmbedder,
+            None,
+        ))
+        .unwrap();
+        drop(orch);
+
+        // The owner landed in the meta on disk.
+        let meta: IndexMeta =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("index.meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(meta.collection.as_deref(), Some("/coll/a.anki2"));
+
+        let reopened = IndexOrchestrator::open_owned(&dir, engine(), owner);
+        assert_eq!(reopened.engine().size(), 1);
+        assert!(!reopened.check_drift(7, Some("m"), false)); // current — no rebuild
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mismatched_owner_is_ignored_and_forces_a_rebuild() {
+        // #67: a cache dir written by a DIFFERENT collection (moved/wrong cache)
+        // is not silently served — the orchestrator loads nothing, so the next
+        // drift check reports "no index" and rebuilds for the current owner.
+        let dir = temp_dir_unique();
+        let orch =
+            IndexOrchestrator::open_owned(&dir, engine(), Some("/coll/original.anki2".to_owned()));
+        block_on(orch.rebuild(
+            vec![input(1, "alpha")],
+            7,
+            Some("m".into()),
+            &StubEmbedder,
+            None,
+        ))
+        .unwrap();
+        drop(orch);
+
+        // Reopen claiming a different collection owns this dir.
+        let foreign =
+            IndexOrchestrator::open_owned(&dir, engine(), Some("/coll/other.anki2".to_owned()));
+        assert_eq!(foreign.engine().size(), 0, "a foreign index must not load");
+        assert_eq!(
+            foreign.col_mod(),
+            None,
+            "no stamp adopted from a foreign meta"
+        );
+        assert!(foreign.check_drift(7, Some("m"), false), "drift → rebuild");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pre_67_index_without_owner_loads_then_gets_stamped() {
+        // An index built before #67 records no owner; it must load as-is (the
+        // single-collection user's index survives the upgrade) and the next
+        // save stamps the owner in.
+        let dir = temp_dir_unique();
+        // Build WITHOUT an owner (the pre-#67 shape: meta has no `collection`).
+        let pre = IndexOrchestrator::open_owned(&dir, engine(), None);
+        block_on(pre.rebuild(
+            vec![input(1, "alpha")],
+            7,
+            Some("m".into()),
+            &StubEmbedder,
+            None,
+        ))
+        .unwrap();
+        drop(pre);
+        let meta: IndexMeta =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("index.meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(meta.collection, None, "pre-#67 meta carries no owner");
+
+        // Reopen as a real (#67) collection: the ownerless index is adopted...
+        let adopted =
+            IndexOrchestrator::open_owned(&dir, engine(), Some("/coll/a.anki2".to_owned()));
+        assert_eq!(adopted.engine().size(), 1);
+        assert!(!adopted.check_drift(7, Some("m"), false));
+        // ...and the owner is persisted on the next save.
+        adopted.save().unwrap();
+        let meta2: IndexMeta =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("index.meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(meta2.collection.as_deref(), Some("/coll/a.anki2"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
