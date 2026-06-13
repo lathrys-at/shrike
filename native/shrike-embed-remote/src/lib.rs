@@ -341,6 +341,13 @@ impl EmbedImages for RemoteEmbedder {
         }
         let span = tracing::debug_span!("embed.remote_media_chunk", batch = images.len());
         let _enter = span.enter();
+        // NOTE (#501 slice B): `props()` is an extra round-trip per chunk —
+        // the kernel calls this once per image batch (no per-batch chunking on
+        // the `Blocking` image path), so a full reindex re-probes ⌈images/64⌉
+        // times. The marker + capabilities are per-process invariants of the
+        // endpoint, so this belongs read-once at engine composition (the attach
+        // path that lands with the config/facade wiring) and cached, leaving
+        // only a cheap assertion here. Harmless to re-read meanwhile.
         let props = self.props().ok_or_else(|| {
             NativeError::unavailable(
                 "endpoint does not serve llama.cpp's /props — image embeddings need its \
@@ -375,15 +382,33 @@ impl RemoteEmbedder {
         let mut body: Vec<NativeEmbeddingItem> = resp.into_json().map_err(|e| {
             NativeError::internal(format!("malformed native embeddings response: {e}"))
         })?;
-        let vector = body
+        // One sequence per request → exactly one outer item, exactly one
+        // pooled inner vector. A multi-inner response means the server is
+        // running `--pooling none` (per-token vectors), which would silently
+        // index only the first token — reject it, the symmetry with
+        // `embed_chunk`'s mixed-width guard. An empty inner is a zero-width
+        // vector the index can't hold (the text path's `ndim == 0` guard).
+        let item = body
             .pop()
-            .and_then(|item| item.embedding.into_iter().next())
             .ok_or_else(|| NativeError::internal("native embeddings response carried no vector"))?;
         if !body.is_empty() {
             return Err(NativeError::internal(format!(
                 "native embeddings response carried {} items for one input",
                 body.len() + 1
             )));
+        }
+        if item.embedding.len() != 1 {
+            return Err(NativeError::internal(format!(
+                "native embeddings response carried {} pooled vectors for one image \
+                 (a multi-vector response means the server runs --pooling none)",
+                item.embedding.len()
+            )));
+        }
+        let vector = item.embedding.into_iter().next().unwrap();
+        if vector.is_empty() {
+            return Err(NativeError::internal(
+                "native embeddings response carried a zero-width vector",
+            ));
         }
         Ok(vector)
     }
@@ -728,5 +753,34 @@ mod tests {
                 .contains("does not support multimodal requests"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn multi_pooled_vector_response_is_rejected() {
+        // `--pooling none` yields a per-token [[...],[...]] response; taking
+        // [0] would silently index only the first token, so it's rejected
+        // (symmetry with the text path's mixed-width guard).
+        let native = r#"[{"index":0,"embedding":[[1.0,2.0],[3.0,4.0]]}]"#;
+        let (url, _rx) = canned_server(vec![
+            ("HTTP/1.1 200 OK", PROPS_MM.to_string()),
+            ("HTTP/1.1 200 OK", native.to_string()),
+        ]);
+        let err = engine(url, None, None)
+            .embed_image_chunk(&[MediaItem::untyped(vec![1])])
+            .unwrap_err();
+        assert!(err.to_string().contains("--pooling none"), "{err}");
+    }
+
+    #[test]
+    fn zero_width_vector_response_is_rejected() {
+        let native = r#"[{"index":0,"embedding":[[]]}]"#;
+        let (url, _rx) = canned_server(vec![
+            ("HTTP/1.1 200 OK", PROPS_MM.to_string()),
+            ("HTTP/1.1 200 OK", native.to_string()),
+        ]);
+        let err = engine(url, None, None)
+            .embed_image_chunk(&[MediaItem::untyped(vec![1])])
+            .unwrap_err();
+        assert!(err.to_string().contains("zero-width"), "{err}");
     }
 }
