@@ -208,9 +208,14 @@ class TestAttachMode:
         # pid (there is no child process to manage).
         assert emb["url"] == f"http://127.0.0.1:{collection_server.embedding_port}"
         assert emb.get("pid") is None
-        # The coverage matrix golden for the attach shape (#498/#235).
+        # The cross-modal coverage matrix golden for the attach shape (#498/#235):
+        # text-only space → text→text native, every other pair unavailable.
         assert emb["modalities"] == ["text"]
-        assert status["coverage"] == {"text": True, "image": False, "audio": False}
+        assert status["coverage"] == {
+            "text": {"text": "native", "image": "unavailable", "audio": "unavailable"},
+            "image": {"text": "unavailable", "image": "unavailable", "audio": "unavailable"},
+            "audio": {"text": "unavailable", "image": "unavailable", "audio": "unavailable"},
+        }
 
         # And the upstream is untouched — still serving its own daemon.
         upstream = httpx.get(

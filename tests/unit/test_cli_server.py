@@ -17,6 +17,9 @@ from click.testing import CliRunner
 from shrike.cli import cli
 from shrike.cli.server_cmd import _wait_for_server
 from shrike.schemas import (
+    CoverageCell,
+    CoverageMatrix,
+    CoverageRow,
     EmbeddingDown,
     EmbeddingRunning,
     IndexBuilding,
@@ -41,7 +44,7 @@ def run(tmp_path):
     return _run
 
 
-def _server(index=None, embedding=None, *, log_dir="/logs"):
+def _server(index=None, embedding=None, *, log_dir="/logs", coverage=None):
     return ServerStatus(
         wire_protocol_version=1,
         pid=4242,
@@ -52,6 +55,7 @@ def _server(index=None, embedding=None, *, log_dir="/logs"):
         uptime="0:01:00",
         embedding=embedding or EmbeddingRunning(available=True, url="http://e", pid=99, model="/m"),
         index=index or IndexReady(state="ready", size=5, ndim=384, col_mod=7, path="/i"),
+        coverage=coverage,
     )
 
 
@@ -95,6 +99,25 @@ class TestServerStatus:
         with patch(f"{SC}.ShrikeClient", return_value=fake):
             result = run("server", "status")
         assert "boom" in result.output
+
+    def test_coverage_matrix_rendered(self, run):
+        # text-only space + OCR: text→text native, text→image via derived text,
+        # the rest unavailable. The renderer shows the matrix legibly.
+        coverage = CoverageMatrix(
+            text=CoverageRow(
+                text=CoverageCell.NATIVE,
+                image=CoverageCell.VIA_DERIVED_TEXT,
+                audio=CoverageCell.UNAVAILABLE,
+            ),
+        )
+        fake = MagicMock()
+        fake.server_status.return_value = _server(coverage=coverage)
+        with patch(f"{SC}.ShrikeClient", return_value=fake):
+            result = run("server", "status")
+        assert result.exit_code == 0
+        assert "Coverage" in result.output
+        assert "native" in result.output
+        assert "via text" in result.output
 
     def test_running_but_unresponsive(self, run):
         fake = MagicMock()

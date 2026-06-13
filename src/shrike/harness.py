@@ -48,6 +48,69 @@ class KernelConfigError(Exception):
 # map key. OCR's is unchanged (`"ocr"`).
 RECOGNITION_OCR = "ocr"
 RECOGNITION_DESCRIBE = "vlm"
+# ASR isn't wired into the kernel yet (#485 gates it), but the coverage matrix
+# names the source it WILL land under so an attached ASR engine lights up
+# text→audio honestly once it's integrated. (Today nothing populates this key,
+# so audio stays `unavailable` — the honest state.)
+RECOGNITION_ASR = "asr"
+
+# Which recognition source derives TEXT from which TARGET modality into the text
+# vector space (#235). An attached, ready engine on one of these sources is what
+# makes its target reachable `via_derived_text` from a text query: OCR text and
+# VLM prose both land in the text space for images; an ASR transcript for audio.
+_DERIVED_TEXT_SOURCES: dict[str, frozenset[str]] = {
+    "image": frozenset({RECOGNITION_OCR, RECOGNITION_DESCRIBE}),
+    "audio": frozenset({RECOGNITION_ASR}),
+}
+
+
+def _coverage_matrix(
+    served: frozenset[str], ready_recognizers: frozenset[str]
+) -> dict[str, dict[str, str]]:
+    """Build the cross-modal coverage matrix (#235): query-modality →
+    target-modality → ``native`` | ``via_derived_text`` | ``unavailable``.
+
+    ``served`` is the union of modalities the live embedding spaces embed (one
+    space today; the union is forward-compatible with #229's multi-space).
+    ``ready_recognizers`` is the set of recognition sources currently attached
+    AND ready (``ocr``/``vlm``/``asr`` — an errored or unattached engine doesn't
+    derive anything, so it doesn't light a cell).
+
+    Per pair (query ``q``, target ``t``):
+
+    - ``native`` when a single live space embeds BOTH ``q`` and ``t`` — today
+      that's ``q in served and t in served`` (≤1 space, so any two modalities it
+      serves share that space). A text query reaches text natively whenever a
+      text space is up; a CLIP/omni space additionally makes text↔image native.
+    - ``via_derived_text`` when ``q`` can reach the TEXT space (``q`` is
+      embeddable — ``q in served`` — and a text space exists, ``"text" in
+      served``) and a ready recognizer derives text from ``t`` into that space.
+      The derived text is what's searched, so it's strictly weaker than native;
+      native therefore wins when both hold.
+    - ``unavailable`` otherwise.
+
+    Degrades sanely: embedding down → ``served`` empty → every cell
+    ``unavailable``; a text-only space with no recognizers → only text→text is
+    ``native``, every media target ``unavailable``.
+    """
+    text_space_up = "text" in served
+    matrix: dict[str, dict[str, str]] = {}
+    for q in MODALITIES:
+        row: dict[str, str] = {}
+        for t in MODALITIES:
+            if q in served and t in served:
+                row[t] = "native"
+            elif (
+                q in served
+                and text_space_up
+                and ready_recognizers & _DERIVED_TEXT_SOURCES.get(t, frozenset())
+            ):
+                # q reaches the text space and t derives text into it.
+                row[t] = "via_derived_text"
+            else:
+                row[t] = "unavailable"
+        matrix[q] = row
+    return matrix
 
 
 @dataclass
@@ -417,17 +480,25 @@ class Harness:
             }
             for source, eng in self._recognition_engines.items()
         }
-        # The modality coverage matrix (#498/#235): which modalities a live
-        # space serves. One space today (#229 adds more — this stays the
-        # union across them); all-False when embedding is down, so the shape
-        # is stable for clients.
+        # The cross-modal coverage matrix (#498/#235): for each (query, target)
+        # modality pair, how the target is reachable — `native` (one live space
+        # embeds both), `via_derived_text` (a ready recognizer derives text from
+        # the target into the text space), or `unavailable`. Derived from the
+        # live embedding spaces (one today; the union is forward-compatible) and
+        # the attached, ready recognizers. All-`unavailable` when embedding is
+        # down, so the shape is stable for clients.
         backend = self.runtime.backend
         served = (
             frozenset(backend.modalities)
             if backend is not None and backend.running
             else frozenset()
         )
-        status["coverage"] = {m: m in served for m in MODALITIES}
+        ready_recognizers = frozenset(
+            source
+            for source, eng in self._recognition_engines.items()
+            if eng.state == "ready"
+        )
+        status["coverage"] = _coverage_matrix(served, ready_recognizers)
         return status
 
     def _index_status(self) -> dict[str, Any]:

@@ -90,9 +90,14 @@ class TestIndexBuild:
         assert idx["ndim"] is not None
         assert idx["ndim"] > 0
         assert body["embedding"]["available"] is True
-        # The coverage matrix golden (#498/#235): a live text backend serves
-        # exactly the text modality, and the per-space report names it.
-        assert body["coverage"] == {"text": True, "image": False, "audio": False}
+        # The cross-modal coverage matrix golden (#498/#235): a live text-only
+        # backend makes text→text native; with no recognizers attached, every
+        # media target is unavailable (no native space, no derived-text path).
+        assert body["coverage"] == {
+            "text": {"text": "native", "image": "unavailable", "audio": "unavailable"},
+            "image": {"text": "unavailable", "image": "unavailable", "audio": "unavailable"},
+            "audio": {"text": "unavailable", "image": "unavailable", "audio": "unavailable"},
+        }
         assert body["embedding"]["modalities"] == ["text"]
 
     def test_save_endpoint(self, collection_server):
