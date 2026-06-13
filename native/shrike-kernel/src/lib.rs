@@ -347,8 +347,26 @@ impl Kernel {
                 .chain(std::iter::once(TAG_TEXT_SPACE.to_string()))
                 .collect(),
         )?);
+        // The derived store is namespaced per collection (#547), mirroring the
+        // index (#67): `<cache_dir>/derived/<namespace>/shrike.db`, so a daemon
+        // serving several collections never shares one `shrike.db` (which would
+        // cross-contaminate substring/fuzzy/OCR search). Migrate an existing
+        // flat `<cache_dir>/shrike.db` into this collection's namespace first,
+        // so the single-collection user keeps their built derived data.
+        cache_layout::migrate_flat_derived(cache_dir, collection_path);
+        let derived_path = cache_layout::derived_db_path(cache_dir, collection_path);
+        if let Some(parent) = derived_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| NativeError::internal(format!("derived dir: {e}")))?;
+        }
+        let derived_path = derived_path.to_str().ok_or_else(|| {
+            NativeError::internal(format!(
+                "non-UTF-8 derived path: {}",
+                derived_path.display()
+            ))
+        })?;
         let derived: Arc<dyn DerivedStore> = Arc::new(DerivedEngine::open(
-            &format!("{}/shrike.db", cache_dir.trim_end_matches('/')),
+            derived_path,
             DerivedEngine::SCHEMA_VERSION,
         )?);
         tracing::debug!(collection = collection_path, "kernel opened");

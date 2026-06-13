@@ -59,10 +59,11 @@ class TestRebuildDerived:
     cross the FFI; the op returns (row_count, the build's col_mod snapshot)."""
 
     def test_rebuild_derived_builds_and_returns_snapshot(self, tmp_path) -> None:
+        from shrike import cache_layout
+
         async def flow():
-            kernel = await shrike_native.async_kernel_open(
-                str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
-            )
+            collection_path = str(tmp_path / "collection.anki2")
+            kernel = await shrike_native.async_kernel_open(collection_path, str(tmp_path / "cache"))
             core = kernel.core_handle()
             basic = core.notetype_id("Basic")
             await kernel.upsert_notes(
@@ -77,8 +78,11 @@ class TestRebuildDerived:
             assert dmod == core.col_mod()
             await kernel.close()
             # The build landed in the sidecar: a fresh engine on the same
-            # shrike.db sees the rows (and the stamped watermark).
-            engine = shrike_native.DerivedTextEngine(str(tmp_path / "cache" / "shrike.db"), 2)
+            # shrike.db sees the rows (and the stamped watermark). The store is
+            # namespaced per collection (#547), so resolve the path the kernel
+            # wrote, not the flat cache root.
+            db_path = cache_layout.derived_db_path(str(tmp_path / "cache"), collection_path)
+            engine = shrike_native.DerivedTextEngine(db_path, 2)
             try:
                 assert engine.get_col_mod() == dmod
                 hits = engine.search_substring("krebs", 10)

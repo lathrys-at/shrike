@@ -1,21 +1,24 @@
-"""Per-collection cache layout (#67): where a collection's vector index lives.
+"""Per-collection cache layout (#67/#547): where a collection's derived caches live.
 
-The vector index (``index.usearch`` + ``index.meta.json``) is namespaced per
-collection under the shared cache dir, so one daemon serving several collections
-never collides their indexes. The load-bearing boundary (#69): **index identity
-keys on a stable function of the collection FILE PATH, never the profile name**
-— every collection has a path; not every collection is registered. The path is
-the only identity always available, which is what lets #67 land independently of
-the registry (#66) and how the routing capstone (#68) wires them (a selector
+The vector index (``index.usearch`` + ``index.meta.json``, #67) and the
+derived-text store (``shrike.db``, #547) are each namespaced per collection
+under the shared cache dir, so one daemon serving several collections never
+collides them. The load-bearing boundary (#69): **index identity keys on a
+stable function of the collection FILE PATH, never the profile name** — every
+collection has a path; not every collection is registered. The path is the only
+identity always available, which is what lets #67 land independently of the
+registry (#66) and how the routing capstone (#68) wires them (a selector
 resolves name → path via the registry, and the path determines the namespace).
 
 The kernel owns the identity derivation and writes the files; this module is the
 host-side mirror so the harness/CLI can resolve the same
-``<cache_dir>/index/<namespace>/`` the kernel writes (status reporting, the #68
-routing, tests). The namespace itself comes from the kernel
-(``shrike_native.index_namespace``) — one implementation, no parity drift — with
-a pure-Python fallback used only when the native extension isn't importable (a
-plain client environment), pinned byte-for-byte against the kernel by a test.
+``<cache_dir>/index/<namespace>/`` (index) and
+``<cache_dir>/derived/<namespace>/shrike.db`` (derived) the kernel writes
+(status reporting, the #68 routing, tests). The namespace itself comes from the
+kernel (``shrike_native.index_namespace``) — one implementation, no parity drift
+— with a pure-Python fallback used only when the native extension isn't
+importable (a plain client environment), pinned byte-for-byte against the kernel
+by a test.
 """
 
 from __future__ import annotations
@@ -26,6 +29,12 @@ import os
 # The subdirectory under the cache dir that holds the per-collection index
 # namespaces — kept in sync with ``shrike_kernel::cache_layout::INDEX_SUBDIR``.
 INDEX_SUBDIR = "index"
+
+# The subdirectory holding the per-collection derived stores (#547), a parallel
+# subtree to ``INDEX_SUBDIR`` — kept in sync with
+# ``shrike_kernel::cache_layout::DERIVED_SUBDIR`` / ``DERIVED_DB_NAME``.
+DERIVED_SUBDIR = "derived"
+DERIVED_DB_NAME = "shrike.db"
 
 
 def _canonicalize_for_identity(collection_path: str) -> str:
@@ -79,3 +88,20 @@ def collection_index_dir(cache_dir: str, collection_path: str) -> str:
     ``config.resolve_cache_dir`` cascade yields.
     """
     return os.path.join(cache_dir, INDEX_SUBDIR, index_namespace(collection_path))
+
+
+def derived_db_path(cache_dir: str, collection_path: str) -> str:
+    """The per-collection derived-store path: ``<cache_dir>/derived/<namespace>/shrike.db`` (#547).
+
+    The same path-derived ``<namespace>`` as :func:`collection_index_dir`, under
+    a parallel ``derived/`` subtree — so a daemon serving several collections
+    gives each its own ``shrike.db`` and substring/fuzzy/OCR search never bleeds
+    across collections. Bit-identical to the kernel's
+    ``shrike_kernel::cache_layout::derived_db_path`` (pinned by the parity test):
+    the kernel's ``DerivedEngine`` opens at the Rust path, the host
+    ``DerivedTextStore`` opens at this one, and the two MUST be the same file
+    (they share one ``shrike.db`` — the kernel ingests, the host reads).
+    """
+    return os.path.join(
+        cache_dir, DERIVED_SUBDIR, index_namespace(collection_path), DERIVED_DB_NAME
+    )

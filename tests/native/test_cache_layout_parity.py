@@ -1,10 +1,12 @@
-"""Kernel↔host parity for the per-collection index namespace (#67).
+"""Kernel↔host parity for the per-collection cache layout (#67/#547).
 
-The namespace has one implementation (the kernel, ``shrike_kernel::cache_layout``)
-bound as ``shrike_native.index_namespace``; the host's pure-Python fallback
-(``shrike.cache_layout``) must match it byte-for-byte, since either may compute
-the on-disk path depending on whether the native extension is importable. This
-pins the two together so they can never drift.
+The namespace + derived-store path each have one implementation (the kernel,
+``shrike_kernel::cache_layout``) bound as ``shrike_native.index_namespace`` /
+``shrike_native.derived_db_path``; the host (``shrike.cache_layout``) must match
+them byte-for-byte, since either side may compute the on-disk path depending on
+whether the native extension is importable, and the kernel's ``DerivedEngine``
+and host's ``DerivedTextStore`` open the SAME ``shrike.db``. This pins them so
+they can never drift.
 """
 
 from __future__ import annotations
@@ -63,3 +65,38 @@ def test_host_helper_defers_to_the_kernel() -> None:
     # (not just a matching fallback) — proving the single-implementation wiring.
     path = os.path.abspath("some/collection.anki2")
     assert cache_layout.index_namespace(path) == shrike_native.index_namespace(path)
+
+
+# -- derived-store path parity (#547) ----------------------------------------
+
+_CACHE = "/var/cache/shrike"
+
+
+@pytest.mark.parametrize("path", _CASES)
+def test_derived_db_path_native_matches_host(path: str) -> None:
+    # The kernel's DerivedEngine and the host's DerivedTextStore must open the
+    # exact same shrike.db, so the two derived_db_path implementations must
+    # agree byte-for-byte across every path shape (incl. `~`, symlinks, absent).
+    native = shrike_native.derived_db_path(_CACHE, path)
+    host = cache_layout.derived_db_path(_CACHE, path)
+    assert native == host, f"derived path drift for {path!r}: {native} != {host}"
+
+
+def test_derived_db_path_existing_file_agrees(tmp_path) -> None:
+    f = tmp_path / "c.anki2"
+    f.write_text("x")
+    assert shrike_native.derived_db_path(_CACHE, str(f)) == cache_layout.derived_db_path(
+        _CACHE, str(f)
+    )
+
+
+def test_derived_db_path_shares_index_namespace_distinct_subtree() -> None:
+    # The derived path uses the SAME namespace as the index but a parallel
+    # `derived/` subtree (the deliberate index-vs-derived separation, #547).
+    path = "/coll/sep.anki2"
+    ns = cache_layout.index_namespace(path)
+    derived = cache_layout.derived_db_path(_CACHE, path)
+    index_dir = cache_layout.collection_index_dir(_CACHE, path)
+    assert derived == os.path.join(_CACHE, "derived", ns, "shrike.db")
+    assert os.path.dirname(derived) != index_dir
+    assert ns in derived and ns in index_dir

@@ -24,9 +24,20 @@ use blake2::{Blake2b, Digest};
 
 /// The subdirectory under the cache dir that holds the per-collection index
 /// namespaces (`<cache_dir>/index/<namespace>/`). Kept distinct from the
-/// derived store's `shrike.db` (which stays at the cache-dir root) so the two
-/// derived caches never tangle.
+/// derived store's `<cache_dir>/derived/<namespace>/` subtree (below) so the
+/// two derived caches never tangle.
 pub const INDEX_SUBDIR: &str = "index";
+
+/// The subdirectory under the cache dir that holds the per-collection derived
+/// stores (`<cache_dir>/derived/<namespace>/shrike.db`, #547). A parallel
+/// subtree to [`INDEX_SUBDIR`] — same path-derived namespacing as the index,
+/// preserving the deliberate index-vs-derived separation, so two collections
+/// sharing one daemon's cache dir never share one `shrike.db` (which would
+/// cross-contaminate substring/fuzzy/OCR search).
+pub const DERIVED_SUBDIR: &str = "derived";
+
+/// The derived store's filename within its per-collection namespace dir.
+pub const DERIVED_DB_NAME: &str = "shrike.db";
 
 /// A stable, path-derived identity for a collection's vector index. The same
 /// collection file always yields the same key; two different files (even with
@@ -49,6 +60,23 @@ pub fn index_dir(cache_dir: &str, collection_path: &str) -> PathBuf {
     Path::new(cache_dir)
         .join(INDEX_SUBDIR)
         .join(index_namespace(collection_path))
+}
+
+/// The per-collection derived-store path:
+/// `<cache_dir>/derived/<namespace>/shrike.db` (#547). The same path-derived
+/// `<namespace>` as [`index_dir`], under a parallel `derived/` subtree — so a
+/// daemon serving several collections gives each its own `shrike.db`.
+///
+/// Bit-identical to the Python mirror (`shrike.cache_layout.derived_db_path`),
+/// pinned by the parity test — `registrar`'s host `DerivedTextStore` calls the
+/// Python one, the kernel's `DerivedEngine` opens at the Rust one, and the two
+/// MUST resolve to the same file.
+#[must_use]
+pub fn derived_db_path(cache_dir: &str, collection_path: &str) -> PathBuf {
+    Path::new(cache_dir)
+        .join(DERIVED_SUBDIR)
+        .join(index_namespace(collection_path))
+        .join(DERIVED_DB_NAME)
 }
 
 /// The owner identity recorded in `index.meta.json` and checked on load: the
@@ -165,6 +193,72 @@ pub fn migrate_flat_layout(cache_dir: &str, index_dir: &Path, collection_path: &
         }
     }
     tracing::info!(path = %index_dir.display(), "migrated flat index layout to per-collection namespace");
+}
+
+/// Migrate an existing single-collection FLAT derived store
+/// (`<cache_dir>/shrike.db`) into this collection's namespace
+/// (`<cache_dir>/derived/<namespace>/shrike.db`, #547), so the long-standing
+/// single-collection user keeps their built FTS5/OCR derived data across the
+/// upgrade without even the (cheap, model-free) rebuild a relocation would
+/// otherwise force.
+///
+/// Guarded conservatively, mirroring [`migrate_flat_layout`]:
+/// - the namespaced db must not exist yet (never clobber a namespaced store);
+/// - the flat `<cache_dir>/shrike.db` must exist.
+///
+/// Unlike the index there is **no owner check**: the derived store is a SQLite
+/// file that records no owning collection (only a `col_mod` watermark inside).
+/// Two facts make adopting it safe anyway. (1) A flat `shrike.db` can only be
+/// the *pre-#547 single-collection* user's — multi-collection mode never wrote
+/// one (it post-dates this change), so on the upgrade open there is exactly one
+/// collection and no ambiguity about whose db it is. (2) Even an unlucky
+/// adoption self-heals: the derived store rebuilds on a `col_mod` mismatch, so
+/// a db whose watermark doesn't match this collection reads as drift and is
+/// rebuilt field-source-scoped on first boot — the cache is rebuildable by
+/// construction.
+///
+/// Best-effort: an IO error logs a warning and leaves the flat db in place; the
+/// kernel then sees no namespaced db and builds a fresh one (correct — the
+/// store is a rebuildable cache). The move is a SQLite-file rename (plus its
+/// `-wal`/`-shm` sidecars if present) within one cache dir → same filesystem,
+/// atomic per file.
+pub fn migrate_flat_derived(cache_dir: &str, collection_path: &str) {
+    let cache = Path::new(cache_dir);
+    let flat_db = cache.join(DERIVED_DB_NAME);
+    let dst_db = derived_db_path(cache_dir, collection_path);
+
+    // Never clobber an already-namespaced store; nothing to migrate without
+    // the flat one.
+    if dst_db.exists() || !flat_db.exists() {
+        return;
+    }
+
+    let Some(dst_dir) = dst_db.parent() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(dst_dir) {
+        tracing::warn!(path = %dst_dir.display(), error = %e, "flat derived migration: mkdir failed");
+        return;
+    }
+
+    // The main db first — it's the load gate (DerivedEngine::open keys on it).
+    // The WAL/SHM sidecars are moved alongside when present; a missing one is
+    // harmless (SQLite recreates them on open), so a sidecar rename failure is
+    // logged but does not abort — the db itself is what matters.
+    if let Err(e) = std::fs::rename(&flat_db, &dst_db) {
+        tracing::warn!(error = %e, "flat derived migration: rename failed");
+        return;
+    }
+    for suffix in ["-wal", "-shm"] {
+        let from = cache.join(format!("{DERIVED_DB_NAME}{suffix}"));
+        if from.exists() {
+            let to = dst_dir.join(format!("{DERIVED_DB_NAME}{suffix}"));
+            if let Err(e) = std::fs::rename(&from, &to) {
+                tracing::warn!(suffix, error = %e, "flat derived migration: sidecar rename failed");
+            }
+        }
+    }
+    tracing::info!(path = %dst_db.display(), "migrated flat derived store to per-collection namespace");
 }
 
 /// Read the flat meta's `collection` owner field and compare to this
@@ -415,6 +509,98 @@ mod tests {
         let layout = IndexLayout::for_collection(cache.to_str().unwrap(), coll);
         assert!(layout.dir.join("index.usearch").exists());
         assert!(!cache.join("index.usearch").exists());
+        std::fs::remove_dir_all(&cache).ok();
+    }
+
+    // -- derived store namespacing (#547) ------------------------------------
+
+    #[test]
+    fn derived_db_path_nests_under_the_derived_subdir() {
+        let coll = "/coll/derived-a.anki2";
+        let p = derived_db_path("/cache", coll);
+        let ns = index_namespace(coll);
+        assert_eq!(
+            p,
+            Path::new("/cache")
+                .join(DERIVED_SUBDIR)
+                .join(&ns)
+                .join(DERIVED_DB_NAME)
+        );
+        // It shares the index's namespace but a parallel (distinct) subtree.
+        assert_ne!(p.parent().unwrap(), index_dir("/cache", coll));
+        assert_eq!(
+            p.parent().unwrap().file_name().unwrap().to_str().unwrap(),
+            ns
+        );
+    }
+
+    #[test]
+    fn two_collections_derive_to_distinct_db_files() {
+        // The isolation property #547 buys: two collections sharing one cache
+        // dir get distinct shrike.db files (no substring/fuzzy/OCR bleed).
+        let a = derived_db_path("/cache", "/coll/a.anki2");
+        let b = derived_db_path("/cache", "/coll/b.anki2");
+        assert_ne!(a, b);
+        assert!(a.starts_with(Path::new("/cache").join(DERIVED_SUBDIR)));
+        assert!(b.starts_with(Path::new("/cache").join(DERIVED_SUBDIR)));
+    }
+
+    /// Lay down a fake flat derived store in `cache` (the pre-#547 layout),
+    /// with optional WAL/SHM sidecars.
+    fn write_flat_derived(cache: &Path, with_sidecars: bool) {
+        std::fs::write(cache.join(DERIVED_DB_NAME), b"sqlite-bytes").unwrap();
+        if with_sidecars {
+            std::fs::write(cache.join("shrike.db-wal"), b"wal").unwrap();
+            std::fs::write(cache.join("shrike.db-shm"), b"shm").unwrap();
+        }
+    }
+
+    #[test]
+    fn migrates_a_flat_derived_store_into_the_namespace() {
+        let cache = temp_cache();
+        let coll = "/coll/derived-migrate.anki2";
+        write_flat_derived(&cache, true);
+
+        migrate_flat_derived(cache.to_str().unwrap(), coll);
+
+        let dst = derived_db_path(cache.to_str().unwrap(), coll);
+        // The db moved, byte-for-byte, with its sidecars...
+        assert_eq!(std::fs::read(&dst).unwrap(), b"sqlite-bytes");
+        assert_eq!(
+            std::fs::read(dst.parent().unwrap().join("shrike.db-wal")).unwrap(),
+            b"wal"
+        );
+        assert!(dst.parent().unwrap().join("shrike.db-shm").exists());
+        // ...and the flat originals are gone (a move, not a copy).
+        assert!(!cache.join(DERIVED_DB_NAME).exists());
+        assert!(!cache.join("shrike.db-wal").exists());
+        std::fs::remove_dir_all(&cache).ok();
+    }
+
+    #[test]
+    fn derived_migration_is_a_noop_when_a_namespaced_db_exists() {
+        let cache = temp_cache();
+        let coll = "/coll/derived-already.anki2";
+        write_flat_derived(&cache, false);
+        let dst = derived_db_path(cache.to_str().unwrap(), coll);
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::write(&dst, b"namespaced-bytes").unwrap();
+
+        migrate_flat_derived(cache.to_str().unwrap(), coll);
+
+        // The namespaced db is untouched; the flat one is left in place.
+        assert_eq!(std::fs::read(&dst).unwrap(), b"namespaced-bytes");
+        assert!(cache.join(DERIVED_DB_NAME).exists());
+        std::fs::remove_dir_all(&cache).ok();
+    }
+
+    #[test]
+    fn derived_migration_is_a_noop_without_a_flat_db() {
+        let cache = temp_cache();
+        let coll = "/coll/derived-none.anki2";
+        // No flat shrike.db → nothing migrated, no namespaced db created.
+        migrate_flat_derived(cache.to_str().unwrap(), coll);
+        assert!(!derived_db_path(cache.to_str().unwrap(), coll).exists());
         std::fs::remove_dir_all(&cache).ok();
     }
 }
