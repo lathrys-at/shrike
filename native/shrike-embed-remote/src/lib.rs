@@ -342,12 +342,13 @@ impl EmbedImages for RemoteEmbedder {
         let span = tracing::debug_span!("embed.remote_media_chunk", batch = images.len());
         let _enter = span.enter();
         // NOTE (#501 slice B): `props()` is an extra round-trip per chunk —
-        // the kernel calls this once per image batch (no per-batch chunking on
-        // the `Blocking` image path), so a full reindex re-probes ⌈images/64⌉
-        // times. The marker + capabilities are per-process invariants of the
-        // endpoint, so this belongs read-once at engine composition (the attach
-        // path that lands with the config/facade wiring) and cached, leaving
-        // only a cheap assertion here. Harmless to re-read meanwhile.
+        // the `Blocking` image path now chunks by the host's image `safe_batch`
+        // (#211), so a full reindex re-probes ⌈images/safe_batch⌉ times (one
+        // chunk per kernel image batch when safe_batch ≥ the batch size, the
+        // normal case). The marker + capabilities are per-process invariants of
+        // the endpoint, so this belongs read-once at engine composition (the
+        // attach path that lands with the config/facade wiring) and cached,
+        // leaving only a cheap assertion here. Harmless to re-read meanwhile.
         let props = self.props().ok_or_else(|| {
             NativeError::unavailable(
                 "endpoint does not serve llama.cpp's /props — image embeddings need its \

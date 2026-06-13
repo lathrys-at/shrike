@@ -283,11 +283,24 @@ impl<T: EmbedText + ?Sized> EmbedText for Arc<T> {
 /// Chunk-level image embedding, pure compute (the CLIP image half).
 pub trait EmbedImages: Send + Sync + 'static {
     fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>>;
+
+    /// The largest image batch this engine is proven safe to embed in one
+    /// call — the vision analogue of [`EmbedText::safe_batch`] (#211). An int8
+    /// vision graph that batches non-deterministically must be capped here so
+    /// a note's image vector stays a pure function of its own image (the
+    /// `reconcile`==rebuild invariant for image vectors). 1 = serial.
+    fn safe_batch(&self) -> usize {
+        1
+    }
 }
 
 impl<T: EmbedImages + ?Sized> EmbedImages for Arc<T> {
     fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>> {
         (**self).embed_image_chunk(images)
+    }
+
+    fn safe_batch(&self) -> usize {
+        (**self).safe_batch()
     }
 }
 
@@ -362,6 +375,10 @@ impl<E: EmbedImages> EmbedImages for WithPolicy<E> {
     fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>> {
         self.engine.embed_image_chunk(images)
     }
+
+    fn safe_batch(&self) -> usize {
+        self.safe_batch
+    }
 }
 
 impl<E: RecognizeMedia> RecognizeMedia for WithPolicy<E> {
@@ -429,7 +446,17 @@ impl<E: EmbedText + 'static> Embedder for Blocking<E> {
 impl<E: EmbedImages + 'static> ImageEmbedder for Blocking<E> {
     fn embed_images(&self, images: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
         let engine = Arc::clone(&self.0);
-        run_blocking(move || engine.embed_image_chunk(&images))
+        run_blocking(move || {
+            // Chunk by the probed vision safe_batch (#211), exactly like the
+            // text path — a batch-variant int8 vision graph embeds serially so
+            // an image vector never depends on its batch-mates.
+            let chunk = engine.safe_batch().max(1);
+            let mut out = Vec::with_capacity(images.len());
+            for piece in images.chunks(chunk) {
+                out.extend(engine.embed_image_chunk(piece)?);
+            }
+            Ok(out)
+        })
     }
 }
 
@@ -468,6 +495,26 @@ mod tests {
         }
     }
 
+    /// The image analogue of `Toy`, for the vision-batching pin (#211).
+    struct ImageToy {
+        batch_cap: usize,
+        calls: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl EmbedImages for ImageToy {
+        fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>> {
+            self.calls.lock().unwrap().push(images.len());
+            Ok(images
+                .iter()
+                .map(|im| vec![im.bytes.len() as f32])
+                .collect())
+        }
+
+        fn safe_batch(&self) -> usize {
+            self.batch_cap
+        }
+    }
+
     fn test_runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -500,6 +547,62 @@ mod tests {
             "split by safe_batch"
         );
         assert_eq!(adapted.fingerprint().as_deref(), Some("toy:v1"));
+    }
+
+    /// The vision path chunks by the (image) safe_batch too (#211): a
+    /// batch-variant int8 vision graph probed to 1 must embed images serially
+    /// on the kernel path, not all-in-one — else the probe's verdict is inert
+    /// where the reconcile==rebuild invariant for image vectors actually lives.
+    #[test]
+    fn blocking_adapter_chunks_images_by_safe_batch_and_preserves_order() {
+        let toy = Arc::new(ImageToy {
+            batch_cap: 2,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let adapted = Blocking(Arc::clone(&toy));
+        // Distinct byte lengths so the per-image vector is identifiable.
+        let images: Vec<MediaItem> = [1usize, 2, 3, 4, 5]
+            .iter()
+            .map(|&n| MediaItem::untyped(vec![0u8; n]))
+            .collect();
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        let out = rt.block_on(adapted.embed_images(images)).unwrap();
+        assert_eq!(
+            out,
+            vec![vec![1.0], vec![2.0], vec![3.0], vec![4.0], vec![5.0]],
+            "image order mirrors input across chunks"
+        );
+        assert_eq!(
+            *toy.calls.lock().unwrap(),
+            vec![2, 2, 1],
+            "images split by the vision safe_batch"
+        );
+    }
+
+    /// safe_batch=1 (a probed batch-variant vision graph) embeds every image
+    /// alone — the kernel-path enforcement of the mixed-precision guard.
+    #[test]
+    fn variant_vision_safe_batch_embeds_images_serially() {
+        let toy = Arc::new(WithPolicy::new(
+            Arc::new(ImageToy {
+                batch_cap: 64, // the engine's own answer — WithPolicy(1) must win
+                calls: std::sync::Mutex::new(Vec::new()),
+            }),
+            None,
+            None,
+            1, // min(text, vision) collapsed to serial for the variant vision graph
+        ));
+        let adapted = Blocking(toy);
+        let images: Vec<MediaItem> = (0..3).map(|_| MediaItem::untyped(vec![0u8; 4])).collect();
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        let _ = rt.block_on(adapted.embed_images(images)).unwrap();
+        assert_eq!(
+            *adapted.0.engine.calls.lock().unwrap(),
+            vec![1, 1, 1],
+            "each image embedded alone"
+        );
     }
 
     /// The eager-embed pin (#374 C): the blocking task is scheduled inside
