@@ -1,0 +1,74 @@
+{
+  "name": "example-adversarial",
+  "closed_world": true,
+  "cards": [
+    {
+      "id": 1,
+      "kind": "text_only",
+      "deck": "AdversarialEval::Text",
+      "note_type": "Basic",
+      "tags": ["adv-text"],
+      "fields": {
+        "Front": "The mitochondrion generates most of a cell's ATP.",
+        "Back": "oxidative phosphorylation"
+      }
+    },
+    {
+      "id": 2,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Image",
+      "note_type": "Basic",
+      "tags": ["adv-image"],
+      "fields": {
+        "Front": "Review card 2, lecture 4",
+        "Back": "<img src=\"$IMG:heart\">"
+      },
+      "media": [
+        {
+          "handle": "heart",
+          "source": "generated",
+          "spec": {"bytes_b64": "aGVhcnQtaW1hZ2UtYnl0ZXM="}
+        }
+      ]
+    },
+    {
+      "id": 301,
+      "kind": "distractor",
+      "deck": "AdversarialEval::Distractor",
+      "note_type": "Basic",
+      "tags": ["adv-distractor"],
+      "fields": {
+        "Front": "A topically adjacent but wrong card about lungs.",
+        "Back": "respiration"
+      }
+    }
+  ],
+  "queries": [
+    {
+      "q": "which organelle produces most of the cell's energy",
+      "adversarial_class": "semantic_text",
+      "expected_signal": "text",
+      "modality": "text",
+      "gold": [{"id": 1, "grade": 3}],
+      "hard_negatives": [{"id": 301, "grade": 0}],
+      "top_k": 10,
+      "threshold": 0.5
+    },
+    {
+      "q": "a labelled diagram of the heart chambers and valves",
+      "adversarial_class": "modality_gap",
+      "expected_signal": "image",
+      "modality": "image",
+      "gold": [{"id": 2}],
+      "top_k": 10
+    },
+    {
+      "q": "purple elephant umbrella dancing",
+      "adversarial_class": "over_return",
+      "expected_signal": null,
+      "modality": "text",
+      "gold": [],
+      "top_k": 10
+    }
+  ]
+}

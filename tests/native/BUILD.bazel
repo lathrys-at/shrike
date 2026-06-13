@@ -24,7 +24,13 @@ py_library(
 pytest_test(
     name = "native",
     srcs = glob(["test_*.py"]),
-    deps = [":conftest"],
+    deps = [
+        ":conftest",
+        # test_search_quality.py drives the REAL search_notes action in-process
+        # via the StubEmbedder + the shared metric engine (#559).
+        "//tests/search_quality",
+        "//tests/search_quality:inprocess",
+    ],
     size = "medium",
 )
 
