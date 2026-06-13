@@ -26,7 +26,7 @@ mod read;
 mod write;
 
 pub use adapter::{FieldsState, ServiceAdapter};
-pub use embed_text::{extract_image_refs, EMBED_TEXT_VERSION};
+pub use embed_text::{extract_image_refs, extract_sound_refs, EMBED_TEXT_VERSION};
 use shrike_ffi::{NativeError, NativeResult};
 
 // Canonical homes moved to the store contract (#389); re-exported so the
@@ -326,6 +326,9 @@ mod contract {
         }
         fn note_image_refs(&self) -> NativeResult<Vec<(i64, Vec<String>)>> {
             Self::note_image_refs(self)
+        }
+        fn note_sound_refs(&self) -> NativeResult<Vec<(i64, Vec<String>)>> {
+            Self::note_sound_refs(self)
         }
         fn note_tag_rows(&self) -> NativeResult<Vec<(i64, Vec<String>)>> {
             Self::note_tag_rows(self)

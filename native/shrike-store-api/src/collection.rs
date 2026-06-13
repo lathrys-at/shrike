@@ -254,6 +254,10 @@ pub trait Collection: Send + Sync {
     /// `(note_id, image_names)` for notes that reference images at all —
     /// the recognition sweep's scoped read (#445).
     fn note_image_refs(&self) -> NativeResult<Vec<(i64, Vec<String>)>>;
+    /// `(note_id, sound_names)` for notes that reference `[sound:…]` audio at
+    /// all — the ASR recognition sweep's scoped read (#485), the audio twin of
+    /// [`Self::note_image_refs`].
+    fn note_sound_refs(&self) -> NativeResult<Vec<(i64, Vec<String>)>>;
     /// `(note_id, tags)` for every tagged note (the tag-centroid feed).
     fn note_tag_rows(&self) -> NativeResult<Vec<(i64, Vec<String>)>>;
     /// Whether ANY of the ids carries a tag (the cheap membership probe).

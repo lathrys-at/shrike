@@ -181,6 +181,41 @@ pub fn extract_image_refs(value: &str) -> Vec<String> {
     names
 }
 
+/// Audio filenames referenced by a field's `[sound:…]` markers — in order,
+/// de-duplicated; basenames only; remote (`scheme://`) refs skipped. The audio
+/// counterpart of [`extract_image_refs`] (#485): `[sound:foo.mp3]` is Anki's
+/// own audio/video reference syntax (the same marker `normalize_for_embedding`
+/// strips from embedding text), so the inner token IS the media filename. A
+/// cheap ASCII byte probe gates the regex pass, mirroring the `<img` probe.
+pub fn extract_sound_refs(value: &str) -> Vec<String> {
+    // Same ASCII-case-insensitive byte probe the SQL pre-filter uses, so the
+    // filter can never skip a field the extractor would return refs for.
+    let has_sound = value
+        .as_bytes()
+        .windows(7)
+        .any(|w| w.eq_ignore_ascii_case(b"[sound:"));
+    if !has_sound {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for caps in SOUND_RE.find_iter(value) {
+        // `caps` is the whole `[sound:…]`; the inner token is between the
+        // `[sound:` prefix (7 bytes) and the trailing `]`.
+        let marker = caps.as_str();
+        let inner = marker[7..marker.len() - 1].trim();
+        if inner.is_empty() || inner.contains("://") {
+            continue;
+        }
+        let name = inner.rsplit('/').next().unwrap_or(inner);
+        if !name.is_empty() && !seen.contains(name) {
+            seen.insert(name.to_string());
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
 /// Scan for `<img …>` start tags and collect their `src` attribute values
 /// (entity-unescaped, like HTMLParser with convert_charrefs). A small
 /// hand-rolled tokenizer: tag name match is case-insensitive; attributes are
@@ -400,5 +435,28 @@ mod tests {
             extract_image_refs("İİİ before <img src=\"after.png\">"),
             vec!["after.png"]
         );
+    }
+
+    #[test]
+    fn sound_refs_extract_basenames_in_order_deduped() {
+        // The basic [sound:…] case + case-insensitivity of the marker.
+        assert_eq!(
+            extract_sound_refs("listen [sound:hello.mp3] then [SOUND:bye.ogg]"),
+            vec!["hello.mp3", "bye.ogg"]
+        );
+        // Order-preserving in-field dedupe (a card repeating one clip).
+        assert_eq!(
+            extract_sound_refs("[sound:a.mp3] x [sound:b.wav] y [sound:a.mp3]"),
+            vec!["a.mp3", "b.wav"]
+        );
+        // Basenames only (Anki stores a flat media dir), remote skipped.
+        assert_eq!(
+            extract_sound_refs("[sound:dir/clip.m4a][sound:http://x/r.mp3]"),
+            vec!["clip.m4a"]
+        );
+        // No marker → empty (the byte probe short-circuits).
+        assert!(extract_sound_refs("no audio here").is_empty());
+        // An empty inner token is not a ref.
+        assert!(extract_sound_refs("[sound:]").is_empty());
     }
 }

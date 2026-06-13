@@ -1134,10 +1134,9 @@ impl Kernel {
     }
 
     /// `(note_id, media_names)` for every note referencing media of `kind` —
-    /// the sweep's pending-set source, routed by media kind (#485). Image
-    /// refs come from `note_image_refs` (the `<img src>` extractor); audio
-    /// enumeration (`note_audio_refs`, the `[sound:…]` extractor) lands in
-    /// Slice 2 (#485) — until then an Audio purpose has an empty pending set.
+    /// the sweep's pending-set source, routed by media kind (#485). Image refs
+    /// come from `note_image_refs` (the `<img src>` extractor); audio refs from
+    /// `note_sound_refs` (the `[sound:…]` extractor) — both scoped reads (#445).
     async fn note_media_refs(
         &self,
         kind: recognize::MediaKind,
@@ -1146,8 +1145,9 @@ impl Kernel {
             recognize::MediaKind::Image => {
                 self.collection.run(|core| core.note_image_refs()).await?
             }
-            // Slice 2 wires `core.note_audio_refs()` here.
-            recognize::MediaKind::Audio => Ok(Vec::new()),
+            recognize::MediaKind::Audio => {
+                self.collection.run(|core| core.note_sound_refs()).await?
+            }
         }
     }
 

@@ -193,11 +193,32 @@ impl CollectionCore {
     /// return names for — then the raw-field extractor (same per-field
     /// extraction + in-order dedupe as `note_embed_inputs`).
     pub fn note_image_refs(&self) -> NativeResult<Vec<(i64, Vec<String>)>> {
+        self.note_media_refs_filtered("<img", embed_text::extract_image_refs)
+    }
+
+    /// `(note_id, sound_names)` for every note whose raw fields reference a
+    /// `[sound:…]` marker — the ASR sweep's pending-set source (#485), the
+    /// audio twin of [`Self::note_image_refs`]. Same scoped-read discipline
+    /// (#445): one SQL pass with an ASCII `lower()` pre-filter that exactly
+    /// matches the extractor's own ASCII byte probe (`[sound:`), then the
+    /// raw-field extractor with in-order dedupe.
+    pub fn note_sound_refs(&self) -> NativeResult<Vec<(i64, Vec<String>)>> {
+        self.note_media_refs_filtered("[sound:", embed_text::extract_sound_refs)
+    }
+
+    /// The shared scoped-read body behind [`Self::note_image_refs`] /
+    /// [`Self::note_sound_refs`] (#485): `probe` is the ASCII-lowered marker
+    /// the SQL `instr` pre-filter looks for, `extract` the per-field ref
+    /// extractor (whose own byte probe matches `probe` exactly, so the filter
+    /// can never skip a note the extractor would return refs for).
+    fn note_media_refs_filtered(
+        &self,
+        probe: &str,
+        extract: impl Fn(&str) -> Vec<String>,
+    ) -> NativeResult<Vec<(i64, Vec<String>)>> {
         let mut out = Vec::new();
-        for r in self
-            .adapter
-            .db_rows("select id, flds from notes where instr(lower(flds), '<img') > 0")?
-        {
+        let sql = format!("select id, flds from notes where instr(lower(flds), '{probe}') > 0");
+        for r in self.adapter.db_rows(&sql)? {
             let (Some(id), Some(flds)) = (
                 r.first().and_then(Value::as_i64),
                 r.get(1).and_then(Value::as_str),
@@ -206,17 +227,17 @@ impl CollectionCore {
                     "unexpected notes row shape".to_string(),
                 ));
             };
-            let mut images: Vec<String> = Vec::new();
+            let mut refs: Vec<String> = Vec::new();
             let mut seen: HashSet<String> = HashSet::new();
             for value in flds.split('\u{1f}') {
-                for name in embed_text::extract_image_refs(value) {
+                for name in extract(value) {
                     if seen.insert(name.clone()) {
-                        images.push(name);
+                        refs.push(name);
                     }
                 }
             }
-            if !images.is_empty() {
-                out.push((id, images));
+            if !refs.is_empty() {
+                out.push((id, refs));
             }
         }
         Ok(out)
