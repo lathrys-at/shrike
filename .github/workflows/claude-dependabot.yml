@@ -1,0 +1,237 @@
+# Stage 2 of the Dependabot review/merge flow (Lane 1 — routine version bumps).
+#
+# Triggered by `dependabot-prep.yml` completing (via workflow_run, so it runs in
+# the base-branch context with full secrets + a write token), or manually for
+# testing. It:
+#   1. resolves the Dependabot PR and re-verifies it really is Dependabot's;
+#   2. DETERMINISTICALLY regenerates MODULE.bazel.lock to mirror the Cargo.lock
+#      Dependabot already updated (the one "necessary change" Dependabot can't
+#      make), and pushes it — this is a plain step, NOT Claude, and runs with no
+#      model key and no PAT in its environment, so an updated crate's build
+#      script can't read your secrets;
+#   3. hands the now-merge-ready PR to Claude purely to JUDGE: review the bump,
+#      approve it, or fix an exception a script can't (a compat shim, the
+#      transitive-cap fork+patch escape hatch);
+#   4. on Claude's explicit MERGE verdict, applies the `ci` label and arms
+#      auto-merge. The PR merges only when the required "CI passed" check is
+#      green — CI stays the gate; Claude approves, it does not bypass.
+#
+# REQUIRED SECRETS (set these once — see the PR description):
+#   - DEPS_BOT_TOKEN          a fine-grained PAT (Contents RW, Pull requests RW,
+#                             Workflows RW). Used for the lock-fix push + the
+#                             label + the merge so they actually TRIGGER CI — the
+#                             default GITHUB_TOKEN can't (its events never start
+#                             new workflow runs), which is why a PAT is needed.
+#   - ANTHROPIC_API_KEY       OR  CLAUDE_CODE_OAUTH_TOKEN  (set exactly one) —
+#                             the model auth for claude-code-action. The GitHub
+#                             App handles GitHub auth only, not this.
+name: Claude — Dependabot review & merge
+
+on:
+  workflow_run:
+    workflows: ["Dependabot prep"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Dependabot PR number to process (manual test)"
+        required: true
+
+# Least privilege for the default token; every privileged op below uses
+# DEPS_BOT_TOKEN, set per-step (never job-wide), so it is never in scope while
+# the deterministic regen compiles/evaluates updated dependency code.
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: claude-dependabot-${{ github.event.workflow_run.id || github.event.inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  review-and-merge:
+    # workflow_run fires for every prep completion; only act on successful ones
+    # that came from a pull_request (or a manual dispatch).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'pull_request')
+    runs-on: ubuntu-latest
+    env:
+      # anki's protobuf codegen needs this for any cargo/bazel invocation here.
+      DESCRIPTORS_BIN: ${{ github.workspace }}/native/third_party/anki/anki_descriptors.bin
+    steps:
+      - name: Resolve PR context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.DEPS_BOT_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR: ${{ github.event.inputs.pr_number }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            PR="$INPUT_PR"
+          else
+            if ! gh run download "$RUN_ID" \
+                  --repo "$REPO" \
+                  --name dependabot-pr-context --dir pr-context 2>/dev/null; then
+              echo "No Dependabot context artifact (non-Dependabot PR) — nothing to do."
+              echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            PR="$(sed -n 's/^number=//p' pr-context/meta.env)"
+          fi
+
+          # PR must be a bare number — guards the manual-dispatch input.
+          case "$PR" in
+            ''|*[!0-9]*) echo "::error::Invalid PR number: '$PR'"; exit 1 ;;
+          esac
+
+          # Re-verify live — never trust the artifact alone.
+          gh pr view "$PR" --repo "$REPO" \
+            --json headRefName,headRefOid,author,state > pr.json
+          if [ "$(jq -r .author.login pr.json)" != "dependabot[bot]" ]; then
+            echo "::warning::PR #$PR is not authored by Dependabot — refusing."
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$(jq -r .state pr.json)" != "OPEN" ]; then
+            echo "PR #$PR is not open — nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # Does this PR touch the native/ cargo surface (the only one with a
+          # Bazel mirror to regenerate)?
+          if gh pr diff "$PR" --repo "$REPO" --name-only \
+               | grep -qE '^native/.*Cargo\.(toml|lock)$'; then
+            CARGO=true
+          else
+            CARGO=false
+          fi
+          {
+            echo "skip=false"
+            echo "pr=$PR"
+            echo "head_ref=$(jq -r .headRefName pr.json)"
+            echo "head_sha=$(jq -r .headRefOid pr.json)"
+            echo "cargo_native=$CARGO"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR branch
+        if: steps.ctx.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.ctx.outputs.head_ref }}
+          # No token persisted in .git/config — the regen step below must run
+          # updated dependency code with NO git credentials reachable.
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Rust cache + protoc
+        if: steps.ctx.outputs.skip != 'true' && steps.ctx.outputs.cargo_native == 'true'
+        uses: ./.github/actions/rust-setup
+        with:
+          shared-key: rust-lint
+
+      - name: Set up Bazel caches
+        if: steps.ctx.outputs.skip != 'true' && steps.ctx.outputs.cargo_native == 'true'
+        uses: ./.github/actions/bazel-setup
+
+      - name: Regenerate MODULE.bazel.lock (deterministic, no secrets in env)
+        id: regen
+        if: steps.ctx.outputs.skip != 'true' && steps.ctx.outputs.cargo_native == 'true'
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "Repinning the crate-universe lock to mirror Dependabot's Cargo.lock ..."
+          # --nobuild: load + analyze (which re-evaluates crate.from_cargo and
+          # rewrites MODULE.bazel.lock under CARGO_BAZEL_REPIN) WITHOUT executing
+          # build scripts. Verify this exact invocation on the first manual run.
+          if CARGO_BAZEL_ISOLATED=0 CARGO_BAZEL_REPIN=1 ./bazel build --nobuild //native/... ; then
+            if git diff --quiet -- MODULE.bazel.lock; then
+              echo "status=ok"      >> "$GITHUB_OUTPUT"
+              echo "changed=false"  >> "$GITHUB_OUTPUT"
+            else
+              echo "status=ok"      >> "$GITHUB_OUTPUT"
+              echo "changed=true"   >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "::warning::Automatic lock regen failed — handing to Claude to assess."
+            echo "status=failed"  >> "$GITHUB_OUTPUT"
+            echo "changed=false"  >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit & push regenerated lock (PAT, so CI re-triggers)
+        if: steps.ctx.outputs.skip != 'true' && steps.regen.outputs.changed == 'true'
+        env:
+          PAT: ${{ secrets.DEPS_BOT_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ steps.ctx.outputs.head_ref }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MODULE.bazel.lock
+          git commit -m "$(printf 'fix(deps): regenerate MODULE.bazel.lock to match Cargo.lock\n\nCo-Authored-By: Claude <noreply@anthropic.com>')"
+          git push "https://x-access-token:${PAT}@github.com/${REPO}.git" "HEAD:${HEAD_REF}"
+
+      - name: Claude — review & approve (fix only if needed)
+        if: steps.ctx.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Set EXACTLY ONE of these two as a repo secret (the other stays empty
+          # and is ignored). API billing -> ANTHROPIC_API_KEY; Claude
+          # subscription -> CLAUDE_CODE_OAUTH_TOKEN (via `claude setup-token`).
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # PAT, so any commit Claude pushes on the fix path also triggers CI.
+          github_token: ${{ secrets.DEPS_BOT_TOKEN }}
+          prompt: |
+            Review Dependabot PR #${{ steps.ctx.outputs.pr }} on lathrys-at/shrike,
+            checked out on its branch `${{ steps.ctx.outputs.head_ref }}`.
+
+            The Bazel lock has ALREADY been regenerated automatically by this
+            workflow (automatic regen status: "${{ steps.regen.outputs.status }}").
+            You do NOT need to regenerate it for the normal case.
+
+            Follow docs/routines/dependency-security-update.md (the ALREADY-OPENED-PR
+            variant: act on THIS branch, do not open an issue or a new branch). Your
+            job is to JUDGE, not to do the mechanical work:
+
+            - Read the PR diff and the dependency's release notes for breaking changes.
+            - If the automatic regen status is "failed", the bump needs more than a
+              mechanical lock sync — likely a compatibility shim or the transitive-cap
+              fork+patch escape hatch the playbook describes. Fix it WITHIN that scope
+              if you can (commit + push to this branch), otherwise HOLD.
+            - Post ONE concise `gh pr comment` with your assessment + any risk.
+            - Write the verdict to `${{ github.workspace }}/.dependabot-verdict`:
+                MERGE  — clean mechanical bump, safe to auto-merge once CI is green;
+                HOLD   — needs human attention (explain why in your comment).
+
+            Keep any diff you make to lockfiles + a minimal forced shim. Do not touch
+            source, tests, CI config, or unrelated dependencies. Do NOT merge or label
+            the PR yourself — a later step does that on your verdict.
+          claude_args: >-
+            --max-turns 40
+            --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(git status:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git diff:*),Bash(git log:*),Bash(git fetch:*),Bash(cargo:*),Bash(./bazel:*),Bash(bazel:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(cat:*),Bash(ls:*),Bash(sed:*),Bash(grep:*),Bash(echo:*)'
+
+      - name: Arm auto-merge on Claude's verdict
+        if: steps.ctx.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.DEPS_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          PR="${{ steps.ctx.outputs.pr }}"
+          VERDICT="$(cat .dependabot-verdict 2>/dev/null || echo HOLD)"
+          if [ "$VERDICT" = "MERGE" ]; then
+            echo "Claude verdict: MERGE — labelling and arming auto-merge for #$PR."
+            gh pr edit  "$PR" --repo "${{ github.repository }}" --add-label ci
+            gh pr merge "$PR" --repo "${{ github.repository }}" --auto --squash
+            echo "Armed. #$PR merges once the required 'CI passed' check is green."
+          else
+            echo "Claude verdict: HOLD — leaving #$PR for human review (no auto-merge)."
+            gh pr edit "$PR" --repo "${{ github.repository }}" --add-label "help wanted" || true
+          fi
+
+      - name: Save Bazel caches
+        if: always() && steps.ctx.outputs.skip != 'true' && steps.ctx.outputs.cargo_native == 'true'
+        uses: ./.github/actions/bazel-save

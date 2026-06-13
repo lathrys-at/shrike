@@ -1,0 +1,59 @@
+# Stage 1 of the Dependabot review/merge flow (Lane 1).
+#
+# WHY TWO WORKFLOWS: a workflow triggered by a Dependabot PR runs with a
+# read-only GITHUB_TOKEN and NO access to Actions secrets — so it can't read the
+# Claude model key, can't push a lockfile fix, and can't merge. This prep
+# workflow does only safe, read-only work (read PR metadata, hand it off as an
+# artifact). Its completion fires `claude-dependabot.yml` via `workflow_run`,
+# which GitHub runs in the base-branch context with full secrets + a write
+# token — the standard, secure escape hatch for acting on a Dependabot PR.
+#
+# This file checks out NO PR code and needs no secrets.
+name: Dependabot prep
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  context:
+    # Only Dependabot's own PRs. The downstream workflow re-verifies this
+    # independently (it must never trust an artifact alone).
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+
+      - name: Record PR context
+        # Route values through env (not direct ${{ }} in the script) so a branch
+        # ref can't inject shell — the downstream workflow re-reads everything
+        # live anyway and only trusts the PR number from here.
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          DIRECTORY: ${{ steps.meta.outputs.directory }}
+        run: |
+          mkdir -p pr-context
+          {
+            echo "number=$PR_NUMBER"
+            echo "head_ref=$HEAD_REF"
+            echo "head_sha=$HEAD_SHA"
+            echo "ecosystem=$ECOSYSTEM"
+            echo "update_type=$UPDATE_TYPE"
+            echo "directory=$DIRECTORY"
+          } > pr-context/meta.env
+
+      - name: Upload PR context
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependabot-pr-context
+          path: pr-context/
+          retention-days: 1
