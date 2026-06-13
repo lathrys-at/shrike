@@ -4,9 +4,12 @@
 //! MCP); the wire contract is "shrike-schemas verbatim". This spike hand-rolls
 //! a tiny shim so the two screens are real without blocking on #505:
 //!
-//!   * [`list_notes`] / `search_notes` would POST to `/actions/list_notes`
-//!     etc. and deserialize the response straight into the canonical
-//!     `shrike_schemas` types — ZERO codegen. That import is the evidence.
+//!   * [`list_notes`] POSTs to `/actions/list_notes` and deserializes the
+//!     response straight into the canonical `ListNotesResponse` — ZERO codegen.
+//!     That import is the evidence. (The real `/actions/search_notes` returns
+//!     `SearchResponse`, an RRF-fused per-signal shape; the spike's search box
+//!     filters client-side and reuses `ListNotesResponse` since the screen reads
+//!     only the note list.)
 //!   * [`status`] GETs `/status` and deserializes `ServerStatus`.
 //!
 //! The public fns return in-memory fixtures so the spike runs with no daemon;
@@ -15,7 +18,7 @@
 //! the whole swap — the deserialize target (a shrike-schemas type) does not move.
 
 use serde::Serialize;
-use shrike_schemas::{Note, ServerStatus};
+use shrike_schemas::{ListNotesResponse, Note, ServerStatus};
 
 /// The actions edge takes/returns shrike-schemas types verbatim. We restate a
 /// couple of request envelopes here only because the spike doesn't depend on
@@ -46,9 +49,11 @@ pub type NoteRow = Note;
 // shrike-schemas type) does not move.
 
 /// Real `POST /actions/list_notes`. Same-origin (the daemon serves the SPA
-/// behind the transport guard), so no cross-origin/credential surface.
+/// behind the transport guard), so no cross-origin/credential surface. The edge
+/// returns the canonical `ListNotesResponse` ({notes, total, limit}) verbatim —
+/// the actions body == the MCP tool's structuredContent (#505 strict parity).
 #[allow(dead_code)]
-pub async fn live_list_notes(req: ListNotesRequest) -> Result<Vec<NoteRow>, String> {
+pub async fn live_list_notes(req: ListNotesRequest) -> Result<ListNotesResponse, String> {
     use gloo_net::http::Request;
     Request::post("/actions/list_notes")
         .json(&req)
@@ -56,7 +61,7 @@ pub async fn live_list_notes(req: ListNotesRequest) -> Result<Vec<NoteRow>, Stri
         .send()
         .await
         .map_err(|e| e.to_string())?
-        .json::<Vec<NoteRow>>()
+        .json::<ListNotesResponse>()
         .await
         .map_err(|e| e.to_string())
 }
@@ -74,16 +79,26 @@ pub async fn live_status() -> Result<ServerStatus, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Stubbed `/actions/list_notes`.
-pub async fn list_notes(_req: ListNotesRequest) -> Result<Vec<NoteRow>, String> {
-    Ok(fixture_notes())
+/// Stubbed `/actions/list_notes`. Returns the canonical `ListNotesResponse`,
+/// the same wrapper shape the real edge serializes (notes + total + limit).
+pub async fn list_notes(req: ListNotesRequest) -> Result<ListNotesResponse, String> {
+    let notes = fixture_notes();
+    let total = notes.len() as i64;
+    Ok(ListNotesResponse {
+        notes,
+        total,
+        limit: req.limit as i64,
+    })
 }
 
-/// Stubbed `/actions/search_notes`. The spike filters the fixtures so the search
-/// box is live; the real edge runs RRF fusion server-side.
-pub async fn search_notes(req: SearchNotesRequest) -> Result<Vec<NoteRow>, String> {
+/// Stubbed `/actions/search_notes`. The spike filters the fixtures client-side so
+/// the search box is live and returns a `ListNotesResponse`; the REAL
+/// `/actions/search_notes` returns `SearchResponse` (RRF-fused per-signal groups,
+/// run server-side). The screen reads only the note list, so the simpler wrapper
+/// is faithful for this evaluation.
+pub async fn search_notes(req: SearchNotesRequest) -> Result<ListNotesResponse, String> {
     let q = req.query.to_lowercase();
-    Ok(fixture_notes()
+    let notes: Vec<NoteRow> = fixture_notes()
         .into_iter()
         .filter(|n| {
             n.content
@@ -92,7 +107,13 @@ pub async fn search_notes(req: SearchNotesRequest) -> Result<Vec<NoteRow>, Strin
                 .unwrap_or(false)
         })
         .take(req.top_k as usize)
-        .collect())
+        .collect();
+    let total = notes.len() as i64;
+    Ok(ListNotesResponse {
+        notes,
+        total,
+        limit: req.top_k as i64,
+    })
 }
 
 /// Stubbed `GET /status`. Deserializes a fixture JSON into the canonical

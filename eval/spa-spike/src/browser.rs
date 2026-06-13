@@ -29,8 +29,10 @@ pub fn CollectionBrowser() -> impl IntoView {
                 })
                 .await
             };
-            if let Ok(notes) = result {
-                set_rows.set(notes);
+            // The actions edge returns the canonical ListNotesResponse; the
+            // screen reads its `notes` list.
+            if let Ok(response) = result {
+                set_rows.set(response.notes);
             }
         });
     };
