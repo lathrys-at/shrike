@@ -3412,6 +3412,134 @@ mod no_cpython_smoke {
         });
     }
 
+    /// An ASR recognizer over audio bytes: transcribes the bytes and carries a
+    /// single time-`Span` segment (the audio locator, vs OCR's bbox).
+    struct AsrRecognizer;
+
+    impl Recognizer for AsrRecognizer {
+        fn recognize(
+            &self,
+            items: Vec<MediaItem>,
+        ) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
+            Box::pin(async move {
+                Ok(items
+                    .iter()
+                    .map(|m| {
+                        let text = String::from_utf8_lossy(&m.bytes).to_string();
+                        Recognition {
+                            text: text.clone(),
+                            confidence: 0.9,
+                            segments: vec![Segment {
+                                text,
+                                confidence: 0.9,
+                                // A time range, not a bbox — the audio locator.
+                                locator: Some(Locator::Span([0.0, 2.5])),
+                            }],
+                        }
+                    })
+                    .collect())
+            })
+        }
+
+        fn fingerprint(&self) -> Option<String> {
+            Some("asr:stub:v1".to_string())
+        }
+    }
+
+    #[test]
+    fn asr_sweep_enumerates_sound_refs_and_mints_lexical_and_vector() {
+        // #485 PR2: the AUDIO path end-to-end. A note referencing [sound:…]
+        // audio is enumerated by note_sound_refs (the new audio twin), the ASR
+        // purpose recognizes it (source "asr", LexicalAndVector like OCR), and
+        // both consumers light up: the transcript is lexically searchable AND
+        // mints a text-space vector. Span segments persist. OCR is untouched.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            // One audio note, one image note — to prove the AUDIO purpose reads
+            // ONLY [sound:] refs (never the image), and vice versa.
+            let notes = vec![
+                serde_json::json!({"note_type": "Basic", "deck": "Default",
+                    "fields": {"Front": "Listen [sound:lecture.mp3]", "Back": "b"}}),
+                serde_json::json!({"note_type": "Basic", "deck": "Default",
+                    "fields": {"Front": "zzz filler card qqq", "Back": "b"}}),
+            ];
+            let results: Vec<serde_json::Value> = serde_json::from_str(
+                &upsert_wire(
+                    &kernel,
+                    serde_json::json!(notes).to_string(),
+                    "error".to_string(),
+                    false,
+                )
+                .await,
+            )
+            .unwrap();
+            let audio_id = results[0]["id"].as_i64().unwrap();
+
+            let mut media = std::collections::HashMap::new();
+            media.insert(
+                "lecture.mp3".to_string(),
+                b"mitochondria are the powerhouse of the cell".to_vec(),
+            );
+            let resolver = Arc::new(MapResolver::new(media));
+
+            kernel.attach_recognizer_with(
+                recognize::RecognitionPurpose::Asr,
+                Arc::new(AsrRecognizer),
+                resolver.clone(),
+            );
+            assert_eq!(
+                kernel.attached_recognition_purposes(),
+                vec![recognize::RecognitionPurpose::Asr]
+            );
+
+            // The sweep enumerates the [sound:] ref and transcribes it.
+            let report = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(
+                report,
+                recognize::SweepReport::Ran {
+                    recognized: 1,
+                    stored: 1,
+                    remaining: 0
+                }
+            );
+
+            // LexicalAndVector — both consumers: the transcript is lexically
+            // searchable (exact) ...
+            let lex = kernel.search("powerhouse of the cell", 5).await.unwrap();
+            let lex_hit = lex
+                .iter()
+                .find(|h| h.note_id == audio_id)
+                .expect("asr transcript lexically searchable");
+            assert!(lex_hit.signals.iter().any(|(s, _)| s == "exact"));
+
+            // ... AND mints a vector (a non-literal token-bag query surfaces it
+            // via the text space).
+            let sem = kernel.search("cell powerhouse mitochondria", 5).await.unwrap();
+            assert!(
+                sem.iter()
+                    .find(|h| h.note_id == audio_id)
+                    .is_some_and(|h| h.signals.iter().any(|(s, _)| s == "text")),
+                "asr transcript mints a text vector"
+            );
+
+            // A second sweep is idle — the item is DONE (not re-transcribed).
+            let idle = kernel.recognize_pending(10).await.unwrap();
+            assert_eq!(idle, recognize::SweepReport::Idle);
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
     #[test]
     fn open_upsert_search_close_without_python() {
         // The harness picks the runtime: here futures' minimal block_on —
