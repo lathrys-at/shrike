@@ -94,8 +94,10 @@ const SEARCH_FIND_AND_REPLACE: u32 = 5;
 // backend-level methods come first (ImportCollectionPackage=0,
 // ExportCollectionPackage=1), then the collection-level ones renumbered after
 // (ImportAnkiPackage=2, GetPresets=3, ExportAnkiPackage=4, …). #71 uses the two
-// export methods; #72 will add the two import ones.
+// export methods; #72 adds the import-anki-package one (a merge import; the
+// destructive import_collection_package=0 restore is the deferred #552).
 const IMPORT_EXPORT_EXPORT_COLLECTION_PACKAGE: u32 = 1;
+const IMPORT_EXPORT_IMPORT_ANKI_PACKAGE: u32 = 2;
 const IMPORT_EXPORT_EXPORT_ANKI_PACKAGE: u32 = 4;
 
 const MEDIA_CHECK_MEDIA: u32 = 0;
@@ -132,6 +134,26 @@ impl FieldsState {
             5 => FieldsState::FieldNotCloze,
             other => FieldsState::Unknown(other),
         }
+    }
+}
+
+/// Build the import summary (#72) from anki's `ImportResponse.Log` — the
+/// counts the `ImportSummary` carries. Kept here (adjacent to the RPC) since it
+/// reads the anki proto; the type itself lives in shrike-store-api (the trait
+/// contract).
+fn import_summary_from_log(
+    log: anki_proto::import_export::import_response::Log,
+) -> shrike_store_api::ImportSummary {
+    shrike_store_api::ImportSummary {
+        new: log.new.len(),
+        updated: log.updated.len(),
+        duplicate: log.duplicate.len(),
+        conflicting: log.conflicting.len(),
+        first_field_match: log.first_field_match.len(),
+        missing_notetype: log.missing_notetype.len(),
+        missing_deck: log.missing_deck.len(),
+        empty_first_field: log.empty_first_field.len(),
+        found_notes: log.found_notes as usize,
     }
 }
 
@@ -541,7 +563,7 @@ impl ServiceAdapter {
         )
     }
 
-    // ── import/export (#71) ────────────────────────────────────────────────
+    // ── import/export (#71/#72) ─────────────────────────────────────────────
 
     /// Export an `.apkg` (the modern Rust exporter, `ExportAnkiPackage`):
     /// whole-collection or deck/note-scoped, with optional scheduling/media.
@@ -594,6 +616,34 @@ impl ServiceAdapter {
             &req,
         )?;
         Ok(())
+    }
+
+    /// Import an `.apkg`/`.colpkg` via anki's modern Rust importer
+    /// (`import_anki_package`) — a MERGE into the open collection (notes added/
+    /// updated), NOT the destructive whole-collection restore (that is the
+    /// separate `import_collection_package`, deferred to #552). MUTATES the
+    /// collection (bumps `col.mod`), so the caller MUST drive a drift reconcile
+    /// afterward (never advance the index watermark — the col_mod bump is the
+    /// signal). Returns per-bucket counts.
+    pub fn import_anki_package(
+        &self,
+        package_path: &str,
+        options: shrike_store_api::ImportOptions,
+    ) -> NativeResult<shrike_store_api::ImportSummary> {
+        let req = anki_proto::import_export::ImportAnkiPackageRequest {
+            package_path: package_path.to_string(),
+            options: Some(anki_proto::import_export::ImportAnkiPackageOptions {
+                merge_notetypes: options.merge_notetypes,
+                update_notes: options.update_notes as i32,
+                update_notetypes: options.update_notetypes as i32,
+                with_scheduling: options.with_scheduling,
+                // Deferred (#72 scope): not exposed; anki's default is false.
+                with_deck_configs: false,
+            }),
+        };
+        let resp: anki_proto::import_export::ImportResponse =
+            self.call(SVC_IMPORT_EXPORT, IMPORT_EXPORT_IMPORT_ANKI_PACKAGE, &req)?;
+        Ok(import_summary_from_log(resp.log.unwrap_or_default()))
     }
 
     // ── maintenance ──────────────────────────────────────────────────────────

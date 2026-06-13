@@ -59,6 +59,7 @@ from shrike.schemas import (
     FieldOp,
     FindReplaceNoteTypesResponse,
     FindReplaceResponse,
+    ImportPackageResponse,
     IndexRebuildResponse,
     IndexSaveResponse,
     IndexStatus,
@@ -667,6 +668,29 @@ class ShrikeClient:
 
     def collection_check(self) -> CollectionCheckResponse:
         return CollectionCheckResponse.model_validate(self._call("collection_check", {}))
+
+    def import_package(
+        self,
+        path: str,
+        *,
+        update_notes: str = "if_newer",
+        update_notetypes: str = "if_newer",
+        with_scheduling: bool = False,
+        merge_notetypes: bool = False,
+    ) -> ImportPackageResponse:
+        """Import an .apkg/.colpkg from a server-local path (#72)."""
+        return ImportPackageResponse.model_validate(
+            self._call(
+                "import_package",
+                {
+                    "path": path,
+                    "update_notes": update_notes,
+                    "update_notetypes": update_notetypes,
+                    "with_scheduling": with_scheduling,
+                    "merge_notetypes": merge_notetypes,
+                },
+            )
+        )
 
     def upsert_decks(self, decks: Sequence[DeckInput | dict[str, Any]]) -> UpsertDecksResponse:
         """Create or rename decks, transparently batching if over the server limit."""

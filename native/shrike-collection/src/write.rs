@@ -15,6 +15,8 @@ use shrike_schemas::{
     UpsertNoteResult,
 };
 
+use shrike_store_api::{ImportOptions, ImportSummary};
+
 use crate::adapter::FieldsState;
 use crate::{CollectionCore, DuplicatePolicy};
 
@@ -71,6 +73,21 @@ struct UpsertMemo {
 }
 
 impl CollectionCore {
+    /// Import an `.apkg`/`.colpkg` package into the collection (#72).
+    ///
+    /// Delegates to anki's modern Rust importer via the service layer. MUTATES
+    /// the collection — `col.mod` bumps — so the kernel op that calls this MUST
+    /// follow with a drift reconcile (`reindex_if_needed`) and a derived
+    /// rebuild, and must NOT advance the index watermark (the col_mod bump is
+    /// the reconcile signal). Returns the per-bucket import summary.
+    pub fn import_package(
+        &self,
+        package_path: &str,
+        options: ImportOptions,
+    ) -> NativeResult<ImportSummary> {
+        self.adapter.import_anki_package(package_path, options)
+    }
+
     /// The bulk upsert: each item is a typed [`NoteInput`] (`id`?,
     /// `note_type`?, `deck`?, `fields` map, `tags`?), per-item typed
     /// results out — `created`/`updated`/`ok`(dry_run)/`skipped`/`error`

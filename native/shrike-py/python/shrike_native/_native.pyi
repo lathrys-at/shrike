@@ -311,6 +311,14 @@ class AsyncKernel:
     def forget_notes(self, note_ids: list[int]) -> Future[None]: ...
     def metadata_changed(self) -> Future[None]: ...
     def delete_notes(self, note_ids: list[int]) -> Future[int]: ...
+    def import_package(
+        self,
+        package_path: str,
+        update_notes: str,
+        update_notetypes: str,
+        with_scheduling: bool,
+        merge_notetypes: bool,
+    ) -> Future[tuple[str, bool]]: ...
     def store_media(
         self,
         items_json: str,

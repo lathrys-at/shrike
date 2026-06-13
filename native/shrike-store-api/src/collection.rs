@@ -46,6 +46,92 @@ pub enum CreateOutcome {
     SkippedDuplicate,
 }
 
+/// The GUID-conflict / update condition for an imported note or notetype (#72)
+/// — mirrors `anki_proto::import_export::ImportAnkiPackageUpdateCondition`. An
+/// imported note with the same GUID as an existing one: `IfNewer` updates it
+/// only when the incoming note is newer; `Always` always overwrites; `Never`
+/// keeps the existing (skips the import). Brand-new notes always add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportUpdateCondition {
+    IfNewer = 0,
+    Always = 1,
+    Never = 2,
+}
+
+impl ImportUpdateCondition {
+    /// Parse the host's condition string (`if_newer`/`always`/`never`).
+    pub fn parse(s: &str) -> NativeResult<Self> {
+        match s {
+            "if_newer" => Ok(Self::IfNewer),
+            "always" => Ok(Self::Always),
+            "never" => Ok(Self::Never),
+            other => Err(shrike_ffi::NativeError::invalid_input(format!(
+                "update condition must be if_newer/always/never (got {other:?})"
+            ))),
+        }
+    }
+}
+
+/// The import conflict/merge knobs Shrike exposes (#72). Defaults match anki
+/// desktop and Shrike's authoring posture: same-GUID notes/notetypes update
+/// only IF_NEWER, scheduling is NOT imported (Shrike manages cards, it does not
+/// review), notetypes are not merged by name. `with_deck_configs` is deferred
+/// (always false, not exposed) — so it is not a field here.
+#[derive(Debug, Clone, Copy)]
+pub struct ImportOptions {
+    pub update_notes: ImportUpdateCondition,
+    pub update_notetypes: ImportUpdateCondition,
+    pub with_scheduling: bool,
+    pub merge_notetypes: bool,
+}
+
+impl Default for ImportOptions {
+    fn default() -> Self {
+        Self {
+            update_notes: ImportUpdateCondition::IfNewer,
+            update_notetypes: ImportUpdateCondition::IfNewer,
+            with_scheduling: false,
+            merge_notetypes: false,
+        }
+    }
+}
+
+/// Per-bucket counts from an import (#72) — the summary of anki's
+/// `ImportResponse.Log`. Counts, not note-id lists (the lists are too noisy for
+/// the tool response; the buckets are what a caller acts on).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportSummary {
+    pub new: usize,
+    pub updated: usize,
+    pub duplicate: usize,
+    pub conflicting: usize,
+    pub first_field_match: usize,
+    pub missing_notetype: usize,
+    pub missing_deck: usize,
+    pub empty_first_field: usize,
+    pub found_notes: usize,
+}
+
+impl ImportSummary {
+    /// The JSON the binding hands the host (field names match the
+    /// `ImportPackageResponse` wire model). Built with `serde_json::json!` so
+    /// no `serde` derive dependency is needed.
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        serde_json::json!({
+            "new": self.new,
+            "updated": self.updated,
+            "duplicate": self.duplicate,
+            "conflicting": self.conflicting,
+            "first_field_match": self.first_field_match,
+            "missing_notetype": self.missing_notetype,
+            "missing_deck": self.missing_deck,
+            "empty_first_field": self.empty_first_field,
+            "found_notes": self.found_notes,
+        })
+    }
+}
+
 /// One note as the collection serves it: id, type, raw fields, tags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceNote {
@@ -226,6 +312,14 @@ pub trait Collection: Send + Sync {
         policy: DuplicatePolicy,
         dry_run: bool,
     ) -> NativeResult<Vec<UpsertNoteResult>>;
+    /// Import an `.apkg`/`.colpkg` package (#72). MUTATES the collection (bumps
+    /// `col.mod`), so the kernel op MUST follow with a drift reconcile and MUST
+    /// NOT advance the index watermark first. Returns per-bucket counts.
+    fn import_package(
+        &self,
+        package_path: &str,
+        options: ImportOptions,
+    ) -> NativeResult<ImportSummary>;
     /// Anki-grammar find/replace over a note set: the anki-reported change
     /// count plus the diffed changed-id set (kernel-internal maintenance
     /// data — the reindex tail — never the wire).

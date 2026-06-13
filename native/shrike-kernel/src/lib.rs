@@ -1373,6 +1373,55 @@ impl Kernel {
         Ok(removed)
     }
 
+    /// Import an `.apkg`/`.colpkg` package, then bring the index in line (#72).
+    ///
+    /// Import is an OPAQUE bulk mutation: anki's importer adds/updates/remaps an
+    /// unknown set of notes and bumps `col.mod`. So the tail is the boot/reload
+    /// drift path, NOT a maintained per-note tail: run the import RPC on the
+    /// collection actor, then drive `reindex_if_needed` — a whole-collection
+    /// drift reconcile that fingerprint-diffs and re-embeds only the
+    /// changed/new notes (dropping deleted), holistically correct across the
+    /// import's notetype/deck remaps. Crucially this does NOT advance the index
+    /// watermark before reconciling: the `col.mod` bump IS the drift signal, so
+    /// `reindex_if_needed` sees it and reconciles. The derived-store rebuild is
+    /// the harness's job (it owns that store), mirroring `reload`. Returns
+    /// `(summary, reindexed)` — the per-bucket counts and whether the index
+    /// reconciled (false only when no embedder is attached).
+    pub async fn import_package(
+        &self,
+        package_path: String,
+        options: shrike_collection::ImportOptions,
+    ) -> NativeResult<(String, bool)> {
+        let summary = self
+            .collection
+            .run(
+                move |core| -> NativeResult<shrike_collection::ImportSummary> {
+                    core.import_package(&package_path, options)
+                },
+            )
+            .await??;
+        // Import bumps col.mod, so BOTH derived caches drift — bring each in
+        // line in one op, exactly as `harness.reload` does (the host coordination
+        // the old `derived is the harness's job` comment hand-waved but never
+        // wired). The col.mod bump is the drift signal for both; we never advance
+        // a watermark before reconciling (that would suppress it).
+        //
+        // 1) Vector index: reconcile (fingerprint-diffed — only changed/new
+        //    notes re-embed; no-op without an embedder attached).
+        let reindexed = self.reindex_if_needed().await?;
+        // 2) Derived-text (FTS5) store: rebuild on drift, so the imported notes
+        //    are immediately findable by substring/fuzzy lexical search — not
+        //    only after an unrelated boot/reload/re-acquire trigger. Conditioned
+        //    on the store actually lagging the collection's col_mod (an import
+        //    always moves it, but the check keeps this a no-op if it somehow
+        //    didn't, and skips a build the store doesn't need).
+        let col_mod = self.col_mod().await?;
+        if self.derived.get_col_mod() != Some(col_mod) {
+            self.rebuild_derived().await?;
+        }
+        Ok((summary.to_json().to_string(), reindexed))
+    }
+
     // ── media + maintenance ops (#391 re-home, decision 3) ──────────────────
     // The #70 media tools and the #89 prune as maintained kernel ops: the
     // host keeps only the tool signatures (and the serving-URL fill, which is
