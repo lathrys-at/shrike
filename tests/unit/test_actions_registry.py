@@ -2,7 +2,7 @@
 
 The behavioural gate is the tools-layer unit files + the integration suite
 passing unmodified through ``register_tools`` (they do); this pins the registry
-itself — the 25-action surface, name stability, and the translation-ready
+itself — the 27-action surface, name stability, and the translation-ready
 contract (async impls with response-model return annotations, docs present).
 """
 
@@ -35,6 +35,7 @@ EXPECTED_ACTIONS = {
     "delete_note_types",
     "collection_prune",
     "collection_check",
+    "import_package",
     "store_media",
     "fetch_media",
     "list_media",
@@ -45,7 +46,7 @@ EXPECTED_ACTIONS = {
 def test_registry_carries_the_full_tool_surface(kharness) -> None:
     actions = build_actions(ActionContext(wrapper=kharness.wrapper, kernel=kharness.kernel))
     assert {a.name for a in actions} == EXPECTED_ACTIONS
-    assert len(actions) == 26
+    assert len(actions) == 27
 
 
 def test_actions_are_translation_ready(kharness) -> None:

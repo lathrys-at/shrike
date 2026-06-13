@@ -36,7 +36,7 @@ from shrike.collection import (
 )
 from shrike.derived import DerivedTextStore
 from shrike.index import IndexState, activation_floor
-from shrike.pathsafety import output_path_within_any_root
+from shrike.pathsafety import output_path_within_any_root, path_within_any_root
 from shrike.schemas import (
     CollectionCheckResponse,
     CollectionInfo,
@@ -54,6 +54,7 @@ from shrike.schemas import (
     FieldOp,
     FindReplaceNoteTypesResponse,
     FindReplaceResponse,
+    ImportPackageResponse,
     ListMediaResponse,
     ListNotesResponse,
     ListProfilesResponse,
@@ -208,6 +209,12 @@ class ActionContext:
     dedup_stats: Any | None = None
     allow_private_fetch: bool = False
     server_path_roots: list[str] | None = None
+    # Server-local roots an import `.apkg`/`.colpkg` path must be contained in
+    # (#72). DISTINCT from server_path_roots (media read) by design: import is a
+    # whole-collection overwrite — a higher blast radius — so it gets its own
+    # `--import-path-root`, never inheriting a media-read root (the lead's root
+    # taxonomy). None/empty → import-by-server-path is disabled.
+    server_import_path_roots: list[str] | None = None
     media_base_url: str | None = None
     # Export (#71): the operator-allowed server-local OUTPUT roots (the
     # --export-path-root capability, write counterpart of server_path_roots),
@@ -244,7 +251,7 @@ class ActionDef:
 
 
 def build_actions(ctx: ActionContext) -> list[ActionDef]:
-    """Build the full action registry against one context (26 actions)."""
+    """Build the full action registry against one context (27 actions)."""
     from urllib.parse import quote
 
     if ctx.kernel is None:
@@ -270,6 +277,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
     dedup_stats = ctx.dedup_stats
     allow_private_fetch = ctx.allow_private_fetch
     server_path_roots = ctx.server_path_roots
+    server_import_path_roots = ctx.server_import_path_roots
     media_base_url = ctx.media_base_url
     export_path_roots = ctx.export_path_roots or []
     export_store = ctx.export_store
@@ -2133,6 +2141,93 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             f"trash={result['have_trash']}"
         )
         return CollectionCheckResponse.model_validate(result)
+
+    @_action
+    async def import_package(
+        path: Annotated[
+            str,
+            Field(
+                min_length=1,
+                description="Server-local path to the .apkg/.colpkg to import. The "
+                "server reads this file off its own filesystem, so it is honored only "
+                "when the operator configured an --import-path-root containing it (off "
+                "by default).",
+            ),
+        ],
+        update_notes: Annotated[
+            Literal["if_newer", "always", "never"],
+            Field(
+                description="How to handle an imported note whose GUID matches an "
+                "existing one: 'if_newer' (default) updates only when the imported note "
+                "is newer; 'always' overwrites; 'never' keeps the existing note. New "
+                "notes always add."
+            ),
+        ] = "if_newer",
+        update_notetypes: Annotated[
+            Literal["if_newer", "always", "never"],
+            Field(description="Same condition, applied to note types. Default 'if_newer'."),
+        ] = "if_newer",
+        with_scheduling: Annotated[
+            bool,
+            Field(
+                description="Import the package's review scheduling (due dates, "
+                "intervals). Default false — Shrike manages cards, it does not review, "
+                "so scheduling is normally left out."
+            ),
+        ] = False,
+        merge_notetypes: Annotated[
+            bool,
+            Field(
+                description="Merge imported note types into existing ones by name "
+                "rather than adding new ones. Default false."
+            ),
+        ] = False,
+        collection: Annotated[
+            str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
+        ] = None,
+    ) -> ImportPackageResponse:
+        """Import an Anki package (.apkg/.colpkg) into the collection.
+
+        Pulls a shared deck or a backup into the collection, via anki's importer.
+        Returns per-bucket counts (notes added/updated/duplicate/conflicting/…) —
+        see the response fields. The conflict behaviour is governed by
+        `update_notes`/`update_notetypes` (default: update a same-GUID note only
+        when the imported one is newer); brand-new notes always add. Scheduling is
+        not imported by default.
+
+        The `path` is read from the **server's** filesystem and is **off by
+        default**: it is honored only when the operator configured an
+        `--import-path-root` (on a purely-local daemon) containing the file —
+        import overwrites collection data, so it gets its own root distinct from
+        media's. Importing mutates the collection, so the search index is
+        reconciled afterward (`reindexed` reports whether that ran)."""
+        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
+        logger.debug("import_package path=%s", path)
+
+        # Server-local-path safety gate (#72), gated exactly like store_media's
+        # `path` and export's `output_path` (#71's shared mechanism): the server
+        # must be purely-local AND the package must resolve inside an
+        # operator-allowed --import-path-root. `path_within_any_root` is the READ
+        # gate — the package must already exist — with commonpath on realpath'd
+        # sides closing `..`/symlink-escape. Fail-closed: empty roots (the
+        # default) or a non-purely-local server rejects, opening nothing.
+        if not (server_purely_local and path_within_any_root(path, server_import_path_roots or [])):
+            raise ToolInputError(
+                "import from a server-local path is not permitted: the server must be "
+                "purely-local and the path must be inside an --import-path-root (and must "
+                "exist). It is off by default — the operator enables it with --import-path-root."
+            )
+
+        raw, reindexed = await kernel.import_package(
+            path, update_notes, update_notetypes, with_scheduling, merge_notetypes
+        )
+        summary = json.loads(raw)
+        summary["reindexed"] = reindexed
+        note_outcome(
+            f"{summary['new']} new, {summary['updated']} updated, "
+            f"{summary['duplicate']} duplicate (reindexed={reindexed})"
+        )
+        return ImportPackageResponse.model_validate(summary)
 
     @_action
     async def upsert_decks(

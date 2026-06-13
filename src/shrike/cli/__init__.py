@@ -23,6 +23,7 @@ _LAZY_COMMANDS: dict[str, str] = {
     "deck": "shrike.cli.deck_cmd:deck",
     "embedding": "shrike.cli.embedding_cmd:embedding",
     "export": "shrike.cli.export_cmd:export",
+    "import": "shrike.cli.import_cmd:import_cmd",
     "index": "shrike.cli.index_cmd:index",
     "info": "shrike.cli.info_cmd:info",
     "media": "shrike.cli.media_cmd:media",

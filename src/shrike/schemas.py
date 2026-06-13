@@ -879,6 +879,31 @@ class FindReplaceResponse(BaseModel):
     samples: list[FindReplaceSample] = []
 
 
+class ImportPackageResponse(BaseModel):
+    """The result of importing an `.apkg`/`.colpkg` (#72) — per-bucket note
+    counts from anki's importer, mirroring `ImportResponse.Log`.
+
+    `new` notes were added; `updated` were same-GUID notes the importer
+    refreshed (governed by the `update_notes` condition); `duplicate` matched an
+    existing note and were skipped; `conflicting` couldn't be merged;
+    `first_field_match` matched an existing note by first field; `missing_notetype`
+    / `missing_deck` couldn't resolve their notetype/deck; `empty_first_field`
+    were rejected as empty. `found_notes` is the total the package contained.
+    Counts, not note-id lists. `reindexed` reports whether the import triggered an
+    index reconcile (False when no embedding is configured)."""
+
+    new: int = 0
+    updated: int = 0
+    duplicate: int = 0
+    conflicting: int = 0
+    first_field_match: int = 0
+    missing_notetype: int = 0
+    missing_deck: int = 0
+    empty_first_field: int = 0
+    found_notes: int = 0
+    reindexed: bool = False
+
+
 # ============================================================================
 # Server status / custom-endpoint models (not tool returns; client-side use)
 # ============================================================================

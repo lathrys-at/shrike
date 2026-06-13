@@ -785,6 +785,33 @@ pub struct FindReplaceResponse {
     pub samples: Vec<FindReplaceSample>,
 }
 
+/// The result of importing an `.apkg`/`.colpkg` (#72) — per-bucket note counts
+/// from anki's importer (`ImportResponse.Log`) + whether the import reconciled
+/// the index. The per-bucket mirror of `shrike.schemas.ImportPackageResponse`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ImportPackageResponse {
+    #[serde(default)]
+    pub new: i64,
+    #[serde(default)]
+    pub updated: i64,
+    #[serde(default)]
+    pub duplicate: i64,
+    #[serde(default)]
+    pub conflicting: i64,
+    #[serde(default)]
+    pub first_field_match: i64,
+    #[serde(default)]
+    pub missing_notetype: i64,
+    #[serde(default)]
+    pub missing_deck: i64,
+    #[serde(default)]
+    pub empty_first_field: i64,
+    #[serde(default)]
+    pub found_notes: i64,
+    #[serde(default)]
+    pub reindexed: bool,
+}
+
 // ============================================================================
 // Server status / custom-endpoint models
 // ============================================================================
@@ -1298,6 +1325,7 @@ catalog![
     ("CollectionCheckResponse", CollectionCheckResponse),
     ("FindReplaceSample", FindReplaceSample),
     ("FindReplaceResponse", FindReplaceResponse),
+    ("ImportPackageResponse", ImportPackageResponse),
     ("EmbeddingStatus", EmbeddingStatus),
     ("IndexProgress", IndexProgress),
     ("IndexStatus", IndexStatus),

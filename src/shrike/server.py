@@ -706,6 +706,18 @@ def main() -> None:
         "daemon — a write capability distinct from --media-path-root's read.",
     )
     parser.add_argument(
+        "--import-path-root",
+        action="append",
+        default=None,
+        metavar="DIR",
+        help="Enable import_package's server-local `path` input, confined to files under "
+        "DIR (after resolving symlinks). DISTINCT from --media-path-root: import writes into "
+        "the collection (a merge), a higher blast radius than a media-file read, so it gets "
+        "its own root and never inherits a media root. Repeatable; off (path rejected) when "
+        "unset. Also read from SHRIKE_IMPORT_PATH_ROOTS (os.pathsep-separated). Requires a "
+        "purely-local daemon.",
+    )
+    parser.add_argument(
         "--index-save-delay",
         type=float,
         default=None,
@@ -1119,6 +1131,18 @@ def main() -> None:
         "export server-local output paths",
     )
 
+    # import_package's server-local `path` read (#72): a DISTINCT capability
+    # from store_media's read and export's write — import writes into the
+    # collection (a merge), a higher blast radius than a media-file read — so
+    # its own root list, never inheriting a media or export root. Same shared
+    # gate (#71's _resolve_path_roots): purely-local + per-root containment.
+    server_import_path_roots = _resolve_path_roots(
+        args.import_path_root,
+        "SHRIKE_IMPORT_PATH_ROOTS",
+        "--import-path-root",
+        "import_package server-local paths",
+    )
+
     # The collection/profile registry (#66): a read-only snapshot for the
     # `list_profiles` enumeration action. Loaded from the server's config file
     # (the explicit --config, or the platform default), best-effort — a missing
@@ -1235,6 +1259,7 @@ def main() -> None:
             dedup_stats=harness.dedup_stats,
             allow_private_fetch=allow_private_media_fetch,
             server_path_roots=server_path_roots,
+            server_import_path_roots=server_import_path_roots,
             media_base_url=media_base_url,
             export_path_roots=export_path_roots,
             export_store=export_store,
