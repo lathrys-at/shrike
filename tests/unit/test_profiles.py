@@ -16,6 +16,7 @@ from shrike.profiles import (
     ProfileError,
     parse_capabilities,
     plan_to_runtime_params,
+    recognizer_plans,
     resolve_profile,
 )
 
@@ -321,17 +322,65 @@ class TestResolve:
         plan = resolve_profile(parse_capabilities(config), MOBILE)
         assert plan.embedder is None
 
-    @pytest.mark.parametrize(
-        ("source", "issue"),
-        [("asr", "#485"), ("describe", "#485")],
-    )
-    def test_unintegrated_recognizers_name_their_issue(self, source, issue):
+    def test_asr_recognizer_names_its_issue(self):
+        # asr is still PR2 — declared but not wired.
         config = {
             "embedders": [],
-            "recognizers": {source: {"runtime": "remote", "endpoint": "http://x/v1"}},
+            "recognizers": {"asr": {"runtime": "remote", "endpoint": "http://x/v1"}},
         }
-        with pytest.raises(ProfileError, match=issue):
+        with pytest.raises(ProfileError, match="asr"):
             _resolve(config)
+
+    def test_describe_remote_resolves_and_plans(self):
+        # #485 PR1: describe over a remote vision endpoint is attachable. It
+        # resolves (no reject) and maps onto a describe-remote RecognizerPlan.
+        config = {
+            "embedders": [],
+            "recognizers": {
+                "describe": {
+                    "runtime": "remote",
+                    "endpoint": "http://vlm.local/v1",
+                    "model": "smolvlm",
+                    "api_key_env": "VLM_KEY",
+                }
+            },
+        }
+        plan = _resolve(config)
+        assert {r.source for r in plan.recognizers} == {"describe"}
+        plans = recognizer_plans(plan)
+        assert len(plans) == 1
+        (p,) = plans
+        assert p.purpose == "describe"
+        assert p.kind == "describe-remote"
+        assert p.endpoint == "http://vlm.local/v1"
+        assert p.model == "smolvlm"
+        assert p.api_key_env == "VLM_KEY"
+
+    def test_describe_remote_needs_an_endpoint(self):
+        config = {
+            "embedders": [],
+            "recognizers": {"describe": {"runtime": "remote"}},
+        }
+        with pytest.raises(ProfileError, match="endpoint"):
+            _resolve(config)
+
+    def test_describe_non_remote_runtime_is_rejected(self):
+        # platform/onnx describe engines don't exist — only remote is wired.
+        config = {
+            "embedders": [],
+            "recognizers": {"describe": {"runtime": "platform"}},
+        }
+        with pytest.raises(ProfileError, match="remote"):
+            _resolve(config)
+
+    def test_describe_remote_needs_engine_remote_feature(self):
+        # A build without engine-remote can't serve a describe engine.
+        config = {
+            "embedders": [],
+            "recognizers": {"describe": {"runtime": "remote", "endpoint": "http://x/v1"}},
+        }
+        with pytest.raises(ProfileError, match="engine-remote"):
+            resolve_profile(parse_capabilities(config), ("anki-core",))
 
     def test_remote_ocr_names_502(self):
         config = {

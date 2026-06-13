@@ -634,11 +634,15 @@ class TestDescribeAttach:
             assert ocr_hit is not None, "OCR text searchable"
             assert "exact" in {s for s, _ in ocr_hit[2]}, "OCR stays lexical (unchanged)"
 
-            # And the derived store confirms the row split directly: the OCR
-            # text is in the lexical store, the describe prose is not.
+            # The describe row IS stored in the derived store (for provenance +
+            # reconcile — VectorOnly hides it from SEARCH, it isn't dropped):
+            # the low-level store facade (unfiltered by design — it is not a
+            # search entry point) sees both rows. The exclusion lives at the
+            # search path (asserted above via kernel.search), not at storage.
             assert harness.derived.search_substring("chlorophyll absorption", limit=5)
-            assert not harness.derived.search_substring("sunlit mountain valley", limit=5), (
-                "the describe row is hidden from substring search"
+            assert harness.derived.search_substring("sunlit mountain valley", limit=5), (
+                "the describe row is stored (provenance + reconcile) even though "
+                "search hides it"
             )
 
             # The dedup view (the other binding search seam) also surfaces the
