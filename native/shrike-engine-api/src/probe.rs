@@ -198,8 +198,7 @@ fn probe_pixel(idx: usize, x: u32, y: u32) -> [u8; 3] {
         5 => [0, 0, 255],     // saturated blue
         // High-frequency checkerboard (alternating extremes — spiky).
         6 => {
-            let on = (x + y) % 2 == 0;
-            if on {
+            if (x + y).is_multiple_of(2) {
                 [255, 255, 255]
             } else {
                 [0, 0, 0]
@@ -207,7 +206,7 @@ fn probe_pixel(idx: usize, x: u32, y: u32) -> [u8; 3] {
         }
         // Fine vertical stripes.
         7 => {
-            if x % 2 == 0 {
+            if x.is_multiple_of(2) {
                 [255, 255, 0]
             } else {
                 [0, 0, 255]
@@ -559,20 +558,11 @@ mod tests {
     /// (the probe images differ, so serial vectors differ), optionally
     /// batch-variant. The int8 vision drift the real fix guards against is
     /// pinned here by the test-double pattern, exactly like the text probe.
+    #[derive(Default)]
     struct ImageToy {
         batch_variant: bool,
         fail_serial: bool,
         fail_batched: bool,
-    }
-
-    impl Default for ImageToy {
-        fn default() -> Self {
-            Self {
-                batch_variant: false,
-                fail_serial: false,
-                fail_batched: false,
-            }
-        }
     }
 
     impl EmbedImages for ImageToy {

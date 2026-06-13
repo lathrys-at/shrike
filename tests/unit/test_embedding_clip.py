@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
+from shrike.embed_batching import BATCH_PROBE_TEXTS
 from shrike.embedding_base import IMAGE, TEXT
 from shrike.embedding_clip import ClipBackend
 from shrike.embedding_onnx_common import resolve_execution_providers
@@ -60,6 +61,17 @@ class _FakeVariantEngine(_FakeEngine):
     def embed_text_chunk(self, texts: list[str]) -> list[list[float]]:
         self.text_calls.append(len(texts))
         return [[float(len(texts)), *([0.5] * (_DIM - 1))] for _ in texts]
+
+
+class _FakeVisionVariantEngine(_FakeEngine):
+    """Text batches safely, but the VISION graph is batch-variant (the #211 mixed-precision
+    case: fp text + int8 vision). The min(text, vision) probe must force the whole engine
+    serial — the text probe alone would wrongly clear it."""
+
+    def embed_image_chunk(self, images: list[bytes]) -> list[list[float]]:
+        self.image_calls.append(len(images))
+        # Output depends on the batch size → batched != serial → the vision probe trips.
+        return [[float(len(images)), *([0.5] * (_DIM - 1))] for _ in images]
 
 
 def _model_dir(tmp_path: Path, *, variant: str = "") -> Path:
@@ -233,6 +245,30 @@ class TestClipBackend:
         be._native_engine.text_calls.clear()
         be.embed_texts(["a", "b", "c"])
         assert be._native_engine.text_calls == [1, 1, 1]
+
+    def test_variant_vision_forces_serial(self, tmp_path: Path) -> None:
+        # The #211 guard: a mixed-precision pair (safe text + batch-variant vision) must take
+        # min(text, vision) and embed BOTH paths serially — the text probe alone would clear it.
+        be = ClipBackend(model=str(_model_dir(tmp_path)))
+        _start(be, engine_cls=_FakeVisionVariantEngine)
+        assert be._safe_batch == 1
+        be._native_engine.image_calls.clear()
+        be.embed_images([b"x", b"y", b"z"])
+        assert be._native_engine.image_calls == [1, 1, 1]
+        # And the safe text path is dragged serial too (one safe_batch governs both halves).
+        be._native_engine.text_calls.clear()
+        be.embed_texts(["a", "b", "c"])
+        assert be._native_engine.text_calls == [1, 1, 1]
+
+    def test_safe_pair_keeps_full_batch(self, tmp_path: Path) -> None:
+        # A uniform-safe pair must batch to the full set on BOTH paths — min(text, vision)
+        # must not lower a safe pair's ceiling (the image set is sized to match the text set).
+        be = ClipBackend(model=str(_model_dir(tmp_path)))
+        _start(be)  # default fake is content-independent on both halves → safe
+        assert be._safe_batch == len(BATCH_PROBE_TEXTS)
+        be._native_engine.image_calls.clear()
+        be.embed_images([b"a", b"b", b"c"])
+        assert be._native_engine.image_calls == [3]
 
     def test_not_running_raises(self) -> None:
         be = ClipBackend(model="x")

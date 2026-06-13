@@ -6,9 +6,11 @@ import pytest
 
 from shrike.embed_batching import (
     BATCH_DRIFT_TOL,
+    BATCH_PROBE_IMAGES,
     BATCH_PROBE_TEXTS,
     ProbeError,
     max_probe_drift,
+    probe_image_max_safe_batch,
     probe_max_safe_batch,
 )
 
@@ -128,3 +130,63 @@ def test_probe_ceiling_covers_index_chunk() -> None:
     kernel_embed_chunk = 64
 
     assert len(BATCH_PROBE_TEXTS) >= kernel_embed_chunk
+
+
+# -- vision probe (#211) -----------------------------------------------------
+
+_NI = len(BATCH_PROBE_IMAGES)
+
+
+def _img_vec(image: bytes) -> list[float]:
+    """A deterministic, batch-independent vector for an image (keyed on content)."""
+    return [float(len(image)), float(sum(image[:16]) % 97)]
+
+
+def _img_deterministic(images: list[bytes]) -> list[list[float]]:
+    """Batch-safe vision graph: each vector is a pure function of its own image."""
+    return [_img_vec(im) for im in images]
+
+
+def _img_variant(images: list[bytes]) -> list[list[float]]:
+    """Batch-variant vision graph: every vector shifted by the batch size (int8-style)."""
+    bias = float(len(images))
+    return [[_img_vec(im)[0] + bias, _img_vec(im)[1]] for im in images]
+
+
+def test_image_probe_set_is_real_images() -> None:
+    # The set is non-trivial and every entry is real image bytes (a BMP magic 'BM').
+    assert _NI >= 12
+    assert all(im[:2] == b"BM" for im in BATCH_PROBE_IMAGES)
+    # Heterogeneous content → distinct bytes, so the probe maximizes batch variance.
+    assert len(set(BATCH_PROBE_IMAGES)) == _NI
+
+
+def test_image_probe_set_matches_text_ceiling() -> None:
+    # Sized to the text set so a uniform-safe CLIP pair's min(text, vision) never lowers
+    # the batch (both probe to the same ceiling); only a variant path collapses it to 1.
+    assert len(BATCH_PROBE_TEXTS) == _NI
+
+
+def test_deterministic_vision_is_safe_to_set_size() -> None:
+    assert probe_image_max_safe_batch(_img_deterministic) == _NI
+
+
+def test_variant_vision_falls_back_to_serial() -> None:
+    assert probe_image_max_safe_batch(_img_variant) == 1
+
+
+def test_vision_serial_reference_failure_raises() -> None:
+    def serial_broken(images: list[bytes]) -> list[list[float]]:
+        raise RuntimeError("vision graph needs an input we don't supply")
+
+    with pytest.raises(ProbeError):
+        probe_image_max_safe_batch(serial_broken)
+
+
+def test_vision_batch_only_failure_falls_back_to_serial() -> None:
+    def batch_only_broken(images: list[bytes]) -> list[list[float]]:
+        if len(images) > 1:
+            raise RuntimeError("vision graph only supports batch size 1")
+        return _img_deterministic(images)
+
+    assert probe_image_max_safe_batch(batch_only_broken) == 1

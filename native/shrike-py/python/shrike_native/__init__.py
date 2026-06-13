@@ -11,6 +11,7 @@ import contextlib
 
 from shrike_native._native import (
     BATCH_DRIFT_TOL,
+    BATCH_PROBE_IMAGES,
     BATCH_PROBE_TEXTS,
     IMAGE_PREP_VERSION_RS,
     ClipEmbedder,
@@ -83,6 +84,7 @@ with contextlib.suppress(ImportError):
 
 __all__ = [
     "BATCH_DRIFT_TOL",
+    "BATCH_PROBE_IMAGES",
     "BATCH_PROBE_TEXTS",
     "ClipEmbedder",
     "DerivedTextEngine",

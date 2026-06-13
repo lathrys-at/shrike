@@ -5,6 +5,7 @@
 # on builds that lack them.
 from shrike_native._native import (
     BATCH_DRIFT_TOL,
+    BATCH_PROBE_IMAGES,
     BATCH_PROBE_TEXTS,
     IMAGE_PREP_VERSION_RS,
     ClipEmbedder,
@@ -61,6 +62,7 @@ from shrike_native._native import rrf_fuse as rrf_fuse
 
 __all__ = [
     "BATCH_DRIFT_TOL",
+    "BATCH_PROBE_IMAGES",
     "BATCH_PROBE_TEXTS",
     "ClipEmbedder",
     "DerivedTextEngine",

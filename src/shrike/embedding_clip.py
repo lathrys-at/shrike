@@ -198,19 +198,18 @@ class ClipBackend:
 
     def _finish_start(self, started: float) -> None:
         """The tail of start(): the batch-safety probe + logging."""
-        # _resolve_files auto-discovers both graphs at the *same* precision, so a uniform export's
-        # text probe already predicts the vision path. We still probe BOTH and take the min (#211)
-        # to harden against a hand-assembled mixed-precision pair (fp text + int8 vision a user
-        # dropped on disk), where the vision graph batches non-deterministically and the text probe
-        # alone would wrongly clear it — breaking the reconcile==rebuild invariant for image vectors.
+        # _resolve_files auto-discovers both graphs at the *same* precision, so a uniform
+        # export's text probe already predicts the vision path. We still probe BOTH and take
+        # the min (#211) to harden against a hand-assembled mixed-precision pair (fp text +
+        # int8 vision a user dropped on disk), where the vision graph batches
+        # non-deterministically and the text probe alone would wrongly clear it — breaking the
+        # reconcile==rebuild invariant for image vectors.
         try:
             text_safe = probe_max_safe_batch(self._embed_text_chunk)
             vision_safe = probe_image_max_safe_batch(self._embed_image_bytes_chunk)
             self._safe_batch = min(text_safe, vision_safe)
             if self._safe_batch == 1 and self._batch_cap and self._batch_cap > 1:
-                culprit = (
-                    "vision graph" if vision_safe < text_safe else "model"
-                )
+                culprit = "vision graph" if vision_safe < text_safe else "model"
                 logger.warning(
                     "CLIP %s is batch-variant; embedding serially (batch size 1) for "
                     "determinism — use a uniform fp CLIP export for batched throughput.",
