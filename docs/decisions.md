@@ -1061,13 +1061,15 @@ authoritative only once green everywhere. The end state is deliberate
 two-lane: the pip lane (`scripts/build-native.sh` + `pytest`) is the fast
 iteration loop — warm xdist workers, `-x`/`-s`/`pdb`, testmon — and the Bazel
 lane is what CI enforces (one `bazel test //...` invocation, #422). Releases
-cut over fully (#245/#422/#497): the platform-tagged wheels, the sdist, and
-the skill bundle are Bazel-built and version-stamped from the git tag via
-`--workspace_status_command` (hatch-vcs remains only as the pip-lane's
-version source — same tag, same PEP 440 string, two readers). Coverage is
-the one deliberate non-migration: it stays on the pip path
-(`scripts/coverage.sh`) because the integration suite's spawned server
-subprocess is invisible to `bazel coverage` (#262 tracks it).
+cut over fully (#245/#422/#497): all the artifacts are Bazel-built, and the
+platform-tagged wheels and the sdist are version-stamped from the git tag
+via `--workspace_status_command` (the skill bundle is a versionless content
+zip; hatch-vcs remains only as the pip-lane's version source — same tag,
+same PEP 440 string, two readers). Coverage is the deliberate hold-back: the
+number stays on the pip path (`scripts/coverage.sh`) because the integration
+suite's spawned server subprocess is invisible to `bazel coverage` — the
+toolchain side (`configure_coverage_tool`) is already wired, and #262 tracks
+closing the subprocess gap.
 
 **Cache choice: free `--disk_cache` via `actions/cache`, with a named
 upgrade path.** No new account or spend: CI persists Bazel's disk cache
