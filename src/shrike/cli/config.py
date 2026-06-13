@@ -556,6 +556,8 @@ def resolve_embedding_profile(
     for key in ("model", "llama_server"):
         if resolved.get(key):
             resolved[key] = os.path.expanduser(str(resolved[key]))
+    if resolved.get("mmprojs"):
+        resolved["mmprojs"] = [os.path.expanduser(str(p)) for p in resolved["mmprojs"]]
     return resolved
 
 

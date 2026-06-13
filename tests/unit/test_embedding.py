@@ -71,17 +71,22 @@ class _StubClient:
         info: tuple[str | None, str] = (None, "{}"),
         vectors: list[list[float]] | None = None,
         embed_error: Exception | None = None,
+        vision: bool = False,
     ) -> None:
         self.healthy = healthy
         self.info = info
         self.vectors = vectors or []
         self.embed_error = embed_error
+        self.vision = vision
         self.health_calls = 0
         self.embed_calls: list[list[str]] = []
 
     def health_ok(self) -> bool:
         self.health_calls += 1
         return self.healthy
+
+    def vision_capable(self) -> bool:
+        return self.vision
 
     def model_info(self) -> tuple[str | None, str]:
         return self.info
@@ -146,6 +151,28 @@ class TestStart:
         svc.stop()
         assert manager.stop_calls == 1
         assert svc._remote is None
+
+    def test_image_gate_failure_stops_the_spawned_server(self) -> None:
+        # #501B: a managed image entry whose server loaded no vision projector
+        # must NOT leave the spawned llama-server orphaned — start() stops it
+        # before re-raising (a degraded boot has no later start() to reap it).
+        from shrike.embedding_base import IMAGE, TEXT
+
+        svc = EmbeddingService(model="/omni.gguf", modalities=frozenset({TEXT, IMAGE}))
+        manager = _StubManager()
+        svc._manager = manager
+        with (
+            patch(
+                "shrike.embedding.shrike_native.RemoteEmbedder",
+                return_value=_StubClient(vision=False),
+            ),
+            patch.object(svc, "model_info", return_value={"id": "omni", "meta": {}}),
+            pytest.raises(RuntimeError, match="vision projector"),
+        ):
+            svc.start()
+        assert manager.stop_calls == 1, "the orphaned server must be stopped"
+        assert svc._remote is None
+        assert svc.running is False
 
 
 class TestHealth:
@@ -299,6 +326,26 @@ class TestModelFingerprint:
         # No pooling set → no pool= token (only the always-present textprep tail).
         with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
             assert svc.model_fingerprint() == "meta:1:2:3:4:5" + self._TP
+
+    def test_mmprojs_folded_in_with_size(self, tmp_path: Path) -> None:
+        # #501B: the projector set is vector-affecting; folded as name:size
+        # (size disambiguates two projectors sharing a basename), sorted, and
+        # omitted entirely when none (a text-only fingerprint is unchanged).
+        from shrike.embedding_base import IMAGE, TEXT
+
+        proj = tmp_path / "vision.mmproj.gguf"
+        proj.write_bytes(b"y" * 42)
+        svc = EmbeddingService(
+            model="/m.gguf", modalities=frozenset({TEXT, IMAGE}), mmprojs=[str(proj)]
+        )
+        with patch.object(svc, "model_info", return_value={"id": "m", "meta": self._META}):
+            assert (
+                svc.model_fingerprint() == "meta:1:2:3:4:5:mmproj=vision.mmproj.gguf:42" + self._TP
+            )
+        # No projectors → no mmproj token.
+        text_only = EmbeddingService(model="/m.gguf")
+        with patch.object(text_only, "model_info", return_value={"id": "m", "meta": self._META}):
+            assert text_only.model_fingerprint() == "meta:1:2:3:4:5" + self._TP
 
     def test_extra_args_folded_in(self) -> None:
         svc = EmbeddingService(model="/m.gguf", extra_args=["--flash-attn"])

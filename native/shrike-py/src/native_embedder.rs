@@ -64,14 +64,22 @@ impl NativeEmbedder {
     /// Compose the remote-embeddings engine — llama-server today, any
     /// OpenAI-compatible endpoint tomorrow. Network requests run on the
     /// blocking pool, never a runtime worker.
+    ///
+    /// `images` composes the image half too (#501): the one remote engine
+    /// impls both `EmbedText` and `EmbedImages`, so a single adapted
+    /// instance serves both modalities — the same shape `from_clip` makes
+    /// for the dual ONNX encoder. Set for a `modalities: [text, image]`
+    /// remote entry against a llama.cpp multimodal endpoint; left off (the
+    /// default) for a text-only endpoint or a cloud API.
     #[cfg(feature = "engine-remote")]
     #[staticmethod]
-    #[pyo3(signature = (engine, *, fingerprint, dim, safe_batch))]
+    #[pyo3(signature = (engine, *, fingerprint, dim, safe_batch, images=false))]
     fn from_remote(
         engine: PyRef<'_, crate::RemoteEmbedder>,
         fingerprint: Option<String>,
         dim: Option<usize>,
         safe_batch: usize,
+        images: bool,
     ) -> Self {
         let tuned = Arc::new(WithPolicy::new(
             engine.engine_arc(),
@@ -79,9 +87,10 @@ impl NativeEmbedder {
             dim,
             safe_batch,
         ));
+        let adapted = Arc::new(Blocking(tuned));
         Self {
-            text: Arc::new(Blocking(tuned)),
-            images: None,
+            text: Arc::clone(&adapted) as Arc<dyn Embedder>,
+            images: images.then_some(adapted as Arc<dyn ImageEmbedder>),
         }
     }
 

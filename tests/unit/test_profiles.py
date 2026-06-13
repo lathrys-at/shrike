@@ -550,3 +550,59 @@ class TestManagedConsumption:
         }
         plan = _resolve(config)
         assert plan.embedder is not None and plan.embedder.runtime == "onnx"
+
+
+class TestMultimodalRemote:
+    """#501: a [text, image] remote entry routes images; mmprojs ride the
+    managed server and fold into the fingerprint."""
+
+    def test_managed_omni_carries_modalities_and_mmprojs(self):
+        config = {
+            "embedders": [
+                {"modalities": ["text", "image"], "runtime": "remote", "model": "~/omni.gguf"}
+            ],
+            "managed": {
+                "llama_server": {
+                    "manage": "auto",
+                    "mmprojs": ["~/vision.mmproj.gguf", "~/audio.mmproj.gguf"],
+                }
+            },
+        }
+        params = plan_to_runtime_params(_resolve(config))
+        assert params["backend"] == "llama"
+        assert params["modalities"] == frozenset({"text", "image"})
+        assert params["mmprojs"] == ["~/vision.mmproj.gguf", "~/audio.mmproj.gguf"]
+
+    def test_attached_multimodal_carries_modalities_no_mmprojs(self):
+        config = {
+            "embedders": [{"modalities": ["text", "image"], "runtime": "remote"}],
+            "managed": {"llama_server": {"manage": "attach", "port": 9000}},
+        }
+        params = plan_to_runtime_params(_resolve(config))
+        assert params["backend"] == "remote"
+        assert params["modalities"] == frozenset({"text", "image"})
+        assert "mmprojs" not in params  # attach loads its own
+
+    def test_mmprojs_without_image_modality_is_an_error(self):
+        config = {
+            "embedders": [{"modalities": ["text"], "runtime": "remote", "model": "m.gguf"}],
+            "managed": {"llama_server": {"manage": "auto", "mmprojs": ["~/v.mmproj"]}},
+        }
+        with pytest.raises(ProfileError, match="declares no image modality"):
+            _resolve(config)
+
+    def test_attach_rejects_mmprojs(self):
+        config = {
+            "embedders": [{"modalities": ["text", "image"], "runtime": "remote"}],
+            "managed": {"llama_server": {"manage": "attach", "mmprojs": ["~/v.mmproj"]}},
+        }
+        with pytest.raises(ProfileError, match="mmprojs don't"):
+            _resolve(config)
+
+    def test_onnx_image_entry_carries_modalities(self):
+        config = {
+            "embedders": [{"modalities": ["text", "image"], "runtime": "onnx", "model": "~/clip"}]
+        }
+        params = plan_to_runtime_params(_resolve(config))
+        assert params["backend"] == "clip"
+        assert params["modalities"] == frozenset({"text", "image"})
