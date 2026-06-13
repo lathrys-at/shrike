@@ -431,6 +431,133 @@ class TestAsyncKernelImages:
         assert backend.image_calls == [1], "one image embed for the one resolvable file"
 
 
+class TestLiveTwoSpaceEndToEnd:
+    """#232: the full live multi-space loop a dedicated text + separate CLIP
+    config enables. Upsert a note with an image → its image lands in the CLIP
+    space's ImageOnly index → the PRODUCTION search (build_cross_space_json +
+    action_search_notes + the PR-C gate) surfaces the image-bearing note. This
+    is the e2e PR-C couldn't write (no write path then)."""
+
+    class _TextPrimary:
+        """A dedicated text embedder (3-dim planted): the query and a distractor
+        text note share an axis; the image note's text is orthogonal."""
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            out = []
+            for t in texts:
+                if "qqquery" in t:
+                    out.append([1.0, 0.0, 0.0])
+                elif "tttarget" in t:
+                    out.append([0.6, 0.8, 0.0])  # cos 0.6 with the query
+                else:
+                    out.append([0.0, 0.0, 1.0])  # orthogonal (the image note)
+            return out
+
+        def model_fingerprint(self) -> str:
+            return "text-primary:v1"
+
+        def embedding_dim(self) -> int:
+            return 3
+
+    class _Clip:
+        """A separate CLIP: its TEXT tower embeds the query, its IMAGE tower
+        embeds the picture, planted so the query→image cosine is high (gate
+        opens) for the diagram and the note's own text is irrelevant to it."""
+
+        modalities = frozenset({"text", "image"})
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            # The CLIP text tower: the query lands on the same axis as the
+            # diagram image (cos high → the gate opens).
+            return [[1.0, 0.0] for _ in texts]
+
+        def embed_images(self, images: list[bytes]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in images]  # aligned with the query
+
+        def model_fingerprint(self) -> str:
+            return "clip:v1"
+
+        def embedding_dim(self) -> int:
+            return 2
+
+    def test_image_note_surfaces_via_clip_space_through_production_search(self, tmp_path) -> None:
+        media = tmp_path / "media"
+        media.mkdir()
+        (media / "diagram.png").write_bytes(b"diagram-bytes")
+
+        def read(name: str) -> bytes | None:
+            p = media / name
+            return p.read_bytes() if p.exists() else None
+
+        def exists(name: str) -> bool:
+            return (media / name).exists()
+
+        async def flow():
+            kernel = await shrike_native.async_kernel_open(
+                str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
+            )
+            # Text-primary FIRST, then the separate CLIP image space (its own key
+            # + the media resolver). Two spaces, dedicated-text + separate-CLIP.
+            text_backend = self._TextPrimary()
+            clip_backend = self._Clip()
+            kernel.attach_embedder(shrike_native.PyEmbedder.capture(text_backend))
+            kernel.attach_embedder(
+                shrike_native.PyEmbedder.capture(clip_backend),
+                read,
+                exists,
+                space_key="clip:v1",
+            )
+            await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+
+            # The image-bearing note (orthogonal text) + a distractor text note.
+            results = await kernel.upsert_notes(
+                [
+                    (basic, 1, ['zzz picture only <img src="diagram.png">', "b"], []),
+                    (basic, 1, ["tttarget some text", "b"], []),
+                ],
+                "error",
+            )
+            image_note = results[0][1]
+
+            # The image landed in the CLIP space's ImageOnly index.
+            assert kernel.embed_space_count() == 2
+            # Run the PRODUCTION search path: build cross_space (embeds the query
+            # into the CLIP space + searches it) + action_search_notes.
+            query = "qqquery find the diagram"
+            vectors = text_backend.embed_texts([query])
+            cross_space = await kernel.build_cross_space_json([query], 10)
+            # The CLIP space contributed (non-empty), and the gate will open
+            # (query→image cos high).
+            assert json.loads(cross_space), "the CLIP space produced cross-space hits"
+
+            def call(c):
+                return shrike_native.action_search_notes(
+                    c,
+                    kernel.engine_handle(),
+                    None,
+                    [(query, query, True)],
+                    vectors,
+                    10,
+                    0.3,
+                    kernel=kernel,
+                    semantic=True,
+                    index_size=kernel.engine_handle().size(),
+                    cross_space=cross_space,
+                )
+
+            raw = await kernel.run_job(lambda: call(core))
+            ids = [m["id"] for m in json.loads(raw)[0]["matches"]]
+            assert image_note in ids, (
+                "the image-bearing note surfaced via the CLIP space + the gate — "
+                "the full live multi-space loop"
+            )
+            await kernel.close()
+
+        asyncio.run(flow())
+
+
 class TestRunJob:
     def test_run_job_serializes_and_rethrows(self, tmp_path) -> None:
         async def flow():
