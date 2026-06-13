@@ -139,12 +139,9 @@ def _title_from_url(url: str) -> str | None:
     from urllib.parse import unquote
 
     parts = [p for p in url.split("/") if p]
-    if "thumb" in parts:
-        # .../thumb/X/XX/<File>/<NNNpx-rendition> → the <File> segment.
-        name = parts[-2]
-    else:
-        name = parts[-1]
-    name = unquote(name)
+    # A thumb URL is .../thumb/X/XX/<File>/<NNNpx-rendition> → take the <File>
+    # segment; a plain upload URL's last segment IS the file.
+    name = unquote(parts[-2] if "thumb" in parts else parts[-1])
     return f"File:{name}" if name else None
 
 

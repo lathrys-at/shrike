@@ -16,7 +16,7 @@ Run::
 
     python scripts/eval_search_quality_corpus.py            # resolve missing, write ASSETS.md
     python scripts/eval_search_quality_corpus.py --refresh  # re-resolve every term
-    python scripts/eval_search_quality_corpus.py --backfill-multimodal  # also pin eval/multimodal/ attribution
+    python scripts/eval_search_quality_corpus.py --backfill-multimodal  # + eval/multimodal pins
 
 The pinned URLs make a replay reproducible; ``--refresh`` re-resolves (a Commons
 file can be deleted/renamed). The licensing block ALWAYS re-reads metadata so
@@ -170,7 +170,9 @@ def write_assets(resolved: dict[str, dict], multimodal: list[dict]) -> None:
         ]
         for a in multimodal:
             page = a["commons_page"]
-            page_md = f"[{page.rsplit('/', 1)[-1][:48]}]({page})" if page.startswith("http") else page
+            page_md = (
+                f"[{page.rsplit('/', 1)[-1][:48]}]({page})" if page.startswith("http") else page
+            )
             lines.append(f"| {a['handle']} | {a['license']} | {a['author']} | {page_md} |")
 
     lines.append("")
