@@ -135,7 +135,7 @@ pub(crate) fn action_attach_neighbors(
 /// semantic ranking is on, and the orchestrator state (image floor, index
 /// size) the kernel will own after S3 (#332).
 #[pyfunction]
-#[pyo3(signature = (core, index_engine, derived_engine, sources, vectors, top_k, threshold, deck=None, tags=None, exclude=None, image_floor=None, weights=None, semantic=false, index_size=0, kernel=None))]
+#[pyo3(signature = (core, index_engine, derived_engine, sources, vectors, top_k, threshold, deck=None, tags=None, exclude=None, image_floor=None, weights=None, semantic=false, index_size=0, kernel=None, cross_space=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn action_search_notes(
     py: Python<'_>,
@@ -154,6 +154,7 @@ pub(crate) fn action_search_notes(
     semantic: bool,
     index_size: usize,
     kernel: Option<PyRef<'_, crate::async_kernel::AsyncKernel>>,
+    cross_space: Option<String>,
 ) -> PyResult<String> {
     // The tag-centroid state (#179) rides the kernel handle; cloned out so
     // the GIL-bound PyRef never crosses the detach.
@@ -175,6 +176,16 @@ pub(crate) fn action_search_notes(
             },
         )
         .collect();
+    // Cross-space inputs (#234): the host pre-built these via
+    // `build_cross_space_json` (embed on the kernel runtime) and threads the
+    // JSON in here. `None`/empty (the N=1 case) → no secondary spaces, so the
+    // args are byte-identical to today.
+    let cross_space: Vec<shrike_kernel::actions::SpaceSemantic> = match cross_space {
+        Some(s) if !s.is_empty() => serde_json::from_str(&s)
+            .map_err(|e| shrike_ffi::NativeError::invalid_input(format!("cross_space: {e}")))
+            .map_err(to_py_err)?,
+        _ => Vec::new(),
+    };
     let args = shrike_kernel::actions::SearchArgs {
         top_k,
         threshold,
@@ -189,6 +200,8 @@ pub(crate) fn action_search_notes(
             .into_iter()
             .map(str::to_string)
             .collect(),
+        cross_space,
+        disable_cross_space_gate: false,
     };
     py.detach(|| {
         let tag_keys = tag_kernel.as_ref().map(|k| k.tag_keys());

@@ -945,6 +945,18 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             else:
                 vectors = embedded
 
+        # Cross-space inputs (#234): the PRIMARY space stays host-embedded above
+        # (#331/#181 LRU). Each SECONDARY text-capable space embeds the query
+        # with its own model + searches its own engine on the KERNEL runtime
+        # (where embed is legal — action_search_notes runs on the collection-
+        # actor thread and can't await embed, #503), returning the per-space
+        # SpaceSemantic rows the kernel fuses with the gate. EMPTY ("[]") when
+        # there are no secondary spaces — the N=1 case stays byte-identical.
+        cross_space_json: str | None = None
+        if semantic_ok and kernel is not None:
+            source_texts = [t for (_, t, _) in sources]
+            cross_space_json = await kernel.build_cross_space_json(source_texts, top_k)
+
         # Orchestrator state the kernel will own after S3 (#332): the #201b
         # image activation floor and the index size for the over-fetch clamp.
         image_floor = (
@@ -976,6 +988,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 image_floor=image_floor,
                 semantic=semantic_ok,
                 index_size=index.size if index is not None else 0,
+                cross_space=cross_space_json,
             )
         )
         groups = TypeAdapter(list[SearchResultGroup]).validate_json(raw)

@@ -532,7 +532,7 @@ type ModalityHits = std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>;
 /// Empty `cross_space` (the N=1 / single-space case) → the rankings vector fed
 /// to `rrf_fuse` is EXACTLY the per-modality set today, so the fused output is
 /// byte-identical.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpaceSemantic {
     /// The space's CONTENT fingerprint — surfaced in per-space provenance
     /// (#182) only when N≥2 (vacuous/absent at N=1).
@@ -544,7 +544,7 @@ pub struct SpaceSemantic {
 /// One secondary space's per-source search result: its per-modality hits plus
 /// the raw best query→match cosine the RELATIVE activation gate (#234) reads
 /// BEFORE RRF strips magnitude.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SpaceSourceHits {
     /// This space's `search_by_modality` row for the source (its own engine,
     /// its own query embedding).

@@ -904,6 +904,28 @@ impl AsyncKernel {
         kernel_op(py, async move { kernel.reindex_if_needed().await })
     }
 
+    /// Cross-space search inputs as JSON (#234) — awaitable. Embeds the query
+    /// texts into every SECONDARY text-capable space (on the kernel runtime,
+    /// where embed is legal — `action_search_notes` runs on the collection-actor
+    /// thread and can't await embed, #503) and searches each secondary engine,
+    /// returning the per-space `SpaceSemantic` rows the host threads into
+    /// `action_search_notes` as `cross_space=`. EMPTY (`"[]"`) when there are no
+    /// secondary spaces — the N=1 case, where the host call stays byte-identical.
+    /// `fetch_k` is the per-space rank cap.
+    fn build_cross_space_json<'py>(
+        &self,
+        py: Python<'py>,
+        source_texts: Vec<String>,
+        fetch_k: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let spaces = kernel.build_cross_space(&source_texts, fetch_k).await?;
+            serde_json::to_string(&spaces)
+                .map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
+        })
+    }
+
     fn col_mod<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
         kernel_op(py, async move { kernel.col_mod().await })
