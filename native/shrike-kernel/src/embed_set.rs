@@ -124,6 +124,27 @@ impl EmbedSpaces {
             .map(|s| Arc::clone(&s.service))
     }
 
+    /// The per-modality-PRIMARY text space as `(key, service)` (#232's write
+    /// routing): the first text-capable space — the ONE space a note's text
+    /// items are embedded into. `None` when no text-capable space is attached.
+    pub fn text_primary_keyed(&self) -> Option<(Option<String>, Arc<EmbedService>)> {
+        self.spaces
+            .iter()
+            .find(|s| s.text_capable())
+            .map(|s| (s.key.clone(), Arc::clone(&s.service)))
+    }
+
+    /// The per-modality-PRIMARY image space as `(key, service)` (#232's write
+    /// routing): the first image-capable space — the ONE space a note's image
+    /// items are embedded into (index-narrow: never every image-capable space).
+    /// `None` when no image-capable space is attached (a text-only deployment).
+    pub fn image_primary_keyed(&self) -> Option<(Option<String>, Arc<EmbedService>)> {
+        self.spaces
+            .iter()
+            .find(|s| s.image_capable())
+            .map(|s| (s.key.clone(), Arc::clone(&s.service)))
+    }
+
     /// The ordered set (services), for the query fan-out / status surfaces
     /// (unused by the index path this PR).
     pub fn services(&self) -> Vec<Arc<EmbedService>> {

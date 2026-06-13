@@ -788,6 +788,34 @@ impl Kernel {
             .secondary_text_capable_keyed()
     }
 
+    /// The SEPARATE image-primary write route (#232), or `None`. Returns the
+    /// image-primary's orchestrator + service ONLY when the per-modality-primary
+    /// image space is a DISTINCT space from the text-primary — i.e. a dedicated
+    /// text embedder + a separate CLIP (the no-omni deployment). When the
+    /// text-primary IS image-capable (an omni/CLIP primary, the N=1 case), the
+    /// text-primary already writes text+image, so there is NO separate image
+    /// route and this is `None` → byte-identical to the single-space path.
+    ///
+    /// `index-narrow`: image items route to this ONE image-primary, never to
+    /// every image-capable space.
+    fn image_only_route(&self) -> Option<(Arc<index_orchestrator::IndexOrchestrator>, Arc<EmbedService>)> {
+        let (text_key, image) = {
+            let spaces = self.embed.read().expect("embed slot poisoned");
+            (
+                spaces.text_primary_keyed().and_then(|(k, _)| k),
+                spaces.image_primary_keyed(),
+            )
+        };
+        let (image_key, image_svc) = image?;
+        let image_key = image_key?; // a keyless image space has no index space
+        // Same space as the text-primary (omni primary) → no separate route.
+        if Some(&image_key) == text_key.as_ref() {
+            return None;
+        }
+        let orch = self.index_set.orchestrator_for(&image_key)?;
+        Some((orch, image_svc))
+    }
+
     /// Embed `source_texts` into every SECONDARY text-capable space and search
     /// each space's own index engine, producing the cross-space semantic inputs
     /// `actions::search_notes` fuses (#234). Each secondary space embeds the
@@ -891,10 +919,52 @@ impl Kernel {
             return Ok(true);
         }
         let inputs = self.compose_embed_inputs(raw, None);
-        orch.reconcile(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
-            .await?;
+        orch.reconcile(
+            inputs.clone(),
+            col_mod,
+            model_id.clone(),
+            &*svc.embedder,
+            svc.images_pair(),
+        )
+        .await?;
+        // The SEPARATE image-primary space (#232), if any: reconcile its
+        // ImageOnly index against its OWN drift (keyed on its own model_id /
+        // image fingerprints). None at N=1 / for an omni primary.
+        self.reconcile_image_route(&inputs, col_mod).await?;
         self.refresh_tags_best_effort().await;
         Ok(true)
+    }
+
+    /// Reconcile the separate image-primary space's ImageOnly index (#232), if
+    /// one exists. Drift is the image space's own (its model_id is the image
+    /// embedder's fingerprint, its hashes fold image refs only), so a pure-text
+    /// edit is a no-op here. No-op when there is no separate image route.
+    async fn reconcile_image_route(
+        &self,
+        inputs: &[index_orchestrator::EmbedInput],
+        col_mod: i64,
+    ) -> NativeResult<()> {
+        let Some((iorch, isvc)) = self.image_only_route() else {
+            return Ok(());
+        };
+        let Some((image_embedder, resolver)) = isvc.images_pair() else {
+            return Ok(()); // an image-primary always has an image pair, but be safe
+        };
+        let image_model_id = isvc.embedder.fingerprint();
+        // The image space drifts on its OWN model_id; check before re-embedding.
+        if !iorch.check_drift(col_mod, image_model_id.as_deref(), true) {
+            return Ok(());
+        }
+        iorch
+            .reconcile_with_mode(
+                inputs.to_vec(),
+                col_mod,
+                image_model_id,
+                &*isvc.embedder,
+                Some((image_embedder, resolver)),
+                index_orchestrator::WriteMode::ImageOnly,
+            )
+            .await
     }
 
     /// Explicit FULL index rebuild (the `/index/rebuild` semantics): drop and
@@ -920,8 +990,30 @@ impl Kernel {
         let total = inputs.len();
         self.index_set
             .primary()
-            .rebuild(inputs, col_mod, model_id, &*svc.embedder, svc.images_pair())
+            .rebuild(
+                inputs.clone(),
+                col_mod,
+                model_id,
+                &*svc.embedder,
+                svc.images_pair(),
+            )
             .await?;
+        // The SEPARATE image-primary space (#232): a full rebuild re-embeds its
+        // ImageOnly index too. None at N=1 / for an omni primary.
+        if let Some((iorch, isvc)) = self.image_only_route() {
+            if let Some((ie, r)) = isvc.images_pair() {
+                iorch
+                    .rebuild_with_mode(
+                        inputs,
+                        col_mod,
+                        isvc.embedder.fingerprint(),
+                        &*isvc.embedder,
+                        Some((ie, r)),
+                        index_orchestrator::WriteMode::ImageOnly,
+                    )
+                    .await?;
+            }
+        }
         self.refresh_tags_best_effort().await;
         Ok(total)
     }
@@ -1407,12 +1499,27 @@ impl Kernel {
         let svc = self.embed_service();
         if let Some(svc) = &svc {
             let inputs = self.compose_embed_inputs(raw_inputs, Some(written));
-            // PR-B: the item-write path indexes into the PRIMARY space (the
-            // per-modality-primary fan-out is PR-C). Byte-identical for N=1.
+            // The TEXT-primary write (#232): text (+ image when the primary is
+            // omni — `images_pair()` is None for a dedicated text embedder).
+            // Byte-identical for N=1.
             self.index_set
                 .primary()
                 .add(&inputs, &*svc.embedder, svc.images_pair())
                 .await?;
+            // The SEPARATE image-primary write (#232): the note's images land in
+            // the image-primary's own ImageOnly index. None at N=1 / omni.
+            if let Some((iorch, isvc)) = self.image_only_route() {
+                if let Some((ie, r)) = isvc.images_pair() {
+                    iorch
+                        .add_with_mode(
+                            &inputs,
+                            &*isvc.embedder,
+                            Some((ie, r)),
+                            index_orchestrator::WriteMode::ImageOnly,
+                        )
+                        .await?;
+                }
+            }
         }
         // Group the derived rows per note; ONE transaction for the whole
         // batch (#445 — one commit per note was journal churn × batch size).
