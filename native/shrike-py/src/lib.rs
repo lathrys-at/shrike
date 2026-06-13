@@ -21,9 +21,10 @@
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-// Trait import for the remote engine's chunk method (its only embed surface).
+// Trait imports for the remote engine's chunk methods (text + the #501
+// native multimodal image path).
 #[cfg(feature = "engine-remote")]
-use shrike_engine_api::EmbedText as _;
+use shrike_engine_api::{EmbedImages as _, EmbedText as _};
 use shrike_ffi::{ErrorKind, NativeError};
 
 #[cfg(feature = "anki-core")]
@@ -452,6 +453,29 @@ impl RemoteEmbedder {
             .map_err(to_py_err)
     }
 
+    /// Embed one chunk of images via llama.cpp's native multimodal dialect
+    /// (#501) — the direct path for the facade's `embed_images` / tests; the
+    /// kernel slot rides the `NativeEmbedder` composition instead. Bytes in,
+    /// one vector per image; vision-gated inside the engine.
+    fn embed_image_chunk(&self, py: Python<'_>, images: Vec<Vec<u8>>) -> PyResult<Vec<Vec<f32>>> {
+        py.detach(|| {
+            let items: Vec<shrike_engine_api::MediaItem> = images
+                .into_iter()
+                .map(shrike_engine_api::MediaItem::untyped)
+                .collect();
+            self.inner.embed_image_chunk(&items)
+        })
+        .map_err(to_py_err)
+    }
+
+    /// Whether the endpoint's loaded model serves image embeddings (its
+    /// vision mmproj is loaded), via `GET /props` (#501). The facade checks
+    /// this at start so a `modalities: [text, image]` entry against a
+    /// text-only endpoint fails fast at boot, not at first image embed.
+    fn vision_capable(&self, py: Python<'_>) -> bool {
+        py.detach(|| self.inner.props().is_some_and(|p| p.vision))
+    }
+
     /// `GET /health` returns 200.
     fn health_ok(&self, py: Python<'_>) -> bool {
         py.detach(|| self.inner.health_ok())
@@ -489,7 +513,7 @@ pub(crate) struct LlamaServerManager {
 #[pymethods]
 impl LlamaServerManager {
     #[new]
-    #[pyo3(signature = (model, *, host, port, binary=None, log_dir=None, context_size=None, threads=None, gpu_layers=None, pooling=None, extra_args=vec![], pid_file=None))]
+    #[pyo3(signature = (model, *, host, port, binary=None, log_dir=None, context_size=None, threads=None, gpu_layers=None, pooling=None, extra_args=vec![], pid_file=None, mmprojs=vec![]))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         model: String,
@@ -503,6 +527,7 @@ impl LlamaServerManager {
         pooling: Option<String>,
         extra_args: Vec<String>,
         pid_file: Option<String>,
+        mmprojs: Vec<String>,
     ) -> Self {
         let cfg = shrike_llama_server::LlamaServerConfig {
             binary,
@@ -517,7 +542,10 @@ impl LlamaServerManager {
             extra_args,
             pid_file: pid_file.map(std::path::PathBuf::from),
         };
-        let manager = shrike_llama_server::LlamaServerManager::new(cfg);
+        // Per-modality projectors for a multimodal embeddings server (#501):
+        // an embeddings server (not chat_mode) that loads vision/audio
+        // mmprojs to embed media. Empty = a text-only embeddings server.
+        let manager = shrike_llama_server::LlamaServerManager::new(cfg).with_mmprojs(mmprojs);
         Self {
             pid_cell: manager.pid_cell(),
             passthrough: manager.passthrough_tokens(false),

@@ -750,6 +750,10 @@ def main() -> None:
         "batch_size": args.embedding_batch_size,
         "endpoint": None,
         "api_key_env": None,
+        # The capability config carries these (#501); the legacy flag path
+        # leaves them at the runtime defaults (text-only, no projectors).
+        "modalities": None,
+        "mmprojs": None,
     }
     if args.config:
         # The daemon resolves the v2 capability sections itself (#498):
@@ -799,6 +803,8 @@ def main() -> None:
         for key in ("model", "llama_server"):
             if v2_params.get(key):
                 v2_params[key] = os.path.expanduser(str(v2_params[key]))
+        if v2_params.get("mmprojs"):
+            v2_params["mmprojs"] = [os.path.expanduser(str(p)) for p in v2_params["mmprojs"]]
         emb_params.update({k: v for k, v in v2_params.items() if v is not None})
         emb_params["backend"] = v2_params.get("backend") or DEFAULT_BACKEND
         logger.info(
@@ -825,6 +831,12 @@ def main() -> None:
         batch_size=emb_params.get("batch_size"),
         endpoint=emb_params.get("endpoint"),
         api_key_env=emb_params.get("api_key_env"),
+        **(
+            {"modalities": emb_params["modalities"]}
+            if emb_params.get("modalities") is not None
+            else {}
+        ),
+        **({"mmprojs": emb_params["mmprojs"]} if emb_params.get("mmprojs") is not None else {}),
     )
 
     # The derived-text store (FTS5 trigram sidecar) — engine factory injected

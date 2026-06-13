@@ -36,7 +36,7 @@ import shrike_native
 
 from shrike.embed_batching import probe_max_safe_batch
 from shrike.embed_text import EMBED_TEXT_VERSION
-from shrike.embedding_base import TEXT, EmbedderBackend
+from shrike.embedding_base import IMAGE, TEXT, EmbedderBackend
 
 # Embedding backend kinds the runtime can construct (see EmbeddingRuntime).
 # The onnx/clip backends run the native (Rust) engines, unconditional since the
@@ -60,9 +60,6 @@ class LlamaServerBackend:
     GGUF/MLX models it serves are text-only, so it advertises ``{TEXT}``.
     """
 
-    # llama-server here serves text-embedding models only.
-    modalities = frozenset({TEXT})
-
     def __init__(
         self,
         *,
@@ -78,6 +75,8 @@ class LlamaServerBackend:
         llama_server: str | None = None,
         pid_file: str | Path | None = None,
         batch_size: int | None = None,
+        modalities: frozenset[str] = frozenset({TEXT}),
+        mmprojs: Sequence[str] | None = None,
     ) -> None:
         self._model = model
         self._host = host
@@ -88,6 +87,11 @@ class LlamaServerBackend:
         self._safe_batch = 1
         self._base_url = f"http://{host}:{port}"
         self._model_name: str | None = None
+        self._modalities = modalities
+        # Per-modality projectors loaded with the server for a multimodal omni
+        # entry (#501); empty = a text-only embeddings server. Vector-affecting,
+        # so they fold into the fingerprint.
+        self._mmprojs = list(mmprojs) if mmprojs else []
         # The native lifecycle manager (#342 P4b): spawn + health-wait +
         # PID-file orphan reaping + SIGTERM→SIGKILL stop, all crate-side
         # (including the reserved-flag guard on the extra_args passthrough).
@@ -103,12 +107,17 @@ class LlamaServerBackend:
             pooling=pooling,
             extra_args=list(extra_args) if extra_args else [],
             pid_file=str(pid_file) if pid_file else None,
+            mmprojs=self._mmprojs,
         )
         self._pooling = pooling
         # The native HTTP client (#342 P4a): one unpinned client for health and
         # model metadata; a model-pinned twin is built once the name is known.
         self._client = shrike_native.RemoteEmbedder(self._base_url)
         self._remote: Any = None
+
+    @property
+    def modalities(self) -> frozenset[str]:
+        return self._modalities
 
     @property
     def running(self) -> bool:
@@ -132,6 +141,15 @@ class LlamaServerBackend:
         # single-model llama-server ignores the pin).
         self._model_name = self.model_info().get("id") or Path(self._model).name
         self._remote = shrike_native.RemoteEmbedder(self._base_url, model=self._model_name)
+
+        # An image entry must have actually loaded a vision mmproj (#501) —
+        # fail fast at boot, not at the first image embed in a sweep.
+        if IMAGE in self._modalities and not self._remote.vision_capable():
+            raise RuntimeError(
+                "embedder declares image modality but the managed llama-server did not load "
+                "a vision projector — set managed.llama_server.mmprojs to the model's vision "
+                "mmproj(s)"
+            )
 
         # Batch-safety probe (universal across backends): confirm a note's vector is
         # independent of its batch-mates before batching requests. llama computes in fp,
@@ -268,6 +286,13 @@ class LlamaServerBackend:
         passthrough = list(self._manager.passthrough_tokens())
         if passthrough:
             base = f"{base}:args={' '.join(passthrough)}"
+        # The mmproj set is vector-affecting (#501): a different projector
+        # produces different image vectors, so changing it must rebuild. By
+        # basename (sorted) — the projector identity, not its path; omitted
+        # when none, so a text-only index built before this matches unchanged.
+        if self._mmprojs:
+            names = " ".join(sorted(Path(p).name for p in self._mmprojs))
+            base = f"{base}:mmproj={names}"
         return f"{base}:textprep={EMBED_TEXT_VERSION}"
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -303,14 +328,26 @@ class LlamaServerBackend:
         vectors: list[list[float]] = client.embed_chunk(texts)
         return vectors
 
+    def embed_images(self, images: list[bytes]) -> list[list[float]]:
+        """Embed images via the native multimodal dialect (#501) — direct
+        path for callers/tests; the kernel rides ``native_embedder``. Only
+        when the managed server loaded a vision projector."""
+        if IMAGE not in self._modalities:
+            raise RuntimeError("this embedder does not serve images (no image modality)")
+        if not self.running or self._remote is None:
+            raise RuntimeError("Embedding service is not running")
+        vectors: list[list[float]] = self._remote.embed_image_chunk(images)
+        return vectors
+
     def native_embedder(self) -> Any:
         """The kernel-slot handle (#342 P4): the model-pinned remote client
         composed behind the engine contract, so kernel embeds run native
         end-to-end (lane → pool thread → HTTP) and never re-enter this
         facade — the same handover the onnx/clip facades make. The facade
         keeps lifecycle (spawn, health-wait, the probe, orphan reaping),
-        identity assembly, and ``health()``. Must be called from a coroutine
-        context (it captures the running loop).
+        identity assembly, and ``health()``. Composes the image half too for
+        a multimodal entry (#501). Must be called from a coroutine context
+        (it captures the running loop).
         """
         if not self.running or self._remote is None:
             raise RuntimeError("Embedding service is not running")
@@ -319,6 +356,7 @@ class LlamaServerBackend:
             fingerprint=self.model_fingerprint(),
             dim=self.embedding_dim(),
             safe_batch=self._effective_batch(self._safe_batch),
+            images=IMAGE in self._modalities,
         )
 
 
@@ -341,9 +379,12 @@ class RemoteBackend:
     and runs the batch-safety probe; ``stop()`` just drops the client.
     Config-only — there is deliberately no flag spelling for this backend
     (structured entries ride ``--config``, #498).
-    """
 
-    modalities = frozenset({TEXT})
+    A ``modalities: [text, image]`` entry against a llama.cpp multimodal
+    endpoint also serves images over the native dialect (#501): the same
+    remote engine embeds both, so the kernel composition exposes both halves
+    and ``start`` fails fast if the endpoint can't actually serve vision.
+    """
 
     def __init__(
         self,
@@ -352,14 +393,20 @@ class RemoteBackend:
         model: str | None = None,
         api_key_env: str | None = None,
         batch_size: int | None = None,
+        modalities: frozenset[str] = frozenset({TEXT}),
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._model = model
         self._api_key_env = api_key_env
         self._batch_cap = batch_size
+        self._modalities = modalities
         self._safe_batch = 1
         self._model_name: str | None = None
         self._remote: Any = None
+
+    @property
+    def modalities(self) -> frozenset[str]:
+        return self._modalities
 
     @property
     def running(self) -> bool:
@@ -400,6 +447,15 @@ class RemoteBackend:
         # /health route, so an embed is the one universal liveness signal —
         # and it surfaces auth errors at start instead of first use.
         remote.embed_chunk([" "])
+        # An image entry must hit an endpoint that actually serves vision
+        # (the native dialect's mmproj). Fail fast at start (#501) — the same
+        # boundary every capability mismatch hits, not a first-image surprise.
+        if IMAGE in self._modalities and not remote.vision_capable():
+            raise RuntimeError(
+                f"embedder declares image modality but the endpoint at {self._endpoint} "
+                "does not serve image embeddings — its model needs a vision mmproj loaded "
+                "(managed.llama_server.mmprojs, or an attached server started with --mmproj)"
+            )
         self._remote = remote
 
         try:
@@ -490,8 +546,21 @@ class RemoteBackend:
         vectors: list[list[float]] = self._remote.embed_chunk(texts)
         return vectors
 
+    def embed_images(self, images: list[bytes]) -> list[list[float]]:
+        """Embed images via the native multimodal dialect (#501) — the direct
+        path for callers/tests; the kernel rides ``native_embedder``. Available
+        only when the entry declares image modality."""
+        if IMAGE not in self._modalities:
+            raise RuntimeError("this embedder does not serve images (no image modality)")
+        if not self.running:
+            raise RuntimeError("Embedding service is not running")
+        vectors: list[list[float]] = self._remote.embed_image_chunk(images)
+        return vectors
+
     def native_embedder(self) -> Any:
-        """The kernel-slot handle — the same composition as the llama facade."""
+        """The kernel-slot handle — the same composition as the llama facade.
+        Composes the image half too when the entry declares image modality
+        (#501); the one remote engine serves both."""
         if not self.running:
             raise RuntimeError("Embedding service is not running")
         return shrike_native.NativeEmbedder.from_remote(
@@ -499,6 +568,7 @@ class RemoteBackend:
             fingerprint=self.model_fingerprint(),
             dim=self.embedding_dim(),
             safe_batch=self._effective_batch(self._safe_batch),
+            images=IMAGE in self._modalities,
         )
 
 
@@ -540,10 +610,16 @@ class EmbeddingRuntime:
         batch_size: int | None = None,
         endpoint: str | None = None,
         api_key_env: str | None = None,
+        modalities: frozenset[str] = frozenset({TEXT}),
+        mmprojs: Sequence[str] | None = None,
     ) -> None:
         self._backend_kind = BACKEND_ALIASES.get(backend, backend)
         self._endpoint = endpoint
         self._api_key_env = api_key_env
+        self._modalities = modalities
+        # Per-modality multimodal projectors for a managed omni embeddings
+        # server (#501); empty for text-only or the in-process backends.
+        self._mmprojs = list(mmprojs) if mmprojs else []
         self._model = model
         self._host = host
         self._port = port
@@ -702,6 +778,7 @@ class EmbeddingRuntime:
                 model=self._model,
                 api_key_env=self._api_key_env,
                 batch_size=self._batch_size,
+                modalities=self._modalities,
             )
         assert self._model is not None  # callers check before constructing
         if self._backend_kind == "onnx":
@@ -741,6 +818,8 @@ class EmbeddingRuntime:
                 llama_server=self._llama_server,
                 pid_file=self._pid_file,
                 batch_size=self._batch_size,
+                modalities=self._modalities,
+                mmprojs=self._mmprojs,
             )
         raise ValueError(
             f"Unknown embedding backend {self._backend_kind!r} "

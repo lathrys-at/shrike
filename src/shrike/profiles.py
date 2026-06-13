@@ -94,6 +94,9 @@ class ManagedLlama:
     context_size: int | None = None
     threads: int | None = None
     gpu_layers: int | None = None
+    # Per-modality multimodal projectors (#501) — loaded with the managed
+    # server so it can embed images/audio. Empty for a text-only server.
+    mmprojs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -272,7 +275,16 @@ def _parse_managed(raw: Any) -> tuple[ManagedLlama | None, ManagedSync | None]:
             raise ProfileError(f"{where} must be a mapping")
         _reject_unknown(
             lraw,
-            ("manage", "binary", "args", "port", "context_size", "threads", "gpu_layers"),
+            (
+                "manage",
+                "binary",
+                "args",
+                "port",
+                "context_size",
+                "threads",
+                "gpu_layers",
+                "mmprojs",
+            ),
             where,
         )
         manage = str(lraw.get("manage", "auto"))
@@ -283,6 +295,9 @@ def _parse_managed(raw: Any) -> tuple[ManagedLlama | None, ManagedSync | None]:
         args_raw = lraw.get("args") or ()
         if isinstance(args_raw, str) or not isinstance(args_raw, Sequence):
             raise ProfileError(f"{where}.args must be a list of token strings")
+        mmprojs_raw = lraw.get("mmprojs") or ()
+        if isinstance(mmprojs_raw, str) or not isinstance(mmprojs_raw, Sequence):
+            raise ProfileError(f"{where}.mmprojs must be a list of projector paths")
         llama = ManagedLlama(
             manage=manage,
             binary=_opt_str(lraw, "binary", where),
@@ -291,6 +306,7 @@ def _parse_managed(raw: Any) -> tuple[ManagedLlama | None, ManagedSync | None]:
             context_size=_opt_int(lraw, "context_size", where),
             threads=_opt_int(lraw, "threads", where),
             gpu_layers=_opt_int(lraw, "gpu_layers", where),
+            mmprojs=tuple(str(m) for m in mmprojs_raw),
         )
 
     sync = None
@@ -564,6 +580,24 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
         raise ProfileError(
             "managed.llama_server.manage: attach uses an existing server — args don't apply"
         )
+    if managed_llama is not None and managed_llama.manage == "attach" and managed_llama.mmprojs:
+        # An attached server loads its own projectors at its own launch.
+        raise ProfileError(
+            "managed.llama_server.manage: attach uses an existing server — mmprojs don't "
+            "apply (the server you attach to loads its own); declare the embedder's "
+            "image modality and start that server with its --mmproj"
+        )
+    if (
+        managed_llama is not None
+        and managed_llama.mmprojs
+        and (embedder is None or "image" not in embedder.modalities)
+    ):
+        # Projectors loaded for a text-only space are never used — a silent
+        # no-op (the cross-talk rule). The mmprojs serve the image half.
+        raise ProfileError(
+            "managed.llama_server.mmprojs is set but the embedder declares no image "
+            "modality — add image to the entry's modalities, or drop the projectors"
+        )
 
     return ResolvedProfile(
         embedder=embedder,
@@ -593,6 +627,9 @@ def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
     e = plan.embedder
     if e is None:
         return {"backend": None, "model": None}
+    # The space's modalities flow to the backend (#501): an image space
+    # composes the image half + reports image coverage.
+    modalities = frozenset(e.modalities)
     if e.runtime == "onnx":
         backend = "clip" if "image" in e.modalities else "onnx"
         return {
@@ -601,6 +638,7 @@ def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
             "pooling": e.pooling,
             "onnx_providers": list(e.providers),
             "batch_size": e.batch_size,
+            "modalities": modalities,
         }
     if e.runtime == "remote":
         llama = plan.managed_llama or ManagedLlama()
@@ -612,6 +650,7 @@ def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
                 "endpoint": endpoint,
                 "api_key_env": e.api_key_env,
                 "batch_size": e.batch_size,
+                "modalities": modalities,
             }
         return {
             "backend": "llama",
@@ -624,5 +663,7 @@ def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
             "context_size": llama.context_size,
             "threads": llama.threads,
             "gpu_layers": llama.gpu_layers,
+            "modalities": modalities,
+            "mmprojs": list(llama.mmprojs),
         }
     raise ProfileError(f"unsupported embedder runtime {e.runtime!r} on this release")
