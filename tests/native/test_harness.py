@@ -9,6 +9,7 @@ routes serve — all without a model, mirroring a no-embedding boot.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 
 import pytest
@@ -151,6 +152,27 @@ class _StubOcr:
         return "stub-ocr:v1"
 
 
+class _StubAsr:
+    """A captured ASR recognizer (#485): transcribes the audio bytes and
+    carries a single time-`Span` segment (the audio locator, vs OCR's bbox).
+    The RecognizerBackend wire contract — captured behind PyRecognizer, like a
+    custom OCR backend — proving the audio path end-to-end without the
+    platform AppleSpeechTranscriber (mobile-only, never the server build)."""
+
+    def recognize(self, items: list[bytes]) -> list[tuple[str, float, str]]:
+        # segments JSON carries a "span" locator (time range), serialized like
+        # the Rust Segment with Locator::Span — the kernel stores it opaquely.
+        out = []
+        for data in items:
+            text = data.decode()
+            segments = json.dumps([{"text": text, "confidence": 0.9, "span": [0.0, 2.5]}])
+            out.append((text, 0.9, segments))
+        return out
+
+    def model_fingerprint(self) -> str:
+        return "stub-asr:v1"
+
+
 class TestRecognition:
     def test_sweep_without_embedding_feeds_lexical_search(self, tmp_path) -> None:
         # Recognition is independent of the embed slot: with embedding off,
@@ -195,6 +217,88 @@ class TestRecognition:
             assert rows, "OCR text reached the lexical store"
 
             harness.detach_recognizer()
+            await harness.close()
+
+        asyncio.run(flow())
+
+    def test_asr_sweep_over_sound_media_through_the_binding(self, tmp_path) -> None:
+        # #485 PR2: the AUDIO path through the harness/binding. A note with a
+        # [sound:] ref is enumerated (note_sound_refs), a captured ASR stub for
+        # the `asr` purpose transcribes it (LexicalAndVector), and the
+        # transcript is both lexically searchable AND vector-minting through the
+        # binding search — proving audio end-to-end without the platform engine.
+        import hashlib
+        from types import SimpleNamespace
+
+        from shrike.harness import KernelIndexView
+
+        class _TokenHash:
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                out = []
+                for t in texts:
+                    v = [0.0] * 64
+                    for tok in t.lower().split():
+                        h = int(hashlib.blake2b(tok.encode(), digest_size=2).hexdigest(), 16)
+                        v[h % 64] += 1.0
+                    n = sum(x * x for x in v) ** 0.5 or 1.0
+                    out.append([x / n for x in v])
+                return out
+
+            def model_fingerprint(self) -> str:
+                return "tok:v1"
+
+            def embedding_dim(self) -> int:
+                return 64
+
+        async def flow():
+            media = {"lecture.mp3": b"mitochondria are the powerhouse of the cell"}
+            runtime = EmbeddingRuntime(model=None)
+            derived = DerivedTextStore(
+                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
+            )
+            harness = await Harness.assemble(
+                collection_path=str(tmp_path / "collection.anki2"),
+                cache_dir=str(tmp_path / "cache"),
+                runtime=runtime,
+                derived=derived,
+                cooperative=False,
+                hold_seconds=5.0,
+                media_read=media.get,
+                media_exists=lambda name: name in media,
+            )
+            await harness.boot(start_embedding=False)
+            backend = _TokenHash()
+            harness.kernel.attach_embedder(shrike_native.PyEmbedder.capture(backend))
+            await harness.kernel.reindex_if_needed()
+
+            notes = await harness.wrapper.upsert_notes(
+                [
+                    {
+                        "note_type": "Basic",
+                        "deck": "Default",
+                        "fields": {"Front": "Listen [sound:lecture.mp3]", "Back": "b"},
+                    }
+                ]
+            )
+            audio_id = notes[0]["id"]
+
+            # Captured ASR stub for the audio purpose (source "asr").
+            harness.attach_recognizer(_StubAsr(), "asr")
+            report = await harness.recognition_sweep(batch_size=4)
+            assert report["total_stored"] == 1, report
+
+            # LexicalAndVector: the transcript reaches the lexical store ...
+            assert harness.derived.search_substring("powerhouse of the cell", limit=5), (
+                "asr transcript reached the lexical store"
+            )
+            # ... and mints a vector reachable through the binding search.
+            view = KernelIndexView(harness.kernel, SimpleNamespace(backend=backend))  # type: ignore[arg-type]
+            hits = view.search(["cell powerhouse mitochondria"], top_k=5)[0]
+            assert any(h["note_id"] == audio_id for h in hits), (
+                "asr transcript reachable via the vector"
+            )
+
+            harness.detach_recognizer("asr")
             await harness.close()
 
         asyncio.run(flow())
