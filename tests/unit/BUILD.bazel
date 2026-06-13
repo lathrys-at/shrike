@@ -109,6 +109,10 @@ _EMBED_HELPERS = [
     "test_search_pipeline.py",
 ]
 
+# The search-quality metric engine + manifest loader (#559): pure, native-free
+# tests over the shared //tests/search_quality support (not a //src/shrike lib).
+_SEARCH_QUALITY = ["test_search_quality_metrics.py"]
+
 _EMBEDDING = [
     "test_embedding.py",
     "test_embedding_clip.py",
@@ -289,6 +293,16 @@ pytest_test(
 )
 
 pytest_test(
+    name = "search_quality_metrics",
+    srcs = _SEARCH_QUALITY,
+    xdist = None,
+    deps = [
+        ":conftest",
+        "//tests/search_quality",
+    ],
+)
+
+pytest_test(
     name = "actions",
     srcs = _ACTIONS,
     xdist = None,
@@ -350,7 +364,7 @@ pytest_test(
 # instead of silently never running under Bazel.
 _ASSIGNED = _PIP_ONLY + _CORE + _CLIENT + _DAEMON + _LOG + _INDEX + _CACHE_LAYOUT + \
             _HARNESS + _PATHSAFETY + _DERIVED + \
-            _EMBED_HELPERS + _EMBEDDING + _ACTIONS + _TOOLS + \
+            _EMBED_HELPERS + _EMBEDDING + _SEARCH_QUALITY + _ACTIONS + _TOOLS + \
             _SERVER + _CONFIG + _CLI
 
 _UNASSIGNED = glob(

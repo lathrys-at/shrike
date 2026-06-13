@@ -1,0 +1,49 @@
+load("@rules_python//python:defs.bzl", "py_library")
+
+package(default_testonly = True)
+
+# The shared search-quality support (#559): the pure metric engine + the
+# manifest loader. Native-free (no shrike_native, no harness) so the unit suite
+# can depend on it; the fixtures ride along as data for the manifest-loader
+# tests. The in-process driver (which needs the native extension + the harness)
+# is a SEPARATE library below so a unit-only consumer doesn't pull the kernel.
+py_library(
+    name = "search_quality",
+    srcs = [
+        "__init__.py",
+        "manifest.py",
+        "metrics.py",
+    ],
+    data = glob(["fixtures/**"]),
+    imports = ["../.."],  # repo root on sys.path so `tests.search_quality.*` resolves
+    visibility = ["//tests:__subpackages__"],
+)
+
+# The in-process harness driver: a real Harness over a throwaway collection +
+# the StubEmbedder, driving the REAL search_notes action. Needs the native
+# extension and the harness, so it's split off the native-free base above.
+py_library(
+    name = "inprocess",
+    srcs = ["inprocess.py"],
+    imports = ["../.."],
+    visibility = ["//tests:__subpackages__"],
+    deps = [
+        ":search_quality",
+        "//native/shrike-py:shrike_native",
+        "//src/shrike:derived",
+        "//src/shrike:embedding",
+        "//src/shrike:harness",
+        "//src/shrike:tools",
+    ],
+)
+
+# Source files for the //:sdist source distribution (#245).
+filegroup(
+    name = "dist_files",
+    testonly = False,
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel", "**/__pycache__/**", "**/*.pyc", "**/*.pyo"],
+    ),
+    visibility = ["//visibility:public"],
+)

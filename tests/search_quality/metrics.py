@@ -26,10 +26,10 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class FailureKind(str, Enum):
+class FailureKind(StrEnum):
     """How a query's result diverged from its gold — recall and precision
     regress independently, so the artifact must say which moved (#559)."""
 
@@ -240,9 +240,7 @@ def evaluate_query(
                 )
 
     # -- precision family -----------------------------------------------------
-    grade0_returned = [
-        c for c in ordered if gold.grade_of(c.note_id) == 0
-    ]
+    grade0_returned = [c for c in ordered if gold.grade_of(c.note_id) == 0]
     fpr = (len(grade0_returned) / returned_count) if returned_count else 0.0
     # P@k: relevant-class (grade>=2) fraction of what was actually returned.
     if returned_count:
@@ -262,19 +260,17 @@ def evaluate_query(
         )
 
     # -- over-return (null-gold query must surface no relevant-class hit) ------
-    over_returned = False
-    if not gold.has_relevant and not gold.grades:
-        # A genuine ∅-gold query: ANY return is junk the fusion floors should
-        # have suppressed. (A query with only grade-0 gold is handled by FPR.)
-        if returned_count:
-            over_returned = True
-            failures.append(
-                Failure(
-                    kind=FailureKind.OVER_RETURN,
-                    note_id=None,
-                    detail=f"null-gold query returned {returned_count} card(s)",
-                )
+    # A genuine ∅-gold query: ANY return is junk the fusion floors should have
+    # suppressed. (A query with only grade-0 gold is handled by FPR above.)
+    over_returned = not gold.has_relevant and not gold.grades and bool(returned_count)
+    if over_returned:
+        failures.append(
+            Failure(
+                kind=FailureKind.OVER_RETURN,
+                note_id=None,
+                detail=f"null-gold query returned {returned_count} card(s)",
             )
+        )
 
     # -- exact-tier purity (no grade-0 floated by the exact override) ---------
     exact_tier_pure: bool | None = None

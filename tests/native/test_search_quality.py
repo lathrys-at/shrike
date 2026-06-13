@@ -175,7 +175,9 @@ class TestExactOverride:
                 assert got[0] == b3, f"the literal hit floats to rank 1, got {got}"
                 b3_match = next(m for m in matches if m["id"] == b3)
                 assert "exact" in _signals(b3_match), "rank 1 carries the exact signal"
-                assert b3_match.get("substring") is not None, "rank 1 carries the substring annotation"
+                assert b3_match.get("substring") is not None, (
+                    "rank 1 carries the substring annotation"
+                )
 
                 # The recomputed RRF order (priority tier included) matches.
                 golden = rrf_order_from_ranks(to_ranked_cards(matches))
@@ -231,7 +233,217 @@ class TestExactOverride:
                     "exact-tier purity is violated: a grade-0 literal was floated"
                 )
                 fp_ids = {f.note_id for f in report.failures if f.kind.value == "precision_fp"}
-                assert trap in fp_ids, "the metric engine tags the grade-0 literal as a false positive"
+                assert trap in fp_ids, (
+                    "the metric engine tags the grade-0 literal as a false positive"
+                )
+            finally:
+                await ip.harness.close()
+
+        asyncio.run(flow())
+
+
+class TestActivationGate:
+    """The #201b activation gate, end-to-end on the REAL calibration path: with
+    >= CALIB_MIN (30) image-bearing notes the kernel calibrates the image
+    modality's typical best-match (``mean + ACTIVATION_MARGIN·std``), so a
+    non-text modality only joins the fusion when its best match clears that
+    floor. The stub embedder makes the on/off-topic distance exact — a text
+    query that aligns with a card's image fires the gate (the modality-gap
+    payoff), an orthogonal query injects no image hit (no pollution).
+
+    The filler images live on axes 5..14 and the target on axis 0, so the
+    calibrated floor sits well above an orthogonal query's ~0 best image
+    cosine and well below an on-axis query's 1.0 — robust to the margin, the
+    knife-edge characterization noted in #559 but here kept clearly on/off."""
+
+    @staticmethod
+    async def _build(tmp_path, *, target_axis: int = 0):
+        backend = StubEmbedder(dim=DIM, fingerprint="stub:gate:v1")
+        media: dict[str, bytes] = {}
+        notes: list[dict] = []
+        # 30 filler image notes spread on axes 5..14 (never the target axis 0 or
+        # the orthogonal-query axis 1) → a moderate calibrated floor.
+        for i in range(30):
+            raw = f"filler-img-{i}".encode()
+            name = f"f{i}.png"
+            media[name] = raw
+            backend.plant_image(raw, onehot(DIM, 5 + (i % 10)))
+            notes.append(
+                {
+                    "note_type": "Basic",
+                    "deck": "AdversarialEval::Gate",
+                    "fields": {"Front": f"filler {i}", "Back": f'<img src="{name}">'},
+                }
+            )
+        # The target image-only-meaning card: its ANSWER lives in the image
+        # (vector on the target axis); its field text is topic-neutral so the
+        # ONLY path to it for an on-topic query is the image vector.
+        traw = b"target-image-bytes"
+        media["target.png"] = traw
+        backend.plant_image(traw, onehot(DIM, target_axis))
+        backend.plant_text("tgt", onehot(DIM, 2))  # text vector off the query axis
+        notes.append(
+            {
+                "note_type": "Basic",
+                "deck": "AdversarialEval::Gate",
+                "fields": {
+                    "Front": "@@P:tgt@@ review card slide seven",
+                    "Back": '<img src="target.png">',
+                },
+            }
+        )
+        ip = await build_harness(tmp_path, backend, media=media, attach_media=True)
+        upn = await ip.harness.wrapper.upsert_notes(notes)
+        target_id = upn[-1]["id"]
+        # On-topic query aligns with the target IMAGE (axis 0 → cosine 1.0).
+        backend.plant_query("the target subject diagram", onehot(DIM, target_axis))
+        # Off-topic query is orthogonal to ALL image vectors (axis 1).
+        backend.plant_query("an unrelated subject entirely", onehot(DIM, 1))
+        await ip.finalize()
+        return ip, target_id
+
+    def test_calibrates_and_fires_for_an_on_topic_image_query(self, tmp_path) -> None:
+        async def flow() -> None:
+            ip, target_id = await TestActivationGate._build(tmp_path)
+            try:
+                # Calibration ran (>= CALIB_MIN images): the meta carries image stats.
+                status = ip.index_status()
+                assert status.get("activation", {}).get("image"), (
+                    "the image modality calibrated (>= 30 images)"
+                )
+
+                matches = await ip.matches("the target subject diagram", top_k=10, threshold=0.5)
+                target = next((m for m in matches if m["id"] == target_id), None)
+                assert target is not None, "the target card is retrieved by its image"
+                # The gate FIRED: the target surfaces via the IMAGE signal — a
+                # text query reaching an answer-blind card through its image.
+                assert "image" in _signals(target), (
+                    f"the modality-gap payoff: image signal fires, got {_signals(target)}"
+                )
+            finally:
+                await ip.harness.close()
+
+        asyncio.run(flow())
+
+    def test_does_not_fire_for_an_off_topic_query(self, tmp_path) -> None:
+        async def flow() -> None:
+            ip, _ = await TestActivationGate._build(tmp_path)
+            try:
+                matches = await ip.matches("an unrelated subject entirely", top_k=10, threshold=0.5)
+                # The gate HELD: no result may carry image provenance — an
+                # off-topic query injects no weak image card (no pollution).
+                polluted = [m["id"] for m in matches if "image" in _signals(m)]
+                assert not polluted, f"off-topic query must inject no image hits; got {polluted}"
+            finally:
+                await ip.harness.close()
+
+        asyncio.run(flow())
+
+    def test_floor_is_the_calibrated_mean_plus_margin(self, tmp_path) -> None:
+        # CHARACTERIZATION of the floor formula (flag-on-change): the host-side
+        # floor mirrors the kernel calibration — mean + ACTIVATION_MARGIN·std —
+        # and the on-topic query's best image cosine (1.0) clears it while the
+        # off-topic's (~0) does not. Pins the gate's decision boundary.
+        async def flow() -> None:
+            from shrike.actions import ACTIVATION_MARGIN
+            from shrike.index import activation_floor
+
+            ip, _ = await TestActivationGate._build(tmp_path)
+            try:
+                stats = ip.index_status()["activation"]["image"]
+                floor = activation_floor(stats, ACTIVATION_MARGIN)
+                assert floor is not None
+                # The on-topic best image cosine is 1.0 (query axis == target
+                # image axis); the off-topic is ~0 (orthogonal). The floor sits
+                # strictly between — the gate's two outcomes are unambiguous.
+                assert 0.0 < floor < 1.0, f"floor {floor} must separate the on/off cases"
+            finally:
+                await ip.harness.close()
+
+        asyncio.run(flow())
+
+
+class TestGracefulDegradation:
+    """The response ANNOUNCES degradation (the #181 two-tier contract + the
+    no-embedding / sub-trigram paths): a degraded search must surface its
+    incompleteness through ``message`` / ``completeness`` / a ``score is None``,
+    never silently return a thinner result that looks complete. The metric
+    engine's DEGRADE_SILENT tag depends on exactly this announcement."""
+
+    def test_live_tier_is_partial_and_skips_the_semantic_signal(self, tmp_path) -> None:
+        async def flow() -> None:
+            backend = StubEmbedder(dim=DIM, fingerprint="stub:degrade:v1")
+            backend.plant_text("d1", onehot(DIM, 0))
+            backend.plant_query("photosynthesis", onehot(DIM, 0))
+            ip = await build_harness(tmp_path, backend, attach_media=False)
+            try:
+                await ip.harness.wrapper.upsert_notes(
+                    [_card("d1", "photosynthesis chloroplast light reaction")]
+                )
+                await ip.finalize()
+
+                live = await ip.search("photosynthesis", top_k=10, threshold=0.0, tier="live")
+                # The live tier ANNOUNCES partial completeness and runs only the
+                # no-embedding signals — its hits carry no semantic `score`.
+                assert live.get("completeness") == "partial", "live tier announces partial"
+                live_matches = live["results"][0]["matches"] if live["results"] else []
+                assert live_matches, "the literal hit still surfaces on the live tier"
+                for m in live_matches:
+                    assert m.get("score") is None, "no semantic score on the live tier"
+                    assert "text" not in _signals(m), "the semantic signal is skipped"
+
+                full = await ip.search("photosynthesis", top_k=10, threshold=0.0, tier="full")
+                assert full.get("completeness") == "full", "the full tier is complete"
+            finally:
+                await ip.harness.close()
+
+        asyncio.run(flow())
+
+    def test_sub_trigram_query_announces_skipped_semantic(self, tmp_path) -> None:
+        async def flow() -> None:
+            backend = StubEmbedder(dim=DIM, fingerprint="stub:subtri:v1")
+            backend.plant_text("s1", onehot(DIM, 0))
+            ip = await build_harness(tmp_path, backend, attach_media=False)
+            try:
+                await ip.harness.wrapper.upsert_notes([_card("s1", "photosynthesis chloroplast")])
+                await ip.finalize()
+
+                # A < 3-char query can't form a trigram → semantic skipped, and
+                # the response says so (the announcement is the contract).
+                resp = await ip.search("ph", top_k=10, threshold=0.0)
+                assert resp.get("message"), "a sub-trigram query announces the skip"
+                assert "shorter than 3" in resp["message"], resp["message"]
+            finally:
+                await ip.harness.close()
+
+        asyncio.run(flow())
+
+    def test_embedding_down_returns_lexical_only_and_announces(self, tmp_path) -> None:
+        async def flow() -> None:
+            # No embedder attached at all (the service is down / never started):
+            # lexical search still works, the semantic tier announces unavailable,
+            # and the hit carries no score — never a silent thinned result.
+            ip = await build_harness(tmp_path, backend=None, attach_media=False)
+            try:
+                await ip.harness.wrapper.upsert_notes(
+                    [
+                        {
+                            "note_type": "Basic",
+                            "deck": "AdversarialEval::Degrade",
+                            "fields": {"Front": "photosynthesis chloroplast", "Back": "x"},
+                        }
+                    ]
+                )
+                await ip.finalize()
+
+                resp = await ip.search("photosynthesis", top_k=10, threshold=0.0)
+                assert resp.get("message"), "embedding-down announces via message"
+                assert "unavailable" in resp["message"].lower(), resp["message"]
+                matches = resp["results"][0]["matches"] if resp["results"] else []
+                assert matches, "lexical search still returns the literal hit"
+                hit = matches[0]
+                assert hit.get("score") is None, "no semantic score when embedding is down"
+                assert "exact" in _signals(hit), "the exact lexical signal still fires"
             finally:
                 await ip.harness.close()
 

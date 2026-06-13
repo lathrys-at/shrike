@@ -112,7 +112,9 @@ class StubEmbedder:
                 planted = self.texts.get(marker.group(1))
             if planted is None:
                 planted = self.texts.get(text)
-            out.append(planted if planted is not None else _hash_vec(text.encode("utf-8"), self.dim))
+            out.append(
+                planted if planted is not None else _hash_vec(text.encode("utf-8"), self.dim)
+            )
         return out
 
     def embed_images(self, images: list[bytes]) -> list[list[float]]:
@@ -224,8 +226,9 @@ async def build_harness(
     embedding-down degradation class: lexical search still works, semantic
     announces unavailable). Registers the real MCP tool registry against the
     harness's surfaces and returns the driver."""
-    from mcp.server.fastmcp import FastMCP
     from types import SimpleNamespace
+
+    from mcp.server.fastmcp import FastMCP
 
     from shrike.tools import register_tools
 
@@ -248,9 +251,7 @@ async def build_harness(
     if backend is not None:
         captured = shrike_native.PyEmbedder.capture(backend)
         if attach_media:
-            harness.kernel.attach_embedder(
-                captured, media_map.get, lambda name: name in media_map
-            )
+            harness.kernel.attach_embedder(captured, media_map.get, lambda name: name in media_map)
         else:
             harness.kernel.attach_embedder(captured)
         await harness.kernel.reindex_if_needed()
@@ -259,7 +260,5 @@ async def build_harness(
     # server wires it); a None backend leaves the semantic tier off.
     view = KernelIndexView(harness.kernel, SimpleNamespace(backend=backend))  # type: ignore[arg-type]
     mcp = FastMCP("search-quality")
-    register_tools(
-        mcp, harness.wrapper, index=view, kernel=harness.kernel, derived=harness.derived
-    )
+    register_tools(mcp, harness.wrapper, index=view, kernel=harness.kernel, derived=harness.derived)
     return InProcessSearch(harness=harness, backend=backend, mcp=mcp, media=media_map)
