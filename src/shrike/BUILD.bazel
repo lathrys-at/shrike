@@ -230,6 +230,8 @@ py_library(
     srcs = ["harness.py"],
     imports = [".."],
     deps = [
+        ":cache_layout",  # #68 routing: per-collection index/derived paths
+        ":cli_core",  # #68 routing: re-reads the registry via cli.config.load_config (lazy)
         ":collection",
         ":derived",
         ":embedding",
@@ -238,6 +240,7 @@ py_library(
         ":pkg",
         ":profiles",
         ":recognition",
+        ":registry",  # #68 routing: the live registry view
         "//native/shrike-py:shrike_native",
     ],
 )

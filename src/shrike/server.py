@@ -35,7 +35,7 @@ from shrike.embedding import (
     SUPPORTED_BACKENDS,
     EmbeddingRuntime,
 )
-from shrike.harness import Harness, KernelConfigError
+from shrike.harness import CollectionManager, Harness, HarnessParams, KernelConfigError
 
 # The transport-free core (#275). The collectors and _maybe_rebuild moved there
 # with it; re-exported here so existing import sites (tests included) are
@@ -1128,6 +1128,29 @@ def main() -> None:
         if args.ocr_backend:
             harness.start_recognition(args.ocr_backend)
 
+        # Multi-collection routing (#68): the manager wraps the boot harness as
+        # the default collection and lazily assembles a per-collection harness
+        # for any other registered profile a call selects (its own namespaced
+        # index + per-collection derived store, sharing this base cache dir and
+        # this embedding runtime). The default harness owns the shared runtime;
+        # routed harnesses attach its backend and never stop it. Selector
+        # plumbing through the tools/CLI is S2; per-collection status is S3.
+        manager = CollectionManager(
+            params=HarnessParams(
+                cache_dir=str(cache_base),
+                runtime=runtime,
+                media_read=_read_img,
+                media_exists=_img_exists,
+                cooperative=args.cooperative_lock,
+                hold_seconds=hold_seconds,
+                index_save_delay=args.index_save_delay,
+                index_save_threshold=args.index_save_threshold,
+            ),
+            default_harness=harness,
+            default_collection_path=args.collection,
+            config_path=args.config or DEFAULT_CONFIG_PATH,
+        )
+
         # These handlers cover the boot window AND the post-drain replay:
         # uvicorn's serve() installs its own SIGTERM/SIGINT handlers (drain
         # gracefully), then its capture_signals contextmanager REPLAYS the
@@ -1136,12 +1159,15 @@ def main() -> None:
         def _signal_shutdown(signum: int, frame: Any) -> None:  # noqa: ARG001
             sig_name = signal.Signals(signum).name
             logger.info("Received %s, shutting down", sig_name)
-            # Sync-safe teardown: flush the index + close the sidecars; the
-            # collection is crash-safe (WAL) and the process exits now.
-            with contextlib.suppress(Exception):
-                harness.kernel.save_index()
-            with contextlib.suppress(Exception):
-                harness.derived.close()
+            # Sync-safe teardown: flush each assembled collection's index + close
+            # the sidecars; the collections are crash-safe (WAL) and the process
+            # exits now. Routed collections (#68) are flushed too; the shared
+            # runtime is stopped once.
+            for h in manager.active_harnesses():
+                with contextlib.suppress(Exception):
+                    h.kernel.save_index()
+                with contextlib.suppress(Exception):
+                    h.derived.close()
             with contextlib.suppress(Exception):
                 harness.runtime.stop()
             server_lock.release()
@@ -1212,7 +1238,9 @@ def main() -> None:
         # _signal_shutdown above instead.
         logger.info("Server drained; shutting down")
         with contextlib.suppress(Exception):
-            await harness.close()
+            # Close every routed collection too (#68), default last (it stops
+            # the shared embedding runtime after the routed ones detach).
+            await manager.close()
         server_lock.release()
         logger.info("Shutdown complete")
 

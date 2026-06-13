@@ -15,16 +15,21 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 from collections import OrderedDict
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import shrike_native
 
+from shrike import cache_layout
 from shrike.collection import CollectionWrapper
-from shrike.derived import DerivedTextStore
+from shrike.derived import DerivedTextStore, NativeDerivedEngine
 from shrike.embedding import EmbeddingRuntime
 from shrike.embedding_base import EmbedderBackend
 from shrike.profiles import MODALITIES
+from shrike.registry import Registry
 
 logger = logging.getLogger("shrike.kernel")
 
@@ -186,6 +191,7 @@ class Harness:
         derived: DerivedTextStore,
         media_read: Any,
         media_exists: Any,
+        owns_runtime: bool = True,
     ) -> None:
         self.kernel = kernel
         self.wrapper = wrapper
@@ -193,6 +199,13 @@ class Harness:
         self.derived = derived
         self._media_read = media_read
         self._media_exists = media_exists
+        # Whether this harness OWNS the embedding runtime's lifecycle (#68).
+        # In multi-collection mode one runtime (the llama-server subprocess /
+        # onnx session) is SHARED across the per-collection harnesses — only
+        # the owner stops it on close(), so a routed collection's teardown
+        # never kills the shared embedder out from under the others. Single-
+        # collection mode (the default) owns its runtime, unchanged.
+        self.owns_runtime = owns_runtime
         self.index_view = KernelIndexView(kernel, runtime)
         self.dedup_stats = DedupStatsRecorder()
         # Background maintenance tasks (#471): tracked so close() drains them
@@ -218,12 +231,15 @@ class Harness:
         media_exists: Any,
         index_save_delay: float | None = None,
         index_save_threshold: int | None = None,
+        owns_runtime: bool = True,
     ) -> Harness:
         """Open the kernel on the running loop. Scheduling is the kernel's
         own (#374 — the owned tokio runtime spawns the collection actor);
         the harness assembles services and awaits completions. The
         ``index_save_*`` tuning reaches the kernel's debounced saver
-        (#355 item 2); ``None`` keeps the built-in defaults."""
+        (#355 item 2); ``None`` keeps the built-in defaults. ``owns_runtime``
+        is False for a per-collection harness sharing one embedding runtime
+        (#68) — then close() leaves the shared runtime running."""
         kernel = await shrike_native.async_kernel_open(
             collection_path,
             cache_dir,
@@ -240,6 +256,7 @@ class Harness:
             derived=derived,
             media_read=media_read,
             media_exists=media_exists,
+            owns_runtime=owns_runtime,
         )
 
     # -- boot ------------------------------------------------------------------
@@ -448,6 +465,21 @@ class Harness:
             "index": self._index_status(),
         }
 
+    async def attach_shared_embedder(self) -> None:
+        """Attach an ALREADY-RUNNING shared embedding runtime's backend to this
+        harness's kernel and reconcile its index (#68 multi-collection).
+
+        Unlike :meth:`start_embedding`, this never starts/stops the runtime —
+        the runtime is owned and started elsewhere (the default harness). A
+        routed per-collection harness calls this so semantic search works on it,
+        then reconciles its own (namespaced) index against the shared model.
+        No-op when no backend is running (lexical search still works)."""
+        backend = self.runtime.backend
+        if backend is None:
+            return
+        self._attach(backend)
+        self._spawn_bg(self._drive_boot_reindex())
+
     def _attach(self, backend: EmbedderBackend) -> None:
         """Attach the backend to the kernel's embed slot (#342). A backend
         exposing ``native_embedder()`` (the onnx/clip/llama facades — every
@@ -602,7 +634,8 @@ class Harness:
         if self._bg_tasks:
             await asyncio.gather(*list(self._bg_tasks), return_exceptions=True)
         self.derived.close()
-        await asyncio.to_thread(self.runtime.stop)
+        if self.owns_runtime:
+            await asyncio.to_thread(self.runtime.stop)
         self.wrapper.close()
         # kernel.close drains the collection actor (#374): nothing in flight
         # when this returns — the interpreter-teardown guard.
@@ -615,3 +648,240 @@ def _log_task_failure(task: asyncio.Task[Any]) -> None:
     exc = task.exception()
     if exc is not None:
         logger.error("Background kernel task failed: %s", exc)
+
+
+# ── multi-collection routing (#68) ──────────────────────────────────────────
+
+
+class RoutingError(Exception):
+    """A caller-actionable routing error: the selector named an unknown
+    profile, or no collection could be resolved (no selector and no active
+    default). The HTTP host maps it to a 400 / ToolInputError — never a bug."""
+
+
+@dataclass(frozen=True)
+class HarnessParams:
+    """The collection-independent assembly parameters every per-collection
+    harness shares (#68). The shared base ``cache_dir`` (NOT per-collection —
+    isolation comes from per-artifact namespacing: the index via #67, the
+    derived store via :func:`cache_layout.derived_db_path`), the shared
+    embedding runtime, media resolvers, cooperative-lock settings, and the
+    index-flush tuning. One of these is built once at boot; the manager
+    stamps a per-collection ``cache_dir``-derived derived store onto each."""
+
+    cache_dir: str
+    runtime: EmbeddingRuntime
+    media_read: Any
+    media_exists: Any
+    cooperative: bool
+    hold_seconds: float
+    index_save_delay: float | None = None
+    index_save_threshold: int | None = None
+
+
+class CollectionManager:
+    """Routes per-call to a per-collection :class:`Harness`, lazily assembled
+    (#68 — the multi-collection capstone).
+
+    One daemon, many collections: each registered/active collection gets its
+    own ``AsyncKernel`` + namespaced index (#67) + per-collection derived store,
+    assembled on first route and governed by its own cooperative-lock
+    idle-release (#64) — only the collection(s) mid-operation hold a lock. The
+    N kernels share one process-global tokio runtime (verified) and one
+    embedding runtime (the llama-server subprocess / onnx session is expensive;
+    one is shared, attached to each kernel's embed slot).
+
+    Selection is **per-call and stateless** (consistent with ``stateless_http``):
+    a selector resolves name → path via a **live, re-readable** registry view
+    (contract #2 — re-read on demand so a ``profile add`` in one session routes
+    in the same session), defaulting to the registry's active profile; no
+    server-side mutable "current collection". The registry's stored path is
+    routed THROUGH :mod:`shrike.cache_layout` (contract #1) so canonicalization
+    is the equalizer — never a raw-abspath-derived index path.
+
+    The **default collection** (the one the daemon booted with, ``--collection``)
+    is seeded as a ready harness so today's single-collection behavior — boot
+    embedding, the operational routes, the recognition sweep — is unchanged; it
+    owns the shared embedding runtime's lifecycle. Routed (non-default)
+    collections attach the same shared backend to their own kernel and never
+    stop it on teardown.
+    """
+
+    # The registry key for the daemon's boot collection when it isn't a
+    # registered profile — so `--collection` always has a routable handle even
+    # with an empty registry (the single-collection default).
+    DEFAULT_KEY = "<default>"
+
+    def __init__(
+        self,
+        *,
+        params: HarnessParams,
+        default_harness: Harness,
+        default_collection_path: str,
+        config_path: str | os.PathLike[str] | None,
+    ) -> None:
+        self._params = params
+        # name -> Harness. The default collection is keyed by its registry
+        # profile name if it matches one, else DEFAULT_KEY.
+        self._harnesses: dict[str, Harness] = {}
+        self._default_path = os.path.abspath(default_collection_path)
+        self._config_path = config_path
+        # One assembly lock PER key so concurrent first-routes to the SAME
+        # collection don't double-assemble (two anki opens on one file), while
+        # routes to DIFFERENT collections still assemble in parallel.
+        self._assembly_locks: dict[str, asyncio.Lock] = {}
+        # Seed the default harness under the name the registry knows it by (so
+        # `profile list`'s default and `--collection` resolve to one harness),
+        # falling back to DEFAULT_KEY.
+        self._default_key = self._key_for_path(self._default_path) or self.DEFAULT_KEY
+        self._harnesses[self._default_key] = default_harness
+
+    # -- the live registry view (contract #2) --------------------------------
+
+    def registry(self) -> Registry:
+        """Re-read the registry from config every call — the live view.
+
+        Cheap (a small YAML read) and authoritative: the config file is the
+        source of truth the ``shrike profile`` CLI writes, so re-reading is how
+        a register-then-route in one session works without a server-side mutable
+        cache that ``stateless_http`` forbids. A missing/unreadable config
+        yields an empty registry (the single-collection default), never an
+        error.
+        """
+        if self._config_path is None:
+            return Registry()
+        try:
+            from shrike.cli.config import load_config
+
+            return Registry.from_config(load_config(Path(self._config_path)))
+        except Exception:  # noqa: BLE001 — routing degrades to the default, never crashes
+            logger.debug("registry re-read failed; routing to the default collection only")
+            return Registry()
+
+    def _key_for_path(self, path: str) -> str | None:
+        """The registry profile name whose collection path matches ``path``
+        (path-based, canonicalized through cache_layout so two spellings of one
+        file match), or None if unregistered."""
+        target = cache_layout.index_namespace(path)
+        for profile in self.registry().profiles:
+            if cache_layout.index_namespace(profile.path) == target:
+                return profile.name
+        return None
+
+    # -- selector resolution --------------------------------------------------
+
+    def resolve(self, selector: str | None) -> tuple[str, str]:
+        """Resolve a selector to ``(key, collection_path)``.
+
+        ``selector`` is a registry profile name (or None). None falls back to
+        the registry's active default; with no default set and no selector, the
+        daemon's boot collection is the implicit default (so a single-collection
+        daemon needs no registry at all). An explicit selector that names no
+        registered profile is a :class:`RoutingError`; a None selector with
+        neither a default nor a boot collection is the "no default set" error.
+        """
+        registry = self.registry()
+        if selector is not None:
+            profile = registry.get(selector)
+            if profile is None:
+                raise RoutingError(
+                    f"unknown collection {selector!r} — register it with "
+                    "`shrike profile add`, or omit the selector for the default"
+                )
+            return (profile.name, os.path.abspath(os.path.expanduser(profile.path)))
+        # No selector: the registry default, else the daemon's boot collection.
+        default = registry.resolve_default()
+        if default is not None:
+            return (default.name, os.path.abspath(os.path.expanduser(default.path)))
+        return (self._default_key, self._default_path)
+
+    # -- routing --------------------------------------------------------------
+
+    async def harness_for(self, selector: str | None) -> Harness:
+        """Route ``selector`` to its harness, assembling on first use.
+
+        The default collection is always already assembled; any other resolves
+        via the live registry and is lazily assembled (its own kernel +
+        namespaced index + per-collection derived store), attaching the shared
+        embedding backend so search works on it too. Concurrent first-routes to
+        the same collection serialize on a per-key lock.
+        """
+        key, path = self.resolve(selector)
+        existing = self._harnesses.get(key)
+        if existing is not None:
+            return existing
+
+        lock = self._assembly_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            # Re-check under the lock: a concurrent route may have assembled it.
+            existing = self._harnesses.get(key)
+            if existing is not None:
+                return existing
+            harness = await self._assemble(key, path)
+            self._harnesses[key] = harness
+            return harness
+
+    async def _assemble(self, key: str, path: str) -> Harness:
+        """Assemble a non-default per-collection harness: its own kernel +
+        namespaced index + per-collection derived store, sharing the base
+        cache dir and the embedding runtime."""
+        logger.info("Routing: assembling collection %r at %s", key, path)
+        # Per-collection derived store path (#547): <cache_dir>/derived/<ns>/shrike.db
+        # — routed through cache_layout (contract #1), never derived from the
+        # raw abspath. The base cache_dir is SHARED (so #67's index namespace
+        # under it is preserved for the single-collection user).
+        derived_path = cache_layout.derived_db_path(self._params.cache_dir, path)
+        Path(derived_path).parent.mkdir(parents=True, exist_ok=True)
+        derived = DerivedTextStore(path=Path(derived_path), engine_factory=NativeDerivedEngine)
+        harness = await Harness.assemble(
+            collection_path=path,
+            cache_dir=self._params.cache_dir,
+            runtime=self._params.runtime,
+            derived=derived,
+            cooperative=self._params.cooperative,
+            hold_seconds=self._params.hold_seconds,
+            media_read=self._params.media_read,
+            media_exists=self._params.media_exists,
+            index_save_delay=self._params.index_save_delay,
+            index_save_threshold=self._params.index_save_threshold,
+            owns_runtime=False,  # the shared runtime is owned by the default harness
+        )
+        # Boot WITHOUT starting embedding (the shared runtime is already
+        # started by the default harness); attach its backend so search works,
+        # then reconcile drift. A routed collection in a cooperative daemon
+        # releases its lock after the idle window like any other.
+        await harness.boot(start_embedding=False)
+        await harness.attach_shared_embedder()
+        return harness
+
+    # -- status + lifecycle ---------------------------------------------------
+
+    def active_keys(self) -> list[str]:
+        """The currently-assembled collection keys (those with a live harness)."""
+        return list(self._harnesses)
+
+    def active_harnesses(self) -> list[Harness]:
+        """Every currently-assembled harness (for teardown / status fan-out)."""
+        return list(self._harnesses.values())
+
+    def get_assembled(self, key: str) -> Harness | None:
+        """The harness for an already-assembled key, or None (no assembly)."""
+        return self._harnesses.get(key)
+
+    @property
+    def default_harness(self) -> Harness:
+        """The daemon's boot collection harness — the operational routes
+        (embedding start/stop, index rebuild/save, recognition) act on it, and
+        it owns the shared embedding runtime."""
+        return self._harnesses[self._default_key]
+
+    async def close(self) -> None:
+        """Tear down every assembled harness (the default last, so it stops the
+        shared runtime after the routed ones have detached)."""
+        for key, harness in list(self._harnesses.items()):
+            if key == self._default_key:
+                continue
+            with contextlib.suppress(Exception):
+                await harness.close()
+        with contextlib.suppress(Exception):
+            await self.default_harness.close()
