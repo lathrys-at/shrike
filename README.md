@@ -12,6 +12,8 @@ Shrike works directly on the collection's SQLite database, without using the Ank
 - an MCP server exposing the same operations to agents
 - semantic search over your notes, with embeddings computed locally
 
+This README covers running Shrike yourself: install the package, point it at your collection, run the daemon. Desktop, mobile, and web apps built on the same core are planned; [docs/distribution.md](docs/distribution.md) is the map of where each is headed.
+
 ## Requirements
 
 - Python 3.12 or newer
@@ -48,51 +50,90 @@ shrike server stop
 
 ## Semantic search
 
-`shrike note search` finds notes by meaning instead of keywords. You supply an embedding model to turn your notes into vectors, and pick a backend to run it. Shrike has three backends, and which one suits you depends mostly on what's on your cards.
+`shrike note search` finds notes by meaning instead of keywords. To turn it on, declare an embedder in your config file (see [Configuration](#configuration) for where the file lives), then start the server as usual. The entry answers two questions: what kinds of content you want searchable, and where the model runs.
 
-### Choosing a backend
+### Text search with a local model
 
-For plain-text cards, which is the common case, the ONNX backend is the simpler choice. It runs inside Shrike, so there's no separate binary to install or process to keep alive, single-card lookups are quick, and a small quantized model keeps memory use low. Reach for this one if you just want related-card search to work.
+The simplest setup runs a small ONNX model inside the Shrike process. There is no separate binary to install or keep alive, single-card updates are quick, and a quantized model keeps memory low enough for small machines; this is the setup for a Raspberry Pi. Put a `model.onnx` and its `tokenizer.json` in a directory ([all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2) has good small exports, including quantized ones a few times smaller than the default), then:
 
-Pick the llama-server backend if you already use llama.cpp or want to run a GGUF or MLX model. Pick the CLIP backend if your cards carry images you want to search by content — it embeds text and images into one shared space, so a text query can surface a card whose meaning lives in its picture. All three can use a GPU; see the ONNX section below for the NVIDIA and Apple paths.
-
-Whichever you pick, search works the same, text-only models are fully supported, and search quality comes from the model you choose rather than the backend.
-
-### ONNX backend
-
-Everything this backend needs ships with the install. Put an ONNX embedding model in a directory: a `model.onnx` file and its `tokenizer.json`. Good small models live in the [all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2) repository, including quantized exports a few times smaller than the default; download the `.onnx` file you want, save it as `model.onnx`, and put `tokenizer.json` beside it.
-
-```bash
-shrike server start --collection ~/path/to/collection.anki2 \
-  --embedding-backend onnx \
-  --embedding-model ~/models/all-MiniLM-L6-v2-onnx
+```yaml
+embedders:
+  - modalities: [text]
+    runtime: onnx
+    model: ~/models/all-MiniLM-L6-v2-onnx
 ```
 
-If you have an NVIDIA GPU, swap the bundled CPU runtime for the GPU build, then add `--embedding-onnx-provider CUDAExecutionProvider`. The two builds can't be installed together, so replace one with the other: `pip uninstall onnxruntime` followed by `pip install onnxruntime-gpu` (the `gpu` extra names the same package if you prefer to pin it through `shrike-mcp[gpu]`). On a Mac the plain install already runs on the Apple GPU. Either way, `shrike server status` shows the provider that actually loaded, so you can confirm the accelerator is in use rather than a quiet fall back to the CPU. A floating-point model (rather than a small quantized one) is what makes a GPU worthwhile, since it can embed cards in larger batches.
+### Searching images too
 
-### llama-server backend
+If your cards carry images worth searching by content, use a CLIP export instead: one model that embeds text and images into the same space, so a query like "diagram of the Krebs cycle" can find a card whose answer is a picture, even when the card's text never says so.
 
-You supply a `llama-server` binary (from llama.cpp) and a GGUF embedding model. Get llama.cpp by building it or installing it from a package manager. Any GGUF embedding model works; a small one like [all-MiniLM-L6-v2](https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF) runs on CPU and is plenty for finding related cards.
-
-```bash
-shrike server start --collection ~/path/to/collection.anki2 \
-  --llama-server ~/llama.cpp/build/bin/llama-server \
-  --embedding-model ~/models/all-MiniLM-L6-v2-Q4_K_M.gguf
+```yaml
+embedders:
+  - modalities: [text, image]
+    runtime: onnx
+    model: ~/models/clip-vit-base-patch32
 ```
 
-If `--llama-server` or `--embedding-model` isn't given on the command line or in your config file, Shrike falls back to `LLAMA_SERVER_PATH` and a `llama-server` on your `PATH` for the binary, and to `SHRIKE_EMBEDDING_MODEL` for the model.
+The model directory holds `text_model.onnx`, `vision_model.onnx`, `tokenizer.json`, and `preprocessor_config.json`; that's the layout of [Xenova/clip-vit-base-patch32](https://huggingface.co/Xenova/clip-vit-base-patch32), and a larger model like jina-clip-v2 searches noticeably better.
 
-### CLIP backend (search images by content)
+### A GGUF model through llama-server
 
-Point `--embedding-model` at a CLIP ONNX export — a directory holding `text_model.onnx`, `vision_model.onnx`, `tokenizer.json`, and `preprocessor_config.json` (the layout of [Xenova/clip-vit-base-patch32](https://huggingface.co/Xenova/clip-vit-base-patch32); a larger model like jina-clip-v2 searches noticeably better). Nothing extra to install:
+If you already use llama.cpp, or the model you want ships as GGUF, declare a remote entry with no endpoint and Shrike runs llama-server for you: spawned at start, stopped with the daemon.
 
-```bash
-shrike server start --collection ~/path/to/collection.anki2 \
-  --embedding-backend clip \
-  --embedding-model ~/models/clip-vit-base-patch32
+```yaml
+embedders:
+  - modalities: [text]
+    runtime: remote
+    model: ~/models/all-MiniLM-L6-v2-Q4_K_M.gguf
+managed:
+  llama_server:
+    manage: auto
+    binary: ~/llama.cpp/build/bin/llama-server   # omit if llama-server is on PATH
 ```
 
-With this backend, a query like "diagram of the Krebs cycle" can find a card whose answer is a picture, even when the card's text never says so. Text-only search still works exactly as on the other backends.
+Last-token models (Jina v5, Qwen3-Embedding) need `pooling: last` on the entry; their GGUF metadata doesn't carry it, and without it the vectors come out wrong. BERT-family models like MiniLM and bge need nothing.
+
+### A llama-server you already run
+
+If another process owns a llama-server, point Shrike at it instead of spawning a second one. Shrike checks it answers and uses it; it never starts, restarts, or stops it.
+
+```yaml
+embedders:
+  - modalities: [text]
+    runtime: remote
+managed:
+  llama_server:
+    manage: attach
+    port: 8373
+```
+
+### A model served somewhere else
+
+Any OpenAI-compatible embeddings endpoint works: a cloud provider, a box on your tailnet. Name the environment variable holding the API key; the key itself never goes in the config file. Keep in mind your note text goes to that endpoint to be embedded, so think before pointing Shrike at a third party.
+
+```yaml
+embedders:
+  - modalities: [text]
+    runtime: remote
+    model: text-embedding-3-small
+    endpoint: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+```
+
+### Using a GPU
+
+For the in-process entries on an NVIDIA GPU, swap the bundled CPU runtime for the GPU build (`pip uninstall onnxruntime`, then `pip install onnxruntime-gpu`; the two can't be installed together) and add `providers: [CUDAExecutionProvider]` to the entry. On a Mac the plain install already runs on the Apple GPU. Either way, `shrike server status` shows the provider that actually loaded, so you can confirm the accelerator is in use rather than a quiet fall back to the CPU. For a managed llama-server, set `gpu_layers:` under `managed.llama_server`. A floating-point model rather than a small quantized one is what makes a GPU worthwhile, since it can embed cards in larger batches.
+
+### Picking a model
+
+Search quality comes from the model, not from where it runs. Text-only models are fully supported everywhere.
+
+| You want | In process (`runtime: onnx`) | Via llama-server (`runtime: remote`) |
+|---|---|---|
+| Text search | [all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2) ONNX export | [all-MiniLM-L6-v2](https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF) GGUF |
+| Text and image search | [clip-vit-base-patch32](https://huggingface.co/Xenova/clip-vit-base-patch32); jina-clip-v2 for better results | not yet; omni models over llama-server are [#501](https://github.com/lathrys-at/shrike/issues/501) |
+
+One embedder entry at a time for now; running a dedicated text model alongside a CLIP model as separate entries is tracked in [#229](https://github.com/lathrys-at/shrike/issues/229), and the config error will tell you exactly that if you try.
 
 ### Reading text inside images (OCR)
 
@@ -262,21 +303,34 @@ Shrike exposes these MCP tools:
 - **fetch_media**: locate media files; returns a download URL per file, never bytes
 - **list_media**: list media filenames, optionally filtered by a glob
 - **delete_media**: move media files to Anki's recoverable trash
-- **collection_check**: read-only media diagnostics — unused files, missing files, broken references
+- **collection_check**: read-only media diagnostics: unused files, missing files, broken references
 - **collection_prune**: clean up unused tags, empty notes, empty cards, and unused media (previews by default)
 
 The machine schema is whatever the running server advertises via `tools/list`. [`docs/mcp-tools.md`](docs/mcp-tools.md) is the human-readable companion.
 
 ## Configuration
 
-Shrike reads settings from a YAML file in the platform config directory: `~/.config/shrike/config.yml` on Linux, `~/Library/Application Support/shrike/config.yml` on macOS. The file is yours to manage; `shrike server start` never writes it on its own. To save the flags you started with so you don't have to repeat them, pass `--save-config` and Shrike writes the resolved settings to the file:
+Shrike reads a YAML file from the platform config directory: `~/.config/shrike/config.yml` on Linux, `~/Library/Application Support/shrike/config.yml` on macOS. The file is yours to manage; `shrike server start` never writes it on its own (pass `--save-config` to persist the operational flags you started with).
 
-```bash
-shrike server start --collection ~/path/to/collection.anki2 \
-  --embedding-model ~/models/all-MiniLM-L6-v2-Q4_K_M.gguf --save-config
+Models and managed processes are declared only in the file. The `embedders:` entries above, a `recognizers:` map (OCR and speech recognition; being reworked, see [#502](https://github.com/lathrys-at/shrike/issues/502)), and `managed:` for processes Shrike runs on your behalf. There is no flag or environment-variable spelling for these; a structured setting wants one home. If the file declares something this build or this release can't serve, the server names what's missing and refuses to start, rather than quietly skipping it.
+
+A complete file looks like this:
+
+```yaml
+collection: ~/Anki/User 1/collection.anki2
+
+embedders:
+  - modalities: [text]
+    runtime: onnx
+    model: ~/models/all-MiniLM-L6-v2-onnx
+
+server:
+  port: 8372
 ```
 
-Most settings also take an environment variable (`SHRIKE_URL`, `SHRIKE_COLLECTION`, `SHRIKE_EMBEDDING_MODEL`, and more) or a command-line flag. Command-line flags take precedence, then environment variables, then the file. [The CLI reference](docs/cli-reference.md) has the full list.
+Operational settings (the collection path, host and port, log level, cache directory) also take command-line flags and environment variables (`SHRIKE_URL`, `SHRIKE_COLLECTION`); flags win, then the environment, then the file. [The CLI reference](docs/cli-reference.md) has the full list.
+
+If you configured embedding before this config shape existed, with the `embedding:` section or the embedding flags: they keep working for one more release and print a pointer to the new shape ([#523](https://github.com/lathrys-at/shrike/issues/523) is the removal).
 
 ## Development
 

@@ -47,24 +47,12 @@ Start the server as a background daemon. The collection path can come from `--co
 | `--index-save-threshold INTEGER` | Unsaved index changes that force an immediate flush (default: 100). |
 | `--cooperative-lock` | Release the collection lock when idle and re-open on demand, so an idle daemon doesn't block launching Anki (opt-in; default holds the lock for the daemon's lifetime). |
 | `--lock-hold-seconds FLOAT` | In cooperative mode, seconds to hold the collection after the last operation before releasing it (default: 5). |
-| `--embedding-backend` | Embedding backend: `llama` (llama-server subprocess, GGUF/MLX), `onnx` (in-process onnxruntime, text-only; needs the `onnx` extra), or `clip` (in-process CLIP for image↔text search; needs the `clip` extra). Default: `llama`. |
-| `--embedding-model PATH` | Path to the embedding model. For the `llama` backend, a GGUF file; for `onnx`, a model directory holding `model.onnx` and `tokenizer.json`. Enables semantic search. |
-| `--embedding-port INTEGER` | Port for the embedding server (default: 8373). `llama` backend only. |
-| `--embedding-context-size INTEGER` | Context size for the embedding model. For `onnx` it sets the token-truncation length (default 256); setting it above the model's own positional limit is on you (Shrike does not clamp it). |
-| `--embedding-threads INTEGER` | CPU threads for embedding inference. `llama` backend only. |
-| `--embedding-gpu-layers INTEGER` | Layers to offload to the GPU. `llama` backend only. |
-| `--embedding-pooling` | Pooling type: `mean`, `last`, `cls`, or `none`. For `llama`, defaults to the model's GGUF setting (set `last` for last-token models like Jina v5 / Qwen3-Embedding, whose metadata omits it); for `onnx`, defaults to `mean` and `none` is not accepted. Changing it forces an index rebuild. |
-| `--embedding-arg TOKENS` | Extra `llama-server` flag passed through verbatim, repeatable and `shlex`-split (e.g. `--embedding-arg='--flash-attn'`). For runtime-only flags; Shrike-owned flags (`--model`/`--host`/`--port`/`--embeddings`) are rejected, and any change forces an index rebuild. Vector-affecting flags belong in typed settings like `--embedding-pooling`. `llama` backend only. |
-| `--embedding-onnx-provider PROVIDER` | onnxruntime execution provider(s), repeatable, in priority order (e.g. `CUDAExecutionProvider`). Default: `CPUExecutionProvider`. `onnx` backend only. |
-| `--embedding-batch-size INTEGER` | Cap the embedding batch size (any backend). Default: batch as large as a startup self-check proves safe. A batch-variant model (e.g. int8 ONNX) is always embedded serially regardless. |
-| `--llama-server PATH` | Path to the `llama-server` binary (default: `LLAMA_SERVER_PATH` or `PATH`). `llama` backend only. |
-| `--no-embedding` | Start without the embedding service even if a model is configured. |
-| `--ocr-backend` | OCR backend for recognizing text in note images. Off by default. `apple` (macOS Vision) is no longer compiled into the server — selecting it reports recognition as unavailable; the replacement is recognition over a configured endpoint ([#502](https://github.com/lathrys-at/shrike/issues/502)). |
-| `--save-config` | Persist the resolved flags to the config file. Without this, `server start` never writes config — it stays under your control and start always reflects the flags you pass. |
+| `--no-embedding` | Start without the embedding service even if one is configured. |
+| `--save-config` | Persist the resolved operational flags to the config file. Without this, `server start` never writes config; it stays under your control and start always reflects the flags you pass. |
 
-The embedding flags above are also accepted by `shrike embedding start`, which cycles the service on an already-running server.
+Embedding models, recognition, and managed processes are declared in the config file, not on the command line: an `embedders:` entry plus, where it applies, a `managed:` section. The [README's semantic search section](../README.md#semantic-search) walks through each shape. The older embedding flags (`--embedding-*`, `--llama-server`, `--ocr-backend`) still exist on `server start` and `embedding start` for one more release; they print a pointer to the config shape, are rejected when the config file declares the new sections, and are removed in [#523](https://github.com/lathrys-at/shrike/issues/523).
 
-`server start` never edits your config file on its own. Pass `--save-config` once to write the flags you started with (collection, ports, embedding model, cache and index tuning) so you can drop them from later commands; without it, the file is yours alone to edit.
+`server start` never edits your config file on its own. Pass `--save-config` once to write the operational flags you started with (collection, ports, cache and index tuning) so you can drop them from later commands; without it, the file is yours alone to edit.
 
 ### `shrike server stop`
 
@@ -610,12 +598,12 @@ Show whether the embedding service is running, its URL, PID, and model.
 
 ### `shrike embedding start`
 
-Start the embedding service on a running server. Accepts the same embedding
-options as `shrike server start` (`--embedding-backend`, `--embedding-model`,
-`--embedding-pooling`, `--embedding-onnx-provider`, `--embedding-batch-size`,
-`--llama-server`, …);
-unspecified ones fall back to the config/env the server booted with. Re-attaches
-the index and rebuilds it if the model changed or the index drifted.
+Start the embedding service on a running server, using whatever the config
+file declares (the daemon resolves its `embedders:`/`managed:` sections). With
+a legacy flag-driven setup it accepts the same deprecated embedding options as
+`shrike server start`, and unspecified ones fall back to what the server
+booted with. Re-attaches the index and rebuilds it if the model changed or the
+index drifted.
 
 ### `shrike embedding stop`
 
