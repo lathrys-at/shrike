@@ -262,13 +262,15 @@ impl AsyncKernel {
             AnyRecognizer::Native(native) => {
                 let adapted: Arc<dyn shrike_kernel::Recognizer> =
                     Arc::new(shrike_engine_api::Blocking(native.engine_arc()));
-                self.inner.attach_recognizer_with(purpose, adapted, resolver);
+                self.inner
+                    .attach_recognizer_with(purpose, adapted, resolver);
             }
             #[cfg(feature = "engine-remote")]
             AnyRecognizer::Describe(describe) => {
                 let adapted: Arc<dyn shrike_kernel::Recognizer> =
                     Arc::new(shrike_engine_api::Blocking(describe.engine_arc()));
-                self.inner.attach_recognizer_with(purpose, adapted, resolver);
+                self.inner
+                    .attach_recognizer_with(purpose, adapted, resolver);
             }
             AnyRecognizer::Captured(captured) => {
                 let handle: Arc<dyn shrike_kernel::Recognizer> = Arc::clone(&captured.handle) as _;

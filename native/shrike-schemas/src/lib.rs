@@ -943,21 +943,35 @@ pub enum LockingMode {
     Cooperative,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RecognitionState {
-    #[default]
     Unavailable,
+    Building,
     Ready,
     Error,
 }
 
+impl Default for RecognitionState {
+    fn default() -> Self {
+        // A present engine row defaults to ready (the harness constructs it
+        // with an explicit state; this is the deserialization default for an
+        // older/partial payload).
+        Self::Ready
+    }
+}
+
+/// One attached recognition engine's self-report (#228/#485). The Rust mirror
+/// of `shrike.schemas.RecognitionEngineStatus`; `ServerStatus.recognition` is
+/// a map of these keyed by source (`ocr`/`vlm`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
-pub struct RecognitionStatus {
+pub struct RecognitionEngineStatus {
     #[serde(default)]
     pub state: RecognitionState,
     #[serde(default)]
     pub backend: Option<String>,
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1017,9 +1031,11 @@ pub struct ServerStatus {
     /// neighbors runs.
     #[serde(default)]
     pub dedup: Option<DedupStats>,
-    /// Recognition (OCR/ASR) state (#228).
+    /// Per-engine recognition state (#228/#485): a map keyed by source
+    /// (`ocr`/`vlm`), each row {state, backend, fingerprint}. An EMPTY map is
+    /// "nothing attached" (distinct from an attached-but-errored engine).
     #[serde(default)]
-    pub recognition: RecognitionStatus,
+    pub recognition: std::collections::BTreeMap<String, RecognitionEngineStatus>,
     /// The modality coverage matrix (#498/#235): per modality, whether a live
     /// embedding space serves it. None on payloads from older servers.
     #[serde(default)]
@@ -1330,7 +1346,7 @@ catalog![
     ("IndexProgress", IndexProgress),
     ("IndexStatus", IndexStatus),
     ("DedupStats", DedupStats),
-    ("RecognitionStatus", RecognitionStatus),
+    ("RecognitionEngineStatus", RecognitionEngineStatus),
     ("DerivedStatus", DerivedStatus),
     ("CollectionStatus", CollectionStatus),
     ("ServerStatus", ServerStatus),

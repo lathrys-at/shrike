@@ -245,10 +245,7 @@ impl RemoteDescriber {
             .ok()
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
-        let info = shrike_describe_remote::ModelInfo {
-            id: model_id,
-            meta,
-        };
+        let info = shrike_describe_remote::ModelInfo { id: model_id, meta };
         Ok(shrike_describe_remote::compose_fingerprint(
             &info,
             configured_model.as_deref(),
