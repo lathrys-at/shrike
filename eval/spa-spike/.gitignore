@@ -1,0 +1,7 @@
+# Trunk build output (target/ is covered by the repo-root .gitignore).
+/dist/
+
+# Tauri generated code/schemas.
+/src-tauri/gen/
+
+# Spike's own resolved lockfile is committed (standalone project); nothing else.

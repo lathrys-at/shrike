@@ -1,0 +1,46 @@
+# SPA stack spike (#506) — STANDALONE, evidence-only.
+#
+# This is deliberately NOT part of native/Cargo.lock: it carries its own
+# [workspace] + Cargo.lock so the wasm frontend's heavy dep graph (leptos,
+# gloo-net, the wasm-bindgen tree, ...) never touches the kernel workspace's
+# resolution or the crate_universe lock. It depends on shrike-schemas by path
+# purely to PROVE the zero-codegen import — that is the whole point of the spike.
+#
+# Two members: the wasm SPA (this crate, a `bin` built by trunk into dist/) and
+# the Tauri v2 shell (src-tauri). The shell serves the pre-built dist/ as its
+# `frontendDist` — it does NOT link this crate, so the two compile independently
+# (the SPA to wasm32, the shell to the host triple).
+
+[workspace]
+members = ["src-tauri"]
+resolver = "2"
+
+[package]
+name = "spa-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0"
+description = "SPA stack spike for #506 — Leptos CSR over the actions-over-HTTP edge."
+
+[dependencies]
+# THE point of the spike: the canonical wire types, imported as a Rust
+# dependency — zero codegen, zero drift. `default-features = false` drops the
+# schemars JsonSchema derive (dead weight in the browser; the client needs
+# only serde de/serialize). NOTE: shrike-schemas does not yet expose that
+# feature split — the ADR records it as the follow-up the real client needs;
+# here we take it whole and let `cargo build --target wasm32` prove the tree
+# compiles regardless.
+shrike-schemas = { path = "../../native/shrike-schemas" }
+
+leptos = { version = "0.8", features = ["csr"] }
+leptos_router = { version = "0.8" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The browser fetch path for the real actions/status edge. Exercised by the
+# compiled-but-unused `live_*` helpers in api.rs so the swap from fixtures to a
+# real daemon is proven to compile (the deserialize target — a shrike-schemas
+# type — does not move). The card iframe is pure Leptos `view!` markup, so it
+# needs no `web-sys` DOM bindings.
+gloo-net = { version = "0.6", features = ["http"] }

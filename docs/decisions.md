@@ -1093,3 +1093,94 @@ were rejected as overlapping Bazel's own hermeticity; an optional `.envrc`
 (direnv sugar that activates the coexistence venv) is the only environment
 nicety, and nothing requires it. See `docs/build-bazel.md` for the
 operational guide.
+
+## The desktop + web SPA stack is Rust-wasm (Leptos) (#506, June 2026)
+
+**The single SPA codebase that serves both the desktop app (a Tauri v2 shell)
+and the browser client is Rust compiled to wasm32, built on Leptos 0.8.x —
+chosen over a TypeScript control (Solid/Svelte) and over the other Rust-wasm
+finalist (Dioxus).** Mobile is explicitly out of scope (it went fully native,
+SwiftUI/Compose, settled 2026-06-12), so Tauri-mobile viability was never a
+criterion; the only consumers are desktop-via-Tauri and the in-browser client,
+both speaking the actions-over-HTTP edge (#505), never MCP. The spike built the
+two evaluation screens — a collection browser (list/search over the actions
+edge, card HTML in a sandboxed frame) and the server status pane (live
+`/status` + the per-space coverage matrix) — and judged the finalists on
+shared-schema ergonomics, iteration DX, bundle size, sandboxed-frame
+integration, Tauri integration, and ecosystem gaps. The skeleton lives in
+`eval/spa-spike/`.
+
+**The decisive factor is the shared schema. The client imports
+`shrike-schemas` as a Rust dependency — zero codegen, zero drift — against a
+24-action catalog whose wire contract is "shrike-schemas verbatim" (#505) and
+still churning.** A TS control pays a type-codegen tax that is real *and*
+permanent, and every concrete generator falls down on the schemas as they
+actually are: `typeshare` is **disqualified** outright — it has no support for
+internally-tagged enums, and the catalog has ~15 such discriminated unions (the
+`status`-tagged result/endpoint families, the schemas.py house style itself);
+`ts-rs` works but is a *second* drift-prone derive bolted onto every wire type,
+maintained in lockstep forever; the schemars-JSON-Schema → TS path
+(`json-schema-to-typescript`) emits **non-discriminated** unions, throwing away
+exactly the tagging the house style exists to preserve; and `tauri-specta` —
+the one path that would close the gap — has been a release-candidate for ~2
+years and is moot anyway over an HTTP edge (it binds Tauri commands, not a wire
+API). Importing the canonical types directly sidesteps all of it: a new action
+or a changed variant is a recompile, not a regenerate-and-reconcile.
+
+**Step zero — does `shrike-schemas` even compile to wasm32 — passed.** `cargo
+build -p shrike-schemas --target wasm32-unknown-unknown` finished clean (6.9s
+cold); the whole tree (serde, serde_json, schemars + derives, itoa, memchr,
+dyn-clone, ref-cast) is wasm-compatible with no fs/net/time/thread/process/FFI
+dependency to gate away. One caveat to act on when the real client is built:
+the wasm client needs only serde de/serialize, so the `schemars` derive (and
+its `JsonSchema` impls) is dead weight in the browser bundle and should be
+feature-gated off there — schemars is no_std-capable, so this is a clean
+`default-features`/feature-flag split, not a fork.
+
+**Leptos over Dioxus is a Tauri-alignment call.** Dioxus 0.7 is diverging from
+Tauri toward its own desktop renderer (Blitz/native), which fights the
+distribution.md boundary directly — desktop is *the same server build inside a
+Tauri v2 shell*, one codebase shipped to both the shell and the browser, never
+a bespoke renderer. Leptos 0.8.x is pure client-side-rendered wasm: it wraps
+cleanly inside a Tauri v2 webview and ships the identical bundle to a plain
+browser tab, so "one SPA, two delivery vehicles" is structural rather than
+maintained. Tauri owns the native integration the spike cares about (tray,
+dialogs, the invisible daemon lifecycle) the same way for any wasm frontend, so
+that axis didn't separate the finalists.
+
+**Accepted costs, recorded honestly — the performance one is concrete.**
+Leptos's ecosystem is thinner than the TS frontier, and the one gap that
+carries a measurable performance risk is **list virtualization**. TS has
+TanStack Virtual; Leptos has no equivalent, so the collection browser will need
+a hand-rolled windowing component to render a large note list — and Shrike
+grounds its performance at a **100k-note collection** (the #445 audit
+baseline), where rendering an un-windowed list to the DOM is the obvious
+client-side bottleneck. This is a known, bounded cost (a windowing component is
+a well-understood widget, not research), but it is the honest price of the
+Rust-wasm choice and it is the (b) leg of the fallback trigger below. The
+headless-primitive libraries (`leptos-use`, the nascent component kits) are
+younger and smaller than Radix / Headless UI, and logic hot-reload is
+wasm-recompile-fast, not Vite-instant (style/markup tweaks are quicker). These
+are deliberate trades for the zero-drift schema win on a contract that will
+keep moving.
+
+**The card frame is the one security-critical surface, and it is
+framework-agnostic.** Anki card HTML is untrusted (templates carry arbitrary
+CSS/JS/MathJax from shared decks), so it renders in an `<iframe sandbox srcdoc>`
+whose sandbox grants `allow-scripts` but **deliberately not**
+`allow-same-origin` — the load-bearing line: with both, the sandbox is defeated
+and card JS shares the host origin; `allow-scripts` alone gives the frame a
+unique opaque origin, so scripts run but cannot script the host. Any
+`postMessage` channel the real client adds (height-fit, link interception)
+treats the inbound `event.origin` as untrusted — a sandboxed opaque-origin
+frame posts with `origin: "null"`, so the host gates on `event.source` being
+that frame's `contentWindow`, never on the payload as a capability. Under Tauri
+v2 the host-page CSP (`security.csp` in `tauri.conf.json`) is the second layer.
+None of this separates the finalists — it is identical under a TS stack.
+
+**The fallback trigger is named, so a future reopen is principled, not a
+re-litigation.** Revisit the stack only if (a) `shrike-schemas` stops compiling
+to wasm32 on an un-gateable transitive non-wasm dependency (step zero would
+flip), or (b) the list-virtualization / component-ecosystem gap proves a
+sustained drag on building the real client rather than a one-time
+hand-rolled-component cost. Neither holds today.
