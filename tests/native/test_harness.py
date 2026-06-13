@@ -682,6 +682,131 @@ class TestDescribeAttach:
 
         asyncio.run(flow())
 
+    def test_describe_vector_only_through_the_search_notes_action(self, tmp_path) -> None:
+        # #485 PR1 (follow-up A): the VectorOnly invariant proven at the actual
+        # `search_notes` MCP ACTION path real clients hit — not just the kernel
+        # search. A literal phrase living ONLY in the describe prose returns the
+        # note (if at all) WITHOUT a `substring` annotation or an `exact`/`fuzzy`
+        # provenance signal; the OCR visible text DOES carry the `substring`
+        # annotation + `exact` signal. This closes the surface-level gap: the
+        # action threads `hidden_lexical_sources` into the native search, so a
+        # describe-source row can never surface a lexical hit to a client.
+        import hashlib
+        from types import SimpleNamespace
+
+        from mcp.server.fastmcp import FastMCP
+
+        from shrike.harness import KernelIndexView
+        from shrike.tools import register_tools
+
+        class _TokenHash:
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                out = []
+                for t in texts:
+                    v = [0.0] * 64
+                    for tok in t.lower().split():
+                        h = int(hashlib.blake2b(tok.encode(), digest_size=2).hexdigest(), 16)
+                        v[h % 64] += 1.0
+                    n = sum(x * x for x in v) ** 0.5 or 1.0
+                    out.append([x / n for x in v])
+                return out
+
+            def model_fingerprint(self) -> str:
+                return "tok:v1"
+
+            def embedding_dim(self) -> int:
+                return 64
+
+        describe_prose = "a photograph of a sunlit mountain valley with grazing cattle at dawn"
+
+        async def flow():
+            media = {"photo.png": b"figure 7 chlorophyll absorption spectrum"}
+            runtime = EmbeddingRuntime(model=None)
+            derived = DerivedTextStore(
+                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
+            )
+            harness = await Harness.assemble(
+                collection_path=str(tmp_path / "collection.anki2"),
+                cache_dir=str(tmp_path / "cache"),
+                runtime=runtime,
+                derived=derived,
+                cooperative=False,
+                hold_seconds=5.0,
+                media_read=media.get,
+                media_exists=lambda name: name in media,
+            )
+            await harness.boot(start_embedding=False)
+            backend = _TokenHash()
+            harness.kernel.attach_embedder(shrike_native.PyEmbedder.capture(backend))
+            await harness.kernel.reindex_if_needed()
+
+            notes = await harness.wrapper.upsert_notes(
+                [
+                    {
+                        "note_type": "Basic",
+                        "deck": "Default",
+                        "fields": {"Front": 'zzz qqq <img src="photo.png">', "Back": "b"},
+                    }
+                ]
+            )
+            photo_id = notes[0]["id"]
+
+            harness.attach_recognizer(_StubOcr2("figure 7 chlorophyll absorption spectrum"), "ocr")
+            harness.attach_recognizer(_StubDescribe(describe_prose), "vlm")
+            report = await harness.recognition_sweep(batch_size=4)
+            assert report["total_stored"] == 2, report
+
+            # Register the REAL MCP action registry against the harness's
+            # surfaces (the search-facing KernelIndexView embeds queries with the
+            # same backend, like the server wires it), then drive search_notes —
+            # the exact path a client's tools/call reaches.
+            view = KernelIndexView(harness.kernel, SimpleNamespace(backend=backend))  # type: ignore[arg-type]
+            mcp = FastMCP("test")
+            register_tools(
+                mcp, harness.wrapper, index=view, kernel=harness.kernel, derived=harness.derived
+            )
+
+            async def search(q: str) -> list[dict]:
+                _, structured = await mcp.call_tool("search_notes", {"queries": [q]})
+                groups = structured["results"]
+                # One query → at most one group; flatten its matches.
+                return groups[0]["matches"] if groups else []
+
+            # (1) A query that is a VERBATIM literal substring of the describe
+            # prose AND a strong token overlap — so it surfaces the note via the
+            # describe `text` vector (a non-vacuous guard: the note IS present),
+            # yet must carry NO `substring` annotation and NO `exact`/`fuzzy`
+            # provenance signal through the action. If hidden_lexical_sources
+            # weren't threaded into the native search, this exact-substring query
+            # would mint an `exact` signal off the describe row — it must not.
+            desc_matches = await search("sunlit mountain valley with grazing cattle at dawn")
+            desc_hit = next((m for m in desc_matches if m["id"] == photo_id), None)
+            assert desc_hit is not None, "the describe vector surfaces the note via text"
+            desc_signals = {p["signal"] for p in desc_hit.get("provenance", [])}
+            assert "text" in desc_signals, f"reachable only via the vector: {desc_signals}"
+            assert desc_hit.get("substring") is None, (
+                f"describe prose leaked a substring annotation: {desc_hit.get('substring')}"
+            )
+            assert not (desc_signals & {"exact", "fuzzy"}), (
+                f"describe prose leaked a lexical signal through search_notes: {desc_signals}"
+            )
+
+            # (2) The OCR visible text: the note IS returned with a substring
+            # annotation + an exact provenance signal (byte-identical routing).
+            ocr_matches = await search("chlorophyll absorption spectrum")
+            ocr_hit = next((m for m in ocr_matches if m["id"] == photo_id), None)
+            assert ocr_hit is not None, "OCR text searchable through search_notes"
+            assert ocr_hit.get("substring") is not None, "OCR carries the substring annotation"
+            assert "exact" in {p["signal"] for p in ocr_hit.get("provenance", [])}, (
+                "OCR carries the exact provenance signal"
+            )
+
+            harness.detach_recognizer("vlm")
+            harness.detach_recognizer("ocr")
+            await harness.close()
+
+        asyncio.run(flow())
+
 
 class _StubOcr2:
     """A captured OCR recognizer over canned visible text (the wire contract).
