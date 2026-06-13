@@ -342,11 +342,11 @@ mod tests {
         dir
     }
 
-    fn open_set(dir: &PathBuf) -> Arc<IndexSet> {
+    fn open_set(dir: &std::path::Path) -> Arc<IndexSet> {
         let engine: Arc<dyn VectorIndex> =
             Arc::new(MultiModalIndex::new(vec!["text".to_string(), "image".to_string()]).unwrap());
         IndexSet::open(
-            dir.clone(),
+            dir.to_path_buf(),
             None,
             engine,
             vec!["text".to_string(), "image".to_string()],

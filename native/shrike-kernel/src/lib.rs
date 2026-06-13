@@ -659,13 +659,8 @@ impl Kernel {
         // (#232) — recompute against its engine, request its saver (tag.text
         // lives only in the primary; never fanned out).
         let tag_engine = self.index_set.tag_engine();
-        let built = tag_centroids::recompute(
-            &*tag_engine,
-            &rows,
-            total,
-            &self.tag_config,
-            &self.tag_keys,
-        )?;
+        let built =
+            tag_centroids::recompute(&*tag_engine, &rows, total, &self.tag_config, &self.tag_keys)?;
         self.index_set.primary_saver().request_save();
         Ok(built)
     }
