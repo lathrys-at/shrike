@@ -108,7 +108,10 @@ _EMBEDDING = [
     "test_embedding_remote.py",
 ]
 
-_ACTIONS = ["test_actions_registry.py"]
+_ACTIONS = [
+    "test_actions_registry.py",
+    "test_list_profiles.py",
+]
 
 # test_collection_busy reaches through mcp_adapter (the busy → _safe_tool
 # normalization); test_recognition rides here rather than alone because on the
@@ -247,6 +250,7 @@ pytest_test(
     deps = [
         ":conftest",
         "//src/shrike:actions",
+        "//src/shrike:registry",  # test_list_profiles builds a Registry snapshot directly
     ],
 )
 

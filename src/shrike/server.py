@@ -1070,6 +1070,22 @@ def main() -> None:
                 "(remote/proxied exposure); store_media server-local paths stay disabled"
             )
 
+    # The collection/profile registry (#66): a read-only snapshot for the
+    # `list_profiles` enumeration action. Loaded from the server's config file
+    # (the explicit --config, or the platform default), best-effort — a missing
+    # or unreadable config yields an empty registry, never a boot failure. The
+    # registry is host-side config; the server operates on --collection today,
+    # and routing by selector is the capstone (#68).
+    from shrike.cli.config import DEFAULT_CONFIG_PATH, load_config
+    from shrike.registry import Registry
+
+    profile_registry: Registry | None = None
+    try:
+        registry_config_path = Path(args.config) if args.config else DEFAULT_CONFIG_PATH
+        profile_registry = Registry.from_config(load_config(registry_config_path))
+    except Exception:  # noqa: BLE001 — enumeration is a convenience, never gates boot
+        logger.debug("profile registry unavailable; list_profiles will report empty")
+
     async def _serve() -> None:
         # Assembly runs ON the loop (#332 S3d-2): the kernel opens with a
         # dedicated harness thread driving its executor; the wrapper rides the
@@ -1135,6 +1151,7 @@ def main() -> None:
             allow_private_fetch=allow_private_media_fetch,
             server_path_roots=server_path_roots,
             media_base_url=media_base_url,
+            registry=profile_registry,
         )
         # The uvicorn Server is created after route registration, so the
         # /shutdown route reaches it through this late-bound holder (#344).

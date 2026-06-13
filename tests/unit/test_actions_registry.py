@@ -2,7 +2,7 @@
 
 The behavioural gate is the tools-layer unit files + the integration suite
 passing unmodified through ``register_tools`` (they do); this pins the registry
-itself — the 24-action surface, name stability, and the translation-ready
+itself — the 25-action surface, name stability, and the translation-ready
 contract (async impls with response-model return annotations, docs present).
 """
 
@@ -14,6 +14,7 @@ from shrike.actions import ActionContext, build_actions
 
 EXPECTED_ACTIONS = {
     "collection_info",
+    "list_profiles",
     "list_notes",
     "search_notes",
     "collection_query",
@@ -43,7 +44,7 @@ EXPECTED_ACTIONS = {
 def test_registry_carries_the_full_tool_surface(kharness) -> None:
     actions = build_actions(ActionContext(wrapper=kharness.wrapper, kernel=kharness.kernel))
     assert {a.name for a in actions} == EXPECTED_ACTIONS
-    assert len(actions) == 24
+    assert len(actions) == 25
 
 
 def test_actions_are_translation_ready(kharness) -> None:

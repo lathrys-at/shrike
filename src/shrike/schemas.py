@@ -1195,3 +1195,33 @@ class ActionErrorCode(StrEnum):
 class ActionError(BaseModel):
     code: ActionErrorCode
     message: str
+
+
+# -- the collection/profile registry enumeration (#66) -----------------------
+# `list_profiles` lets an agent discover which collections this server knows
+# about (by friendly name) and which one is the active default — the read half
+# of the multi-collection surface. Selection-as-routing (a per-call `collection`
+# selector) is the routing capstone (#68); this action only enumerates. These
+# are host-side config shapes (like ServerStatus), not kernel wire types, so
+# they live here and not in shrike-schemas — the kernel never produces them.
+class ProfileEntry(BaseModel):
+    """One registered collection profile: a friendly ``name`` and its
+    collection ``path``. ``is_default`` marks the active default — the profile
+    the per-call selector resolves to when no selector is passed.
+
+    Per-profile embedding/cache overrides exist in the registry (config) but
+    are deliberately not surfaced here: they're consumed by routing (#68) /
+    namespacing (#67), not actionable through enumeration."""
+
+    name: str
+    path: str
+    is_default: bool = False
+
+
+class ListProfilesResponse(BaseModel):
+    """The registry enumeration: the registered profiles and the active-default
+    name (``None`` when none is set — e.g. after the default was removed among
+    several profiles)."""
+
+    profiles: list[ProfileEntry] = Field(default_factory=list)
+    default: str | None = None

@@ -95,6 +95,31 @@ Requesting `include: ["all"]` (or specific sections) adds them:
 
 ---
 
+## `list_profiles`
+
+List the collection profiles the server knows about. A profile maps a friendly name to a collection (`.anki2`) path; the registry is Shrike's superset of Anki's profiles, so any collection path can be registered, not only ones under Anki's base directory.
+
+Returns the registered profiles and which one is the active default. This is read-only and does not change which collection the server is operating on — selecting a collection per call is a separate capability.
+
+### Parameters
+
+None.
+
+### Response
+
+```jsonc
+{
+  "profiles": [
+    { "name": "work", "path": "/decks/work.anki2", "is_default": false },
+    { "name": "home", "path": "/decks/home.anki2", "is_default": true }
+  ],
+  // the active-default profile name, or null when none is set
+  "default": "home"
+}
+```
+
+---
+
 ## `list_notes`
 
 Retrieve notes by structured filters: deck, tags, note type, note IDs, or modification date. Use this for precise lookups: fetching specific notes by ID, listing everything in a deck, or finding notes matching exact criteria. For conceptual or fuzzy queries ("cards about mitochondrial membrane potential"), use `search_notes` instead.

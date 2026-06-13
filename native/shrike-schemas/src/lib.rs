@@ -1029,6 +1029,29 @@ pub struct ReloadResponse {
     pub rebuilding: bool,
 }
 
+/// One registered collection profile (#66). The registry name is a friendly
+/// handle only — index identity keys on the collection file path, never the
+/// name. `is_default` marks the active default (the profile the per-call
+/// selector resolves to when none is passed).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ProfileEntry {
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+/// The collection/profile registry enumeration (#66): the registered profiles
+/// and the active-default name (`None` when none is set). Read-only — selection
+/// as routing is the capstone (#68).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ListProfilesResponse {
+    #[serde(default)]
+    pub profiles: Vec<ProfileEntry>,
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
 /// Discriminated on the bool `stopped` (string tags only in serde, so this is
 /// an untagged union whose variants self-select via the literal-bool types).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1227,6 +1250,8 @@ catalog![
     ("ReloadResponse", ReloadResponse),
     ("StopResponse", StopResponse),
     ("ActionError", ActionError),
+    ("ProfileEntry", ProfileEntry),
+    ("ListProfilesResponse", ListProfilesResponse),
 ];
 
 #[cfg(test)]

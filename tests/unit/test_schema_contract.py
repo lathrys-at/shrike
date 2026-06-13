@@ -415,6 +415,19 @@ ROUNDTRIP_CASES: list[tuple[str, dict]] = [
     ("ActionError", {"code": "collection_busy", "message": "in use"}),
     ("ActionError", {"code": "unknown_action", "message": "no such action"}),
     ("ActionError", {"code": "internal_error", "message": "the server failed"}),
+    # The collection/profile registry enumeration (#66).
+    ("ProfileEntry", {"name": "work", "path": "/decks/work.anki2", "is_default": True}),
+    (
+        "ListProfilesResponse",
+        {
+            "profiles": [
+                {"name": "work", "path": "/w.anki2", "is_default": False},
+                {"name": "home", "path": "/h.anki2", "is_default": True},
+            ],
+            "default": "home",
+        },
+    ),
+    ("ListProfilesResponse", {"profiles": [], "default": None}),
 ]
 
 

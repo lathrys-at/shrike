@@ -51,9 +51,11 @@ from shrike.schemas import (
     FindReplaceResponse,
     ListMediaResponse,
     ListNotesResponse,
+    ListProfilesResponse,
     MigrateNoteTypeResponse,
     NoteInput,
     NoteTypeInput,
+    ProfileEntry,
     RenameTagResponse,
     SearchResponse,
     SearchResultGroup,
@@ -154,6 +156,11 @@ class ActionContext:
     allow_private_fetch: bool = False
     server_path_roots: list[str] | None = None
     media_base_url: str | None = None
+    # The collection/profile registry (#66) — a Registry snapshot for the
+    # read-only `list_profiles` enumeration. None disables the action's data
+    # (an empty registry) without removing the action. Selection-as-routing is
+    # the capstone (#68); this carries only what enumeration needs.
+    registry: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -171,7 +178,7 @@ class ActionDef:
 
 
 def build_actions(ctx: ActionContext) -> list[ActionDef]:
-    """Build the full action registry against one context (24 actions)."""
+    """Build the full action registry against one context (25 actions)."""
     from urllib.parse import quote
 
     if ctx.kernel is None:
@@ -193,6 +200,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
     allow_private_fetch = ctx.allow_private_fetch
     server_path_roots = ctx.server_path_roots
     media_base_url = ctx.media_base_url
+    registry = ctx.registry
 
     actions: list[ActionDef] = []
 
@@ -261,6 +269,32 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             lambda c: shrike_native.action_collection_info(c, include_list, note_type_details)
         )
         return CollectionInfo.model_validate_json(raw)
+
+    @_action
+    async def list_profiles() -> ListProfilesResponse:
+        """List the collection profiles this server knows about.
+
+        Returns the registered profiles (each a friendly `name` and its
+        collection `path`) and which one is the active default. The registry is
+        a superset of Anki's profiles — any collection path can be registered,
+        not only ones under Anki's base directory.
+
+        Use this to discover what collections exist by name. This is read-only
+        and does not change which collection the server is operating on —
+        selecting a collection per call is a separate capability."""
+        # Host-side enumeration: no collection/kernel involvement. The registry
+        # snapshot was loaded from config at assembly; an absent one (None)
+        # reports an empty registry rather than erroring.
+        entries = list(registry.profiles) if registry is not None else []
+        default = registry.default if registry is not None else None
+        note_outcome(f"{len(entries)} profile(s)")
+        return ListProfilesResponse(
+            profiles=[
+                ProfileEntry(name=p.name, path=p.path, is_default=(p.name == default))
+                for p in entries
+            ],
+            default=default,
+        )
 
     @_action
     async def list_notes(
