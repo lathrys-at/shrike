@@ -22,6 +22,7 @@ from typing import Any
 
 import shrike_native
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.tools.base import Tool
 
 from shrike.actions import ActionDef, ToolInputError, _call_outcome
 from shrike.collection import CollectionBusyError
@@ -141,3 +142,19 @@ def register_actions(mcp: FastMCP, actions: list[ActionDef]) -> None:
     ``mcp.tool()`` over the ``_safe_tool``-wrapped impl)."""
     for action in actions:
         mcp.tool()(_safe_tool(action.impl))
+
+
+def build_action_tools(actions: list[ActionDef]) -> dict[str, Tool]:
+    """Build a ``name -> Tool`` map for the actions-over-HTTP edge (#505).
+
+    Strict parity by construction: each ``Tool`` is built from the *exact same*
+    ``_safe_tool``-wrapped impl that :func:`register_actions` binds to MCP
+    (``mcp.tool()`` calls ``Tool.from_function`` on the same wrapped callable).
+    So the UI edge inherits the identical ``arg_model`` (func_metadata's
+    JSON→typed coercion + ``pre_parse_json``), the same ``_safe_tool`` error
+    policy + one-INFO-line logging, and the same ``output_model`` — the
+    structured payload it serializes is byte-identical to the ``structuredContent``
+    the MCP path emits, minus the JSON-RPC envelope. MCP is the agent edge;
+    these tools are the UI edge; same catalog, two adapters.
+    """
+    return {action.name: Tool.from_function(_safe_tool(action.impl)) for action in actions}

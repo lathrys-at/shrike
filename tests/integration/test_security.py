@@ -34,6 +34,7 @@ _CUSTOM_ROUTES = [
     ("POST", "/embedding/start"),
     ("POST", "/embedding/stop"),
     ("POST", "/reload"),
+    ("POST", "/actions/collection_info"),  # the actions-over-HTTP edge (#505)
 ]
 
 
@@ -108,10 +109,13 @@ class TestOriginAndMethodEdges:
         resp = httpx.get(f"{_base_url(server)}/status", timeout=5.0)
         assert resp.status_code == 200
 
-    @pytest.mark.parametrize("path", ["/shutdown", "/index/rebuild", "/reload"])
+    @pytest.mark.parametrize(
+        "path", ["/shutdown", "/index/rebuild", "/reload", "/actions/collection_info"]
+    )
     def test_get_on_post_only_route_is_405(self, server: ServerInfo, path: str) -> None:
-        # Destructive routes are POST-only, so `<img src=.../shutdown>` can't fire
-        # them (a GET is 405, before any guard/handler).
+        # POST-only routes can't be fired by a no-preflight GET (`<img src=...>`):
+        # a GET is 405, before any guard/handler. The /actions/* family is POST-
+        # only too, so a write action can never ride a cross-origin <img>/<form>.
         resp = httpx.get(f"{_base_url(server)}{path}", timeout=5.0)
         assert resp.status_code == 405
         assert httpx.get(f"{_base_url(server)}/status", timeout=5.0).status_code == 200
@@ -166,6 +170,84 @@ class TestEmbeddingStartInputRobustness:
         )
         assert resp.status_code == 400, resp.text  # no model configured, handled cleanly
         assert httpx.get(f"{_base_url(server)}/status", timeout=5.0).status_code == 200
+
+
+class TestActionsErrorEnvelope:
+    """The actions-over-HTTP edge (#505) returns ONE error envelope, and it must
+    not leak server internals on any error code. The envelope is
+    `{"code": <taxonomy>, "message": <non-leaking>}`; the security-critical case
+    is the 500, whose message is FIXED — the real exception + traceback go only
+    to the log (via `_safe_tool`'s `logger.exception`), never to the wire."""
+
+    def _post(self, server: ServerInfo, name: str, body: dict | None = None) -> httpx.Response:
+        return httpx.post(
+            f"{_base_url(server)}/actions/{name}",
+            json=body if body is not None else {},
+            timeout=10.0,
+        )
+
+    def test_unknown_action_is_404(self, server: ServerInfo) -> None:
+        resp = self._post(server, "no_such_action")
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body == {"code": "unknown_action", "message": body["message"]}
+        # The name is echoed (it's the caller's, not a server internal).
+        assert "no_such_action" in body["message"]
+
+    def test_input_error_is_400(self, server: ServerInfo) -> None:
+        # list_notes with no filter raises ToolInputError → 400 input_error.
+        resp = self._post(server, "list_notes", {})
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["code"] == "input_error"
+        assert "filter" in body["message"].lower()
+
+    def test_out_of_range_arg_is_400_input_error(self, server: ServerInfo) -> None:
+        # A bound the MCP tool's arg_model enforces (limit <= 200) must NOT be
+        # bypassable on the UI edge: the same validation runs, surfacing a 400.
+        resp = self._post(server, "list_notes", {"deck": "Default", "limit": 9999})
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "input_error"
+
+    def test_malformed_body_is_400_not_500(self, server: ServerInfo) -> None:
+        resp = httpx.post(
+            f"{_base_url(server)}/actions/collection_info",
+            content="this is not json",
+            headers={"Content-Type": "application/json"},
+            timeout=10.0,
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "input_error"
+
+    def test_non_object_body_is_400(self, server: ServerInfo) -> None:
+        resp = httpx.post(
+            f"{_base_url(server)}/actions/collection_info",
+            content="[1, 2, 3]",
+            headers={"Content-Type": "application/json"},
+            timeout=10.0,
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "input_error"
+
+    @pytest.mark.parametrize(
+        ("name", "body"),
+        [
+            ("no_such_action", {}),  # 404
+            ("list_notes", {}),  # 400 input_error
+            ("list_notes", {"deck": "Default", "limit": 9999}),  # 400 validation
+        ],
+    )
+    def test_error_bodies_never_leak_internals(
+        self, server: ServerInfo, name: str, body: dict
+    ) -> None:
+        # No filesystem path, stack frame, or module internal in ANY error body.
+        resp = self._post(server, name, body)
+        assert resp.status_code in (400, 404, 409, 500)
+        payload = resp.json()
+        assert set(payload.keys()) == {"code", "message"}
+        text = payload["message"]
+        for leak in ("Traceback", "/Users/", "/home/", "site-packages", 'File "'):
+            assert leak not in text, f"error message leaked {leak!r}: {text!r}"
 
 
 class TestNonLoopbackGuard:

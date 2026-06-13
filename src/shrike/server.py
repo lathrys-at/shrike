@@ -17,10 +17,12 @@ from typing import Any
 
 import shrike_native
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.tools.base import Tool
 from mcp.server.transport_security import (
     TransportSecurityMiddleware,
     TransportSecuritySettings,
 )
+from pydantic import ValidationError
 
 from shrike._mcp_perf import install_validator_cache
 from shrike.collection import DEFAULT_LOCK_HOLD
@@ -39,14 +41,21 @@ from shrike.harness import Harness, KernelConfigError
 # unchanged.
 from shrike.log import configure_logging
 from shrike.paths import cache_dir, state_dir
-from shrike.schemas import WIRE_PROTOCOL_VERSION
-from shrike.tools import register_tools
+from shrike.schemas import WIRE_PROTOCOL_VERSION, ActionError, ActionErrorCode
+from shrike.tools import ToolInputError, register_tools
 
 # The kernel saver's built-in flush tuning (#355): the --index-save-* help
 # names the defaults the flags would override. Sourced from the kernel, not
 # the retired Python facade.
 DEFAULT_SAVE_DELAY = float(shrike_native.INDEX_SAVE_DELAY_DEFAULT)
 DEFAULT_SAVE_THRESHOLD = int(shrike_native.INDEX_SAVE_THRESHOLD_DEFAULT)
+
+# The actions-over-HTTP wire-version header (#505/#392). Every /actions/*
+# response echoes the server's WIRE_PROTOCOL_VERSION; a request may carry the
+# same header to assert it speaks the same fabric (a mismatch is refused, the
+# minimum handshake a separately-shipped client needs). /status already reports
+# the version in its body — this is the per-call header form.
+WIRE_VERSION_HEADER = "X-Shrike-Wire-Version"
 
 logger = logging.getLogger("shrike.server")
 
@@ -241,6 +250,7 @@ def _register_custom_routes(
     meta: dict[str, Any],
     security: TransportSecuritySettings | None,
     request_shutdown: Callable[[], None],
+    action_tools: dict[str, Tool] | None = None,
 ) -> None:
     """Register custom HTTP endpoints on the server.
 
@@ -252,12 +262,19 @@ def _register_custom_routes(
     operational verbs live on the kernel-mode Harness and await natively; only
     what is genuinely host-specific stays here (the guard, uptime/pid/url
     assembly, the media FileResponse, process exit).
+
+    ``action_tools`` (the ``name -> Tool`` map from :func:`register_tools`) backs
+    the actions-over-HTTP edge (#505): a single ``POST /actions/{name}`` route,
+    behind the same ``_guard``, runs each named action through the *same*
+    ``_safe_tool``-wrapped impl the MCP tools bind — the UI edge of the one
+    catalog. When None (a future host that wants only the operational routes) the
+    actions route isn't registered.
     """
     wrapper = harness.wrapper
     from starlette.requests import Request
     from starlette.responses import FileResponse, JSONResponse, Response
 
-    from shrike.collection import _safe_media_name
+    from shrike.collection import CollectionBusyError, _safe_media_name
 
     security_mw = TransportSecurityMiddleware(security)
 
@@ -285,8 +302,17 @@ def _register_custom_routes(
             response = await handler(request)
             elapsed_ms = (time.perf_counter() - started) * 1000
             # Every served route logs at INFO — including /status polls: knowing
-            # what the server did (and how long it took) is the point.
-            logger.info(
+            # what the server did (and how long it took) is the point. The one
+            # exception is the actions edge (#505): when an action reaches its
+            # impl, the _safe_tool wrapper ALREADY emits the canonical
+            # one-INFO-line-per-call (tool name + params + outcome + duration),
+            # so the transport line here would be a SECOND INFO line for the
+            # same call. Demote it to DEBUG for /actions/* (the handler logs its
+            # own INFO line for the early-return errors that never reach a tool,
+            # so the "one INFO line per served call" rule holds either way).
+            level = logging.DEBUG if path.startswith("/actions/") else logging.INFO
+            logger.log(
+                level,
                 "%s %s -> %d (%.0fms)",
                 request.method,
                 path,
@@ -406,6 +432,124 @@ def _register_custom_routes(
     @_guard
     async def handle_reload(request: Request) -> JSONResponse:
         return JSONResponse(await harness.reload())
+
+    # --- actions-over-HTTP: the UI edge of the action catalog (#505) ----------
+    # POST /actions/{name}: typed JSON request -> typed JSON response over the
+    # SAME named ops the MCP tools bind, served through the SAME _safe_tool path
+    # (so error policy + INFO logging + arg coercion are identical), behind the
+    # SAME Host/Origin guard. MCP stays the agent edge; this is the UI edge. The
+    # body it returns is the structured content the MCP path emits, minus the
+    # JSON-RPC envelope. The loopback daemon stays unauthenticated — auth is the
+    # relay/proxy edge (#52), never here.
+    def _wire_headers() -> dict[str, str]:
+        return {WIRE_VERSION_HEADER: str(WIRE_PROTOCOL_VERSION)}
+
+    def _action_error(code: ActionErrorCode, message: str, status: int) -> JSONResponse:
+        body = ActionError(code=code, message=message).model_dump(mode="json", by_alias=True)
+        return JSONResponse(body, status_code=status, headers=_wire_headers())
+
+    if action_tools is not None:
+
+        @app.custom_route("/actions/{name}", methods=["POST"])
+        @_guard
+        async def handle_action(request: Request) -> JSONResponse:
+            name = request.path_params.get("name", "")
+
+            # #392 handshake: an optional request wire-version header must match
+            # the server's. A mismatch is refused before the op runs — the
+            # minimum a separately-shipped client needs to fail fast on a fabric
+            # skew. Absent header = no assertion (today's CLI/programmatic use).
+            requested = request.headers.get(WIRE_VERSION_HEADER)
+            if requested is not None and requested.strip() != str(WIRE_PROTOCOL_VERSION):
+                # The handler owns the one INFO line for the early-return errors
+                # that never reach _safe_tool (the route line in _guard is DEBUG
+                # for /actions/*).
+                logger.info("action %s rejected: wire version %r", name, requested)
+                return _action_error(
+                    ActionErrorCode.INPUT_ERROR,
+                    f"Unsupported wire protocol version {requested!r}; "
+                    f"this server speaks {WIRE_PROTOCOL_VERSION}.",
+                    400,
+                )
+
+            tool = action_tools.get(name)
+            if tool is None:
+                logger.info("action %s -> unknown_action (404)", name)
+                return _action_error(
+                    ActionErrorCode.UNKNOWN_ACTION,
+                    f"No action named {name!r}.",
+                    404,
+                )
+
+            # The request body is the tool's arguments object (a JSON object, or
+            # absent for a no-arg call). A malformed/non-object body is a caller
+            # mistake → input_error, not a 500.
+            arguments: dict[str, Any] = {}
+            if await request.body():
+                try:
+                    parsed = await request.json()
+                except Exception:
+                    logger.info("action %s rejected: malformed JSON body", name)
+                    return _action_error(
+                        ActionErrorCode.INPUT_ERROR,
+                        "Request body must be a JSON object of the action's arguments.",
+                        400,
+                    )
+                if not isinstance(parsed, dict):
+                    logger.info("action %s rejected: body is not a JSON object", name)
+                    return _action_error(
+                        ActionErrorCode.INPUT_ERROR,
+                        "Request body must be a JSON object of the action's arguments.",
+                        400,
+                    )
+                arguments = parsed
+
+            try:
+                # The same path the MCP tool runs: func_metadata validates +
+                # coerces the args against the action's typed signature, then
+                # the _safe_tool-wrapped impl runs (its error policy + the one
+                # INFO completion line included). convert_result=False returns
+                # the raw response model, which we serialize exactly as MCP's
+                # structuredContent does (output_model.model_dump by_alias).
+                result = await tool.run(arguments, convert_result=False)
+            except Exception as exc:
+                # Tool.run wraps every failure in ToolError, preserving the
+                # original as __cause__; argument-validation failures (a bad or
+                # out-of-range arg) surface as a pydantic ValidationError raised
+                # before the impl runs, so they aren't a _safe_tool-mapped type.
+                cause = exc.__cause__ if exc.__cause__ is not None else exc
+                if isinstance(cause, ToolInputError):
+                    return _action_error(ActionErrorCode.INPUT_ERROR, str(cause), 400)
+                if isinstance(cause, CollectionBusyError | shrike_native.NativeBusyError):
+                    # The op never ran (contention) — the caller may retry.
+                    return _action_error(
+                        ActionErrorCode.COLLECTION_BUSY,
+                        "The collection is in use by another process; retry shortly.",
+                        409,
+                    )
+                if isinstance(cause, ValidationError):
+                    return _action_error(ActionErrorCode.INPUT_ERROR, str(cause), 400)
+                # A genuine bug: _safe_tool already logged it with a traceback
+                # (or, for a validation-stage failure, log it here). The wire
+                # body carries a FIXED, non-leaking message — never the detail.
+                logger.exception("Unhandled error serving action %r", name)
+                return _action_error(
+                    ActionErrorCode.INTERNAL_ERROR,
+                    "The server failed to process this action.",
+                    500,
+                )
+
+            # Serialize exactly as MCP's structuredContent (FuncMetadata.
+            # convert_result): validate the response model, dump json+by_alias.
+            # wrap_output is False for every action (each returns a BaseModel),
+            # but honor it for completeness so this stays a faithful mirror.
+            meta_md = tool.fn_metadata
+            payload = {"result": result} if meta_md.wrap_output else result
+            assert meta_md.output_model is not None  # every action has a response model
+            structured = meta_md.output_model.model_validate(payload).model_dump(
+                mode="json", by_alias=True
+            )
+            return JSONResponse(structured, headers=_wire_headers())
 
     @app.custom_route("/shutdown", methods=["POST"])
     @_guard
@@ -979,7 +1123,9 @@ def main() -> None:
         signal.signal(signal.SIGTERM, _signal_shutdown)
         signal.signal(signal.SIGINT, _signal_shutdown)
 
-        register_tools(
+        # register_tools binds the action registry to MCP and returns the same
+        # actions as a name->Tool map for the actions-over-HTTP edge (#505).
+        action_tools = register_tools(
             mcp,
             harness.wrapper,
             index=harness.index_view,
@@ -1005,6 +1151,7 @@ def main() -> None:
             meta=server_meta,
             security=transport_security,
             request_shutdown=_request_shutdown,
+            action_tools=action_tools,
         )
 
         logger.info(

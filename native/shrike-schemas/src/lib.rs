@@ -1049,6 +1049,52 @@ pub enum StopResponse {
 }
 
 // ============================================================================
+// The action exchange error envelope (#505)
+// ============================================================================
+
+/// The machine-readable class of an actions-over-HTTP failure (#505).
+///
+/// The UI edge (`POST /actions/{name}`) maps the transport-neutral error
+/// contract the actions raise — and that `_safe_tool` re-raises — onto a small,
+/// stable taxonomy carried in the [`ActionError`] body, paired with an HTTP
+/// status. It deliberately mirrors the MCP edge's split (a `ToolInputError` is
+/// the caller's mistake; `collection_busy` is contention; everything else is an
+/// internal bug whose detail stays in the log, never on the wire) without
+/// reusing MCP's JSON-RPC envelope.
+///
+/// Like [`NoteValidationReason`] this is a *field-level* enum (the `code` of
+/// `ActionError`), not a standalone catalog entry — its shape is contract-tested
+/// through `ActionError`. The codes (and their HTTP status): `input_error` (400,
+/// a caller mistake — a `ToolInputError` or argument-validation failure);
+/// `collection_busy` (409, contention under cooperative locking #65 — the op
+/// never ran, retryable); `unknown_action` (404, no such action name);
+/// `internal_error` (500, an unexpected server bug — detail logged, never
+/// returned, so it can't leak to a UI client).
+///
+/// No per-variant doc comments: schemars then renders a plain string `enum`,
+/// matching Pydantic's str-Enum (the contract normalizer compares them).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionErrorCode {
+    InputError,
+    CollectionBusy,
+    UnknownAction,
+    InternalError,
+}
+
+/// The one error envelope every `POST /actions/{name}` failure returns (#505).
+///
+/// Defined once here (the wire contract is shrike-schemas verbatim) and mirrored
+/// by `shrike.schemas.ActionError`. `message` is a non-leaking human string: for
+/// an `internal_error` it is a fixed, generic sentence (the real cause is in the
+/// server log); for the caller-actionable codes it carries the actionable text.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ActionError {
+    pub code: ActionErrorCode,
+    pub message: String,
+}
+
+// ============================================================================
 // The catalog: every wire type by its Python name
 // ============================================================================
 
@@ -1180,6 +1226,7 @@ catalog![
     ("ShutdownResponse", ShutdownResponse),
     ("ReloadResponse", ReloadResponse),
     ("StopResponse", StopResponse),
+    ("ActionError", ActionError),
 ];
 
 #[cfg(test)]

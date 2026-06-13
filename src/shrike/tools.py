@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.tools.base import Tool
 
 # Re-exports: these lived here pre-split and are part of the module's surface
 # (ACTIVATION_MARGIN is imported by tests; ToolInputError is the error
@@ -25,7 +26,7 @@ from shrike.actions import (
 )
 from shrike.collection import CollectionWrapper
 from shrike.derived import DerivedTextStore
-from shrike.mcp_adapter import _safe_tool, register_actions
+from shrike.mcp_adapter import _safe_tool, build_action_tools, register_actions
 
 __all__ = [
     "ACTIVATION_MARGIN",
@@ -46,12 +47,16 @@ def register_tools(
     allow_private_fetch: bool = False,
     server_path_roots: list[str] | None = None,
     media_base_url: str | None = None,
-) -> None:
+) -> dict[str, Tool]:
     """Build the action registry against this server's context and bind it to MCP.
 
     ``kernel`` (the AsyncKernel) is required (#355): write paths route through
     the maintained kernel ops, and ``index`` carries the search-facing
     ``KernelIndexView`` (or None when embedding is unconfigured).
+
+    Returns the ``name -> Tool`` map for the actions-over-HTTP edge (#505), built
+    from the *same* action registry as the MCP binding — so the host can register
+    ``POST /actions/{name}`` over an identical catalog (one core, two adapters).
     """
     context = ActionContext(
         wrapper=wrapper,
@@ -63,4 +68,6 @@ def register_tools(
         server_path_roots=server_path_roots,
         media_base_url=media_base_url,
     )
-    register_actions(mcp, build_actions(context))
+    actions = build_actions(context)
+    register_actions(mcp, actions)
+    return build_action_tools(actions)
