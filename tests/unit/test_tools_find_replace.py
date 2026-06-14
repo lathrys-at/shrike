@@ -7,6 +7,8 @@ fresh embed call carrying the edited text.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -45,6 +47,25 @@ class TestValidation:
             kharness.call_tool(
                 mcp_app, "find_replace_notes", {"search": "", "replace": "b", "deck": "Bio"}
             )
+
+    def test_invalid_regex_is_clean_input_error(self, kharness, mcp_app, caplog):
+        # #599: an invalid regex/backref is caller-supplied bad input — a clean
+        # ToolInputError (WARNING, no traceback), not the catch-all "Unhandled
+        # error" + traceback. The preview loop compiles the pattern on EVERY
+        # call, so this bites a real apply, not only dry_run.
+        kharness.seed_note("hello", deck="Bio")
+        with caplog.at_level(logging.DEBUG, logger="shrike.tools"):
+            with pytest.raises(ToolError):
+                kharness.call_tool(
+                    mcp_app,
+                    "find_replace_notes",
+                    {"search": "(unbalanced", "replace": "x", "deck": "Bio", "regex": True},
+                )
+        unhandled = [r for r in caplog.records if "Unhandled error" in r.getMessage()]
+        assert not unhandled, (
+            "invalid regex logged as an unhandled server bug (with traceback): "
+            f"{[r.getMessage() for r in unhandled]}"
+        )
 
 
 class TestReembed:

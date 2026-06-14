@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -655,7 +656,15 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
 
         cutoff: int | None = None
         if modified_since:
-            dt = datetime.fromisoformat(modified_since)
+            try:
+                dt = datetime.fromisoformat(modified_since)
+            except ValueError as e:
+                # Caller-supplied bad input, not a server bug: a clean rejection
+                # (WARNING, no traceback) rather than the catch-all's "Unhandled
+                # error" + traceback + leaked isoformat detail (#599).
+                raise ToolInputError(
+                    f"`modified_since` is not a valid ISO 8601 datetime: {modified_since!r}"
+                ) from e
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=UTC)
             cutoff = int(dt.timestamp())
@@ -1646,18 +1655,25 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             field,
             dry_run,
         )
-        result = await wrapper.find_replace(
-            search,
-            replace,
-            regex=regex,
-            match_case=match_case,
-            field=field,
-            deck=deck,
-            tags=tags or None,
-            note_type=note_type,
-            ids=ids or None,
-            dry_run=dry_run,
-        )
+        try:
+            result = await wrapper.find_replace(
+                search,
+                replace,
+                regex=regex,
+                match_case=match_case,
+                field=field,
+                deck=deck,
+                tags=tags or None,
+                note_type=note_type,
+                ids=ids or None,
+                dry_run=dry_run,
+            )
+        except re.error as e:
+            # A malformed pattern/backref is caller-supplied bad input, not a
+            # server bug — and the preview loop compiles it on EVERY call,
+            # including a real apply (#599). Raise a clean rejection (WARNING, no
+            # traceback) instead of the catch-all's "Unhandled error" + traceback.
+            raise ToolInputError(f"Invalid regular expression: {e}") from e
         changed_ids = result.pop("changed_ids", [])
         note_outcome(
             f"{'would change' if dry_run else 'changed'} {result['notes_changed']} note(s)"

@@ -429,7 +429,16 @@ class CollectionWrapper:
     ) -> dict[str, Any]:
         cutoff: int | None = None
         if modified_since is not None:
-            dt = datetime.fromisoformat(modified_since)
+            try:
+                dt = datetime.fromisoformat(modified_since)
+            except ValueError as e:
+                # Caller-supplied bad input: raise a clean, non-leaky ValueError
+                # the tool layer turns into a ToolInputError (#599), not
+                # fromisoformat's "Invalid isoformat string" leak via the
+                # catch-all "Unhandled error" + traceback.
+                raise ValueError(
+                    f"`modified_since` is not a valid ISO 8601 datetime: {modified_since!r}"
+                ) from e
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=UTC)
             cutoff = int(dt.timestamp())
