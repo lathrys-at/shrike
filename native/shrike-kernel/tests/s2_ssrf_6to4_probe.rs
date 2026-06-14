@@ -14,11 +14,11 @@ use shrike_kernel::media_fetch::ip_is_allowed;
 #[test]
 fn ssrf_classifier_refuses_6to4_and_3fff_like_python() {
     let must_refuse = [
-        "2002::1",         // 6to4 base
-        "2002:7f00:1::1",  // 6to4 of 127.0.0.1 (internal!)
-        "2002:a00:1::1",   // 6to4 of 10.0.0.1 (internal!)
-        "2002:c0a8:1::1",  // 6to4 of 192.168.0.1 (internal!)
-        "3fff::1",         // 3fff::/20 reserved-by-IANA
+        "2002::1",        // 6to4 base
+        "2002:7f00:1::1", // 6to4 of 127.0.0.1 (internal!)
+        "2002:a00:1::1",  // 6to4 of 10.0.0.1 (internal!)
+        "2002:c0a8:1::1", // 6to4 of 192.168.0.1 (internal!)
+        "3fff::1",        // 3fff::/20 reserved-by-IANA
     ];
     for s in must_refuse {
         let ip: IpAddr = s.parse().unwrap();
