@@ -30,10 +30,18 @@ load("@shrike_pip//:requirements.bzl", "requirement")
 
 _RUNNER = "//tools/bazel:pytest_runner.py"
 
-def pytest_test(name, srcs, deps = [], data = [], args = [], size = "small", xdist = "auto", **kwargs):
+def pytest_test(name, srcs, deps = [], data = [], args = [], size = "small", xdist = "auto", env = {}, **kwargs):
     # `-n <xdist>` (xdist worker count) unless a caller disables it with a falsy
     # value (None / 0 / False) for a serial run. str() so an int count works too.
     xdist_args = ["-n", str(xdist)] if xdist else []
+
+    # Disarm the local native-staleness backstop (#573) under Bazel: that hook
+    # (tests/conftest.py) guards the pip lane's per-venv .so against a missing
+    # rebuild, but Bazel builds the extension hermetically and has no venv stamp
+    # to read, so the check is meaningless here. A caller's own `env` still wins.
+    test_env = {"SHRIKE_SKIP_NATIVE_STALE_CHECK": "1"}
+    test_env.update(env)
+
     py_test(
         name = name,
         size = size,
@@ -48,5 +56,6 @@ def pytest_test(name, srcs, deps = [], data = [], args = [], size = "small", xdi
             requirement("pytest-xdist"),
         ],
         data = data,
+        env = test_env,
         **kwargs
     )

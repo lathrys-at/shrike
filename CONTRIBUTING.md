@@ -146,8 +146,7 @@ pytest tests/unit -q
 pytest tests/integration -q -m "integration and not embedding"
 ```
 
-For a change touching the Rust workspace, also run the native gate (and rebuild
-the extension into your venv before pytest, which otherwise tests the stale one):
+For a change touching the Rust workspace, also run the native gate:
 
 ```bash
 (cd native && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings)
@@ -156,6 +155,15 @@ scripts/build-native.sh && pytest tests/unit tests/native -q
 ./bazel test //...     # the authoritative CI lane
 ```
 
+`pip install` doesn't build the `shrike_native` extension (a separate cargo step
+in `scripts/build-native.sh`), so a stale `.so` used to slip into a pytest run
+silently after a `native/` change. That's structurally closed now (#573): run
+`scripts/dev-setup.sh` once for the whole setup, then rebuilds are automatic with
+direnv (`.envrc` rebuilds a stale extension on `cd`) and `pytest` fails loud
+(before importing the extension) if you skip the rebuild without direnv. The
+staleness check is `scripts/native-stale.sh`; `SHRIKE_SKIP_NATIVE_STALE_CHECK=1`
+bypasses the pytest backstop.
+
 Development is deliberately two-lane: iterate on the **pip lane** (the venv,
 `scripts/build-native.sh`, `pytest` with its debugging affordances), and let
 the **Bazel lane** be the proof — CI runs one `bazel test` invocation over the
@@ -163,8 +171,8 @@ whole graph, and releases are Bazel-built. The committed `./bazel` wrapper
 bootstraps the pinned toolchain (no install). [`docs/build-bazel.md`](docs/build-bazel.md)
 covers the targets, regenerating the dependency locks, and how caching works;
 the design rationale is the Bazel ADR in [`docs/decisions.md`](docs/decisions.md).
-An optional `.envrc` auto-activates the venv if you use direnv — nothing
-requires it.
+An optional `.envrc` auto-activates the venv (and keeps the native extension
+fresh) if you use direnv — nothing requires it.
 
 `scripts/coverage.sh` runs the coverage measurement locally and enforces the
 `fail_under` target (the per-PR CI lane runs tests *without* the tracer for speed,

@@ -47,3 +47,11 @@ python - <<'PY'
 import shrike_native
 print(f"shrike_native {shrike_native.version()} — {shrike_native.build_info()}")
 PY
+
+# Record the staleness stamp keyed to this venv (#573), so scripts/native-stale.sh
+# (and the .envrc / pytest backstop) can tell a fresh extension from a stale one.
+# Reuse scripts/native-stamp.sh — the single source of truth, never inlined here.
+if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+  "$(dirname "$0")/native-stamp.sh" >"$VIRTUAL_ENV/.shrike-native-stamp"
+  echo "stamped $VIRTUAL_ENV/.shrike-native-stamp"
+fi
