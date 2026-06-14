@@ -107,6 +107,8 @@ fn ipv6_is_global(addr: Ipv6Addr) -> bool {
             && !in_net([0x2001, 0x20, 0, 0, 0, 0, 0, 0], 28)
             && !in_net([0x2001, 0x30, 0, 0, 0, 0, 0, 0], 28))
         || in_net([0x2001, 0xdb8, 0, 0, 0, 0, 0, 0], 32)
+        || in_net([0x2002, 0, 0, 0, 0, 0, 0, 0], 16) // 6to4: embeds an IPv4, fails open to internal (2002:7f00:1:: = 127.0.0.1)
+        || in_net([0x3fff, 0, 0, 0, 0, 0, 0, 0], 20) // 3fff::/20 reserved-by-IANA (RFC 9637, documentation)
         || in_net([0xfc00, 0, 0, 0, 0, 0, 0, 0], 7)
         || in_net([0xfe80, 0, 0, 0, 0, 0, 0, 0], 10);
     let _ = seg;

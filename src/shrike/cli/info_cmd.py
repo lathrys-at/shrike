@@ -91,7 +91,8 @@ def info(
 
 
 def _render_summary(summary: Summary) -> None:
-    output.kv("Collection", f"[cyan]{summary.path}[/cyan]")
+    # The collection path is escaped (kv() does not escape its value).
+    output.kv("Collection", f"[cyan]{output.esc(summary.path)}[/cyan]")
     output.kv("Created", summary.created)
     output.kv("Modified", summary.modified)
     output.kv("Notes", summary.notes)
@@ -112,23 +113,25 @@ def _render_note_types(note_types: list[NoteTypeInfo], col_path: str) -> None:
 
 
 def _render_decks(decks: list[DeckInfo], col_path: str) -> None:
+    # Deck names + collection path are collection-authored → escaped.
     count = len(decks)
-    output.console.print(f"Showing {count} decks in [cyan]{col_path}[/cyan]")
+    output.console.print(f"Showing {count} decks in [cyan]{output.esc(col_path)}[/cyan]")
     output.console.print()
-    rows = [[f"[cyan]{d.name}[/cyan]", str(d.note_count)] for d in decks]
+    rows = [[f"[cyan]{output.esc(d.name)}[/cyan]", str(d.note_count)] for d in decks]
     output.table(["Name", "Notes"], rows)
 
 
 def _render_tags(tags: list[str], col_path: str) -> None:
+    # Tag names + collection path are collection-authored → escaped.
     count = len(tags)
-    output.console.print(f"Showing {count} tags in [cyan]{col_path}[/cyan]")
+    output.console.print(f"Showing {count} tags in [cyan]{output.esc(col_path)}[/cyan]")
     output.console.print()
-    rows = [[f"[yellow]{t}[/yellow]"] for t in sorted(tags)]
+    rows = [[f"[yellow]{output.esc(t)}[/yellow]"] for t in sorted(tags)]
     output.table(["Name"], rows)
 
 
 def _render_stats(stats: Stats, col_path: str) -> None:
-    output.console.print(f"Showing statistics for [cyan]{col_path}[/cyan]")
+    output.console.print(f"Showing statistics for [cyan]{output.esc(col_path)}[/cyan]")
     output.console.print()
     output.kv("Notes", stats.total_notes)
     output.kv("Cards", stats.total_cards)
@@ -137,8 +140,9 @@ def _render_stats(stats: Stats, col_path: str) -> None:
 
     if stats.decks_summary:
         output.console.print()
+        # Deck names are collection-authored → escaped.
         rows = [
-            [f"[cyan]{name}[/cyan]", str(d.notes), str(d.due)]
+            [f"[cyan]{output.esc(name)}[/cyan]", str(d.notes), str(d.due)]
             for name, d in stats.decks_summary.items()
         ]
         output.table(["Deck", "Notes", "Due"], rows)

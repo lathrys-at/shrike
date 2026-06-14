@@ -70,6 +70,16 @@ pub trait VectorIndex: Send + Sync {
     /// Load persisted state from `dir`; `candidates` bounds key discovery
     /// where the format can't enumerate keys. False = nothing restored.
     fn restore(&self, dir: &str, candidates: Option<&[i64]>) -> bool;
+    /// Persist state under `dir`.
+    ///
+    /// **`save` must not block `search`** (#588): a save runs on the kernel's
+    /// blocking pool concurrently with the search paths (the debounced/burst
+    /// flush every 60s/100 changes, and `close()`), so an impl must not hold a
+    /// lock across its on-disk write that `search_by_modality` also needs —
+    /// otherwise every concurrent search stalls for the full save window. An
+    /// impl with internal mutation locking should snapshot/serialize under the
+    /// lock and write outside it (the #445 "never hold a lock across file
+    /// writes" rule).
     fn save(&self, dir: &str) -> NativeResult<()>;
     fn add(&self, modality: &str, keys: &[i64], vectors: &[Vec<f32>]) -> NativeResult<()>;
     /// Remove every vector under each key, across modalities; returns how

@@ -76,3 +76,13 @@ rust_test(
         "@crates//:serde_json",
     ],
 )
+
+# SSRF classifier parity regression (#591): the allowlist must refuse 6to4
+# (2002::/16) and 3fff::/20 like Python's `ipaddress.is_global`.
+rust_test(
+    name = "s2_ssrf_6to4_probe_test",
+    size = "small",
+    srcs = ["tests/s2_ssrf_6to4_probe.rs"],
+    edition = "2021",
+    deps = [":shrike_kernel"],
+)

@@ -450,6 +450,16 @@ where
 
 /// Max-abs element-wise difference, in f64 (mismatched shapes → infinite
 /// drift, which correctly reads as batch-variant).
+///
+/// A `NaN` element on either side also reads as **infinite** drift: a
+/// batch-variant model whose drift manifests as `NaN`/`inf` (the int8
+/// magnitude extremes the spiked probe set is built to surface) must condemn
+/// the model to serial, not slip through. `f64::max` *discards* a `NaN`
+/// operand (it returns the non-`NaN` side), and `(finite - NaN).abs()` is
+/// `NaN`, so a plain `max.max(diff)` would silently drop the `NaN` drift and
+/// declare the model batch-safe — breaking the reconcile == rebuild invariant.
+/// Treating any `NaN` as `f64::INFINITY` mirrors the mismatched-shape handling
+/// above.
 fn drift(reference: &[Vec<f32>], batched: &[Vec<f32>]) -> f64 {
     if reference.len() != batched.len() {
         return f64::INFINITY;
@@ -460,6 +470,9 @@ fn drift(reference: &[Vec<f32>], batched: &[Vec<f32>]) -> f64 {
             return f64::INFINITY;
         }
         for (x, y) in r.iter().zip(b) {
+            if x.is_nan() || y.is_nan() {
+                return f64::INFINITY;
+            }
             max = max.max((f64::from(*x) - f64::from(*y)).abs());
         }
     }
@@ -475,6 +488,10 @@ mod tests {
     /// Hash-deterministic per-text vectors, optionally batch-variant.
     struct Toy {
         batch_variant: bool,
+        /// Emit `NaN` for every element of a *batched* embed — the int8
+        /// magnitude-extreme failure mode. Serial stays finite, so the model
+        /// is batch-variant and must probe to serial (#587).
+        nan_batched: bool,
         fail_serial: bool,
         fail_batched: bool,
         calls: AtomicUsize,
@@ -484,6 +501,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 batch_variant: false,
+                nan_batched: false,
                 fail_serial: false,
                 fail_batched: false,
                 calls: AtomicUsize::new(0),
@@ -499,6 +517,9 @@ mod tests {
             }
             if texts.len() > 1 && self.fail_batched {
                 return Err(NativeError::invalid_input("fixed batch-1 graph"));
+            }
+            if self.nan_batched && texts.len() > 1 {
+                return Ok(texts.iter().map(|_| vec![f32::NAN, 1.0]).collect());
             }
             let shift = if self.batch_variant && texts.len() > 1 {
                 0.05 // dynamic-quant-style drift, well past the tolerance
@@ -531,6 +552,35 @@ mod tests {
         };
         assert_eq!(probe_max_safe_batch(&toy).unwrap(), 1);
         assert!(max_probe_drift(&toy).unwrap() > BATCH_DRIFT_TOL * 10.0);
+    }
+
+    /// A model whose batched embed produces `NaN` (the int8 magnitude-extreme
+    /// failure mode) is batch-**variant** and must probe to serial. Regression
+    /// guard for #587: `drift`'s old `max.max((finite - NaN).abs())` swallowed
+    /// the `NaN` (Rust `f64::max` returns the non-`NaN` operand), so the model
+    /// was declared safe (`safe_batch = 64`) → a note's vector became
+    /// batch-dependent → reconcile (small chunks) ≠ rebuild (64-chunks).
+    #[test]
+    fn nan_batched_engine_probes_to_serial() {
+        // The floating-point facts the old code tripped on (#587): the diff
+        // against a NaN is NaN, and `f64::max` discards a NaN operand — so the
+        // running `max` stayed 0.0 (≤ BATCH_DRIFT_TOL, i.e. "safe"), silently
+        // dropping the drift.
+        assert!((1.0_f64 - f64::NAN).abs().is_nan());
+        assert_eq!(0.0_f64.max(f64::NAN), 0.0);
+
+        let toy = Toy {
+            nan_batched: true,
+            ..Toy::default()
+        };
+        assert_eq!(probe_max_safe_batch(&toy).unwrap(), 1);
+        // The drift is now reported as infinite, not silently dropped to 0.
+        let observed = max_probe_drift(&toy).unwrap();
+        assert!(
+            observed.is_infinite() && observed > 0.0,
+            "expected +inf NaN drift, got {observed}"
+        );
+        assert!(observed > BATCH_DRIFT_TOL);
     }
 
     #[test]

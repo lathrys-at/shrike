@@ -19,8 +19,9 @@ def _render_preview(r: CollectionPruneResponse) -> int:
     if r.unused_tags is not None:
         total += r.unused_tags.removed
         output.console.print(f"[yellow]{r.unused_tags.removed}[/yellow] unused tag(s)")
+        # Tag names are collection-authored → escaped.
         for t in r.unused_tags.tags:
-            output.console.print(f"  [yellow]{t}[/yellow]")
+            output.console.print(f"  [yellow]{output.esc(t)}[/yellow]")
     if r.empty_notes is not None:
         n = len(r.empty_notes.removed)
         total += n
@@ -37,8 +38,9 @@ def _render_preview(r: CollectionPruneResponse) -> int:
     if r.unused_media is not None:
         total += r.unused_media.removed
         output.console.print(f"[yellow]{r.unused_media.removed}[/yellow] unused media file(s)")
+        # Media filenames are collection-authored → escaped.
         for f in r.unused_media.files:
-            output.console.print(f"  [cyan]{f}[/cyan]")
+            output.console.print(f"  [cyan]{output.esc(f)}[/cyan]")
     return total
 
 
@@ -115,12 +117,14 @@ def prune(
 
 
 def _render_check(r: CollectionCheckResponse) -> None:
+    # Media dir + filenames are collection-authored → escaped so a bracket-bearing
+    # name renders literally rather than crashing the render.
     issues = bool(r.unused or r.missing or r.have_trash)
-    output.console.print(f"[dim]Media folder:[/dim] [cyan]{r.media_dir}[/cyan]")
+    output.console.print(f"[dim]Media folder:[/dim] [cyan]{output.esc(r.media_dir)}[/cyan]")
     if r.missing:
         output.console.print(f"[bold red]{len(r.missing)}[/bold red] missing media file(s):")
         for f in r.missing:
-            output.console.print(f"  [red]{f}[/red]")
+            output.console.print(f"  [red]{output.esc(f)}[/red]")
         if r.missing_media_notes:
             ids = ", ".join(f"#{n}" for n in r.missing_media_notes)
             output.console.print(f"  [dim]referenced by notes:[/dim] [green]{ids}[/green]")
@@ -130,7 +134,7 @@ def _render_check(r: CollectionCheckResponse) -> None:
             "[dim](shrike collection prune --unused-media)[/dim]:"
         )
         for f in r.unused:
-            output.console.print(f"  [cyan]{f}[/cyan]")
+            output.console.print(f"  [cyan]{output.esc(f)}[/cyan]")
     if r.have_trash:
         output.console.print("[dim]Anki's media trash is non-empty.[/dim]")
     if not issues:
@@ -197,9 +201,10 @@ def query(ctx: click.Context, expression: str, brief: bool, limit: int) -> None:
 
     col_path = resolve_collection(ctx.obj["config"]) or "collection"
     count = f"{len(notes)} of {result.total}" if result.total > len(notes) else str(result.total)
+    # The query expression + collection path can contain brackets → escaped.
     output.console.print(
-        f"[dim]Showing {count} note(s) matching [cyan]{expression}[/cyan] "
-        f"from [cyan]{col_path}[/cyan][/dim]"
+        f"[dim]Showing {count} note(s) matching [cyan]{output.esc(expression)}[/cyan] "
+        f"from [cyan]{output.esc(col_path)}[/cyan][/dim]"
     )
     output.console.print()
 

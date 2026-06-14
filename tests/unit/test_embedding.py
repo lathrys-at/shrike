@@ -485,3 +485,41 @@ class TestEmbeddingRuntime:
         with pytest.raises(ValueError, match="Unknown embedding backend"):
             runtime.start()
         assert runtime.state == "failed"
+
+    # --- #602: backend-alias normalization on the start(backend=) override ---
+    # The ctor normalizes documented aliases ("onnx-rs"/"clip-rs") via
+    # BACKEND_ALIASES; the start() override must do the same, or a documented
+    # alias 400s on /embedding/start AND poisons _backend_kind for the daemon's
+    # life (mutate-before-validate).
+
+    def test_start_override_normalizes_documented_backend_alias(self) -> None:
+        # start(backend="onnx-rs") must behave like the ctor: normalize to
+        # "onnx" so it never raises "Unknown embedding backend" for a documented
+        # alias. (Mock the backend so this is a pure normalization assertion.)
+        runtime = EmbeddingRuntime(backend="llama", model="/m.gguf")
+        fake_be = MagicMock()
+        fake_be.running = True
+        # _make_backend does `from shrike.embedding_onnx import OnnxBackend`, so
+        # the patch target is the source module.
+        with patch("shrike.embedding_onnx.OnnxBackend", return_value=fake_be):
+            runtime.start(backend="onnx-rs")
+        assert runtime.backend_kind == "onnx"
+
+    def test_start_override_normalizes_alias_even_when_start_fails(self) -> None:
+        # A documented alias must normalize BEFORE the kind is mutated, so even a
+        # failed start leaves _backend_kind a valid kind (never the raw alias) —
+        # otherwise subsequent no-override start()s also raise, bricking the
+        # runtime for the daemon's life.
+        runtime = EmbeddingRuntime(backend="onnx", model="/nonexistent")
+
+        def _boom(*_a: object, **_k: object) -> MagicMock:
+            raise RuntimeError("model load failed")
+
+        with (
+            patch("shrike.embedding_onnx.OnnxBackend", side_effect=_boom),
+            pytest.raises(RuntimeError) as ei,
+        ):
+            runtime.start(backend="onnx-rs")
+        # The failure is the real reason (model load), never the alias error.
+        assert "Unknown embedding backend" not in str(ei.value)
+        assert runtime.backend_kind in ("onnx", "clip", "llama", "remote")
