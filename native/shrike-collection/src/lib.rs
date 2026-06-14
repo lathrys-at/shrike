@@ -797,6 +797,51 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// #589 (S8b-1): an update whose deck ref resolves to no deck must report
+    /// an error WITHOUT having written the fields. The old order committed the
+    /// fields/tags via update_note and only THEN resolved the deck, so a bad
+    /// `#id` ref half-wrote the note (and bumped col.mod) — create_note_named
+    /// resolves the deck before its write, and update_note_named now mirrors it.
+    #[test]
+    fn s8b_update_bad_deck_half_writes_fields() {
+        let (core, dir) = temp_core();
+        let basic = core.notetype_id("Basic").unwrap();
+        let CreateOutcome::Created(nid) = core
+            .create_note(
+                basic,
+                DEFAULT_DECK,
+                &["orig front".into(), "orig back".into()],
+                &[],
+                DuplicatePolicy::Error,
+            )
+            .unwrap()
+        else {
+            panic!("create failed")
+        };
+
+        let upd = serde_json::json!([{
+            "id": nid,
+            "fields": {"Front": "NEW front", "Back": "NEW back"},
+            "deck": "#999999999"
+        }]);
+        let results = upsert_json(&core, &upd.to_string(), "error", false);
+
+        assert_eq!(results[0]["status"], "error", "item should report error");
+        assert!(results[0]["error"].as_str().unwrap().contains("not found"));
+
+        // The fields must NOT have been mutated despite the bad deck ref.
+        let note = core.get_note(nid).unwrap();
+        assert_eq!(
+            note.fields,
+            vec!["orig front".to_string(), "orig back".to_string()],
+            "error result, but fields were half-written: {:?}",
+            note.fields
+        );
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn read_surface_round_trip() {
         // Tripwires for the step-2 (service, method) indices — deck_names,
