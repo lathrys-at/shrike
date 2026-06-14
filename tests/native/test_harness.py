@@ -653,7 +653,8 @@ class TestRecognition:
             assert report["total_stored"] == 3
             assert report["remaining"] == 0
             rows = harness.derived.search_substring("oxaloacetate", limit=5)
-            assert rows, "the tail item landed once the prefix healed"
+            cap_sweep = _capture_650("sweep-substring", harness, 0)
+            assert rows, f"the tail item landed once the prefix healed | {cap_sweep}"
 
             harness.detach_recognizer()
             await harness.close()
