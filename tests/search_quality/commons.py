@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,8 +69,6 @@ def _clean(text: str | None) -> str:
     """Strip HTML out of an extmetadata value (Artist often carries an <a> tag)."""
     if not text:
         return "unknown"
-    import re
-
     stripped = re.sub(r"<[^>]+>", "", text).strip()
     return stripped or "unknown"
 

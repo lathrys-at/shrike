@@ -1,22 +1,28 @@
 load("@rules_python//python:defs.bzl", "py_library")
+load("@shrike_pip//:requirements.bzl", "requirement")
 
 package(default_testonly = True)
 
 # The shared search-quality support (#559): the pure metric engine + the
-# manifest loader. Native-free (no shrike_native, no harness) so the unit suite
-# can depend on it; the fixtures ride along as data for the manifest-loader
-# tests. The in-process driver (which needs the native extension + the harness)
-# is a SEPARATE library below so a unit-only consumer doesn't pull the kernel.
+# manifest loader + the Commons resolve→pin→cache module (the manual corpus's
+# image sourcing). Native-free (no shrike_native, no harness) so the unit suite
+# can depend on the metric engine; ``commons`` needs ``httpx`` (the Commons API)
+# but only the manual suite imports it. The fixtures ride along as data for the
+# manifest-loader tests. The in-process driver (which needs the native extension
+# + the harness) is a SEPARATE library below so a unit-only consumer doesn't
+# pull the kernel.
 py_library(
     name = "search_quality",
     srcs = [
         "__init__.py",
+        "commons.py",
         "manifest.py",
         "metrics.py",
     ],
     data = glob(["fixtures/**"]),
     imports = ["../.."],  # repo root on sys.path so `tests.search_quality.*` resolves
     visibility = ["//tests:__subpackages__"],
+    deps = [requirement("httpx")],
 )
 
 # The in-process harness driver: a real Harness over a throwaway collection +

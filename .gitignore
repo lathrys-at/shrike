@@ -40,5 +40,7 @@ eval/multimodal/cache/
 
 # Search-quality eval image-bytes cache (#559): URLs pinned in resolved_urls.json,
 # attribution in ASSETS.md — the Commons bytes are NEVER committed (downloaded
-# on demand by the manual suite). Also the runner's RESULTS.md is generated.
+# on demand by the manual suite).
 eval/search_quality/cache/
+# The PR2b runner's generated report (a local artifact, not committed).
+eval/search_quality/RESULTS.md
