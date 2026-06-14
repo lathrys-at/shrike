@@ -133,7 +133,15 @@ pub trait DerivedStore: Send + Sync {
     /// Drop rows by note — all sources, or one.
     fn remove(&self, note_ids: &[i64], source: Option<&str>) -> NativeResult<()>;
     fn count(&self) -> NativeResult<i64>;
+    /// The stored drift watermark (the `col.mod` the store was last reconciled
+    /// to), or `None` before the first build.
     fn get_col_mod(&self) -> Option<i64>;
+    /// Stamp the drift watermark. INVARIANT (#585): set `value` ONLY after the
+    /// rows for every write up to `value`'s `col.mod` are durably committed —
+    /// the watermark is the sole drift signal, so over-stamping it silently
+    /// hides an un-ingested note from substring/fuzzy search forever. A
+    /// failed/partial ingest must leave the watermark behind for the next drift
+    /// rebuild to heal.
     fn set_col_mod(&self, value: i64) -> NativeResult<()>;
     fn meta_get(&self, key: &str) -> NativeResult<Option<String>>;
     fn meta_set(&self, key: &str, value: &str) -> NativeResult<()>;
