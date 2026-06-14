@@ -1,26 +1,61 @@
 name: Set up Bazel caches
 description: >
-  The two split-cadence Bazel caches every Bazel lane shares (#418/#422), plus
-  the flag wiring. Toolchains + repository cache are keyed on the pins — a pure
-  restore unless a lock changed. The action/test-result disk cache must
-  ACCUMULATE so an unchanged test is a cache hit (skipped, not re-run): a save
-  never updates an existing key, so a lock-stable key would freeze after its
-  first save and every later run would re-execute everything — the save key is
-  suffixed with the run id so each run writes a fresh superset, and
-  restore-keys pulls the most recent prior one. Finally, the cache paths are
-  written into .bazelrc.user (gitignored, try-imported by .bazelrc) as
-  absolute paths — Bazel does not expand ~ in flags — so every ./bazel
-  invocation in the job picks them up without per-call flags.
+  The split-cadence Bazel caches every Bazel lane shares (#418/#422/#645), plus
+  the flag wiring. Three entries, by change-cadence and by who owns the save:
 
-  RESTORE-ONLY since #438: the combined actions/cache action's post-step
-  skips its save when the job failed, which let a flake-red warm run starve
-  main's scope of the Bazel 9 caches and put every PR back on a cold build.
-  Saving is the explicit bazel-save composite, invoked with `if: always()` as
-  the LAST step of every lane that uses this one — keys there MUST stay
-  byte-identical to the keys here.
+    1. bazel-models  — the heavy embedding externals (the GGUF/ONNX/CLIP model
+       files + the pinned llama-server binaries). ~hundreds of MB, and they
+       change only when their VERSION PINS change (scripts/llama-server.lock +
+       the EMBEDDING_MODEL_*/ONNX_*/CLIP_* names in
+       tests/integration/model_cache.py) — NOT on a Cargo.lock/MODULE.bazel.lock
+       bump. Keyed on those pins so a crate churn never re-downloads them, and
+       split OUT of the toolchains entry so the big rarely-changing blobs stop
+       riding (and re-saving inside) the churning toolchains entry (#645). They
+       extract into the same repository-cache dir as everything else (content-
+       addressed by sha256), so restoring this entry alongside bazel-repo just
+       pre-populates those blobs.
+    2. bazel-repo    — the Rust/Python/CC toolchains + the rules_* repo contents
+       (extracted repo dirs; default `{--repository_cache}/contents` since Bazel
+       9, #420 — what collapses a fresh runner's loading phase from 290s -> 6s).
+       Keyed on the locks. SAVED ONLY ON `main` (the warmer / a tag build): it's
+       1.7 GB, identical across PRs at a given lock, and every PR can READ
+       main's scope — so a PR re-saving it just stamps a redundant ref-scoped
+       1.7 GB copy that crowds the 10 GB repo cache budget and evicts the disk
+       cache (the #645 root cause: 5x the same 1.7 GB blob, one per PR ref,
+       leaving no room for compiled-crate disk entries). `save: pr` skips this
+       entry's save.
+    3. bazel-disk    — the action/test-result disk cache. Must ACCUMULATE so an
+       unchanged test is a cache hit (skipped, not re-run): a save never updates
+       an existing key, so a lock-stable key would freeze after its first save
+       and every later run would re-execute everything — the save key is
+       suffixed with the run id so each run writes a fresh superset, and
+       restore-keys pulls the most recent prior one. SAVED by every lane (this
+       is the entry PRs must keep current).
+
+  The cache paths are written into .bazelrc.user (gitignored, try-imported by
+  .bazelrc) as absolute paths — Bazel does not expand ~ in flags — so every
+  ./bazel invocation in the job picks them up without per-call flags.
+
+  RESTORE-ONLY since #438: the combined actions/cache action's post-step skips
+  its save when the job failed, which let a flake-red warm run starve main's
+  scope of the caches and put every PR back on a cold build. Saving is the
+  explicit bazel-save composite, invoked with `if: always()` as the LAST step of
+  every lane that uses this one — keys there MUST stay byte-identical to the
+  keys here.
 runs:
   using: composite
   steps:
+    # The heavy embedding externals (#645): keyed on the VERSION PINS, not the
+    # crate locks, so a Cargo.lock/MODULE.bazel.lock churn (the epic's frequent
+    # case) never re-downloads them and never rotates this big-blob entry.
+    # Restored into the same repository-cache dir (content-addressed), so it just
+    # pre-populates those sha256s for bazel-repo to find.
+    - name: Restore Bazel embedding-model externals
+      uses: actions/cache/restore@v5
+      with:
+        path: ~/.cache/shrike/bazel-repo
+        key: bazel-models-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/llama-server.lock', 'tests/integration/model_cache.py') }}
+        restore-keys: bazel-models-${{ runner.os }}-${{ runner.arch }}-
     # ~/.cache/llama.cpp is llama-server's model-preset cache (#441): built
     # once per model file (~6s), then every later llama boot is ~0.1s — the
     # embedding suites boot several.
