@@ -714,19 +714,49 @@ class TestMultiSpace:
         assert plan_to_runtime_params_set(plan) == ()
 
     def test_per_modality_primary_is_the_first_declaring_space(self):
-        # Two CLIP-ish spaces: the first claims text+image; the second declares
-        # image too but is primary for NOTHING (both its modalities are already
-        # claimed). The role mirrors the kernel's insertion-order primary.
+        # The first space claims text+image; a second TEXT space declares text
+        # too but is primary for NOTHING (its modality is already claimed). The
+        # role mirrors the kernel's insertion-order primary. (The duplicate is
+        # text, not image: at most one image space is allowed since #580 — the
+        # primary-role logic is modality-agnostic, so text exercises it.)
         config = {
             "embedders": [
                 {"modalities": ["text", "image"], "runtime": "onnx", "model": "~/a"},
-                {"modalities": ["image"], "runtime": "onnx", "model": "~/b"},
+                {"modalities": ["text"], "runtime": "onnx", "model": "~/b"},
             ]
         }
         plan = _resolve(config)
         a, b = plan.embedders
         assert a.primary_modalities == frozenset({"text", "image"})
         assert b.primary_modalities == frozenset()
+
+    def test_two_image_spaces_are_rejected(self):
+        # #580: at most ONE image-embedding space. Floor-admission (the cross-
+        # space mechanism since #580) admits a single image space on its own
+        # calibrated floor; two would reintroduce the N≥2 flood the retired
+        # relative gate guarded against, with no mechanism left to bound it → a
+        # named config error, not a silent degrade.
+        config = {
+            "embedders": [
+                {"modalities": ["text", "image"], "runtime": "onnx", "model": "~/a"},
+                {"modalities": ["image"], "runtime": "onnx", "model": "~/b"},
+            ]
+        }
+        with pytest.raises(ProfileError, match="at most ONE image-embedding space"):
+            _resolve(config)
+
+    def test_one_image_plus_text_only_space_resolves(self):
+        # The valid multi-space shape: one image-capable space + a text-only
+        # space. The single-image rule allows it (only the image modality is
+        # capped at one).
+        config = {
+            "embedders": [
+                {"modalities": ["text", "image"], "runtime": "onnx", "model": "~/clip"},
+                {"modalities": ["text"], "runtime": "onnx", "model": "~/minilm"},
+            ]
+        }
+        plan = _resolve(config)
+        assert len(plan.embedders) == 2
 
     def test_two_managed_remote_no_endpoint_entries_are_rejected(self):
         # At most one entry may bind the single managed llama-server (a remote

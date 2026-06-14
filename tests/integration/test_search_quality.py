@@ -111,6 +111,7 @@ class TestCorpusManifest:
             "cross_lingual_exact",  # "manzana" via literal substring
             "over_return",  # null-gold precision probe
             "semantic_text",
+            "spurious_filename",  # #580 homonym pairs: floor-admit corroboration + ordering
         ):
             assert required in classes, f"corpus is missing the {required!r} adversarial class"
 
@@ -329,14 +330,20 @@ class TestRealPrecision:
 
 @requires_clip
 class TestRealActivationGate:
-    """The relative cross-space activation gate (#234) on REAL CLIP cosines: it
-    FIRES (the CLIP `image#clip` signal contributes) for clearly cross-modal
-    queries where the image is the only path, and STAYS CLOSED (no portrait
-    injected via CLIP) when the text space answers the query. This is the whole
-    reason the corpus sources ≥30 real images."""
+    """Cross-space FLOOR-ADMISSION (#580) on REAL CLIP cosines. The relative
+    winner-take-all gate (#234) is RETIRED: an image space is admitted on its own
+    calibrated floor, so the CLIP `image#clip` signal contributes whenever the
+    image space clears its floor for the query — independent of how the text
+    space did. The production invariants this class pins:
+      - the signal FIRES for clearly cross-modal queries (image is the path);
+      - a text-answered fact query keeps its correct TEXT card at rank-1 and the
+        portrait hard-negative does NOT out-rank it (the portrait MAY now carry
+        `image#clip` at a lower rank — the space-level signal admits the whole
+        image ranking; stripping that provenance per-note is #582).
+    This is the whole reason the corpus sources ≥30 real images."""
 
     # Queries where the answer is purely visual AND the filename doesn't leak the
-    # subject — so the relative gate must open (CLIP beats the weak text signal).
+    # subject — floor-admission must surface the image (CLIP clears its floor).
     GATE_FIRES = [
         "a photograph of a domestic cat",
         "a photo of a green apple",
@@ -345,39 +352,50 @@ class TestRealActivationGate:
         "a photo of the Eiffel Tower in Paris",
     ]
 
-    def test_gate_fires_for_strongly_cross_modal_queries(self, real_run) -> None:
+    def test_clip_fires_for_strongly_cross_modal_queries(self, real_run) -> None:
         from tests.search_quality.runner import clip_fired
 
         # A MEMBERSHIP floor, not an all-or-nothing conjunction (matching the
-        # suite's threshold philosophy): the gate must open for the large
-        # majority of these strongly-visual queries — one non-fire from the int8
-        # cosine wobble shouldn't fail the suite, but a broad gate regression
+        # suite's threshold philosophy): the image signal must contribute for the
+        # large majority of these strongly-visual queries — one non-fire from the
+        # int8 cosine wobble shouldn't fail the suite, but a broad regression
         # (most stop firing) must. Observed: all 5 fire.
         fired = [
             q for q in self.GATE_FIRES if any(clip_fired(m) for m in real_run.returns.get(q, []))
         ]
         assert len(fired) >= len(self.GATE_FIRES) - 1, (
-            f"the relative gate opened for only {len(fired)}/{len(self.GATE_FIRES)} "
+            f"floor-admission surfaced CLIP for only {len(fired)}/{len(self.GATE_FIRES)} "
             f"strongly-visual queries — fired: {fired}"
         )
 
-    def test_gate_does_not_inject_portrait_via_clip(self, real_run) -> None:
-        from tests.search_quality.runner import clip_fired
-
-        # For a query the TEXT answers (a Curie/Napoleon fact), the portrait
-        # (grade-0 hard-negative) must NEVER surface via the CLIP image signal —
-        # the relative gate stays closed for the vision space (the text space is
-        # more confident). It may appear at a low rank via TEXT (a lexical leak),
-        # but never `image#clip`. (Gold lives on the manifest query, not the
-        # graded report — so iterate the manifest.)
+    def test_floor_admit_does_not_let_portrait_outrank_the_canonical_answer(self, real_run) -> None:
+        # The #580 production behaviour: for a query the TEXT answers (a Curie/
+        # Napoleon fact), floor-admission may admit the portrait's CLIP image
+        # signal (it clears the floor — the portrait IS a weak CLIP match for the
+        # named entity), so the portrait (grade-0 hard-negative) MAY carry
+        # `image#clip` at a lower rank. What must hold is that it never OUT-RANKS
+        # the CANONICAL (highest-grade) text answer — a weaker grade-2 secondary
+        # fact may legitimately rank below a rank-2 distractor, but the canonical
+        # answer must win against the portrait. (Stripping the portrait's
+        # image#clip provenance per-note is the #582 follow-up; the space-level
+        # signal admits the whole image ranking by design.)
         for q in real_run.manifest.queries:
             if q.adversarial_class != "gate_no_inject_portrait":
                 continue
             hard_negatives = {nid for nid, g in q.gold.grades.items() if g == 0}
-            for m in real_run.returns.get(q.q, []):
-                if m["id"] in hard_negatives:
-                    assert not clip_fired(m), (
-                        f"portrait {m['id']} injected via CLIP for {q.q!r} — gate leaked"
+            # The canonical answer = the highest-graded relevant card.
+            canonical = max(
+                (nid for nid, g in q.gold.grades.items() if g >= 2),
+                key=lambda nid: q.gold.grades[nid],
+            )
+            order = [m["id"] for m in real_run.returns.get(q.q, [])]
+            assert canonical in order, f"canonical answer {canonical} absent for {q.q!r}"
+            canonical_rank = order.index(canonical)
+            for hn in hard_negatives:
+                if hn in order:
+                    assert canonical_rank < order.index(hn), (
+                        f"portrait {hn} out-ranks the canonical answer {canonical} for "
+                        f"{q.q!r} (order {order[:5]}) — floor-admission let the hard-negative win"
                     )
 
     def test_gate_no_inject_text_card_wins_rank_one(self, real_run) -> None:
@@ -391,6 +409,47 @@ class TestRealActivationGate:
             assert top[0]["id"] in relevant, (
                 f"rank-1 for {q.q!r} is {top[0]['id']}, not a relevant text card {relevant}"
             )
+
+
+@requires_clip
+class TestSpuriousFilenameFloorAdmit:
+    """The #580 floor-admission win + precision guard on REAL CLIP cosines. The
+    homonym matched pairs (jaguar animal/car, crane bird/machine, bass fish/
+    guitar): the disambiguated query lexically matches BOTH cards via the shared
+    filename word, so the pre-#580 relative gate (text wins on the filename)
+    would shut CLIP out. Floor-admission admits the on-topic CLIP hit, and the
+    CLIP encoder ranks the correct visual sense first."""
+
+    def test_on_topic_sense_wins_rank_one_and_corroborates(self, real_run) -> None:
+        from tests.search_quality.runner import clip_fired
+
+        for q in real_run.manifest.queries:
+            if q.adversarial_class != "spurious_filename":
+                continue
+            on_topic = max(
+                (nid for nid, g in q.gold.grades.items() if g >= 2),
+                key=lambda nid: q.gold.grades[nid],
+            )
+            off_topic = {nid for nid, g in q.gold.grades.items() if g == 0}
+            order = [m["id"] for m in real_run.returns.get(q.q, [])]
+            matches = {m["id"]: m for m in real_run.returns.get(q.q, [])}
+            assert on_topic in order, f"on-topic {on_topic} absent for {q.q!r}"
+            on_rank = order.index(on_topic)
+            # The win: the on-topic image card wins rank-1 …
+            assert on_rank == 0, (
+                f"on-topic {on_topic} is rank {on_rank + 1} for {q.q!r} (order {order[:4]})"
+            )
+            # … carries the corroborating CLIP signal (floor-admission admitted
+            # it even though the filename also won the text/fuzzy signal) …
+            assert clip_fired(matches[on_topic]), (
+                f"on-topic {on_topic} lacks image#clip for {q.q!r} — corroboration lost"
+            )
+            # … and ranks ABOVE the off-topic homonym (CLIP separates the senses).
+            for off in off_topic:
+                if off in order:
+                    assert on_rank < order.index(off), (
+                        f"off-topic {off} out-ranks on-topic {on_topic} for {q.q!r}"
+                    )
 
 
 @requires_clip

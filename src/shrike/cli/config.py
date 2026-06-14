@@ -324,6 +324,35 @@ def resolve_cache_dir(config: dict[str, Any], cache_dir_override: str | None = N
     return None
 
 
+def resolve_cross_space_margin(config: dict[str, Any]) -> float:
+    """The cross-space image floor margin via env → config → default (#580).
+
+    The floor is ``mean + margin·std`` of a secondary image space's typical best
+    match (#201b); ``margin`` is the precision/recall dial — higher → a stricter
+    floor → more precision, less recall. Lives under ``search.cross_space_fusion``
+    in config; env var ``SHRIKE_CROSS_SPACE_FLOOR_MARGIN``. Default ``1.0``
+    (``ACTIVATION_MARGIN`` — today's behaviour). This is an operational knob (no
+    v2 capability section), so it keeps the env→config→default cascade past
+    #523, like the cache dir / index-flush tuning. An unparseable value falls
+    back to the default rather than failing boot."""
+    from shrike.actions import ACTIVATION_MARGIN
+
+    env = os.environ.get("SHRIKE_CROSS_SPACE_FLOOR_MARGIN")
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    cfg = (config.get("search", {}) or {}).get("cross_space_fusion", {}) or {}
+    raw = cfg.get("margin")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    return ACTIVATION_MARGIN
+
+
 def resolve_index_save(
     config: dict[str, Any],
     *,

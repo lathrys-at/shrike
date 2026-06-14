@@ -931,7 +931,10 @@ impl Kernel {
     /// samples land. A space with too few image notes gets no floor (the gate
     /// then rides the relative comparison alone). Returns the per-space derived
     /// floor (`None` = uncalibrated) for the harness to log / surface.
-    pub async fn calibrate_secondary_floors(&self) -> NativeResult<Vec<(String, Option<f64>)>> {
+    pub async fn calibrate_secondary_floors(
+        &self,
+        margin: f64,
+    ) -> NativeResult<Vec<(String, Option<f64>)>> {
         let secondaries = self.secondary_embed_spaces();
         if secondaries.is_empty() {
             self.secondary_floors
@@ -962,7 +965,7 @@ impl Kernel {
         let mut derived: Vec<(String, Option<f64>)> = Vec::new();
         for (key, svc) in secondaries {
             let floor = self
-                .calibrate_one_secondary_floor(&key, &svc, &sample, &note_spaces)
+                .calibrate_one_secondary_floor(&key, &svc, &sample, &note_spaces, margin)
                 .await?;
             {
                 let mut floors = self
@@ -985,14 +988,17 @@ impl Kernel {
 
     /// One secondary space's image floor: CLIP-text-embed the sample texts on
     /// this space's backend, search its image vectors, collect best non-self
-    /// cosines, return `mean + ACTIVATION_MARGIN·std` (or `None` below
-    /// `CALIB_MIN`). No-op (`None`) when the space has no image vectors.
+    /// cosines, return `mean + margin·std` (or `None` below `CALIB_MIN`). No-op
+    /// (`None`) when the space has no image vectors. `margin` is the harness-
+    /// resolved `search.cross_space_fusion.margin` (#580) — the precision/recall
+    /// dial; `ACTIVATION_MARGIN` (1.0) is its default.
     async fn calibrate_one_secondary_floor(
         &self,
         key: &str,
         svc: &EmbedService,
         sample: &[(i64, String)],
         note_spaces: &[String],
+        margin: f64,
     ) -> NativeResult<Option<f64>> {
         let Some(orch) = self.index_set.orchestrator_for(key) else {
             return Ok(None);
@@ -1037,11 +1043,9 @@ impl Kernel {
             .sum::<f64>()
             / n;
         // The one floor formula (#201b's `mean + margin·std`), shared with the
-        // primary's via `actions::activation_floor`.
-        Ok(actions::activation_floor(
-            Some((mean, var.sqrt())),
-            actions::ACTIVATION_MARGIN,
-        ))
+        // primary's via `actions::activation_floor`. The margin is the harness-
+        // resolved dial (#580); `ACTIVATION_MARGIN` is its 1.0 default.
+        Ok(actions::activation_floor(Some((mean, var.sqrt())), margin))
     }
 
     /// The PRIMARY orchestrator (state, status, drift) — the harness's status

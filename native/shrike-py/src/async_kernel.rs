@@ -932,12 +932,21 @@ impl AsyncKernel {
     }
 
     /// Recalibrate every secondary cross-space image floor (#576) — awaitable.
-    /// The harness drives this after a (re)build / model change. Returns the
-    /// per-space derived floor as `[(space_key, floor_or_None), …]` so the
+    /// The harness drives this after a (re)build / model change. `margin` is the
+    /// harness-resolved `search.cross_space_fusion.margin` (#580 — the precision/
+    /// recall dial folded into `mean + margin·std`; 1.0 is the default). Returns
+    /// the per-space derived floor as `[(space_key, floor_or_None), …]` so the
     /// harness can log/surface the values. No-op (empty) in the N=1 case.
-    fn calibrate_secondary_floors<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (margin))]
+    fn calibrate_secondary_floors<'py>(
+        &self,
+        py: Python<'py>,
+        margin: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        kernel_op(py, async move { kernel.calibrate_secondary_floors().await })
+        kernel_op(py, async move {
+            kernel.calibrate_secondary_floors(margin).await
+        })
     }
 
     /// The index status block as JSON (state/size/progress/stamps).

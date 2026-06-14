@@ -55,13 +55,14 @@ SPURIOUS = "spurious_filename"
 COLLISION_IDS = {1: "heart", 2: "skeleton", 6: "plant_cell", 7: "animal_cell",
                  8: "citric_acid", 10: "periodic_table", 15: "great_wall"}
 
-# The modes to sweep: the production baseline, then the #580 prototype family.
+# The modes to sweep: the pre-#580 production gate (now eval-only) vs the #580
+# floor-admission family. `FloorAdmit` is the PRODUCTION default since #580.
 # (FloorAdmitBudget B=1.0 is included to show N=1 — the production-valid single-
 # image-space case — is unaffected by the budget; the budget only ever bites at
-# N>=2, which the config assertion makes impossible.)
+# N>=2, which the single-image-space config error makes impossible.)
 MODES = [
-    ("RelativeFloor (PROD baseline)", "relative_floor"),
-    ("FloorAdmit (binary)", "floor_admit"),
+    ("RelativeFloor (pre-#580 gate)", "relative_floor"),
+    ("FloorAdmit (PROD default #580)", "floor_admit"),
     ("FloorAdmitBudget B=1.0 (N=1)", "floor_admit_budget"),
     ("SoftFloorAdmit (tau=0.05)", "soft_floor_admit"),
     ("SoftFloorAdmit (tau=0.10)", "soft_floor_admit"),
@@ -197,7 +198,7 @@ async def main() -> None:
 
     rows = []
     try:
-        derived = await ip.harness.kernel.calibrate_secondary_floors()
+        derived = await ip.harness.kernel.calibrate_secondary_floors(ip.harness.cross_space_floor_margin)
         print(f"\nDERIVED secondary image floor(s): {derived}\n", flush=True)
         for idx, (label, mode) in enumerate(MODES):
             _set_mode(mode, TAU_OVERRIDE.get(idx))

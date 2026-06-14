@@ -1201,6 +1201,17 @@ def main() -> None:
 
     export_store = ExportStore(str(cache_base))
 
+    # The cross-space image floor margin (#580): config/env-resolved (no flag —
+    # an operational knob, not a v2 capability section), so the server loads it
+    # from the config file the daemon was started with. Default 1.0.
+    from shrike.cli.config import load_config, resolve_cross_space_margin
+
+    try:
+        _margin_config = load_config(Path(args.config)) if args.config else load_config()
+    except Exception:  # noqa: BLE001 — a missing/garbage config falls back to the default margin
+        _margin_config = {}
+    cross_space_floor_margin = resolve_cross_space_margin(_margin_config)
+
     async def _serve() -> None:
         # Assembly runs ON the loop (#332 S3d-2): the kernel opens with a
         # dedicated harness thread driving its executor; the wrapper rides the
@@ -1219,6 +1230,7 @@ def main() -> None:
             index_save_delay=args.index_save_delay,
             index_save_threshold=args.index_save_threshold,
             secondary_runtimes=secondary_runtimes,
+            cross_space_floor_margin=cross_space_floor_margin,
         )
         # Embedding starts at boot when anything configures it: a model (flag
         # or config entry) OR a bare endpoint (#498 — a remote/attach entry's
@@ -1264,6 +1276,7 @@ def main() -> None:
                 hold_seconds=hold_seconds,
                 index_save_delay=args.index_save_delay,
                 index_save_threshold=args.index_save_threshold,
+                cross_space_floor_margin=cross_space_floor_margin,
             ),
             default_harness=harness,
             default_collection_path=args.collection,

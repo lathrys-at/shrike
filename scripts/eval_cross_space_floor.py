@@ -89,7 +89,7 @@ async def main() -> None:
 
     rows = []
     try:
-        derived = await ip.harness.kernel.calibrate_secondary_floors()
+        derived = await ip.harness.kernel.calibrate_secondary_floors(ip.harness.cross_space_floor_margin)
         print(f"\nDERIVED secondary image floor(s): {derived}", flush=True)
 
         for label, mode in [

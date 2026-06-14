@@ -177,10 +177,13 @@ class InProcessSearch:
         vector index to rebuild."""
         if self.backend is not None:
             await self.harness.kernel.rebuild_index()
-            # Recalibrate the secondary cross-space image floors (#576) — the
-            # production harness drives this after every rebuild; the in-process
-            # finalize mirrors it so the real-model suite exercises the floor.
-            await self.harness.kernel.calibrate_secondary_floors()
+            # Recalibrate the secondary cross-space image floors (#576/#580) —
+            # the production harness drives this after every rebuild; the
+            # in-process finalize mirrors it (with the harness's resolved floor
+            # margin) so the real-model suite exercises the floor.
+            await self.harness.kernel.calibrate_secondary_floors(
+                self.harness.cross_space_floor_margin
+            )
         await self.harness.kernel.rebuild_derived()
 
     def index_status(self) -> dict[str, Any]:

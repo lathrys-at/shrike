@@ -550,31 +550,42 @@ pub struct SpaceSemantic {
     pub image_floor: Option<f64>,
 }
 
-/// The cross-space fusion variant (#576). `RelativeFloor` is the SHIPPED
-/// PRODUCTION default: the relative gate composed with a per-space calibrated
-/// intra-modal image floor (the #576 experiment's winner — closes the ∅-gold
-/// over-return leak with no recall loss). The other three #576 modes are
-/// eval-only measurement modes the `SHRIKE_CROSS_SPACE_FUSION_MODE` seam
-/// selects to reproduce the decision table; they never change production. The
-/// relative gate composes with all of them (it is the negative-control backstop
-/// and never drops out — see #234).
+/// The cross-space fusion variant. `FloorAdmit` is the SHIPPED PRODUCTION
+/// default since #580: the relative winner-take-all gate (#234) is RETIRED from
+/// the production path — a secondary image space is admitted on its OWN
+/// calibrated intra-modal floor (`image_best > z_floor`), independent of how the
+/// text space did, so a strong on-topic CLIP hit reaches RRF and corroborates a
+/// card even when the text space "won" on a spurious filename/lexical match (the
+/// #580 corroboration win, measured on the real MiniLM+CLIP corpus:
+/// `eval/search_quality/RESULTS_580.md`). The floor margin is the precision/
+/// recall dial (`search.cross_space_fusion.margin`, threaded into calibration).
 ///
-/// The `FloorAdmit*` modes (#580) are the EVAL prototype for the
-/// floor-based-admission redesign: they DROP the relative gate and admit a
-/// vision space on its OWN absolute floor (above its calibrated intra-modal
-/// noise floor), independent of how the text space did — so a strong, on-topic
-/// CLIP hit reaches RRF even when the text space "won" on a spurious
-/// filename/lexical match (the #580 corroboration case). Multiplicity (the N≥2
-/// flooding the relative gate guards) is handled by a vision-WEIGHT BUDGET
-/// instead of per-space relative suppression. These are eval-only; production
-/// stays on `RelativeFloor` until a separate user-gated change.
+/// Retiring the relative gate is sound because >1 image-embedding space is a
+/// config error (`profiles.resolve_profile`): with at most ONE image space
+/// there is no multiplicity to guard, which was the relative gate's sole job
+/// (the N≥2 flood — `cross_space_ungated_regresses_text_negative_control` +
+/// `floor_admit_alone_floods_n2_but_budget_holds_it` document the
+/// impossible-by-construction behaviour at the kernel level).
+///
+/// The other modes are EVAL-ONLY (`SHRIKE_CROSS_SPACE_FUSION_MODE`), kept to
+/// reproduce the historical #576/#580 decision tables — they NEVER select in
+/// production: the relative family (`Relative`, `RelativeFloor`, `SoftRelative`,
+/// `SoftCalibrated`) reproduces the pre-#580 gate; `SoftFloorAdmit*` reproduces
+/// the dominated soft variant (#580 §5: zero recall upside, re-opens the
+/// over-return leak with τ); the `*Budget` modes reproduce the N≥2 multiplicity
+/// measurement that justifies the single-image-space invariant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CrossSpaceFusionMode {
-    /// V0+floor (PRODUCTION) — relative AND a per-space calibrated intra-modal
-    /// floor (`image_best > z_floor`): a hard drop of the space's image ranking
-    /// when its best surviving image cosine clears no floor. The shipped #576
-    /// winner; the floor is harness-calibrated per secondary space.
+    /// PRODUCTION (#580) — FLOOR-ADMIT (binary): the relative gate is gone; admit
+    /// a vision space iff its best surviving image cosine clears its OWN
+    /// calibrated floor (`image_best > z_floor`), at full weight 1.0. An
+    /// uncalibrated space (no floor) is admitted (the floor is a no-op). The
+    /// single-image-space invariant (a config error otherwise) means the N≥2
+    /// flood the relative gate used to guard cannot occur.
     #[default]
+    FloorAdmit,
+    /// V0+floor (eval) — the pre-#580 production default: relative gate AND a
+    /// per-space calibrated intra-modal floor. Kept to reproduce the #576 table.
     RelativeFloor,
     /// V0 (eval) — binary relative gate only (`clip_best >= text_best`). The
     /// pre-#576 behaviour; leaks weak image cards when the primary's best cosine
@@ -587,34 +598,21 @@ pub enum CrossSpaceFusionMode {
     /// V2 (eval) — soft-calibrated: weight `w = σ((z_s − z0)/τ)`, composed with
     /// the relative gate. The soft alternative to the hard floor.
     SoftCalibrated,
-    /// #580 — FLOOR-ADMIT (binary, NO budget): drop the relative gate entirely;
-    /// admit a vision space iff its best surviving image cosine clears its OWN
-    /// calibrated floor (`image_best > z_floor`), at full weight 1.0. An
-    /// uncalibrated space (no floor) is admitted (the floor is a no-op). This is
-    /// the pure thesis — it fixes the filename-collision case but, with no
-    /// budget, the N≥2 negative control flooding is unprotected (each off-topic
-    /// but intra-modally-confident space clears its floor and floods).
-    FloorAdmit,
-    /// #580 — FLOOR-ADMIT + WEIGHT BUDGET (binary): admit on the absolute floor
-    /// (relative gate dropped), but bound the TOTAL vision RRF weight when N≥2
-    /// spaces fire by splitting a budget `B` (default 1.0, `cross_space_budget`)
-    /// equally across the admitted spaces (each gets `B/N`). N=1 keeps full
-    /// weight `B` (the production-common case is unpenalized). The budget is what
-    /// holds the N≥2 negative control without per-space relative suppression.
+    /// #580 (eval) — FLOOR-ADMIT + WEIGHT BUDGET (binary): admit on the absolute
+    /// floor, but bound the TOTAL vision RRF weight when N≥2 spaces fire by
+    /// splitting a budget `B` (default 1.0, `cross_space_budget`) equally across
+    /// the admitted spaces (each gets `B/N`). N=1 keeps full weight `B`. The
+    /// budget held the N≥2 negative control without relative suppression — the
+    /// MEASURED RATIONALE for the single-image-space invariant (moot in
+    /// production, where N≥2 is a config error).
     FloorAdmitBudget,
-    /// #580 — SOFT floor-admit (NO budget): drop the relative gate; weight each
-    /// admitted space `w = σ((image_best − z_floor)/τ)` — a confident hit
-    /// contributes near-fully, a borderline one partially. This is the soft
-    /// V2-style admission of #576 applied to its REAL purpose (corroboration),
-    /// without the relative composition. No budget → same N≥2 exposure as
-    /// `FloorAdmit`, but the soft taper attenuates a near-floor flood.
+    /// #580 (eval) — SOFT floor-admit (NO budget): drop the relative gate; weight
+    /// each admitted space `w = σ((image_best − z_floor)/τ)`. DOMINATED (#580
+    /// §5): no recall upside over binary, and re-opens the over-return leak as τ
+    /// grows. Kept only to reproduce that finding.
     SoftFloorAdmit,
-    /// #580 — SOFT floor-admit + WEIGHT BUDGET: the graceful form. Each admitted
-    /// space gets a soft weight `σ((image_best − z_floor)/τ)`; the per-space soft
-    /// weights are then scaled so their SUM never exceeds the budget `B` (when
-    /// `Σ raw > B`, each is scaled by `B / Σ raw`; otherwise left as-is). N=1
-    /// with a confident hit keeps ~full weight; N≥2 confident off-topic spaces
-    /// share the budget. This is the candidate the memo measures as the winner.
+    /// #580 (eval) — SOFT floor-admit + WEIGHT BUDGET: the soft variant with the
+    /// N≥2 budget (sum-scaled to `B`). Also dominated; kept for completeness.
     SoftFloorAdmitBudget,
 }
 
@@ -1334,28 +1332,31 @@ pub fn search_notes(
         ];
 
         // ── Cross-space fusion (#234 / #576 / #580) ──────────────────────────
-        // Each SECONDARY text-capable space contributes its own gated `image`
-        // ranking. EMPTY cross_space (N=1) → this whole block is a no-op and the
-        // rankings vector above is byte-identical to today, so `rrf_fuse` gets
-        // identical inputs.
+        // Each SECONDARY image space contributes its own `image` ranking. EMPTY
+        // cross_space (N=1 — the production-common case) → this whole block is a
+        // no-op and the rankings vector above is byte-identical, so `rrf_fuse`
+        // gets identical inputs.
         //
-        // TWO admission families select on `cross_space_fusion_mode`:
-        //   - RELATIVE family (#234/#576, the PRODUCTION default): a vision space
-        //     fires ONLY when its best query→match cosine clears the PRIMARY text
-        //     space's best for this same source (the relative gate), optionally
-        //     composed with the per-space intra-modal floor (#576). Winner-take-
-        //     all: text winning (even on a filename lexical match) shuts CLIP out.
-        //   - FLOOR-ADMIT family (#580, EVAL): the relative gate is DROPPED; a
-        //     space is admitted on its OWN absolute floor (`image_best > z_floor`)
-        //     so a strong on-topic CLIP hit corroborates the card even when text
-        //     also hit. Multiplicity is bounded by a vision-weight BUDGET (the
-        //     `*Budget` modes), not by relative suppression.
+        // PRODUCTION (#580): FLOOR-ADMIT. The relative winner-take-all gate is
+        // RETIRED — a secondary image space is admitted on its OWN calibrated
+        // intra-modal floor (`image_best > z_floor`), independent of how the text
+        // space did, so a strong on-topic CLIP hit corroborates the card even
+        // when text "won" on a spurious filename lexical match (the #580 win).
+        // Sound because >1 image space is a config error (`profiles`): with at
+        // most one image space there is no multiplicity, which was the relative
+        // gate's only job.
         //
-        // Per-space soft weights (V1/V2 and the #580 soft modes) collected here,
-        // applied to the `image#<key>` signal's RRF weight after the canonical
-        // weights resolve. Two passes: (1) admit + raw weight per space; (2)
-        // the budget normalization across the admitted set (a no-op for the
-        // non-budget modes), then fold/push.
+        // EVAL-ONLY (`SHRIKE_CROSS_SPACE_FUSION_MODE`): the relative family
+        // (`Relative*`/`*Floor` non-admit) reproduces the pre-#580 gate; the
+        // `Soft*`/`*Budget` modes reproduce the dominated soft variant + the N≥2
+        // multiplicity measurement. `uses_relative_gate` keeps the gate for the
+        // relative family ONLY; the floor-admit family skips it.
+        //
+        // Per-space soft/budget weights (eval modes) collected here, applied to
+        // the `image#<key>` signal's RRF weight after the canonical weights
+        // resolve. Two passes: (1) admit + raw weight per space; (2) the budget
+        // normalization across the admitted set (a no-op for the production
+        // FloorAdmit mode), then fold/push.
         let mut cross_space_weights: std::collections::BTreeMap<String, f64> =
             std::collections::BTreeMap::new();
         if !args.cross_space.is_empty() {
@@ -1949,10 +1950,13 @@ mod search_tests {
 
     #[test]
     fn cross_space_gated_preserves_text_target() {
-        // (a) The eval's "fully preserved": with the relative gate ON, an
-        // OFF-TOPIC vision space (its best image cosine BELOW the primary text
-        // space's best) does NOT fire — the text-target note stays rank-1, the
-        // dedicated-text baseline. The gate is closed because vision < text.
+        // (a) Documents the now-EVAL-ONLY relative gate (retired from production
+        // by #580): under `Relative`, an OFF-TOPIC vision space (its best image
+        // cosine BELOW the primary text space's best) does NOT fire — the
+        // text-target note stays rank-1. Kept as a kernel-level record of the
+        // gate's behaviour now that floor-admission is the default. (Under the
+        // production `FloorAdmit` the off-topic space here would be dropped by
+        // the floor instead; this test exercises the relative path explicitly.)
         let (dir, core) = temp_collection();
         let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
         let image_note = add_note(&core, "unrelated filler card", "misc");
@@ -1976,10 +1980,12 @@ mod search_tests {
         .unwrap();
         assert_eq!(groups[0].matches[0].note.id, text_target, "baseline rank-1");
 
-        // GATED cross-space: the vision space's best image cosine (0.30) is far
-        // BELOW the primary text space's best (0.90) → the relative gate keeps
-        // it OUT. Text-target ranking is byte-for-byte the baseline.
+        // GATED cross-space (eval `Relative`): the vision space's best image
+        // cosine (0.30) is far BELOW the primary text space's best (0.90) → the
+        // relative gate keeps it OUT. Text-target ranking is byte-for-byte the
+        // baseline.
         let mut a = cross_args(10);
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::Relative;
         a.cross_space = vec![vision_space("clip", &[image_note], &[0.70])]; // cos 0.30
         let gated = search_notes(
             &core,
@@ -2007,13 +2013,15 @@ mod search_tests {
     #[test]
     fn cross_space_ungated_regresses_text_negative_control() {
         // (b) THE NEGATIVE CONTROL — the eval's load-bearing finding (text R@1
-        // collapse, the 0.08-vs-1.00 separation), productionized. The query is
-        // ON-TOPIC for text: the text-target is the correct rank-1, and the
-        // off-topic image note's vision cosine is BELOW the text-target's — so
-        // the relative gate SHOULD keep the image note OUT. With the gate
-        // DISABLED, the image note floods in across multiple always-on vision
-        // spaces and out-fuses the correct text note. The gate's whole job is to
-        // prevent exactly this; turning it off reproduces the regression.
+        // collapse, the 0.08-vs-1.00 separation). It documents WHY the relative
+        // gate existed: N=2 off-topic vision spaces flood a text query. #580
+        // RETIRED the gate because >1 image space is a config error
+        // (`profiles.resolve_profile`), so this N=2 shape is IMPOSSIBLE in
+        // production — this test is a kernel-level record of the now-eval-only
+        // relative gate (selected explicitly via `Relative`), not a production
+        // path. The query is ON-TOPIC for text; the off-topic image's vision
+        // cosine is BELOW the text-target's, so the relative gate keeps it OUT;
+        // ungated (or under floor-admit with no floor) it floods.
         let (dir, core) = temp_collection();
         let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
         let off_topic_image = add_note(
@@ -2067,12 +2075,14 @@ mod search_tests {
             "ungated: the text-target is no longer rank-1 (the regression)"
         );
 
-        // THE SAME inputs WITH the relative gate ON: both vision spaces close
-        // (vision 0.70 < text 0.80), the off-topic image note is excluded, and
-        // the text-target is restored to rank-1 — the dedicated-text baseline.
-        // This is the load-bearing contrast: the gate IS what prevents (b).
+        // THE SAME inputs WITH the relative gate ON (eval `Relative`): both
+        // vision spaces close (vision 0.70 < text 0.80), the off-topic image
+        // note is excluded, and the text-target is restored to rank-1. This is
+        // the load-bearing contrast: the gate IS what prevented (b) — the reason
+        // it was safe to retire is that the N=2 input is now a config error.
         let mut gated_args = ungated_args.clone();
         gated_args.disable_cross_space_gate = false;
+        gated_args.cross_space_fusion_mode = CrossSpaceFusionMode::Relative;
         let gated = search_notes(
             &core,
             Some(&index),

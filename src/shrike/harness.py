@@ -26,6 +26,7 @@ from typing import Any
 import shrike_native
 
 from shrike import cache_layout
+from shrike.actions import ACTIVATION_MARGIN
 from shrike.collection import CollectionWrapper
 from shrike.derived import DerivedTextStore, NativeDerivedEngine
 from shrike.embedding import EmbeddingRuntime
@@ -295,10 +296,16 @@ class Harness:
         media_exists: Any,
         owns_runtime: bool = True,
         secondary_runtimes: Sequence[EmbeddingRuntime] | None = None,
+        cross_space_floor_margin: float = ACTIVATION_MARGIN,
     ) -> None:
         self.kernel = kernel
         self.wrapper = wrapper
         self.runtime = runtime
+        # The cross-space image floor margin (#580): the precision/recall dial
+        # folded into the secondary floor's `mean + margin·std` at calibration.
+        # Default 1.0 (ACTIVATION_MARGIN) = today's behaviour; resolved harness-
+        # side from `search.cross_space_fusion.margin` / the env twin.
+        self.cross_space_floor_margin = cross_space_floor_margin
         # Additional embedding spaces (#233): the SECONDARY runtimes, attached
         # to their own kernel embed-space keys alongside the primary. Empty in
         # the N=1 case (the default), so single-space behaviour — and every
@@ -348,6 +355,7 @@ class Harness:
         index_save_threshold: int | None = None,
         owns_runtime: bool = True,
         secondary_runtimes: Sequence[EmbeddingRuntime] | None = None,
+        cross_space_floor_margin: float = ACTIVATION_MARGIN,
     ) -> Harness:
         """Open the kernel on the running loop. Scheduling is the kernel's
         own (#374 — the owned tokio runtime spawns the collection actor);
@@ -376,6 +384,7 @@ class Harness:
             media_exists=media_exists,
             owns_runtime=owns_runtime,
             secondary_runtimes=secondary_runtimes,
+            cross_space_floor_margin=cross_space_floor_margin,
         )
 
     # -- boot ------------------------------------------------------------------
@@ -891,12 +900,14 @@ class Harness:
         A dedicated CLIP secondary is image-only, so the engine's own #201b
         calibration (text→image) finds no text vectors there; this harness-driven
         pass CLIP-text-embeds a sample of note texts through each secondary's own
-        backend and fires them at its image vectors to derive the floor. Best
-        effort: a failure leaves the prior floors and only weakens the gate to
-        the relative comparison — never breaks search. No-op in the N=1 case
-        (the kernel returns an empty list when there are no secondaries)."""
+        backend and fires them at its image vectors to derive the floor
+        (``mean + margin·std``, the #580 margin dial). Best effort: a failure
+        leaves the prior floors and only weakens the floor admission to "no
+        floor" (admit any non-empty space) — never breaks search. No-op in the
+        N=1 case (the kernel returns an empty list when there are no
+        secondaries)."""
         try:
-            derived = await self.kernel.calibrate_secondary_floors()
+            derived = await self.kernel.calibrate_secondary_floors(self.cross_space_floor_margin)
         except Exception as e:  # noqa: BLE001 — calibration is advisory; never fail search
             logger.warning("Secondary cross-space floor calibration failed: %s", e)
             return
@@ -990,6 +1001,7 @@ class HarnessParams:
     hold_seconds: float
     index_save_delay: float | None = None
     index_save_threshold: int | None = None
+    cross_space_floor_margin: float = ACTIVATION_MARGIN
 
 
 class CollectionManager:
@@ -1163,6 +1175,7 @@ class CollectionManager:
             media_exists=self._params.media_exists,
             index_save_delay=self._params.index_save_delay,
             index_save_threshold=self._params.index_save_threshold,
+            cross_space_floor_margin=self._params.cross_space_floor_margin,
             owns_runtime=False,  # the shared runtime is owned by the default harness
         )
         # Boot WITHOUT starting embedding (the shared runtime is already
