@@ -35,6 +35,7 @@ pub mod media_fetch;
 pub mod recognize;
 pub mod tag_centroids;
 pub mod textsim;
+pub mod watermark;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -295,6 +296,11 @@ pub struct Kernel {
     /// (not a batch-size cap) because it bounds CONCURRENCY without shrinking a
     /// single sweep's batch — throughput per call is unchanged.
     slow_recognition: Arc<tokio::sync::Semaphore>,
+    /// The watermark over-certification guard (#585/#590): tracks in-flight +
+    /// un-healed-failed writes per watermark space (index, derived) so an
+    /// advance never certifies a `col.mod` whose writes this op did not actually
+    /// index/ingest. See [`watermark`].
+    watermarks: watermark::WatermarkTracker,
     /// The per-secondary-space cross-space IMAGE activation floor (#576),
     /// keyed by space key. A dedicated CLIP secondary is image-only
     /// (`WriteMode::ImageOnly`), so the engine's own #201b calibration — which
@@ -556,6 +562,7 @@ impl Kernel {
             recognize: RwLock::new(BTreeMap::new()),
             recognition_gate: recognize::RecognitionGate::default(),
             slow_recognition: Arc::new(tokio::sync::Semaphore::new(SLOW_RECOGNITION_CONCURRENCY)),
+            watermarks: watermark::WatermarkTracker::default(),
             secondary_floors: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
@@ -1100,6 +1107,9 @@ impl Kernel {
             if let Some(dim) = svc.embedder.dim() {
                 orch.materialize_empty(dim, col_mod, model_id.as_deref());
             }
+            // A whole-collection (re)materialize re-certifies the index space →
+            // any earlier per-op index-tail failure is healed (#585).
+            self.watermarks.clear_index_poison();
             self.refresh_tags_best_effort().await;
             return Ok(true);
         }
@@ -1112,6 +1122,11 @@ impl Kernel {
             svc.images_pair(),
         )
         .await?;
+        // A successful whole-collection reconcile re-indexes every changed/new
+        // note (and drops deleted) and stamps its own snapshot col_mod, so every
+        // prior per-op index-tail failure is now healed — clear the poison floor
+        // that was holding the watermark back (#585).
+        self.watermarks.clear_index_poison();
         // The SEPARATE image-primary space (#232), if any: reconcile its
         // ImageOnly index against its OWN drift (keyed on its own model_id /
         // image fingerprints). None at N=1 / for an omni primary.
@@ -1199,6 +1214,9 @@ impl Kernel {
                     .await?;
             }
         }
+        // A full rebuild re-certifies the whole index space → clear any poison
+        // floor from earlier per-op index-tail failures (#585).
+        self.watermarks.clear_index_poison();
         self.refresh_tags_best_effort().await;
         Ok(total)
     }
@@ -1294,6 +1312,12 @@ impl Kernel {
             let (n, dmod, now) = self.rebuild_derived_once().await?;
             last = (n, dmod);
             if now == dmod {
+                // A clean whole-collection derived rebuild re-ingests every note
+                // and stamps its own snapshot col_mod → prior per-op derived
+                // ingest failures are healed; clear the derived poison floor
+                // (#585). (The capped/raced fallback below deliberately does
+                // NOT — its watermark is knowingly behind.)
+                self.watermarks.clear_derived_poison();
                 return Ok(last);
             }
             tracing::debug!(
@@ -1656,8 +1680,40 @@ impl Kernel {
         }
     }
 
+    /// The maintained index/derived tail for a set of created/updated notes,
+    /// used by paths that DON'T do their own `col.mod`-bumping write before the
+    /// tail (the recognition sweep, `reindex_notes`). It captures the live
+    /// `col.mod` and registers it as in-flight HERE — there is no separate
+    /// committed write whose `col.mod` it must inherit.
     async fn index_written(&self, written: &[i64]) -> NativeResult<()> {
+        let col_mod = self.col_mod().await?;
+        let tokens = self.watermarks.register(col_mod);
+        self.index_written_tracked(written, tokens).await
+    }
+
+    /// The maintained index/derived tail, best-effort (#590) and
+    /// over-certification-safe (#585). `tokens` carries the `col.mod` captured
+    /// (and registered as in-flight) with this op's collection write, so the
+    /// watermark advance is bounded to a value whose writes this op actually
+    /// indexed.
+    ///
+    /// The tail is best-effort: a failed embed/index/ingest after the
+    /// collection write already committed logs a WARNING and returns
+    /// successfully with the watermark LEFT BEHIND (the token completed as a
+    /// failure), so the next boot/reload drift check reconciles the note —
+    /// rather than failing the whole call and telling the caller a committed
+    /// write failed (the committed-but-errored window). This mirrors every
+    /// sibling maintained op (`collection_prune`/`migrate_note_type`/…).
+    async fn index_written_tracked(
+        &self,
+        written: &[i64],
+        tokens: watermark::WriteTokens,
+    ) -> NativeResult<()> {
         if written.is_empty() {
+            // Nothing to index — complete both tokens as success so the empty
+            // tail (e.g. a batch of all-errors) doesn't strand the watermark
+            // behind its own captured col.mod.
+            self.advance_watermarks(tokens, true, true).await;
             return Ok(());
         }
         // First-occurrence dedupe (#445): a batch that wrote the same note
@@ -1672,7 +1728,10 @@ impl Kernel {
             .collect();
         let written = &written[..];
         let ids = written.to_vec();
-        let (raw_inputs, rows, tagged) = self
+        // The read is the input to BOTH tails; a read failure means neither tail
+        // ran, so both watermarks stay behind (best-effort) and the next drift
+        // heals. (Pre-#590 this `?`-propagated and failed the whole call.)
+        let read = self
             .collection
             .run(move |core| -> NativeResult<_> {
                 let inputs = core.note_embed_inputs(&ids)?;
@@ -1680,52 +1739,117 @@ impl Kernel {
                 let tagged = core.any_tagged(&ids)?;
                 Ok((inputs, rows, tagged))
             })
-            .await??;
+            .await;
+        let (raw_inputs, rows, tagged) = match read.and_then(|r| r) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    notes = written.len(),
+                    "index tail read failed after the collection write committed; \
+                     leaving the watermark behind for next-boot drift to heal"
+                );
+                self.advance_watermarks(tokens, false, false).await;
+                return Ok(());
+            }
+        };
         let svc = self.embed_service();
-        if let Some(svc) = &svc {
-            let inputs = self.compose_embed_inputs(raw_inputs, Some(written));
-            // The TEXT-primary write (#232): text (+ image when the primary is
-            // omni — `images_pair()` is None for a dedicated text embedder).
-            // Byte-identical for N=1.
-            self.index_set
-                .primary()
-                .add(&inputs, &*svc.embedder, svc.images_pair())
-                .await?;
-            // The SEPARATE image-primary write (#232): the note's images land in
-            // the image-primary's own ImageOnly index. None at N=1 / omni.
-            if let Some((iorch, isvc)) = self.image_only_route() {
-                if let Some((ie, r)) = isvc.images_pair() {
-                    iorch
-                        .add_with_mode(
-                            &inputs,
-                            &*isvc.embedder,
-                            Some((ie, r)),
-                            index_orchestrator::WriteMode::ImageOnly,
-                        )
-                        .await?;
+        // The index half. With no embedder attached the index is intentionally
+        // NOT maintained (it reconciles on the next attach), so its watermark
+        // must stay put — modelled as "index tail did not succeed for this op"
+        // so the in-flight token doesn't advance the index watermark.
+        let index_ok = if let Some(svc) = &svc {
+            match self.write_index(&raw_inputs, written, svc).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        notes = written.len(),
+                        "index add failed after the collection write committed; \
+                         leaving the index watermark behind for next-boot drift to heal"
+                    );
+                    false
                 }
             }
+        } else {
+            false
+        };
+        // The derived (lexical) half, independent of the index half — it runs
+        // even with embeddings off (#98).
+        let derived_ok = match self.ingest_derived(&rows, written) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    notes = written.len(),
+                    "derived ingest failed after the collection write committed; \
+                     leaving the derived watermark behind for next-boot drift to heal"
+                );
+                false
+            }
+        };
+        self.advance_watermarks(tokens, index_ok, derived_ok).await;
+        // Tag centroids derive from the text vectors just written (#179) —
+        // refreshed off the op tail, and only when the op could have changed
+        // membership AND the index half actually landed (a failed embed wrote no
+        // vectors to derive a centroid from).
+        if index_ok && (tagged || self.tag_keys.any_member_of(written)) {
+            self.tag_refresh.request();
         }
-        // Group the derived rows per note; ONE transaction for the whole
-        // batch (#445 — one commit per note was journal churn × batch size).
+        Ok(())
+    }
+
+    /// The index-add half of the maintained tail (#232): the text-primary write
+    /// plus the separate image-primary write when one exists.
+    async fn write_index(
+        &self,
+        raw_inputs: &[(i64, String, Vec<String>)],
+        written: &[i64],
+        svc: &EmbedService,
+    ) -> NativeResult<()> {
+        let inputs = self.compose_embed_inputs(raw_inputs.to_vec(), Some(written));
+        // The TEXT-primary write (#232): text (+ image when the primary is
+        // omni — `images_pair()` is None for a dedicated text embedder).
+        // Byte-identical for N=1.
+        self.index_set
+            .primary()
+            .add(&inputs, &*svc.embedder, svc.images_pair())
+            .await?;
+        // The SEPARATE image-primary write (#232): the note's images land in
+        // the image-primary's own ImageOnly index. None at N=1 / omni.
+        if let Some((iorch, isvc)) = self.image_only_route() {
+            if let Some((ie, r)) = isvc.images_pair() {
+                iorch
+                    .add_with_mode(
+                        &inputs,
+                        &*isvc.embedder,
+                        Some((ie, r)),
+                        index_orchestrator::WriteMode::ImageOnly,
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The derived-ingest half of the maintained tail: group the rows per note
+    /// and ingest in ONE transaction for the whole batch (#445).
+    fn ingest_derived(
+        &self,
+        rows: &[(i64, String, String, String)],
+        written: &[i64],
+    ) -> NativeResult<()> {
         let mut refs: BTreeMap<i64, Vec<(String, String)>> = BTreeMap::new();
         for (nid, _source, name, value) in rows {
-            refs.entry(nid).or_default().push((name, value));
+            refs.entry(*nid)
+                .or_default()
+                .push((name.clone(), value.clone()));
         }
         let batch: Vec<(i64, Vec<(String, String)>)> = written
             .iter()
             .map(|note_id| (*note_id, refs.remove(note_id).unwrap_or_default()))
             .collect();
-        self.derived.ingest_many(&batch, FIELD_SOURCE)?;
-        self.advance_watermarks(svc.is_some()).await?;
-        // Tag centroids derive from the text vectors just written (#179) —
-        // refreshed off the op tail, and only when the op could have changed
-        // membership: a written note carries tags now, or was a member
-        // before (an update that removed them) (#445).
-        if tagged || self.tag_keys.any_member_of(written) {
-            self.tag_refresh.request();
-        }
-        Ok(())
+        self.derived.ingest_many(&batch, FIELD_SOURCE)
     }
 
     /// The wire-shaped bulk upsert (#77): the collection core's NAMED upsert
@@ -1741,11 +1865,19 @@ impl Kernel {
     ) -> NativeResult<Vec<shrike_schemas::UpsertNoteResult>> {
         let span = tracing::debug_span!("kernel.upsert_notes_wire", dry_run);
         async move {
-            let results = self
+            // Read `col.mod` in the SAME write job (#585) so the watermark this
+            // op may advance to is the one its OWN write produced. A dry run
+            // mutates nothing, so it needs no watermark token at all.
+            let (results, col_mod) = self
                 .collection
-                .run(move |core| core.upsert_notes(&notes, policy, dry_run))
+                .run(move |core| -> NativeResult<_> {
+                    let results = core.upsert_notes(&notes, policy, dry_run)?;
+                    let col_mod = if dry_run { None } else { Some(core.col_mod()?) };
+                    Ok((results, col_mod))
+                })
                 .await??;
-            if !dry_run {
+            if let Some(col_mod) = col_mod {
+                let tokens = self.watermarks.register(col_mod);
                 // Typed outcomes (#391): written ids come straight off the
                 // variants — the parse-own-output round-trip is gone.
                 let written: Vec<i64> = results
@@ -1756,7 +1888,10 @@ impl Kernel {
                         _ => None,
                     })
                     .collect();
-                self.index_written(&written).await?;
+                // Best-effort tail (#590): the note is committed; a failed
+                // embed/index/ingest logs a warning and returns the successful
+                // per-item results rather than failing the whole call.
+                self.index_written_tracked(&written, tokens).await?;
             }
             Ok(results)
         }
@@ -1764,14 +1899,31 @@ impl Kernel {
         .await
     }
 
-    /// Advance the derived-store watermark — and, when the index was actually
-    /// maintained by this op (an embedder is attached), the index watermark +
-    /// a debounced flush. With no embedder the index watermark stays put, so
-    /// the next attach sees drift and reconciles (cheap via the fingerprints).
-    async fn advance_watermarks(&self, index_maintained: bool) -> NativeResult<()> {
-        let col_mod = self.collection.run(|core| core.col_mod()).await??;
-        self.derived.set_col_mod(col_mod)?;
-        if index_maintained {
+    /// Complete this op's watermark tokens and advance each space's watermark to
+    /// the captured `col.mod` — but ONLY to a value whose writes this op (and
+    /// every still-in-flight earlier write) actually indexed/ingested (#585).
+    ///
+    /// `index_ok`/`derived_ok` say whether THIS op's respective tail succeeded;
+    /// the [`watermark::WatermarkTracker`] additionally blocks an advance that
+    /// would over-certify a concurrent in-flight write or an un-healed earlier
+    /// failure. A blocked or failed advance leaves the watermark behind — the
+    /// lagging op's completion or the next boot/reload drift heals it.
+    ///
+    /// Never reads the live `col.mod` (the pre-#585 bug): the value comes from
+    /// the token captured in the op's own collection write job, so an
+    /// interleaved concurrent write can't be silently certified here.
+    async fn advance_watermarks(
+        &self,
+        tokens: watermark::WriteTokens,
+        index_ok: bool,
+        derived_ok: bool,
+    ) {
+        if let Some(col_mod) = self.watermarks.complete_derived(tokens.derived, derived_ok) {
+            if let Err(e) = self.derived.set_col_mod(col_mod) {
+                tracing::warn!(error = %e, "advancing the derived watermark failed");
+            }
+        }
+        if let Some(col_mod) = self.watermarks.complete_index(tokens.index, index_ok) {
             // Fan out the watermark + save request to EVERY index space (#232):
             // a maintained write advances each space's own col_mod and arms its
             // saver. With one space this is the single set_col_mod + request,
@@ -1779,7 +1931,6 @@ impl Kernel {
             self.index_set.set_col_mod_all(col_mod);
             self.index_set.request_save_all();
         }
-        Ok(())
     }
 
     pub async fn col_mod(&self) -> NativeResult<i64> {
@@ -1831,18 +1982,23 @@ impl Kernel {
         // Send — spawnable on any multithreaded runtime.
         let span = tracing::debug_span!("kernel.upsert_notes", batch = notes.len());
         async move {
-            // One serialized job for the whole batch of writes.
-            let outcomes: Vec<NativeResult<CreateOutcome>> = self
+            // One serialized job for the whole batch of writes — and it reads
+            // `col.mod` in the SAME job (#585), so the watermark this op may
+            // advance to is the one its OWN write produced, never a live read
+            // racing a concurrent op's interleaved write.
+            let (outcomes, col_mod): (Vec<NativeResult<CreateOutcome>>, i64) = self
                 .collection
-                .run(move |core| {
-                    notes
+                .run(move |core| -> NativeResult<_> {
+                    let outcomes = notes
                         .iter()
                         .map(|n| {
                             core.create_note(n.notetype_id, n.deck_id, &n.fields, &n.tags, policy)
                         })
-                        .collect()
+                        .collect();
+                    Ok((outcomes, core.col_mod()?))
                 })
-                .await?;
+                .await??;
+            let tokens = self.watermarks.register(col_mod);
             let created: Vec<i64> = outcomes
                 .iter()
                 .filter_map(|o| match o {
@@ -1850,7 +2006,7 @@ impl Kernel {
                     _ => None,
                 })
                 .collect();
-            self.index_written(&created).await?;
+            self.index_written_tracked(&created, tokens).await?;
             Ok(outcomes)
         }
         .instrument(span)
@@ -1859,20 +2015,41 @@ impl Kernel {
 
     /// Drop already-deleted notes from the index + derived store (the prune
     /// path: the collection op removed them internally; this is the sidecar
-    /// half of `delete_notes`).
+    /// half of `delete_notes`). No own collection write precedes it, so it
+    /// registers the watermark token off the live `col.mod` here (#585).
     pub async fn forget_notes(&self, note_ids: Vec<i64>) -> NativeResult<()> {
-        self.drop_note_sidecars(&note_ids).await
+        let col_mod = self.col_mod().await?;
+        let tokens = self.watermarks.register(col_mod);
+        self.drop_note_sidecars(&note_ids, tokens).await
     }
 
     /// The sidecar tail shared by every note-deletion shape (#382): drop the
     /// notes' vectors + derived rows, advance the watermarks, refresh tags.
-    async fn drop_note_sidecars(&self, note_ids: &[i64]) -> NativeResult<()> {
+    /// `tokens` carries the `col.mod` captured with the deleting write (#585);
+    /// the removals are best-effort (#590) — a failed removal leaves the
+    /// watermark behind so the next drift reconciles the now-deleted note out.
+    async fn drop_note_sidecars(
+        &self,
+        note_ids: &[i64],
+        tokens: watermark::WriteTokens,
+    ) -> NativeResult<()> {
         // Removal fans out to EVERY index space (#232): a deleted note leaves
         // all indexes. With one space this is the single remove, byte-identical.
-        self.index_set.remove_all(note_ids)?;
-        self.derived.remove(note_ids, None)?;
-        self.advance_watermarks(self.embed_service().is_some())
-            .await?;
+        let index_ok = match self.index_set.remove_all(note_ids) {
+            Ok(_) => self.embed_service().is_some(),
+            Err(e) => {
+                tracing::warn!(error = %e, notes = note_ids.len(), "index removal failed after delete; leaving the index watermark behind");
+                false
+            }
+        };
+        let derived_ok = match self.derived.remove(note_ids, None) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, notes = note_ids.len(), "derived removal failed after delete; leaving the derived watermark behind");
+                false
+            }
+        };
+        self.advance_watermarks(tokens, index_ok, derived_ok).await;
         // A deletion changes membership only if a deleted note was IN it —
         // the in-memory probe alone decides (the rows are already gone), and
         // the refresh runs off the op tail (#445).
@@ -1885,9 +2062,16 @@ impl Kernel {
     /// A metadata-only collection change (tags/decks/templates/field metadata
     /// — nothing that feeds embedding text or derived rows): advance the
     /// watermarks so the col_mod bump doesn't read as drift on next boot.
+    /// There is no index/derived tail that could fail (the vectors/rows are
+    /// unchanged), so both watermark sides complete as success — but still only
+    /// advance past concurrent in-flight writes the tracker certifies (#585).
     pub async fn metadata_changed(&self) -> NativeResult<()> {
-        self.advance_watermarks(self.embed_service().is_some())
-            .await?;
+        let col_mod = self.col_mod().await?;
+        let tokens = self.watermarks.register(col_mod);
+        // The index watermark advances only when an embedder is attached (else
+        // it must stay put so the next attach reconciles, as before).
+        let index_ok = self.embed_service().is_some();
+        self.advance_watermarks(tokens, index_ok, true).await;
         // Tag-only ops (update_note_tags / rename_tag) ride this path and
         // change MEMBERSHIP without an index op — centroids previously went
         // stale until the next upsert/delete or reboot. The coalescing
@@ -1899,11 +2083,17 @@ impl Kernel {
 
     pub async fn delete_notes(&self, note_ids: Vec<i64>) -> NativeResult<usize> {
         let ids = note_ids.clone();
-        let removed = self
+        // Capture `col.mod` in the SAME job as the delete (#585) so the
+        // watermark this op advances to is the one its OWN delete produced.
+        let (removed, col_mod) = self
             .collection
-            .run(move |core| core.delete_notes(&ids))
+            .run(move |core| -> NativeResult<_> {
+                let removed = core.delete_notes(&ids)?;
+                Ok((removed, core.col_mod()?))
+            })
             .await??;
-        self.drop_note_sidecars(&note_ids).await?;
+        let tokens = self.watermarks.register(col_mod);
+        self.drop_note_sidecars(&note_ids, tokens).await?;
         Ok(removed)
     }
 
@@ -5295,6 +5485,317 @@ mod no_cpython_smoke {
                 "the rebuild restored B's rows"
             );
             kernel.close().await.unwrap();
+        });
+    }
+
+    // ── #585 / #590: watermark over-certification + best-effort tail ──────────
+
+    /// An embedder that, on the FIRST text containing "bravo", PARKS (so a
+    /// concurrent op can interleave while it is in flight) and then FAILS that
+    /// embed when released; EVERY LATER bravo embed succeeds (so a heal path —
+    /// `reindex_if_needed` — can reconcile bravo in). All non-bravo texts embed
+    /// normally. The probe of #585/#590.
+    struct GatedEmbedder {
+        gate: tokio::sync::Notify,
+        parked: tokio::sync::Notify,
+        bravo_seen: std::sync::atomic::AtomicBool,
+        first_bravo_done: std::sync::atomic::AtomicBool,
+    }
+    impl GatedEmbedder {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                gate: tokio::sync::Notify::new(),
+                parked: tokio::sync::Notify::new(),
+                bravo_seen: std::sync::atomic::AtomicBool::new(false),
+                first_bravo_done: std::sync::atomic::AtomicBool::new(false),
+            })
+        }
+    }
+    impl Embedder for GatedEmbedder {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            Box::pin(async move {
+                use std::sync::atomic::Ordering::SeqCst;
+                let is_bravo = texts.iter().any(|t| t.contains("bravo"));
+                // Only the FIRST bravo embed parks+fails; later ones succeed so
+                // the heal path can reconcile. `swap` makes the gate single-shot.
+                if is_bravo && !self.first_bravo_done.swap(true, SeqCst) {
+                    self.bravo_seen.store(true, SeqCst);
+                    self.parked.notify_one();
+                    self.gate.notified().await;
+                    return Err(NativeError::internal("bravo embed deliberately failed"));
+                }
+                Ok(HashEmbedder::embed_sync(&texts))
+            })
+        }
+        fn fingerprint(&self) -> Option<String> {
+            Some("gated-embedder:v1".to_string())
+        }
+        fn dim(&self) -> Option<usize> {
+            Some(64)
+        }
+    }
+
+    /// #585 (= S5-1, the keystone). A concurrent op B writes "bravo" and parks
+    /// in embed (in flight, its index tail not yet run); op A writes "alpha" and
+    /// runs its full tail. Pre-#585, op A's `advance_watermarks` read the LIVE
+    /// `col.mod` (already reflecting bravo) and stamped it → `check_drift` saw no
+    /// drift → bravo was PERMANENTLY missing from the index. Fixed: op A may not
+    /// certify a `col.mod` covering B's still-in-flight write, so the watermark
+    /// stays behind and drift heals bravo. RED at fa54f8c.
+    #[test]
+    fn s5_interleaved_upsert_does_not_falsely_advance_the_index_watermark() {
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Arc::new(
+                Kernel::open(
+                    dir.join("c.anki2").to_str().unwrap(),
+                    dir.join("cache").to_str().unwrap(),
+                )
+                .await
+                .unwrap(),
+            );
+            let embedder = GatedEmbedder::new();
+            kernel.attach_embedder(embedder.clone(), None);
+            kernel.reindex_if_needed().await.unwrap();
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+
+            // Op B: writes "bravo", then PARKS in embed (in flight). Its
+            // collection write completes before it parks, so col.mod already
+            // reflects bravo.
+            let kb = Arc::clone(&kernel);
+            let op_b = crate::spawn_op(async move {
+                kb.upsert_note(
+                    basic,
+                    1,
+                    vec!["bravo bravo bravo".into(), "b".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .map(|_| ())
+            });
+            embedder.parked.notified().await;
+            assert!(embedder.bravo_seen.load(std::sync::atomic::Ordering::SeqCst));
+
+            // Op A: writes "alpha" + runs its full index tail.
+            let alpha = kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["alpha alpha alpha".into(), "a".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap();
+            let CreateOutcome::Created(alpha_id) = alpha else {
+                panic!("alpha create")
+            };
+
+            embedder.gate.notify_one(); // release op B → it ERRORS, bravo never indexed
+            let _ = op_b.await;
+
+            let all_ids = kernel
+                .collection()
+                .run(|core| core.find_notes(""))
+                .await
+                .unwrap()
+                .unwrap();
+            let bravo_id = *all_ids.iter().find(|id| **id != alpha_id).unwrap();
+            let primary = kernel.index_set().primary();
+            let col_mod = kernel.col_mod().await.unwrap();
+
+            assert!(primary.engine().contains(alpha_id), "alpha indexed (sanity)");
+            assert!(
+                !primary.engine().contains(bravo_id),
+                "PRECONDITION: bravo's embed failed, not indexed"
+            );
+            assert_ne!(
+                primary.col_mod(),
+                Some(col_mod),
+                "FIX (#585): the watermark was NOT advanced to the live col.mod, \
+                 so drift stays armed"
+            );
+            let drift_will_heal = kernel.reindex_if_needed().await.unwrap();
+            assert!(
+                drift_will_heal,
+                "FIX (#585): watermark < col.mod, reindex sees drift and reconciles"
+            );
+            assert!(
+                primary.engine().contains(bravo_id),
+                "FIX (#585): the drift reconcile healed bravo into the index"
+            );
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    /// #585 derived/FTS5 twin (= S6-2). The SAME interleave over the lexical
+    /// surface: while op B is in flight (parked in embed, its derived ingest not
+    /// yet run, so bravo is NOT in FTS5), op A completes its full tail. Pre-#585,
+    /// op A's `advance_watermarks` advanced the DERIVED watermark to the live
+    /// col.mod too (the UNCONDITIONAL `self.derived.set_col_mod` at the old
+    /// lib.rs:1773 — fired even with no embedder) → `rebuild_derived`'s drift
+    /// gate went quiet → bravo invisible to substring/fuzzy forever. Fixed: op A
+    /// may not certify a derived watermark covering B's still-in-flight
+    /// (un-ingested) write, so the derived watermark stays behind and the drift
+    /// gate remains armed. Assert at the parked moment — that IS the
+    /// over-certification point. RED at fa54f8c.
+    #[test]
+    fn s6_2_interleaved_upsert_does_not_falsely_advance_the_derived_watermark() {
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Arc::new(
+                Kernel::open(
+                    dir.join("c.anki2").to_str().unwrap(),
+                    dir.join("cache").to_str().unwrap(),
+                )
+                .await
+                .unwrap(),
+            );
+            let embedder = GatedEmbedder::new();
+            kernel.attach_embedder(embedder.clone(), None);
+            kernel.reindex_if_needed().await.unwrap();
+            // Build the derived store so its watermark exists and tracks col.mod.
+            kernel.rebuild_derived().await.unwrap();
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+
+            // Op B writes "bravo" and PARKS in embed — its derived ingest has
+            // NOT run, so bravo is not in FTS5 and its derived watermark token
+            // is still in flight.
+            let kb = Arc::clone(&kernel);
+            let op_b = crate::spawn_op(async move {
+                kb.upsert_note(
+                    basic,
+                    1,
+                    vec!["bravo bravo bravo".into(), "b".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .map(|_| ())
+            });
+            embedder.parked.notified().await;
+
+            // Op A writes "alpha" and runs its FULL tail (its derived ingest
+            // succeeds). Its derived-watermark advance must be BLOCKED by op B's
+            // still-in-flight derived token.
+            let alpha = kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["alpha alpha alpha".into(), "a".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap();
+            let CreateOutcome::Created(_alpha_id) = alpha else {
+                panic!("alpha create")
+            };
+
+            // While op B is still parked: the live col.mod reflects both writes,
+            // but bravo is NOT in FTS5 (B parked before ingest).
+            let col_mod = kernel.col_mod().await.unwrap();
+            assert!(
+                kernel
+                    .derived
+                    .search_substring("bravo", 5, None, &[])
+                    .unwrap()
+                    .unwrap()
+                    .is_empty(),
+                "PRECONDITION: bravo not yet ingested into FTS5 (op B parked)"
+            );
+            assert_ne!(
+                kernel.derived.get_col_mod(),
+                Some(col_mod),
+                "FIX (#585/S6-2): op A did NOT advance the derived watermark to \
+                 the live col.mod over op B's un-ingested write → the derived \
+                 drift gate stays armed (pre-#585 it equalled col_mod → silent loss)"
+            );
+
+            // Release op B; its derived ingest now lands bravo. The watermark
+            // catches up legitimately, and a rebuild keeps both searchable.
+            embedder.gate.notify_one();
+            let _ = op_b.await;
+            kernel.rebuild_derived().await.unwrap();
+            assert!(
+                !kernel
+                    .derived
+                    .search_substring("bravo", 5, None, &[])
+                    .unwrap()
+                    .unwrap()
+                    .is_empty(),
+                "bravo is searchable after op B's ingest + the rebuild heal"
+            );
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    /// #590 (= S6-1) in-crate companion to `tests/s6_repro.rs`: a single
+    /// upsert whose embed tail fails returns Ok with the per-item result (the
+    /// committed note), AND leaves the index watermark behind so drift heals it.
+    #[test]
+    fn s6_best_effort_tail_returns_results_and_leaves_the_watermark_behind() {
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            let embedder = GatedEmbedder::new();
+            kernel.attach_embedder(embedder.clone(), None);
+            kernel.reindex_if_needed().await.unwrap();
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+
+            // Release the gate immediately so the bravo embed fails without
+            // parking (no concurrency needed for the best-effort assertion).
+            embedder.gate.notify_one();
+            let outcome = kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["bravo bravo bravo".into(), "b".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await;
+
+            // FIX (#590): the committed write returns Ok despite the failed
+            // embed (RED at fa54f8c: the `?` propagated → Err).
+            let CreateOutcome::Created(bravo_id) =
+                outcome.expect("committed write returns Ok despite a failed embed tail")
+            else {
+                panic!("bravo create")
+            };
+            let primary = kernel.index_set().primary();
+            let col_mod = kernel.col_mod().await.unwrap();
+            assert!(
+                !primary.engine().contains(bravo_id),
+                "the embed failed, so no vector was written"
+            );
+            assert_ne!(
+                primary.col_mod(),
+                Some(col_mod),
+                "FIX (#585/#590): a failed tail leaves the watermark behind"
+            );
+            // The drift gate stays armed (watermark < col.mod) — a future boot
+            // with a working embedder would reconcile bravo in. We assert the
+            // gate directly rather than driving the reconcile, since this gated
+            // embedder would just fail bravo again.
+            let model_id = embedder.fingerprint();
+            assert!(
+                primary.check_drift(col_mod, model_id.as_deref(), false),
+                "FIX (#585/#590): drift is still armed — never falsely certified"
+            );
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
         });
     }
 }
