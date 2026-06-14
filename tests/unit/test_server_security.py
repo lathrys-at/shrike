@@ -13,7 +13,16 @@ from shrike.server import (
     _is_loopback,
     _server_is_purely_local,
     _validate_media_path_root,
+    create_mcp,
 )
+
+
+def _mcp_protection(host: str, security: object) -> bool:
+    """The DNS-rebinding-protection state FastMCP applies to /mcp for these inputs."""
+    app = create_mcp(host=host, port=8372, transport_security=security)  # type: ignore[arg-type]
+    ts = app.settings.transport_security
+    assert ts is not None
+    return ts.enable_dns_rebinding_protection
 
 
 @pytest.mark.parametrize(
@@ -110,6 +119,48 @@ def test_no_dns_rebinding_protection_disables_guard_on_any_bind() -> None:
     # even on loopback (Shrike behind a local reverse proxy / tailscale serve).
     assert _build_transport_security("127.0.0.1", disable=True) is None
     assert _build_transport_security("0.0.0.0", disable=True) is None
+
+
+# -- #605: --no-dns-rebinding-protection must reach /mcp, not just the custom routes --
+
+
+def test_disabled_guard_is_honored_on_mcp_endpoint_loopback() -> None:
+    # #605: with the guard disabled on a loopback bind, _build_transport_security
+    # returns None — and FastMCP would SILENTLY re-enable DNS-rebinding protection
+    # on /mcp for 127.0.0.1 when handed None (mcp fastmcp/server.py auto-enables for
+    # 127.0.0.1/localhost/::1). The custom routes honor the off-state but /mcp didn't.
+    # create_mcp must translate None into explicit protection-off so /mcp obeys the flag.
+    security = _build_transport_security("127.0.0.1", disable=True)
+    assert security is None
+    assert _mcp_protection("127.0.0.1", security) is False
+
+
+def test_disabled_guard_matches_custom_routes_on_mcp() -> None:
+    # The two layers must AGREE: when the guard is off, both /mcp (FastMCP) and the
+    # custom routes (TransportSecurityMiddleware(None)) report protection disabled.
+    security = _build_transport_security("localhost", disable=True)
+    custom_route_protection = TransportSecurityMiddleware(
+        security
+    ).settings.enable_dns_rebinding_protection
+    assert custom_route_protection is False  # custom routes already honored the flag
+    assert _mcp_protection("localhost", security) is False  # /mcp now agrees
+
+
+def test_disabled_guard_not_reenabled_for_any_loopback_spelling() -> None:
+    # The SDK's auto-re-enable keys on the exact loopback literals; cover them all so
+    # a refactor can't reopen the divergence for one spelling.
+    for host in ("127.0.0.1", "localhost", "::1"):
+        security = _build_transport_security(host, disable=True)
+        assert security is None
+        assert _mcp_protection(host, security) is False
+
+
+def test_default_loopback_guard_stays_on_at_mcp() -> None:
+    # Boundary: the fix only changes the EXPLICITLY-disabled case. The default
+    # loopback bind (no --no-dns-rebinding-protection) keeps the guard ON at /mcp.
+    security = _build_transport_security("127.0.0.1")
+    assert security is not None
+    assert _mcp_protection("127.0.0.1", security) is True
 
 
 def test_explicit_allow_list_builds_guard_even_when_non_loopback() -> None:
