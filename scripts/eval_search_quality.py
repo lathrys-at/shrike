@@ -77,7 +77,7 @@ def _render(result, elapsed: float) -> str:
         lines.append(
             f"| {cls} | {len(qs)} | "
             f"{_fmt(suite.mean_recall_at_1(by_class=cls))} | "
-            f"{_fmt(suite._mean('recall_at_5', by_class=cls))} | "
+            f"{_fmt(suite.mean_recall_at_5(by_class=cls))} | "
             f"{_fmt(suite.mean_recall_at_k(by_class=cls))} | "
             f"{_fmt(suite.mean_mrr(by_class=cls))} | "
             f"{_fmt(suite.mean_ndcg(by_class=cls))} | "

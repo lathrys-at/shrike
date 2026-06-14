@@ -119,25 +119,39 @@ async def build_real_collection(
     text.start()
     clip.start()
 
-    ip = await build_harness_real(
-        tmp_path, text_backend=text, clip_backend=clip, media=media, clip_space_key=CLIP_SPACE_KEY
-    )
-
-    id_map: dict[int, int] = {}
-    for card in manifest.cards:
-        fields = _substitute_media(dict(card.fields))
-        result = await ip.harness.wrapper.upsert_notes(
-            [
-                {
-                    "note_type": card.note_type,
-                    "deck": card.deck,
-                    "fields": fields,
-                    "tags": list(card.tags),
-                }
-            ]
+    ip: InProcessSearch | None = None
+    try:
+        ip = await build_harness_real(
+            tmp_path,
+            text_backend=text,
+            clip_backend=clip,
+            media=media,
+            clip_space_key=CLIP_SPACE_KEY,
         )
-        id_map[card.id] = int(result[0]["id"])
-    await ip.finalize()
+        id_map: dict[int, int] = {}
+        for card in manifest.cards:
+            fields = _substitute_media(dict(card.fields))
+            result = await ip.harness.wrapper.upsert_notes(
+                [
+                    {
+                        "note_type": card.note_type,
+                        "deck": card.deck,
+                        "fields": fields,
+                        "tags": list(card.tags),
+                    }
+                ]
+            )
+            id_map[card.id] = int(result[0]["id"])
+        await ip.finalize()
+    except BaseException:
+        # A build failure must not leak the started ONNX/CLIP sessions or the
+        # open Anki collection (it holds a file lock — a retry would then hit a
+        # locked collection). Tear everything down before re-raising.
+        if ip is not None:
+            await ip.harness.close()
+        text.stop()
+        clip.stop()
+        raise
     return ip, id_map, (text, clip)
 
 
@@ -167,7 +181,8 @@ async def run_search_quality(
         space_count = ip.harness.kernel.embed_space_count()
 
         for q in manifest.queries:
-            matches = await ip.matches(q.q, top_k=q.top_k, threshold=q.threshold or 0.5)
+            thr = q.threshold if q.threshold is not None else 0.5
+            matches = await ip.matches(q.q, top_k=q.top_k, threshold=thr)
             # Remap live anki ids back to manifest ids (gold is manifest-keyed).
             for m in matches:
                 m["id"] = inv.get(m["id"], m["id"])

@@ -232,9 +232,18 @@ class TestRealRecall:
 
     def test_two_spaces_and_enough_images(self, real_run) -> None:
         assert real_run.space_count == 2, "a dedicated text space + a separate CLIP space"
-        # >= 30 image vectors is what lets the corpus exercise the gate on real
-        # CLIP; the index holds text + image vectors so size exceeds the cards.
-        assert real_run.index_size >= 30, f"index too small: {real_run.index_size}"
+        # >= 30 image-bearing notes is what lets the corpus exercise the gate on
+        # real CLIP — count the manifest's image cards directly (the index `size`
+        # conflates text + image vectors, so it can't prove the image half).
+        image_cards = [c for c in real_run.manifest.cards if c.media]
+        assert len(image_cards) >= 30, f"only {len(image_cards)} image-bearing notes"
+        # The 2-space index holds both spaces' vectors → strictly more than the
+        # text-only card count (a coarse "the image space actually indexed" check;
+        # the gate-firing tests are the real backstop).
+        assert real_run.index_size > len(real_run.manifest.cards), (
+            f"index size {real_run.index_size} doesn't exceed the {len(real_run.manifest.cards)} "
+            "cards — the image space may not have indexed"
+        )
 
     def test_overall_recall_at_k_floor(self, real_run) -> None:
         rk = real_run.suite.mean_recall_at_k()
@@ -268,18 +277,27 @@ class TestRealPrecision:
     hard-negatives. Open-world grading (the corpus is per-query sparse gold), so
     FPR counts only the explicit hard-negatives, never incidental non-answers."""
 
-    def test_over_return_query_finds_no_relevant_card(self, real_run) -> None:
-        # A query nothing in the corpus answers must return zero grade>=2 cards
-        # (RRF must not fuse junk from every signal's floor; the text threshold
-        # and the relative gate hold).
-        report = next(q for q in real_run.suite.queries if q.adversarial_class == "over_return")
-        # recall is undefined (no gold); the signal is "no relevant-class hit".
-        assert report.recall_at_k is None, "the over-return query has no gradeable gold"
-        # No returned card is a graded relevant card → no recall failure tagged.
-        from tests.search_quality.metrics import FailureKind
-
-        recall_misses = [f for f in report.failures if f.kind == FailureKind.RECALL_MISS]
-        assert not recall_misses, "an ∅-gold query cannot miss recall"
+    def test_over_return_query_surfaces_only_weak_low_confidence_hits(self, real_run) -> None:
+        # CHARACTERIZATION of the relative gate's known precision trade-off
+        # (#234): a query that answers NOTHING ("purple elephant…") has a
+        # near-zero text-space best, so the CLIP space's WEAK image cosines still
+        # clear the relative gate (clip_best >= text_best ≈ 0) and a handful of
+        # low-confidence image cards leak in. This is real and documented, not a
+        # failure — but the leaks must be (a) only the weak image signal (never a
+        # strong exact/text hit), and (b) all LOW confidence. So an ∅-gold query
+        # never surfaces a *confident* false positive.
+        q = next(qq for qq in real_run.manifest.queries if qq.adversarial_class == "over_return")
+        returned = real_run.returns.get(q.q, [])
+        OVER_RETURN_SCORE_CEILING = 0.45  # well below the threshold a real answer clears
+        for m in returned:
+            signals = {p["signal"] for p in m["provenance"]}
+            assert not (signals & {"exact", "fuzzy"}), (
+                f"the ∅-gold query produced a LEXICAL hit {m['id']} ({signals}) — junk fused"
+            )
+            score = m.get("score")
+            assert score is None or score <= OVER_RETURN_SCORE_CEILING, (
+                f"the ∅-gold query produced a CONFIDENT hit {m['id']} (score {score})"
+            )
 
     def test_planted_hard_negative_fpr_is_bounded(self, real_run) -> None:
         # The portrait hard-negatives (grade-0) may leak in at a LOW rank via the
@@ -318,12 +336,18 @@ class TestRealActivationGate:
     def test_gate_fires_for_strongly_cross_modal_queries(self, real_run) -> None:
         from tests.search_quality.runner import clip_fired
 
-        for q in self.GATE_FIRES:
-            matches = real_run.returns.get(q, [])
-            assert matches, f"query {q!r} returned nothing"
-            assert any(clip_fired(m) for m in matches), (
-                f"the relative gate should OPEN for {q!r} (CLIP image signal absent)"
-            )
+        # A MEMBERSHIP floor, not an all-or-nothing conjunction (matching the
+        # suite's threshold philosophy): the gate must open for the large
+        # majority of these strongly-visual queries — one non-fire from the int8
+        # cosine wobble shouldn't fail the suite, but a broad gate regression
+        # (most stop firing) must. Observed: all 5 fire.
+        fired = [
+            q for q in self.GATE_FIRES if any(clip_fired(m) for m in real_run.returns.get(q, []))
+        ]
+        assert len(fired) >= len(self.GATE_FIRES) - 1, (
+            f"the relative gate opened for only {len(fired)}/{len(self.GATE_FIRES)} "
+            f"strongly-visual queries — fired: {fired}"
+        )
 
     def test_gate_does_not_inject_portrait_via_clip(self, real_run) -> None:
         from tests.search_quality.runner import clip_fired

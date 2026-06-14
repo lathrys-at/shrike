@@ -332,6 +332,9 @@ class SuiteReport:
     def mean_recall_at_1(self, by_class: str | None = None) -> float | None:
         return self._mean("recall_at_1", by_class=by_class)
 
+    def mean_recall_at_5(self, by_class: str | None = None) -> float | None:
+        return self._mean("recall_at_5", by_class=by_class)
+
     def mean_mrr(self, by_class: str | None = None) -> float | None:
         return self._mean("mrr", by_class=by_class)
 
