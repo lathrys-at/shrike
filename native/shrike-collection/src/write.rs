@@ -312,6 +312,26 @@ impl CollectionCore {
             note.tags = tags.clone();
         }
 
+        // Resolve the deck reference BEFORE any write (#589): a bad ref — a
+        // numeric/#id that resolves to no deck — must fail the item WITHOUT
+        // having mutated the note. (The old order wrote the fields/tags first
+        // and resolved the deck after, so a bad ref half-wrote the note and
+        // bumped col.mod; create_note_named resolves the deck before its write,
+        // and this mirrors that.) `resolve_deck_ref` is read-only — a
+        // not-yet-existing plain name passes through and is auto-created on the
+        // write path below, so a dry run still creates nothing.
+        let deck_target = match note_input.deck.as_deref() {
+            Some(deck_ref) => {
+                let Some(deck_name) = self.resolve_deck_ref(deck_ref)? else {
+                    return Err(NativeError::invalid_input(format!(
+                        "Deck '{deck_ref}' not found"
+                    )));
+                };
+                Some(deck_name)
+            }
+            None => None,
+        };
+
         if dry_run {
             return Ok(UpsertNoteResult::Ok {
                 index,
@@ -321,12 +341,7 @@ impl CollectionCore {
 
         self.adapter.update_note(&note)?;
 
-        if let Some(deck_ref) = note_input.deck.as_deref() {
-            let Some(deck_name) = self.resolve_deck_ref(deck_ref)? else {
-                return Err(NativeError::invalid_input(format!(
-                    "Deck '{deck_ref}' not found"
-                )));
-            };
+        if let Some(deck_name) = deck_target {
             let deck_id = match self.adapter.deck_id_by_name(&deck_name)? {
                 Some(id) => id,
                 None => self.adapter.add_deck(&deck_name)?,
