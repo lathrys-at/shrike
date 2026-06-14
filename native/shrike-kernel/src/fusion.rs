@@ -58,7 +58,17 @@ pub fn rrf_fuse(
     ordered.sort_by(|a, b| a.0.cmp(&b.0));
 
     for (signal, ids) in ordered {
+        // Sanitize a non-finite weight to the default (1.0) BEFORE it reaches
+        // the score accumulation and the sort (#611). A NaN weight poisons a
+        // note's score to NaN, and the two impls order NaN scores differently —
+        // Rust's `total_cmp` total-orders NaN, while the reference's Python sort
+        // key (`-score`) leaves NaN comparisons false → input-order-dependent —
+        // so a NaN weight broke the frozen-reference parity contract. A
+        // non-finite weight is meaningless as a scale, so both sides coerce it
+        // to 1.0; finite-weight RRF (incl. 0.0 and negatives) is unchanged.
+        // `search_fusion.py` applies the identical coercion.
         let w = weights.get(signal).copied().unwrap_or(1.0);
+        let w = if w.is_finite() { w } else { 1.0 };
         let mut seen: HashSet<i64> = HashSet::new();
         for (pos, note_id) in ids.iter().enumerate() {
             if !seen.insert(*note_id) {
@@ -80,8 +90,12 @@ pub fn rrf_fuse(
     hits.sort_by(|a, b| {
         let tier_a = i32::from(!a.2.iter().any(|(s, _)| priority_signals.contains(s)));
         let tier_b = i32::from(!b.2.iter().any(|(s, _)| priority_signals.contains(s)));
-        // total_cmp, not partial_cmp().expect(): a NaN weight from config must
-        // not panic the actor (#382) — identical ordering for finite scores.
+        // total_cmp, not partial_cmp().expect(): a defensive total order so the
+        // sort can never panic the actor (#382). Non-finite weights are
+        // sanitized above (#611), so scores are finite for any finite ranking
+        // input; this is the belt-and-suspenders for any residual non-finite
+        // score, and matches the reference's deterministic ordering on finite
+        // scores. Reference parity holds because no NaN reaches this sort.
         tier_a
             .cmp(&tier_b)
             .then(b.1.total_cmp(&a.1))
@@ -138,8 +152,9 @@ mod tests {
 
     #[test]
     fn nan_weight_does_not_panic() {
-        // #382: a NaN weight from config poisons the scores; the sort must
-        // stay total (no partial_cmp panic in the actor), output deterministic.
+        // #382: a NaN weight from config must not panic the actor and must be
+        // deterministic. #611: it is now sanitized to the default before the
+        // sort, so it produces a finite, well-ordered result.
         let mut weights = BTreeMap::new();
         weights.insert("text".to_string(), f64::NAN);
         let rankings = vec![
@@ -148,5 +163,63 @@ mod tests {
         ];
         let hits = rrf_fuse(&rankings, &weights, RRF_K, &HashSet::new());
         assert_eq!(hits.len(), 2);
+        for h in &hits {
+            assert!(
+                h.1.is_finite(),
+                "a sanitized NaN weight must not poison the score"
+            );
+        }
+    }
+
+    #[test]
+    fn non_finite_weight_is_sanitized_to_the_default_order() {
+        // #611: a NaN/inf/-inf weight is coerced to the default (1.0) before the
+        // sort, so the fused ORDER is identical to the all-default-weights run.
+        // This is the property the frozen-reference parity contract depends on
+        // (the reference, search_fusion.py, applies the same coercion). Uses the
+        // repro's exact shape: rankings {text:[1,2,3], exact:[3,2]}, priority
+        // {exact}, weight {text: <non-finite>} → must equal the default order.
+        let rankings = vec![
+            ("text".to_string(), vec![1, 2, 3]),
+            ("exact".to_string(), vec![3, 2]),
+        ];
+        let mut priority = HashSet::new();
+        priority.insert("exact".to_string());
+
+        let baseline = rrf_fuse(&rankings, &BTreeMap::new(), RRF_K, &priority);
+        let baseline_ids: Vec<i64> = baseline.iter().map(|h| h.0).collect();
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut weights = BTreeMap::new();
+            weights.insert("text".to_string(), bad);
+            let hits = rrf_fuse(&rankings, &weights, RRF_K, &priority);
+            let ids: Vec<i64> = hits.iter().map(|h| h.0).collect();
+            assert_eq!(
+                ids, baseline_ids,
+                "a non-finite ({bad}) weight must order like the default (1.0)"
+            );
+            for h in &hits {
+                assert!(h.1.is_finite(), "sanitized weight keeps scores finite");
+            }
+        }
+    }
+
+    #[test]
+    fn finite_weights_are_unchanged_by_the_sanitizer() {
+        // The #611 guard must not touch finite weights — including 0.0 and a
+        // negative weight, which are meaningful scales and must flow through.
+        let rankings = vec![
+            ("text".to_string(), vec![1, 2, 3]),
+            ("fuzzy".to_string(), vec![3, 2, 1]),
+        ];
+        let mut weights = BTreeMap::new();
+        weights.insert("text".to_string(), 2.0);
+        weights.insert("fuzzy".to_string(), 0.5);
+        let hits = rrf_fuse(&rankings, &weights, RRF_K, &HashSet::new());
+        // text-weighted: note 1 (text rank 1) leads; every score finite.
+        assert_eq!(hits[0].0, 1);
+        for h in &hits {
+            assert!(h.1.is_finite());
+        }
     }
 }

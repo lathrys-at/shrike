@@ -36,7 +36,12 @@ def _random_case(rng: random.Random) -> tuple[dict[str, list[int]], dict[str, fl
     for signal in rng.sample(SIGNALS, k=rng.randint(1, len(SIGNALS))):
         # Duplicates included deliberately — one-signal-one-rank is part of the spec.
         rankings[signal] = [rng.randint(1, 30) for _ in range(rng.randint(0, 25))]
-    weights = {s: rng.choice([0.25, 0.5, 1.0, 2.0]) for s in rankings if rng.random() < 0.7}
+    # Include non-finite weights in the sample (#611): they must be sanitized
+    # identically on both sides, so the property suite is the drift alarm for
+    # the NaN/inf parity too (it sampled only finite weights before, which is
+    # exactly why the NaN divergence went uncaught).
+    weight_choices = [0.25, 0.5, 1.0, 2.0, float("nan"), float("inf"), float("-inf")]
+    weights = {s: rng.choice(weight_choices) for s in rankings if rng.random() < 0.7}
     priority = frozenset(s for s in rankings if rng.random() < 0.3)
     return rankings, weights, priority
 
@@ -54,6 +59,22 @@ class TestProtocol:
         assert ReferenceSearchPipeline().fuse(
             rankings, priority_signals=frozenset({"exact"})
         ) == rrf_fuse(rankings, priority_signals=frozenset({"exact"}))
+
+    def test_reference_sanitizes_non_finite_weight_to_default(self) -> None:
+        # The reference half of #611 (no native extension needed): a non-finite
+        # weight orders AND scores identically to the default-weight run, so a
+        # NaN/inf weight can't reach the sort with a divergent ordering.
+        rankings = {"text": [1, 2, 3], "exact": [3, 2]}
+        priority = frozenset({"exact"})
+        default = ReferenceSearchPipeline().fuse(rankings, priority_signals=priority)
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            got = ReferenceSearchPipeline().fuse(
+                rankings, weights={"text": bad}, priority_signals=priority
+            )
+            assert [h.note_id for h in got] == [h.note_id for h in default]
+            assert all(h.score == d.score for h, d in zip(got, default, strict=True)), (
+                f"a non-finite ({bad}) weight must score like the default"
+            )
 
 
 @requires_shrike_native
@@ -82,3 +103,34 @@ class TestNativeParity:
         nat = NativeSearchPipeline().fuse(rankings, k=7)
         assert [(h.note_id, h.score) for h in ref] == [(h.note_id, h.score) for h in nat]
         assert RRF_K == 60  # the default the tools layer relies on
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_native_equals_reference_on_a_non_finite_weight(self, bad: float) -> None:
+        # #611 (= S9-1, the s9_nan_parity repro): a non-finite weight must not
+        # break the frozen-reference parity contract. Pre-fix a NaN weight
+        # diverged (ref=[3,2,1], native=[2,3,1]) — Rust total_cmp total-orders
+        # NaN while the Python sort key leaves NaN comparisons false
+        # (input-order-dependent); inf/-inf agreed but were equally meaningless.
+        # Both sides now sanitize a non-finite weight to the default (1.0), so
+        # the fused order is identical AND equals the all-default-weights order.
+        rankings = {"text": [1, 2, 3], "exact": [3, 2]}
+        weights = {"text": bad}
+        priority = frozenset({"exact"})
+        ref = [
+            h.note_id
+            for h in ReferenceSearchPipeline().fuse(
+                rankings, weights=weights, priority_signals=priority
+            )
+        ]
+        nat = [
+            h.note_id
+            for h in NativeSearchPipeline().fuse(
+                rankings, weights=weights, priority_signals=priority
+            )
+        ]
+        assert ref == nat, f"parity broken on {bad} weight: ref={ref} native={nat}"
+        # The sanitizer coerces to the default, so it equals the no-weights run.
+        default = [
+            h.note_id for h in ReferenceSearchPipeline().fuse(rankings, priority_signals=priority)
+        ]
+        assert ref == default, f"non-finite weight must order like default: {ref} != {default}"

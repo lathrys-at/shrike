@@ -23,6 +23,7 @@ This module is pure: rankings of ints in, fused order out. No embedding / index 
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -74,7 +75,16 @@ def rrf_fuse(
     # with the dict order — enough to flip a near-tie and silently weaken "stable across queries".
     for signal in sorted(rankings):
         ids = rankings[signal]
+        # Sanitize a non-finite weight to the default (1.0) before it reaches the score
+        # accumulation and the sort (#611). A NaN weight poisons a note's score to NaN, and
+        # the native port orders NaN scores differently (Rust `total_cmp` total-orders NaN;
+        # this Python `-h.score` sort key leaves NaN comparisons false → input-order-dependent),
+        # which broke the frozen-reference parity contract. A non-finite weight is meaningless
+        # as a scale, so coerce it to 1.0; finite-weight RRF (incl. 0.0 and negatives) is
+        # unchanged. `shrike_kernel::fusion::rrf_fuse` applies the identical coercion.
         w = weights.get(signal, 1.0)
+        if not math.isfinite(w):
+            w = 1.0
         seen: set[int] = set()
         for pos, note_id in enumerate(ids):
             nid = int(note_id)
