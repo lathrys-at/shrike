@@ -253,6 +253,17 @@ def _parse_embedder(raw: Any, index: int) -> EmbedderEntry:
         )
     if len(set(modalities)) != len(modalities):
         raise ProfileError(f"{where}.modalities has duplicates")
+    # Every space MUST embed text (the EmbedderBackend contract is `modalities ⊇
+    # {text}` — embedding_base.py). Text-only is the permanent first-class
+    # capability; a multimodal entry advertises MORE (text + image). An
+    # image-only entry would build a backend that violates the protocol with no
+    # downstream guard (#603), so reject it here at parse time, like the other
+    # modality validations.
+    if "text" not in modalities:
+        raise ProfileError(
+            f"{where}.modalities must include 'text' (every embedding space embeds "
+            f"text — a multimodal entry adds image/audio on top; got {list(modalities)})"
+        )
 
     runtime = _require_str(raw.get("runtime"), f"{where}.runtime")
     if runtime not in EMBEDDER_RUNTIMES:
