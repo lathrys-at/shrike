@@ -186,6 +186,11 @@ pub(crate) fn action_search_notes(
             .map_err(to_py_err)?,
         _ => Vec::new(),
     };
+    // #576 experiment knobs (TEST-ONLY, like `disable_cross_space_gate`): the
+    // eval harness selects a cross-space fusion variant + τ via env vars so the
+    // MCP tool schema is unchanged and production stays on the `Relative`
+    // default. Unset → today's behaviour exactly.
+    let (cross_space_fusion_mode, cross_space_tau) = cross_space_fusion_from_env();
     let args = shrike_kernel::actions::SearchArgs {
         top_k,
         threshold,
@@ -202,6 +207,8 @@ pub(crate) fn action_search_notes(
             .collect(),
         cross_space,
         disable_cross_space_gate: false,
+        cross_space_fusion_mode,
+        cross_space_tau,
     };
     py.detach(|| {
         let tag_keys = tag_kernel.as_ref().map(|k| k.tag_keys());
@@ -211,4 +218,30 @@ pub(crate) fn action_search_notes(
         serde_json::to_string(&groups).map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
     })
     .map_err(to_py_err)
+}
+
+/// Resolve the #576 cross-space fusion variant + τ from the environment
+/// (`SHRIKE_CROSS_SPACE_FUSION_MODE` ∈ {relative, relative_floor, soft_relative,
+/// soft_calibrated}; `SHRIKE_CROSS_SPACE_TAU` a float). TEST-ONLY: the eval
+/// harness sets these to sweep the experiment; unset → `Relative` (today's
+/// behaviour) and a τ that the binary modes ignore. An unrecognized mode falls
+/// back to `Relative` so a typo can never silently change production fusion.
+fn cross_space_fusion_from_env() -> (shrike_kernel::actions::CrossSpaceFusionMode, f64) {
+    use shrike_kernel::actions::CrossSpaceFusionMode as M;
+    let mode = match std::env::var("SHRIKE_CROSS_SPACE_FUSION_MODE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("relative_floor") => M::RelativeFloor,
+        Some("soft_relative") => M::SoftRelative,
+        Some("soft_calibrated") => M::SoftCalibrated,
+        // "relative", "", unset, or anything unrecognized → today's behaviour.
+        _ => M::Relative,
+    };
+    let tau = std::env::var("SHRIKE_CROSS_SPACE_TAU")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .unwrap_or(0.05);
+    (mode, tau)
 }

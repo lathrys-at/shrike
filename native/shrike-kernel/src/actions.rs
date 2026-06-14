@@ -539,6 +539,40 @@ pub struct SpaceSemantic {
     pub space_key: String,
     /// One entry per search source, in `sources` order.
     pub per_source: Vec<SpaceSourceHits>,
+    /// This space's OWN #201b intra-modal image activation floor
+    /// (`mean + margin·std` of its image modality's typical best match),
+    /// calibrated on its OWN index stats — NOT the primary's `image_floor`,
+    /// which is calibrated on a different index (#576). `None` when the space
+    /// is uncalibrated (text-only collection, too few samples), in which case
+    /// the intra-modal floor is a no-op and only the relative gate applies.
+    /// The kernel fills this from the space's orchestrator at fan-out time.
+    #[serde(default)]
+    pub image_floor: Option<f64>,
+}
+
+/// The cross-space fusion variant (#576 experiment). The default `Relative` is
+/// TODAY's behaviour (the binary relative gate only), so production is unchanged
+/// until the experiment's data selects a winner. The other three are
+/// eval-selectable measurement modes; the relative gate composes with all of
+/// them (it is the negative-control backstop and never drops out — see #234).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CrossSpaceFusionMode {
+    /// V0 — binary relative gate only (`clip_best >= text_best`). Production
+    /// default; leaks weak image cards when the primary's best cosine → 0.
+    #[default]
+    Relative,
+    /// V0+floor — relative AND a per-space intra-modal floor
+    /// (`image_best > z_floor`): a hard drop of the space's image ranking when
+    /// its best surviving image cosine clears no floor. The conservative
+    /// candidate.
+    RelativeFloor,
+    /// V1 — soft-relative: weight `w = σ((clip_best − text_best)/τ)` folded
+    /// into the `image#<key>` RRF weight. Calibration-free CONTROL — expected
+    /// to still leak (proves the leak is intra-modal, not relative).
+    SoftRelative,
+    /// V2 — soft-calibrated: weight `w = σ((z_s − z0)/τ)`, composed with the
+    /// relative gate. The ren proposal (calibration-as-auto-weight).
+    SoftCalibrated,
 }
 
 /// One secondary space's per-source search result: its per-modality hits plus
@@ -681,6 +715,14 @@ pub struct SearchArgs {
     /// showed floods text queries and regresses text recall (the load-bearing
     /// 0.08-vs-1.00 separation a test pins). Never set in production.
     pub disable_cross_space_gate: bool,
+    /// The cross-space fusion variant (#576). `Relative` (the default) is
+    /// today's binary relative gate — production behaviour is unchanged until
+    /// the experiment's data selects a winner. The floor/soft modes are
+    /// eval-selectable measurement variants.
+    pub cross_space_fusion_mode: CrossSpaceFusionMode,
+    /// The temperature τ for the soft variants (#576): smaller τ → a sharper
+    /// taper (τ→0 is the binary floor limit). Ignored by the binary modes.
+    pub cross_space_tau: f64,
 }
 
 /// Insertion-ordered candidate cache: Python dict iteration order is part of
@@ -784,6 +826,23 @@ pub fn best_query_cosine_of(
         .filter_map(|m| hits.get(*m).and_then(|(_, dists)| dists.first()))
         .map(|d| 1.0 - f64::from(*d))
         .fold(None, |acc, c| Some(acc.map_or(c, |a: f64| a.max(c))))
+}
+
+/// The #201b intra-modal activation floor for a modality (`mean + margin·std`),
+/// the kernel mirror of `shrike.index.activation_floor` (#576): used for a
+/// SECONDARY cross-space's image floor, computed on that space's OWN stats.
+/// `None` (uncalibrated) → no floor, the gate disabled for that modality.
+pub fn activation_floor(stats: Option<(f64, f64)>, margin: f64) -> Option<f64> {
+    stats.map(|(mean, std)| mean + margin * std)
+}
+
+/// The host-side `ACTIVATION_MARGIN` (#201b) mirrored for the kernel-computed
+/// cross-space floor — kept in lockstep with `shrike.actions.ACTIVATION_MARGIN`.
+pub const ACTIVATION_MARGIN: f64 = 1.0;
+
+/// Logistic squash `σ(x) = 1/(1+e^-x)` for the #576 soft-weight variants.
+fn sigmoid(x: f64) -> f64 {
+    1.0 / (1.0 + (-x).exp())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1209,13 +1268,21 @@ pub fn search_notes(
             ("fuzzy".into(), ranking_fuzzy),
         ];
 
-        // ── Cross-space fusion (#234) ────────────────────────────────────────
+        // ── Cross-space fusion (#234 / #576) ─────────────────────────────────
         // Each SECONDARY text-capable space contributes its own gated `image`
         // ranking. EMPTY cross_space (N=1) → this whole block is a no-op and the
         // rankings vector above is byte-identical to today, so `rrf_fuse` gets
         // identical inputs. The relative activation gate (the eval's mandatory
         // finding) fires a vision space ONLY when its best query→match cosine
-        // clears the PRIMARY text space's best for this same source.
+        // clears the PRIMARY text space's best for this same source. The #576
+        // fusion mode composes a per-space INTRA-MODAL floor (calibrated on the
+        // space's OWN stats) with the relative gate, closing the over-return
+        // leak when the primary's best cosine → 0 (the relative gate inverts).
+        //
+        // Per-space soft weights (V1/V2) collected here, applied to the
+        // `image#<key>` signal's RRF weight after the canonical weights resolve.
+        let mut cross_space_weights: std::collections::BTreeMap<String, f64> =
+            std::collections::BTreeMap::new();
         if !args.cross_space.is_empty() {
             // The primary text space's best query cosine (the gate's reference).
             // The primary's hits are `modality_hits` (this source's row).
@@ -1226,7 +1293,9 @@ pub fn search_notes(
                 };
                 // The relative gate (default): the vision space fires only when
                 // its best query cosine ≥ the primary text space's. With the
-                // gate disabled (the negative control), every space fires.
+                // gate disabled (the negative control), every space fires. The
+                // relative gate composes with EVERY #576 variant — it is the
+                // negative-control backstop and never drops out.
                 let gate_open = args.disable_cross_space_gate
                     || match (shits.best_query_cosine, primary_best) {
                         (Some(v), Some(p)) => v >= p,
@@ -1261,6 +1330,51 @@ pub fn search_notes(
                 if ranking_space_image.is_empty() {
                     continue;
                 }
+                // The best surviving image cosine — the value the intra-modal
+                // floor judges (exactly the primary's `image_score[first]` rule).
+                let image_best = ranking_space_image
+                    .first()
+                    .and_then(|nid| space_score.get(nid).copied());
+
+                // #576: apply the fusion mode. The binary modes hard-drop the
+                // space; the soft modes taper its RRF weight.
+                let weight = match args.cross_space_fusion_mode {
+                    // V0 — relative only (today): contribute at weight 1.0.
+                    CrossSpaceFusionMode::Relative => Some(1.0),
+                    // V0+floor — relative AND z_s > z_floor (per-space). Drop
+                    // the space when its best surviving image cosine clears no
+                    // floor; an uncalibrated space (no floor) is admitted (the
+                    // floor is a no-op, the relative gate alone governs).
+                    CrossSpaceFusionMode::RelativeFloor => match (image_best, space.image_floor) {
+                        (Some(b), Some(floor)) if b <= floor => None,
+                        _ => Some(1.0),
+                    },
+                    // V1 — soft-relative: w = σ((clip_best − text_best)/τ). The
+                    // calibration-free CONTROL (expected to still leak).
+                    CrossSpaceFusionMode::SoftRelative => {
+                        match (shits.best_query_cosine, primary_best, args.cross_space_tau) {
+                            (Some(v), Some(p), tau) if tau > 0.0 => Some(sigmoid((v - p) / tau)),
+                            // No reference / τ≤0 → fall back to the binary
+                            // contribution (the σ→step limit).
+                            _ => Some(1.0),
+                        }
+                    }
+                    // V2 — soft-calibrated: w = σ((z_s − z0)/τ), composed with
+                    // the relative gate (already applied above). The ren
+                    // proposal — taper near the per-space floor instead of a
+                    // hard drop. An uncalibrated space falls back to weight 1.0.
+                    CrossSpaceFusionMode::SoftCalibrated => {
+                        match (image_best, space.image_floor, args.cross_space_tau) {
+                            (Some(b), Some(floor), tau) if tau > 0.0 => {
+                                Some(sigmoid((b - floor) / tau))
+                            }
+                            _ => Some(1.0),
+                        }
+                    }
+                };
+                let Some(weight) = weight else {
+                    continue; // the floor dropped this space's image ranking
+                };
                 // Fold the space's image cosines into the displayed semantic
                 // `score` (max-over-items, exactly like the primary image).
                 for (nid, isim) in &space_score {
@@ -1272,19 +1386,26 @@ pub fn search_notes(
                 // A DISTINCT signal name per space so provenance (#182)
                 // identifies which vision space surfaced the note, and each
                 // space fuses as its own RRF signal (weight defaults to 1.0 —
-                // the eval's equal weighting). `image#<key>` reads as "the image
-                // modality of space <key>".
-                rankings.push((cross_space_signal(&space.space_key), ranking_space_image));
+                // the eval's equal weighting; the soft modes override it below).
+                // `image#<key>` reads as "the image modality of space <key>".
+                let signal = cross_space_signal(&space.space_key);
+                if (weight - 1.0).abs() > f64::EPSILON {
+                    cross_space_weights.insert(signal.clone(), weight);
+                }
+                rankings.push((signal, ranking_space_image));
             }
         }
 
         // Host-supplied weights override; empty means the kernel's canonical
         // set (#388 — the one source of truth in `fusion`).
-        let weights = if args.weights.is_empty() {
+        let mut weights = if args.weights.is_empty() {
             crate::fusion::search_weights()
         } else {
             args.weights.clone()
         };
+        // #576 soft variants: the per-space `image#<key>` weight (a per-query
+        // taper) overrides the canonical default of 1.0 for that signal.
+        weights.extend(cross_space_weights);
         let priority: HashSet<String> =
             std::iter::once(crate::fusion::PRIORITY_SIGNAL.to_owned()).collect();
         let fused = crate::fusion::rrf_fuse(&rankings, &weights, crate::fusion::RRF_K, &priority);
@@ -1623,8 +1744,19 @@ mod search_tests {
     // `SpaceSemantic` rows — exactly the shape `build_cross_space` produces.
 
     /// One secondary space's `SpaceSemantic` carrying image-modality hits for a
-    /// single source, with the best query cosine the relative gate reads.
+    /// single source, with the best query cosine the relative gate reads. No
+    /// intra-modal floor (`image_floor: None`) — `vision_space_floored` adds one.
     fn vision_space(key: &str, image_keys: &[i64], image_dists: &[f32]) -> SpaceSemantic {
+        vision_space_floored(key, image_keys, image_dists, None)
+    }
+
+    /// `vision_space` with an explicit per-space intra-modal image floor (#576).
+    fn vision_space_floored(
+        key: &str,
+        image_keys: &[i64],
+        image_dists: &[f32],
+        image_floor: Option<f64>,
+    ) -> SpaceSemantic {
         let best = image_dists
             .iter()
             .copied()
@@ -1643,6 +1775,7 @@ mod search_tests {
                 modality_hits: hits,
                 best_query_cosine: best,
             }],
+            image_floor,
         }
     }
 
@@ -1869,6 +2002,267 @@ mod search_tests {
         assert!(
             img.provenance.iter().any(|p| p.signal == "image#clip"),
             "the match carries its vision space's per-space provenance"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ── The #576 cross-space intra-modal floor (the over-return leak) ────────
+    //
+    // These pin the variant mechanics against `search_notes` DIRECTLY. The
+    // failure they guard: when the PRIMARY text space's best cosine → 0 (an
+    // ∅-gold query nothing answers), the relative gate `v >= p` is trivially
+    // satisfied by ANY positive CLIP cosine, so a weak image card (cos ~0.2)
+    // leaks in at full RRF weight. The intra-modal floor (V0+floor / V2) is the
+    // backstop the relative gate is structurally blind to.
+
+    /// An ∅-gold scenario: the primary text space has a vector that the query
+    /// matches only WEAKLY (cos ≈ 0), and one secondary vision space surfaces a
+    /// weak off-topic image (cos ≈ 0.2, well below its own floor). Returns the
+    /// (dir, core, index, weak_text, image_note) so each variant runs the same
+    /// inputs. The query embeds to `[1,0]`; the primary text vector sits at the
+    /// given cosine to it.
+    fn empty_primary_scenario(
+        primary_text_cos: f32,
+    ) -> (
+        std::path::PathBuf,
+        shrike_collection::CollectionCore,
+        MultiModalIndex,
+        i64,
+        i64,
+    ) {
+        let (dir, core) = temp_collection();
+        let weak_text = add_note(&core, "a totally unrelated text card", "text");
+        let image_note = add_note(&core, "card whose picture is off-topic", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add("text", &[weak_text], &[at_distance(1.0 - primary_text_cos)])
+            .unwrap();
+        (dir, core, index, weak_text, image_note)
+    }
+
+    #[test]
+    fn over_return_v0_leaks_weak_image_on_empty_primary() {
+        // V0 (today): the primary's best cosine ≈ 0, so the relative gate
+        // `v(0.2) >= p(0.0)` is trivially OPEN and the weak off-topic image
+        // leaks into the results. This is the leak #576 closes — pinned here so
+        // the floor variants below have a positive baseline to beat.
+        let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
+        let mut a = cross_args(10);
+        // The space carries its own floor (0.5), but V0 never consults it.
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_note],
+            &[0.80],
+            Some(0.5),
+        )]; // cos 0.20
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::Relative;
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("purple elephant playing chess")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        assert!(
+            groups[0].matches.iter().any(|m| m.note.id == image_note),
+            "V0 leaks the weak off-topic image (the relative gate inverts under an empty primary)"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn over_return_v0_floor_closes_the_leak() {
+        // V0+floor: the space's best surviving image cosine (0.20) is BELOW its
+        // OWN intra-modal floor (0.5) → the floor hard-drops the space's image
+        // ranking. The weak off-topic image never enters. The relative gate is
+        // still satisfied (empty primary) — the floor is the backstop.
+        let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
+        let mut a = cross_args(10);
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_note],
+            &[0.80],
+            Some(0.5),
+        )]; // cos 0.20
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::RelativeFloor;
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("purple elephant playing chess")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        assert!(
+            !groups[0].matches.iter().any(|m| m.note.id == image_note),
+            "V0+floor closes the leak: cos 0.20 ≤ floor 0.50 → the vision space is dropped"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn over_return_v0_floor_keeps_an_above_floor_image() {
+        // The floor must NOT over-suppress: a vision space whose best image
+        // cosine (0.92) CLEARS its own floor (0.5) still contributes, even
+        // under an empty primary — the floor drops only the genuinely-weak best.
+        let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
+        let mut a = cross_args(10);
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_note],
+            &[0.08],
+            Some(0.5),
+        )]; // cos 0.92
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::RelativeFloor;
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("the content shown in the diagram")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        assert!(
+            groups[0].matches.iter().any(|m| m.note.id == image_note),
+            "V0+floor keeps an above-floor image (0.92 > 0.50): no over-suppression"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn over_return_v2_soft_calibrated_tapers_the_weak_image() {
+        // V2 (soft-calibrated): the weak image (cos 0.20, floor 0.5) gets a
+        // near-zero weight `σ((0.20-0.50)/τ)` at a small τ, so even if it stays
+        // in the ranking its RRF mass is negligible — it does not out-rank the
+        // primary's own (weak) text hit. With a tiny τ this approaches the hard
+        // floor; here we assert the weak image is demoted below the text card.
+        let (dir, core, index, weak_text, image_note) = empty_primary_scenario(0.30);
+        let mut a = cross_args(10);
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_note],
+            &[0.80],
+            Some(0.5),
+        )]; // cos 0.20
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::SoftCalibrated;
+        a.cross_space_tau = 0.05;
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("krebs cycle")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        let text_rank = groups[0]
+            .matches
+            .iter()
+            .position(|m| m.note.id == weak_text);
+        let image_rank = groups[0]
+            .matches
+            .iter()
+            .position(|m| m.note.id == image_note);
+        assert!(
+            matches!((text_rank, image_rank), (Some(t), Some(i)) if t < i) || image_rank.is_none(),
+            "V2 tapers the weak image's weight to near-zero → it ranks below the text card"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn over_return_v1_soft_relative_still_leaks() {
+        // V1 (soft-relative, calibration-free): the weight is
+        // `σ((clip_best − text_best)/τ)`. On an empty primary `text_best ≈ 0`
+        // and `clip_best = 0.20`, so the argument is POSITIVE → weight ≈ 1.
+        // V1 is the CONTROL: it does NOT consult the intra-modal floor, so it
+        // STILL leaks the weak image. This proves the leak is intra-modal, not
+        // relative.
+        let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
+        let mut a = cross_args(10);
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_note],
+            &[0.80],
+            Some(0.5),
+        )]; // cos 0.20
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::SoftRelative;
+        a.cross_space_tau = 0.05;
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("purple elephant playing chess")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        assert!(
+            groups[0].matches.iter().any(|m| m.note.id == image_note),
+            "V1 (soft-relative) still leaks: it never consults the intra-modal floor"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn floor_holds_the_negative_control_at_n2() {
+        // The negative control MUST hold under V0+floor: a text-target query
+        // with N=2 off-topic-but-intra-modally-confident vision spaces. Each
+        // space's image best (0.70) CLEARS its own floor (0.5) — so the floor
+        // does NOT drop them — but the RELATIVE gate closes them (vision 0.70 <
+        // text 0.80). The composition (floor AND relative) keeps the text-target
+        // at rank-1: the floor never re-opens what the relative gate closed.
+        let (dir, core) = temp_collection();
+        let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
+        let off_topic_image = add_note(&core, "an off-topic but confident diagram", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add("text", &[text_target], &[at_distance(0.2)])
+            .unwrap(); // cos 0.80
+
+        let mut a = cross_args(10);
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::RelativeFloor;
+        // Two intra-modally-CONFIDENT spaces (image best 0.70 > floor 0.50) but
+        // OFF-TOPIC relative to the text answer (0.70 < text 0.80).
+        a.cross_space = vec![
+            vision_space_floored("clip-a", &[off_topic_image], &[0.30], Some(0.5)), // cos 0.70
+            vision_space_floored("clip-b", &[off_topic_image], &[0.30], Some(0.5)),
+        ];
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("krebs cycle energy metabolism")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        assert_eq!(
+            groups[0].matches[0].note.id, text_target,
+            "the negative control holds under V0+floor: the relative gate closes both off-topic spaces"
+        );
+        assert!(
+            !groups[0]
+                .matches
+                .iter()
+                .any(|m| m.note.id == off_topic_image),
+            "the off-topic image stays out (relative gate closed, floor did not re-open it)"
         );
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();

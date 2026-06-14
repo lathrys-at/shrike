@@ -1259,6 +1259,19 @@ impl IndexOrchestrator {
         Ok(())
     }
 
+    /// This space's #201b intra-modal activation floor for `modality`
+    /// (`mean + margin·std`), from its OWN persisted calibration (#576). `None`
+    /// when uncalibrated (text-only space, too few samples) → the modality has
+    /// no floor. Used to thread a SECONDARY cross-space's image floor into the
+    /// fusion, computed on that space's own stats (never the primary's).
+    pub fn activation_floor(&self, modality: &str, margin: f64) -> Option<f64> {
+        let shared = self.shared.lock().expect("orchestrator poisoned");
+        let stats = shared.activation.as_ref()?.get(modality)?;
+        let mean = stats.get("mean").copied()?;
+        let std = stats.get("std").copied()?;
+        Some(mean + margin * std)
+    }
+
     /// The status block (state, size, progress, stamps) for the harness.
     pub fn status(&self) -> OrchestratorStatus {
         let shared = self.shared.lock().expect("orchestrator poisoned");

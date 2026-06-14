@@ -860,9 +860,15 @@ impl Kernel {
                     }
                 })
                 .collect();
+            // This space's OWN #201b image floor (#576): calibrated on its own
+            // index stats and persisted in its own orchestrator — NOT the
+            // primary's. `None` when uncalibrated (the floor is then a no-op and
+            // only the relative gate applies for this space).
+            let image_floor = orch.activation_floor("image", actions::ACTIVATION_MARGIN);
             out.push(actions::SpaceSemantic {
                 space_key: key,
                 per_source,
+                image_floor,
             });
         }
         Ok(out)
