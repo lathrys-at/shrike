@@ -249,6 +249,7 @@ py_library(
     srcs = ["harness.py"],
     imports = [".."],
     deps = [
+        ":actions",  # #580: ACTIVATION_MARGIN (the cross-space floor margin default)
         ":cache_layout",  # #68 routing: per-collection index/derived paths
         ":cli_core",  # #68 routing: re-reads the registry via cli.config.load_config (lazy)
         ":collection",
