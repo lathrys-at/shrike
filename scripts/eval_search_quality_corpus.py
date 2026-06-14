@@ -47,7 +47,7 @@ MULTIMODAL_RESOLVED = ROOT / "eval" / "multimodal" / "resolved_urls.json"
 # rejects arbitrary thumb sizes (HTTP 400/404), but the API always returns the
 # file's CURRENT valid URL for a title. PD/PD-art/CC0 preferred (see ASSETS.md).
 CANONICAL_TITLES = {
-    "animal_cell": "File:Cell-organelles-labeled.png",  # CC BY-SA 4.0 — a labeled animal cell
+    "animal_cell": "File:Animal_cell_structure_en.svg",  # Public domain — LadyofHats' labeled cell
     "sunflower": "File:Sunflower_sky_backdrop.jpg",  # GFDL/CC — Fir0002's sunflower
     "violin": "File:Violin_VL100.png",  # CC0 — a clean violin render
     "coffee": "File:A_small_cup_of_coffee.JPG",  # CC BY-SA — a real coffee cup

@@ -15,7 +15,7 @@ page, where the full license terms and authorship live.
 
 | Handle | License | Author | Commons page |
 | --- | --- | --- | --- |
-| `animal_cell` | CC BY-SA 4.0 | Bingbongboing | [File:Cell-organelles-labeled.png](https://commons.wikimedia.org/wiki/File:Cell-organelles-labeled.png) |
+| `animal_cell` | Public domain | LadyofHats (Mariana Ruiz) | [File:Animal_cell_structure_en.svg](https://commons.wikimedia.org/wiki/File:Animal_cell_structure_en.svg) |
 | `apple` | CC0 | Billjones94 | [File:A_%27Granny_Smith%27_green_apple_from_Austr](https://commons.wikimedia.org/wiki/File:A_%27Granny_Smith%27_green_apple_from_Australia,_photographed_in_India,_December_4,_2023.jpg) |
 | `bicycle` | CC0 | Abraham | [File:20250810_bicycle_Panewniki.jpg](https://commons.wikimedia.org/wiki/File:20250810_bicycle_Panewniki.jpg) |
 | `cat` | CC BY-SA 3.0 | Von.grzanka | [File:Felis_catus-cat_on_snow.jpg](https://commons.wikimedia.org/wiki/File:Felis_catus-cat_on_snow.jpg) |
