@@ -37,13 +37,16 @@ def _render_upsert(ctx: click.Context, result: UpsertDecksResponse) -> None:
     if ctx.obj["json"]:
         output.emit_json(result)
         return
+    # Deck names + server error text are collection-authored → escaped.
     for r in result.results:
         if r.status == "created":
-            output.console.print(f"[green]+[/green] Created deck [cyan]{r.name}[/cyan]")
+            name = output.esc(r.name)
+            output.console.print(f"[green]+[/green] Created deck [cyan]{name}[/cyan]")
         elif r.status == "updated":
-            output.console.print(f"[yellow]~[/yellow] Updated deck [cyan]{r.name}[/cyan]")
+            name = output.esc(r.name)
+            output.console.print(f"[yellow]~[/yellow] Updated deck [cyan]{name}[/cyan]")
         else:
-            output.console.print(f"[bold red]![/bold red] [red]{r.error}[/red]")
+            output.console.print(f"[bold red]![/bold red] [red]{output.esc(r.error)}[/red]")
 
 
 @deck.command("create", short_help="Create a deck")
@@ -119,14 +122,16 @@ def deck_delete(ctx: click.Context, names: tuple[str, ...], yes: bool) -> None:
         output.emit_json(result)
         return
 
+    # Server-returned deck names are collection-authored → escaped.
     for name in result.deleted:
-        output.console.print(f"[red]-[/red] Deleted deck [cyan]{name}[/cyan]")
+        output.console.print(f"[red]-[/red] Deleted deck [cyan]{output.esc(name)}[/cyan]")
     for name in result.not_empty:
         output.console.print(
-            f"[bold red]![/bold red] [cyan]{name}[/cyan] is not empty — move its notes out first"
+            f"[bold red]![/bold red] [cyan]{output.esc(name)}[/cyan] is not empty — "
+            "move its notes out first"
         )
     for name in result.not_found:
-        output.console.print(f"[bold red]![/bold red] Not found: [cyan]{name}[/cyan]")
+        output.console.print(f"[bold red]![/bold red] Not found: [cyan]{output.esc(name)}[/cyan]")
 
     if result.not_empty or result.not_found:
         ctx.exit(1)

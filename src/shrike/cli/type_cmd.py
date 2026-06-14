@@ -198,8 +198,9 @@ def type_create(
 
     for r in result.results:
         if r.status == "created":
+            # Note-type names are collection-authored → escaped.
             output.console.print(
-                f"[green]+[/green] Created note type [cyan]{r.name or ''}[/cyan]"
+                f"[green]+[/green] Created note type [cyan]{output.esc(r.name or '')}[/cyan]"
                 f" ([green]#{r.id}[/green])"
             )
         elif r.status == "error":
@@ -265,8 +266,9 @@ def type_update(
 
     for r in result.results:
         if r.status == "updated":
+            # Note-type names are collection-authored → escaped.
             output.console.print(
-                f"[yellow]~[/yellow] Updated note type [cyan]{r.name or ''}[/cyan]"
+                f"[yellow]~[/yellow] Updated note type [cyan]{output.esc(r.name or '')}[/cyan]"
                 f" ([green]#{r.id}[/green])"
             )
         elif r.status == "error":
@@ -306,14 +308,14 @@ def type_delete(ctx: click.Context, identifiers: tuple[str, ...], yes: bool) -> 
 
     for r in result.results:
         if r.status == "deleted":
-            output.console.print(
-                f"Deleted note type [cyan]{r.name or ''}[/cyan] ([green]#{r.id}[/green])"
-            )
+            # Note-type names are collection-authored → escaped.
+            name = output.esc(r.name or "")
+            output.console.print(f"Deleted note type [cyan]{name}[/cyan] ([green]#{r.id}[/green])")
         elif r.status == "not_found":
             output.console.print(f"[dim]Not found: #{r.id}[/dim]")
         elif r.status == "error":
             output.console.print(
-                f"[bold red]![/bold red] [cyan]{r.name or ''}[/cyan]"
+                f"[bold red]![/bold red] [cyan]{output.esc(r.name or '')}[/cyan]"
                 f" ([green]#{r.id}[/green]):"
-                f" [red]{r.error or 'Unknown error'}[/red]"
+                f" [red]{output.esc(r.error or 'Unknown error')}[/red]"
             )

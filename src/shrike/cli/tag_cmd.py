@@ -49,7 +49,8 @@ def tag_rename(ctx: click.Context, old: str, new: str, note_ids: tuple[int, ...]
         output.emit_json(result)
         return
 
+    # Tag names can contain brackets → escaped so they render literally.
     output.console.print(
-        f"Renamed [yellow]{old}[/yellow] → [yellow]{new}[/yellow] "
+        f"Renamed [yellow]{output.esc(old)}[/yellow] → [yellow]{output.esc(new)}[/yellow] "
         f"on {result.notes_modified} note(s)."
     )

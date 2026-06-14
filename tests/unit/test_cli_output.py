@@ -19,13 +19,19 @@ the output and that no ``MarkupError`` escapes. These are RED before the
 from __future__ import annotations
 
 import io
+from unittest.mock import MagicMock, patch
 
 import pytest
+from click.testing import CliRunner
 from rich.console import Console
 from rich.errors import MarkupError
 
-from shrike.cli import output
+from shrike import client as shrike_client
+from shrike.cli import cli, output
 from shrike.schemas import (
+    CollectionCheckResponse,
+    CollectionInfo,
+    DeckInfo,
     FieldDetail,
     ListMediaResponse,
     MediaFileInfo,
@@ -184,3 +190,64 @@ def test_esc_neutralizes_markup() -> None:
     # The centralized helper turns brackets into literal text.
     assert output.esc(SPOOF) == r"\[blink]gotcha\[/blink]"
     assert "[" not in output.esc(MALFORMED).replace("\\[", "")
+
+
+# --- End-to-end CLI adversarial cases (the joint-review must-fix) -------------
+#
+# Drive the real CLI commands (`info --decks/--tags`, `collection check`) with a
+# stubbed client returning bracket-bearing collection content. These cover the
+# sibling render files (info_cmd/collection_cmd) the first sweep missed. Each
+# runs with `catch_exceptions=False` so an uncaught MarkupError fails the test,
+# and asserts the bracketed content survives literally (no restyle).
+
+
+@pytest.fixture
+def cli_run(tmp_path):
+    """Invoke the real CLI with a MagicMock ShrikeClient and an empty config."""
+    fake = MagicMock(spec=shrike_client.ShrikeClient)
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("")
+    runner = CliRunner()
+
+    def _run(*args: str):
+        with patch("shrike.client.ShrikeClient", return_value=fake):
+            return runner.invoke(cli, ["--config", str(cfg), *args], catch_exceptions=False)
+
+    _run.fake = fake  # type: ignore[attr-defined]
+    return _run
+
+
+def test_info_decks_renders_bracketed_deck_name_literally(cli_run) -> None:
+    # Case 1: a deck named "[red]PWNED[/red]" must render literally (no restyle).
+    cli_run.fake.collection_info.return_value = CollectionInfo(
+        decks=[DeckInfo(name="[red]PWNED[/red]", id=1, note_count=3)]
+    )
+    result = cli_run("info", "--decks")
+    assert result.exit_code == 0, result.output
+    assert "[red]PWNED[/red]" in result.output
+
+
+def test_info_decks_and_tags_malformed_markup_does_not_crash(cli_run) -> None:
+    # Case 2: a deck "Deck [/notreal]" and a tag "[/x]" must not raise MarkupError.
+    cli_run.fake.collection_info.return_value = CollectionInfo(
+        decks=[DeckInfo(name="Deck [/notreal]", id=1, note_count=0)],
+        tags=["[/x]"],
+    )
+    decks = cli_run("info", "--decks")
+    assert decks.exit_code == 0, decks.output
+    assert "[/notreal]" in decks.output
+
+    tags = cli_run("info", "--tags")
+    assert tags.exit_code == 0, tags.output
+    assert "[/x]" in tags.output
+
+
+def test_collection_check_renders_bracketed_filename_literally(cli_run) -> None:
+    # Case 3: an unused media file "a[/z].png" must render literally, no crash.
+    cli_run.fake.collection_check.return_value = CollectionCheckResponse(
+        media_dir="/media",
+        unused=["a[/z].png"],
+    )
+    result = cli_run("collection", "check")
+    assert result.exit_code == 0, result.output
+    assert "a[/z].png" in result.output
