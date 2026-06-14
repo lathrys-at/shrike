@@ -40,14 +40,17 @@ ASSETS = EVAL_DIR / "ASSETS.md"
 MULTIMODAL_RESOLVED = ROOT / "eval" / "multimodal" / "resolved_urls.json"
 
 # Canonical pins for handles where a fuzzy Commons search picks the wrong file
-# (a desmosome instead of the cell, an instrument museum instead of a violin).
-# These handles back explicit recall queries, so the image MUST be the right
-# subject — pin the well-known file by URL. PD/PD-art preferred (see ASSETS.md).
-CANONICAL_URLS = {
-    "animal_cell": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0d/Animal_cell_structure_en.svg/960px-Animal_cell_structure_en.svg.png",
-    "sunflower": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/40/Sunflower_sky_backdrop.jpg/960px-Sunflower_sky_backdrop.jpg",
-    "violin": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/9e/Violin_VL100.png/480px-Violin_VL100.png",
-    "coffee": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/45/A_small_cup_of_coffee.JPG/960px-A_small_cup_of_coffee.JPG",
+# (a desmosome instead of the cell, a rock formation instead of a violin). These
+# handles back explicit recall queries, so the image MUST be the right subject —
+# pin a specific well-known file by its ``File:`` page TITLE. Title resolution is
+# robust where a hardcoded thumb URL isn't: Commons renames thumb paths and
+# rejects arbitrary thumb sizes (HTTP 400/404), but the API always returns the
+# file's CURRENT valid URL for a title. PD/PD-art/CC0 preferred (see ASSETS.md).
+CANONICAL_TITLES = {
+    "animal_cell": "File:Cell-organelles-labeled.png",  # CC BY-SA 4.0 — a labeled animal cell
+    "sunflower": "File:Sunflower_sky_backdrop.jpg",  # GFDL/CC — Fir0002's sunflower
+    "violin": "File:Violin_VL100.png",  # CC0 — a clean violin render
+    "coffee": "File:A_small_cup_of_coffee.JPG",  # CC BY-SA — a real coffee cup
 }
 
 
@@ -77,15 +80,17 @@ def resolve_corpus(refresh: bool) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for handle, term in _commons_entries(manifest):
         pinned = pins.get(handle)
-        canonical = CANONICAL_URLS.get(handle)
+        title = CANONICAL_TITLES.get(handle)
         try:
-            if canonical and (refresh or pins.get(handle) != canonical):
-                # A handle with a canonical pin always resolves to it (and
-                # repins), overriding a noisy search result.
-                asset = resolve_asset(canonical, is_url=True)
-                pins[handle] = canonical
-            elif pinned and not refresh:
+            if pinned and not refresh:
+                # An existing pin replays verbatim (canonical or not — once a
+                # title resolved to a working URL it's pinned like any other).
                 asset = resolve_asset(pinned, is_url=True)
+            elif title is not None:
+                # A canonical handle resolves by File: title (robust) → pin the
+                # CURRENT valid URL the API returns, overriding a noisy search.
+                asset = resolve_asset(title, is_title=True, width_hint=800)
+                pins[handle] = asset.url
             else:
                 asset = resolve_asset(term)
                 pins[handle] = asset.url
