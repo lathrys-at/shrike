@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -34,11 +35,17 @@ def pytest_configure(config: pytest.Config) -> None:
         # Source/sdist checkout without the dev scripts — nothing to check.
         return
 
+    # We ARE the authoritative interpreter — hand the script the venv root
+    # (sys.prefix) so it resolves the venv even under .venv/bin/pytest / an IDE
+    # runner / `uv run`, where VIRTUAL_ENV is unset. The activated path
+    # (VIRTUAL_ENV set) is unchanged.
+    env = {**os.environ, "SHRIKE_NATIVE_VENV": sys.prefix}
     result = subprocess.run(
         ["bash", str(_STALE_SCRIPT)],
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
+        env=env,
     )
     if result.returncode != 0:
         raise pytest.UsageError(

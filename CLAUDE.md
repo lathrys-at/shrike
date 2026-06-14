@@ -161,8 +161,8 @@ pip-lane inner loop). You don't have to remember to run it: with direnv the
 `.envrc` rebuilds a stale extension on `cd`, and either way `pytest` aborts loud
 (a `pytest.UsageError`, before any test imports the extension) if the `.so` is
 stale — `pip install` does not rebuild it, so the old silent-stale-`.so` footgun
-is gone (#573). A staleness check (`scripts/native-stale.sh`, ~50ms of git
-plumbing) keyed to a per-venv stamp drives both. `SHRIKE_SKIP_NATIVE_STALE_CHECK=1`
+is gone (#573). A staleness check (`scripts/native-stale.sh`, well under 100ms of
+git plumbing) keyed to a per-venv stamp drives both. `SHRIKE_SKIP_NATIVE_STALE_CHECK=1`
 bypasses the pytest backstop (Bazel sets it — that lane builds the extension
 hermetically). **Bazel is NOT on PATH** — use the
 committed `./bazel` launcher at the repo root (it bootstraps bazelisk + the

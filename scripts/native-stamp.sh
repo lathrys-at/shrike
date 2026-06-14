@@ -46,7 +46,12 @@ else
   others_hash="no-untracked"
 fi
 
-# 4. The active interpreter.
-interp="$(python -c 'import sys; print(sys.executable, sys.version)' 2>/dev/null || echo 'no-python')"
+# 4. The active interpreter (the abi3 .so is venv-bound). SHRIKE_NATIVE_PYTHON
+#    lets a caller pin the exact interpreter to probe — the venv's own python —
+#    so the stamp is identical whether pytest runs activated (bare `python` is
+#    the venv) or as .venv/bin/pytest with no VIRTUAL_ENV (where bare `python`
+#    would otherwise resolve to a system interpreter and spuriously shift it).
+PYTHON="${SHRIKE_NATIVE_PYTHON:-python}"
+interp="$("$PYTHON" -c 'import sys; print(sys.executable, sys.version)' 2>/dev/null || echo 'no-python')"
 
 printf '%s\n%s\n%s\n%s\n' "$tree_hash" "$diff_hash" "$others_hash" "$interp" | _sha256
