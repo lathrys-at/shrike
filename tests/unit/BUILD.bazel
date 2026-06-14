@@ -68,6 +68,7 @@ _CORE = [
     "test_note_types.py",
     "test_rehomed_actions.py",
     "test_schema_contract.py",
+    "test_schema_numeric_bounds.py",
     "test_schemas.py",
     "test_substring_search.py",
     "test_update_note_tags.py",
@@ -198,6 +199,7 @@ pytest_test(
     deps = [
         ":conftest",
         "//src/shrike:client",
+        requirement("mcp"),  # test_client_busy drives the real FastMCP handler (#598)
     ],
 )
 

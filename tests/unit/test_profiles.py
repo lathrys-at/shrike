@@ -82,6 +82,15 @@ class TestParse:
         )
         assert caps.embedders[0].modalities == ("text", "image", "audio")
 
+    def test_text_inclusive_modalities_accepted(self):
+        # #603 control: the floor only rejects entries MISSING text — every
+        # text-inclusive shape still parses (text, text+image, text+audio).
+        for mods in (["text"], ["text", "image"], ["text", "audio"]):
+            caps = parse_capabilities(
+                {"embedders": [{"modalities": mods, "runtime": "remote", "model": "m"}]}
+            )
+            assert caps.embedders[0].modalities == tuple(mods)
+
     def test_remote_entry_with_endpoint_and_key(self):
         caps = parse_capabilities(
             {
@@ -145,6 +154,26 @@ class TestParse:
             (
                 {"embedders": [{"modalities": ["video"], "runtime": "onnx", "model": "m"}]},
                 "unknown modality",
+            ),
+            # #603: every space must embed text (the EmbedderBackend contract is
+            # modalities ⊇ {text}). An image-only entry is currently a valid
+            # shape per the unknown-modality check but violates the protocol —
+            # reject it at parse time. (Same for an audio-only entry.)
+            (
+                {"embedders": [{"modalities": ["image"], "runtime": "remote", "model": "m"}]},
+                "must include 'text'",
+            ),
+            (
+                {"embedders": [{"modalities": ["audio"], "runtime": "remote", "model": "m"}]},
+                "must include 'text'",
+            ),
+            (
+                {
+                    "embedders": [
+                        {"modalities": ["image", "audio"], "runtime": "remote", "model": "m"}
+                    ]
+                },
+                "must include 'text'",
             ),
             (
                 {"embedders": [{"modalities": ["text"], "runtime": "torch", "model": "m"}]},
@@ -736,10 +765,12 @@ class TestMultiSpace:
         # calibrated floor; two would reintroduce the N≥2 flood the retired
         # relative gate guarded against, with no mechanism left to bound it → a
         # named config error, not a silent degrade.
+        # Both spaces are valid text+image entries (each satisfies the #603
+        # modalities ⊇ {text} floor); the ceiling rejects the SECOND image space.
         config = {
             "embedders": [
                 {"modalities": ["text", "image"], "runtime": "onnx", "model": "~/a"},
-                {"modalities": ["image"], "runtime": "onnx", "model": "~/b"},
+                {"modalities": ["text", "image"], "runtime": "onnx", "model": "~/b"},
             ]
         }
         with pytest.raises(ProfileError, match="at most ONE image-embedding space"):

@@ -137,8 +137,18 @@ impl Default for RemoteDescriberConfig {
 
 /// The engine: a thin, stateless HTTP client (ureq agents are cheap and
 /// `Send + Sync`; each call is one request).
+///
+/// SSRF posture (#592, same as `shrike-embed-remote`): `base_url` is
+/// operator-configured and trusted, so it is NOT `is_global`-gated — but the
+/// agent has auto-redirects OFF and is **pinned to `base_url`'s resolved IP**
+/// (closing the DNS-rebinding TOCTOU), and a redirect is followed only when it
+/// stays on the SAME host (`shrike_net::same_host_redirect` refuses a
+/// cross-host 30x — the SSRF vector). The IP is pinned once at construction;
+/// reconstruct to re-pin if the endpoint's address rotates.
 pub struct RemoteDescriber {
     base_url: String,
+    /// `base_url` parsed once, for the same-host redirect comparison.
+    base: url::Url,
     api_key: Option<String>,
     model: Option<String>,
     prompt: String,
@@ -222,28 +232,133 @@ impl RemoteDescriber {
                 ));
             }
         }
+        let base_url = cfg.base_url.trim_end_matches('/').to_string();
+        let timeout = cfg.timeout.unwrap_or(DESCRIBE_TIMEOUT);
+        // SSRF posture (#592): pin the connection to base_url's resolved IP with
+        // auto-redirects OFF. The agent-level timeout is a backstop; each request
+        // sets its own via `.timeout()`.
+        let (agent, base) = shrike_net::pinned_endpoint_agent(&base_url, timeout)?;
         Ok(Self {
-            base_url: cfg.base_url.trim_end_matches('/').to_string(),
+            base_url,
+            base,
             api_key: cfg.api_key,
             model: cfg.model,
             prompt: cfg.prompt.unwrap_or_else(|| DESCRIBE_PROMPT_V1.to_string()),
             max_tokens: cfg.max_tokens,
             temperature: cfg.temperature,
             detail: cfg.detail,
-            timeout: cfg.timeout.unwrap_or(DESCRIBE_TIMEOUT),
-            agent: ureq::AgentBuilder::new().build(),
+            timeout,
+            agent,
         })
     }
 
     fn request(&self, method: &str, path: &str, timeout: Duration) -> ureq::Request {
-        let mut req = self
-            .agent
-            .request(method, &format!("{}{}", self.base_url, path))
-            .timeout(timeout);
+        self.request_abs(method, &format!("{}{}", self.base_url, path), timeout)
+    }
+
+    /// Build a request to an ABSOLUTE url (the redirect loop sends to the
+    /// validated same-host target, not a base-relative path).
+    fn request_abs(&self, method: &str, url: &str, timeout: Duration) -> ureq::Request {
+        let mut req = self.agent.request(method, url).timeout(timeout);
         if let Some(key) = &self.api_key {
             req = req.set("Authorization", &format!("Bearer {key}"));
         }
         req
+    }
+
+    /// POST the chat payload, following SAME-HOST redirects (#592) and applying
+    /// the bounded transient retry per URL. `Ok(Some(resp))` is a 2xx; `Ok(None)`
+    /// is an item-level rejection (a 4xx the image caused — the caller degrades
+    /// to the empty recognition); `Err` is an endpoint-level failure. A
+    /// cross-host redirect is refused (the SSRF vector), capped at
+    /// `shrike_net::MAX_REDIRECTS`.
+    fn post_chat(&self, payload: &serde_json::Value) -> NativeResult<Option<ureq::Response>> {
+        let mut current = format!("{}/v1/chat/completions", self.base_url);
+        let mut from = self.base.clone();
+        for _hop in 0..=shrike_net::MAX_REDIRECTS {
+            let Some(resp) = self.post_chat_one_url(&current, payload)? else {
+                return Ok(None); // item-level reject
+            };
+            if (300..400).contains(&resp.status()) {
+                let location = resp.header("location").ok_or_else(|| {
+                    NativeError::unavailable("redirect response without a Location header")
+                })?;
+                let target = shrike_net::same_host_redirect(&from, location)?;
+                current = target.to_string();
+                from = target;
+                continue;
+            }
+            return Ok(Some(resp));
+        }
+        Err(NativeError::unavailable(format!(
+            "too many redirects (>{})",
+            shrike_net::MAX_REDIRECTS
+        )))
+    }
+
+    /// One absolute URL's bounded-retry chat POST. `Ok(Some(resp))` is a 2xx OR
+    /// a 3xx (returned for the redirect loop to follow/refuse); `Ok(None)` is an
+    /// item-level rejection; `Err` is endpoint-level.
+    fn post_chat_one_url(
+        &self,
+        url: &str,
+        payload: &serde_json::Value,
+    ) -> NativeResult<Option<ureq::Response>> {
+        let mut attempt = 1u32;
+        loop {
+            let err = match self
+                .request_abs("POST", url, self.timeout)
+                .send_json(payload)
+            {
+                Ok(resp) => return Ok(Some(resp)),
+                // A 3xx may surface as Error::Status — return it for the redirect
+                // loop, identically to the Ok(3xx) case.
+                Err(ureq::Error::Status(code, resp)) if (300..400).contains(&code) => {
+                    return Ok(Some(resp));
+                }
+                Err(e) => e,
+            };
+            // Item-level: this image is unprocessable (oversized, rejected,
+            // malformed) — degrade to the empty recognition, never sink the
+            // batch, never retry (a bad image won't improve).
+            if let ureq::Error::Status(code, _) = &err {
+                if item_level_status(*code) {
+                    tracing::warn!(status = code, "endpoint rejected an image; item skipped");
+                    return Ok(None);
+                }
+            }
+            // Endpoint-level: transient (429/5xx/transport) retries bounded;
+            // anything else (auth, bad route) errors the chunk immediately.
+            let transient = match &err {
+                ureq::Error::Status(code, _) => retryable_status(*code),
+                ureq::Error::Transport(_) => true,
+            };
+            if !transient {
+                return Err(NativeError::unavailable(format!(
+                    "describe request failed: {err}"
+                )));
+            }
+            if attempt >= DESCRIBE_ATTEMPTS {
+                return Err(NativeError::unavailable(format!(
+                    "describe request failed after {DESCRIBE_ATTEMPTS} attempt(s): {err}"
+                )));
+            }
+            let delay = match &err {
+                ureq::Error::Status(_, resp) => {
+                    retry_after(resp).unwrap_or_else(|| backoff(attempt))
+                }
+                ureq::Error::Transport(_) => backoff(attempt),
+            };
+            tracing::warn!(
+                attempt,
+                max_attempts = DESCRIBE_ATTEMPTS,
+                delay_ms = delay.as_millis() as u64,
+                error = %err,
+                "transient describe failure; retrying"
+            );
+            std::thread::sleep(delay);
+            attempt += 1;
+        }
     }
 
     /// `GET /health` is 200 — llama-server's readiness; other services may
@@ -317,55 +432,9 @@ impl RemoteDescriber {
             payload["model"] = serde_json::Value::String(model.clone());
         }
 
-        let mut attempt = 1u32;
-        let resp = loop {
-            let err = match self
-                .request("POST", "/v1/chat/completions", self.timeout)
-                .send_json(&payload)
-            {
-                Ok(resp) => break resp,
-                Err(e) => e,
-            };
-            // Item-level: this image is unprocessable (oversized, rejected,
-            // malformed) — degrade to the empty recognition, never sink the
-            // batch, never retry (a bad image won't improve).
-            if let ureq::Error::Status(code, _) = &err {
-                if item_level_status(*code) {
-                    tracing::warn!(status = code, "endpoint rejected an image; item skipped");
-                    return Ok(empty_recognition());
-                }
-            }
-            // Endpoint-level: transient (429/5xx/transport) retries bounded;
-            // anything else (auth, bad route) errors the chunk immediately.
-            let transient = match &err {
-                ureq::Error::Status(code, _) => retryable_status(*code),
-                ureq::Error::Transport(_) => true,
-            };
-            if !transient {
-                return Err(NativeError::unavailable(format!(
-                    "describe request failed: {err}"
-                )));
-            }
-            if attempt >= DESCRIBE_ATTEMPTS {
-                return Err(NativeError::unavailable(format!(
-                    "describe request failed after {DESCRIBE_ATTEMPTS} attempt(s): {err}"
-                )));
-            }
-            let delay = match &err {
-                ureq::Error::Status(_, resp) => {
-                    retry_after(resp).unwrap_or_else(|| backoff(attempt))
-                }
-                ureq::Error::Transport(_) => backoff(attempt),
-            };
-            tracing::warn!(
-                attempt,
-                max_attempts = DESCRIBE_ATTEMPTS,
-                delay_ms = delay.as_millis() as u64,
-                error = %err,
-                "transient describe failure; retrying"
-            );
-            std::thread::sleep(delay);
-            attempt += 1;
+        // Item-level rejection (a 4xx the image caused) → empty recognition.
+        let Some(resp) = self.post_chat(&payload)? else {
+            return Ok(empty_recognition());
         };
 
         let body: ChatResponse = resp
@@ -573,6 +642,43 @@ mod tests {
             !err.to_string().contains("attempt"),
             "no retry on 401: {err}"
         );
+    }
+
+    // ── SSRF redirect re-vet (#592) ─────────────────────────────────────────
+
+    #[test]
+    fn cross_host_redirect_is_refused() {
+        // The endpoint 30x-es to a DIFFERENT host (the SSRF vector). The 200
+        // queued behind it must NEVER be followed — refused as a chunk error.
+        let (url, _rx) = canned_server(vec![
+            (
+                "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/",
+                "{}".into(),
+            ),
+            ("HTTP/1.1 200 OK", chat_ok("leaked")),
+        ]);
+        let err = engine(url, None, None)
+            .recognize_chunk(&[item(&[1], "a.png")])
+            .unwrap_err();
+        assert!(err.to_string().contains("cross-host redirect"), "{err}");
+    }
+
+    #[test]
+    fn same_host_redirect_is_followed_repinned() {
+        // A same-host redirect IS followed and lands on the same pinned host.
+        let (url, rx) = canned_server(vec![
+            (
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: /v2/chat/completions",
+                "{}".into(),
+            ),
+            ("HTTP/1.1 200 OK", chat_ok("after redirect")),
+        ]);
+        let out = engine(url, None, None)
+            .recognize_chunk(&[item(&[1], "a.png")])
+            .unwrap();
+        assert_eq!(out[0].text, "after redirect");
+        assert!(rx.recv().unwrap().starts_with("POST /v1/chat/completions"));
+        assert!(rx.recv().unwrap().starts_with("POST /v2/chat/completions"));
     }
 
     #[test]

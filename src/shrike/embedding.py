@@ -730,7 +730,25 @@ class EmbeddingRuntime:
         Raises ``ValueError`` if no model is configured or the backend kind is
         unknown, ``FileNotFoundError`` / ``RuntimeError`` if it won't start, or
         ``ImportError`` if the ONNX optional dependency isn't installed.
+
+        **SSRF defense-in-depth (#592):** ``endpoint`` / ``api_key_env`` are
+        config-only — they reach the runtime via the constructor
+        (``profiles.py`` → ``plan_to_runtime_params``), never as a start-time
+        override. They are rejected here with ``ValueError`` so that even a
+        future careless ``POST /embedding/start`` route body that forwards them
+        cannot point the embedding traffic at an attacker-chosen endpoint. The
+        remote endpoints stay operator-configured; the remote engines now pin
+        the configured host's IP and re-vet redirects (cross-host refused), but
+        the historical lack of any classifier on those paths is why the
+        endpoint must not be settable over HTTP. (Both kwargs stay on the
+        signature so the rejection is explicit, not a silent ``**kwargs`` drop.)
         """
+        if endpoint is not None or api_key_env is not None:
+            raise ValueError(
+                "endpoint/api_key_env are config-only and cannot be set via a "
+                "start() override (they reach the runtime through the embedders: "
+                "config entry, not an HTTP /embedding/start body)"
+            )
         with self._lock:
             if self._backend is not None and self._backend.running:
                 return self._backend
@@ -761,10 +779,8 @@ class EmbeddingRuntime:
                 self._onnx_providers = list(onnx_providers) or None
             if batch_size is not None:
                 self._batch_size = batch_size
-            if endpoint is not None:
-                self._endpoint = endpoint
-            if api_key_env is not None:
-                self._api_key_env = api_key_env
+            # endpoint/api_key_env are rejected above (config-only, #592) — no
+            # override assignment here by design.
 
             if not self._configured:
                 raise ValueError("No embedding model configured")

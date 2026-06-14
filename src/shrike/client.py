@@ -262,10 +262,22 @@ class ShrikeClient:
             # longer embed an error field in structuredContent — failures are
             # MCP isError results.
             text = _error_text(result.get("content"))
-            if text and text.startswith(f"{COLLECTION_BUSY_CODE}:"):
-                # The collection couldn't be acquired (another process holds it);
-                # raise a distinct, catchable error with the human message.
-                raise CollectionBusyError(text.split(":", 1)[1].strip())
+            if text:
+                # Detect the busy sentinel by POSITION, not prefix: FastMCP's
+                # Tool.run wraps a raised exception as
+                # "Error executing tool <name>: collection_busy: <message>", so
+                # the sentinel is mid-string, not at index 0 (#598). A bare
+                # `startswith` missed the wrapped form and mis-raised ServerError,
+                # silently defeating every `except CollectionBusyError: retry`.
+                sentinel = f"{COLLECTION_BUSY_CODE}:"
+                pos = text.find(sentinel)
+                if pos != -1:
+                    # Slice the human message from *after* the sentinel — a plain
+                    # split(":", 1) would keep the wrapper's "Error executing
+                    # tool …" half. The collection couldn't be acquired (another
+                    # process holds it); raise a distinct, catchable error.
+                    message = text[pos + len(sentinel) :].strip()
+                    raise CollectionBusyError(message)
             raise ServerError(text or "Tool returned an error")
 
         content = result.get("structuredContent", {})

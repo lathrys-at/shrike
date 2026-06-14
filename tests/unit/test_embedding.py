@@ -523,3 +523,43 @@ class TestEmbeddingRuntime:
         # The failure is the real reason (model load), never the alias error.
         assert "Unknown embedding backend" not in str(ei.value)
         assert runtime.backend_kind in ("onnx", "clip", "llama", "remote")
+
+    # --- #592: endpoint/api_key_env are config-only; rejected as start() overrides ---
+    # SSRF defense-in-depth — even a future careless POST /embedding/start body
+    # that forwards these must not be able to point embedding traffic at an
+    # attacker-chosen endpoint. They reach the runtime via the ctor only.
+
+    def test_start_rejects_endpoint_override(self) -> None:
+        runtime = EmbeddingRuntime(model="/m.gguf")
+        with pytest.raises(ValueError, match="endpoint/api_key_env are config-only"):
+            runtime.start(endpoint="http://evil.example/v1")
+
+    def test_start_rejects_api_key_env_override(self) -> None:
+        runtime = EmbeddingRuntime(model="/m.gguf")
+        with pytest.raises(ValueError, match="endpoint/api_key_env are config-only"):
+            runtime.start(api_key_env="STOLEN_KEY")
+
+    def test_start_rejection_does_not_mutate_runtime(self) -> None:
+        # The guard runs BEFORE the lock/mutation block, so a rejected override
+        # leaves the runtime untouched (a normal start still works after).
+        runtime = EmbeddingRuntime(model="/m.gguf")
+        with pytest.raises(ValueError):
+            runtime.start(endpoint="http://evil.example/v1")
+        fake_svc = MagicMock()
+        fake_svc.running = True
+        with patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc):
+            runtime.start()
+        assert runtime.running is True
+
+    def test_start_endpoint_via_ctor_is_accepted(self) -> None:
+        # The legitimate path: endpoint/api_key_env arrive at construction (the
+        # config entry), NOT a start() override — so a remote runtime is fine.
+        runtime = EmbeddingRuntime(backend="remote", endpoint="http://endpoint.example/v1")
+        assert runtime.backend_kind == "remote"
+        # No start() override of the endpoint → no rejection on a bare start
+        # attempt (it proceeds to the configured-check / backend construction).
+        fake_be = MagicMock()
+        fake_be.running = True
+        with patch("shrike.embedding.RemoteBackend", return_value=fake_be):
+            runtime.start()
+        assert runtime.running is True

@@ -1128,8 +1128,8 @@ class ServerStatus(BaseModel):
 
     running: Literal[True] = True
     # The action exchange's protocol version (#392) — a future remote client
-    # checks this before speaking.
-    wire_protocol_version: int
+    # checks this before speaking. ``ge=0`` mirrors the Rust ``u32`` (#606).
+    wire_protocol_version: int = Field(ge=0)
     pid: int
     url: str
     collection: str
@@ -1354,7 +1354,7 @@ class ExportPackageResult(BaseModel):
     """The kernel export-op outcome: notes written + the path the package
     landed at. Internal wire — the host action wraps it for the tool response."""
 
-    note_count: int
+    note_count: int = Field(ge=0)  # mirrors the Rust ``u32`` (#606)
     out_path: str
 
 
@@ -1366,16 +1366,16 @@ class ExportPackageResult(BaseModel):
 # mirroring fetch_media's "GET the url for the bytes".
 class ExportPackagePath(BaseModel):
     delivery: Literal["path"]
-    note_count: int
-    bytes: int
+    note_count: int = Field(ge=0)  # Rust ``u32`` (#606)
+    bytes: int = Field(ge=0)  # Rust ``u64`` (#606)
     format: str  # "apkg" | "colpkg"
     path: str
 
 
 class ExportPackageUrl(BaseModel):
     delivery: Literal["url"]
-    note_count: int
-    bytes: int
+    note_count: int = Field(ge=0)  # Rust ``u32`` (#606)
+    bytes: int = Field(ge=0)  # Rust ``u64`` (#606)
     format: str
     url: str
 

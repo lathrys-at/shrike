@@ -21,6 +21,11 @@ shrike-collection = { path = "../shrike-collection" }
 shrike-derived = { path = "../shrike-derived" }
 shrike-engine-api = { path = "../shrike-engine-api" }
 shrike-ffi = { workspace = true }
+# Shared SSRF-safety primitives (#592): the is_global classifier, resolve-and-vet,
+# and the IP-pinned agent builder — one home, shared with the remote engine
+# crates. A LOW utility crate (no engine dep, no kernel dep), so this edge keeps
+# the kernel pure.
+shrike-net = { workspace = true }
 shrike-store-api = { workspace = true }
 # media URL fetch (#278 step 5b, kernel-owned since #389 B2): ureq is a
 # SYNCHRONOUS client — no tokio coupling; the prepare rides the blocking pool.

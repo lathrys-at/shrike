@@ -2101,7 +2101,19 @@ impl Kernel {
     /// There is no index/derived tail that could fail (the vectors/rows are
     /// unchanged), so both watermark sides complete as success — but still only
     /// advance past concurrent in-flight writes the tracker certifies (#585).
-    pub async fn metadata_changed(&self) -> NativeResult<()> {
+    /// A metadata-only collection change (tags/decks/templates/field metadata —
+    /// nothing that feeds embedding text or derived rows): advance the
+    /// watermarks so the col_mod bump doesn't read as drift on next boot.
+    ///
+    /// `membership_may_have_changed` is the tag-centroid relevance probe (#600):
+    /// only a TAG-membership change (a note gained/lost a tag, a tag was
+    /// renamed/cleared) can move a centroid, so only those ops request the
+    /// refresh. Deck rename/reparent, template/CSS find-replace, and field
+    /// metadata bump col_mod but touch NO centroid input — requesting a refresh
+    /// there is pure O(collection) waste (`note_tag_rows` + `note_count` +
+    /// a whole-collection recompute) behind no relevance signal (#445: per-op
+    /// tails do no O(collection) work; the refresh runs only when relevant).
+    pub async fn metadata_changed(&self, membership_may_have_changed: bool) -> NativeResult<()> {
         // Read `col.mod` + register in one actor job (#585) — the metadata write
         // already committed in its own prior job, so FIFO orders this read after
         // it; registering in-job keeps it ordered with any concurrent upsert too.
@@ -2110,12 +2122,14 @@ impl Kernel {
         // it must stay put so the next attach reconciles, as before).
         let index_ok = self.embed_service().is_some();
         self.advance_watermarks(tokens, index_ok, true).await;
-        // Tag-only ops (update_note_tags / rename_tag) ride this path and
-        // change MEMBERSHIP without an index op — centroids previously went
-        // stale until the next upsert/delete or reboot. The coalescing
-        // refresher makes the over-trigger on deck/template/field-metadata
-        // edits cheap, so request unconditionally (#445).
-        self.tag_refresh.request();
+        // Tag-only ops (update_note_tags / rename_tag / clear-unused-tags) ride
+        // this path and change MEMBERSHIP without an index op — centroids would
+        // otherwise go stale until the next upsert/delete or reboot. The
+        // coalescing refresher caps a burst to ~1 recompute (#445); request it
+        // ONLY when tag membership could actually have moved.
+        if membership_may_have_changed {
+            self.tag_refresh.request();
+        }
         Ok(())
     }
 
@@ -2327,7 +2341,10 @@ impl Kernel {
             let tail = if !removed_note_ids.is_empty() {
                 self.forget_notes(removed_note_ids).await
             } else if tags_removed {
-                self.metadata_changed().await
+                // clear_unused_tags removes only tags on NO notes → no note's
+                // membership moves and no centroid (min_members > 0) changes →
+                // watermark bump only, no refresh (#600).
+                self.metadata_changed(false).await
             } else {
                 Ok(())
             };
@@ -2347,11 +2364,15 @@ impl Kernel {
     /// The shared metadata tail: advance the watermarks so a vectors-
     /// unchanged col_mod bump doesn't read as drift on next boot. Best-effort
     /// — cache bookkeeping never fails an op already committed.
-    async fn metadata_tail(&self, changed: bool) {
+    ///
+    /// `membership_may_have_changed` gates the tag-centroid refresh (#600): a
+    /// deck/template/field-metadata edit passes `false` (no centroid input
+    /// moved); a tag-membership edit passes `true`.
+    async fn metadata_tail(&self, changed: bool, membership_may_have_changed: bool) {
         if !changed {
             return;
         }
-        if let Err(e) = self.metadata_changed().await {
+        if let Err(e) = self.metadata_changed(membership_may_have_changed).await {
             tracing::warn!(error = %e, "watermark bump after metadata change failed");
         }
     }
@@ -2369,7 +2390,8 @@ impl Kernel {
             .collection
             .run(move |core| core.update_note_tags(&note_ids, set_tags.as_deref(), &add, &remove))
             .await??;
-        self.metadata_tail(response.notes_modified > 0).await;
+        // Tag membership changed → refresh centroids (#600).
+        self.metadata_tail(response.notes_modified > 0, true).await;
         Ok(response)
     }
 
@@ -2384,7 +2406,8 @@ impl Kernel {
             .collection
             .run(move |core| core.rename_tag(&old, &new, &note_ids))
             .await??;
-        self.metadata_tail(response.notes_modified > 0).await;
+        // A rename remaps a centroid's tag key → refresh centroids (#600).
+        self.metadata_tail(response.notes_modified > 0, true).await;
         Ok(response)
     }
 
@@ -2404,7 +2427,8 @@ impl Kernel {
                     | shrike_schemas::UpsertDeckResult::Updated { .. }
             )
         });
-        self.metadata_tail(changed).await;
+        // Deck names are not centroid inputs → watermark bump only, no refresh (#600).
+        self.metadata_tail(changed, false).await;
         Ok(results)
     }
 
@@ -2417,7 +2441,10 @@ impl Kernel {
             .collection
             .run(move |core| core.delete_decks(&refs))
             .await??;
-        self.metadata_tail(!response.deleted.is_empty()).await;
+        // delete_decks is empty-only (never deletes a note) → no membership
+        // change; watermark bump only, no centroid refresh (#600).
+        self.metadata_tail(!response.deleted.is_empty(), false)
+            .await;
         Ok(response)
     }
 
@@ -2497,7 +2524,8 @@ impl Kernel {
             })
             .await??;
         if response.replacements > 0 {
-            if let Err(e) = self.metadata_changed().await {
+            // Template/CSS text is not a centroid input → no refresh (#600).
+            if let Err(e) = self.metadata_changed(false).await {
                 tracing::warn!(error = %e, "watermark advance after find_replace_note_types failed");
             }
         }
@@ -2517,7 +2545,9 @@ impl Kernel {
             .collection
             .run(move |core| core.update_note_type_field_metadata(&note_type_name, &updates))
             .await??;
-        if let Err(e) = self.metadata_changed().await {
+        // Field editor metadata (font/size/description) is not a centroid input
+        // → watermark bump only, no refresh (#600).
+        if let Err(e) = self.metadata_changed(false).await {
             tracing::warn!(error = %e, "watermark advance after field-metadata update failed");
         }
         Ok(response)
@@ -3750,6 +3780,117 @@ mod no_cpython_smoke {
         });
     }
 
+    /// #600: a METADATA-ONLY op (deck rename) must NOT fire a tag-centroid
+    /// recompute (no centroid input moved); a TAG-membership op must. The
+    /// GREEN-proof from the audit: mutate tags OUT OF BAND (straight through the
+    /// collection actor, so the mutation itself fires no `request()`), then —
+    /// because `recompute` re-reads `note_tag_rows` from the live collection —
+    /// a fresh out-of-band tag appears in the centroid key map ONLY IF a
+    /// recompute actually ran. So a deck op leaving it ABSENT proves no
+    /// recompute; a tag op making it APPEAR proves the relevant refresh still
+    /// fires. Pre-#600 (`metadata_changed` requested unconditionally) the deck
+    /// op fired a recompute → `beta` appeared → this test's "absent" assertion
+    /// is RED.
+    #[test]
+    fn metadata_only_op_does_not_recompute_tag_centroids() {
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+
+            // 6 UNTAGGED notes first (so total_notes is settled), then tag two of
+            // them "alpha" in one op. Coverage 2/6 < 0.5 → a real centroid (if we
+            // tagged during creation, the first refresh would fire when only the
+            // 2 tagged notes existed → coverage 1.0 > 0.5 → alpha excluded).
+            let mut alpha_ids = Vec::new();
+            for i in 0..6 {
+                let CreateOutcome::Created(id) = kernel
+                    .upsert_note(
+                        basic,
+                        1,
+                        vec![format!("note {i} text"), "back".into()],
+                        vec![],
+                        DuplicatePolicy::Error,
+                    )
+                    .await
+                    .unwrap()
+                else {
+                    panic!("create failed")
+                };
+                if i < 2 {
+                    alpha_ids.push(id);
+                }
+            }
+            // Tag two notes "alpha" in one op (a tag-membership change → refresh).
+            kernel
+                .update_note_tags(alpha_ids.clone(), None, vec!["alpha".into()], Vec::new())
+                .await
+                .unwrap();
+            // Wait for "alpha" to land so we have a known-good baseline.
+            wait_for_tags(&kernel, |k| {
+                k.lookup(tag_centroids::tag_key("alpha")).is_some()
+            })
+            .await;
+            let beta = tag_centroids::tag_key("beta");
+            assert!(
+                kernel.tag_keys().lookup(beta).is_none(),
+                "precondition: no beta centroid yet"
+            );
+
+            // OUT-OF-BAND: add "beta" to the alpha notes straight through the
+            // collection actor — this changes membership in the collection but
+            // does NOT call tag_refresh.request() (it bypasses
+            // kernel.update_note_tags). The centroid map can only learn "beta"
+            // via a fresh recompute that re-reads note_tag_rows.
+            let oob_ids = alpha_ids.clone();
+            kernel
+                .collection()
+                .run(move |core| core.update_note_tags(&oob_ids, None, &["beta".to_string()], &[]))
+                .await
+                .unwrap()
+                .unwrap();
+
+            // A METADATA-ONLY op: a deck create. With the fix it passes
+            // membership_may_have_changed=false → no recompute → "beta" stays
+            // invisible to the centroid map. Give the coalescing refresher
+            // ample time to run if it were going to (it must not).
+            kernel
+                .upsert_decks(vec![shrike_schemas::DeckInput {
+                    id: None,
+                    name: "SomeDeck".into(),
+                }])
+                .await
+                .unwrap();
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(
+                kernel.tag_keys().lookup(beta).is_none(),
+                "DEFECT (#600): a deck op fired a full tag-centroid recompute \
+                 with no relevance probe (beta appeared without a tag op)"
+            );
+
+            // A TAG-membership op: update_note_tags (adds a throwaway tag) passes
+            // membership_may_have_changed=true → the recompute runs, re-reads the
+            // collection, and now SEES the out-of-band beta membership.
+            kernel
+                .update_note_tags(alpha_ids.clone(), None, vec!["gamma".into()], Vec::new())
+                .await
+                .unwrap();
+            wait_for_tags(&kernel, |k| k.lookup(beta).is_some()).await;
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
     #[test]
     fn note_type_ops_run_as_kernel_ops() {
         // The #391 re-home, long-tail group 3: the metadata-tail ops advance
@@ -3990,7 +4131,8 @@ mod no_cpython_smoke {
                 .await
                 .unwrap()
                 .unwrap();
-            kernel.metadata_changed().await.unwrap();
+            // A rename is a membership-relevant change → request the refresh.
+            kernel.metadata_changed(true).await.unwrap();
             wait_for_tags(&kernel, |k| {
                 k.lookup(tag_centroids::tag_key("bio::organelle")).is_some()
                     && k.lookup(tag_centroids::tag_key("bio::cell")).is_none()
