@@ -299,8 +299,12 @@ pub struct Kernel {
     /// The watermark over-certification guard (#585/#590): tracks in-flight +
     /// un-healed-failed writes per watermark space (index, derived) so an
     /// advance never certifies a `col.mod` whose writes this op did not actually
-    /// index/ingest. See [`watermark`].
-    watermarks: watermark::WatermarkTracker,
+    /// index/ingest. See [`watermark`]. `Arc` so a write can `register` INSIDE
+    /// its collection-actor job — the actor's FIFO then orders registration with
+    /// the write, closing the post-await-continuation race (an earlier-`col.mod`
+    /// write is always registered before any later op's job runs, hence before
+    /// any later op can complete-and-advance).
+    watermarks: Arc<watermark::WatermarkTracker>,
     /// The per-secondary-space cross-space IMAGE activation floor (#576),
     /// keyed by space key. A dedicated CLIP secondary is image-only
     /// (`WriteMode::ImageOnly`), so the engine's own #201b calibration — which
@@ -562,7 +566,7 @@ impl Kernel {
             recognize: RwLock::new(BTreeMap::new()),
             recognition_gate: recognize::RecognitionGate::default(),
             slow_recognition: Arc::new(tokio::sync::Semaphore::new(SLOW_RECOGNITION_CONCURRENCY)),
-            watermarks: watermark::WatermarkTracker::default(),
+            watermarks: Arc::new(watermark::WatermarkTracker::default()),
             secondary_floors: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
@@ -1680,14 +1684,30 @@ impl Kernel {
         }
     }
 
+    /// Read `col.mod` AND register a watermark token in ONE collection-actor
+    /// job (#585). For paths with no own `col.mod`-bumping write (the
+    /// recognition sweep, `reindex_notes`, `forget_notes`, `metadata_changed`):
+    /// reading and registering in the same job is what keeps registration
+    /// FIFO-ordered with every concurrent write. By the actor's FIFO, any write
+    /// whose `col.mod ≤ V` ran (and so registered, inside its own job) before
+    /// this job observes `V` — so this op cannot complete-and-advance past an
+    /// un-indexed earlier write. A separate read-then-register (two jobs, or a
+    /// continuation) would let a write commit+register in the gap and be
+    /// over-certified.
+    async fn read_col_mod_and_register(&self) -> NativeResult<watermark::WriteTokens> {
+        let watermarks = Arc::clone(&self.watermarks);
+        self.collection
+            .run(move |core| -> NativeResult<_> { Ok(watermarks.register(core.col_mod()?)) })
+            .await?
+    }
+
     /// The maintained index/derived tail for a set of created/updated notes,
     /// used by paths that DON'T do their own `col.mod`-bumping write before the
-    /// tail (the recognition sweep, `reindex_notes`). It captures the live
-    /// `col.mod` and registers it as in-flight HERE — there is no separate
-    /// committed write whose `col.mod` it must inherit.
+    /// tail (the recognition sweep, `reindex_notes`). It reads the live
+    /// `col.mod` and registers it as in-flight in ONE actor job — there is no
+    /// separate committed write whose `col.mod` it must inherit.
     async fn index_written(&self, written: &[i64]) -> NativeResult<()> {
-        let col_mod = self.col_mod().await?;
-        let tokens = self.watermarks.register(col_mod);
+        let tokens = self.read_col_mod_and_register().await?;
         self.index_written_tracked(written, tokens).await
     }
 
@@ -1865,19 +1885,27 @@ impl Kernel {
     ) -> NativeResult<Vec<shrike_schemas::UpsertNoteResult>> {
         let span = tracing::debug_span!("kernel.upsert_notes_wire", dry_run);
         async move {
-            // Read `col.mod` in the SAME write job (#585) so the watermark this
-            // op may advance to is the one its OWN write produced. A dry run
-            // mutates nothing, so it needs no watermark token at all.
-            let (results, col_mod) = self
+            // Read `col.mod` AND register the watermark token in the SAME write
+            // job (#585): the collection actor's FIFO then guarantees an
+            // earlier-`col.mod` write registers before any later op's job runs,
+            // so a later op can never complete-and-advance past an un-indexed
+            // earlier write — even if this op's continuation is starved across
+            // the later op's whole async tail. A dry run mutates nothing, so it
+            // takes no token at all.
+            let watermarks = Arc::clone(&self.watermarks);
+            let (results, tokens) = self
                 .collection
                 .run(move |core| -> NativeResult<_> {
                     let results = core.upsert_notes(&notes, policy, dry_run)?;
-                    let col_mod = if dry_run { None } else { Some(core.col_mod()?) };
-                    Ok((results, col_mod))
+                    let tokens = if dry_run {
+                        None
+                    } else {
+                        Some(watermarks.register(core.col_mod()?))
+                    };
+                    Ok((results, tokens))
                 })
                 .await??;
-            if let Some(col_mod) = col_mod {
-                let tokens = self.watermarks.register(col_mod);
+            if let Some(tokens) = tokens {
                 // Typed outcomes (#391): written ids come straight off the
                 // variants — the parse-own-output round-trip is gone.
                 let written: Vec<i64> = results
@@ -1983,22 +2011,31 @@ impl Kernel {
         let span = tracing::debug_span!("kernel.upsert_notes", batch = notes.len());
         async move {
             // One serialized job for the whole batch of writes — and it reads
-            // `col.mod` in the SAME job (#585), so the watermark this op may
-            // advance to is the one its OWN write produced, never a live read
-            // racing a concurrent op's interleaved write.
-            let (outcomes, col_mod): (Vec<NativeResult<CreateOutcome>>, i64) = self
-                .collection
-                .run(move |core| -> NativeResult<_> {
-                    let outcomes = notes
-                        .iter()
-                        .map(|n| {
-                            core.create_note(n.notetype_id, n.deck_id, &n.fields, &n.tags, policy)
-                        })
-                        .collect();
-                    Ok((outcomes, core.col_mod()?))
-                })
-                .await??;
-            let tokens = self.watermarks.register(col_mod);
+            // `col.mod` AND registers the watermark token in the SAME job (#585),
+            // so the actor's FIFO orders this op's registration with its write
+            // ahead of any later op's job (closing the post-await-continuation
+            // race the lead flagged), and the watermark it may advance to is the
+            // one its OWN write produced.
+            let watermarks = Arc::clone(&self.watermarks);
+            let (outcomes, tokens): (Vec<NativeResult<CreateOutcome>>, watermark::WriteTokens) =
+                self.collection
+                    .run(move |core| -> NativeResult<_> {
+                        let outcomes = notes
+                            .iter()
+                            .map(|n| {
+                                core.create_note(
+                                    n.notetype_id,
+                                    n.deck_id,
+                                    &n.fields,
+                                    &n.tags,
+                                    policy,
+                                )
+                            })
+                            .collect();
+                        let tokens = watermarks.register(core.col_mod()?);
+                        Ok((outcomes, tokens))
+                    })
+                    .await??;
             let created: Vec<i64> = outcomes
                 .iter()
                 .filter_map(|o| match o {
@@ -2016,10 +2053,9 @@ impl Kernel {
     /// Drop already-deleted notes from the index + derived store (the prune
     /// path: the collection op removed them internally; this is the sidecar
     /// half of `delete_notes`). No own collection write precedes it, so it
-    /// registers the watermark token off the live `col.mod` here (#585).
+    /// reads `col.mod` + registers the watermark token in one actor job (#585).
     pub async fn forget_notes(&self, note_ids: Vec<i64>) -> NativeResult<()> {
-        let col_mod = self.col_mod().await?;
-        let tokens = self.watermarks.register(col_mod);
+        let tokens = self.read_col_mod_and_register().await?;
         self.drop_note_sidecars(&note_ids, tokens).await
     }
 
@@ -2066,8 +2102,10 @@ impl Kernel {
     /// unchanged), so both watermark sides complete as success — but still only
     /// advance past concurrent in-flight writes the tracker certifies (#585).
     pub async fn metadata_changed(&self) -> NativeResult<()> {
-        let col_mod = self.col_mod().await?;
-        let tokens = self.watermarks.register(col_mod);
+        // Read `col.mod` + register in one actor job (#585) — the metadata write
+        // already committed in its own prior job, so FIFO orders this read after
+        // it; registering in-job keeps it ordered with any concurrent upsert too.
+        let tokens = self.read_col_mod_and_register().await?;
         // The index watermark advances only when an embedder is attached (else
         // it must stay put so the next attach reconciles, as before).
         let index_ok = self.embed_service().is_some();
@@ -2083,16 +2121,19 @@ impl Kernel {
 
     pub async fn delete_notes(&self, note_ids: Vec<i64>) -> NativeResult<usize> {
         let ids = note_ids.clone();
-        // Capture `col.mod` in the SAME job as the delete (#585) so the
-        // watermark this op advances to is the one its OWN delete produced.
-        let (removed, col_mod) = self
+        // Read `col.mod` AND register the watermark token in the SAME job as the
+        // delete (#585), so the actor's FIFO orders registration with the write
+        // (closing the post-await-continuation race) and the watermark advances
+        // only to the value this op's OWN delete produced.
+        let watermarks = Arc::clone(&self.watermarks);
+        let (removed, tokens) = self
             .collection
             .run(move |core| -> NativeResult<_> {
                 let removed = core.delete_notes(&ids)?;
-                Ok((removed, core.col_mod()?))
+                let tokens = watermarks.register(core.col_mod()?);
+                Ok((removed, tokens))
             })
             .await??;
-        let tokens = self.watermarks.register(col_mod);
         self.drop_note_sidecars(&note_ids, tokens).await?;
         Ok(removed)
     }
@@ -5800,6 +5841,77 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    /// #585 registration-ordering pin (the lead's must-fix on the keystone):
+    /// `register` runs INSIDE the collection-actor job, so the actor's FIFO
+    /// orders an earlier-`col.mod` write's registration ahead of a later op's
+    /// job — even when the later op's continuation (its tail + advance) runs
+    /// FIRST. Were `register` in the post-await continuation instead, op A could
+    /// register 200 and advance to 200 before op B (100) ever registered, and a
+    /// later failure of B would be silently certified.
+    ///
+    /// This drives the real `SerializedCollection` + `WatermarkTracker`
+    /// contract the production write paths use: B's write job (FIFO-first) reads
+    /// col.mod + registers in-job; A's write job (FIFO-second) does the same;
+    /// then A "completes" its tail BEFORE B does. A must be BLOCKED from
+    /// advancing past B's still-in-flight col.mod. The load-bearing assertion is
+    /// `registered_after_jobs`: once both FIFO write JOBS have returned, BOTH
+    /// writes are already in flight — the exact property a post-await-continuation
+    /// register would lose (B's continuation could be starved past A's
+    /// completion, leaving B unregistered and A free to over-certify). The full
+    /// real-kernel adversarial interleave is `s5_interleaved_*` (B parked in its
+    /// tail while A completes end-to-end).
+    #[test]
+    fn register_in_job_orders_registration_with_writes_under_fifo() {
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let collection = Arc::new(
+                SerializedCollection::open(dir.join("c.anki2").to_string_lossy().into_owned())
+                    .await
+                    .unwrap(),
+            );
+            let tracker = Arc::new(watermark::WatermarkTracker::default());
+
+            // Two writes through the actor, FIFO-ordered. Each reads col.mod and
+            // registers IN THE JOB (exactly as upsert/delete do). We pin the two
+            // col.mod values explicitly so the assertion doesn't depend on the
+            // collection's actual mod stamps: B registers 100, A registers 200,
+            // mirroring "B writes first (lower mod), A writes second (higher)".
+            let tk = Arc::clone(&tracker);
+            let b_tokens = collection.run(move |_core| tk.register(100)).await.unwrap();
+            let tk = Arc::clone(&tracker);
+            let a_tokens = collection.run(move |_core| tk.register(200)).await.unwrap();
+
+            // The load-bearing guarantee: once both write JOBS have returned,
+            // BOTH writes are in flight — registration happened IN the jobs, not
+            // in a (possibly-starved) continuation. A continuation-register could
+            // leave this at 1.
+            assert_eq!(
+                tracker.index_in_flight(),
+                2,
+                "both FIFO write jobs registered in-job before either completes"
+            );
+
+            // A's tail finishes FIRST (the adversarial continuation order). With
+            // register-in-job, B (100) is already in flight, so A (200) is
+            // blocked — it may not certify a watermark covering B's write.
+            assert_eq!(
+                tracker.complete_index(a_tokens.index, true),
+                None,
+                "A must NOT advance past B's earlier in-flight write (FIFO registration)"
+            );
+            // B then completes; nothing earlier remains → it advances to 100.
+            assert_eq!(
+                tracker.complete_index(b_tokens.index, true),
+                Some(100),
+                "B advances to its own col.mod once it is the earliest in flight"
+            );
+
+            collection.close().await.unwrap();
+            collection.shutdown().await;
             std::fs::remove_dir_all(dir).ok();
         });
     }

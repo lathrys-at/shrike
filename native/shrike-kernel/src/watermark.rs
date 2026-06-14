@@ -20,9 +20,9 @@
 //!    but absent from the index/FTS5; the watermark must be left behind so boot
 //!    drift heals it.
 //!
-//! The fix: capture `col.mod` in the SAME actor job as the write, register the
-//! write as *in flight* there, then on the tail's completion advance the
-//! watermark to the captured value ONLY IF
+//! The fix: read `col.mod` AND [`WatermarkTracker::register`] the write as *in
+//! flight* INSIDE the SAME collection-actor job as the write, then on the tail's
+//! completion advance the watermark to the captured value ONLY IF
 //!
 //! - this op's tail SUCCEEDED (a failed/partial tail leaves the watermark
 //!   behind — #590), AND
@@ -32,6 +32,23 @@
 //! - no earlier FAILED write is still un-healed (the poison floor — a failed
 //!   tail at `col.mod F` keeps the watermark strictly below `F` so drift stays
 //!   armed until a full reconcile re-indexes that note).
+//!
+//! **Why registration must be IN the actor job (the happens-before argument).**
+//! The collection actor runs jobs FIFO and inline; an op is a write job, then an
+//! off-actor tail (embed/index/ingest, several awaits), then a completion. Ops
+//! are independent tasks on a multi-thread runtime, so a *continuation* (the
+//! code after `.await` on the job) is NOT ordered against other ops — only the
+//! jobs are. If `register` ran in the continuation, an adversarial schedule
+//! (op B's continuation starved across op A's whole async tail) could let op A
+//! register col.mod 200 and advance to 200 BEFORE op B ever registers its
+//! col.mod-100 write — then if B's tail fails, B's note is un-indexed yet the
+//! watermark is 200 ≥ 100 → drift quiet → the silent loss this fix exists to
+//! close. Registering INSIDE the job fixes the ordering: `col.mod` is monotonic,
+//! so any write with `col.mod ≤ V` committed in a job that, by FIFO, ran (and
+//! therefore registered, in-job) before the job that observes `V`. Hence at any
+//! op's completion every earlier-or-equal write is already in-flight (or
+//! poisoned) and the `≤ V` gate sees it. Registration order == write order, by
+//! construction.
 //!
 //! When the gate blocks an advance, the op leaves the watermark behind; the
 //! lagging op's own completion — or, failing that, the next boot/reload drift
@@ -70,11 +87,13 @@ pub struct SpaceTracker {
 }
 
 impl SpaceTracker {
-    /// Register a write that captured `col_mod` in its actor job. Call this in
-    /// the SAME job as the write (or, for the no-own-write tails — recognition
-    /// sweep, reindex_notes, metadata — at the point the captured `col.mod` is
-    /// read), so the registration cannot miss a concurrent write that lands
-    /// after us.
+    /// Register a write that captured `col_mod`. MUST be called INSIDE the
+    /// collection-actor job that reads `col_mod` (the write's own job, or — for
+    /// the no-own-write tails: recognition sweep, reindex_notes, forget_notes,
+    /// metadata — a job that reads `col.mod` and registers atomically). The
+    /// actor's FIFO then orders registration with every concurrent write; see
+    /// the module-level happens-before argument. Calling it from a post-await
+    /// continuation reintroduces the over-certification race.
     fn register(&mut self, col_mod: i64) -> WriteToken {
         let token = self.next;
         self.next += 1;
@@ -143,7 +162,11 @@ pub struct WriteTokens {
 
 impl WatermarkTracker {
     /// Register an in-flight write that captured `col_mod`, returning the tokens
-    /// to complete each space with. Call in the write's actor job.
+    /// to complete each space with. MUST be called INSIDE the collection-actor
+    /// job that read `col_mod` (the tracker is held by an `Arc` so it can be
+    /// cloned into the job closure) — the actor's FIFO is what orders
+    /// registration with concurrent writes (see the module docs). A post-await
+    /// continuation call is unordered and reintroduces the #585 race.
     pub fn register(&self, col_mod: i64) -> WriteTokens {
         WriteTokens {
             index: self
@@ -193,6 +216,18 @@ impl WatermarkTracker {
             .lock()
             .expect("watermark tracker poisoned")
             .clear_poison();
+    }
+
+    /// Test-only: how many index-side writes are currently in flight. Used to
+    /// pin the FIFO-register-in-job guarantee (both writes in flight once their
+    /// actor jobs have returned).
+    #[cfg(test)]
+    pub fn index_in_flight(&self) -> usize {
+        self.index
+            .lock()
+            .expect("watermark tracker poisoned")
+            .in_flight
+            .len()
     }
 }
 
