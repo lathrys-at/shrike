@@ -832,10 +832,11 @@ pub fn best_query_cosine_of(
         .fold(None, |acc, c| Some(acc.map_or(c, |a: f64| a.max(c))))
 }
 
-/// The #201b intra-modal activation floor for a modality (`mean + margin·std`),
-/// the kernel mirror of `shrike.index.activation_floor` (#576): used for a
-/// SECONDARY cross-space's image floor, computed on that space's OWN stats.
-/// `None` (uncalibrated) → no floor, the gate disabled for that modality.
+/// The #201b intra-modal activation floor from `(mean, std)` of a modality's
+/// typical best match (`mean + margin·std`), the kernel mirror of
+/// `shrike.index.activation_floor`. The single source of the floor formula —
+/// the harness-side secondary calibration (#576) routes through it. `None`
+/// (uncalibrated — too few samples) → no floor, the gate disabled there.
 pub fn activation_floor(stats: Option<(f64, f64)>, margin: f64) -> Option<f64> {
     stats.map(|(mean, std)| mean + margin * std)
 }

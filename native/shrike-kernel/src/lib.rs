@@ -1036,7 +1036,12 @@ impl Kernel {
             .map(|s| (s - mean) * (s - mean))
             .sum::<f64>()
             / n;
-        Ok(Some(mean + actions::ACTIVATION_MARGIN * var.sqrt()))
+        // The one floor formula (#201b's `mean + margin·std`), shared with the
+        // primary's via `actions::activation_floor`.
+        Ok(actions::activation_floor(
+            Some((mean, var.sqrt())),
+            actions::ACTIVATION_MARGIN,
+        ))
     }
 
     /// The PRIMARY orchestrator (state, status, drift) — the harness's status
