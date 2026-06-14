@@ -92,9 +92,7 @@ impl SpaceTracker {
     ///   note).
     /// - `Some(V)` when the captured `col.mod` is safe to certify now.
     fn complete(&mut self, token: WriteToken, success: bool) -> Option<i64> {
-        let Some(captured) = self.in_flight.remove(&token.0) else {
-            return None;
-        };
+        let captured = self.in_flight.remove(&token.0)?;
         if !success {
             // The note is in the collection but not in this space — keep the
             // watermark strictly below it so drift re-fires until a full
@@ -246,7 +244,11 @@ mod tests {
         let t = WatermarkTracker::default();
         let b = t.register(100);
         let a = t.register(200);
-        assert_eq!(t.complete_index(b.index, false), None, "B failed → poisoned at 100");
+        assert_eq!(
+            t.complete_index(b.index, false),
+            None,
+            "B failed → poisoned at 100"
+        );
         assert_eq!(
             t.complete_index(a.index, true),
             None,
@@ -279,7 +281,15 @@ mod tests {
         assert_eq!(t.complete_derived(a.derived, true), Some(100));
         // A later index write is still poisoned; a later derived write is not.
         let b = t.register(200);
-        assert_eq!(t.complete_index(b.index, true), None, "index poisoned at 100");
-        assert_eq!(t.complete_derived(b.derived, true), Some(200), "derived clean");
+        assert_eq!(
+            t.complete_index(b.index, true),
+            None,
+            "index poisoned at 100"
+        );
+        assert_eq!(
+            t.complete_derived(b.derived, true),
+            Some(200),
+            "derived clean"
+        );
     }
 }

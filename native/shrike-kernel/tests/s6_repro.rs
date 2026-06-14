@@ -89,7 +89,10 @@ fn upsert_wire_returns_ok_results_even_when_the_embed_tail_fails() {
             matches!(r, shrike_schemas::UpsertNoteResult::Error { reason, .. }
                 if format!("{reason:?}").to_lowercase().contains("dup"))
         });
-        assert!(dup, "the first note was committed (the best-effort tail did not roll it back)");
+        assert!(
+            dup,
+            "the first note was committed (the best-effort tail did not roll it back)"
+        );
 
         kernel.close().await.unwrap();
         let _ = std::fs::remove_dir_all(dir);

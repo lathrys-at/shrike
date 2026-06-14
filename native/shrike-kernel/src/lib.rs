@@ -5575,7 +5575,9 @@ mod no_cpython_smoke {
                 .map(|_| ())
             });
             embedder.parked.notified().await;
-            assert!(embedder.bravo_seen.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(embedder
+                .bravo_seen
+                .load(std::sync::atomic::Ordering::SeqCst));
 
             // Op A: writes "alpha" + runs its full index tail.
             let alpha = kernel
@@ -5605,7 +5607,10 @@ mod no_cpython_smoke {
             let primary = kernel.index_set().primary();
             let col_mod = kernel.col_mod().await.unwrap();
 
-            assert!(primary.engine().contains(alpha_id), "alpha indexed (sanity)");
+            assert!(
+                primary.engine().contains(alpha_id),
+                "alpha indexed (sanity)"
+            );
             assert!(
                 !primary.engine().contains(bravo_id),
                 "PRECONDITION: bravo's embed failed, not indexed"
