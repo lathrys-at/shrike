@@ -908,6 +908,27 @@ fn sigmoid(x: f64) -> f64 {
     1.0 / (1.0 + (-x).exp())
 }
 
+/// The PER-NOTE image activation floor (#582): retain in `ranking` only the
+/// notes whose OWN image cosine (`score[id]`) clears `floor`, and prune the
+/// dropped notes from `score` so the displayed-`score` fold and the `image_best`
+/// read stay consistent. The pre-#582 behaviour was a per-SPACE gate (admit the
+/// WHOLE ranking iff the rank-1 cosine cleared the floor); this is the correct
+/// per-note granularity — a below-floor tail card no longer rides in on a
+/// strong rank-1's coat-tails, so it carries no spurious image signal/provenance.
+///
+/// `floor = None` (an uncalibrated space) is a no-op (the floor can't judge).
+/// It can only TIGHTEN: every kept note cleared the floor, and the rank-1 (if
+/// it cleared) is unchanged — so a genuine cross-modal find (above-floor by
+/// construction) is preserved, while an ∅-gold ranking whose best is sub-floor
+/// is emptied exactly as the per-space gate did.
+fn apply_image_floor(ranking: &mut Vec<i64>, score: &mut HashMap<i64, f64>, floor: Option<f64>) {
+    let Some(floor) = floor else {
+        return;
+    };
+    ranking.retain(|nid| score.get(nid).is_some_and(|&c| c > floor));
+    score.retain(|_, &mut c| c > floor);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rank_modality(
     core: &dyn Collection,
@@ -1241,12 +1262,12 @@ pub fn search_notes(
             args,
             false,
         );
-        if let (Some(first), Some(floor)) = (ranking_image.first(), args.image_floor) {
-            if image_score[first] <= floor {
-                ranking_image.clear(); // no good-enough surviving image match
-                image_score.clear();
-            }
-        }
+        // #582: per-NOTE image floor — keep only the cards whose own image
+        // cosine clears the floor (was a per-space all-or-nothing gate on the
+        // rank-1). A below-floor tail card no longer rides in on the rank-1's
+        // coat-tails. When the rank-1 itself is sub-floor the whole ranking
+        // empties (the old behaviour falls out as the rank-1 case).
+        apply_image_floor(&mut ranking_image, &mut image_score, args.image_floor);
         // Tag-centroid signal (#179): conditionally present — activated tags
         // expand to member notes through the SAME scope/exclusion machinery
         // (synthetic order-preserving distances into a scratch score map, so
@@ -1416,7 +1437,7 @@ pub fn search_notes(
                     continue;
                 }
                 let mut space_score: HashMap<i64, f64> = HashMap::new();
-                let ranking_space_image = rank_modality(
+                let mut ranking_space_image = rank_modality(
                     core,
                     sk,
                     sd,
@@ -1429,8 +1450,27 @@ pub fn search_notes(
                 if ranking_space_image.is_empty() {
                     continue;
                 }
-                // The best surviving image cosine — the value the intra-modal
-                // floor judges (exactly the primary's `image_score[first]` rule).
+                // #582 (PRODUCTION FloorAdmit only): a PER-NOTE floor — keep only
+                // the cards whose own image cosine clears this space's floor, so
+                // a below-floor tail card carries no `image#clip`. The eval modes
+                // keep the historical per-SPACE rule below (on `image_best`) so
+                // they reproduce the decision tables unchanged. An uncalibrated
+                // space (no floor) is a no-op either way.
+                if matches!(
+                    mode,
+                    CrossSpaceFusionMode::FloorAdmit | CrossSpaceFusionMode::FloorAdmitBudget
+                ) {
+                    apply_image_floor(
+                        &mut ranking_space_image,
+                        &mut space_score,
+                        space.image_floor,
+                    );
+                    if ranking_space_image.is_empty() {
+                        continue; // every card fell below the floor → nothing to add
+                    }
+                }
+                // The best surviving image cosine — the value the eval modes'
+                // per-space floor judges (exactly the primary's old rank-1 rule).
                 let image_best = ranking_space_image
                     .first()
                     .and_then(|nid| space_score.get(nid).copied());
@@ -1471,16 +1511,14 @@ pub fn search_notes(
                             _ => Some(1.0),
                         }
                     }
-                    // #580 FloorAdmit / FloorAdmitBudget — admit on the absolute
-                    // floor alone (relative gate already skipped). Drop the space
-                    // when its best image cosine clears no floor; an uncalibrated
-                    // space (no floor) is admitted. Raw weight 1.0 (the budget
-                    // pass divides it down for the budget mode).
+                    // #580/#582 FloorAdmit / FloorAdmitBudget — admit on the
+                    // absolute floor alone (relative gate already skipped). The
+                    // PER-NOTE floor filter above already dropped sub-floor cards
+                    // and `continue`d if none survived, so any surviving ranking
+                    // has cleared the floor → raw weight 1.0 (the budget pass
+                    // divides it down for the budget mode).
                     CrossSpaceFusionMode::FloorAdmit | CrossSpaceFusionMode::FloorAdmitBudget => {
-                        match (image_best, space.image_floor) {
-                            (Some(b), Some(floor)) if b <= floor => None,
-                            _ => Some(1.0),
-                        }
+                        Some(1.0)
                     }
                     // #580 SoftFloorAdmit / SoftFloorAdmitBudget — soft admission
                     // `w = σ((image_best − z_floor)/τ)`, no relative composition.
@@ -2758,6 +2796,106 @@ mod search_tests {
         assert!(
             m.provenance.iter().any(|p| p.signal == "image#clip"),
             "SoftFloorAdmit: a confident hit (cos 0.92 ≫ floor) corroborates at ≈full weight"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ── #582 per-note image floor (drop the below-floor tail) ────────────────
+
+    #[test]
+    fn floor_admit_secondary_drops_below_floor_tail() {
+        // #582: the per-NOTE floor on the SECONDARY cross-space image ranking. A
+        // vision space surfaces TWO image cards: one ABOVE the floor (cos 0.92)
+        // and one BELOW it (cos 0.20, floor 0.50). Floor-admission's per-note
+        // filter keeps the above-floor card's `image#clip` and DROPS the
+        // below-floor one — the latter no longer rides in on the rank-1's
+        // coat-tails (the pre-#582 per-space gate admitted the whole ranking).
+        let (dir, core) = temp_collection();
+        let weak_text = add_note(&core, "a loosely related text card", "text");
+        let above = add_note(&core, "card whose image strongly matches", "img");
+        let below = add_note(&core, "card whose image barely matches", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add("text", &[weak_text], &[at_distance(0.45)])
+            .unwrap();
+
+        let mut a = cross_args(10);
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmit;
+        // One space, two image hits: above (cos 0.92) + below (cos 0.20), floor 0.5.
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[above, below],
+            &[0.08, 0.80],
+            Some(0.5),
+        )];
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("the content shown in the diagram")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        let above_m = groups[0].matches.iter().find(|m| m.note.id == above);
+        let below_m = groups[0].matches.iter().find(|m| m.note.id == below);
+        assert!(
+            above_m.is_some_and(|m| m.provenance.iter().any(|p| p.signal == "image#clip")),
+            "the above-floor card keeps its image#clip"
+        );
+        // The below-floor card carries NO image#clip (it may be absent entirely
+        // if it has no other signal).
+        assert!(
+            below_m.is_none_or(|m| !m.provenance.iter().any(|p| p.signal == "image#clip")),
+            "#582: the below-floor tail card carries no image#clip (per-note floor dropped it)"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn primary_image_floor_is_per_note() {
+        // #582: the per-NOTE floor on the PRIMARY image ranking (the #201b core,
+        // used by omni/single-space deployments). The primary image modality
+        // returns two cards: one above the floor (cos 0.90) and one below (cos
+        // 0.20, floor 0.50). The above-floor card surfaces via `image`; the
+        // below-floor one does NOT (was: the whole ranking admitted iff the
+        // rank-1 cleared the floor).
+        let (dir, core) = temp_collection();
+        let above = add_note(&core, "card whose image strongly matches", "imgA");
+        let below = add_note(&core, "card whose image barely matches", "imgB");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add(
+                "image",
+                &[above, below],
+                &[at_distance(0.10), at_distance(0.80)],
+            )
+            .unwrap(); // cos 0.90 (above) + cos 0.20 (below)
+
+        let mut a = cross_args(10);
+        a.image_floor = Some(0.5);
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("the diagram content")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        let above_m = groups[0].matches.iter().find(|m| m.note.id == above);
+        let below_m = groups[0].matches.iter().find(|m| m.note.id == below);
+        assert!(
+            above_m.is_some_and(|m| m.provenance.iter().any(|p| p.signal == "image")),
+            "the above-floor card surfaces via the primary image signal"
+        );
+        assert!(
+            below_m.is_none_or(|m| !m.provenance.iter().any(|p| p.signal == "image")),
+            "#582: the below-floor card carries no primary image signal (per-note floor)"
         );
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();

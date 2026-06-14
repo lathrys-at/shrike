@@ -238,8 +238,9 @@ async def main() -> None:
 
     # ── Axis 1b: spurious-filename precision (ORDERING, not provenance) ─────
     print("\n" + "=" * 100)
-    print("AXIS 1b — spurious-filename PRECISION (homonym pairs). The image signal is SPACE-LEVEL,")
-    print("so both senses carry image#clip whenever either does (the #201b gate, not a #580 change).")
+    print("AXIS 1b — spurious-filename PRECISION (homonym pairs). With the #582 per-NOTE floor, a")
+    print("card carries image#clip only when its OWN image clears the floor — but BOTH homonym senses")
+    print("are above the floor (CLIP genuinely matched them), so both are KEPT and that's correct.")
     print("The precision that matters is ORDERING: on-topic must rank ABOVE off-topic (cosine sep).")
     print("=" * 100)
     for label, a in rows:
