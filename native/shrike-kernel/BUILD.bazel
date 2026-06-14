@@ -57,3 +57,22 @@ rust_test(
         "@crates//:tokio",
     ],
 )
+
+# The #590 committed-but-errored regression (= S6-1): the maintained write tail
+# is best-effort — a committed note's call returns Ok despite a failed embed
+# tail. Its own test binary (an integration test linking the public crate API +
+# the schema/store wire types + a FailingEmbedder).
+rust_test(
+    name = "s6_repro_test",
+    size = "small",
+    srcs = ["tests/s6_repro.rs"],
+    edition = "2021",
+    deps = [
+        ":shrike_kernel",
+        "//native/shrike-ffi:shrike_ffi",
+        "//native/shrike-schemas:shrike_schemas",
+        "//native/shrike-store-api:shrike_store_api",
+        "@crates//:futures",
+        "@crates//:serde_json",
+    ],
+)
