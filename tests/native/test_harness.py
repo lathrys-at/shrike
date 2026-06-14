@@ -20,6 +20,54 @@ from shrike.derived import DerivedTextStore, NativeDerivedEngine  # noqa: E402
 from shrike.embedding import EmbeddingRuntime  # noqa: E402
 from shrike.harness import Harness, KernelConfigError  # noqa: E402
 
+# ── #650 angle-A instrumentation (TEMPORARY) ────────────────────────────────
+# Capture the FULL engine + derived state at a family assert so a failure under
+# the bazel xdist load repro classifies ABSENT vs UNRECALLED definitively.
+import os  # noqa: E402
+
+
+def _capture_650(tag, harness, note_id, *, draft=None, hits=None):
+    """Snapshot the recognition-vector state and return a string for the assert.
+
+    Also appends a JSON line to ``$TEST_UNDECLARED_OUTPUTS_DIR/_650_capture.jsonl``
+    (or ``/tmp`` when not under bazel) so the evidence survives the test process.
+    """
+    import json as _json
+    import time as _time
+    import traceback as _tb
+
+    snap = {"tag": tag, "note_id": int(note_id), "ts": _time.time(), "pid": os.getpid()}
+    # 1) Vector counts in the TEXT modality (the decisive datum).
+    try:
+        eng = harness.kernel.engine_handle()
+        vecs = eng.modality_get("text", int(note_id))
+        snap["text_vec_count"] = None if vecs is None else len(vecs)
+        snap["text_keys"] = sorted(int(k) for k in eng.modality_keys("text"))
+        snap["text_distinct_keys"] = sorted(set(snap["text_keys"]))
+        snap["engine_keys"] = sorted(int(k) for k in eng.keys())
+    except Exception as e:  # pragma: no cover - diagnostic only
+        snap["engine_error"] = f"{type(e).__name__}: {e}\n{_tb.format_exc()}"
+    # 2) Derived-store availability/state/size.
+    try:
+        snap["derived_available"] = bool(harness.derived.available)
+        snap["derived_status"] = harness.derived.status()
+    except Exception as e:  # pragma: no cover
+        snap["derived_error"] = f"{type(e).__name__}: {e}"
+    # 3) The search hits, if provided (UNRECALLED needs the present-but-unranked).
+    if hits is not None:
+        snap["draft"] = draft
+        snap["hits"] = [
+            {"note_id": int(h["note_id"]), "distance": float(h["distance"])} for h in hits
+        ]
+    line = _json.dumps(snap, sort_keys=True)
+    out_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR") or "/tmp"
+    try:
+        with open(os.path.join(out_dir, "_650_capture.jsonl"), "a") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+    return line
+
 
 async def _assemble(tmp_path, *, cooperative: bool = False) -> Harness:
     runtime = EmbeddingRuntime(model=None)
@@ -396,14 +444,17 @@ class TestRecognition:
             assert report["total_stored"] == 1, report
 
             # LexicalAndVector: the transcript reaches the lexical store ...
-            assert harness.derived.search_substring("powerhouse of the cell", limit=5), (
-                "asr transcript reached the lexical store"
-            )
+            sub = harness.derived.search_substring("powerhouse of the cell", limit=5)
+            cap_sub = _capture_650("asr-substring", harness, audio_id)
+            assert sub, f"asr transcript reached the lexical store | sub={sub!r} | {cap_sub}"
             # ... and mints a vector reachable through the binding search.
             view = KernelIndexView(harness.kernel, SimpleNamespace(backend=backend))  # type: ignore[arg-type]
             hits = view.search(["cell powerhouse mitochondria"], top_k=5)[0]
+            cap_vec = _capture_650(
+                "asr-vector", harness, audio_id, draft="cell powerhouse mitochondria", hits=hits
+            )
             assert any(h["note_id"] == audio_id for h in hits), (
-                "asr transcript reachable via the vector"
+                f"asr transcript reachable via the vector | {cap_vec}"
             )
 
             harness.detach_recognizer("asr")
@@ -740,9 +791,10 @@ class TestDedupOverOcr:
             draft = "oxaloacetate condenses with acetyl coa today"
             hits = view.search([draft], top_k=5)[0]
             scores = {h["note_id"]: 1.0 - h["distance"] for h in hits}
-            assert diagram_id in scores, "the image-only content surfaced as a near-dupe"
+            cap = _capture_650("dedup", harness, diagram_id, draft=draft, hits=hits)
+            assert diagram_id in scores, f"the image-only content surfaced as a near-dupe | {cap}"
             assert scores[diagram_id] >= 0.6, (
-                f"clears the dedup threshold via the OCR vector: {scores[diagram_id]:.3f}"
+                f"clears the dedup threshold via the OCR vector: {scores[diagram_id]:.3f} | {cap}"
             )
 
             await harness.close()
@@ -860,7 +912,8 @@ class TestDescribeAttach:
             # the note through the `text` signal in the FUSED binding search.
             sem = await harness.kernel.search("mountain valley cattle grazing dawn", 5)
             sem_hit = next((h for h in sem if h[0] == photo_id), None)
-            assert sem_hit is not None, "describe vector ranks in the fused search"
+            cap_sem = _capture_650("describe-sem", harness, photo_id)
+            assert sem_hit is not None, f"describe vector ranks in the fused search | {cap_sem}"
             signals = {s for s, _ in sem_hit[2]}
             assert "text" in signals, f"the describe vector mints a text signal: {signals}"
 
@@ -879,17 +932,22 @@ class TestDescribeAttach:
             # lexically reachable (the `exact` signal) through the same search.
             ocr = await harness.kernel.search("chlorophyll absorption spectrum", 5)
             ocr_hit = next((h for h in ocr if h[0] == photo_id), None)
-            assert ocr_hit is not None, "OCR text searchable"
-            assert "exact" in {s for s, _ in ocr_hit[2]}, "OCR stays lexical (unchanged)"
+            cap_ocr = _capture_650("describe-ocr", harness, photo_id)
+            assert ocr_hit is not None, f"OCR text searchable | {cap_ocr}"
+            assert "exact" in {s for s, _ in ocr_hit[2]}, (
+                f"OCR stays lexical (unchanged) | {cap_ocr}"
+            )
 
             # The describe row IS stored in the derived store (for provenance +
             # reconcile — VectorOnly hides it from SEARCH, it isn't dropped):
             # the low-level store facade (unfiltered by design — it is not a
             # search entry point) sees both rows. The exclusion lives at the
             # search path (asserted above via kernel.search), not at storage.
-            assert harness.derived.search_substring("chlorophyll absorption", limit=5)
+            _ds1 = harness.derived.search_substring("chlorophyll absorption", limit=5)
+            cap_ds = _capture_650("describe-store", harness, photo_id)
+            assert _ds1, f"derived store chlorophyll | _ds1={_ds1!r} | {cap_ds}"
             assert harness.derived.search_substring("sunlit mountain valley", limit=5), (
-                "the describe row is stored (provenance + reconcile) even though search hides it"
+                f"the describe row is stored (provenance + reconcile) | {cap_ds}"
             )
 
             # The dedup view (the other binding search seam) also surfaces the
