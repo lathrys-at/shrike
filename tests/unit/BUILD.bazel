@@ -198,6 +198,7 @@ pytest_test(
     deps = [
         ":conftest",
         "//src/shrike:client",
+        requirement("mcp"),  # test_client_busy drives the real FastMCP handler (#598)
     ],
 )
 
