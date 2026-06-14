@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use shrike_ffi::{NativeError, NativeResult};
 use usearch::Index;
@@ -35,7 +35,17 @@ const SEARCH_OVERFETCH: usize = 4;
 pub use shrike_store_api::{ActivationStats, ModalityRanking};
 
 struct Sub {
-    index: Index,
+    /// `Arc` so [`MultiModalIndex::save`] can clone a cheap handle under the
+    /// state lock and serialize+write it *outside* the lock (#588). usearch's
+    /// `Index` is `Send + Sync` with its own internal locking; the
+    /// `save_mutation` guard excludes the in-place mutators
+    /// ([`add`](MultiModalIndex::add)/[`remove`](MultiModalIndex::remove)) for
+    /// the duration of the serialize, while leaving searches concurrent — so a
+    /// save and a concurrent search share the same `Index` without the state
+    /// mutex held across the file write. (Note `add`/`remove`/`reserve` are also
+    /// `&self` on usearch's `Index`, so `&self` alone does not imply read-only —
+    /// the mutual exclusion comes from the guard, not the receiver.)
+    index: Arc<Index>,
     /// key → vector count (the Rust binding has no key enumeration).
     counts: BTreeMap<i64, u32>,
     /// False when restored without candidates (text-only path) — keys unknown.
@@ -45,7 +55,7 @@ struct Sub {
 impl Sub {
     fn new(index: Index) -> Self {
         Self {
-            index,
+            index: Arc::new(index),
             counts: BTreeMap::new(),
             keys_known: true,
         }
@@ -63,6 +73,16 @@ pub struct MultiModalIndex {
     modalities: Vec<String>,
     text: String,
     state: Mutex<State>,
+    /// Serializes [`save`](Self::save) against the in-place byte mutators
+    /// ([`add`](Self::add)/[`remove`](Self::remove)) **without** gating
+    /// [`search_by_modality`](Self::search_by_modality) (#588). `save` clones a
+    /// cheap `Arc` to each sub-index under the `state` lock, releases that lock,
+    /// then serializes+writes the file while holding only this guard — so a
+    /// concurrent search (which takes only the `state` lock) is never blocked
+    /// behind the file write, while a concurrent `add`/`remove` (which can't
+    /// mutate an `Index` usearch is mid-serialization on) is excluded. Always
+    /// taken *before* the `state` lock to keep one lock order.
+    save_mutation: Mutex<()>,
 }
 
 fn file_name(text_modality: &str, modality: &str) -> String {
@@ -108,11 +128,18 @@ impl MultiModalIndex {
                 indexes: BTreeMap::new(),
                 ndim: None,
             }),
+            save_mutation: Mutex::new(()),
         })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("index state lock poisoned")
+    }
+
+    fn lock_save_mutation(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.save_mutation
+            .lock()
+            .expect("index save-mutation guard poisoned")
     }
 
     pub fn size(&self) -> usize {
@@ -225,22 +252,55 @@ impl MultiModalIndex {
     /// writes a same-directory `.tmp` first and a rename replaces the
     /// canonical file — a crash mid-save leaves the old file complete, never
     /// a truncation (#381).
+    ///
+    /// **The state lock is NOT held across the file write (#588, the #445
+    /// "never hold a lock across file writes" rule one layer below
+    /// `IndexOrchestrator::save`).** Under the `state` lock we only snapshot a
+    /// cheap `Arc` handle to each sub-index (plus the loaded-modality set); the
+    /// `state` guard is dropped and every `index.save(tmp)`+rename runs while
+    /// holding only the dedicated `save_mutation` guard, so a concurrent
+    /// [`search_by_modality`](Self::search_by_modality) (which takes only the
+    /// `state` lock) is never serialized behind the whole multi-file usearch
+    /// write.
+    ///
+    /// `add`/`remove` ARE excluded during the write: usearch's `Index` is
+    /// `Send + Sync` with internal locking, but `save` serializes the whole
+    /// structure while those mutate it in place, so the `save_mutation` guard
+    /// serializes save against them (it does NOT gate searches). usearch
+    /// documents concurrent search+update but is silent on save-vs-mutate, so
+    /// the guard is the conservative, self-evidently-correct exclusion rather
+    /// than a reliance on an undocumented upstream guarantee. Concurrent
+    /// save+search is read+read on the shared `Index` and safe.
     pub fn save(&self, dir: &str) -> NativeResult<()> {
+        // Exclude the in-place byte mutators for the whole serialize+write, but
+        // not searches (which take only the `state` lock). Taken before the
+        // `state` lock to keep a single lock order (#588).
+        let _mutation = self.lock_save_mutation();
         let base = Path::new(dir);
         std::fs::create_dir_all(base)
             .map_err(|e| NativeError::internal(format!("mkdir {dir}: {e}")))?;
-        let state = self.lock();
-        for (modality, sub) in &state.indexes {
+        // Snapshot under the state lock, then release it before any I/O.
+        let (to_write, loaded): (Vec<(String, Arc<Index>)>, std::collections::HashSet<String>) = {
+            let state = self.lock();
+            let to_write = state
+                .indexes
+                .iter()
+                .map(|(modality, sub)| (modality.clone(), Arc::clone(&sub.index)))
+                .collect();
+            let loaded = state.indexes.keys().cloned().collect();
+            (to_write, loaded)
+        };
+        for (modality, index) in &to_write {
             let file = base.join(file_name(&self.text, modality));
             let tmp = tmp_path(&file);
-            sub.index
+            index
                 .save(&tmp.to_string_lossy())
                 .map_err(|e| NativeError::internal(format!("usearch save: {e}")))?;
             std::fs::rename(&tmp, &file)
                 .map_err(|e| NativeError::internal(format!("usearch save rename: {e}")))?;
         }
         for modality in &self.modalities {
-            if !state.indexes.contains_key(modality) {
+            if !loaded.contains(modality) {
                 let stale = base.join(file_name(&self.text, modality));
                 if stale.exists() {
                     let _ = std::fs::remove_file(&stale);
@@ -270,6 +330,8 @@ impl MultiModalIndex {
             return Ok(());
         }
         let ndim = vectors[0].len();
+        // Exclude a concurrent save's serialization read of this Index (#588).
+        let _mutation = self.lock_save_mutation();
         let mut state = self.lock();
         if !state.indexes.contains_key(modality) {
             state
@@ -291,6 +353,8 @@ impl MultiModalIndex {
     /// Remove the keys' vectors from every sub-index; returns the count removed
     /// from the *text* sub-index (one text vector per note — the note count).
     pub fn remove(&self, keys: &[i64]) -> NativeResult<usize> {
+        // Exclude a concurrent save's serialization read of this Index (#588).
+        let _mutation = self.lock_save_mutation();
         let mut state = self.lock();
         if keys.is_empty() || state.indexes.is_empty() {
             return Ok(0);
