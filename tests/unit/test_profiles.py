@@ -683,8 +683,52 @@ class TestMultimodalRemote:
             "embedders": [{"modalities": ["text"], "runtime": "remote", "model": "m.gguf"}],
             "managed": {"llama_server": {"manage": "auto", "mmprojs": ["~/v.mmproj"]}},
         }
-        with pytest.raises(ProfileError, match="no embedder declares an image modality"):
+        with pytest.raises(ProfileError, match="does not declare an image modality"):
             _resolve(config)
+
+    def test_mmprojs_rejected_when_image_is_on_a_separate_endpoint(self):
+        # #609: the managed llama-server's CONSUMER is the text-only
+        # remote/no-endpoint entry; image lives on a SEPARATE remote endpoint.
+        # The projectors would load onto the text-only server that never embeds
+        # images (silent no-op + a needless TEXT rebuild) — so reject, even
+        # though *some* space declares image. Was wrongly ACCEPTED before #609.
+        config = {
+            "embedders": [
+                # The managed-llama consumer: remote, no endpoint, text-only.
+                {"modalities": ["text"], "runtime": "remote", "model": "~/text.gguf"},
+                # Image lives elsewhere — a separate remote endpoint.
+                {
+                    "modalities": ["text", "image"],
+                    "runtime": "remote",
+                    "endpoint": "https://img.example.com/v1",
+                    "model": "clip",
+                },
+            ],
+            "managed": {"llama_server": {"manage": "auto", "mmprojs": ["~/v.mmproj"]}},
+        }
+        with pytest.raises(ProfileError, match="does not declare an image modality"):
+            _resolve(config)
+
+    def test_mmprojs_accepted_when_the_consumer_declares_image(self):
+        # #609 control: the SEPARATE-endpoint shape is fine when the managed
+        # server's own consumer (remote, no endpoint) is the image-capable one.
+        config = {
+            "embedders": [
+                # The managed-llama consumer is image-capable — projectors apply.
+                {"modalities": ["text", "image"], "runtime": "remote", "model": "~/omni.gguf"},
+                # A separate text-only remote endpoint coexists fine.
+                {
+                    "modalities": ["text"],
+                    "runtime": "remote",
+                    "endpoint": "https://text.example.com/v1",
+                    "model": "minilm",
+                },
+            ],
+            "managed": {"llama_server": {"manage": "auto", "mmprojs": ["~/v.mmproj"]}},
+        }
+        params = plan_to_runtime_params(_resolve(config))
+        assert params["mmprojs"] == ["~/v.mmproj"]
+        assert "image" in params["modalities"]
 
     def test_attach_rejects_mmprojs(self):
         config = {

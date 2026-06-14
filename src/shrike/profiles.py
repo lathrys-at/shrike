@@ -720,19 +720,24 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
             "apply (the server you attach to loads its own); declare the embedder's "
             "image modality and start that server with its --mmproj"
         )
-    if (
-        managed_llama is not None
-        and managed_llama.mmprojs
-        and not any("image" in e.modalities for e in caps.embedders)
-    ):
-        # Projectors loaded for a text-only space are never used — a silent
-        # no-op (the cross-talk rule). The mmprojs serve the image half. (The
-        # managed server backs the one remote-no-endpoint entry; an image
-        # modality on ANY declared space satisfies the consumer.)
-        raise ProfileError(
-            "managed.llama_server.mmprojs is set but no embedder declares an image "
-            "modality — add image to an entry's modalities, or drop the projectors"
-        )
+    if managed_llama is not None and managed_llama.mmprojs:
+        # Projectors load onto the managed server, which embeds for ITS consumer
+        # — the remote/no-endpoint entry (the same one the `consumed` check above
+        # binds). They're only used if that consumer declares image; testing "ANY
+        # space has image" would wrongly accept a config where image lives on a
+        # SEPARATE remote endpoint, loading the projectors onto a text-only
+        # server that never embeds an image (a silent no-op + a needless TEXT
+        # rebuild via the fingerprint fold). Bind the check to the actual
+        # consumer (#609).
+        consumers = [e for e in caps.embedders if e.runtime == "remote" and e.endpoint is None]
+        if not any("image" in e.modalities for e in consumers):
+            raise ProfileError(
+                "managed.llama_server.mmprojs is set but the embedder it serves "
+                "(runtime: remote, no endpoint) does not declare an image modality — "
+                "add image to that entry's modalities, or drop the projectors "
+                "(projectors load onto the managed server, so its OWN consumer must "
+                "embed images; an image modality on a separate endpoint doesn't count)"
+            )
 
     return ResolvedProfile(
         embedders=_resolve_embedder_roles(caps.embedders),
