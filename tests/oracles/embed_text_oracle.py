@@ -67,6 +67,17 @@ _MATHJAX_RE = re.compile(r"\\[()\[\]]|\$\$")
 # Block-level tags and <br> → whitespace, so "a<br>b" doesn't become "ab" once
 # Anki's stripper (which glues across block tags) runs.
 _BLOCK_TAG_RE = re.compile(r"(?i)<\s*/?\s*(?:br|div|p|li|ul|ol|tr|td|h[1-6]|blockquote)\b[^>]*>")
+# Whitespace collapse. NOTE (#612): Python `re`'s `\s` matches the C0 separators
+# U+001C-U+001F, but Rust's `\s` (Unicode White_Space) does NOT, so the two
+# normalizers diverge on those four code points. The byte-identity contract this
+# oracle pins therefore holds over **anki-sanitized field text**: anki's
+# `invalid_char_for_field` strips U+001C-U+001F from stored field values before
+# they reach the normalizer, so neither side ever sees one on the field path,
+# and the OCR/ASR path does not route through normalize_for_embedding. The Rust
+# side keeps `\s+` (not the C0-extended class) deliberately — matching Python
+# literally would change the output for an unreachable input and force an
+# EMBED_TEXT_VERSION bump + index rebuild for no behavioral gain. See the
+# matching note in native/shrike-collection/src/embed_text.rs.
 _WS_RE = re.compile(r"\s+")
 
 

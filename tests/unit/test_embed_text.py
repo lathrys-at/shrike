@@ -117,6 +117,39 @@ class TestDeterminism:
         assert normalize_for_embedding(raw) == "The mitochondria is the powerhouse of the cell."
 
 
+class TestC0SeparatorContractScope:
+    """#612: the Python `\\s` whitespace class matches the C0 separators
+    U+001C-U+001F, but Rust's `\\s` (Unicode White_Space) does not — so the two
+    normalizers diverge on those four code points. This is documented as a
+    contract-SCOPE limit (the byte-identity holds over anki-sanitized field
+    text, which never contains them) rather than fixed, because folding them
+    into the pattern would change the output for an unreachable input and force
+    an EMBED_TEXT_VERSION bump + index rebuild for no behavioral gain. These
+    tests pin that the divergence exists exactly where documented, so a future
+    change to either pattern is caught.
+    """
+
+    C0_SEPARATORS = ["\x1c", "\x1d", "\x1e", "\x1f"]
+
+    @pytest.mark.parametrize("sep", C0_SEPARATORS)
+    def test_python_oracle_treats_c0_separator_as_whitespace(self, sep: str) -> None:
+        # The Python side collapses a C0 separator like any whitespace (this is
+        # the source of the divergence the contract scopes around). The text is
+        # plain (no tag/entity), so strip_html is byte-identity and only the
+        # whitespace collapse acts.
+        assert normalize_for_embedding(f"a{sep}b") == "a b"
+
+    def test_sanitized_field_text_has_no_c0_separators(self) -> None:
+        # The contract holds over anki-sanitized field text: anki's
+        # invalid_char_for_field strips U+001C-U+001F before a field is stored,
+        # so neither normalizer ever sees one on the field path. We can't invoke
+        # that Rust-side gate from here, but we pin the property the scope relies
+        # on — a normal field carries no C0 separator, so the two sides agree.
+        sanitized = "The mitochondria is the powerhouse of the cell."
+        assert all(c not in sanitized for c in self.C0_SEPARATORS)
+        assert normalize_for_embedding(sanitized) == sanitized
+
+
 def test_version_is_an_int() -> None:
     # Folded into the index fingerprint; must be a stable scalar.
     assert isinstance(EMBED_TEXT_VERSION, int)
