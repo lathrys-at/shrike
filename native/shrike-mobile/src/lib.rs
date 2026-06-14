@@ -253,17 +253,17 @@ struct Driver {
 #[cfg(feature = "anki-core")]
 static DRIVER: std::sync::Mutex<Option<Driver>> = std::sync::Mutex::new(None);
 
-/// Terminal "the dedicated driver has been shut down" flag (#597).
+/// Terminal "the dedicated driver is shutting down / shut down" flag (#597,
+/// #637).
 ///
-/// Set ONLY by [`shrike_runtime_shutdown`] once it has actually stopped the
-/// driver thread it owned. After this the `current_thread` runtime exists but
-/// is **undriven** — a `spawn_op`'d task would be queued and never polled, so
-/// its completion callback would never fire and [`shrike_close`]'s `rx.recv()`
-/// would block forever (the S14b-1 hang, realistic on a racy iOS suspend/
-/// teardown). The async entries below check this and FAST-FAIL a completion
-/// through the callback instead of dispatching onto the dead runtime — the
-/// crate's documented contract ("a synchronous misuse … reported through the
-/// callback, never a panic"; a post-shutdown op is exactly such a misuse).
+/// Set (under [`ADMIT_LOCK`]) by [`shrike_runtime_shutdown`] **before** it wakes
+/// the driver to drain. Once set, [`admit_op`] refuses new ops, so they
+/// FAST-FAIL a completion through the callback instead of being dispatched onto
+/// a runtime that is being torn down (the undriven `current_thread` runtime
+/// would queue a task that is never polled — its callback would never fire and
+/// [`shrike_close`]'s `rx.recv()` would block forever; the S14b-1 hang,
+/// realistic on a racy iOS suspend/teardown). Ops admitted BEFORE the store are
+/// counted in [`INFLIGHT`] and the driver drains them to completion first.
 ///
 /// It is distinct from "`DRIVER` is `None`": that is ALSO the pre-init state of
 /// the default multi-thread lane, whose worker threads DO drive spawned tasks.
@@ -273,13 +273,52 @@ static DRIVER: std::sync::Mutex<Option<Driver>> = std::sync::Mutex::new(None);
 #[cfg(feature = "anki-core")]
 static DRIVER_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Whether the dedicated driver has been shut down (so the `current_thread`
-/// runtime is no longer driven). `Acquire` pairs with the `Release` store in
-/// [`shrike_runtime_shutdown`] — a thread that observes `true` also observes
-/// the completed driver join that preceded it.
+/// In-flight op accounting for the drain-on-shutdown (#637). An op admitted by
+/// [`admit_op`] increments this; [`finish_op`] decrements it when the op's task
+/// (and its callback) has run. The driver's shutdown path drains until this is
+/// zero, so an op that was admitted BEFORE shutdown still completes rather than
+/// being stranded on the dying runtime.
 #[cfg(feature = "anki-core")]
-fn driver_is_shut_down() -> bool {
-    DRIVER_SHUTDOWN.load(std::sync::atomic::Ordering::Acquire)
+static INFLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Woken (via `notify_waiters`) each time [`finish_op`] brings [`INFLIGHT`] to
+/// zero, so the driver's drain loop can re-check and exit.
+#[cfg(feature = "anki-core")]
+static DRAINED: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
+
+/// Serializes the admission decision against shutdown (#637). The op path takes
+/// it to atomically "check the flag AND increment INFLIGHT"; shutdown takes it
+/// to "set the flag" — so an op can never read the flag as `false` and then
+/// increment AFTER shutdown has already snapshotted INFLIGHT and started
+/// draining. (A brief, uncontended std mutex; never held across `.await`.)
+#[cfg(feature = "anki-core")]
+static ADMIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Try to admit one op for dispatch onto the runtime. Returns `true` (and
+/// counts the op in [`INFLIGHT`]) when the runtime is still driven; `false`
+/// when the driver has been shut down — the caller then fast-fails through the
+/// callback rather than spawning onto a dying/undriven runtime. The flag read +
+/// the increment are under [`ADMIT_LOCK`], paired with the same lock in
+/// [`shrike_runtime_shutdown`], so the admit↔shutdown race window is closed:
+/// either this admits and the drain waits for the op, or it fast-fails.
+#[cfg(feature = "anki-core")]
+fn admit_op() -> bool {
+    let _guard = ADMIT_LOCK.lock().expect("admit lock poisoned");
+    if DRIVER_SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+        return false;
+    }
+    INFLIGHT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    true
+}
+
+/// Mark one admitted op finished (after its task + callback ran). When this
+/// brings [`INFLIGHT`] to zero it wakes the driver's drain loop.
+#[cfg(feature = "anki-core")]
+fn finish_op() {
+    if INFLIGHT.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+        DRAINED.notify_waiters();
+    }
 }
 
 /// Install a `current_thread` tokio runtime as the process kernel runtime AND
@@ -317,7 +356,29 @@ pub extern "C" fn shrike_runtime_init() -> bool {
             let thread = std::thread::Builder::new()
                 .name("shrike-mobile-rt".to_string())
                 .spawn(move || {
-                    shrike_kernel::block_on(async move { park.notified().await });
+                    // Drive the runtime for its life. On the shutdown signal,
+                    // DRAIN already-spawned ops before returning (#637): a
+                    // current_thread runtime only polls spawned tasks while a
+                    // thread is inside block_on, so returning the instant we're
+                    // notified would strand any op admitted just before shutdown
+                    // (never polled, callback never fires). Instead, keep driving
+                    // until INFLIGHT hits zero — every in-flight op runs to
+                    // completion and fires its callback first. Ops admitted AFTER
+                    // shutdown set the flag are fast-failed by `admit_op`, so they
+                    // never enter INFLIGHT and can't keep the drain spinning.
+                    shrike_kernel::block_on(async move {
+                        park.notified().await;
+                        loop {
+                            // Register interest BEFORE the check so a
+                            // concurrent finish_op's notify_waiters can't be
+                            // lost between the load and the await.
+                            let drained = DRAINED.notified();
+                            if INFLIGHT.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                                break;
+                            }
+                            drained.await;
+                        }
+                    });
                 })
                 .expect("the driver thread spawns");
             *DRIVER.lock().expect("driver lock poisoned") = Some(Driver { shutdown, thread });
@@ -341,35 +402,45 @@ pub extern "C" fn shrike_runtime_init() -> bool {
 }
 
 /// Stop the `current_thread` driver thread started by [`shrike_runtime_init`]
-/// (teardown). Notifies the park future and joins the driver; a no-op if no
-/// driver is running (the default multi-thread mode, or already shut down).
-/// After this the `current_thread` runtime is no longer driven.
+/// (teardown). Sets the shutdown flag, wakes the driver to DRAIN every
+/// already-admitted op, and joins it; a no-op if no driver is running (the
+/// default multi-thread mode, or already shut down). After this the
+/// `current_thread` runtime is no longer driven.
 ///
-/// The #597 fix guarantees safety for the **sequential** misuse: once this has
-/// RETURNED, a later [`shrike_op`] / [`shrike_close`] observes the shutdown flag
-/// (Acquire/Release across the join) and FAST-FAILS through the callback rather
-/// than hanging on the dead runtime. It does NOT close the **concurrent** race:
-/// an op issued mid-shutdown (already past the flag check when the driver is
-/// torn down) can still be left undriven — so the contract still asks the host
-/// to call this only at teardown, after every op and `shrike_close` has
-/// completed (the drain-then-shutdown ordering). That residual race is tracked
-/// as #637.
+/// **An op is never orphaned by shutdown — sequential OR concurrent (#597 +
+/// #637).** An op issued strictly after this has returned fast-fails through
+/// the callback (the flag is set; the runtime is provably undriven). An op
+/// issued CONCURRENTLY with this resolves to one of two safe outcomes, never a
+/// hang: either it was admitted before the flag store and the driver drains it
+/// to completion (its callback fires), or it reaches admission after the store
+/// and fast-fails through the callback. The host should still drain-then-
+/// shutdown for predictable results, but a racy iOS suspend/teardown can no
+/// longer strand an op's callback.
 #[no_mangle]
 pub extern "C" fn shrike_runtime_shutdown() {
     ffi_guard("shrike_runtime_shutdown", (), || {
         #[cfg(feature = "anki-core")]
         if let Some(driver) = DRIVER.lock().expect("driver lock poisoned").take() {
+            // Set the flag BEFORE notifying the driver (#637), under ADMIT_LOCK
+            // so it is atomic with respect to op admission. The ordering closes
+            // the concurrent-op race: an op issued while shutdown runs either
+            //   (a) was admitted before this store → it's counted in INFLIGHT,
+            //       so the driver's drain loop waits for it to complete + fire;
+            //   (b) reaches `admit_op` after this store → it fast-fails through
+            //       the callback (the runtime is being torn down).
+            // Neither outcome strands the op on a dying runtime. (#597 only
+            // covered the strictly-after-shutdown case; this closes the window
+            // between the old notify and store.)
+            {
+                let _guard = ADMIT_LOCK.lock().expect("admit lock poisoned");
+                DRIVER_SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
+            }
+            // Wake the driver: it resolves `park`, then DRAINS every already-
+            // admitted op (keeps driving until INFLIGHT == 0) before returning
+            // from block_on and exiting. Join so teardown is deterministic and
+            // the runtime is provably undriven once this returns.
             driver.shutdown.notify_one();
-            // The park future resolves; the driver thread returns from
-            // block_on and exits. Join so teardown is deterministic.
             let _ = driver.thread.join();
-            // Mark the runtime undriven AFTER the join, with Release ordering:
-            // a subsequent op observing the flag (Acquire) is guaranteed to see
-            // a fully stopped driver, so it fast-fails rather than racing a
-            // driver that is still draining one last task. Only set when we
-            // actually owned + stopped a driver — never in the multi-thread
-            // default lane (where DRIVER was None and worker threads drive).
-            DRIVER_SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
         }
     })
 }
@@ -419,6 +490,13 @@ pub unsafe extern "C" fn shrike_open(
                 )))
             }
         };
+        // Admit the open like any other op (#637): fast-fail if shut down,
+        // otherwise count it so a concurrent shutdown drains it.
+        if !admit_op() {
+            return Dispatch::Now(Err(NativeError::unavailable(
+                "the kernel runtime has been shut down; no further ops can run",
+            )));
+        }
         spawn_completion(completion, async move {
             let kernel = Kernel::open(&collection, &cache).await?;
             let handle = Box::new(ShrikeHandle {
@@ -453,16 +531,17 @@ pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
             return;
         }
         let handle = Box::from_raw(handle);
-        // Post-shutdown fast-path (#597): the driver is gone, so the
-        // spawn + std-channel bridge below would block forever on rx.recv()
-        // (the spawned close is queued onto the undriven runtime and never
-        // runs, so the send never lands). Free the handle without driving the
-        // close — the runtime is dead and the process is tearing down, so the
-        // actor cannot drain anyway; dropping the Box here reclaims the memory
-        // and is the most we can soundly do. (The handle's Arc<Kernel> drops
-        // with it; any in-flight ops are the caller's documented ordering
-        // responsibility.)
-        if driver_is_shut_down() {
+        // Post-shutdown fast-path (#597/#637): admit the close like any op. If
+        // the driver is shut down, `admit_op` returns false and the spawn +
+        // std-channel bridge below (which would block forever on rx.recv(),
+        // since the spawned close is queued onto an undriven runtime and never
+        // runs) is skipped. Free the handle without driving the close — the
+        // runtime is dead and the process is tearing down, so the actor cannot
+        // drain anyway; dropping the Box reclaims the memory and is the most we
+        // can soundly do. When admitted, the close is counted in INFLIGHT so a
+        // CONCURRENT shutdown DRAINS it (drives it to completion) rather than
+        // stranding this thread on rx.recv() — the #637 close path.
+        if !admit_op() {
             drop(handle);
             return;
         }
@@ -477,8 +556,17 @@ pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
         // runtime — the one shape that would otherwise hang. Dropping the
         // returned future detaches our observation; the spawned close (and its
         // std-channel send) still runs to completion (spawn_op's contract).
+        // `finish_op` runs in the task tail (a drop guard, so a panic in
+        // close() can't leak the count) — pairing the `admit_op` above.
         let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
         drop(shrike_kernel::spawn_op(async move {
+            struct FinishGuard;
+            impl Drop for FinishGuard {
+                fn drop(&mut self) {
+                    finish_op();
+                }
+            }
+            let _finish = FinishGuard;
             let _ = kernel.close().await;
             let _ = tx.send(());
             Ok(())
@@ -529,15 +617,9 @@ pub unsafe extern "C" fn shrike_op(
     user_data: *mut c_void,
 ) {
     ffi_guard_completion("shrike_op", callback, user_data, |completion| {
-        // Post-shutdown fast-fail (#597): the driver is gone, so spawning onto
-        // the undriven current_thread runtime would queue a task that never
-        // runs and a callback that never fires. Report it through the callback
-        // (the documented misuse-via-callback contract), never hang.
-        if driver_is_shut_down() {
-            return Dispatch::Now(Err(NativeError::unavailable(
-                "the kernel runtime has been shut down; no further ops can run",
-            )));
-        }
+        // Validate the synchronous preconditions FIRST (no admission needed for
+        // a request that never reaches the runtime), so a bad-input op doesn't
+        // perturb the in-flight count.
         if handle.is_null() {
             return Dispatch::Now(Err(NativeError::invalid_input("handle is null")));
         }
@@ -552,6 +634,15 @@ pub unsafe extern "C" fn shrike_op(
                 )))
             }
         };
+        // Admit the op (#597/#637): fast-fail through the callback if the driver
+        // is shut down (the undriven current_thread runtime would queue a task
+        // that never runs); otherwise count it in INFLIGHT so a concurrent
+        // shutdown DRAINS it instead of stranding it.
+        if !admit_op() {
+            return Dispatch::Now(Err(NativeError::unavailable(
+                "the kernel runtime has been shut down; no further ops can run",
+            )));
+        }
         spawn_completion(completion, dispatch(kernel, action, params));
         Dispatch::Spawned
     });
@@ -796,15 +887,30 @@ fn to_json<T: serde::Serialize>(value: &T) -> NativeResult<String> {
 /// caller's observation but the task — op AND callback — still runs to
 /// completion (`spawn_op`'s detach-not-abort contract). The wrapper itself
 /// resolves to `()` and is dropped; the callback is the real result channel.
+///
+/// The caller MUST have already counted this op via [`admit_op`]; the spawned
+/// task calls [`finish_op`] in its tail (after the callback fires) so the
+/// shutdown drain (#637) waits for it to complete. `finish_op` runs even if the
+/// inner future or the callback panics — tokio's task harness unwinds the task,
+/// but the count must not leak, so it's released via a drop guard.
 #[cfg(feature = "anki-core")]
 fn spawn_completion(
     completion: Completion,
     fut: impl std::future::Future<Output = NativeResult<String>> + Send + 'static,
 ) {
+    // Decrement INFLIGHT on the way out no matter how the task ends (normal or
+    // a panic in the future/callback), so a panicked op can't wedge the drain.
+    struct FinishGuard;
+    impl Drop for FinishGuard {
+        fn drop(&mut self) {
+            finish_op();
+        }
+    }
     // The op's result is captured and the callback fired from inside the
     // spawned task, so this never needs the (crate-private) runtime handle.
     // We drop the returned future immediately — detach, never abort.
     drop(shrike_kernel::spawn_op(async move {
+        let _finish = FinishGuard;
         completion.fire(fut.await);
         Ok(())
     }));
