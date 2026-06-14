@@ -1180,6 +1180,23 @@ impl IndexOrchestrator {
         images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
         mode: WriteMode,
     ) -> NativeResult<()> {
+        // A MODEL SWAP must full-rebuild, never reconcile (#586). The per-note
+        // hash folds text/images/OCR but NEVER the model_id, so a swap that
+        // changes no note content yields an empty (or partial) diff — leaving
+        // unchanged notes' vectors in the OLD model's space. The diff cannot see
+        // it; only the stamped model_id can. This mirrors `check_drift`'s own
+        // "different model → rebuild" rule and the documented invariant
+        // ("model_id differs → full rebuild"). `rebuild_with_mode` re-embeds
+        // EVERY note into the new space and stamps the new model_id, so the
+        // end-state equals a full rebuild and drift goes quiet correctly.
+        // (A first build — stored model_id None — falls through to the
+        // empty-prior-state rebuild below; this gate only fires on a real swap.)
+        let stored_model_id = self.model_id();
+        if stored_model_id.is_some() && stored_model_id != model_id {
+            return self
+                .rebuild_with_mode(inputs, col_mod, model_id, embedder, images, mode)
+                .await;
+        }
         let new_hashes: BTreeMap<i64, String> = inputs
             .iter()
             .map(|i| (i.note_id, self.hash_for(i, images, mode)))
@@ -1488,6 +1505,169 @@ mod op_tests {
         }
     }
 
+    // ── Model swap → full rebuild (#586 = audit S7-1) ───────────────────────
+    //
+    // The companion to `reconcile_matches_rebuild_end_state`: that test only
+    // covers a SAME-model col_mod bump (the fast path). These cover the gap a
+    // model swap opens — the per-note hash never folds model_id, so the diff
+    // can't see a swap and unchanged notes keep OLD-model vectors unless the
+    // reconcile gates to a full rebuild on a model_id mismatch.
+
+    /// An embedder whose vectors carry a per-model `tag` component, so the same
+    /// text under two "models" produces DIFFERENT vectors (a real space change).
+    struct TaggedEmbedder {
+        tag: f32,
+    }
+    impl Embedder for TaggedEmbedder {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            let tag = self.tag;
+            Box::pin(async move {
+                Ok(texts
+                    .iter()
+                    .map(|t| {
+                        let b = (t.len() as f32 % 7.0) / 7.0;
+                        vec![b, 1.0 - b, tag, 0.0]
+                    })
+                    .collect())
+            })
+        }
+    }
+
+    /// Pure swap (col_mod UNCHANGED): a new model arrives via /embedding/start
+    /// with no note edit. Pre-#586 the empty diff left model_id + every vector
+    /// stale forever (drift re-fires as a no-op). Fixed: reconcile gates to a
+    /// full rebuild — every vector is the new model's and model_id is stamped.
+    #[test]
+    fn reconcile_on_pure_model_swap_rebuilds_into_the_new_space() {
+        let model_a = TaggedEmbedder { tag: 0.10 };
+        let model_b = TaggedEmbedder { tag: 0.90 };
+        let inputs = vec![input(1, "one"), input(2, "two"), input(3, "three")];
+        let col_mod = 7; // UNCHANGED across the model swap
+
+        let reconciled = temp_orch();
+        block_on(reconciled.rebuild(
+            inputs.clone(),
+            col_mod,
+            Some("model-A".into()),
+            &model_a,
+            None,
+        ))
+        .unwrap();
+        // A model swap must register as drift.
+        assert!(
+            reconciled.check_drift(col_mod, Some("model-B"), false),
+            "a model swap must register as drift"
+        );
+        block_on(reconciled.reconcile(
+            inputs.clone(),
+            col_mod,
+            Some("model-B".into()),
+            &model_b,
+            None,
+        ))
+        .unwrap();
+
+        let rebuilt = temp_orch();
+        block_on(rebuilt.rebuild(inputs, col_mod, Some("model-B".into()), &model_b, None)).unwrap();
+
+        // model_id stamped to the NEW model (drift now goes quiet correctly).
+        assert_eq!(
+            reconciled.model_id(),
+            rebuilt.model_id(),
+            "reconcile must stamp the new model_id after a swap (else it drifts forever)"
+        );
+        assert!(
+            !reconciled.check_drift(col_mod, Some("model-B"), false),
+            "after the swap-rebuild, the new model no longer drifts"
+        );
+        // Every vector equals a full rebuild's (no OLD-model vectors left).
+        let mut a = reconciled.engine().keys();
+        let mut b = rebuilt.engine().keys();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b);
+        for key in a {
+            assert_eq!(
+                reconciled.engine().get(key),
+                rebuilt.engine().get(key),
+                "note {key} holds an OLD-model vector after the swap"
+            );
+        }
+    }
+
+    /// Swap + 1 edit (col_mod BUMPS): the insidious variant. Pre-#586 the
+    /// non-empty diff stamped the new model_id while the 2/3 UNCHANGED notes
+    /// kept OLD-model vectors → a silent MIXED-MODEL index that reports clean.
+    /// Fixed: the model_id gate forces a full rebuild regardless of the diff.
+    #[test]
+    fn reconcile_on_model_swap_plus_edit_is_not_a_mixed_model_index() {
+        let model_a = TaggedEmbedder { tag: 0.10 };
+        let model_b = TaggedEmbedder { tag: 0.90 };
+        let v1 = vec![input(1, "one"), input(2, "two"), input(3, "three")];
+        // Note 2 edited (its hash moves); notes 1 and 3 unchanged.
+        let v2 = vec![
+            input(1, "one"),
+            input(2, "two EDITED LONGER"),
+            input(3, "three"),
+        ];
+
+        let reconciled = temp_orch();
+        block_on(reconciled.rebuild(v1, 1, Some("model-A".into()), &model_a, None)).unwrap();
+        block_on(reconciled.reconcile(v2.clone(), 2, Some("model-B".into()), &model_b, None))
+            .unwrap();
+
+        let rebuilt = temp_orch();
+        block_on(rebuilt.rebuild(v2, 2, Some("model-B".into()), &model_b, None)).unwrap();
+
+        // Drift reports clean (model_id stamped) — and that's only SOUND because
+        // every note, not just the edited one, was re-embedded into model-B.
+        assert_eq!(reconciled.model_id(), Some("model-B".to_owned()));
+        let mut a = reconciled.engine().keys();
+        let mut b = rebuilt.engine().keys();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b);
+        for key in a {
+            assert_eq!(
+                reconciled.engine().get(key),
+                rebuilt.engine().get(key),
+                "unchanged note {key} kept an OLD-model vector → mixed-model index"
+            );
+        }
+    }
+
+    /// Boundary guard: a SAME-model col_mod bump must STILL take the incremental
+    /// reconcile fast path (#585/#38), not get swept into a full rebuild by the
+    /// model gate. Re-embeds only the changed note; unchanged notes' vectors are
+    /// untouched and identical to the rebuild end-state.
+    #[test]
+    fn same_model_col_mod_bump_still_reconciles_incrementally() {
+        let model = TaggedEmbedder { tag: 0.42 };
+        let v1 = vec![input(1, "one"), input(2, "two"), input(3, "three")];
+        let v2 = vec![input(1, "one"), input(2, "two EDITED"), input(3, "three")];
+
+        let orch = temp_orch();
+        block_on(orch.rebuild(v1, 1, Some("m".into()), &model, None)).unwrap();
+        // Capture an unchanged note's vector before the reconcile.
+        let before = orch.engine().get(1);
+        block_on(orch.reconcile(v2.clone(), 2, Some("m".into()), &model, None)).unwrap();
+        // Unchanged note 1 was NOT re-embedded (same vector object/content) — the
+        // fast path held (a full rebuild would also reproduce it, but the point
+        // is the gate didn't fire on a same-model bump).
+        assert_eq!(orch.engine().get(1), before, "unchanged note re-embedded");
+
+        let rebuilt = temp_orch();
+        block_on(rebuilt.rebuild(v2, 2, Some("m".into()), &model, None)).unwrap();
+        let mut a = orch.engine().keys();
+        let mut b = rebuilt.engine().keys();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b);
+        for key in a {
+            assert_eq!(orch.engine().get(key), rebuilt.engine().get(key));
+        }
+    }
+
     // ── Image-only write mode (#232) ────────────────────────────────────────
 
     /// An EmbedInput with image refs (the image-only path's input shape).
@@ -1602,6 +1782,88 @@ mod op_tests {
             assert!(
                 !reconciled.engine().modality_contains(TEXT, *key),
                 "no text vectors"
+            );
+        }
+    }
+
+    /// An image embedder whose vectors carry a per-model `tag`, so a CLIP model
+    /// swap produces DIFFERENT image vectors (the image-route analogue of
+    /// `TaggedEmbedder`).
+    struct TaggedImageEmbedder {
+        tag: f32,
+    }
+    impl ImageEmbedder for TaggedImageEmbedder {
+        fn embed_images(
+            &self,
+            images: Vec<MediaItem>,
+        ) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            let tag = self.tag;
+            Box::pin(async move { Ok(vec![vec![tag, 1.0 - tag, 0.0, 0.0]; images.len()]) })
+        }
+    }
+
+    /// #586 cross-surface: the IMAGE-PRIMARY route (the separate ImageOnly
+    /// secondary, on a CLIP model swap) flows through the same
+    /// `reconcile_with_mode`, so the model_id gate must rebuild it too — else the
+    /// secondary's image vectors stay in the OLD CLIP space. Pure swap (col_mod
+    /// unchanged); pre-#586 the empty image-diff left every image vector stale.
+    #[test]
+    fn image_only_reconcile_on_model_swap_rebuilds_into_the_new_space() {
+        let clip_a = TaggedImageEmbedder { tag: 0.10 };
+        let clip_b = TaggedImageEmbedder { tag: 0.90 };
+        let inputs = vec![
+            img_input(1, "t1", &["a.png"]),
+            img_input(2, "t2", &["b.png"]),
+            img_input(3, "t3", &["c.png"]),
+        ];
+        let col_mod = 5; // UNCHANGED across the CLIP swap
+
+        let reconciled = temp_orch();
+        block_on(reconciled.rebuild_with_mode(
+            inputs.clone(),
+            col_mod,
+            Some("clip-A".into()),
+            &StubEmbedder,
+            Some((&clip_a, &AlwaysResolver)),
+            WriteMode::ImageOnly,
+        ))
+        .unwrap();
+        block_on(reconciled.reconcile_with_mode(
+            inputs.clone(),
+            col_mod,
+            Some("clip-B".into()),
+            &StubEmbedder,
+            Some((&clip_b, &AlwaysResolver)),
+            WriteMode::ImageOnly,
+        ))
+        .unwrap();
+
+        let rebuilt = temp_orch();
+        block_on(rebuilt.rebuild_with_mode(
+            inputs,
+            col_mod,
+            Some("clip-B".into()),
+            &StubEmbedder,
+            Some((&clip_b, &AlwaysResolver)),
+            WriteMode::ImageOnly,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            reconciled.model_id(),
+            Some("clip-B".to_owned()),
+            "image-route reconcile must stamp the new CLIP model_id"
+        );
+        let mut a = reconciled.engine().keys();
+        let mut b = rebuilt.engine().keys();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b);
+        for key in a {
+            assert_eq!(
+                reconciled.engine().modality_get("image", key),
+                rebuilt.engine().modality_get("image", key),
+                "image key {key} kept an OLD-CLIP vector after the swap"
             );
         }
     }
