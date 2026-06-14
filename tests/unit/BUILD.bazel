@@ -348,6 +348,10 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
+        # test_config.py drives server.main() (the daemon --config path, #610),
+        # so the cluster needs the server library too — pytest sees the full
+        # package on path, but Bazel needs the per-target dep declared.
+        "//src/shrike:server",
         "//src/shrike:cli_core",
         "//src/shrike:profiles",
     ],
