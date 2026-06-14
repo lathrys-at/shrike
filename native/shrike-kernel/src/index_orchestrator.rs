@@ -1668,6 +1668,234 @@ mod op_tests {
         }
     }
 
+    // ── The gate CLEARS after a swap-rebuild — incremental reconcile RESUMES
+    // (the "doesn't stick / rebuild-forever" guards, from engine's #586
+    // cross-review). After a swap re-stamps model_id, a subsequent SAME-model
+    // edit must take the incremental fast path again, not full-rebuild forever.
+
+    /// (1) After an A→B swap-rebuild, a same-model(B) col_mod bump editing only
+    /// note 2 reconciles INCREMENTALLY: note 1 keeps its exact model-B vector
+    /// (not re-embedded), the end-state equals a full rebuild, and drift is
+    /// quiet. Proves the model gate fired ONCE on the swap and then released.
+    #[test]
+    fn incremental_reconcile_resumes_after_a_swap_rebuild() {
+        let model_a = TaggedEmbedder { tag: 0.10 };
+        let model_b = TaggedEmbedder { tag: 0.90 };
+        let v1 = vec![input(1, "one"), input(2, "two"), input(3, "three")];
+
+        let orch = temp_orch();
+        block_on(orch.rebuild(v1.clone(), 1, Some("model-A".into()), &model_a, None)).unwrap();
+        // Swap A→B (col_mod unchanged) → full rebuild into model-B's space.
+        block_on(orch.reconcile(v1, 1, Some("model-B".into()), &model_b, None)).unwrap();
+        // Capture note 1's model-B vector; it must survive the next reconcile.
+        let note1_b = orch.engine().get(1);
+
+        // A SAME-model(B) edit of only note 2 (col_mod bumps): incremental.
+        let v2 = vec![input(1, "one"), input(2, "two EDITED"), input(3, "three")];
+        block_on(orch.reconcile(v2.clone(), 2, Some("model-B".into()), &model_b, None)).unwrap();
+        assert_eq!(
+            orch.engine().get(1),
+            note1_b,
+            "note 1 was re-embedded — the gate stuck on 'rebuild forever' instead of resuming incremental"
+        );
+        // Drift is quiet (same model, watermark advanced) and the end-state
+        // equals a full rebuild in model-B.
+        assert!(
+            !orch.check_drift(2, Some("model-B"), false),
+            "after the same-model edit, model-B no longer drifts"
+        );
+        let rebuilt = temp_orch();
+        block_on(rebuilt.rebuild(v2, 2, Some("model-B".into()), &model_b, None)).unwrap();
+        let mut a = orch.engine().keys();
+        let mut b = rebuilt.engine().keys();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b);
+        for key in a {
+            assert_eq!(orch.engine().get(key), rebuilt.engine().get(key));
+        }
+    }
+
+    /// (2) Image-route analogue of (1): after a CLIP A→B swap-rebuild via
+    /// `reconcile_with_mode(ImageOnly)`, a same-CLIP-model image edit reconciles
+    /// incrementally and matches a full ImageOnly rebuild; image drift is quiet.
+    #[test]
+    fn image_only_incremental_reconcile_resumes_after_a_swap_rebuild() {
+        let clip_a = TaggedImageEmbedder { tag: 0.10 };
+        let clip_b = TaggedImageEmbedder { tag: 0.90 };
+        let v1 = vec![
+            img_input(1, "t1", &["a.png"]),
+            img_input(2, "t2", &["b.png"]),
+            img_input(3, "t3", &["c.png"]),
+        ];
+
+        let orch = temp_orch();
+        block_on(orch.rebuild_with_mode(
+            v1.clone(),
+            1,
+            Some("clip-A".into()),
+            &StubEmbedder,
+            Some((&clip_a, &AlwaysResolver)),
+            WriteMode::ImageOnly,
+        ))
+        .unwrap();
+        // CLIP swap A→B (col_mod unchanged) → full ImageOnly rebuild into B.
+        block_on(orch.reconcile_with_mode(
+            v1,
+            1,
+            Some("clip-B".into()),
+            &StubEmbedder,
+            Some((&clip_b, &AlwaysResolver)),
+            WriteMode::ImageOnly,
+        ))
+        .unwrap();
+        let note1_b = orch.engine().modality_get("image", 1);
+        // INTERMEDIATE: the swap leg must have rebuilt note 1 into clip-B (catches
+        // a gate that never fires — note 1's image didn't change, so only the
+        // model_id gate re-embeds it).
+        let fresh_b_swap = temp_orch();
+        block_on(fresh_b_swap.rebuild_with_mode(
+            vec![
+                img_input(1, "t1", &["a.png"]),
+                img_input(2, "t2", &["b.png"]),
+                img_input(3, "t3", &["c.png"]),
+            ],
+            1,
+            Some("clip-B".into()),
+            &StubEmbedder,
+            Some((&clip_b, &AlwaysResolver)),
+            WriteMode::ImageOnly,
+        ))
+        .unwrap();
+        assert_eq!(
+            note1_b,
+            fresh_b_swap.engine().modality_get("image", 1),
+            "the CLIP swap left note 1's image vector in the OLD clip-A space"
+        );
+
+        // Same-CLIP-model(B) image edit: note 2's image swapped (col_mod bumps).
+        let v2 = vec![
+            img_input(1, "t1", &["a.png"]),
+            img_input(2, "t2", &["b2.png"]),
+            img_input(3, "t3", &["c.png"]),
+        ];
+        block_on(orch.reconcile_with_mode(
+            v2.clone(),
+            2,
+            Some("clip-B".into()),
+            &StubEmbedder,
+            Some((&clip_b, &AlwaysResolver)),
+            WriteMode::ImageOnly,
+        ))
+        .unwrap();
+        assert_eq!(
+            orch.engine().modality_get("image", 1),
+            note1_b,
+            "image note 1 re-embedded — the image-route gate stuck instead of resuming incremental"
+        );
+        assert!(
+            !orch.check_drift(2, Some("clip-B"), true),
+            "after the same-CLIP edit, the image space no longer drifts"
+        );
+        let rebuilt = temp_orch();
+        block_on(rebuilt.rebuild_with_mode(
+            v2,
+            2,
+            Some("clip-B".into()),
+            &StubEmbedder,
+            Some((&clip_b, &AlwaysResolver)),
+            WriteMode::ImageOnly,
+        ))
+        .unwrap();
+        let mut a = orch.engine().keys();
+        let mut b = rebuilt.engine().keys();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b);
+        for key in a {
+            assert_eq!(
+                orch.engine().modality_get("image", key),
+                rebuilt.engine().modality_get("image", key),
+            );
+        }
+    }
+
+    /// (3) Round-trip A→B→A: swapping back to the ORIGINAL model rebuilds into
+    /// A's space with NO stale B vectors — the end-state equals a fresh rebuild
+    /// in A. The gate must fire on each direction of the swap, not just the
+    /// first; a per-note hash (which never folds model_id) is identical across
+    /// A→B→A, so only the model_id gate catches the return trip.
+    #[test]
+    fn round_trip_model_swap_lands_back_in_the_original_space() {
+        let model_a = TaggedEmbedder { tag: 0.10 };
+        let model_b = TaggedEmbedder { tag: 0.90 };
+        let inputs = vec![input(1, "one"), input(2, "two"), input(3, "three")];
+        let col_mod = 7; // unchanged across both swaps
+
+        let orch = temp_orch();
+        block_on(orch.rebuild(
+            inputs.clone(),
+            col_mod,
+            Some("model-A".into()),
+            &model_a,
+            None,
+        ))
+        .unwrap();
+        block_on(orch.reconcile(
+            inputs.clone(),
+            col_mod,
+            Some("model-B".into()),
+            &model_b,
+            None,
+        ))
+        .unwrap();
+        // INTERMEDIATE: the A→B leg must already have rebuilt into B (catches a
+        // gate that never fires — every vector now carries model-B's tag 0.90).
+        assert_eq!(orch.model_id(), Some("model-B".to_owned()));
+        let fresh_b = temp_orch();
+        block_on(fresh_b.rebuild(
+            inputs.clone(),
+            col_mod,
+            Some("model-B".into()),
+            &model_b,
+            None,
+        ))
+        .unwrap();
+        for key in fresh_b.engine().keys() {
+            assert_eq!(
+                orch.engine().get(key),
+                fresh_b.engine().get(key),
+                "A→B leg left note {key} in the OLD model-A space"
+            );
+        }
+        // …and back to A (the return trip — only the model_id gate catches it,
+        // since the per-note hash is identical across A→B→A).
+        block_on(orch.reconcile(
+            inputs.clone(),
+            col_mod,
+            Some("model-A".into()),
+            &model_a,
+            None,
+        ))
+        .unwrap();
+
+        assert_eq!(orch.model_id(), Some("model-A".to_owned()));
+        let fresh_a = temp_orch();
+        block_on(fresh_a.rebuild(inputs, col_mod, Some("model-A".into()), &model_a, None)).unwrap();
+        let mut a = orch.engine().keys();
+        let mut b = fresh_a.engine().keys();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b);
+        for key in a {
+            assert_eq!(
+                orch.engine().get(key),
+                fresh_a.engine().get(key),
+                "note {key} holds a stale model-B vector after the A→B→A round-trip"
+            );
+        }
+    }
+
     // ── Image-only write mode (#232) ────────────────────────────────────────
 
     /// An EmbedInput with image refs (the image-only path's input shape).
