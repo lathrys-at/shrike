@@ -144,3 +144,32 @@ rust_test(
         "@crates//:serde_json",
     ],
 )
+
+# The #637 concurrent-op race gate: own process. An op issued concurrently with
+# shrike_runtime_shutdown always fires its callback (completes or fast-fails),
+# never orphans — closing the notify->store window #597 left open.
+rust_test(
+    name = "op_racing_shutdown_test",
+    size = "small",
+    srcs = ["tests/op_racing_shutdown.rs"],
+    crate_features = MOBILE_FEATURES,
+    edition = "2021",
+    deps = [
+        ":shrike_mobile_lib",
+        "@crates//:serde_json",
+    ],
+)
+
+# The #637 drain gate (the "careful part"): own process. An op already in flight
+# when shutdown begins is DRAINED to a successful completion, not abandoned.
+rust_test(
+    name = "inflight_op_drains_test",
+    size = "small",
+    srcs = ["tests/inflight_op_drains.rs"],
+    crate_features = MOBILE_FEATURES,
+    edition = "2021",
+    deps = [
+        ":shrike_mobile_lib",
+        "@crates//:serde_json",
+    ],
+)
