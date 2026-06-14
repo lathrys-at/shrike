@@ -118,7 +118,8 @@ def note_list(
     if note_type:
         filter_parts.append(f"of type [cyan]{output.esc(note_type)}[/cyan]")
     if tags:
-        filter_parts.append(f"tagged {', '.join(f'[yellow]{output.esc(t)}[/yellow]' for t in tags)}")
+        styled = ", ".join(f"[yellow]{output.esc(t)}[/yellow]" for t in tags)
+        filter_parts.append(f"tagged {styled}")
     filter_desc = " ".join(filter_parts)
     if filter_desc:
         filter_desc = f" {filter_desc}"

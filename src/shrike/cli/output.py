@@ -311,10 +311,18 @@ def result_status(results: list[UpsertNoteResult]) -> None:
 
 
 def error(message: str) -> None:
-    """Print an error message to stderr."""
-    err_console.print(f"[bold red]Error:[/bold red] {message}")
+    """Print an error message to stderr.
+
+    ``message`` is data (often server/echoed error text that may carry
+    collection-authored content) → escaped so it can't inject markup or crash.
+    """
+    err_console.print(f"[bold red]Error:[/bold red] {esc(message)}")
 
 
 def success(message: str) -> None:
-    """Print a success message."""
-    console.print(f"[green]{message}[/green]")
+    """Print a success message.
+
+    ``message`` is treated as data and escaped (callers pass plain text, never
+    Shrike's own markup).
+    """
+    console.print(f"[green]{esc(message)}[/green]")

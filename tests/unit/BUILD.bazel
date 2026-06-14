@@ -173,6 +173,7 @@ _CLI = [
     "test_cli_json_output.py",
     "test_cli_migrate_type.py",
     "test_cli_note_replace.py",
+    "test_cli_output.py",
     "test_cli_note_tag.py",
     "test_cli_profile.py",
     "test_cli_routing.py",
