@@ -25,10 +25,8 @@ from mcp.server.transport_security import (
 from pydantic import ValidationError
 
 from shrike._mcp_perf import install_validator_cache
-from shrike.cache_layout import derived_db_path
 from shrike.collection import DEFAULT_LOCK_HOLD
 from shrike.daemon import AlreadyRunningError, ServerLock
-from shrike.derived import DerivedTextStore, NativeDerivedEngine
 from shrike.embedding import (
     BACKEND_ALIASES,
     DEFAULT_BACKEND,
@@ -1124,20 +1122,18 @@ def main() -> None:
         for p in secondary_param_sets
     ]
 
-    # The derived-text store (FTS5 trigram sidecar) — engine factory injected
-    # here, like the index engine (the harness owns assembly, #278 C5). The
-    # store is namespaced per collection (#547): it opens the SAME
+    # The derived-text store (FTS5 trigram sidecar) is built by Harness.assemble
+    # AFTER the kernel opens the collection (#547/#562) — NOT here, before open.
+    # The store is namespaced per collection (#547): it opens the SAME
     # `<cache_dir>/derived/<namespace>/shrike.db` the kernel's DerivedEngine
-    # writes (they share one file — the kernel ingests, this host surface
-    # reads), so a daemon serving several collections never shares one db.
-    # Pass the SAME collection-path string the kernel receives
-    # (`args.collection`, below) so both sides feed `index_namespace` identical
-    # input and resolve to the same db — canonicalization (realpath/abspath)
-    # then folds any spelling difference, but identical input needs no folding.
-    derived = DerivedTextStore(
-        path=derived_db_path(str(cache_base), args.collection),
-        engine_factory=NativeDerivedEngine,
-    )
+    # writes (they share one file — the kernel ingests, this host surface reads).
+    # The namespace canonicalizes the collection path, and that canonicalization
+    # differs by whether the file EXISTS (realpath folds a symlinked prefix like
+    # macOS /var/folders → /private/var/...; an absent file's lexical abspath does
+    # not). Building before the kernel created the file hashed a fresh collection
+    # under the abspath namespace while the kernel used the realpath one (#562),
+    # so the host /status read an empty store. assemble builds it post-open so the
+    # file exists for both sides; the native engine factory is the default.
 
     transport_security = _build_transport_security(
         args.host,
@@ -1303,7 +1299,7 @@ def main() -> None:
             collection_path=args.collection,
             cache_dir=str(cache_base),
             runtime=runtime,
-            derived=derived,
+            # derived omitted: assemble builds it post-open at the kernel's path (#562).
             cooperative=args.cooperative_lock,
             hold_seconds=hold_seconds,
             media_read=_read_img,
@@ -1398,7 +1394,7 @@ def main() -> None:
             mcp,
             harness.wrapper,
             index=harness.index_view,
-            derived=derived,
+            derived=harness.derived,
             kernel=harness.kernel,
             dedup_stats=harness.dedup_stats,
             allow_private_fetch=allow_private_media_fetch,

@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -346,7 +346,8 @@ class Harness:
         collection_path: str,
         cache_dir: str,
         runtime: EmbeddingRuntime,
-        derived: DerivedTextStore,
+        derived: DerivedTextStore | None = None,
+        derived_engine_factory: Callable[[Path], NativeDerivedEngine] = NativeDerivedEngine,
         cooperative: bool,
         hold_seconds: float,
         media_read: Any,
@@ -365,13 +366,38 @@ class Harness:
         is False for a per-collection harness sharing one embedding runtime
         (#68) — then close() leaves the shared runtime running.
         ``secondary_runtimes`` are the additional embedding spaces (#233);
-        empty (the default) is the byte-identical N=1 case."""
+        empty (the default) is the byte-identical N=1 case.
+
+        The host ``DerivedTextStore`` (the ``/status`` read surface) is built
+        **here, AFTER the kernel opens the collection** (#562), at the same
+        ``cache_layout.derived_db_path`` the kernel's ``DerivedEngine`` opened —
+        not by a caller before assembly. The path-derived namespace
+        canonicalizes the collection path, and that canonicalization differs by
+        whether the file EXISTS at computation time (an existing file → realpath,
+        which folds a symlinked prefix like macOS ``/var/folders`` →
+        ``/private/var/...``; an absent file → a lexical abspath that does NOT).
+        A fresh collection computed before open (the old caller order) hashed
+        under the abspath namespace while the kernel — which creates the file
+        during open — hashed under the realpath one, so the host ``/status`` read
+        an EMPTY store while the kernel's search store held the rows. Building
+        after open means the file exists for both, so both realpath to the SAME
+        ``derived/<namespace>/shrike.db``. A pre-built ``derived`` may still be
+        injected (the test seam); production passes none and lets assembly
+        resolve the kernel-authoritative path."""
         kernel = await shrike_native.async_kernel_open(
             collection_path,
             cache_dir,
             save_delay=index_save_delay,
             save_threshold=index_save_threshold,
         )
+        if derived is None:
+            # Resolve AFTER open (the collection file now exists, so the host's
+            # canonicalization matches the kernel's — #562). Same computation the
+            # kernel used internally, so they open one shared shrike.db.
+            derived_path = cache_layout.derived_db_path(cache_dir, collection_path)
+            derived = DerivedTextStore(
+                path=Path(derived_path), engine_factory=derived_engine_factory
+            )
         wrapper = CollectionWrapper.over_kernel(
             kernel, collection_path, cooperative=cooperative, hold_seconds=hold_seconds
         )
@@ -1164,18 +1190,16 @@ class CollectionManager:
         namespaced index + per-collection derived store, sharing the base
         cache dir and the embedding runtime."""
         logger.info("Routing: assembling collection %r at %s", key, path)
-        # Per-collection derived store path (#547): <cache_dir>/derived/<ns>/shrike.db
-        # — routed through cache_layout (contract #1), never derived from the
-        # raw abspath. The base cache_dir is SHARED (so #67's index namespace
-        # under it is preserved for the single-collection user).
-        derived_path = cache_layout.derived_db_path(self._params.cache_dir, path)
-        Path(derived_path).parent.mkdir(parents=True, exist_ok=True)
-        derived = DerivedTextStore(path=Path(derived_path), engine_factory=NativeDerivedEngine)
+        # The per-collection derived store (#547, <cache_dir>/derived/<ns>/shrike.db)
+        # is built by assemble AFTER the kernel opens this collection (#562), so
+        # the host namespace canonicalizes the now-existing file identically to
+        # the kernel's DerivedEngine — never pre-computed here from a maybe-absent
+        # path. The base cache_dir is SHARED (so #67's index namespace under it is
+        # preserved for the single-collection user).
         harness = await Harness.assemble(
             collection_path=path,
             cache_dir=self._params.cache_dir,
             runtime=self._params.runtime,
-            derived=derived,
             cooperative=self._params.cooperative,
             hold_seconds=self._params.hold_seconds,
             media_read=self._params.media_read,

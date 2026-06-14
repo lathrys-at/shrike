@@ -38,6 +38,109 @@ async def _assemble(tmp_path, *, cooperative: bool = False) -> Harness:
     )
 
 
+class TestDerivedNamespaceParity:
+    """#562: the host DerivedTextStore (the /status read surface) and the
+    kernel's DerivedEngine must open the SAME per-collection derived namespace.
+
+    The namespace canonicalizes the collection path, and that canonicalization
+    differs by whether the file EXISTS at computation time (existing → realpath,
+    which folds a symlinked prefix; absent → a lexical abspath that does NOT).
+    The old caller order built the host store BEFORE the kernel created a fresh
+    collection's file, so the host hashed under the abspath namespace while the
+    kernel used the realpath one — host /status read an EMPTY store while the
+    kernel's search store held the rows. Harness.assemble now builds the host
+    store AFTER open, so the file exists for both and they realpath identically.
+    """
+
+    def test_host_store_and_kernel_resolve_same_path_for_fresh_collection(self, tmp_path) -> None:
+        # The repro condition: a FRESH collection (file absent at assemble time)
+        # reached via a SYMLINKED prefix (so abspath != realpath, like macOS
+        # /var/folders -> /private/var/...). With the pre-open build, the host
+        # store landed in the abspath namespace; post-open it realpaths to the
+        # kernel's namespace.
+        from shrike import cache_layout
+
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        # Pass the SYMLINKED spelling — abspath keeps the link, realpath folds it.
+        cache_dir = str(link / "cache")
+        collection = str(link / "collection.anki2")  # does NOT exist yet
+
+        async def flow():
+            runtime = EmbeddingRuntime(model=None)
+            # No `derived` injected: assemble resolves it post-open (the fix).
+            harness = await Harness.assemble(
+                collection_path=collection,
+                cache_dir=cache_dir,
+                runtime=runtime,
+                cooperative=False,
+                hold_seconds=5.0,
+                media_read=None,
+                media_exists=None,
+            )
+            try:
+                # The kernel's own path (Rust) and the host store's path agree —
+                # and equal the host recomputation now that the file exists.
+                kernel_path = shrike_native.derived_db_path(cache_dir, collection)
+                assert str(harness.derived._path) == kernel_path
+                assert cache_layout.derived_db_path(cache_dir, collection) == kernel_path
+            finally:
+                await harness.close()
+
+        asyncio.run(flow())
+
+    def test_host_status_store_sees_rows_through_boot(self, tmp_path) -> None:
+        # End-to-end via the production boot path (no injected derived store):
+        # upsert a note, boot (which builds the derived store kernel-side and
+        # settles the host read surface), and assert the host /status store —
+        # built by assemble at the kernel's namespace — reports ready AND a
+        # substring query finds the row. Under the old caller order this host
+        # store sat in a stale abspath namespace and read empty (#562). The
+        # symlinked prefix + fresh collection is the exact bug condition.
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        cache_dir = str(link / "cache")
+        collection = str(link / "collection.anki2")
+
+        async def flow():
+            runtime = EmbeddingRuntime(model=None)
+            harness = await Harness.assemble(
+                collection_path=collection,
+                cache_dir=cache_dir,
+                runtime=runtime,
+                cooperative=False,
+                hold_seconds=5.0,
+                media_read=None,
+                media_exists=None,
+            )
+            try:
+                await harness.wrapper.upsert_notes(
+                    [
+                        {
+                            "note_type": "Basic",
+                            "deck": "Default",
+                            "fields": {"Front": "the krebs cycle", "Back": "citric acid"},
+                        }
+                    ]
+                )
+                await harness.boot(start_embedding=False)
+                for _ in range(100):
+                    if harness.derived.status().get("state") == "ready":
+                        break
+                    await asyncio.sleep(0.05)
+                assert harness.derived.status()["state"] == "ready"
+                hits = harness.derived.search_substring("krebs", 10)
+                assert hits, "host store must see the rows on the shared shrike.db"
+            finally:
+                await harness.close()
+
+        asyncio.run(flow())
+
+
 class TestHarness:
     def test_boot_status_and_verbs_without_embedding(self, tmp_path) -> None:
         async def flow():
