@@ -1010,7 +1010,7 @@ def main() -> None:
                 f"--config is mutually exclusive with {', '.join(legacy_flags)} — "
                 "the config file is the only home for these (docs/distribution.md)"
             )
-        from shrike.cli.config import load_config
+        from shrike.cli.config import load_config, resolve_embedding
         from shrike.profiles import (
             ProfileError,
             parse_capabilities,
@@ -1020,39 +1020,72 @@ def main() -> None:
             resolve_profile,
         )
 
+        config_dict = load_config(Path(args.config))
         try:
-            caps = parse_capabilities(load_config(Path(args.config)))
-            plan = resolve_profile(caps, shrike_native.build_features())
+            caps = parse_capabilities(config_dict)
         except ProfileError as e:
+            # A structural parse error (e.g. both v2 and legacy sections) is a
+            # genuine config error on either launch path → refuse to boot.
             parser.error(str(e))
-        for warning in plan.warnings:
-            logger.warning("%s", warning)
-        # The resolved recognizers (#485): describe (and, post-#502, remote OCR)
-        # ride the v2 config — no flag spelling, so they reach boot from here.
-        recognizer_boot_plans = recognizer_plans(plan)
-        all_param_sets = plan_to_runtime_params_set(plan)
+        if caps.legacy:
+            # A legacy config (no v2 sections) DEGRADES with a warning on BOTH
+            # launch paths (#610): the CLI's resolve_embedding_profile short-
+            # circuits caps.legacy to this same resolve_embedding, never running
+            # the build-validating resolve_profile. Routing the daemon --config
+            # path here too is what keeps the two paths consistent — the legacy
+            # cascade is "warn-and-map for one release" (#523 removes it), so the
+            # intended behavior is degrade, not refuse-boot. A real v2-config
+            # error still hits resolve_profile below and refuses.
+            for warning in caps.warnings:
+                logger.warning("%s", warning)
+            try:
+                legacy_params = resolve_embedding(config_dict)
+            except ValueError as e:
+                # A malformed legacy value (e.g. batch_size < 1) is a real config
+                # error on either path (the CLI's resolve_embedding raises the same
+                # ValueError) → refuse to boot, not degrade.
+                parser.error(str(e))
+            emb_params.update({k: v for k, v in legacy_params.items() if v is not None})
+            emb_params["backend"] = legacy_params.get("backend") or DEFAULT_BACKEND
+            logger.info(
+                "Legacy embedding config resolved from %s: backend=%s model=%s",
+                args.config,
+                emb_params["backend"],
+                emb_params.get("model"),
+            )
+        else:
+            try:
+                plan = resolve_profile(caps, shrike_native.build_features())
+            except ProfileError as e:
+                parser.error(str(e))
+            for warning in plan.warnings:
+                logger.warning("%s", warning)
+            # The resolved recognizers (#485): describe (and, post-#502, remote OCR)
+            # ride the v2 config — no flag spelling, so they reach boot from here.
+            recognizer_boot_plans = recognizer_plans(plan)
+            all_param_sets = plan_to_runtime_params_set(plan)
 
-        def _expand_paths(params: dict[str, Any]) -> dict[str, Any]:
-            for key in ("model", "llama_server"):
-                if params.get(key):
-                    params[key] = os.path.expanduser(str(params[key]))
-            if params.get("mmprojs"):
-                params["mmprojs"] = [os.path.expanduser(str(p)) for p in params["mmprojs"]]
-            return params
+            def _expand_paths(params: dict[str, Any]) -> dict[str, Any]:
+                for key in ("model", "llama_server"):
+                    if params.get(key):
+                        params[key] = os.path.expanduser(str(params[key]))
+                if params.get("mmprojs"):
+                    params["mmprojs"] = [os.path.expanduser(str(p)) for p in params["mmprojs"]]
+                return params
 
-        # The PRIMARY space drives the index/search path (byte-identical N=1);
-        # the 2nd+ entries become SECONDARY spaces (#233), each its own runtime.
-        v2_params = _expand_paths(plan_to_runtime_params(plan))
-        secondary_param_sets = tuple(_expand_paths(dict(p)) for p in all_param_sets[1:])
-        emb_params.update({k: v for k, v in v2_params.items() if v is not None})
-        emb_params["backend"] = v2_params.get("backend") or DEFAULT_BACKEND
-        logger.info(
-            "Capability config resolved from %s: backend=%s model=%s endpoint=%s",
-            args.config,
-            emb_params["backend"],
-            emb_params.get("model"),
-            emb_params.get("endpoint"),
-        )
+            # The PRIMARY space drives the index/search path (byte-identical N=1);
+            # the 2nd+ entries become SECONDARY spaces (#233), each its own runtime.
+            v2_params = _expand_paths(plan_to_runtime_params(plan))
+            secondary_param_sets = tuple(_expand_paths(dict(p)) for p in all_param_sets[1:])
+            emb_params.update({k: v for k, v in v2_params.items() if v is not None})
+            emb_params["backend"] = v2_params.get("backend") or DEFAULT_BACKEND
+            logger.info(
+                "Capability config resolved from %s: backend=%s model=%s endpoint=%s",
+                args.config,
+                emb_params["backend"],
+                emb_params.get("model"),
+                emb_params.get("endpoint"),
+            )
 
     def _runtime_from_params(params: dict[str, Any], *, pid_file: Path | None) -> EmbeddingRuntime:
         return EmbeddingRuntime(
