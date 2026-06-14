@@ -251,3 +251,45 @@ def test_collection_check_renders_bracketed_filename_literally(cli_run) -> None:
     result = cli_run("collection", "check")
     assert result.exit_code == 0, result.output
     assert "a[/z].png" in result.output
+
+
+# --- --json/--pretty mutual exclusion is order-independent (#607) -------------
+#
+# The mutual-exclusion guard must reject `--json --pretty` regardless of which
+# flag comes first. Before the fix, only `--json --pretty` errored — the eager
+# callbacks fire in token order and only _merge_pretty checked the other flag,
+# so `--pretty --json` silently let --json win.
+
+_MUTEX = "--pretty and --json are mutually exclusive"
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--json", "--pretty"],
+        ["--pretty", "--json"],  # was silently accepted before the fix
+    ],
+)
+def test_json_pretty_conflict_errors_regardless_of_order(cli_run, flags) -> None:
+    # A valid response is stubbed so the command would otherwise succeed — the
+    # only thing that can make it fail is the mutual-exclusion guard itself.
+    cli_run.fake.collection_info.return_value = CollectionInfo()
+    result = cli_run("info", *flags)
+    assert result.exit_code != 0, result.output
+    assert _MUTEX in result.output
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--json", "--no-pretty"],
+        ["--no-pretty", "--json"],
+        ["--json"],
+    ],
+)
+def test_json_with_no_pretty_is_allowed(cli_run, flags) -> None:
+    # --json + --no-pretty both mean "no styling": compatible, never an error.
+    cli_run.fake.collection_info.return_value = CollectionInfo()
+    result = cli_run("info", *flags)
+    assert result.exit_code == 0, result.output
+    assert _MUTEX not in result.output
