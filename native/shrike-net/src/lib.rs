@@ -358,4 +358,54 @@ mod tests {
         let err = same_host_redirect(&from, "file:///etc/passwd").unwrap_err();
         assert!(err.message.contains("unsupported scheme"), "{err:?}");
     }
+
+    // The look-alike redirect class (#592 review): inputs crafted to *appear*
+    // same-host while resolving to a different host. These are exactly where a
+    // future refactor of the host comparison could silently reopen SSRF, so they
+    // are pinned as regression guards. `host_str()` is the authority — it parses
+    // out userinfo, resolves protocol-relative against the base, and IDNA-encodes
+    // a Unicode host to punycode — so each of these compares as a different host.
+
+    #[test]
+    fn same_host_redirect_refuses_userinfo_decoy() {
+        // The "@" makes the base host the USERINFO, evil.com the real host —
+        // host_str() returns evil.com, so it's refused.
+        let from = url::Url::parse("http://trusted.example.com/v1").unwrap();
+        let err = same_host_redirect(&from, "http://trusted.example.com@evil.com/").unwrap_err();
+        assert!(err.message.contains("cross-host redirect"), "{err:?}");
+    }
+
+    #[test]
+    fn same_host_redirect_refuses_protocol_relative_to_other_host() {
+        // A protocol-relative `//host/...` location resolves (against the http
+        // base) to that host — here evil.com, not the base — so it's refused.
+        let from = url::Url::parse("http://trusted.example.com/v1").unwrap();
+        let target = from.join("//evil.com/latest/meta-data/").unwrap();
+        assert_eq!(target.host_str(), Some("evil.com")); // resolves cross-host
+        let err = same_host_redirect(&from, "//evil.com/latest/meta-data/").unwrap_err();
+        assert!(err.message.contains("cross-host redirect"), "{err:?}");
+    }
+
+    #[test]
+    fn same_host_redirect_refuses_idna_homoglyph() {
+        // A Cyrillic-homoglyph host that LOOKS like the base but is a different
+        // host: `url` IDNA-encodes it to punycode (xn--…), which is not the
+        // ASCII base host — refused. (The 'а' here is U+0430 CYRILLIC A.)
+        let from = url::Url::parse("http://example.com/v1").unwrap();
+        let homoglyph = "http://ex\u{0430}mple.com/"; // exаmple.com (Cyrillic а)
+        let target = url::Url::parse(homoglyph).unwrap();
+        assert_ne!(target.host_str(), Some("example.com")); // punycode, not ASCII
+        let err = same_host_redirect(&from, homoglyph).unwrap_err();
+        assert!(err.message.contains("cross-host redirect"), "{err:?}");
+    }
+
+    #[test]
+    fn same_host_redirect_allows_port_only_change_same_host() {
+        // A different port is still the SAME host — allowed, and the returned URL
+        // keeps the base host (the IP/port pinning to the base is exercised by
+        // the agent-level tests; here we pin that the host identity is preserved).
+        let from = url::Url::parse("http://trusted.example.com:8080/v1").unwrap();
+        let target = same_host_redirect(&from, "http://trusted.example.com:9999/x").unwrap();
+        assert_eq!(target.host_str(), Some("trusted.example.com"));
+    }
 }
