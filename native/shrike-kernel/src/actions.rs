@@ -553,11 +553,21 @@ pub struct SpaceSemantic {
 /// The cross-space fusion variant (#576). `RelativeFloor` is the SHIPPED
 /// PRODUCTION default: the relative gate composed with a per-space calibrated
 /// intra-modal image floor (the #576 experiment's winner — closes the ∅-gold
-/// over-return leak with no recall loss). The other three are eval-only
-/// measurement modes the `SHRIKE_CROSS_SPACE_FUSION_MODE` seam selects to
-/// reproduce the decision table; they never change production. The relative
-/// gate composes with all of them (it is the negative-control backstop and
-/// never drops out — see #234).
+/// over-return leak with no recall loss). The other three #576 modes are
+/// eval-only measurement modes the `SHRIKE_CROSS_SPACE_FUSION_MODE` seam
+/// selects to reproduce the decision table; they never change production. The
+/// relative gate composes with all of them (it is the negative-control backstop
+/// and never drops out — see #234).
+///
+/// The `FloorAdmit*` modes (#580) are the EVAL prototype for the
+/// floor-based-admission redesign: they DROP the relative gate and admit a
+/// vision space on its OWN absolute floor (above its calibrated intra-modal
+/// noise floor), independent of how the text space did — so a strong, on-topic
+/// CLIP hit reaches RRF even when the text space "won" on a spurious
+/// filename/lexical match (the #580 corroboration case). Multiplicity (the N≥2
+/// flooding the relative gate guards) is handled by a vision-WEIGHT BUDGET
+/// instead of per-space relative suppression. These are eval-only; production
+/// stays on `RelativeFloor` until a separate user-gated change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CrossSpaceFusionMode {
     /// V0+floor (PRODUCTION) — relative AND a per-space calibrated intra-modal
@@ -577,6 +587,35 @@ pub enum CrossSpaceFusionMode {
     /// V2 (eval) — soft-calibrated: weight `w = σ((z_s − z0)/τ)`, composed with
     /// the relative gate. The soft alternative to the hard floor.
     SoftCalibrated,
+    /// #580 — FLOOR-ADMIT (binary, NO budget): drop the relative gate entirely;
+    /// admit a vision space iff its best surviving image cosine clears its OWN
+    /// calibrated floor (`image_best > z_floor`), at full weight 1.0. An
+    /// uncalibrated space (no floor) is admitted (the floor is a no-op). This is
+    /// the pure thesis — it fixes the filename-collision case but, with no
+    /// budget, the N≥2 negative control flooding is unprotected (each off-topic
+    /// but intra-modally-confident space clears its floor and floods).
+    FloorAdmit,
+    /// #580 — FLOOR-ADMIT + WEIGHT BUDGET (binary): admit on the absolute floor
+    /// (relative gate dropped), but bound the TOTAL vision RRF weight when N≥2
+    /// spaces fire by splitting a budget `B` (default 1.0, `cross_space_budget`)
+    /// equally across the admitted spaces (each gets `B/N`). N=1 keeps full
+    /// weight `B` (the production-common case is unpenalized). The budget is what
+    /// holds the N≥2 negative control without per-space relative suppression.
+    FloorAdmitBudget,
+    /// #580 — SOFT floor-admit (NO budget): drop the relative gate; weight each
+    /// admitted space `w = σ((image_best − z_floor)/τ)` — a confident hit
+    /// contributes near-fully, a borderline one partially. This is the soft
+    /// V2-style admission of #576 applied to its REAL purpose (corroboration),
+    /// without the relative composition. No budget → same N≥2 exposure as
+    /// `FloorAdmit`, but the soft taper attenuates a near-floor flood.
+    SoftFloorAdmit,
+    /// #580 — SOFT floor-admit + WEIGHT BUDGET: the graceful form. Each admitted
+    /// space gets a soft weight `σ((image_best − z_floor)/τ)`; the per-space soft
+    /// weights are then scaled so their SUM never exceeds the budget `B` (when
+    /// `Σ raw > B`, each is scaled by `B / Σ raw`; otherwise left as-is). N=1
+    /// with a confident hit keeps ~full weight; N≥2 confident off-topic spaces
+    /// share the budget. This is the candidate the memo measures as the winner.
+    SoftFloorAdmitBudget,
 }
 
 /// One secondary space's per-source search result: its per-modality hits plus
@@ -727,6 +766,27 @@ pub struct SearchArgs {
     /// The temperature τ for the soft variants (#576): smaller τ → a sharper
     /// taper (τ→0 is the binary floor limit). Ignored by the binary modes.
     pub cross_space_tau: f64,
+    /// The total vision-WEIGHT BUDGET `B` for the #580 `*Budget` floor-admission
+    /// modes: when N≥2 vision spaces clear their floor, their combined RRF weight
+    /// is bounded to `B` (split equally in the binary mode, sum-scaled in the
+    /// soft mode). N=1 keeps full weight `B`. `<= 0.0` (the `Default`) is read as
+    /// the canonical `1.0` so a space's default weight is unchanged — the budget
+    /// modes only ever DIVIDE down from there. Ignored by the non-budget modes.
+    pub cross_space_budget: f64,
+}
+
+impl SearchArgs {
+    /// The effective vision-weight budget — `<= 0.0` reads as the canonical
+    /// `1.0` (a single fired space then keeps full weight, matching the
+    /// non-budget modes; `Default::default()` zeroes the field, so this keeps
+    /// the eval's `..Default::default()` construction honest).
+    fn effective_budget(&self) -> f64 {
+        if self.cross_space_budget > 0.0 {
+            self.cross_space_budget
+        } else {
+            1.0
+        }
+    }
 }
 
 /// Insertion-ordered candidate cache: Python dict iteration order is part of
@@ -1273,45 +1333,79 @@ pub fn search_notes(
             ("fuzzy".into(), ranking_fuzzy),
         ];
 
-        // ── Cross-space fusion (#234 / #576) ─────────────────────────────────
+        // ── Cross-space fusion (#234 / #576 / #580) ──────────────────────────
         // Each SECONDARY text-capable space contributes its own gated `image`
         // ranking. EMPTY cross_space (N=1) → this whole block is a no-op and the
         // rankings vector above is byte-identical to today, so `rrf_fuse` gets
-        // identical inputs. The relative activation gate (the eval's mandatory
-        // finding) fires a vision space ONLY when its best query→match cosine
-        // clears the PRIMARY text space's best for this same source. The #576
-        // fusion mode composes a per-space INTRA-MODAL floor (calibrated on the
-        // space's OWN stats) with the relative gate, closing the over-return
-        // leak when the primary's best cosine → 0 (the relative gate inverts).
+        // identical inputs.
         //
-        // Per-space soft weights (V1/V2) collected here, applied to the
-        // `image#<key>` signal's RRF weight after the canonical weights resolve.
+        // TWO admission families select on `cross_space_fusion_mode`:
+        //   - RELATIVE family (#234/#576, the PRODUCTION default): a vision space
+        //     fires ONLY when its best query→match cosine clears the PRIMARY text
+        //     space's best for this same source (the relative gate), optionally
+        //     composed with the per-space intra-modal floor (#576). Winner-take-
+        //     all: text winning (even on a filename lexical match) shuts CLIP out.
+        //   - FLOOR-ADMIT family (#580, EVAL): the relative gate is DROPPED; a
+        //     space is admitted on its OWN absolute floor (`image_best > z_floor`)
+        //     so a strong on-topic CLIP hit corroborates the card even when text
+        //     also hit. Multiplicity is bounded by a vision-weight BUDGET (the
+        //     `*Budget` modes), not by relative suppression.
+        //
+        // Per-space soft weights (V1/V2 and the #580 soft modes) collected here,
+        // applied to the `image#<key>` signal's RRF weight after the canonical
+        // weights resolve. Two passes: (1) admit + raw weight per space; (2)
+        // the budget normalization across the admitted set (a no-op for the
+        // non-budget modes), then fold/push.
         let mut cross_space_weights: std::collections::BTreeMap<String, f64> =
             std::collections::BTreeMap::new();
         if !args.cross_space.is_empty() {
-            // The primary text space's best query cosine (the gate's reference).
-            // The primary's hits are `modality_hits` (this source's row).
+            let mode = args.cross_space_fusion_mode;
+            let uses_relative_gate = matches!(
+                mode,
+                CrossSpaceFusionMode::Relative
+                    | CrossSpaceFusionMode::RelativeFloor
+                    | CrossSpaceFusionMode::SoftRelative
+                    | CrossSpaceFusionMode::SoftCalibrated
+            );
+            let is_budget = matches!(
+                mode,
+                CrossSpaceFusionMode::FloorAdmitBudget
+                    | CrossSpaceFusionMode::SoftFloorAdmitBudget
+            );
+            // The primary text space's best query cosine (the relative gate's
+            // reference). The primary's hits are `modality_hits` (this row).
             let primary_best = best_query_cosine_of(modality_hits);
+            // Pass 1: collect each admitted space's ranking, its per-note image
+            // scores (for the displayed-score fold), and its RAW pre-budget
+            // weight.
+            struct Admitted {
+                signal: String,
+                ranking: Vec<i64>,
+                space_score: HashMap<i64, f64>,
+                weight: f64,
+            }
+            let mut admitted: Vec<Admitted> = Vec::new();
             for space in &args.cross_space {
                 let Some(shits) = space.per_source.get(i) else {
                     continue;
                 };
-                // The relative gate (default): the vision space fires only when
-                // its best query cosine ≥ the primary text space's. With the
-                // gate disabled (the negative control), every space fires. The
-                // relative gate composes with EVERY #576 variant — it is the
-                // negative-control backstop and never drops out.
-                let gate_open = args.disable_cross_space_gate
-                    || match (shits.best_query_cosine, primary_best) {
-                        (Some(v), Some(p)) => v >= p,
-                        // No primary text reference → nothing to gate against;
-                        // admit the space (degenerate, lexical-only primary).
-                        (Some(_), None) => true,
-                        // The space itself returned no hits → nothing to add.
-                        (None, _) => false,
-                    };
-                if !gate_open {
-                    continue;
+                // The relative gate (#234) — applied ONLY for the relative
+                // family. With the gate disabled (the negative control), every
+                // space fires. The floor-admit family skips it entirely (the
+                // floor below is the sole admission test).
+                if uses_relative_gate {
+                    let gate_open = args.disable_cross_space_gate
+                        || match (shits.best_query_cosine, primary_best) {
+                            (Some(v), Some(p)) => v >= p,
+                            // No primary text reference → nothing to gate
+                            // against; admit (degenerate, lexical-only primary).
+                            (Some(_), None) => true,
+                            // The space itself returned no hits → nothing to add.
+                            (None, _) => false,
+                        };
+                    if !gate_open {
+                        continue;
+                    }
                 }
                 let (sk, sd) = shits
                     .modality_hits
@@ -1341,9 +1435,10 @@ pub fn search_notes(
                     .first()
                     .and_then(|nid| space_score.get(nid).copied());
 
-                // #576: apply the fusion mode. The binary modes hard-drop the
-                // space; the soft modes taper its RRF weight.
-                let weight = match args.cross_space_fusion_mode {
+                // Apply the fusion mode's admission + raw weight. `None` drops
+                // the space; `Some(w)` admits it at raw weight `w` (the budget
+                // pass may scale it down for the `*Budget` modes).
+                let weight = match mode {
                     // V0 — relative only (today): contribute at weight 1.0.
                     CrossSpaceFusionMode::Relative => Some(1.0),
                     // V0+floor — relative AND z_s > z_floor (per-space). Drop
@@ -1376,13 +1471,70 @@ pub fn search_notes(
                             _ => Some(1.0),
                         }
                     }
+                    // #580 FloorAdmit / FloorAdmitBudget — admit on the absolute
+                    // floor alone (relative gate already skipped). Drop the space
+                    // when its best image cosine clears no floor; an uncalibrated
+                    // space (no floor) is admitted. Raw weight 1.0 (the budget
+                    // pass divides it down for the budget mode).
+                    CrossSpaceFusionMode::FloorAdmit
+                    | CrossSpaceFusionMode::FloorAdmitBudget => {
+                        match (image_best, space.image_floor) {
+                            (Some(b), Some(floor)) if b <= floor => None,
+                            _ => Some(1.0),
+                        }
+                    }
+                    // #580 SoftFloorAdmit / SoftFloorAdmitBudget — soft admission
+                    // `w = σ((image_best − z_floor)/τ)`, no relative composition.
+                    // An uncalibrated space / τ≤0 falls back to weight 1.0. There
+                    // is no hard drop: a sub-floor hit gets a near-zero weight
+                    // (negligible RRF mass), which the soft taper is for.
+                    CrossSpaceFusionMode::SoftFloorAdmit
+                    | CrossSpaceFusionMode::SoftFloorAdmitBudget => {
+                        match (image_best, space.image_floor, args.cross_space_tau) {
+                            (Some(b), Some(floor), tau) if tau > 0.0 => {
+                                Some(sigmoid((b - floor) / tau))
+                            }
+                            _ => Some(1.0),
+                        }
+                    }
                 };
                 let Some(weight) = weight else {
                     continue; // the floor dropped this space's image ranking
                 };
+                admitted.push(Admitted {
+                    signal: cross_space_signal(&space.space_key),
+                    ranking: ranking_space_image,
+                    space_score,
+                    weight,
+                });
+            }
+
+            // Pass 2: the #580 vision-weight BUDGET. When N≥2 admitted spaces
+            // share a bounded total weight `B`, no flood of always-confident
+            // off-topic spaces can out-fuse the text answer (the negative
+            // control the relative gate used to guard). N=1 keeps full weight
+            // (the production-common case is unpenalized). Two scalings:
+            //   - binary budget (FloorAdmitBudget): every weight is 1.0, so each
+            //     becomes B/N (the equal split).
+            //   - soft budget (SoftFloorAdmitBudget): only scale DOWN, and only
+            //     when the soft weights already sum above B (`B / Σ raw`); a
+            //     confident N=1 hit keeps its near-1.0 weight.
+            if is_budget && admitted.len() >= 2 {
+                let budget = args.effective_budget();
+                let total: f64 = admitted.iter().map(|a| a.weight).sum();
+                if total > budget && total > 0.0 {
+                    let scale = budget / total;
+                    for a in &mut admitted {
+                        a.weight *= scale;
+                    }
+                }
+            }
+
+            // Fold + push each admitted space.
+            for a in admitted {
                 // Fold the space's image cosines into the displayed semantic
                 // `score` (max-over-items, exactly like the primary image).
-                for (nid, isim) in &space_score {
+                for (nid, isim) in &a.space_score {
                     let entry = sem_score.entry(*nid).or_insert(*isim);
                     if *isim > *entry {
                         *entry = *isim;
@@ -1391,13 +1543,12 @@ pub fn search_notes(
                 // A DISTINCT signal name per space so provenance (#182)
                 // identifies which vision space surfaced the note, and each
                 // space fuses as its own RRF signal (weight defaults to 1.0 —
-                // the eval's equal weighting; the soft modes override it below).
+                // the eval's equal weighting; the soft/budget modes override it).
                 // `image#<key>` reads as "the image modality of space <key>".
-                let signal = cross_space_signal(&space.space_key);
-                if (weight - 1.0).abs() > f64::EPSILON {
-                    cross_space_weights.insert(signal.clone(), weight);
+                if (a.weight - 1.0).abs() > f64::EPSILON {
+                    cross_space_weights.insert(a.signal.clone(), a.weight);
                 }
-                rankings.push((signal, ranking_space_image));
+                rankings.push((a.signal, a.ranking));
             }
         }
 
