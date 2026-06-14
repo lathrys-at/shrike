@@ -431,6 +431,7 @@ class Harness:
     async def _drive_reindex(self) -> None:
         if await self.kernel.reindex_if_needed():
             logger.info("Collection changed while idle; index reconciled")
+            await self._recalibrate_secondary_floors()
 
     async def _maybe_build_derived(self) -> None:
         """Cheap col_mod probe; the rebuild itself is fire-and-forget — boot
@@ -579,9 +580,16 @@ class Harness:
         total_notes = await self.wrapper.run(lambda c: len(c.find_notes("")))
         if total_notes == 0:
             await self.kernel.rebuild_index()
+            await self._recalibrate_secondary_floors()
             return {"status": "complete", "size": 0}
-        self._spawn_bg(self.kernel.rebuild_index())
+        self._spawn_bg(self._rebuild_then_calibrate())
         return {"status": "started", "total": total_notes}
+
+    async def _rebuild_then_calibrate(self) -> None:
+        """Full index rebuild, then recalibrate the secondary floors (#576) —
+        the secondary image vectors are fresh, so the floor must be re-derived."""
+        await self.kernel.rebuild_index()
+        await self._recalibrate_secondary_floors()
 
     async def save_index(self) -> dict[str, Any]:
         """Flush the index now (the ``POST /index/save`` semantics)."""
@@ -875,6 +883,30 @@ class Harness:
     async def _drive_boot_reindex(self) -> None:
         if await self.kernel.reindex_if_needed():
             logger.info("Index reconciled after embedding start")
+        await self._recalibrate_secondary_floors()
+
+    async def _recalibrate_secondary_floors(self) -> None:
+        """Recompute the secondary cross-space image activation floors (#576).
+
+        A dedicated CLIP secondary is image-only, so the engine's own #201b
+        calibration (text→image) finds no text vectors there; this harness-driven
+        pass CLIP-text-embeds a sample of note texts through each secondary's own
+        backend and fires them at its image vectors to derive the floor. Best
+        effort: a failure leaves the prior floors and only weakens the gate to
+        the relative comparison — never breaks search. No-op in the N=1 case
+        (the kernel returns an empty list when there are no secondaries)."""
+        try:
+            derived = await self.kernel.calibrate_secondary_floors()
+        except Exception as e:  # noqa: BLE001 — calibration is advisory; never fail search
+            logger.warning("Secondary cross-space floor calibration failed: %s", e)
+            return
+        for space_key, floor in derived:
+            if floor is None:
+                logger.info(
+                    "Cross-space floor for %s: uncalibrated (too few image notes)", space_key
+                )
+            else:
+                logger.info("Cross-space image floor for %s: %.3f", space_key, floor)
 
     async def stop_embedding(self) -> dict[str, Any]:
         """Detach + stop the embedding service (``POST /embedding/stop``)."""

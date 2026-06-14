@@ -277,27 +277,39 @@ class TestRealPrecision:
     hard-negatives. Open-world grading (the corpus is per-query sparse gold), so
     FPR counts only the explicit hard-negatives, never incidental non-answers."""
 
-    def test_over_return_query_surfaces_only_weak_low_confidence_hits(self, real_run) -> None:
-        # CHARACTERIZATION of the relative gate's known precision trade-off
-        # (#234): a query that answers NOTHING ("purple elephant…") has a
-        # near-zero text-space best, so the CLIP space's WEAK image cosines still
-        # clear the relative gate (clip_best >= text_best ≈ 0) and a handful of
-        # low-confidence image cards leak in. This is real and documented, not a
-        # failure — but the leaks must be (a) only the weak image signal (never a
-        # strong exact/text hit), and (b) all LOW confidence. So an ∅-gold query
-        # never surfaces a *confident* false positive.
+    def test_over_return_query_injects_no_clip_image_card(self, real_run) -> None:
+        # ASSERT-CLOSED (#576): the calibrated cross-space image floor closes the
+        # relative gate's ∅-gold over-return leak. A query that answers NOTHING
+        # ("purple elephant…") has a near-zero text-space best, so the relative
+        # gate alone (`clip_best >= text_best ≈ 0`) used to admit a handful of
+        # WEAK CLIP image cards (cos ~0.17–0.23). The per-space floor — calibrated
+        # to ~0.25 on this corpus (CLIP-text→image pseudo-queries, mean+1·std) —
+        # now drops every one of them: the weak image best clears no floor. So the
+        # ∅-gold query surfaces NO `image#clip` card at all. (Was a
+        # characterization of the documented leak; #576 closed it.)
+        from tests.search_quality.runner import clip_fired
+
         q = next(qq for qq in real_run.manifest.queries if qq.adversarial_class == "over_return")
         returned = real_run.returns.get(q.q, [])
-        OVER_RETURN_SCORE_CEILING = 0.45  # well below the threshold a real answer clears
+        clip_leaks = [m for m in returned if clip_fired(m)]
+        assert not clip_leaks, (
+            f"the ∅-gold query injected {len(clip_leaks)} CLIP image card(s) "
+            f"({[m['id'] for m in clip_leaks]}) — the #576 floor failed to close the leak"
+        )
+        # No SEMANTIC false positive survives either: with the CLIP cards floored
+        # out, nothing semantic should remain (a real semantic answer would have
+        # a non-None score well above the leak band — there is none for ∅-gold).
         for m in returned:
-            signals = {p["signal"] for p in m["provenance"]}
-            assert not (signals & {"exact", "fuzzy"}), (
-                f"the ∅-gold query produced a LEXICAL hit {m['id']} ({signals}) — junk fused"
-            )
             score = m.get("score")
-            assert score is None or score <= OVER_RETURN_SCORE_CEILING, (
-                f"the ∅-gold query produced a CONFIDENT hit {m['id']} (score {score})"
+            assert score is None, (
+                f"the ∅-gold query produced a SEMANTIC hit {m['id']} (score {score}) "
+                "after the CLIP floor — only lexical near-misses should remain"
             )
+        # NOTE: a weak `fuzzy` trigram near-miss may still surface (the only
+        # remaining signal once the image floor closes — its precision is the
+        # fuzzy signal's own concern, tracked separately, not #576's cross-space
+        # floor). #576 asserts the cross-space IMAGE leak is closed; the lexical
+        # tier is unchanged by this work.
 
     def test_planted_hard_negative_fpr_is_bounded(self, real_run) -> None:
         # The portrait hard-negatives (grade-0) may leak in at a LOW rank via the

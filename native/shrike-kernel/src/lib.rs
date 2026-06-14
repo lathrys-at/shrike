@@ -295,6 +295,19 @@ pub struct Kernel {
     /// (not a batch-size cap) because it bounds CONCURRENCY without shrinking a
     /// single sweep's batch — throughput per call is unchanged.
     slow_recognition: Arc<tokio::sync::Semaphore>,
+    /// The per-secondary-space cross-space IMAGE activation floor (#576),
+    /// keyed by space key. A dedicated CLIP secondary is image-only
+    /// (`WriteMode::ImageOnly`), so the engine's own #201b calibration — which
+    /// samples a space's *text* sub-index as pseudo-queries — finds no text
+    /// vectors there and yields no floor. This map is the harness-driven
+    /// replacement: calibrated by CLIP-text-embedding a sample of note texts
+    /// (the live dual encoder's text side) and firing them at the secondary's
+    /// image vectors, the #201b method with the pseudo-queries sourced from the
+    /// encoder instead of stored vectors. Recomputed at every (re)build / model
+    /// change; `build_cross_space` reads it to gate each secondary's `image`
+    /// ranking. Empty until the first calibration (the floor is then a no-op
+    /// and only the relative gate applies — today's behaviour).
+    secondary_floors: Arc<RwLock<BTreeMap<String, f64>>>,
 }
 
 /// One attached recognition capability: the engine + the media resolver it
@@ -357,6 +370,27 @@ pub const NOTE_MODALITIES: &[&str] = &["text", "image"];
 /// renormalized mean of member notes' TEXT vectors per tag (never a
 /// cross-modal mean — the modality gap makes one semantically empty).
 pub const TAG_TEXT_SPACE: &str = "tag.text";
+
+/// Deterministically truncate `items` to at most `cap` via a PARTIAL LCG
+/// Fisher-Yates (#576): only the first `cap` slots are drawn, so a large
+/// collection isn't fully shuffled to take the sample. Stable across runs (a
+/// fixed seed) — the calibration stats are statistical, never byte-pinned.
+/// Mirrors the engine's own #201b sampler (`engine.rs::calibrate_activation`).
+fn deterministic_sample<T>(items: &mut Vec<T>, cap: usize) {
+    let n = items.len();
+    if n <= cap {
+        return;
+    }
+    let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
+    for i in 0..cap {
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let j = i + ((rng >> 33) as usize % (n - i));
+        items.swap(i, j);
+    }
+    items.truncate(cap);
+}
 
 impl Kernel {
     /// Open a collection and its sidecar stores (cache_dir holds the derived
@@ -522,6 +556,7 @@ impl Kernel {
             recognize: RwLock::new(BTreeMap::new()),
             recognition_gate: recognize::RecognitionGate::default(),
             slow_recognition: Arc::new(tokio::sync::Semaphore::new(SLOW_RECOGNITION_CONCURRENCY)),
+            secondary_floors: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
 
@@ -860,11 +895,18 @@ impl Kernel {
                     }
                 })
                 .collect();
-            // This space's OWN #201b image floor (#576): calibrated on its own
-            // index stats and persisted in its own orchestrator — NOT the
-            // primary's. `None` when uncalibrated (the floor is then a no-op and
-            // only the relative gate applies for this space).
-            let image_floor = orch.activation_floor("image", actions::ACTIVATION_MARGIN);
+            // This space's cross-space image floor (#576): the harness-driven
+            // calibration (CLIP-text pseudo-queries → image vectors), keyed by
+            // space. A dedicated CLIP secondary is image-only, so the engine's
+            // own #201b stats (text→image) are empty there — `secondary_floors`
+            // is the replacement. `None` (uncalibrated, too few image samples)
+            // → the floor is a no-op and only the relative gate applies.
+            let image_floor = self
+                .secondary_floors
+                .read()
+                .expect("secondary_floors poisoned")
+                .get(&key)
+                .copied();
             out.push(actions::SpaceSemantic {
                 space_key: key,
                 per_source,
@@ -872,6 +914,129 @@ impl Kernel {
             });
         }
         Ok(out)
+    }
+
+    /// Recalibrate every SECONDARY cross-space's image activation floor (#576)
+    /// and store it in `secondary_floors`. The harness drives this at every
+    /// (re)build / model change (the embedder coupling lives here, where the
+    /// CLIP backend Arcs are — engine.rs stays embedder-free).
+    ///
+    /// The method is #201b's exactly, with the pseudo-queries sourced from the
+    /// LIVE CLIP-text encoder rather than stored text vectors (a dedicated CLIP
+    /// secondary indexes images only, so it has none): take a deterministic
+    /// sample of image-bearing notes, CLIP-text-embed each note's text through
+    /// the secondary's OWN backend, search it against that space's image
+    /// vectors, record the best NON-SELF cosine (exclude the note's own image,
+    /// like #201b), and set `floor = mean + margin·std` when ≥ `CALIB_MIN`
+    /// samples land. A space with too few image notes gets no floor (the gate
+    /// then rides the relative comparison alone). Returns the per-space derived
+    /// floor (`None` = uncalibrated) for the harness to log / surface.
+    pub async fn calibrate_secondary_floors(&self) -> NativeResult<Vec<(String, Option<f64>)>> {
+        let secondaries = self.secondary_embed_spaces();
+        if secondaries.is_empty() {
+            self.secondary_floors
+                .write()
+                .expect("secondary_floors poisoned")
+                .clear();
+            return Ok(Vec::new());
+        }
+        // Sample image-bearing notes once (shared across spaces): the same
+        // embed inputs a rebuild reads, filtered to notes that carry an image,
+        // deterministically truncated to the calibration cap.
+        let raw = self
+            .collection
+            .run(|core| -> NativeResult<_> {
+                let ids = core.find_notes("")?;
+                core.note_embed_inputs(&ids)
+            })
+            .await??;
+        let inputs = self.compose_embed_inputs(raw, None);
+        let mut sample: Vec<(i64, String)> = inputs
+            .into_iter()
+            .filter(|i| !i.image_names.is_empty() && !i.text.trim().is_empty())
+            .map(|i| (i.note_id, i.text))
+            .collect();
+        deterministic_sample(&mut sample, index_orchestrator::CALIB_SAMPLE);
+
+        let note_spaces: Vec<String> = NOTE_MODALITIES.iter().map(|m| m.to_string()).collect();
+        let mut derived: Vec<(String, Option<f64>)> = Vec::new();
+        for (key, svc) in secondaries {
+            let floor = self
+                .calibrate_one_secondary_floor(&key, &svc, &sample, &note_spaces)
+                .await?;
+            {
+                let mut floors = self
+                    .secondary_floors
+                    .write()
+                    .expect("secondary_floors poisoned");
+                match floor {
+                    Some(f) => {
+                        floors.insert(key.clone(), f);
+                    }
+                    None => {
+                        floors.remove(&key);
+                    }
+                }
+            }
+            derived.push((key, floor));
+        }
+        Ok(derived)
+    }
+
+    /// One secondary space's image floor: CLIP-text-embed the sample texts on
+    /// this space's backend, search its image vectors, collect best non-self
+    /// cosines, return `mean + ACTIVATION_MARGIN·std` (or `None` below
+    /// `CALIB_MIN`). No-op (`None`) when the space has no image vectors.
+    async fn calibrate_one_secondary_floor(
+        &self,
+        key: &str,
+        svc: &EmbedService,
+        sample: &[(i64, String)],
+        note_spaces: &[String],
+    ) -> NativeResult<Option<f64>> {
+        let Some(orch) = self.index_set.orchestrator_for(key) else {
+            return Ok(None);
+        };
+        let engine = orch.engine_arc();
+        // The image sub-index must be non-empty (the space indexes images).
+        if engine
+            .modality_sizes()
+            .iter()
+            .all(|(m, n)| m != "image" || *n == 0)
+        {
+            return Ok(None);
+        }
+        if sample.len() < index_orchestrator::CALIB_MIN {
+            return Ok(None);
+        }
+        // CLIP-text-embed every sample note's text on THIS space's encoder.
+        let texts: Vec<String> = sample.iter().map(|(_, t)| t.clone()).collect();
+        let qvectors = svc.embedder.embed(texts).await?;
+        // CALIB_K so a pseudo-query whose own image is the nearest hit still has
+        // a non-self hit to record (mirrors the engine's #201b sampling).
+        let rows =
+            engine.search_by_modality(&qvectors, index_orchestrator::CALIB_K, Some(note_spaces))?;
+        let mut best_sims: Vec<f64> = Vec::with_capacity(sample.len());
+        for ((self_id, _), modality_hits) in sample.iter().zip(rows.iter()) {
+            let Some((keys, dists)) = modality_hits.get("image") else {
+                continue;
+            };
+            // The best NON-SELF image hit (exclude the note's own image vector).
+            if let Some((_, dist)) = keys.iter().zip(dists.iter()).find(|(k, _)| **k != *self_id) {
+                best_sims.push(1.0 - *dist as f64);
+            }
+        }
+        if best_sims.len() < index_orchestrator::CALIB_MIN {
+            return Ok(None);
+        }
+        let n = best_sims.len() as f64;
+        let mean = best_sims.iter().sum::<f64>() / n;
+        let var = best_sims
+            .iter()
+            .map(|s| (s - mean) * (s - mean))
+            .sum::<f64>()
+            / n;
+        Ok(Some(mean + actions::ACTIVATION_MARGIN * var.sqrt()))
     }
 
     /// The PRIMARY orchestrator (state, status, drift) — the harness's status

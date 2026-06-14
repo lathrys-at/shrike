@@ -931,6 +931,15 @@ impl AsyncKernel {
         kernel_op(py, async move { kernel.col_mod().await })
     }
 
+    /// Recalibrate every secondary cross-space image floor (#576) — awaitable.
+    /// The harness drives this after a (re)build / model change. Returns the
+    /// per-space derived floor as `[(space_key, floor_or_None), …]` so the
+    /// harness can log/surface the values. No-op (empty) in the N=1 case.
+    fn calibrate_secondary_floors<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move { kernel.calibrate_secondary_floors().await })
+    }
+
     /// The index status block as JSON (state/size/progress/stamps).
     fn index_status_json(&self) -> PyResult<String> {
         crate::kernel_actions::wire(&self.inner.index().status()).map_err(crate::to_py_err)

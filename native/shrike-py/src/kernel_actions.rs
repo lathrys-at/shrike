@@ -222,10 +222,12 @@ pub(crate) fn action_search_notes(
 
 /// Resolve the #576 cross-space fusion variant + τ from the environment
 /// (`SHRIKE_CROSS_SPACE_FUSION_MODE` ∈ {relative, relative_floor, soft_relative,
-/// soft_calibrated}; `SHRIKE_CROSS_SPACE_TAU` a float). TEST-ONLY: the eval
-/// harness sets these to sweep the experiment; unset → `Relative` (today's
-/// behaviour) and a τ that the binary modes ignore. An unrecognized mode falls
-/// back to `Relative` so a typo can never silently change production fusion.
+/// soft_calibrated}; `SHRIKE_CROSS_SPACE_TAU` a float). The PRODUCTION default
+/// (unset) is `RelativeFloor`, the shipped #576 winner — the env seam is the
+/// EVAL escape hatch the search-quality sweep uses to reproduce the decision
+/// table (e.g. `relative` to measure the pre-#576 leak). An unrecognized value
+/// falls back to the production default so a typo can never silently weaken the
+/// gate. The MCP tool schema is unchanged either way.
 fn cross_space_fusion_from_env() -> (shrike_kernel::actions::CrossSpaceFusionMode, f64) {
     use shrike_kernel::actions::CrossSpaceFusionMode as M;
     let mode = match std::env::var("SHRIKE_CROSS_SPACE_FUSION_MODE")
@@ -233,11 +235,12 @@ fn cross_space_fusion_from_env() -> (shrike_kernel::actions::CrossSpaceFusionMod
         .as_deref()
         .map(str::trim)
     {
-        Some("relative_floor") => M::RelativeFloor,
+        Some("relative") => M::Relative,
         Some("soft_relative") => M::SoftRelative,
         Some("soft_calibrated") => M::SoftCalibrated,
-        // "relative", "", unset, or anything unrecognized → today's behaviour.
-        _ => M::Relative,
+        // "relative_floor", "", unset, or anything unrecognized → the shipped
+        // production default (the calibrated floor).
+        _ => M::default(),
     };
     let tau = std::env::var("SHRIKE_CROSS_SPACE_TAU")
         .ok()

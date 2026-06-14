@@ -550,28 +550,32 @@ pub struct SpaceSemantic {
     pub image_floor: Option<f64>,
 }
 
-/// The cross-space fusion variant (#576 experiment). The default `Relative` is
-/// TODAY's behaviour (the binary relative gate only), so production is unchanged
-/// until the experiment's data selects a winner. The other three are
-/// eval-selectable measurement modes; the relative gate composes with all of
-/// them (it is the negative-control backstop and never drops out — see #234).
+/// The cross-space fusion variant (#576). `RelativeFloor` is the SHIPPED
+/// PRODUCTION default: the relative gate composed with a per-space calibrated
+/// intra-modal image floor (the #576 experiment's winner — closes the ∅-gold
+/// over-return leak with no recall loss). The other three are eval-only
+/// measurement modes the `SHRIKE_CROSS_SPACE_FUSION_MODE` seam selects to
+/// reproduce the decision table; they never change production. The relative
+/// gate composes with all of them (it is the negative-control backstop and
+/// never drops out — see #234).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CrossSpaceFusionMode {
-    /// V0 — binary relative gate only (`clip_best >= text_best`). Production
-    /// default; leaks weak image cards when the primary's best cosine → 0.
+    /// V0+floor (PRODUCTION) — relative AND a per-space calibrated intra-modal
+    /// floor (`image_best > z_floor`): a hard drop of the space's image ranking
+    /// when its best surviving image cosine clears no floor. The shipped #576
+    /// winner; the floor is harness-calibrated per secondary space.
     #[default]
-    Relative,
-    /// V0+floor — relative AND a per-space intra-modal floor
-    /// (`image_best > z_floor`): a hard drop of the space's image ranking when
-    /// its best surviving image cosine clears no floor. The conservative
-    /// candidate.
     RelativeFloor,
-    /// V1 — soft-relative: weight `w = σ((clip_best − text_best)/τ)` folded
-    /// into the `image#<key>` RRF weight. Calibration-free CONTROL — expected
-    /// to still leak (proves the leak is intra-modal, not relative).
+    /// V0 (eval) — binary relative gate only (`clip_best >= text_best`). The
+    /// pre-#576 behaviour; leaks weak image cards when the primary's best cosine
+    /// → 0. Kept to measure the leak the floor closes.
+    Relative,
+    /// V1 (eval) — soft-relative: weight `w = σ((clip_best − text_best)/τ)`
+    /// folded into the `image#<key>` RRF weight. Calibration-free CONTROL — it
+    /// still leaks (proves the leak is intra-modal, not relative).
     SoftRelative,
-    /// V2 — soft-calibrated: weight `w = σ((z_s − z0)/τ)`, composed with the
-    /// relative gate. The ren proposal (calibration-as-auto-weight).
+    /// V2 (eval) — soft-calibrated: weight `w = σ((z_s − z0)/τ)`, composed with
+    /// the relative gate. The soft alternative to the hard floor.
     SoftCalibrated,
 }
 
