@@ -44,6 +44,19 @@ static MATHJAX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\[()\[\]]|\$
 static BLOCK_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)<\s*/?\s*(?:br|div|p|li|ul|ol|tr|td|h[1-6]|blockquote)\b[^>]*>").unwrap()
 });
+// Whitespace collapse. NOTE (#612): Rust's `\s` is Unicode `White_Space`,
+// which EXCLUDES the C0 separators U+001C–U+001F; Python `re`'s `\s` INCLUDES
+// them. So the byte-identity contract with the Python oracle holds over
+// **anki-sanitized field text** (the only thing on this path): anki's
+// `invalid_char_for_field` strips U+001C–U+001F from stored field values
+// before they ever reach the normalizer, so neither side ever sees one — the
+// divergence is unreachable on the field path. The recognition (OCR/ASR) path
+// does NOT route through this normalizer, so it can't surface it either. Folding
+// the C0 separators into this pattern to match Python literally would change the
+// normalized output for an input that can't occur, forcing an `EMBED_TEXT_VERSION`
+// bump + a one-time index rebuild for zero behavioral gain — so we document the
+// scope instead. Revisit (and bump BOTH versions) if a future source feeds
+// un-sanitized text through here.
 static WS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
 /// Replace cloze deletions with their answer text (wrapper + hint dropped).
