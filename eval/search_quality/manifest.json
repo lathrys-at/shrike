@@ -897,6 +897,144 @@
           }
         }
       ]
+    },
+    {
+      "id": 60,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Homonym",
+      "note_type": "Basic",
+      "tags": [
+        "adv-homonym",
+        "on_topic"
+      ],
+      "fields": {
+        "Front": "Review card 60",
+        "Back": "<img src=\"$IMG:jaguar_animal\">"
+      },
+      "media": [
+        {
+          "handle": "jaguar_animal",
+          "source": "commons",
+          "spec": {
+            "url": "pinned"
+          }
+        }
+      ]
+    },
+    {
+      "id": 61,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Homonym",
+      "note_type": "Basic",
+      "tags": [
+        "adv-homonym",
+        "off_topic"
+      ],
+      "fields": {
+        "Front": "Review card 61",
+        "Back": "<img src=\"$IMG:jaguar_car\">"
+      },
+      "media": [
+        {
+          "handle": "jaguar_car",
+          "source": "commons",
+          "spec": {
+            "url": "pinned"
+          }
+        }
+      ]
+    },
+    {
+      "id": 62,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Homonym",
+      "note_type": "Basic",
+      "tags": [
+        "adv-homonym",
+        "on_topic"
+      ],
+      "fields": {
+        "Front": "Review card 62",
+        "Back": "<img src=\"$IMG:crane_bird\">"
+      },
+      "media": [
+        {
+          "handle": "crane_bird",
+          "source": "commons",
+          "spec": {
+            "url": "pinned"
+          }
+        }
+      ]
+    },
+    {
+      "id": 63,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Homonym",
+      "note_type": "Basic",
+      "tags": [
+        "adv-homonym",
+        "off_topic"
+      ],
+      "fields": {
+        "Front": "Review card 63",
+        "Back": "<img src=\"$IMG:crane_machine\">"
+      },
+      "media": [
+        {
+          "handle": "crane_machine",
+          "source": "commons",
+          "spec": {
+            "url": "pinned"
+          }
+        }
+      ]
+    },
+    {
+      "id": 64,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Homonym",
+      "note_type": "Basic",
+      "tags": [
+        "adv-homonym",
+        "on_topic"
+      ],
+      "fields": {
+        "Front": "Review card 64",
+        "Back": "<img src=\"$IMG:bass_fish\">"
+      },
+      "media": [
+        {
+          "handle": "bass_fish",
+          "source": "commons",
+          "spec": {
+            "url": "pinned"
+          }
+        }
+      ]
+    },
+    {
+      "id": 65,
+      "kind": "image_only",
+      "deck": "AdversarialEval::Homonym",
+      "note_type": "Basic",
+      "tags": [
+        "adv-homonym",
+        "off_topic"
+      ],
+      "fields": {
+        "Front": "Review card 65",
+        "Back": "<img src=\"$IMG:bass_guitar\">"
+      },
+      "media": [
+        {
+          "handle": "bass_guitar",
+          "source": "commons",
+          "spec": {
+            "url": "pinned"
+          }
+        }
+      ]
     }
   ],
   "queries": [
@@ -1394,6 +1532,60 @@
       ],
       "top_k": 10,
       "threshold": 0.5
+    },
+    {
+      "q": "a jaguar, the spotted big cat animal in the wild",
+      "adversarial_class": "spurious_filename",
+      "expected_signal": "image",
+      "top_k": 10,
+      "threshold": 0.5,
+      "_note": "the spotted big cat, not the car",
+      "gold": [
+        {
+          "id": 60,
+          "grade": 3
+        },
+        {
+          "id": 61,
+          "grade": 0
+        }
+      ]
+    },
+    {
+      "q": "a crane, the tall long-legged long-necked wading bird",
+      "adversarial_class": "spurious_filename",
+      "expected_signal": "image",
+      "top_k": 10,
+      "threshold": 0.5,
+      "_note": "the wading bird, not the construction machine",
+      "gold": [
+        {
+          "id": 62,
+          "grade": 3
+        },
+        {
+          "id": 63,
+          "grade": 0
+        }
+      ]
+    },
+    {
+      "q": "a bass, the freshwater game fish swimming underwater",
+      "adversarial_class": "spurious_filename",
+      "expected_signal": "image",
+      "top_k": 10,
+      "threshold": 0.5,
+      "_note": "the fish, not the musical instrument",
+      "gold": [
+        {
+          "id": 64,
+          "grade": 3
+        },
+        {
+          "id": 65,
+          "grade": 0
+        }
+      ]
     }
   ]
 }

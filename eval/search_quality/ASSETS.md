@@ -49,6 +49,23 @@ page, where the full license terms and authorship live.
 | `water_cycle` | CC BY-SA 4.0 | Kevregourez | [File:Water_Cycle_-_br.svg](https://commons.wikimedia.org/wiki/File:Water_Cycle_-_br.svg) |
 | `world_map` | Public domain | Thomas Kitchin | [File:1794_Samuel_Dunn_Wall_Map_of_the_World_in_H](https://commons.wikimedia.org/wiki/File:1794_Samuel_Dunn_Wall_Map_of_the_World_in_Hemispheres_-_Geographicus_-_World2-dunn-1794.jpg) |
 
+## Homonym matched pairs (#580 spurious-filename precision)
+
+Three homonym pairs — one filename word, two visual senses — for the #580
+floor-admission precision axis: for a disambiguated query, the on-topic image
+must clear the cross-space floor (rank above) and the off-topic one must not.
+The note text is answer-blind, so only the shared filename word carries the
+lexical signal and only CLIP can judge the image.
+
+| Handle | License | Author | Commons page |
+| --- | --- | --- | --- |
+| `bass_fish` | CC BY 2.0 | Robert Pos | [File:1351_largemouth_bass_(Micropterus_salmoides)_300_dpi.jpg](https://commons.wikimedia.org/wiki/File:1351_largemouth_bass_(Micropterus_salmoides)_300_dpi.jpg) |
+| `bass_guitar` | CC0 | Ziongarage | [File:Bass_guitar_(instrument).jpg](https://commons.wikimedia.org/wiki/File:Bass_guitar_(instrument).jpg) |
+| `crane_bird` | CC BY-SA 3.0 | Marek Szczepanek | [File:Grus_grus_2_(Marek_Szczepanek).jpg](https://commons.wikimedia.org/wiki/File:Grus_grus_2_(Marek_Szczepanek).jpg) |
+| `crane_machine` | CC BY-SA 4.0 | Rodhullandemu | [File:Crane_on_Leeds_Street,_Liverpool.jpg](https://commons.wikimedia.org/wiki/File:Crane_on_Leeds_Street,_Liverpool.jpg) |
+| `jaguar_animal` | CC BY-SA 3.0 | Bjørn Christian Tørrissen | [File:Junior-Jaguar-Belize-Zoo.jpg](https://commons.wikimedia.org/wiki/File:Junior-Jaguar-Belize-Zoo.jpg) |
+| `jaguar_car` | CC BY-SA 4.0 | DeFacto | [File:Jaguar_E-Type_series_2_coupé_1968.jpg](https://commons.wikimedia.org/wiki/File:Jaguar_E-Type_series_2_coupé_1968.jpg) |
+
 ## Reused multimodal-eval images (`eval/multimodal/`)
 
 Attribution for the images the multimodal eval (#162) pinned without a
