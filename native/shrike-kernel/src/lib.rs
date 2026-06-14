@@ -34,7 +34,6 @@ pub mod index_set;
 pub mod media_fetch;
 pub mod recognize;
 pub mod tag_centroids;
-pub mod textsim;
 pub mod watermark;
 
 use std::collections::BTreeMap;

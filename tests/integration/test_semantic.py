@@ -286,7 +286,12 @@ class TestUpsertNeighbors:
 
         semantic_mcp("delete_notes", {"ids": [r["id"]]})
 
-    def test_threshold_filters_irrelevant(self, semantic_mcp, collection_server):
+    def test_unrelated_note_returns_no_neighbors(self, semantic_mcp, collection_server):
+        # #531: a note unrelated to everything in this bio/physics collection
+        # gets no neighbors — the holistic similarity gate ("none relevant →
+        # return nothing"): no semantic match clears the search floor, and a
+        # fuzzy-trigram / tag coincidence does NOT qualify as a neighbor. There
+        # is no magic neighbor_threshold; relevance is the gate.
         _wait_for_index_ready(collection_server)
         result = semantic_mcp(
             "upsert_notes",
@@ -301,12 +306,11 @@ class TestUpsertNeighbors:
                         },
                     }
                 ],
-                "neighbor_threshold": 0.95,
             },
         )
         r = result["results"][0]
         neighbors = r.get("neighbors", [])
-        assert len(neighbors) == 0
+        assert len(neighbors) == 0, f"unrelated note should have no neighbors, got {neighbors}"
 
         semantic_mcp("delete_notes", {"ids": [r["id"]]})
 
@@ -335,6 +339,77 @@ class TestUpsertNeighbors:
 
         ids = [r["id"] for r in created]
         semantic_mcp("delete_notes", {"ids": ids})
+
+    def test_neighbors_are_gated_search_results_of_the_content(
+        self, semantic_mcp, collection_server
+    ):
+        # #531: neighbors ARE search results of the note's own content (capped
+        # at k, minus the note), gated to similarity-backed hits. This pins the
+        # principle the fix is built on — neighbors route through the SAME RRF
+        # search pipeline as search_notes — and is what makes the feature
+        # platform-robust (RRF doesn't break-empty on one borderline cosine, so
+        # neighbors inherit search's green aarch64 behaviour).
+        #
+        # Asserted as the two load-bearing properties (not a brittle byte-equal
+        # set: the neighbor path queries the note's normalized embed text, a
+        # `search_notes(queries=[front+back])` queries the raw string, so the
+        # marginal top-k membership can differ — that tie-margin is not the
+        # contract):
+        #   1. every neighbor is SIMILARITY-BACKED — a semantic match (non-null
+        #      score) or an exact-text hit (`exact` provenance); never a
+        #      fuzzy-only / tag-only coincidence.
+        #   2. the neighbors are a SUBSET of a (generous) self-search of the
+        #      content — they come from that same fused pipeline.
+        _wait_for_index_ready(collection_server)
+        front = "What is cellular respiration?"
+        back = "The process cells use to convert glucose into ATP"
+        content = f"{front} {back}"
+        k = 5
+        result = semantic_mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "deck": "Biology",
+                        "note_type": "Basic",
+                        "fields": {"Front": front, "Back": back},
+                        "tags": ["cell-biology"],
+                    }
+                ],
+                "top_k_neighbors": k,
+            },
+        )
+        r = result["results"][0]
+        assert r["status"] == "created"
+        note_id = r["id"]
+        neighbors = r["neighbors"]
+        neighbor_ids = {n["id"] for n in neighbors}
+
+        # Property 1: every neighbor is similarity-backed.
+        for n in neighbors:
+            signals = {p["signal"] for p in n["provenance"]}
+            assert n["score"] is not None or "exact" in signals, (
+                f"neighbor {n['id']} is not similarity-backed (fuzzy/tag-only): {n}"
+            )
+        # A topically-close note has neighbors, at least one semantic-backed.
+        assert neighbor_ids, "a topically-close note must have neighbors"
+        assert any(n["score"] is not None for n in neighbors), (
+            "the cell-biology neighbors must be semantic-backed"
+        )
+
+        # Property 2: neighbors ⊆ a generous self-search of the same content.
+        search = semantic_mcp(
+            "search_notes",
+            {"queries": [content], "top_k": k * 4, "exclude_ids": [note_id]},
+        )
+        groups = search["results"]
+        search_ids = {m["id"] for m in groups[0]["matches"]} if groups else set()
+        assert neighbor_ids <= search_ids, (
+            f"neighbors must come from a self-search of the content: "
+            f"neighbors={neighbor_ids} search={search_ids}"
+        )
+
+        semantic_mcp("delete_notes", {"ids": [note_id]})
 
 
 # ---------------------------------------------------------------------------
