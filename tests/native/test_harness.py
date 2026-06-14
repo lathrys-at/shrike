@@ -23,7 +23,42 @@ from shrike.harness import Harness, KernelConfigError  # noqa: E402
 # ── #650 angle-A instrumentation (TEMPORARY) ────────────────────────────────
 # Capture the FULL engine + derived state at a family assert so a failure under
 # the bazel xdist load repro classifies ABSENT vs UNRECALLED definitively.
+import logging as _logging  # noqa: E402
 import os  # noqa: E402
+
+# Discriminator (#650, lead request #2): record whether the kernel's swallow
+# WARNING ("reading recognized texts failed; embedding without them",
+# lib.rs:1276) fires — it forwards through pyo3-log to the `shrike_kernel`
+# python logger. Presence => H-D1 (un-retried SQLITE_BUSY on the vector-minting
+# derived read). We capture EVERY warning+ record so we also see the Err variant.
+_SWALLOW_PHRASE = "reading recognized texts failed"
+_LOG_RECORDS: list[str] = []
+
+
+class _RecordingHandler(_logging.Handler):
+    def emit(self, record: _logging.LogRecord) -> None:
+        try:
+            _LOG_RECORDS.append(f"{record.name}:{record.levelname}:{record.getMessage()}")
+        except Exception:
+            pass
+
+
+def _install_log_capture() -> None:
+    """Attach a recording handler to the root + shrike_kernel loggers (once),
+    forcing levels low enough that pyo3-log WARNINGs are delivered."""
+    root = _logging.getLogger()
+    if not any(isinstance(h, _RecordingHandler) for h in root.handlers):
+        h = _RecordingHandler()
+        h.setLevel(_logging.DEBUG)
+        root.addHandler(h)
+    root.setLevel(_logging.DEBUG)
+    _logging.getLogger("shrike_kernel").setLevel(_logging.DEBUG)
+    # pyo3-log caches the level filter on first log; the native side reads the
+    # effective python level. DEBUG here lets the WARNING through regardless.
+
+
+# Install at import so the recording handler is live before ANY sweep runs.
+_install_log_capture()
 
 
 def _capture_650(tag, harness, note_id, *, draft=None, hits=None):
@@ -60,6 +95,15 @@ def _capture_650(tag, harness, note_id, *, draft=None, hits=None):
         snap["hits"] = [
             {"note_id": int(h["note_id"]), "distance": float(h["distance"])} for h in hits
         ]
+    # 4) THE DISCRIMINATOR (#650 lead #2): did the kernel swallow-WARNING fire?
+    swallow = [r for r in _LOG_RECORDS if _SWALLOW_PHRASE in r]
+    snap["swallow_warning_fired"] = bool(swallow)
+    snap["swallow_records"] = swallow[:5]
+    # Any kernel warning/error at all (the Err variant lives here, e.g. a
+    # SQLITE_BUSY vs another db_err).
+    snap["kernel_warns"] = [
+        r for r in _LOG_RECORDS if ":WARNING:" in r or ":ERROR:" in r
+    ][:10]
     line = _json.dumps(snap, sort_keys=True)
     out_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR") or "/tmp"
     try:
