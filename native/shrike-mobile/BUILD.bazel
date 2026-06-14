@@ -127,3 +127,20 @@ rust_test(
         "@crates//:serde_json",
     ],
 )
+
+# The #597 re-init-after-shutdown regression guard: YET another separate test
+# binary (own process — the runtime seam is process-global + terminally undriven
+# after shutdown). Pins the actual OnceLock behaviour: a re-init after shutdown
+# is a no-op false, the flag stays set, and a subsequent op STILL fast-fails
+# (dispatch can't be re-enabled in-process).
+rust_test(
+    name = "reinit_after_shutdown_test",
+    size = "small",
+    srcs = ["tests/reinit_after_shutdown.rs"],
+    crate_features = MOBILE_FEATURES,
+    edition = "2021",
+    deps = [
+        ":shrike_mobile_lib",
+        "@crates//:serde_json",
+    ],
+)

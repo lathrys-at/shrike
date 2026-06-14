@@ -321,11 +321,15 @@ pub extern "C" fn shrike_runtime_init() -> bool {
                 })
                 .expect("the driver thread spawns");
             *DRIVER.lock().expect("driver lock poisoned") = Some(Driver { shutdown, thread });
-            // A freshly installed driver IS driving again: clear any terminal
-            // shutdown flag (a no-op on the common first init; correct if a host
-            // re-inits — though the kernel runtime OnceLock makes a real re-init
-            // rare). Done after publishing the driver so an op can't observe
-            // "not shut down" before the driver exists.
+            // Clear the terminal shutdown flag for this freshly installed driver.
+            // This is a DEFENSIVE no-op given the kernel runtime is a OnceLock: a
+            // second `shrike_runtime_init` finds the runtime already set and
+            // returns `false` BEFORE reaching here, so re-init does NOT re-enable
+            // dispatch in-process — once shut down, the runtime stays terminally
+            // undriven (the documented contract). The store only ever runs on the
+            // FIRST successful init (where the flag is already false), and is
+            // published after the driver so an op can't observe "not shut down"
+            // before the driver exists.
             DRIVER_SHUTDOWN.store(false, std::sync::atomic::Ordering::Release);
             true
         }
@@ -339,10 +343,17 @@ pub extern "C" fn shrike_runtime_init() -> bool {
 /// Stop the `current_thread` driver thread started by [`shrike_runtime_init`]
 /// (teardown). Notifies the park future and joins the driver; a no-op if no
 /// driver is running (the default multi-thread mode, or already shut down).
-/// After this the `current_thread` runtime is no longer driven, so a later
-/// [`shrike_op`] / [`shrike_close`] FAST-FAILS through the callback rather than
-/// hanging on the dead runtime (#597) — but the contract still asks the host to
-/// call this only at teardown, after every op and `shrike_close` has completed.
+/// After this the `current_thread` runtime is no longer driven.
+///
+/// The #597 fix guarantees safety for the **sequential** misuse: once this has
+/// RETURNED, a later [`shrike_op`] / [`shrike_close`] observes the shutdown flag
+/// (Acquire/Release across the join) and FAST-FAILS through the callback rather
+/// than hanging on the dead runtime. It does NOT close the **concurrent** race:
+/// an op issued mid-shutdown (already past the flag check when the driver is
+/// torn down) can still be left undriven — so the contract still asks the host
+/// to call this only at teardown, after every op and `shrike_close` has
+/// completed (the drain-then-shutdown ordering). That residual race is tracked
+/// as #637.
 #[no_mangle]
 pub extern "C" fn shrike_runtime_shutdown() {
     ffi_guard("shrike_runtime_shutdown", (), || {
