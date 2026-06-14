@@ -1369,8 +1369,7 @@ pub fn search_notes(
             );
             let is_budget = matches!(
                 mode,
-                CrossSpaceFusionMode::FloorAdmitBudget
-                    | CrossSpaceFusionMode::SoftFloorAdmitBudget
+                CrossSpaceFusionMode::FloorAdmitBudget | CrossSpaceFusionMode::SoftFloorAdmitBudget
             );
             // The primary text space's best query cosine (the relative gate's
             // reference). The primary's hits are `modality_hits` (this row).
@@ -1476,8 +1475,7 @@ pub fn search_notes(
                     // when its best image cosine clears no floor; an uncalibrated
                     // space (no floor) is admitted. Raw weight 1.0 (the budget
                     // pass divides it down for the budget mode).
-                    CrossSpaceFusionMode::FloorAdmit
-                    | CrossSpaceFusionMode::FloorAdmitBudget => {
+                    CrossSpaceFusionMode::FloorAdmit | CrossSpaceFusionMode::FloorAdmitBudget => {
                         match (image_best, space.image_floor) {
                             (Some(b), Some(floor)) if b <= floor => None,
                             _ => Some(1.0),
@@ -2419,6 +2417,337 @@ mod search_tests {
                 .iter()
                 .any(|m| m.note.id == off_topic_image),
             "the off-topic image stays out (relative gate closed, floor did not re-open it)"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ── #580 floor-based admission (drop the relative gate) ──────────────────
+    //
+    // These pin the floor-admission mechanics against `search_notes` DIRECTLY.
+    // The win they prove: a strong on-topic CLIP hit reaches RRF even when the
+    // text space "won" (the relative gate would close it) — corroboration, not
+    // winner-take-all. The guard they prove: the absolute floor still rejects a
+    // genuinely-weak (spurious-filename) image. The multiplicity tension they
+    // measure: FloorAdmit alone floods the N≥2 negative control (the rationale
+    // for the "no two image spaces" config assertion); the budget holds it.
+
+    #[test]
+    fn floor_admit_corroborates_when_text_wins() {
+        // THE #580 WIN — the filename-collision case at the unit level. A text
+        // query whose answer is in a card's image, where the card's FILENAME
+        // also lexically wins the primary text space (so the relative gate would
+        // shut CLIP out). Here the primary text matches the image card STRONGLY
+        // (cos 0.95 — the "filename won" proxy) while the vision space's image
+        // best (0.85) is BELOW it → the relative gate CLOSES. But 0.85 clears the
+        // floor (0.50), so floor-admission ADMITS the CLIP hit: the card carries
+        // its `image#clip` provenance (the corroborating vote the relative gate
+        // discarded).
+        let (dir, core) = temp_collection();
+        let image_card = add_note(&core, "card whose answer is in heart.png", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        // Primary text wins on the filename token (cos 0.95).
+        index
+            .add("text", &[image_card], &[at_distance(0.05)])
+            .unwrap();
+
+        // BASELINE — RelativeFloor (production): vision 0.85 < text 0.95 → the
+        // relative gate CLOSES, so no `image#clip` reaches the card.
+        let mut rel = cross_args(10);
+        rel.cross_space_fusion_mode = CrossSpaceFusionMode::RelativeFloor;
+        rel.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_card],
+            &[0.15],
+            Some(0.5),
+        )]; // cos 0.85
+        let baseline = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("a labelled diagram of the human heart")],
+            &[vec![1.0, 0.0]],
+            &rel,
+        )
+        .unwrap();
+        let rel_match = baseline[0]
+            .matches
+            .iter()
+            .find(|m| m.note.id == image_card)
+            .expect("the card still surfaces via its text/filename hit");
+        assert!(
+            !rel_match.provenance.iter().any(|p| p.signal == "image#clip"),
+            "RelativeFloor BASELINE: the relative gate (vision 0.85 < text 0.95) discards the CLIP vote"
+        );
+
+        // FLOOR-ADMIT: same inputs, the relative gate dropped. 0.85 > floor 0.50
+        // → CLIP is admitted; the card now carries `image#clip` provenance.
+        let mut fa = rel.clone();
+        fa.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmit;
+        let admitted = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("a labelled diagram of the human heart")],
+            &[vec![1.0, 0.0]],
+            &fa,
+        )
+        .unwrap();
+        let fa_match = admitted[0]
+            .matches
+            .iter()
+            .find(|m| m.note.id == image_card)
+            .expect("the card is present");
+        assert!(
+            fa_match.provenance.iter().any(|p| p.signal == "image#clip"),
+            "FloorAdmit: the on-topic CLIP hit corroborates the card even though text won"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn floor_admit_rejects_spurious_filename_image() {
+        // THE #580 PRECISION GUARD — the homonym/lying-filename case at the unit
+        // level. A card's filename lexically wins the text space, but its IMAGE
+        // is OFF-TOPIC for the query, so the vision space's image best (0.30)
+        // falls BELOW the floor (0.50). Floor-admission must REJECT the CLIP hit:
+        // the card may still surface via its filename text hit, but it carries NO
+        // `image#clip` (the floor is the SOLE discriminator now that the relative
+        // gate is gone — this is the load-bearing test for the thesis).
+        let (dir, core) = temp_collection();
+        let lying_card = add_note(&core, "card with jaguar.png but the image is a car", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add("text", &[lying_card], &[at_distance(0.05)])
+            .unwrap(); // text wins on "jaguar"
+
+        let mut fa = cross_args(10);
+        fa.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmit;
+        // The image is off-topic for "the spotted big cat" → cos 0.30 < floor.
+        fa.cross_space = vec![vision_space_floored(
+            "clip",
+            &[lying_card],
+            &[0.70],
+            Some(0.5),
+        )];
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("a jaguar, the spotted big cat")],
+            &[vec![1.0, 0.0]],
+            &fa,
+        )
+        .unwrap();
+        let m = groups[0]
+            .matches
+            .iter()
+            .find(|m| m.note.id == lying_card)
+            .expect("the card surfaces via its filename text hit");
+        assert!(
+            !m.provenance.iter().any(|p| p.signal == "image#clip"),
+            "FloorAdmit: the floor REJECTS the off-topic image (cos 0.30 ≤ floor 0.50) — \
+             the lying filename does not summon a spurious CLIP vote"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn floor_admit_keeps_the_over_return_leak_closed() {
+        // The #576 over-return leak must STAY closed under floor-admission: an
+        // ∅-gold query, empty primary, one weak off-topic image (cos 0.20 < floor
+        // 0.50). With no relative gate the floor is the only guard — and it holds
+        // (0.20 ≤ 0.50 → dropped). Same outcome as RelativeFloor, different path.
+        let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
+        let mut a = cross_args(10);
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_note],
+            &[0.80],
+            Some(0.5),
+        )]; // cos 0.20
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmit;
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("purple elephant playing chess")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        assert!(
+            !groups[0].matches.iter().any(|m| m.note.id == image_note),
+            "FloorAdmit closes the over-return leak: cos 0.20 ≤ floor 0.50 → dropped"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn floor_admit_alone_floods_n2_but_budget_holds_it() {
+        // THE MEASURED RATIONALE for the "no two image spaces" config assertion
+        // (#580). The N=2 negative control's protection came ENTIRELY from the
+        // relative gate (see `floor_holds_the_negative_control_at_n2`): both
+        // off-topic spaces clear their floor, so dropping the relative gate lets
+        // them flood. FloorAdmit (no budget) REGRESSES text R@1; FloorAdmitBudget
+        // (B=1.0 split 0.5/0.5) restores it. In production this scenario is
+        // IMPOSSIBLE (only one image space exists), so the budget is moot there —
+        // this test documents WHY the relative gate can be dropped: not because
+        // floor-admission handles N≥2, but because N≥2 image spaces never occur.
+        let (dir, core) = temp_collection();
+        let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
+        let off_topic_image = add_note(&core, "an off-topic but confident diagram", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add("text", &[text_target], &[at_distance(0.2)])
+            .unwrap(); // text cos 0.80
+                       // Two intra-modally-confident but off-topic spaces (image best 0.70 >
+                       // floor 0.50) — exactly the shape the relative gate used to close.
+        let spaces = vec![
+            vision_space_floored("clip-a", &[off_topic_image], &[0.30], Some(0.5)), // cos 0.70
+            vision_space_floored("clip-b", &[off_topic_image], &[0.30], Some(0.5)),
+        ];
+
+        // FloorAdmit (no budget): both spaces clear the floor and flood — the
+        // off-topic image accumulates 2× RRF mass and out-fuses the text target.
+        let mut flood = cross_args(10);
+        flood.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmit;
+        flood.cross_space = spaces.clone();
+        let flooded = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("krebs cycle energy metabolism")],
+            &[vec![1.0, 0.0]],
+            &flood,
+        )
+        .unwrap();
+        assert_eq!(
+            flooded[0].matches[0].note.id, off_topic_image,
+            "FloorAdmit (no budget) floods at N=2: the off-topic image out-fuses the text target"
+        );
+
+        // FloorAdmitBudget (B=1.0): the two spaces share the budget (0.5 each),
+        // so their combined RRF mass cannot out-fuse the full-weight text signal
+        // → the text target is restored to rank-1.
+        let mut budgeted = flood.clone();
+        budgeted.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmitBudget;
+        budgeted.cross_space_budget = 1.0;
+        let held = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("krebs cycle energy metabolism")],
+            &[vec![1.0, 0.0]],
+            &budgeted,
+        )
+        .unwrap();
+        assert_eq!(
+            held[0].matches[0].note.id, text_target,
+            "FloorAdmitBudget holds the N=2 negative control: the split budget can't out-fuse text"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn floor_admit_n1_unaffected_by_budget() {
+        // The production-common case: a SINGLE image space. The budget must not
+        // penalize it — N=1 keeps full weight under FloorAdmitBudget (the budget
+        // only divides when N≥2). The on-topic CLIP hit corroborates at full
+        // strength exactly like FloorAdmit.
+        let (dir, core) = temp_collection();
+        let weak_text = add_note(&core, "a loosely related text card", "text");
+        let image_note = add_note(&core, "card whose answer is only in the picture", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add("text", &[weak_text], &[at_distance(0.45)])
+            .unwrap();
+
+        let mut a = cross_args(10);
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmitBudget;
+        a.cross_space_budget = 1.0;
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_note],
+            &[0.08],
+            Some(0.5),
+        )]; // cos 0.92
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("the content shown in the diagram")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        let m = groups[0]
+            .matches
+            .iter()
+            .find(|m| m.note.id == image_note)
+            .expect("the single image space surfaces the image-only card");
+        assert!(
+            m.provenance.iter().any(|p| p.signal == "image#clip"),
+            "N=1 FloorAdmitBudget: the lone image space keeps full weight (no budget penalty)"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn soft_floor_admit_tapers_near_floor() {
+        // SoftFloorAdmit: a borderline-above-floor image (cos 0.55, floor 0.50)
+        // gets a tapered weight `σ((0.55-0.50)/τ)` < 1, while a confident one
+        // (cos 0.92) gets ≈1. Here we assert the confident hit is admitted with
+        // its provenance (the graceful form still corroborates), and a clearly
+        // sub-floor hit (cos 0.20) gets a near-zero weight so it cannot out-rank
+        // a real text card — the soft analogue of the hard floor's drop.
+        let (dir, core) = temp_collection();
+        let weak_text = add_note(&core, "a loosely related text card", "text");
+        let image_note = add_note(&core, "card whose answer is only in the picture", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add("text", &[weak_text], &[at_distance(0.45)])
+            .unwrap();
+
+        let mut a = cross_args(10);
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::SoftFloorAdmit;
+        a.cross_space_tau = 0.05;
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_note],
+            &[0.08],
+            Some(0.5),
+        )]; // cos 0.92
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("the content shown in the diagram")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        let m = groups[0]
+            .matches
+            .iter()
+            .find(|m| m.note.id == image_note)
+            .expect("SoftFloorAdmit admits the confident image hit");
+        assert!(
+            m.provenance.iter().any(|p| p.signal == "image#clip"),
+            "SoftFloorAdmit: a confident hit (cos 0.92 ≫ floor) corroborates at ≈full weight"
         );
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
