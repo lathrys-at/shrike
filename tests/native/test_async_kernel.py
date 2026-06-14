@@ -167,8 +167,10 @@ class TestAsyncKernel:
             # Watermarks advanced: no drift after the kernel's own writes.
             assert not await kernel.reindex_if_needed()
 
-            # Delete propagates to vectors too.
-            assert await kernel.delete_notes([results[0][1]]) == 1
+            # Delete propagates to vectors too. The maintained op (#604) returns
+            # {deleted, not_found} JSON in its single write job.
+            deleted = json.loads(await kernel.delete_notes([results[0][1]]))
+            assert deleted == {"deleted": [results[0][1]], "not_found": []}
             assert sorted(engine.keys()) == sorted(created[1:])
             assert not await kernel.reindex_if_needed()
 

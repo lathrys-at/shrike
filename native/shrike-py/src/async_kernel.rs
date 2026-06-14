@@ -460,14 +460,24 @@ impl AsyncKernel {
         })
     }
 
-    /// Delete notes; vectors, fingerprints, and derived rows go with them.
+    /// Delete notes in ONE maintained op (#604): the existence partition, the
+    /// anki delete, and the sidecar drop (vectors/fingerprints/derived rows)
+    /// run as a single kernel op. Returns `{"deleted": [...], "not_found": [...]}`
+    /// JSON (the marshaling convention — parsed once on the Python side), so the
+    /// action no longer needs a separate `wrapper.delete_notes` existence
+    /// pre-check + `forget_notes` round trip.
     fn delete_notes<'py>(
         &self,
         py: Python<'py>,
         note_ids: Vec<i64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        kernel_op(py, async move { kernel.delete_notes(note_ids).await })
+        kernel_op(py, async move {
+            let response = kernel.delete_notes(note_ids).await?;
+            serde_json::to_string(&response).map_err(|e| {
+                shrike_ffi::NativeError::internal(format!("serializing delete response: {e}"))
+            })
+        })
     }
 
     // ── media + maintenance ops (#391 re-home) ──────────────────────────────

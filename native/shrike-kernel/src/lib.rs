@@ -1501,24 +1501,84 @@ impl Kernel {
         // all-gated window converges instead of re-taking itself forever.
         // `raw` is the pre-enumerated (note_id, names) set shared across
         // same-kind purposes (#445): the pending diff needs only the names.
-        let mut done: std::collections::HashSet<(i64, String)> =
-            self.derived.refs_for_source(source)?.into_iter().collect();
-        done.extend(self.derived.gated_refs_for_source(source)?);
+        //
+        // Done-set keyed `note_id -> {name}` (#601): the per-pair probe no
+        // longer clones the name for a `(i64, String)` lookup — it borrows
+        // `name` against the note's set. Built ONCE here, then this call DRAINS
+        // the whole pending set in bounded chunks below, so the O(collection)
+        // enumeration + done-load is paid once per drain, not once per batch
+        // (the harness loops `recognize_pending` until `remaining == 0`; a
+        // per-batch re-enumeration was ~O(image-notes × backlog/batch)).
+        let mut done: std::collections::HashMap<i64, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        for (nid, name) in self
+            .derived
+            .refs_for_source(source)?
+            .into_iter()
+            .chain(self.derived.gated_refs_for_source(source)?)
+        {
+            done.entry(nid).or_default().insert(name);
+        }
         let mut pending: Vec<(i64, String)> = Vec::new();
         for (note_id, names) in raw {
+            let note_done = done.get(note_id);
             for name in names {
-                if !done.contains(&(*note_id, name.clone())) && svc.resolver.exists(name) {
+                let already = note_done.is_some_and(|s| s.contains(name));
+                if !already && svc.resolver.exists(name) {
                     pending.push((*note_id, name.clone()));
                 }
             }
         }
-        let total_pending = pending.len();
-        pending.truncate(max_items);
         if pending.is_empty() {
             self.derived.meta_set(fingerprint_key, &fingerprint)?;
             return Ok(recognize::SweepReport::Idle);
         }
 
+        // Drain the whole pending set in bounded chunks within THIS call (#601):
+        // each chunk dispatches at most `max_items` to the recognizer (the
+        // load-bearing bounded-batch property — a chunk parks one blocking-pool
+        // thread; the slow-recognition permit still bounds concurrency), and we
+        // `.await` between chunks so collection ops interleave exactly as the
+        // old per-`recognize_pending`-call yield did. A chunk that recognizes
+        // NOTHING (an unreadable prefix of the pending order) stops the drain —
+        // the same no-progress halt the harness applied between calls, now
+        // applied between chunks; the leftover stays pending and a later sweep
+        // trigger retries. A chunk `Err` (down endpoint) propagates and aborts
+        // the drain before that chunk's persist, leaving its backlog pending.
+        let total_pending = pending.len();
+        let mut total_recognized = 0usize;
+        let mut total_stored = 0usize;
+        let mut drained = 0usize;
+        for chunk in pending.chunks(max_items.max(1)) {
+            let (recognized, stored) = self.recognize_chunk(&svc, purpose, source, chunk).await?;
+            total_recognized += recognized;
+            total_stored += stored;
+            drained += chunk.len();
+            if recognized == 0 {
+                break; // no-progress: an unreadable prefix; retry next sweep.
+            }
+        }
+        self.derived.meta_set(fingerprint_key, &fingerprint)?;
+        Ok(recognize::SweepReport::Ran {
+            recognized: total_recognized,
+            stored: total_stored,
+            remaining: total_pending.saturating_sub(drained),
+        })
+    }
+
+    /// Recognize + persist ONE bounded chunk of pending `(note_id, name)` pairs
+    /// for a purpose (#601, the inner step of the drain loop). Returns
+    /// `(recognized, stored)`. A recognizer `Err` propagates BEFORE any persist
+    /// (the down-endpoint contract); the fingerprint meta is advanced by the
+    /// caller once the drain completes.
+    #[allow(clippy::type_complexity)]
+    async fn recognize_chunk(
+        &self,
+        svc: &RecognizeService,
+        purpose: recognize::RecognitionPurpose,
+        source: &str,
+        pending: &[(i64, String)],
+    ) -> NativeResult<(usize, usize)> {
         // One pass, many consumers: recognize the batch, keep text AND
         // segments. A read that fails after the exists() check (TOCTOU
         // delete, transient error, resolver bug) SKIPS the item rather than
@@ -1527,7 +1587,7 @@ impl Kernel {
         // the recognizer's output stays aligned with what was actually sent.
         let mut sent: Vec<(i64, String)> = Vec::with_capacity(pending.len());
         let mut items: Vec<MediaItem> = Vec::with_capacity(pending.len());
-        for (note_id, name) in &pending {
+        for (note_id, name) in pending {
             match svc.resolver.read(name) {
                 Some(bytes) => {
                     items.push(MediaItem::from_named(name, bytes));
@@ -1642,7 +1702,9 @@ impl Kernel {
             self.derived.put_segments(*note_id, source, name, json)?;
         }
         self.derived.mark_gated(source, &gated)?;
-        self.derived.meta_set(fingerprint_key, &fingerprint)?;
+        // NB the fingerprint meta is advanced by the DRAIN CALLER once the whole
+        // drain completes (#601) — not here per chunk — so a mid-drain abort
+        // never marks this purpose's recognition as up-to-date.
 
         // Re-embed the affected notes: their hash now folds the recognized
         // text, so this mints the vectors and the next reconcile sees them
@@ -1653,17 +1715,10 @@ impl Kernel {
         }
 
         // `recognized` counts what was actually sent. A skipped (unreadable)
-        // item stores nothing, so it STAYS PENDING and the next call re-takes
-        // the same window — with an unreadable prefix of the pending order
-        // and more items beyond it, `remaining` stays > 0 indefinitely. The
-        // kernel does not terminate that loop; the HARNESS's driver stops on
-        // a no-progress batch (`recognized == 0`) and the next sweep trigger
-        // (boot, /reload, cooperative re-acquire) retries the read.
-        Ok(recognize::SweepReport::Ran {
-            recognized: sent.len(),
-            stored: stored_count,
-            remaining: total_pending.saturating_sub(pending.len()),
-        })
+        // item stores nothing, so it STAYS PENDING; the drain loop stops on a
+        // chunk that recognized nothing (an unreadable prefix), and a later
+        // sweep trigger (boot, /reload, cooperative re-acquire) retries the read.
+        Ok((sent.len(), stored_count))
     }
 
     /// `(note_id, media_names)` for every note referencing media of `kind` —
@@ -2133,23 +2188,64 @@ impl Kernel {
         Ok(())
     }
 
-    pub async fn delete_notes(&self, note_ids: Vec<i64>) -> NativeResult<usize> {
+    /// Delete notes and drop their sidecars in ONE maintained op (#604): the
+    /// existence partition (`deleted`/`not_found`), the anki delete, and the
+    /// `col.mod`+watermark capture all run in the SAME collection write job,
+    /// then the shared sidecar tail drops vectors/derived rows. This is the op
+    /// the MCP `delete_notes` action rides — it replaces the host's old
+    /// `wrapper.delete_notes` (its own `nid:` existence pre-check, a separate
+    /// round trip) + separate `kernel.forget_notes` (the sidecar tail, two more
+    /// round trips) with one write job + the tail. Returns `{deleted,
+    /// not_found}`: a requested id that no longer exists is `not_found`, never
+    /// silently counted as deleted.
+    pub async fn delete_notes(
+        &self,
+        note_ids: Vec<i64>,
+    ) -> NativeResult<shrike_schemas::DeleteNotesResponse> {
         let ids = note_ids.clone();
-        // Read `col.mod` AND register the watermark token in the SAME job as the
-        // delete (#585), so the actor's FIFO orders registration with the write
-        // (closing the post-await-continuation race) and the watermark advances
-        // only to the value this op's OWN delete produced.
+        // Existence partition + delete + `col.mod`/watermark capture in ONE job
+        // (#604 single-op; #585 in-job register so the actor's FIFO orders
+        // registration with the write). The `nid:` find scopes the existence
+        // check to the requested ids (no full scan) — same partition the host's
+        // wrapper.delete_notes computed, now without the extra round trip.
         let watermarks = Arc::clone(&self.watermarks);
-        let (removed, tokens) = self
+        let (deleted, tokens) = self
             .collection
             .run(move |core| -> NativeResult<_> {
-                let removed = core.delete_notes(&ids)?;
+                let existing: std::collections::HashSet<i64> = if ids.is_empty() {
+                    std::collections::HashSet::new()
+                } else {
+                    let nid = ids
+                        .iter()
+                        .map(|i| i.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    core.find_notes(&format!("nid:{nid}"))?
+                        .into_iter()
+                        .collect()
+                };
+                let deleted: Vec<i64> = ids
+                    .iter()
+                    .copied()
+                    .filter(|i| existing.contains(i))
+                    .collect();
+                if !deleted.is_empty() {
+                    core.delete_notes(&deleted)?;
+                }
                 let tokens = watermarks.register(core.col_mod()?);
-                Ok((removed, tokens))
+                Ok((deleted, tokens))
             })
             .await??;
-        self.drop_note_sidecars(&note_ids, tokens).await?;
-        Ok(removed)
+        let not_found: Vec<i64> = note_ids
+            .iter()
+            .copied()
+            .filter(|i| !deleted.contains(i))
+            .collect();
+        // Sidecar tail over exactly the notes that were deleted (#382): drop
+        // their vectors + derived rows, advance the watermarks. Best-effort —
+        // a failed sidecar leaves the watermark behind so next-boot drift heals.
+        self.drop_note_sidecars(&deleted, tokens).await?;
+        Ok(shrike_schemas::DeleteNotesResponse { deleted, not_found })
     }
 
     /// Import an `.apkg`/`.colpkg` package, then bring the index in line (#72).
@@ -3433,7 +3529,10 @@ mod no_cpython_smoke {
             );
 
             // Delete → both spaces drop the note (remove_all fans out).
-            assert_eq!(kernel.delete_notes(vec![nid]).await.unwrap(), 1);
+            assert_eq!(
+                kernel.delete_notes(vec![nid]).await.unwrap().deleted,
+                vec![nid]
+            );
             assert!(
                 !kernel.index().engine().contains(nid),
                 "gone from text space"
@@ -3444,6 +3543,75 @@ mod no_cpython_smoke {
             );
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(&dir).ok();
+        });
+    }
+
+    #[test]
+    fn delete_notes_partitions_deleted_and_not_found_in_one_op() {
+        // #604: the maintained kernel delete_notes returns {deleted, not_found}
+        // in its single write job (existence partition + delete + sidecar drop),
+        // so the action routes through it instead of wrapper.delete_notes +
+        // a separate forget_notes. A requested id that doesn't exist is
+        // not_found (never silently counted deleted), and a real id's vectors +
+        // derived rows leave in the same op.
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+            let CreateOutcome::Created(nid) = kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["mitochondria powerhouse".into(), "b".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("create failed")
+            };
+            assert!(kernel.index().engine().contains(nid), "indexed");
+            // Lexical row exists too (derived store ingested on upsert).
+            assert!(!kernel
+                .derived
+                .search_substring("mitochondria", 5, None, &[])
+                .unwrap()
+                .unwrap()
+                .is_empty());
+
+            // Delete a mix: the real id + a bogus one. ONE op partitions them.
+            let bogus = nid + 99_999;
+            let resp = kernel.delete_notes(vec![nid, bogus]).await.unwrap();
+            assert_eq!(resp.deleted, vec![nid], "the real id is deleted");
+            assert_eq!(resp.not_found, vec![bogus], "the bogus id is not_found");
+
+            // Sidecars dropped in the SAME op — no separate forget_notes needed.
+            assert!(
+                !kernel.index().engine().contains(nid),
+                "vector dropped in the maintained op"
+            );
+            assert!(
+                kernel
+                    .derived
+                    .search_substring("mitochondria", 5, None, &[])
+                    .unwrap()
+                    .unwrap()
+                    .is_empty(),
+                "derived row dropped in the maintained op"
+            );
+            // No drift: the watermark advanced in-op (the maintained-write tail).
+            assert!(!kernel.reindex_if_needed().await.unwrap());
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -4375,6 +4543,70 @@ mod no_cpython_smoke {
     }
 
     #[test]
+    fn one_sweep_call_drains_a_multi_chunk_backlog_enumerating_once() {
+        // #601: a single recognize_pending(batch) call DRAINS the whole pending
+        // backlog in internal bounded chunks — so the O(collection) image-ref
+        // enumeration + done-set load is paid ONCE per drain, not once per
+        // batch. With 5 pending images and batch=2 the drain runs 3 internal
+        // chunks (2+2+1) but ONE enumeration; the call returns
+        // recognized=5/remaining=0. PRE-#601 the same call processed only the
+        // first 2 (remaining=3) and the harness re-entered — re-enumerating the
+        // whole collection each time (~O(image-notes × backlog/batch)).
+        crate::runtime::block_on(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            kernel.reindex_if_needed().await.unwrap();
+
+            // 5 notes, each referencing one distinct image.
+            let mut media = std::collections::HashMap::new();
+            let notes: Vec<serde_json::Value> = (0..5)
+                .map(|i| {
+                    let name = format!("img{i}.png");
+                    media.insert(name.clone(), format!("recognized text {i}").into_bytes());
+                    serde_json::json!({"note_type": "Basic", "deck": "Default",
+                        "fields": {"Front": format!("see <img src=\"{name}\">"), "Back": "b"}})
+                })
+                .collect();
+            upsert_wire(
+                &kernel,
+                serde_json::json!(notes).to_string(),
+                "error".to_string(),
+                false,
+            )
+            .await;
+
+            kernel.attach_recognizer(Arc::new(StubRecognizer), Arc::new(MapResolver::new(media)));
+
+            // ONE call, batch=2 < 5 pending → the internal drain processes all
+            // five and reports nothing remaining.
+            let report = kernel.recognize_pending(2).await.unwrap();
+            assert_eq!(
+                report,
+                recognize::SweepReport::Ran {
+                    recognized: 5,
+                    stored: 5,
+                    remaining: 0,
+                },
+                "one call must drain the whole backlog (enumerate once), not just one batch"
+            );
+            // A second call is Idle — everything is done.
+            assert_eq!(
+                kernel.recognize_pending(2).await.unwrap(),
+                recognize::SweepReport::Idle
+            );
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
     fn recognition_skips_unreadable_media_and_keeps_it_pending() {
         // #386: exists() says present but read() returns None (TOCTOU
         // delete, transient error) — the item must be SKIPPED, never
@@ -4515,10 +4747,12 @@ mod no_cpython_smoke {
             }
             kernel.attach_recognizer(Arc::new(StubRecognizer), resolver.clone());
 
-            // The batch window covers only the unreadable prefix: nothing is
-            // sent, nothing stored, and the readable tail stays beyond the
-            // window — the exact shape a driver must stop on, since the next
-            // call would re-take the identical window.
+            // The FIRST drain chunk covers only the unreadable prefix [u1,u2]:
+            // nothing is sent, nothing stored, so the internal drain STOPS on
+            // that no-progress chunk (#601 — the same halt the harness used to
+            // apply between calls, now applied between chunks) and the readable
+            // `ok.png` tail stays pending. The next call would re-take the
+            // identical prefix, so the report signals no progress.
             let report = kernel.recognize_pending(2).await.unwrap();
             assert_eq!(
                 report,
@@ -4533,26 +4767,19 @@ mod no_cpython_smoke {
             let again = kernel.recognize_pending(2).await.unwrap();
             assert_eq!(again, report);
 
-            // Healed reads drain normally across batches, then go idle.
+            // Healed reads: ONE call now drains the WHOLE backlog (#601) — the
+            // [u1,u2] chunk (now readable) AND the `ok.png` chunk — instead of
+            // one batch per call. recognized=3, nothing remaining.
             resolver.unreadable.lock().unwrap().clear();
             let healed = kernel.recognize_pending(2).await.unwrap();
             assert_eq!(
                 healed,
                 recognize::SweepReport::Ran {
-                    recognized: 2,
-                    stored: 2,
-                    remaining: 1
+                    recognized: 3,
+                    stored: 3,
+                    remaining: 0
                 }
             );
-            let tail = kernel.recognize_pending(2).await.unwrap();
-            assert!(matches!(
-                tail,
-                recognize::SweepReport::Ran {
-                    recognized: 1,
-                    remaining: 0,
-                    ..
-                }
-            ));
             let idle = kernel.recognize_pending(2).await.unwrap();
             assert_eq!(idle, recognize::SweepReport::Idle);
 
@@ -4725,30 +4952,23 @@ mod no_cpython_smoke {
             let recognizer = Arc::new(CountingRecognizer::new("stub:v1"));
             kernel.attach_recognizer(recognizer.clone(), Arc::new(MapResolver::new(media)));
 
-            // Window 1: all recognized, all gated — real work (recognized > 0,
-            // so the driver keeps going), and the window is now done.
+            // ONE drain (#601): chunk [t1,t2] then chunk [t3] — each recognizes
+            // (recognized > 0, so the drain does NOT stop on a no-progress halt)
+            // but all gate out (stored=0). Markers make each item DONE, so the
+            // chunks ADVANCE rather than re-taking the same window forever (the
+            // #416 convergence), and the whole gated backlog drains in this call.
             let first = kernel.recognize_pending(2).await.unwrap();
             assert_eq!(
                 first,
                 recognize::SweepReport::Ran {
-                    recognized: 2,
+                    recognized: 3,
                     stored: 0,
-                    remaining: 1
+                    remaining: 0
                 }
             );
 
-            // Window 2 ADVANCES past the marked items and drains the tail.
-            let second = kernel.recognize_pending(2).await.unwrap();
-            assert!(matches!(
-                second,
-                recognize::SweepReport::Ran {
-                    recognized: 1,
-                    remaining: 0,
-                    ..
-                }
-            ));
-
-            // Convergence: idle, with each item judged exactly once.
+            // Convergence: idle, with each item judged exactly once (markers
+            // make the gated items DONE — never re-recognized).
             let idle = kernel.recognize_pending(2).await.unwrap();
             assert_eq!(idle, recognize::SweepReport::Idle);
             assert_eq!(
@@ -5562,7 +5782,10 @@ mod no_cpython_smoke {
         assert!(fuzzy_hits.iter().any(|h| h.note_id == mito));
 
         // Delete propagates to every store.
-        assert_eq!(kernel.delete_notes(vec![mito]).await.unwrap(), 1);
+        assert_eq!(
+            kernel.delete_notes(vec![mito]).await.unwrap().deleted,
+            vec![mito]
+        );
         let after = kernel.search("mitochondria powerhouse", 5).await.unwrap();
         assert!(after.iter().all(|h| h.note_id != mito));
 

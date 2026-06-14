@@ -1570,17 +1570,16 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         verify which notes will be deleted."""
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("delete_notes requested=%d", len(ids))
-        result = await wrapper.delete_notes(ids)
+        # ONE maintained kernel op (#604): the existence partition, the anki
+        # delete, and the sidecar drop (vectors + fingerprints + derived rows +
+        # watermark advance) run in a single op. This replaces the old
+        # wrapper.delete_notes (its own `nid:` existence pre-check, a separate
+        # round trip) + a separate kernel.forget_notes (the sidecar tail, two
+        # more) — the maintained-write-path invariant. Best-effort tail is
+        # internal to the op: the notes are gone from the collection either way,
+        # and a failed sidecar leaves the watermark behind for next-boot drift.
+        result = json.loads(await kernel.delete_notes(ids))
         note_outcome(f"{len(result['deleted'])} deleted, {len(result['not_found'])} not found")
-
-        # One maintained kernel op drops vectors + fingerprints + derived
-        # rows and advances the watermarks. Best-effort: the notes are gone
-        # from the collection either way.
-        if result["deleted"]:
-            try:
-                await kernel.forget_notes(result["deleted"])
-            except Exception:
-                logger.warning("Failed to update index after delete", exc_info=True)
         return DeleteNotesResponse.model_validate(result)
 
     @_action

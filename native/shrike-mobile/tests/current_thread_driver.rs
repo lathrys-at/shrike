@@ -138,13 +138,15 @@ fn full_flow_fires_callbacks_under_the_current_thread_driver() {
     assert!(!hits.is_empty(), "lexical search found the note");
     assert_eq!(hits[0][0].as_i64(), Some(nid), "the note is the top hit");
 
-    // delete — count returns to zero.
-    let removed = ok(op(
+    // delete — the maintained op (#604) returns {deleted, not_found}; the note
+    // leaves and the count returns to zero.
+    let deleted = ok(op(
         handle,
         "delete_notes",
         &serde_json::json!({ "note_ids": [nid] }).to_string(),
     ));
-    assert_eq!(removed.as_u64(), Some(1));
+    assert_eq!(deleted["deleted"], serde_json::json!([nid]));
+    assert_eq!(deleted["not_found"], serde_json::json!([]));
     let info = ok(op(handle, "collection_info", "{}"));
     assert_eq!(info.get("note_count").and_then(|v| v.as_i64()), Some(0));
 

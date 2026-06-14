@@ -589,7 +589,8 @@ pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
 /// - `upsert_notes` — `{"notes": [...], "on_duplicate": "error"|..., "dry_run": bool}`;
 ///   result is the `Vec<UpsertNoteResult>` JSON.
 /// - `search` — `{"query": "...", "top_k": N}`; result is `[[note_id, score, [[signal, rank], ...]], ...]`.
-/// - `delete_notes` — `{"note_ids": [...]}`; result is the removed count.
+/// - `delete_notes` — `{"note_ids": [...]}`; result is `{"deleted": [...],
+///   "not_found": [...]}` (#604: the maintained single-op kernel delete).
 /// - `collection_info` — `{}`; result is `{"note_count": N}` (the read the
 ///   smoke verifies; the full info surface grows in a later slice).
 ///
@@ -698,8 +699,11 @@ async fn dispatch(kernel: Arc<Kernel>, action: String, params: String) -> Native
                 note_ids: Vec<i64>,
             }
             let args: Args = parse(&params)?;
-            let removed = kernel.delete_notes(args.note_ids).await?;
-            to_json(&removed)
+            // The maintained kernel op (#604) returns {deleted, not_found} in
+            // its single write job — the same shape the MCP `delete_notes`
+            // action serves. Serialize it through as the result JSON.
+            let response = kernel.delete_notes(args.note_ids).await?;
+            to_json(&response)
         }
         "collection_info" => {
             // The read the smoke verifies: a scoped `note_count` (a COUNT
