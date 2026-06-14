@@ -230,7 +230,18 @@ def create_mcp(
     global so the server is testable and re-usable in-process. ``host``/``port``
     and ``transport_security`` are passed at construction so the MCP endpoint's
     DNS-rebinding protection matches the address actually bound.
+
+    ``transport_security is None`` means "no guard" everywhere else in the host
+    (the custom routes' ``TransportSecurityMiddleware(None)`` leaves protection
+    off). But FastMCP would *silently re-enable* the guard on ``/mcp`` for a
+    loopback host when handed ``None`` (mcp ``fastmcp/server.py`` auto-enables for
+    127.0.0.1/localhost/::1) — so ``--no-dns-rebinding-protection`` would be
+    honored on the custom routes yet ignored on ``/mcp`` (#605). Pass FastMCP an
+    *explicit* protection-disabled settings instead of ``None`` so ``/mcp`` and
+    the custom routes agree: when the guard is off, it is off on both.
     """
+    if transport_security is None:
+        transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
     return FastMCP(
         "Shrike",
         stateless_http=True,
