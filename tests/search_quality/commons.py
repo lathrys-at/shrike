@@ -77,18 +77,29 @@ def resolve_asset(
     term_or_url: str,
     *,
     is_url: bool = False,
+    is_title: bool = False,
     width_hint: int = 640,
 ) -> CommonsAsset:
-    """Resolve a Commons ``search_term`` (or verify a pinned ``url``) to a
-    :class:`CommonsAsset` with licensing metadata.
+    """Resolve a Commons input to a :class:`CommonsAsset` with licensing metadata.
 
-    With ``is_url`` the URL is taken verbatim (the pinned-replay path) and only
-    its file's metadata is looked up; otherwise a search picks the first
-    bitmap/drawing match. PD-first selection is a *human* choice at corpus
-    authoring time — this just records whatever license the chosen file carries
-    so ``ASSETS.md`` is honest.
+    Three modes:
+      - ``is_title`` — ``term_or_url`` is a ``File:Name`` page title; the API
+        returns its CURRENT valid (rate-limit-allowed) thumb/original URL. This
+        is the robust pin for a specific file a fuzzy search can't reliably find
+        (a Commons-renamed thumb path or a thumb-size-restricted file).
+      - ``is_url`` — taken verbatim (the pinned-replay path); only metadata is
+        looked up.
+      - default — a search picks the first bitmap/drawing match.
+
+    PD-first selection is a *human* choice at corpus authoring time — this just
+    records whatever license the chosen file carries so ``ASSETS.md`` is honest.
     """
-    if is_url:
+    if is_title:
+        meta = _file_metadata(term_or_url, width_hint=width_hint)
+        url = meta.get("thumburl") or meta.get("url", "")
+        if not url:
+            raise RuntimeError(f"no Commons file for title {term_or_url!r}")
+    elif is_url:
         title = _title_from_url(term_or_url)
         meta = _file_metadata(title) if title else {}
         url = term_or_url
@@ -144,18 +155,22 @@ def _title_from_url(url: str) -> str | None:
     return f"File:{name}" if name else None
 
 
-def _file_metadata(title: str) -> dict[str, Any]:
+def _file_metadata(title: str, *, width_hint: int | None = None) -> dict[str, Any]:
+    """The imageinfo block for a ``File:Title``. With ``width_hint`` the API also
+    returns a ``thumburl`` at a valid (rate-limit-allowed) size — used by the
+    title-pin path; without it only ``url`` + ``extmetadata`` (the url-verify
+    path, which keeps the verbatim URL)."""
     try:
-        r = _get(
-            COMMONS_API,
-            params={
-                "action": "query",
-                "format": "json",
-                "titles": title,
-                "prop": "imageinfo",
-                "iiprop": "url|extmetadata",
-            },
-        )
+        params: dict[str, Any] = {
+            "action": "query",
+            "format": "json",
+            "titles": title,
+            "prop": "imageinfo",
+            "iiprop": "url|extmetadata",
+        }
+        if width_hint is not None:
+            params["iiurlwidth"] = width_hint
+        r = _get(COMMONS_API, params=params)
         pages = r.json().get("query", {}).get("pages", {})
         for p in pages.values():
             ii = p.get("imageinfo")

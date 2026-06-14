@@ -25,12 +25,18 @@ py_library(
     deps = [requirement("httpx")],
 )
 
-# The in-process harness driver: a real Harness over a throwaway collection +
-# the StubEmbedder, driving the REAL search_notes action. Needs the native
-# extension and the harness, so it's split off the native-free base above.
+# The in-process harness driver + the real-model run engine (#559 PR2b): a real
+# Harness over a throwaway collection driving the REAL search_notes action.
+# Needs the native extension and the harness, so it's split off the native-free
+# base above. ``runner`` also imports ``tests.integration.model_cache`` (the
+# cached CLIP/MiniLM backends) — provided at runtime by the manual suite target's
+# ``:conftest`` dep, so it isn't named here (the unit suite never imports runner).
 py_library(
     name = "inprocess",
-    srcs = ["inprocess.py"],
+    srcs = [
+        "inprocess.py",
+        "runner.py",
+    ],
     imports = ["../.."],
     visibility = ["//tests:__subpackages__"],
     deps = [

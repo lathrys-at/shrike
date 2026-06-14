@@ -1,6 +1,6 @@
 {
   "name": "adversarial-real-corpus",
-  "closed_world": true,
+  "closed_world": false,
   "_about": "Manual real-model adversarial corpus (#559 PR2). Images from Wikimedia Commons, resolved+pinned at build time (resolved_urls.json), bytes downloaded on demand into the gitignored cache. Per-image attribution in ASSETS.md. Never run in CI.",
   "cards": [
     {
