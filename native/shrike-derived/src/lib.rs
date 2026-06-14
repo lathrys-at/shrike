@@ -222,6 +222,17 @@ impl DerivedEngine {
         .ok()
     }
 
+    /// Stamp the derived-store drift watermark.
+    ///
+    /// INVARIANT (#585): set `value` ONLY after the rows for every write up to
+    /// `value`'s `col.mod` are DURABLY COMMITTED to this store. The watermark is
+    /// the sole drift signal (`rebuild_derived` reconciles iff `get_col_mod() !=
+    /// live col.mod`), so stamping it past an un-ingested write certifies that
+    /// write as searchable when it is not — the heal gate then goes quiet and
+    /// the note is permanently invisible to substring/fuzzy. The kernel enforces
+    /// this with its [`crate`]-external watermark tracker: a failed/partial
+    /// ingest, or a value covering a concurrent in-flight write, leaves the
+    /// watermark behind for the next drift to heal — never advances it here.
     pub fn set_col_mod(&self, value: i64) -> NativeResult<()> {
         let conn = self.lock();
         conn.execute(

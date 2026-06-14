@@ -131,13 +131,87 @@ fn port_bindable(host: &str, port: u16) -> bool {
 }
 
 /// Something else holds the port — `EADDRINUSE` specifically, so an
-/// unrelated bind failure (e.g. an unresolvable host) never reads as "held"
-/// and corroborates a kill.
+/// unrelated bind failure (e.g. an unresolvable host) never reads as "held".
+/// Test-only since #594: the reap gate verifies *which PID* owns the port
+/// ([`pid_owns_port`]), never the bare "someone holds it" signal this gave
+/// (that signal, paired with a recycled PID, was what killed bystanders).
+#[cfg(test)]
 fn port_held(host: &str, port: u16) -> bool {
     matches!(
         TcpListener::bind((host, port)),
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse
     )
+}
+
+/// The PIDs currently LISTENing on `port`, or `None` if ownership could not
+/// be established (the query tool is absent or errored). The reap gate treats
+/// `None` as "do not kill" — we never terminate a PID we cannot prove owns
+/// our port, so a recycled PID can't take a bystander down with it.
+///
+/// `lsof`/`netstat` rather than a `/proc`-net + fd-scan: it is the one query
+/// available on both macOS and Linux with no extra crate, and the reap is a
+/// rare pre-spawn step (cost is irrelevant). A bind to all interfaces means
+/// the host part of our address is immaterial to ownership — we match on the
+/// numeric port alone, which is what we are about to bind.
+fn port_owner_pids(port: u16) -> Option<Vec<i64>> {
+    #[cfg(unix)]
+    {
+        // -nP: no name/port resolution (fast, unambiguous); -t: terse, one
+        // PID per line; -sTCP:LISTEN: only the listener, never a transient
+        // client connected TO the port. Exit code is non-zero when nothing
+        // matches, which is a legitimate "no owner" answer, not a failure —
+        // distinguish "ran but found nothing" (Some(empty)) from "could not
+        // run" (None) by whether the command spawned at all.
+        let out = Command::new("lsof")
+            .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let pids = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.trim().parse::<i64>().ok())
+            .collect();
+        Some(pids)
+    }
+    #[cfg(not(unix))]
+    {
+        // `netstat -ano` lists "Proto Local Foreign State PID"; take the PID
+        // of any LISTENING row whose local address ends in `:PORT`. This is
+        // what lets the Windows guard escape the `pid_alive == true` collapse:
+        // ownership is established by the port→PID match, not a port-held OR
+        // a hardcoded-alive signal.
+        let out = Command::new("netstat")
+            .args(["-ano", "-p", "TCP"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let needle = format!(":{port}");
+        let mut pids = Vec::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            // Proto Local-Address Foreign-Address State PID
+            if cols.len() >= 5
+                && cols[0].eq_ignore_ascii_case("TCP")
+                && cols[3].eq_ignore_ascii_case("LISTENING")
+                && cols[1].ends_with(&needle)
+            {
+                if let Ok(pid) = cols[4].parse::<i64>() {
+                    pids.push(pid);
+                }
+            }
+        }
+        Some(pids)
+    }
+}
+
+/// Whether `pid` is provably the (a) process LISTENing on `port`. Returns
+/// false both when some *other* process owns the port (the recycled-PID +
+/// unrelated-holder case) and when ownership cannot be determined at all —
+/// the kill is gated on a positive match, never on an absent signal.
+fn pid_owns_port(pid: i64, port: u16) -> bool {
+    matches!(port_owner_pids(port), Some(owners) if owners.contains(&pid))
 }
 
 /// Poll-wait for a PID to die. This is the kill confirmation: `pid_alive`
@@ -349,10 +423,15 @@ impl LlamaServerManager {
         }
     }
 
-    /// Kill a llama-server left over from a prior unclean shutdown. A
-    /// recorded PID that is still alive *and* holding our port is an orphan;
-    /// both signals are required so a recycled PID can't make us kill an
-    /// unrelated process. Private: it clears the PID file as a side effect,
+    /// Kill a llama-server left over from a prior unclean shutdown. The
+    /// orphan is the recorded PID **only if that PID is itself the process
+    /// LISTENing on our port** — checked with [`pid_owns_port`], not the old
+    /// independent `pid_alive && port_held` pair. That pair could kill an
+    /// unrelated process: a recycled PID (now some other live process) plus
+    /// *any* unrelated holder of our port satisfied both signals without the
+    /// PID ever being the holder. Requiring the PID to own the port closes
+    /// that, and fails safe (no positive ownership → no kill) when ownership
+    /// can't be established. Private: it clears the PID file as a side effect,
     /// so it is strictly a pre-spawn step of [`start`](Self::start) — a host
     /// calling it with a live child would wipe that child's reap record.
     fn reap_orphan(&self) {
@@ -366,7 +445,10 @@ impl LlamaServerManager {
             self.clear_pid_file();
             return;
         };
-        if pid_alive(pid) && port_held(&self.cfg.host, self.cfg.port) {
+        // `pid_owns_port` already implies the PID is alive (it holds a
+        // socket); the cheap `pid_alive` short-circuits the lsof spawn for an
+        // obviously-dead recorded PID.
+        if pid_alive(pid) && pid_owns_port(pid, self.cfg.port) {
             tracing::warn!(
                 "Reaping orphaned llama-server (PID {pid}) holding port {}",
                 self.cfg.port
@@ -739,6 +821,104 @@ mod tests {
         let _ = sleeper.kill();
         let _ = sleeper.wait();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn s12_recycled_pid_with_unrelated_port_holder_is_wrongly_killed() {
+        // #594 (audit S12-1): a recycled PID recorded for reaping, plus an
+        // UNRELATED process holding our port — the old `pid_alive(recorded)
+        // && port_held(ANY holder)` pair killed the bystander because it
+        // never asked whether the recorded PID *is* the holder. The unrelated
+        // process (U) must survive: it does not own our port → not an orphan.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port(); // H holds this port
+
+        let dir = std::env::temp_dir().join(format!("shrike-s12-wrongkill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("embedding.pid");
+        // U: an unrelated live process whose PID landed in our reap record.
+        let mut victim = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        std::fs::write(&pid_file, victim.id().to_string()).unwrap();
+
+        let mut m = manager(&[]);
+        m.cfg.port = port; // reap against the port H holds
+        m.cfg.pid_file = Some(pid_file.clone());
+
+        m.reap_orphan();
+
+        // U must survive (it does not hold our port → not an orphan).
+        let victim_status = victim.try_wait();
+        let _ = victim.kill();
+        let _ = victim.wait();
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(victim_status, Ok(None)),
+            "the recycled-PID unrelated process must survive (it does not hold our port); \
+             got {victim_status:?} — the dual signal killed the wrong process"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_real_orphan_holding_our_port_is_still_reaped() {
+        // The boundary: the fix must not regress the legitimate reap. A
+        // *detached* (reparented-to-init) process that genuinely LISTENs on
+        // our port — a real orphan — and whose PID is recorded must still be
+        // terminated. Detach via `sh -c '... & echo $!'` like
+        // terminate_pid_confirms_death_via_pid_not_port, so the SIGTERM'd
+        // process is reaped by init rather than zombied (a direct child would
+        // linger as a zombie that `kill(pid, 0)` still reports alive).
+        let dir = std::env::temp_dir().join(format!("shrike-s12-orphan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("embedding.pid");
+        // Pick a free port, then hand it to the detached listener.
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let py = format!(
+            "import socket,time;\
+             s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);\
+             s.bind(('127.0.0.1',{port}));s.listen();time.sleep(30)"
+        );
+        let out = Command::new("/bin/sh")
+            .args([
+                "-c",
+                &format!("python3 -c \"{py}\" >/dev/null 2>&1 & echo $!"),
+            ])
+            .output()
+            .unwrap();
+        let pid: i64 = String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::fs::write(&pid_file, pid.to_string()).unwrap();
+
+        // Wait until the orphan is actually LISTENing (it owns the port).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !pid_owns_port(pid, port) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            pid_owns_port(pid, port),
+            "test setup: orphan never bound the port"
+        );
+
+        let mut m = manager(&[]);
+        m.cfg.port = port;
+        m.cfg.pid_file = Some(pid_file.clone());
+        m.reap_orphan();
+
+        // The genuine orphan was terminated and the record cleared.
+        let dead = !pid_alive(pid);
+        if !dead {
+            terminate_raw(pid, true); // belt-and-suspenders cleanup
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(dead, "a real orphan holding our port must still be reaped");
+        assert!(!pid_file.exists(), "the record is cleared after the reap");
     }
 
     #[test]
