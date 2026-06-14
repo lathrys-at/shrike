@@ -1,19 +1,46 @@
 name: Save Bazel caches
 description: >
-  The save half of bazel-setup (#438) — invoked with `if: always()` as the
+  The save half of bazel-setup (#438/#645) — invoked with `if: always()` as the
   LAST step of every Bazel lane, so caches seed even when tests failed. The
-  combined actions/cache action skipped its post-save on job failure, which
-  let a flake-red warm run starve main's scope (every PR then paid the full
-  cold build until a warm happened to go green). Saving on red is exactly
-  right here: the compiled graph and the PASSING test results are valid
-  regardless of which test flaked, and an iterating PR gets warm caches
-  across red→green pushes too. Keys MUST stay byte-identical to bazel-setup's
-  restore keys. Saving an already-existing key (the lock-stable bazel-repo
-  entry between lock bumps) logs a warning and skips — harmless.
+  combined actions/cache action skipped its post-save on job failure, which let
+  a flake-red warm run starve main's scope (every PR then paid the full cold
+  build until a warm happened to go green). Saving on red is exactly right here:
+  the compiled graph and the PASSING test results are valid regardless of which
+  test flaked, and an iterating PR gets warm caches across red→green pushes too.
+  Keys MUST stay byte-identical to bazel-setup's restore keys.
+
+  `save` controls WHICH entries this lane saves (#645):
+    - `all` (the warmer on main, and tag builds on release.yml): saves all three
+      entries. main's scope is the only one every PR can READ, so the warmer is
+      what seeds the big bazel-models + bazel-repo blobs for every PR to restore.
+    - `pr` (the per-PR tests lane): saves ONLY the bazel-disk entry. The big
+      bazel-models + bazel-repo blobs are identical across PRs at a given pin/
+      lock and already live in main's scope; a PR re-saving them stamps a
+      redundant ref-scoped 1.7 GB copy that crowds the 10 GB cache budget and
+      evicts the compiled-crate disk cache (the #645 root cause). PRs keep the
+      disk entry current (their compiled-crate delta + new test results); the
+      blobs they read from main.
+  Saving an already-existing key (a stable bazel-repo/bazel-models entry between
+  pin/lock bumps) logs a warning and skips — harmless.
+inputs:
+  save:
+    description: >
+      `all` to save every entry (the main warmer + tag builds — main's scope is
+      what PRs read from), or `pr` to save only the churning bazel-disk entry
+      (per-PR lanes; the big blobs are read from main, never re-stamped).
+    required: false
+    default: all
 runs:
   using: composite
   steps:
+    - name: Save Bazel embedding-model externals
+      if: ${{ inputs.save == 'all' }}
+      uses: actions/cache/save@v5
+      with:
+        path: ~/.cache/shrike/bazel-repo
+        key: bazel-models-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/llama-server.lock', 'tests/integration/model_cache.py') }}
     - name: Save Bazel toolchains + repo
+      if: ${{ inputs.save == 'all' }}
       uses: actions/cache/save@v5
       with:
         path: |

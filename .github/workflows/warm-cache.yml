@@ -44,6 +44,9 @@ on:
 
 permissions:
   contents: read
+  # actions: write so the prune-disk-cache job can delete superseded
+  # bazel-disk-* entries via `gh cache delete` (#645).
+  actions: write
 
 # A merge burst (a PR stack landing) queues several warms; only the newest
 # matters — each warm is a superset built from the latest main. Cancel the
@@ -124,3 +127,43 @@ jobs:
         env:
           DESCRIPTORS_BIN: ${{ github.workspace }}/native/third_party/anki/anki_descriptors.bin
         run: cd native && cargo build -p shrike-py
+
+  # Prune superseded bazel-disk-* entries (#645). The disk cache is keyed on the
+  # run id (a fresh ~0.5 GB superset every run, by design — it must accumulate
+  # so an unchanged test replays as a hit), so without a cap the entries pile up
+  # and, against the 10 GB per-repo budget, evict each other — including the
+  # freshly-warmed main-scoped one a PR needs to restore. This keeps only the
+  # newest KEEP entries (the warmer's just-saved one + a little slack) and
+  # deletes the rest, so main's scope always carries a restorable disk cache for
+  # PRs. Runs AFTER the warm save (needs: warm-bazel) so it never deletes the
+  # entry that run just created. Deletes are scoped to this repo's own caches;
+  # the bazel-repo/bazel-models entries are key-stable (one per pin/lock) and
+  # left untouched.
+  prune-disk-cache:
+    name: Prune superseded bazel-disk caches
+    needs: warm-bazel
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      KEEP: "2"
+    steps:
+      - name: Delete all but the newest bazel-disk-* entries
+        run: |
+          set -euo pipefail
+          # Newest-first by createdAt; keep the newest $KEEP, delete the rest.
+          # jq sorts by createdAt descending and emits the cache ids to delete.
+          mapfile -t stale < <(
+            gh cache list --repo "$GITHUB_REPOSITORY" --limit 100 \
+              --json key,id,createdAt \
+              --jq "[.[] | select(.key | startswith(\"bazel-disk-\"))]
+                    | sort_by(.createdAt) | reverse | .[($KEEP | tonumber):] | .[].id"
+          )
+          if [ "${#stale[@]}" -eq 0 ]; then
+            echo "No superseded bazel-disk caches to prune."
+            exit 0
+          fi
+          for id in "${stale[@]}"; do
+            echo "Deleting superseded bazel-disk cache id=$id"
+            gh cache delete "$id" --repo "$GITHUB_REPOSITORY" || true
+          done
