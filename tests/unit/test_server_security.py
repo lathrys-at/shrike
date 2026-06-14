@@ -6,6 +6,7 @@ import ipaddress
 import logging
 
 import pytest
+from mcp.server.transport_security import TransportSecurityMiddleware
 
 from shrike.server import (
     _build_transport_security,
@@ -68,6 +69,40 @@ def test_extra_allowed_host_extends_loopback_list() -> None:
         "host.tailnet.ts.net",
     ]
     assert "https://host.tailnet.ts.net" in settings.allowed_origins
+
+
+@pytest.mark.parametrize(
+    ("host", "expected_host", "expected_origin"),
+    [
+        ("127.0.0.2", "127.0.0.2:*", "http://127.0.0.2:*"),
+        ("127.0.0.53", "127.0.0.53:*", "http://127.0.0.53:*"),
+        # An expanded ::1 is still loopback; it canonicalizes to the bracketed
+        # "[::1]:*" form, which the fixed trio already carries — so no duplicate.
+        ("0:0:0:0:0:0:0:1", "[::1]:*", "http://[::1]:*"),
+    ],
+)
+def test_loopback_bind_host_folded_into_allow_list(
+    host: str, expected_host: str, expected_origin: str
+) -> None:
+    # #595: is_loopback accepts ALL of 127/8, so main() accepts a bind like
+    # --host 127.0.0.2 with no --allow-remote. The guard must therefore answer
+    # that bind's own Host header rather than 421 every request (self-brick).
+    settings = _build_transport_security(host)
+    assert settings is not None
+    assert expected_host in settings.allowed_hosts
+    assert expected_origin in settings.allowed_origins
+    # No duplicate entries (an already-fixed literal like [::1]:* isn't re-added).
+    assert settings.allowed_hosts.count(expected_host) == 1
+
+
+def test_non_127_0_0_1_loopback_bind_is_reachable() -> None:
+    # The S1-1 repro, INVERTED to assert the CORRECT behavior: a legitimate client
+    # to a 127.0.0.2 bind must validate (was False → 421 before #595). 127.0.0.1
+    # stays valid too (the fixed loopback literals are not dropped).
+    settings = _build_transport_security("127.0.0.2")
+    mw = TransportSecurityMiddleware(settings)
+    assert mw._validate_host("127.0.0.2:8372") is True
+    assert mw._validate_host("127.0.0.1:8372") is True
 
 
 def test_no_dns_rebinding_protection_disables_guard_on_any_bind() -> None:

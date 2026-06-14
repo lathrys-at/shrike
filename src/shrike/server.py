@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import contextlib
 import functools
+import ipaddress
 import logging
 import os
 import signal
@@ -107,6 +108,29 @@ _LOOPBACK_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 _LOOPBACK_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
 
 
+def _host_header_form(host: str) -> str:
+    """The Host-header spelling of a bind host (IPv6 bracketed), for the allow-list.
+
+    ``is_loopback`` accepts *any* 127/8 address (or an expanded ``::1``), so a bind
+    Shrike happily accepts as loopback (e.g. ``--host 127.0.0.2``) may not be one of
+    the fixed ``_LOOPBACK_HOSTS`` literals. A client then sends ``Host: 127.0.0.2:PORT``
+    and the guard rejects it (HTTP 421) — the server is reachable but answers nothing
+    (#595). Folding the actual bind host into the allow-list closes that self-brick.
+
+    The Host header carries an IPv6 literal in brackets (``Host: [::1]:8372``), so an
+    IPv6 bind host is canonicalized (``ipaddress``) and bracketed; an IPv4 address or a
+    plain name is passed through. The port is wildcarded (``:*``) to match every entry.
+    """
+    bare = host.strip("[]")
+    try:
+        addr = ipaddress.ip_address(bare)
+    except ValueError:
+        return f"{host}:*"  # a name (e.g. "localhost") — pass through verbatim
+    if addr.version == 6:
+        return f"[{addr.compressed}]:*"
+    return f"{addr.compressed}:*"
+
+
 def _positive_int(raw: str) -> int:
     """argparse type: a >= 1 integer (e.g. --embedding-batch-size)."""
     value = int(raw)
@@ -140,7 +164,11 @@ def _build_transport_security(
 
     Otherwise returns settings allow-listing the loopback Host/Origin values (when
     bound to loopback) plus any explicit additions — so a loopback server behind a
-    local proxy can trust the proxy's forwarded hostname without opening up.
+    local proxy can trust the proxy's forwarded hostname without opening up. The
+    *actual* bind host is always folded in too: ``is_loopback`` accepts any 127/8
+    address, so a bind Shrike happily accepts (e.g. ``--host 127.0.0.2``) that isn't
+    one of the fixed loopback literals must still answer its own ``Host`` header
+    rather than self-brick with HTTP 421 (#595).
     """
     extra_hosts = allowed_hosts or []
     extra_origins = allowed_origins or []
@@ -152,6 +180,15 @@ def _build_transport_security(
 
     base_hosts = list(_LOOPBACK_HOSTS) if _is_loopback(host) else []
     base_origins = list(_LOOPBACK_ORIGINS) if _is_loopback(host) else []
+    # Fold the actual loopback bind host into the allow-list when it isn't already a
+    # fixed literal (e.g. 127.0.0.2) — a loopback bind the server accepts must stay
+    # reachable. Non-loopback binds stay fail-closed: only the explicit allow-list
+    # is trusted, never the bind interface itself.
+    if _is_loopback(host):
+        bind_host = _host_header_form(host)
+        if bind_host not in base_hosts:
+            base_hosts.append(bind_host)
+            base_origins.append(f"http://{bind_host}")
     allow_hosts = base_hosts + extra_hosts
     if not allow_hosts:
         # Rebinding protection on with an empty Host allow-list rejects *every*
