@@ -327,4 +327,109 @@ mod tests {
             "derived clean"
         );
     }
+
+    // ── Cross-review guards (#588 peer review): seams that, if they regressed,
+    // would silently re-open the #585 silent-loss bug. Pure tracker-level, like
+    // the rest of this module.
+
+    /// (a') A later SUCCESS cannot jump a poison left by an EARLIER FAILURE. The
+    /// failure here is the *earlier* write (200) and the success arrives *after*
+    /// (300) — the watermark must stay below the un-healed 200 until a reconcile
+    /// clears the floor, or 200's note is lost (watermark would reach 300 ≥ 200).
+    #[test]
+    fn a_later_success_cannot_jump_an_earlier_failures_poison() {
+        let t = WatermarkTracker::default();
+        let mid = t.register(200);
+        assert_eq!(
+            t.complete_index(mid.index, false),
+            None,
+            "200 failed → poison@200"
+        );
+        let later = t.register(300);
+        assert_eq!(
+            t.complete_index(later.index, true),
+            None,
+            "300 must not certify past the un-healed failure at 200"
+        );
+        // Only a full reconcile (re-indexes 200's note) may clear the floor.
+        t.clear_index_poison();
+        let next = t.register(400);
+        assert_eq!(t.complete_index(next.index, true), Some(400));
+    }
+
+    /// (b) A same-`col.mod` FAILURE blocks a peer at the same `col.mod`. Two
+    /// writes share col.mod 100 (a same-millisecond pair); x fails → poison@100;
+    /// y succeeds but its own 100 is `≤` the poison floor of 100, so it must NOT
+    /// advance — otherwise y would certify 100 while x's note (also at 100) is
+    /// un-indexed.
+    #[test]
+    fn a_same_col_mod_failure_blocks_its_peer() {
+        let t = WatermarkTracker::default();
+        let x = t.register(100);
+        let y = t.register(100);
+        assert_eq!(
+            t.complete_index(x.index, false),
+            None,
+            "x failed → poison@100"
+        );
+        assert_eq!(
+            t.complete_index(y.index, true),
+            None,
+            "y's own 100 is ≤ the poison floor 100 — it cannot certify its peer's loss"
+        );
+    }
+
+    /// (c-HARD) `clear_poison` must clear ONLY the poison floor, never drop
+    /// in-flight writes. If a reconcile fires while an earlier write is still in
+    /// flight, clearing the poison must not also forget that write — a later
+    /// success must stay BLOCKED by the still-in-flight earlier write (not by
+    /// poison). This is the exact regression that would re-open the bug if
+    /// `clear_poison` ever touched `in_flight`.
+    #[test]
+    fn clear_poison_does_not_drop_in_flight_writes() {
+        let t = WatermarkTracker::default();
+        let early = t.register(100); // E: in flight, never completed
+        let high = t.register(200); // H: completes after the clear
+                                    // A reconcile clears the poison floor mid-flight (E is still pending).
+        t.clear_index_poison();
+        assert_eq!(
+            t.complete_index(high.index, true),
+            None,
+            "H must stay blocked by the still-in-flight E@100, NOT by poison — \
+             clear_poison must not have dropped E"
+        );
+        // Sanity: once E completes, nothing earlier remains → it advances.
+        assert_eq!(t.complete_index(early.index, true), Some(100));
+    }
+
+    /// (d) On a FAILURE, the index and derived sides move independently: an
+    /// index failure poisons only index; the same op's derived side still
+    /// advances; and a LATER write advances derived but not (still-poisoned)
+    /// index.
+    #[test]
+    fn a_failure_keeps_index_and_derived_independent() {
+        let t = WatermarkTracker::default();
+        let a = t.register(100);
+        assert_eq!(
+            t.complete_index(a.index, false),
+            None,
+            "index failed → poison@100"
+        );
+        assert_eq!(
+            t.complete_derived(a.derived, true),
+            Some(100),
+            "derived side is unaffected by the index failure"
+        );
+        let b = t.register(200);
+        assert_eq!(
+            t.complete_index(b.index, true),
+            None,
+            "later index still blocked by the index poison@100"
+        );
+        assert_eq!(
+            t.complete_derived(b.derived, true),
+            Some(200),
+            "later derived advances — derived was never poisoned"
+        );
+    }
 }
