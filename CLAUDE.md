@@ -130,12 +130,19 @@ docs/
 ## Development setup
 
 ```bash
-python -m venv .venv
+scripts/dev-setup.sh        # creates .venv, installs ".[dev]", builds the native extension
 source .venv/bin/activate
-pip install -e ".[dev]"
 ```
 
-Python 3.12 is used (managed via pyenv; `.python-version` is at repo root). The `anki` package requires Python >= 3.11.
+One step, idempotent (re-run it any time as a repair button). It picks the
+pinned interpreter (`.python-version`, via pyenv if present else `python3.12`),
+installs the editable package + dev tooling, and builds the Rust `shrike_native`
+extension — `pip install` alone does **not** build it (that's a separate cargo
+step, #573). Refreshes after that are automatic if you use direnv (`.envrc`
+rebuilds a stale extension on `cd`); without direnv, `pytest` fails loud if the
+extension is stale rather than silently importing a stale `.so` (see Tests
+below). Python 3.12 is used (managed via pyenv; `.python-version` is at repo
+root). The `anki` package requires Python >= 3.11.
 
 ## Running commands
 
@@ -150,8 +157,14 @@ pytest tests/integration -v -m integration     # Integration tests (starts a ser
 
 The Rust workspace lives in `native/` (run `cargo` from there); the Python
 extension is rebuilt into the venv with `scripts/build-native.sh` (the fast
-pip-lane inner loop — run it after any Rust change before pytest, which
-otherwise tests the stale extension). **Bazel is NOT on PATH** — use the
+pip-lane inner loop). You don't have to remember to run it: with direnv the
+`.envrc` rebuilds a stale extension on `cd`, and either way `pytest` aborts loud
+(a `pytest.UsageError`, before any test imports the extension) if the `.so` is
+stale — `pip install` does not rebuild it, so the old silent-stale-`.so` footgun
+is gone (#573). A staleness check (`scripts/native-stale.sh`, ~50ms of git
+plumbing) keyed to a per-venv stamp drives both. `SHRIKE_SKIP_NATIVE_STALE_CHECK=1`
+bypasses the pytest backstop (Bazel sets it — that lane builds the extension
+hermetically). **Bazel is NOT on PATH** — use the
 committed `./bazel` launcher at the repo root (it bootstraps bazelisk + the
 pinned Bazel from `.bazelversion`; same entry point CI uses). The full local
 gate for a native change:
