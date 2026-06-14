@@ -110,3 +110,20 @@ rust_test(
         "@crates//:serde_json",
     ],
 )
+
+# The #597 (S14b-1) post-shutdown gate: ANOTHER separate test binary — after
+# `shrike_runtime_shutdown` the process-global runtime is terminally undriven,
+# so this proof must run in its own process (never sharing with the driver-alive
+# flow above). It asserts a post-shutdown `shrike_op`/`shrike_close` fast-fail
+# through the callback within a short timeout instead of hanging forever.
+rust_test(
+    name = "post_shutdown_test",
+    size = "small",
+    srcs = ["tests/post_shutdown.rs"],
+    crate_features = MOBILE_FEATURES,
+    edition = "2021",
+    deps = [
+        ":shrike_mobile_lib",
+        "@crates//:serde_json",
+    ],
+)
