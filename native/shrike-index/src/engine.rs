@@ -37,9 +37,14 @@ pub use shrike_store_api::{ActivationStats, ModalityRanking};
 struct Sub {
     /// `Arc` so [`MultiModalIndex::save`] can clone a cheap handle under the
     /// state lock and serialize+write it *outside* the lock (#588). usearch's
-    /// `Index` is `Send + Sync` and serializes/searches via `&self` (both are
-    /// reads), so a save and a concurrent search share the same `Index` without
-    /// the state mutex held across the file write.
+    /// `Index` is `Send + Sync` with its own internal locking; the
+    /// `save_mutation` guard excludes the in-place mutators
+    /// ([`add`](MultiModalIndex::add)/[`remove`](MultiModalIndex::remove)) for
+    /// the duration of the serialize, while leaving searches concurrent — so a
+    /// save and a concurrent search share the same `Index` without the state
+    /// mutex held across the file write. (Note `add`/`remove`/`reserve` are also
+    /// `&self` on usearch's `Index`, so `&self` alone does not imply read-only —
+    /// the mutual exclusion comes from the guard, not the receiver.)
     index: Arc<Index>,
     /// key → vector count (the Rust binding has no key enumeration).
     counts: BTreeMap<i64, u32>,
@@ -250,13 +255,22 @@ impl MultiModalIndex {
     ///
     /// **The state lock is NOT held across the file write (#588, the #445
     /// "never hold a lock across file writes" rule one layer below
-    /// `IndexOrchestrator::save`).** Under the lock we only snapshot a cheap
-    /// `Arc` handle to each sub-index (plus the loaded-modality set); the
-    /// guard is dropped and every `index.save(tmp)`+rename runs unlocked, so a
-    /// concurrent `search`/`add`/`remove` is never serialized behind the whole
-    /// multi-file usearch write. usearch serializes and searches an `Index`
-    /// through `&self` (both are reads) and the type is `Send + Sync`, so the
-    /// shared `Index` tolerates the concurrent save + search safely.
+    /// `IndexOrchestrator::save`).** Under the `state` lock we only snapshot a
+    /// cheap `Arc` handle to each sub-index (plus the loaded-modality set); the
+    /// `state` guard is dropped and every `index.save(tmp)`+rename runs while
+    /// holding only the dedicated `save_mutation` guard, so a concurrent
+    /// [`search_by_modality`](Self::search_by_modality) (which takes only the
+    /// `state` lock) is never serialized behind the whole multi-file usearch
+    /// write.
+    ///
+    /// `add`/`remove` ARE excluded during the write: usearch's `Index` is
+    /// `Send + Sync` with internal locking, but `save` serializes the whole
+    /// structure while those mutate it in place, so the `save_mutation` guard
+    /// serializes save against them (it does NOT gate searches). usearch
+    /// documents concurrent search+update but is silent on save-vs-mutate, so
+    /// the guard is the conservative, self-evidently-correct exclusion rather
+    /// than a reliance on an undocumented upstream guarantee. Concurrent
+    /// save+search is read+read on the shared `Index` and safe.
     pub fn save(&self, dir: &str) -> NativeResult<()> {
         // Exclude the in-place byte mutators for the whole serialize+write, but
         // not searches (which take only the `state` lock). Taken before the
