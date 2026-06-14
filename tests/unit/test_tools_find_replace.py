@@ -54,13 +54,15 @@ class TestValidation:
         # error" + traceback. The preview loop compiles the pattern on EVERY
         # call, so this bites a real apply, not only dry_run.
         kharness.seed_note("hello", deck="Bio")
-        with caplog.at_level(logging.DEBUG, logger="shrike.tools"):
-            with pytest.raises(ToolError):
-                kharness.call_tool(
-                    mcp_app,
-                    "find_replace_notes",
-                    {"search": "(unbalanced", "replace": "x", "deck": "Bio", "regex": True},
-                )
+        with (
+            caplog.at_level(logging.DEBUG, logger="shrike.tools"),
+            pytest.raises(ToolError),
+        ):
+            kharness.call_tool(
+                mcp_app,
+                "find_replace_notes",
+                {"search": "(unbalanced", "replace": "x", "deck": "Bio", "regex": True},
+            )
         unhandled = [r for r in caplog.records if "Unhandled error" in r.getMessage()]
         assert not unhandled, (
             "invalid regex logged as an unhandled server bug (with traceback): "
