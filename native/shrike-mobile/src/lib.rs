@@ -253,6 +253,35 @@ struct Driver {
 #[cfg(feature = "anki-core")]
 static DRIVER: std::sync::Mutex<Option<Driver>> = std::sync::Mutex::new(None);
 
+/// Terminal "the dedicated driver has been shut down" flag (#597).
+///
+/// Set ONLY by [`shrike_runtime_shutdown`] once it has actually stopped the
+/// driver thread it owned. After this the `current_thread` runtime exists but
+/// is **undriven** — a `spawn_op`'d task would be queued and never polled, so
+/// its completion callback would never fire and [`shrike_close`]'s `rx.recv()`
+/// would block forever (the S14b-1 hang, realistic on a racy iOS suspend/
+/// teardown). The async entries below check this and FAST-FAIL a completion
+/// through the callback instead of dispatching onto the dead runtime — the
+/// crate's documented contract ("a synchronous misuse … reported through the
+/// callback, never a panic"; a post-shutdown op is exactly such a misuse).
+///
+/// It is distinct from "`DRIVER` is `None`": that is ALSO the pre-init state of
+/// the default multi-thread lane, whose worker threads DO drive spawned tasks.
+/// This flag is only ever true after a real driver shutdown, so the
+/// multi-thread default lane (where `shrike_runtime_init` was never called) and
+/// every pre-shutdown op are wholly unaffected.
+#[cfg(feature = "anki-core")]
+static DRIVER_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the dedicated driver has been shut down (so the `current_thread`
+/// runtime is no longer driven). `Acquire` pairs with the `Release` store in
+/// [`shrike_runtime_shutdown`] — a thread that observes `true` also observes
+/// the completed driver join that preceded it.
+#[cfg(feature = "anki-core")]
+fn driver_is_shut_down() -> bool {
+    DRIVER_SHUTDOWN.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Install a `current_thread` tokio runtime as the process kernel runtime AND
 /// start its driver thread. Returns `true` if this call installed it, `false`
 /// if a runtime was already installed (idempotent-friendly — a second call is
@@ -292,6 +321,12 @@ pub extern "C" fn shrike_runtime_init() -> bool {
                 })
                 .expect("the driver thread spawns");
             *DRIVER.lock().expect("driver lock poisoned") = Some(Driver { shutdown, thread });
+            // A freshly installed driver IS driving again: clear any terminal
+            // shutdown flag (a no-op on the common first init; correct if a host
+            // re-inits — though the kernel runtime OnceLock makes a real re-init
+            // rare). Done after publishing the driver so an op can't observe
+            // "not shut down" before the driver exists.
+            DRIVER_SHUTDOWN.store(false, std::sync::atomic::Ordering::Release);
             true
         }
         #[cfg(not(feature = "anki-core"))]
@@ -304,8 +339,10 @@ pub extern "C" fn shrike_runtime_init() -> bool {
 /// Stop the `current_thread` driver thread started by [`shrike_runtime_init`]
 /// (teardown). Notifies the park future and joins the driver; a no-op if no
 /// driver is running (the default multi-thread mode, or already shut down).
-/// After this the `current_thread` runtime is no longer driven — call only at
-/// host teardown, after every op and `shrike_close` has completed.
+/// After this the `current_thread` runtime is no longer driven, so a later
+/// [`shrike_op`] / [`shrike_close`] FAST-FAILS through the callback rather than
+/// hanging on the dead runtime (#597) — but the contract still asks the host to
+/// call this only at teardown, after every op and `shrike_close` has completed.
 #[no_mangle]
 pub extern "C" fn shrike_runtime_shutdown() {
     ffi_guard("shrike_runtime_shutdown", (), || {
@@ -315,6 +352,13 @@ pub extern "C" fn shrike_runtime_shutdown() {
             // The park future resolves; the driver thread returns from
             // block_on and exits. Join so teardown is deterministic.
             let _ = driver.thread.join();
+            // Mark the runtime undriven AFTER the join, with Release ordering:
+            // a subsequent op observing the flag (Acquire) is guaranteed to see
+            // a fully stopped driver, so it fast-fails rather than racing a
+            // driver that is still draining one last task. Only set when we
+            // actually owned + stopped a driver — never in the multi-thread
+            // default lane (where DRIVER was None and worker threads drive).
+            DRIVER_SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
         }
     })
 }
@@ -398,6 +442,19 @@ pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
             return;
         }
         let handle = Box::from_raw(handle);
+        // Post-shutdown fast-path (#597): the driver is gone, so the
+        // spawn + std-channel bridge below would block forever on rx.recv()
+        // (the spawned close is queued onto the undriven runtime and never
+        // runs, so the send never lands). Free the handle without driving the
+        // close — the runtime is dead and the process is tearing down, so the
+        // actor cannot drain anyway; dropping the Box here reclaims the memory
+        // and is the most we can soundly do. (The handle's Arc<Kernel> drops
+        // with it; any in-flight ops are the caller's documented ordering
+        // responsibility.)
+        if driver_is_shut_down() {
+            drop(handle);
+            return;
+        }
         let kernel = Arc::clone(&handle.kernel);
         // Drive close to completion on the kernel runtime via the SPAWN +
         // std-channel bridge (#504 driver fix): spawn the close onto the
@@ -461,6 +518,15 @@ pub unsafe extern "C" fn shrike_op(
     user_data: *mut c_void,
 ) {
     ffi_guard_completion("shrike_op", callback, user_data, |completion| {
+        // Post-shutdown fast-fail (#597): the driver is gone, so spawning onto
+        // the undriven current_thread runtime would queue a task that never
+        // runs and a callback that never fires. Report it through the callback
+        // (the documented misuse-via-callback contract), never hang.
+        if driver_is_shut_down() {
+            return Dispatch::Now(Err(NativeError::unavailable(
+                "the kernel runtime has been shut down; no further ops can run",
+            )));
+        }
         if handle.is_null() {
             return Dispatch::Now(Err(NativeError::invalid_input("handle is null")));
         }
