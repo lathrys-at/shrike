@@ -330,16 +330,16 @@ class TestRealPrecision:
 
 @requires_clip
 class TestRealActivationGate:
-    """Cross-space FLOOR-ADMISSION (#580) on REAL CLIP cosines. The relative
-    winner-take-all gate (#234) is RETIRED: an image space is admitted on its own
-    calibrated floor, so the CLIP `image#clip` signal contributes whenever the
-    image space clears its floor for the query — independent of how the text
-    space did. The production invariants this class pins:
+    """Cross-space FLOOR-ADMISSION (#580/#582) on REAL CLIP cosines. The relative
+    winner-take-all gate (#234) is RETIRED: an image card contributes its
+    `image#clip` signal whenever its OWN image cosine clears the calibrated floor
+    (the #582 per-note floor), independent of how the text space did. The
+    production invariants this class pins:
       - the signal FIRES for clearly cross-modal queries (image is the path);
       - a text-answered fact query keeps its correct TEXT card at rank-1 and the
-        portrait hard-negative does NOT out-rank it (the portrait MAY now carry
-        `image#clip` at a lower rank — the space-level signal admits the whole
-        image ranking; stripping that provenance per-note is #582).
+        portrait hard-negative does NOT out-rank the canonical answer (the
+        portrait MAY carry `image#clip` at a lower rank when its OWN image clears
+        the floor — a genuine weak CLIP match for the named entity).
     This is the whole reason the corpus sources ≥30 real images."""
 
     # Queries where the answer is purely visual AND the filename doesn't leak the
