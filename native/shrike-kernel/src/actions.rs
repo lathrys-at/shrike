@@ -1002,14 +1002,18 @@ fn collect_substring_candidates(
         .iter()
         .map(String::as_str)
         .collect();
+    // `Ok(None)` = the store can't serve this query (a sub-trigram query, or no
+    // store at all) → the `find_notes` field-text fallback below is correct.
+    // `Err` = a REAL derived-read failure (e.g. a transient SQLITE_BUSY that
+    // outlived the busy-retry). It must NOT silently fall back to `find_notes`
+    // (#644): OCR/ASR text lives ONLY in the derived store, never in an anki
+    // field, so the field-text fallback structurally cannot serve it — a silent
+    // fallback would drop the OCR/ASR `exact`/substring signal with no error.
+    // Surface it instead (the store's own contract: "a MATCH error is a real
+    // error; the caller decides whether to degrade" — and degrading to a
+    // fallback that can't serve derived sources is not a valid degradation).
     let lex = if let Some(d) = derived {
-        match d.search_substring(text, (args.top_k + exclude.len()) as i64, scope, &hidden) {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::debug!(error = ?e, "FTS5 substring query failed; falling back");
-                None
-            }
-        }
+        d.search_substring(text, (args.top_k + exclude.len()) as i64, scope, &hidden)?
     } else {
         None
     };
@@ -1107,22 +1111,19 @@ fn collect_fuzzy(
     exclude: &HashSet<i64>,
     args: &SearchArgs,
     scope: Option<&[i64]>,
-) -> (Vec<i64>, FuzzyEvidence) {
+) -> NativeResult<(Vec<i64>, FuzzyEvidence)> {
     let Some(d) = derived else {
-        return (Vec::new(), HashMap::new());
+        return Ok((Vec::new(), HashMap::new()));
     };
     let hidden: Vec<&str> = args
         .hidden_lexical_sources
         .iter()
         .map(String::as_str)
         .collect();
-    let hits = match d.search_fuzzy(text, args.top_k as i64, scope, &hidden) {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::debug!(error = ?e, "FTS5 fuzzy query failed");
-            return (Vec::new(), HashMap::new());
-        }
-    };
+    // A real derived-read failure surfaces (#644): the fuzzy signal has no
+    // anki-field fallback at all (no `find_notes` path here), so silently
+    // returning empty would drop OCR/ASR fuzzy matches with no error. Propagate.
+    let hits = d.search_fuzzy(text, args.top_k as i64, scope, &hidden)?;
     let hit_ids: Vec<i64> = hits
         .iter()
         .map(|(nid, ..)| *nid)
@@ -1151,7 +1152,7 @@ fn collect_fuzzy(
             break;
         }
     }
-    (ranking, evidence)
+    Ok((ranking, evidence))
 }
 
 /// The fused search assembly (see module-section comment). `vectors` carries
@@ -1316,7 +1317,7 @@ pub fn search_notes(
                 &exclude,
                 args,
                 lex_scope.as_deref(),
-            )
+            )?
         } else {
             (Vec::new(), HashMap::new())
         };
@@ -1779,6 +1780,201 @@ mod search_tests {
         assert!(fuzzy[0].fuzzy.is_some(), "fuzzy evidence carried");
         assert!(fuzzy[0].provenance.iter().any(|p| p.signal == "fuzzy"));
         core.close().unwrap();
+    }
+
+    /// A `DerivedStore` that delegates to a real engine but forces the two
+    /// lexical reads (`search_substring`/`search_fuzzy`) to return `Err` — the
+    /// shape of a derived-read failure that survives the busy-retry (#644). All
+    /// other methods delegate so build/ingest still work.
+    struct FlakyDerived {
+        inner: DerivedEngine,
+        fail_lexical: bool,
+    }
+    impl shrike_store_api::DerivedStore for FlakyDerived {
+        fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()> {
+            self.inner.build(rows, col_mod)
+        }
+        fn ingest(&self, n: i64, s: &str, r: &[(String, String)]) -> NativeResult<()> {
+            self.inner.ingest(n, s, r)
+        }
+        fn ingest_many(
+            &self,
+            notes: &[(i64, Vec<(String, String)>)],
+            source: &str,
+        ) -> NativeResult<()> {
+            self.inner.ingest_many(notes, source)
+        }
+        fn remove(&self, ids: &[i64], source: Option<&str>) -> NativeResult<()> {
+            self.inner.remove(ids, source)
+        }
+        fn count(&self) -> NativeResult<i64> {
+            self.inner.count()
+        }
+        fn get_col_mod(&self) -> Option<i64> {
+            self.inner.get_col_mod()
+        }
+        fn set_col_mod(&self, v: i64) -> NativeResult<()> {
+            self.inner.set_col_mod(v)
+        }
+        fn meta_get(&self, k: &str) -> NativeResult<Option<String>> {
+            self.inner.meta_get(k)
+        }
+        fn meta_set(&self, k: &str, v: &str) -> NativeResult<()> {
+            self.inner.meta_set(k, v)
+        }
+        fn refs_for_source(&self, s: &str) -> NativeResult<Vec<(i64, String)>> {
+            self.inner.refs_for_source(s)
+        }
+        fn texts_for_source(&self, s: &str) -> NativeResult<Vec<(i64, String, String)>> {
+            self.inner.texts_for_source(s)
+        }
+        fn texts_for_source_for_notes(
+            &self,
+            s: &str,
+            ids: &[i64],
+        ) -> NativeResult<Vec<(i64, String, String)>> {
+            self.inner.texts_for_source_for_notes(s, ids)
+        }
+        fn mark_gated(&self, s: &str, pairs: &[(i64, String)]) -> NativeResult<()> {
+            self.inner.mark_gated(s, pairs)
+        }
+        fn gated_refs_for_source(&self, s: &str) -> NativeResult<Vec<(i64, String)>> {
+            self.inner.gated_refs_for_source(s)
+        }
+        fn clear_gated(&self, s: &str) -> NativeResult<()> {
+            self.inner.clear_gated(s)
+        }
+        fn put_segments(&self, n: i64, s: &str, r: &str, j: &str) -> NativeResult<()> {
+            self.inner.put_segments(n, s, r, j)
+        }
+        fn get_segments(&self, n: i64, s: &str, r: &str) -> NativeResult<Option<String>> {
+            self.inner.get_segments(n, s, r)
+        }
+        fn match_rows(
+            &self,
+            expr: &str,
+            limit: i64,
+            with_text: bool,
+            scope: Option<&[i64]>,
+            exclude: &[&str],
+        ) -> NativeResult<Vec<shrike_store_api::MatchRow>> {
+            self.inner
+                .match_rows(expr, limit, with_text, scope, exclude)
+        }
+        fn search_substring(
+            &self,
+            q: &str,
+            limit: i64,
+            scope: Option<&[i64]>,
+            exclude: &[&str],
+        ) -> NativeResult<Option<Vec<shrike_store_api::LexicalRow>>> {
+            if self.fail_lexical {
+                return Err(NativeError::unavailable("derived busy (simulated)"));
+            }
+            self.inner.search_substring(q, limit, scope, exclude)
+        }
+        fn search_fuzzy(
+            &self,
+            q: &str,
+            top_k: i64,
+            scope: Option<&[i64]>,
+            exclude: &[&str],
+        ) -> NativeResult<Vec<shrike_store_api::LexicalRow>> {
+            if self.fail_lexical {
+                return Err(NativeError::unavailable("derived busy (simulated)"));
+            }
+            self.inner.search_fuzzy(q, top_k, scope, exclude)
+        }
+    }
+
+    #[test]
+    fn derived_read_error_surfaces_never_silently_field_falls_back() {
+        // #644 (the correctness fix): a REAL derived-read failure (a busy that
+        // outlived the retry) must SURFACE from search_notes, not silently fall
+        // back to the `find_notes("*text*")` field scan. The field scan can't
+        // serve OCR/ASR text (it lives only in the derived store, never in an
+        // anki field), so a silent fallback would drop the OCR `exact`/`fuzzy`
+        // signal with NO error — exactly the silent degradation #644 is about.
+        let (dir, core) = temp_collection();
+        // Ingest an OCR row whose text is NOT in any anki field (the note's
+        // field text is unrelated), so only the derived store can serve it.
+        let nid = add_note(&core, "unrelated field text", "back");
+        let derived = derived_for(&core, &dir);
+        derived
+            .ingest(
+                nid,
+                "ocr",
+                &[("photo.png".into(), "chlorophyll spectrum".into())],
+            )
+            .unwrap();
+        // Sanity: with a healthy store the OCR text IS found with an `exact`
+        // signal (the very thing the flake intermittently lost).
+        let ok = search_notes(
+            &core,
+            None,
+            Some(&derived),
+            None,
+            &[query("chlorophyll spectrum")],
+            &[],
+            &args(10),
+        )
+        .unwrap();
+        let ok_hit = ok[0].matches.iter().find(|m| m.note.id == nid).unwrap();
+        assert!(
+            ok_hit.provenance.iter().any(|p| p.signal == "exact"),
+            "healthy store: OCR text carries the exact signal"
+        );
+
+        // Now the lexical reads fail (a surviving busy). search_notes must Err —
+        // NOT return a degraded result that silently dropped the OCR `exact`.
+        let flaky = FlakyDerived {
+            inner: derived,
+            fail_lexical: true,
+        };
+        let err = search_notes(
+            &core,
+            None,
+            Some(&flaky),
+            None,
+            &[query("chlorophyll spectrum")],
+            &[],
+            &args(10),
+        );
+        assert!(
+            err.is_err(),
+            "a derived-read failure must surface, never silently field-fall-back \
+             (the field scan can't serve OCR text)"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn derived_unavailable_none_still_field_falls_back() {
+        // The other side of #644: `Ok(None)` (a sub-trigram query, or no store)
+        // is NOT an error — the `find_notes` field-text fallback is correct for
+        // FIELD text and must still run. A 2-char query (< MIN_TRIGRAM) makes
+        // the store return None; the literal must still hit via the field scan.
+        let (dir, core) = temp_collection();
+        let ab = add_note(&core, "ab cd ef", "back"); // contains the 2-char literal "ab"
+        let derived = derived_for(&core, &dir);
+        // The test relies on a 2-char query being sub-trigram (compile-time pin).
+        const { assert!(MIN_TRIGRAM > 2) };
+        let groups = search_notes(
+            &core,
+            None,
+            Some(&derived),
+            None,
+            &[query("ab")],
+            &[],
+            &args(10),
+        )
+        .unwrap();
+        assert!(
+            groups[0].matches.iter().any(|m| m.note.id == ab),
+            "a sub-trigram literal still hits via the field-text fallback"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

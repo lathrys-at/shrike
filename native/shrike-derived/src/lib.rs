@@ -60,6 +60,49 @@ fn db_err(e: rusqlite::Error) -> NativeError {
     NativeError::unavailable(format!("sqlite: {e}"))
 }
 
+/// True for a transient SQLite lock contention (`SQLITE_BUSY`/`SQLITE_LOCKED`,
+/// incl. the `*_SNAPSHOT` variants). Two engines share one `shrike.db` file
+/// (the kernel's write connection + the Python facade's read connection, #547),
+/// so a read can momentarily lose the file lock to a concurrent write even with
+/// `busy_timeout` set — that case is RETRYABLE, not a real failure (#644).
+fn is_busy(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked,
+                ..
+            },
+            _,
+        )
+    )
+}
+
+/// How many extra times a read retries past a transient busy before surfacing
+/// it (#644). The connection's `busy_timeout` (5s) already absorbs the common
+/// lock-acquisition wait; this is the belt for a busy that surfaces despite it
+/// (e.g. a snapshot conflict). A surviving busy then surfaces as `unavailable`
+/// — the caller (kernel search) propagates it rather than silently degrading to
+/// a fallback that can't serve OCR/ASR-only text.
+const BUSY_RETRIES: usize = 5;
+
+/// Run a fallible read, retrying a transient `SQLITE_BUSY`/`LOCKED` up to
+/// [`BUSY_RETRIES`] times with a short backoff. Non-busy errors and success
+/// pass straight through.
+fn with_busy_retry<T>(mut read: impl FnMut() -> rusqlite::Result<T>) -> NativeResult<T> {
+    let mut attempt = 0;
+    loop {
+        match read() {
+            Ok(v) => return Ok(v),
+            Err(e) if is_busy(&e) && attempt < BUSY_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10 * attempt as u64));
+            }
+            Err(e) => return Err(db_err(e)),
+        }
+    }
+}
+
 impl DerivedEngine {
     /// Open (or create) the store and ensure the schema, resetting the derived
     /// data on a schema-version mismatch (no migrations — it's a rebuildable
@@ -777,17 +820,48 @@ impl DerivedEngine {
              FROM idx JOIN rowmap m ON m.rowid = idx.rowid \
              WHERE idx MATCH ?2 {scope_clause}{exclude_clause}ORDER BY rank LIMIT ?3"
         );
-        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&SNIPPET_TOKENS, &expr, &limit];
-        params.extend(exclude_sources.iter().map(|s| s as &dyn rusqlite::ToSql));
-        let mut stmt = conn.prepare(&sql).map_err(db_err)?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(params), |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-            })
-            .map_err(|e| NativeError::invalid_input(format!("fts5 match: {e}")))?
-            .collect::<Result<Vec<MatchRow>, _>>()
-            .map_err(|e| NativeError::invalid_input(format!("fts5 match: {e}")))?;
-        Ok(rows)
+        // Retry a transient busy (#644): two engines share the file, so a read
+        // can lose the lock to a concurrent write even with `busy_timeout`. The
+        // closure re-prepares + re-runs per attempt; a busy at prepare or step
+        // bubbles as a `rusqlite::Error` for `with_busy_retry` to retry, while a
+        // non-busy FTS5/MATCH fault returns `Ok(Err(invalid_input))` (a real
+        // query error, not a lock — surfaced without retry). A busy surviving
+        // the retries surfaces as `unavailable`; the kernel caller propagates it
+        // rather than silently degrading to a fallback that can't serve OCR/ASR.
+        let run = || -> rusqlite::Result<Result<Vec<MatchRow>, NativeError>> {
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&SNIPPET_TOKENS, &expr, &limit];
+            params.extend(exclude_sources.iter().map(|s| s as &dyn rusqlite::ToSql));
+            let mut stmt = conn.prepare(&sql)?;
+            let mut q = stmt.query(rusqlite::params_from_iter(params))?;
+            let mut rows: Vec<MatchRow> = Vec::new();
+            loop {
+                let row = match q.next() {
+                    Ok(Some(r)) => r,
+                    Ok(None) => break,
+                    Err(e) if is_busy(&e) => return Err(e), // retried
+                    Err(e) => {
+                        return Ok(Err(NativeError::invalid_input(format!("fts5 match: {e}"))))
+                    }
+                };
+                match (|| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })() {
+                    Ok(tuple) => rows.push(tuple),
+                    Err(e) if is_busy(&e) => return Err(e),
+                    Err(e) => {
+                        return Ok(Err(NativeError::invalid_input(format!("fts5 match: {e}"))))
+                    }
+                }
+            }
+            Ok(Ok(rows))
+        };
+        with_busy_retry(run)?
     }
 }
 
@@ -927,6 +1001,57 @@ mod tests {
         // The bundled-SQLite win: creating the trigram FTS5 table just works.
         let (_e, dir) = store();
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn busy_err() -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".into()),
+        )
+    }
+
+    #[test]
+    fn busy_retry_succeeds_after_transient_busy() {
+        // #644 (option 2): a read that hits a transient SQLITE_BUSY a few times
+        // then succeeds is RETRIED to success — it never surfaces as an error.
+        use std::cell::Cell;
+        let calls = Cell::new(0usize);
+        let out: i32 = with_busy_retry(|| {
+            let n = calls.get();
+            calls.set(n + 1);
+            if n < 3 {
+                Err(busy_err())
+            } else {
+                Ok(42)
+            }
+        })
+        .expect("a transient busy is retried to success");
+        assert_eq!(out, 42);
+        assert_eq!(calls.get(), 4, "3 busies + 1 success");
+    }
+
+    #[test]
+    fn busy_retry_surfaces_a_persistent_busy_as_unavailable() {
+        // A busy that outlives the retries surfaces (as `unavailable`) — the
+        // kernel caller then propagates it rather than silently degrading to a
+        // fallback that can't serve OCR/ASR text (#644).
+        let err = with_busy_retry::<i32>(|| Err(busy_err())).unwrap_err();
+        assert_eq!(err.kind, shrike_ffi::ErrorKind::Unavailable);
+    }
+
+    #[test]
+    fn busy_retry_does_not_retry_a_non_busy_error() {
+        // A genuine (non-busy) error is NOT retried — it surfaces immediately,
+        // so a real fault isn't masked by the busy retry.
+        use std::cell::Cell;
+        let calls = Cell::new(0usize);
+        let err = with_busy_retry::<i32>(|| {
+            calls.set(calls.get() + 1);
+            Err(rusqlite::Error::InvalidQuery)
+        })
+        .unwrap_err();
+        assert_eq!(calls.get(), 1, "a non-busy error is not retried");
+        assert_eq!(err.kind, shrike_ffi::ErrorKind::Unavailable); // db_err maps all to unavailable
     }
 
     #[test]
