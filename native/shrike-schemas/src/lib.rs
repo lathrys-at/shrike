@@ -330,7 +330,10 @@ pub enum NoteTypeResult {
 pub enum FieldOp {
     Add {
         name: String,
+        // 0-based insert position; mirror the Python `ge=0` so the advertised
+        // schema declares the bound it enforces (#606).
         #[serde(default)]
+        #[schemars(range(min = 0))]
         position: Option<i64>,
     },
     Remove {
@@ -342,6 +345,7 @@ pub enum FieldOp {
     },
     Reposition {
         name: String,
+        #[schemars(range(min = 0))]
         position: i64,
     },
 }
@@ -351,7 +355,10 @@ pub struct FieldMetadataInput {
     pub name: String,
     #[serde(default)]
     pub font: Option<String>,
+    // Edit-time font size in px; mirror the Python `ge=1` so the advertised
+    // schema declares the bound it enforces (#606).
     #[serde(default)]
+    #[schemars(range(min = 1))]
     pub size: Option<i64>,
     #[serde(default)]
     pub description: Option<String>,
@@ -378,7 +385,9 @@ pub enum TemplateOp {
         name: String,
         front: String,
         back: String,
+        // 0-based insert position; mirror the Python `ge=0` (#606).
         #[serde(default)]
+        #[schemars(range(min = 0))]
         position: Option<i64>,
     },
     Remove {
@@ -390,6 +399,7 @@ pub enum TemplateOp {
     },
     Reposition {
         name: String,
+        #[schemars(range(min = 0))]
         position: i64,
     },
 }
@@ -1512,5 +1522,85 @@ mod tests {
         // Pydantic's extra="ignore": a newer server's field doesn't break us.
         let json = r#"{"id":1,"score":0.9,"tags":[],"brand_new_field":123}"#;
         assert!(serde_json::from_str::<Neighbor>(json).is_ok());
+    }
+
+    // The numeric-bound parity the advertised schema must declare (#606): the
+    // Python side enforces these with `ge=`; without the schemars `range`, the
+    // schema served via MCP `tools/list` claimed any integer, so a client
+    // following it strictly had inaccurate type info.
+    fn schema_of(name: &str) -> serde_json::Value {
+        let json = schema_catalog()
+            .into_iter()
+            .find(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("no schema for {name}"))
+            .1;
+        serde_json::from_str(&json).unwrap()
+    }
+
+    /// The `minimum` declared on a property, unwrapping an Option's
+    /// `[T, "null"]`/anyOf wrapper to the non-null branch.
+    fn property_minimum(schema: &serde_json::Value, prop: &str) -> Option<i64> {
+        let p = &schema["properties"][prop];
+        if let Some(m) = p.get("minimum") {
+            return m.as_i64();
+        }
+        // Option<T> renders as anyOf:[{...}, {"type":"null"}]; the bound lives
+        // on the non-null branch.
+        if let Some(branches) = p.get("anyOf").and_then(|b| b.as_array()) {
+            for b in branches {
+                if b.get("type").and_then(|t| t.as_str()) != Some("null") {
+                    if let Some(m) = b.get("minimum") {
+                        return m.as_i64();
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn tagged_variant<'a>(
+        schema: &'a serde_json::Value,
+        tag: &str,
+        value: &str,
+    ) -> &'a serde_json::Value {
+        let branches = schema["oneOf"]
+            .as_array()
+            .or_else(|| schema["anyOf"].as_array())
+            .expect("tagged union has oneOf/anyOf");
+        branches
+            .iter()
+            .find(|b| {
+                let t = &b["properties"][tag];
+                t.get("const").and_then(|c| c.as_str()) == Some(value)
+                    || t.get("enum")
+                        .and_then(|e| e.as_array())
+                        .map(|vs| vs.iter().any(|v| v.as_str() == Some(value)))
+                        .unwrap_or(false)
+            })
+            .unwrap_or_else(|| panic!("no {tag}={value} variant"))
+    }
+
+    #[test]
+    fn field_metadata_size_schema_declares_minimum_1() {
+        let schema = schema_of("FieldMetadataInput");
+        assert_eq!(property_minimum(&schema, "size"), Some(1));
+    }
+
+    #[test]
+    fn field_op_position_schema_declares_minimum_0() {
+        let schema = schema_of("FieldOp");
+        let add = tagged_variant(&schema, "op", "add");
+        assert_eq!(property_minimum(add, "position"), Some(0));
+        let reposition = tagged_variant(&schema, "op", "reposition");
+        assert_eq!(property_minimum(reposition, "position"), Some(0));
+    }
+
+    #[test]
+    fn template_op_position_schema_declares_minimum_0() {
+        let schema = schema_of("TemplateOp");
+        let add = tagged_variant(&schema, "op", "add");
+        assert_eq!(property_minimum(add, "position"), Some(0));
+        let reposition = tagged_variant(&schema, "op", "reposition");
+        assert_eq!(property_minimum(reposition, "position"), Some(0));
     }
 }
