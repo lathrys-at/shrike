@@ -5038,8 +5038,10 @@ dependencies = [
  "serde_json",
  "shrike-engine-api",
  "shrike-ffi",
+ "shrike-net",
  "tracing",
  "ureq",
+ "url",
 ]
 
 [[package]]
@@ -5064,8 +5066,10 @@ dependencies = [
  "serde_json",
  "shrike-engine-api",
  "shrike-ffi",
+ "shrike-net",
  "tracing",
  "ureq",
+ "url",
 ]
 
 [[package]]

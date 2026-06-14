@@ -35,6 +35,11 @@ use std::time::Duration;
 
 use shrike_ffi::{NativeError, NativeResult};
 
+/// The hop cap shared by every manual redirect-following loop in the tree (the
+/// kernel media fetch and the remote engines), so "how many redirects" is one
+/// number, not three.
+pub const MAX_REDIRECTS: usize = 5;
+
 fn invalid(msg: impl Into<String>) -> NativeError {
     NativeError::invalid_input(msg)
 }
@@ -159,6 +164,39 @@ pub fn resolve_pinned(host: &str) -> NativeResult<IpAddr> {
         .ok_or_else(|| invalid(format!("could not resolve host '{host}'")))
 }
 
+/// Validate a redirect for the operator-configured remote-endpoint posture:
+/// the only redirect allowed is to the **same host** as where the request was
+/// sent — an embeddings/describe POST endpoint that 30x-es you to a DIFFERENT
+/// host is the SSRF vector, so a cross-host (or schemeless/hostless) redirect
+/// is refused. Returns the resolved absolute target URL on success (its host
+/// equals `from`'s host, so the connection stays pinned to the already-vetted
+/// base IP — a same-host redirect can't be used to rebind to a new address).
+///
+/// `from` is the URL the request was sent to; `location` is the raw `Location`
+/// header (may be relative). Relative locations resolve against `from`.
+pub fn same_host_redirect(from: &url::Url, location: &str) -> NativeResult<url::Url> {
+    let target = from
+        .join(location)
+        .map_err(|e| invalid(format!("bad redirect location: {e}")))?;
+    let scheme = target.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(invalid(format!(
+            "refusing redirect to unsupported scheme '{scheme}'"
+        )));
+    }
+    let from_host = from.host_str();
+    let to_host = target.host_str();
+    if to_host.is_none() || to_host != from_host {
+        return Err(invalid(format!(
+            "refusing cross-host redirect from '{}' to '{}' (an endpoint may not \
+             redirect to a different host)",
+            from_host.unwrap_or("?"),
+            to_host.unwrap_or("?"),
+        )));
+    }
+    Ok(target)
+}
+
 /// A ureq agent that connects ONLY to `pinned` (the vetted IP) on `port`,
 /// ignoring the netloc ureq would otherwise re-resolve, with auto-redirects
 /// OFF so the caller follows + re-vets each hop manually. The URL keeps the
@@ -173,6 +211,34 @@ pub fn pinned_agent(pinned: IpAddr, port: u16, timeout: Duration) -> ureq::Agent
             Ok(vec![SocketAddr::new(pinned, port)])
         })
         .build()
+}
+
+/// Build an IP-pinned agent for an OPERATOR-CONFIGURED endpoint base URL: parse
+/// it, resolve its host (WITHOUT the `is_global` gate — the operator trusts the
+/// host, e.g. loopback llama-server / a tailnet), and pin the connection to
+/// that one address. Returns the agent plus the parsed base URL (which the
+/// caller keeps for the same-host redirect comparison). The pin closes the
+/// DNS-rebinding TOCTOU even for a trusted host; redirects are OFF so the caller
+/// applies [`same_host_redirect`] per hop.
+pub fn pinned_endpoint_agent(
+    base_url: &str,
+    timeout: Duration,
+) -> NativeResult<(ureq::Agent, url::Url)> {
+    let base =
+        url::Url::parse(base_url).map_err(|e| invalid(format!("invalid endpoint URL: {e}")))?;
+    let scheme = base.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(invalid(format!(
+            "endpoint URL must be http(s), got scheme '{scheme}'"
+        )));
+    }
+    let host = base
+        .host_str()
+        .ok_or_else(|| invalid("endpoint URL has no host"))?
+        .to_string();
+    let port = base.port_or_known_default().unwrap_or(0);
+    let pinned = resolve_pinned(&host)?;
+    Ok((pinned_agent(pinned, port, timeout), base))
 }
 
 #[cfg(test)]
@@ -255,5 +321,41 @@ mod tests {
         // use case) where resolve_public_ip refuses it.
         let ip = resolve_pinned("127.0.0.1").unwrap();
         assert!(ip.is_loopback());
+    }
+
+    #[test]
+    fn same_host_redirect_allows_same_host() {
+        let from = url::Url::parse("http://api.example.com:8080/v1/embeddings").unwrap();
+        // Relative same-host.
+        let t = same_host_redirect(&from, "/v2/embeddings").unwrap();
+        assert_eq!(t.as_str(), "http://api.example.com:8080/v2/embeddings");
+        // Absolute same-host (different port is still the same HOST — the IP is
+        // pinned to the base host regardless, so this stays on the vetted box).
+        let t2 = same_host_redirect(&from, "http://api.example.com/x").unwrap();
+        assert_eq!(t2.host_str(), Some("api.example.com"));
+    }
+
+    #[test]
+    fn same_host_redirect_refuses_cross_host() {
+        let from = url::Url::parse("http://api.example.com/v1/embeddings").unwrap();
+        for bad in [
+            "http://169.254.169.254/latest/meta-data/", // cloud metadata
+            "http://127.0.0.1/x",                       // loopback
+            "http://evil.example.net/x",                // a different host
+            "https://attacker.test/",                   // cross-host https
+        ] {
+            let err = same_host_redirect(&from, bad).unwrap_err();
+            assert!(
+                err.message.contains("cross-host redirect"),
+                "{bad}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn same_host_redirect_refuses_non_http_scheme() {
+        let from = url::Url::parse("http://api.example.com/x").unwrap();
+        let err = same_host_redirect(&from, "file:///etc/passwd").unwrap_err();
+        assert!(err.message.contains("unsupported scheme"), "{err:?}");
     }
 }

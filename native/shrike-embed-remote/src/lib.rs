@@ -76,8 +76,21 @@ pub struct RemoteEmbedderConfig {
 
 /// The engine: a thin, stateless HTTP client (ureq agents are cheap and
 /// `Send + Sync`; each call is one request).
+///
+/// SSRF posture (#592): `base_url` is operator-configured and trusted (a
+/// loopback llama-server, a tailnet host, a cloud API the operator chose), so
+/// it is NOT `is_global`-gated. But the agent is built with auto-redirects OFF
+/// and **pinned to `base_url`'s resolved IP** (closing the DNS-rebinding
+/// TOCTOU), and a redirect is followed only when it stays on the SAME host (an
+/// embeddings endpoint that 30x-es you to a different host is the SSRF vector —
+/// `shrike_net::same_host_redirect` refuses it). NOTE: the IP is pinned once at
+/// construction; an endpoint whose address rotates mid-life (a cloud LB
+/// draining a node) would surface as a transient failure → the bounded retry,
+/// not silently wrong — reconstruct the engine to re-pin.
 pub struct RemoteEmbedder {
     base_url: String,
+    /// `base_url` parsed once, for the same-host redirect comparison.
+    base: url::Url,
     api_key: Option<String>,
     model: Option<String>,
     agent: ureq::Agent,
@@ -130,19 +143,28 @@ impl RemoteEmbedder {
                 ));
             }
         }
+        let base_url = cfg.base_url.trim_end_matches('/').to_string();
+        // SSRF posture (#592): pin the connection to base_url's resolved IP with
+        // auto-redirects OFF. The agent-level timeout is a backstop; each request
+        // sets its own via `.timeout()`.
+        let (agent, base) = shrike_net::pinned_endpoint_agent(&base_url, EMBED_TIMEOUT)?;
         Ok(Self {
-            base_url: cfg.base_url.trim_end_matches('/').to_string(),
+            base_url,
+            base,
             api_key: cfg.api_key,
             model: cfg.model,
-            agent: ureq::AgentBuilder::new().build(),
+            agent,
         })
     }
 
     fn request(&self, method: &str, path: &str, timeout: Duration) -> ureq::Request {
-        let mut req = self
-            .agent
-            .request(method, &format!("{}{}", self.base_url, path))
-            .timeout(timeout);
+        self.request_abs(method, &format!("{}{}", self.base_url, path), timeout)
+    }
+
+    /// Build a request to an ABSOLUTE url (the redirect loop sends to the
+    /// validated same-host target, not a base-relative path).
+    fn request_abs(&self, method: &str, url: &str, timeout: Duration) -> ureq::Request {
+        let mut req = self.agent.request(method, url).timeout(timeout);
         if let Some(key) = &self.api_key {
             req = req.set("Authorization", &format!("Bearer {key}"));
         }
@@ -221,10 +243,51 @@ impl RemoteEmbedder {
         path: &str,
         payload: &serde_json::Value,
     ) -> NativeResult<ureq::Response> {
+        // The redirect loop (SSRF #592): auto-redirects are OFF, so a 3xx
+        // surfaces as Ok(resp). Follow it only if it stays on the SAME host
+        // (the pinned base host); a cross-host redirect is refused. Capped at
+        // shrike_net::MAX_REDIRECTS. Each URL gets its own transient-retry.
+        let mut current = format!("{}{}", self.base_url, path);
+        let mut from = self.base.clone();
+        for _hop in 0..=shrike_net::MAX_REDIRECTS {
+            let resp = self.post_one_url_with_retry(&current, payload)?;
+            if (300..400).contains(&resp.status()) {
+                let location = resp.header("location").ok_or_else(|| {
+                    NativeError::unavailable("redirect response without a Location header")
+                })?;
+                let target = shrike_net::same_host_redirect(&from, location)?;
+                current = target.to_string();
+                from = target;
+                continue;
+            }
+            return Ok(resp);
+        }
+        Err(NativeError::unavailable(format!(
+            "too many redirects (>{})",
+            shrike_net::MAX_REDIRECTS
+        )))
+    }
+
+    /// One absolute URL's bounded-retry POST (the per-URL half the redirect
+    /// loop drives). A 3xx is returned as Ok for the caller to follow/refuse.
+    fn post_one_url_with_retry(
+        &self,
+        url: &str,
+        payload: &serde_json::Value,
+    ) -> NativeResult<ureq::Response> {
         let mut attempt = 1u32;
         loop {
-            let err = match self.request("POST", path, EMBED_TIMEOUT).send_json(payload) {
+            let err = match self
+                .request_abs("POST", url, EMBED_TIMEOUT)
+                .send_json(payload)
+            {
                 Ok(resp) => return Ok(resp),
+                // ureq surfaces a 3xx either as Ok (redirects disabled) or as
+                // Error::Status depending on version — return it for the
+                // redirect loop to follow/refuse, identically to the Ok case.
+                Err(ureq::Error::Status(code, resp)) if (300..400).contains(&code) => {
+                    return Ok(resp);
+                }
                 Err(e) => e,
             };
             let transient = match &err {
@@ -665,6 +728,46 @@ mod tests {
             .embed_chunk(&[])
             .unwrap();
         assert!(out.is_empty());
+    }
+
+    // ── SSRF redirect re-vet (#592) ─────────────────────────────────────────
+
+    #[test]
+    fn cross_host_redirect_is_refused() {
+        // The endpoint 30x-es to a DIFFERENT host (the SSRF vector: a public
+        // endpoint redirecting you to cloud metadata / loopback). The 200 queued
+        // behind it must NEVER be followed — the cross-host redirect is refused.
+        let ok = serde_json::json!({"data": [{"index": 0, "embedding": [1.0, 2.0]}]}).to_string();
+        let (url, _rx) = canned_server(vec![
+            (
+                "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/",
+                "{}".into(),
+            ),
+            ("HTTP/1.1 200 OK", ok),
+        ]);
+        let err = engine(url, None, None)
+            .embed_chunk(&["a".into()])
+            .unwrap_err();
+        assert!(err.to_string().contains("cross-host redirect"), "{err}");
+    }
+
+    #[test]
+    fn same_host_redirect_is_followed_repinned() {
+        // A same-host redirect (relative Location) IS followed — and lands on
+        // the same pinned host, so the 200 behind it is served.
+        let ok = serde_json::json!({"data": [{"index": 0, "embedding": [7.0, 8.0]}]}).to_string();
+        let (url, rx) = canned_server(vec![
+            (
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: /v2/embeddings",
+                "{}".into(),
+            ),
+            ("HTTP/1.1 200 OK", ok),
+        ]);
+        let out = engine(url, None, None).embed_chunk(&["a".into()]).unwrap();
+        assert_eq!(out, vec![vec![7.0, 8.0]]);
+        // First request hit /v1/embeddings, the redirect followed to /v2/.
+        assert!(rx.recv().unwrap().starts_with("POST /v1/embeddings"));
+        assert!(rx.recv().unwrap().starts_with("POST /v2/embeddings"));
     }
     // ── The llama.cpp native multimodal dialect (#501) ──────────────────────
 

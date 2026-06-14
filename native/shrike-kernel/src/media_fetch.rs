@@ -41,7 +41,9 @@ pub use shrike_net::{ip_is_allowed, resolve_public_ip};
 
 pub use shrike_store_api::MEDIA_MAX_BYTES;
 pub const URL_FETCH_TIMEOUT_SECS: u64 = 30;
-pub const MAX_MEDIA_REDIRECTS: usize = 5;
+/// The redirect hop cap (= `shrike_net::MAX_REDIRECTS`, kept as a named alias so
+/// existing call sites and the error message that quotes it are unchanged).
+pub const MAX_MEDIA_REDIRECTS: usize = shrike_net::MAX_REDIRECTS;
 
 fn invalid(msg: impl Into<String>) -> NativeError {
     NativeError::invalid_input(msg)
