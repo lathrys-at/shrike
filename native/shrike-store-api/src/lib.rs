@@ -82,8 +82,11 @@ pub trait VectorIndex: Send + Sync {
     /// writes" rule).
     fn save(&self, dir: &str) -> NativeResult<()>;
     fn add(&self, modality: &str, keys: &[i64], vectors: &[Vec<f32>]) -> NativeResult<()>;
-    /// Remove every vector under each key, across modalities; returns how
-    /// many vectors left.
+    /// Remove every vector under each key, across modalities; returns the
+    /// number of vectors REMOVED from the text modality (the note count —
+    /// one text vector per note). NOT the number remaining: the canonical
+    /// impl and the kernel consumer both read this as the removed count, and
+    /// the kernel reports it as such (#608).
     fn remove(&self, keys: &[i64]) -> NativeResult<usize>;
     /// Rank each query against each (selected) modality separately — the
     /// per-modality RRF signals (#201a).
