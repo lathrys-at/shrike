@@ -138,20 +138,28 @@ async def flow(tmp: Path) -> dict:
 
 
 def main() -> int:
-    tmp = Path(tempfile.mkdtemp(prefix=f"oss650-{os.getpid()}-"))
-    try:
-        res = asyncio.run(flow(tmp))
-    except Exception as e:  # noqa: BLE001
-        print(f"PID {os.getpid()} EXC {type(e).__name__}: {e}", file=sys.stderr)
-        return 3
-    status = "OK" if res["ok"] else "FAIL"
-    print(
-        f"PID {os.getpid()} {status} "
-        f"stored={res['total_stored']} in_scores={res['in_scores']} "
-        f"score={res['score']} vcount={res['vector_count']} "
-        f"idx={res['index_status']} report={res['report']}"
-    )
-    return 0 if res["ok"] else 1
+    # Replicate xdist: ONE long-lived interpreter runs the flow REPS times,
+    # reusing the process-global tokio runtime + blocking pool across runs
+    # (each fresh asyncio loop per run, like each test's asyncio.run).
+    reps = int(os.environ.get("OSS_REPS", "1"))
+    rc = 0
+    for i in range(reps):
+        tmp = Path(tempfile.mkdtemp(prefix=f"oss650-{os.getpid()}-{i}-"))
+        try:
+            res = asyncio.run(flow(tmp))
+        except Exception as e:  # noqa: BLE001
+            print(f"PID {os.getpid()} rep {i} EXC {type(e).__name__}: {e}", file=sys.stderr)
+            rc = 3
+            continue
+        if not res["ok"]:
+            print(
+                f"PID {os.getpid()} rep {i} FAIL "
+                f"stored={res['total_stored']} in_scores={res['in_scores']} "
+                f"score={res['score']} vcount={res['vector_count']} "
+                f"idx={res['index_status']} report={res['report']}"
+            )
+            rc = 1
+    return rc
 
 
 if __name__ == "__main__":
