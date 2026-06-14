@@ -25,7 +25,7 @@ use std::sync::{Arc, RwLock};
 use blake2::digest::consts::U8;
 use blake2::{Blake2b, Digest};
 
-use shrike_ffi::NativeResult;
+use shrike_ffi::{NativeError, NativeResult};
 use shrike_store_api::VectorIndex;
 
 use crate::TAG_TEXT_SPACE;
@@ -315,7 +315,18 @@ impl TagRefresher {
                 .collection
                 .run(|core| -> NativeResult<_> { Ok((core.note_tag_rows()?, core.note_count()?)) })
                 .await??;
-            recompute(&*self.engine, &rows, total, &self.config, &self.keys)?;
+            // `recompute` is O(collection) CPU + engine reads/writes (a vector
+            // per distinct tagged note, then a wholesale tag-space rebuild). It
+            // MUST NOT run on a runtime worker (#445: blocking/compute work rides
+            // `spawn_blocking`, never a worker thread) — at 100k notes it would
+            // stall the worker for the whole recompute. Hand it to the blocking
+            // pool with owned/Arc captures.
+            let engine = Arc::clone(&self.engine);
+            let keys = Arc::clone(&self.keys);
+            let config = self.config.clone();
+            tokio::task::spawn_blocking(move || recompute(&*engine, &rows, total, &config, &keys))
+                .await
+                .map_err(|e| NativeError::internal(format!("tag recompute task: {e}")))??;
             Ok(())
         }
         .await;

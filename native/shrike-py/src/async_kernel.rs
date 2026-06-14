@@ -445,9 +445,19 @@ impl AsyncKernel {
 
     /// Advance the watermarks after a metadata-only change (tags/decks/
     /// templates) — no re-embed, no drift on next boot. Awaitable.
-    fn metadata_changed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// `membership_may_have_changed` is the tag-centroid relevance probe (#600):
+    /// pass `True` only for a tag-membership change (a centroid input moved);
+    /// `False` for deck/template/field-metadata edits, which would otherwise
+    /// trigger a full O(collection) recompute behind no relevance signal.
+    fn metadata_changed<'py>(
+        &self,
+        py: Python<'py>,
+        membership_may_have_changed: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
-        kernel_op(py, async move { kernel.metadata_changed().await })
+        kernel_op(py, async move {
+            kernel.metadata_changed(membership_may_have_changed).await
+        })
     }
 
     /// Delete notes; vectors, fingerprints, and derived rows go with them.
