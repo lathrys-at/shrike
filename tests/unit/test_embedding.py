@@ -515,8 +515,11 @@ class TestEmbeddingRuntime:
         def _boom(*_a: object, **_k: object) -> MagicMock:
             raise RuntimeError("model load failed")
 
-        with patch("shrike.embedding_onnx.OnnxBackend", side_effect=_boom):
-            with pytest.raises(Exception) as ei:  # noqa: B017,PT011
-                runtime.start(backend="onnx-rs")
+        with (
+            patch("shrike.embedding_onnx.OnnxBackend", side_effect=_boom),
+            pytest.raises(RuntimeError) as ei,
+        ):
+            runtime.start(backend="onnx-rs")
+        # The failure is the real reason (model load), never the alias error.
         assert "Unknown embedding backend" not in str(ei.value)
         assert runtime.backend_kind in ("onnx", "clip", "llama", "remote")
