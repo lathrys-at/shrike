@@ -163,12 +163,7 @@ fn port_owner_pids(port: u16) -> Option<Vec<i64>> {
         // distinguish "ran but found nothing" (Some(empty)) from "could not
         // run" (None) by whether the command spawned at all.
         let out = Command::new("lsof")
-            .args([
-                "-nP",
-                &format!("-iTCP:{port}"),
-                "-sTCP:LISTEN",
-                "-t",
-            ])
+            .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()
@@ -869,38 +864,45 @@ mod tests {
     #[test]
     fn a_real_orphan_holding_our_port_is_still_reaped() {
         // The boundary: the fix must not regress the legitimate reap. A
-        // detached process that genuinely LISTENs on our port (a real orphan)
-        // and whose PID is recorded must still be terminated.
+        // *detached* (reparented-to-init) process that genuinely LISTENs on
+        // our port — a real orphan — and whose PID is recorded must still be
+        // terminated. Detach via `sh -c '... & echo $!'` like
+        // terminate_pid_confirms_death_via_pid_not_port, so the SIGTERM'd
+        // process is reaped by init rather than zombied (a direct child would
+        // linger as a zombie that `kill(pid, 0)` still reports alive).
         let dir = std::env::temp_dir().join(format!("shrike-s12-orphan-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let pid_file = dir.join("embedding.pid");
-        // Pick a free port, then hand it to a detached child that binds and
-        // holds it (reparented like a real orphan). `nc -l` would be ideal
-        // but isn't portable; a tiny python listener is available in CI.
+        // Pick a free port, then hand it to the detached listener.
         let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let script = format!(
-            "import socket,time\n\
-             s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n\
-             s.bind(('127.0.0.1',{port}));s.listen()\n\
-             time.sleep(30)\n"
+        let py = format!(
+            "import socket,time;\
+             s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);\
+             s.bind(('127.0.0.1',{port}));s.listen();time.sleep(30)"
         );
-        let mut orphan = Command::new("python3")
-            .args(["-c", &script])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+        let out = Command::new("/bin/sh")
+            .args([
+                "-c",
+                &format!("python3 -c \"{py}\" >/dev/null 2>&1 & echo $!"),
+            ])
+            .output()
             .unwrap();
-        std::fs::write(&pid_file, orphan.id().to_string()).unwrap();
+        let pid: i64 = String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::fs::write(&pid_file, pid.to_string()).unwrap();
 
         // Wait until the orphan is actually LISTENing (it owns the port).
         let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && !pid_owns_port(orphan.id() as i64, port) {
+        while Instant::now() < deadline && !pid_owns_port(pid, port) {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(
-            pid_owns_port(orphan.id() as i64, port),
+            pid_owns_port(pid, port),
             "test setup: orphan never bound the port"
         );
 
@@ -909,10 +911,11 @@ mod tests {
         m.cfg.pid_file = Some(pid_file.clone());
         m.reap_orphan();
 
-        // The genuine orphan was terminated.
-        let dead = wait_pid_dead(orphan.id() as i64, SHUTDOWN_TIMEOUT);
-        let _ = orphan.kill();
-        let _ = orphan.wait();
+        // The genuine orphan was terminated and the record cleared.
+        let dead = !pid_alive(pid);
+        if !dead {
+            terminate_raw(pid, true); // belt-and-suspenders cleanup
+        }
         let _ = std::fs::remove_dir_all(&dir);
         assert!(dead, "a real orphan holding our port must still be reaped");
         assert!(!pid_file.exists(), "the record is cleared after the reap");
