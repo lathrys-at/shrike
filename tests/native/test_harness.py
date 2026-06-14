@@ -47,10 +47,11 @@ def _capture_650(tag, harness, note_id, *, draft=None, hits=None):
         snap["engine_keys"] = sorted(int(k) for k in eng.keys())
     except Exception as e:  # pragma: no cover - diagnostic only
         snap["engine_error"] = f"{type(e).__name__}: {e}\n{_tb.format_exc()}"
-    # 2) Derived-store availability/state/size.
+    # 2) Derived-store availability/state/size + the background-build state.
     try:
         snap["derived_available"] = bool(harness.derived.available)
         snap["derived_status"] = harness.derived.status()
+        snap["bg_tasks_pending"] = len(getattr(harness, "_bg_tasks", ()))
     except Exception as e:  # pragma: no cover
         snap["derived_error"] = f"{type(e).__name__}: {e}"
     # 3) The search hits, if provided (UNRECALLED needs the present-but-unranked).
@@ -456,6 +457,84 @@ class TestRecognition:
             assert any(h["note_id"] == audio_id for h in hits), (
                 f"asr transcript reachable via the vector | {cap_vec}"
             )
+
+            harness.detach_recognizer("asr")
+            await harness.close()
+
+        asyncio.run(flow())
+
+    def test_asr_sweep_TOGGLE_settled(self, tmp_path) -> None:
+        # #650 angle-A TOGGLE (TEMPORARY): byte-identical to
+        # test_asr_sweep_over_sound_media_through_the_binding EXCEPT it awaits
+        # `settle_background()` before reading the Python derived facade. If the
+        # original flakes (facade still BUILDING) and THIS never does, the cause
+        # is the un-awaited background derived-store build, not an absent vector.
+        import hashlib
+        from types import SimpleNamespace
+
+        from shrike.harness import KernelIndexView
+
+        class _TokenHash:
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                out = []
+                for t in texts:
+                    v = [0.0] * 64
+                    for tok in t.lower().split():
+                        h = int(hashlib.blake2b(tok.encode(), digest_size=2).hexdigest(), 16)
+                        v[h % 64] += 1.0
+                    n = sum(x * x for x in v) ** 0.5 or 1.0
+                    out.append([x / n for x in v])
+                return out
+
+            def model_fingerprint(self) -> str:
+                return "tok:v1"
+
+            def embedding_dim(self) -> int:
+                return 64
+
+        async def flow():
+            media = {"lecture.mp3": b"mitochondria are the powerhouse of the cell"}
+            runtime = EmbeddingRuntime(model=None)
+            derived = DerivedTextStore(
+                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
+            )
+            harness = await Harness.assemble(
+                collection_path=str(tmp_path / "collection.anki2"),
+                cache_dir=str(tmp_path / "cache"),
+                runtime=runtime,
+                derived=derived,
+                cooperative=False,
+                hold_seconds=5.0,
+                media_read=media.get,
+                media_exists=lambda name: name in media,
+            )
+            await harness.boot(start_embedding=False)
+            backend = _TokenHash()
+            harness.kernel.attach_embedder(shrike_native.PyEmbedder.capture(backend))
+            await harness.kernel.reindex_if_needed()
+
+            notes = await harness.wrapper.upsert_notes(
+                [
+                    {
+                        "note_type": "Basic",
+                        "deck": "Default",
+                        "fields": {"Front": "Listen [sound:lecture.mp3]", "Back": "b"},
+                    }
+                ]
+            )
+            audio_id = notes[0]["id"]
+
+            harness.attach_recognizer(_StubAsr(), "asr")
+            report = await harness.recognition_sweep(batch_size=4)
+            assert report["total_stored"] == 1, report
+
+            # THE TOGGLE: drain the background derived-store build before reading
+            # the Python facade. (The original test omits this.)
+            await harness.settle_background()
+
+            sub = harness.derived.search_substring("powerhouse of the cell", limit=5)
+            cap_sub = _capture_650("asr-toggle-substring", harness, audio_id)
+            assert sub, f"[TOGGLE] asr transcript reached the lexical store | {cap_sub}"
 
             harness.detach_recognizer("asr")
             await harness.close()
