@@ -351,9 +351,20 @@ class TestRecognition:
             )
 
             harness.attach_recognizer(_StubOcr())
-            # Bounded wait: a livelocked loop awaits between batches, so a
-            # regression fails by timeout here rather than hanging the suite.
-            report = await asyncio.wait_for(harness.recognition_sweep(batch_size=2), timeout=30)
+            # The no-progress STOP is bounded by kernel-call COUNT, not wall
+            # clock (#525): the driver must return after exactly one no-progress
+            # batch. `max_batches` is a generous livelock ceiling so a #386
+            # regression (re-taking the same window forever) returns instead of
+            # hanging the suite — but a correct driver stops at batch 1, well
+            # under it. Asserting `batches == 1` (not a 30s timeout) makes the
+            # test deterministic under load: pass/fail keys on the driver's
+            # logic, never on how fast a contended machine runs one batch.
+            report = await harness.recognition_sweep(batch_size=2, max_batches=50)
+            assert report["batches"] == 1, (
+                "the sweep must STOP on the first no-progress batch, not re-take "
+                "the unreadable window (a #386 livelock regression would loop to "
+                f"the max_batches ceiling): batches={report['batches']}"
+            )
             assert report["status"] == "ran"
             assert report["recognized"] == 0
             assert report["remaining"] == 1

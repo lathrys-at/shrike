@@ -744,8 +744,14 @@ class Harness:
             report: dict[str, Any] = json.loads(await self.kernel.recognize_pending(batch_size))
             total_stored += int(report.get("stored", 0))
             batches += 1
+            # ``batches`` is the count of kernel sweep calls this run made — the
+            # observable that distinguishes the no-progress STOP (returns after
+            # one no-progress batch) from a livelock REGRESSION (would re-take
+            # the same window every call). Surfaced so a test can assert the
+            # driver stopped by logic, not by a wall-clock timeout (#525).
             if report.get("status") != "ran" or int(report.get("remaining", 0)) == 0:
                 report["total_stored"] = total_stored
+                report["batches"] = batches
                 if total_stored:
                     logger.info(
                         "Recognition sweep stored %d item(s) over %d batch(es)",
@@ -764,6 +770,7 @@ class Harness:
                 # (the reads drained, recognition ran) and must not stop the
                 # sweep.
                 report["total_stored"] = total_stored
+                report["batches"] = batches
                 logger.warning(
                     "Recognition sweep stopped on a no-progress batch "
                     "(%d item(s) still pending, unreadable)",
@@ -772,6 +779,7 @@ class Harness:
                 return report
             if max_batches is not None and batches >= max_batches:
                 report["total_stored"] = total_stored
+                report["batches"] = batches
                 return report
 
     def start_recognition(self, kind: str) -> None:
