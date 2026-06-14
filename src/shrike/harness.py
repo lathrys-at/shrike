@@ -941,6 +941,13 @@ class Harness:
         rebuilding = False
         if self.runtime.backend is not None:
             rebuilding = await self.kernel.reindex_if_needed()
+            if rebuilding:
+                # The reconcile re-embedded secondary image vectors, so the
+                # cross-space image floor (#576/#580) must be re-derived — every
+                # other reindex path (_drive_reindex/_rebuild_then_calibrate/
+                # _drive_boot_reindex) recalibrates; /reload was the outlier (#596).
+                # No-op at N=1 (the kernel returns an empty list with no secondaries).
+                await self._recalibrate_secondary_floors()
         return {"status": "reloaded", "col_mod": col_mod, "rebuilding": rebuilding}
 
     async def close(self) -> None:
