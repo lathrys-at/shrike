@@ -144,6 +144,20 @@ extension is stale rather than silently importing a stale `.so` (see Tests
 below). Python 3.12 is used (managed via pyenv; `.python-version` is at repo
 root). The `anki` package requires Python >= 3.11.
 
+**Cacheable dev artifacts go in the repo-root `.cache/`, not `~/.cache`.**
+Downloaded toolchains, test models, and build inputs cache under `<repo>/.cache/`
+(gitignored) so they stay with the checkout instead of polluting your home or
+colliding across checkouts. The helper scripts already follow this
+(`scripts/fetch-llama-server.sh`; `scripts/test-embedding.sh` uses
+`${ROOT}/.cache/llama-server`). Use the same rule for any new cacheable dev/build
+work, and don't redirect a build system's output directory elsewhere just to
+manage disk (bound disk via controlled parallelism + cleanup instead). Two
+intentional exceptions live under `~/.cache`: the `./bazel`/bazelisk launcher
+cache and the shared test-model cache (`SHRIKE_TEST_MODEL_DIR`, default
+`~/.cache/shrike-test-models`). This is dev/build caching; it is separate from
+the *application's* runtime cache dir (the platform `Cache` directory under
+Platform directories below).
+
 ## Running commands
 
 ### Tests
