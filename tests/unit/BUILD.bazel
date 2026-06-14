@@ -141,6 +141,7 @@ _TOOLS = [
     "test_tools_find_replace.py",
     "test_tools_find_replace_models.py",
     "test_tools_import.py",
+    "test_tools_list_notes.py",
     "test_tools_migrate.py",
     "test_tools_prune.py",
     "test_tools_query.py",
