@@ -87,8 +87,21 @@ def spinner(message: str) -> Generator[None, None, None]:
         yield
 
 
+_MUTEX_MSG = "--pretty and --json are mutually exclusive."
+
+# Tracks an *explicit* leaf `--pretty` (value True) so the conflict is caught
+# regardless of flag order. We can't key off ctx.obj["pretty"] is True: the root
+# group's --pretty defaults to True and seeds ctx.obj before the eager leaf
+# callbacks run, so that would false-positive on a bare `info --json` (#607).
+_PRETTY_EXPLICIT = "_pretty_explicit"
+
+
 def _merge_json(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
     if value:
+        # Symmetric with _merge_pretty: `--pretty` before `--json` must also
+        # error, not silently let --json win. `--no-pretty` (False) is compatible.
+        if ctx.obj.get(_PRETTY_EXPLICIT):
+            raise click.UsageError(_MUTEX_MSG)
         ctx.obj["json"] = True
         ctx.obj["pretty"] = False
         set_pretty(False)
@@ -96,8 +109,10 @@ def _merge_json(ctx: click.Context, _param: click.Parameter, value: bool) -> Non
 
 def _merge_pretty(ctx: click.Context, _param: click.Parameter, value: bool | None) -> None:
     if value is not None:
-        if value and ctx.obj.get("json"):
-            raise click.UsageError("--pretty and --json are mutually exclusive.")
+        if value:
+            if ctx.obj.get("json"):
+                raise click.UsageError(_MUTEX_MSG)
+            ctx.obj[_PRETTY_EXPLICIT] = True
         ctx.obj["pretty"] = value
         set_pretty(value)
 
