@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from shrike.embed_batching import (
@@ -9,6 +10,7 @@ from shrike.embed_batching import (
     BATCH_PROBE_IMAGES,
     BATCH_PROBE_TEXTS,
     ProbeError,
+    _probe_items,
     max_probe_drift,
     probe_image_max_safe_batch,
     probe_max_safe_batch,
@@ -190,3 +192,33 @@ def test_vision_batch_only_failure_falls_back_to_serial() -> None:
         return _img_deterministic(images)
 
     assert probe_image_max_safe_batch(batch_only_broken) == 1
+
+
+# --- #602 S11b sibling check: the Python probe lane is NaN-safe (PASSES today) ---
+# These confirm there is no Python-side twin of the Rust-only NaN-weight drift
+# concern: a model that emits NaN only under batching is classified serial, and
+# numpy's max propagates NaN so the `drift <= tol` comparison is False (→ variant
+# → serial), never silently "safe". They are passing controls, not regressions.
+
+
+def test_python_probe_treats_nan_drift_as_unsafe() -> None:
+    dim = 4
+
+    def nan_under_batching(items: list[str]) -> list[list[float]]:
+        if len(items) == 1:
+            return [[1.0] * dim]
+        out = [[1.0] * dim for _ in items]
+        out[1][0] = float("nan")
+        return out
+
+    items = [f"t{i}" for i in range(4)]
+    safe = _probe_items(items, nan_under_batching, tol=1e-3, attempts=3)
+    assert safe == 1, "a NaN-under-batching model must be classified serial (batch-variant)"
+
+
+def test_numpy_max_propagates_nan_sanity() -> None:
+    ref = np.array([[1.0, 2.0]], dtype=np.float64)
+    batched = np.array([[1.0, float("nan")]], dtype=np.float64)
+    drift = float(np.max(np.abs(ref - batched)))
+    assert drift != drift  # NaN
+    assert not (drift <= 1e-3)  # → variant → safe

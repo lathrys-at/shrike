@@ -736,7 +736,11 @@ class EmbeddingRuntime:
                 return self._backend
 
             if backend is not None:
-                self._backend_kind = backend
+                # Normalize the same way __init__ does (BACKEND_ALIASES), so a
+                # documented alias ("onnx-rs"/"clip-rs") on the start() override
+                # path behaves like the ctor — and a bad override can't poison
+                # _backend_kind for subsequent no-override starts.
+                self._backend_kind = BACKEND_ALIASES.get(backend, backend)
             if model is not None:
                 self._model = model
             if port is not None:
