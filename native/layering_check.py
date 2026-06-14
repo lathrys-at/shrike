@@ -28,6 +28,9 @@ PYO3_ALLOWED = {"shrike-py", "shrike-native-demo"}
 
 # Engine crates the kernel must NEVER name (#342). Grown as engine crates are
 # added; the kernel's only engine-shaped dep is shrike-engine-api (the traits).
+# (shrike-net is intentionally NOT here: it's a shared LOW utility crate — the
+# SSRF-safety primitives, #592 — that sits below both the kernel and the engine
+# crates, so BOTH may depend on it without inverting the layer graph.)
 ENGINE_CRATES = {
     "shrike-embed",
     "shrike-recognize-apple",

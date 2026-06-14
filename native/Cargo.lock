@@ -5112,6 +5112,7 @@ dependencies = [
  "shrike-engine-api",
  "shrike-ffi",
  "shrike-index",
+ "shrike-net",
  "shrike-schemas",
  "shrike-store-api",
  "tokio",
@@ -5156,6 +5157,16 @@ name = "shrike-native-demo"
 version = "0.0.0"
 dependencies = [
  "pyo3",
+]
+
+[[package]]
+name = "shrike-net"
+version = "0.1.0"
+dependencies = [
+ "shrike-ffi",
+ "tracing",
+ "ureq",
+ "url",
 ]
 
 [[package]]

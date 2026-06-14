@@ -24,7 +24,6 @@
 //! into trusted internal hosts) — same switch as the Python facade.
 
 use std::io::Read;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 
 use base64::Engine;
 use shrike_ffi::{NativeError, NativeResult};
@@ -32,116 +31,20 @@ use shrike_schemas::StoreMediaItem;
 use shrike_store_api::{PreparedMedia, PreparedMediaSource};
 use url::Url;
 
+// The SSRF classifier + the resolve-and-vet helper now live in the shared
+// `shrike-net` crate (#592) so the remote engine crates use the SAME control.
+// Re-exported here so the kernel's Python-facing binding
+// (anki_core::media_ip_allowed) and any in-tree caller keep importing them from
+// `media_fetch` unchanged — a pure move, store_media SSRF behavior + the parity
+// corpus are byte-identical.
+pub use shrike_net::{ip_is_allowed, resolve_public_ip};
+
 pub use shrike_store_api::MEDIA_MAX_BYTES;
 pub const URL_FETCH_TIMEOUT_SECS: u64 = 30;
 pub const MAX_MEDIA_REDIRECTS: usize = 5;
 
 fn invalid(msg: impl Into<String>) -> NativeError {
     NativeError::invalid_input(msg)
-}
-
-/// Python `ipaddress.is_global` for IPv4 (the registry-derived private set
-/// plus the explicit 100.64.0.0/10 carve-out), with the two per-registry
-/// exceptions inside 192.0.0.0/24 that ARE global. Parity-tested against
-/// Python over a corpus in tests/native.
-fn ipv4_is_global(addr: Ipv4Addr) -> bool {
-    let o = addr.octets();
-    let in_net = |net: [u8; 4], prefix: u32| -> bool {
-        let ip = u32::from_be_bytes(o);
-        let net = u32::from_be_bytes(net);
-        let mask = if prefix == 0 {
-            0
-        } else {
-            u32::MAX << (32 - prefix)
-        };
-        (ip & mask) == (net & mask)
-    };
-    // Exceptions inside 192.0.0.0/24 that the IANA registry marks global.
-    if o == [192, 0, 0, 9] || o == [192, 0, 0, 10] {
-        return true;
-    }
-    let private = in_net([0, 0, 0, 0], 8)
-        || in_net([10, 0, 0, 0], 8)
-        || in_net([127, 0, 0, 0], 8)
-        || in_net([169, 254, 0, 0], 16)
-        || in_net([172, 16, 0, 0], 12)
-        || in_net([192, 0, 0, 0], 24)
-        || in_net([192, 0, 2, 0], 24)
-        || in_net([192, 168, 0, 0], 16)
-        || in_net([198, 18, 0, 0], 15)
-        || in_net([198, 51, 100, 0], 24)
-        || in_net([203, 0, 113, 0], 24)
-        || in_net([240, 0, 0, 0], 4)
-        || o == [255, 255, 255, 255];
-    let shared = in_net([100, 64, 0, 0], 10); // carrier-grade NAT: not private, not global
-    !private && !shared
-}
-
-/// Python `ipaddress.is_global` for IPv6 (the private set; an IPv4-mapped
-/// address defers to the IPv4 classifier, like Python's `ipv4_mapped`
-/// handling rejects ::ffff:10.0.0.1).
-fn ipv6_is_global(addr: Ipv6Addr) -> bool {
-    if let Some(v4) = addr.to_ipv4_mapped() {
-        return ipv4_is_global(v4);
-    }
-    let seg = addr.segments();
-    let in_net = |net: [u16; 8], prefix: u32| -> bool {
-        let ip = u128::from_be_bytes(addr.octets());
-        let net_ip = u128::from_be_bytes(Ipv6Addr::from(net).octets());
-        let mask = if prefix == 0 {
-            0
-        } else {
-            u128::MAX << (128 - prefix)
-        };
-        (ip & mask) == (net_ip & mask)
-    };
-    let private = addr.is_loopback()
-        || addr.is_unspecified()
-        || in_net([0x64, 0xff9b, 0x1, 0, 0, 0, 0, 0], 48) // 64:ff9b:1::/48
-        || in_net([0x100, 0, 0, 0, 0, 0, 0, 0], 64) // 100::/64
-        || (in_net([0x2001, 0, 0, 0, 0, 0, 0, 0], 23)
-            // exceptions that ARE global inside 2001::/23
-            && !in_net([0x2001, 0x1, 0, 0, 0, 0, 0, 0], 32)
-            && !in_net([0x2001, 0x3, 0, 0, 0, 0, 0, 0], 32)
-            && !in_net([0x2001, 0x4, 0x112, 0, 0, 0, 0, 0], 48)
-            && !in_net([0x2001, 0x20, 0, 0, 0, 0, 0, 0], 28)
-            && !in_net([0x2001, 0x30, 0, 0, 0, 0, 0, 0], 28))
-        || in_net([0x2001, 0xdb8, 0, 0, 0, 0, 0, 0], 32)
-        || in_net([0x2002, 0, 0, 0, 0, 0, 0, 0], 16) // 6to4: embeds an IPv4, fails open to internal (2002:7f00:1:: = 127.0.0.1)
-        || in_net([0x3fff, 0, 0, 0, 0, 0, 0, 0], 20) // 3fff::/20 reserved-by-IANA (RFC 9637, documentation)
-        || in_net([0xfc00, 0, 0, 0, 0, 0, 0, 0], 7)
-        || in_net([0xfe80, 0, 0, 0, 0, 0, 0, 0], 10);
-    let _ = seg;
-    !private
-}
-
-/// Whether one address passes the SSRF allowlist (global and not multicast).
-pub fn ip_is_allowed(addr: IpAddr) -> bool {
-    match addr {
-        IpAddr::V4(v4) => ipv4_is_global(v4) && !v4.is_multicast(),
-        IpAddr::V6(v6) => ipv6_is_global(v6) && !v6.is_multicast(),
-    }
-}
-
-/// `_resolve_public_ip`: resolve and vet EVERY address (a name can't smuggle
-/// an internal A record alongside a public one); return the first so the
-/// caller pins the connection to it.
-pub fn resolve_public_ip(host: &str) -> NativeResult<IpAddr> {
-    let addrs: Vec<SocketAddr> = (host, 0u16)
-        .to_socket_addrs()
-        .map_err(|e| invalid(format!("could not resolve host '{host}': {e}")))?
-        .collect();
-    let mut vetted: Option<IpAddr> = None;
-    for sa in &addrs {
-        let ip = sa.ip();
-        if !ip_is_allowed(ip) {
-            return Err(invalid(format!(
-                "refusing to fetch from non-public address {ip} (host '{host}')"
-            )));
-        }
-        vetted.get_or_insert(ip);
-    }
-    vetted.ok_or_else(|| invalid(format!("could not resolve host '{host}'")))
 }
 
 /// `_decode_media_b64`: cap on the ENCODED length first (base64 is ~4/3 of
@@ -176,9 +79,10 @@ pub fn fetch_media_url(url: &str, allow_private: bool) -> NativeResult<(Vec<u8>,
         // Pin the connection: the resolver hands ureq the vetted IP while the
         // URL keeps the hostname, so SNI/cert/Host all see the name and the
         // socket goes where we checked. With allow_private, system resolution.
+        let timeout = std::time::Duration::from_secs(URL_FETCH_TIMEOUT_SECS);
         let agent = if allow_private {
             ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(URL_FETCH_TIMEOUT_SECS))
+                .timeout(timeout)
                 .redirects(0)
                 .build()
         } else {
@@ -188,13 +92,7 @@ pub fn fetch_media_url(url: &str, allow_private: bool) -> NativeResult<(Vec<u8>,
             // string ureq hands the resolver doesn't split cleanly for
             // bracketed IPv6 literals (#382).
             let port = parsed.port_or_known_default().unwrap_or(0);
-            ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(URL_FETCH_TIMEOUT_SECS))
-                .redirects(0)
-                .resolver(move |_netloc: &str| -> std::io::Result<Vec<SocketAddr>> {
-                    Ok(vec![SocketAddr::new(pinned, port)])
-                })
-                .build()
+            shrike_net::pinned_agent(pinned, port, timeout)
         };
 
         // ureq surfaces 3xx either as Ok (redirects disabled) or Error::Status
@@ -322,6 +220,8 @@ pub fn prepare_media_item(
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use super::*;
 
     #[test]
