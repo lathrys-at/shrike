@@ -186,11 +186,13 @@ pub(crate) fn action_search_notes(
             .map_err(to_py_err)?,
         _ => Vec::new(),
     };
-    // #576 experiment knobs (TEST-ONLY, like `disable_cross_space_gate`): the
-    // eval harness selects a cross-space fusion variant + τ via env vars so the
-    // MCP tool schema is unchanged and production stays on the `Relative`
-    // default. Unset → today's behaviour exactly.
-    let (cross_space_fusion_mode, cross_space_tau) = cross_space_fusion_from_env();
+    // #576/#580 experiment knobs (TEST-ONLY, like `disable_cross_space_gate`):
+    // the eval harness selects a cross-space fusion variant + τ + the #580
+    // vision-weight budget via env vars so the MCP tool schema is unchanged and
+    // production stays on the `FloorAdmit` default (#580). Unset → production
+    // floor-admission exactly.
+    let (cross_space_fusion_mode, cross_space_tau, cross_space_budget) =
+        cross_space_fusion_from_env();
     let args = shrike_kernel::actions::SearchArgs {
         top_k,
         threshold,
@@ -209,6 +211,7 @@ pub(crate) fn action_search_notes(
         disable_cross_space_gate: false,
         cross_space_fusion_mode,
         cross_space_tau,
+        cross_space_budget,
     };
     py.detach(|| {
         let tag_keys = tag_kernel.as_ref().map(|k| k.tag_keys());
@@ -220,31 +223,47 @@ pub(crate) fn action_search_notes(
     .map_err(to_py_err)
 }
 
-/// Resolve the #576 cross-space fusion variant + τ from the environment
-/// (`SHRIKE_CROSS_SPACE_FUSION_MODE` ∈ {relative, relative_floor, soft_relative,
-/// soft_calibrated}; `SHRIKE_CROSS_SPACE_TAU` a float). The PRODUCTION default
-/// (unset) is `RelativeFloor`, the shipped #576 winner — the env seam is the
-/// EVAL escape hatch the search-quality sweep uses to reproduce the decision
-/// table (e.g. `relative` to measure the pre-#576 leak). An unrecognized value
-/// falls back to the production default so a typo can never silently weaken the
-/// gate. The MCP tool schema is unchanged either way.
-fn cross_space_fusion_from_env() -> (shrike_kernel::actions::CrossSpaceFusionMode, f64) {
+/// Resolve the cross-space fusion variant + τ + budget from the environment
+/// (`SHRIKE_CROSS_SPACE_FUSION_MODE` ∈ {floor_admit, relative, relative_floor,
+/// soft_relative, soft_calibrated, floor_admit_budget, soft_floor_admit,
+/// soft_floor_admit_budget}; `SHRIKE_CROSS_SPACE_TAU` a float;
+/// `SHRIKE_CROSS_SPACE_BUDGET` a float). The PRODUCTION default (unset) is
+/// `FloorAdmit` (#580); the env seam is the EVAL escape hatch the search-quality
+/// sweep uses to reproduce the historical decision tables (e.g. `relative_floor`
+/// for the pre-#580 production gate, `relative` for the pre-#576 leak). An
+/// unrecognized value falls back to the production default (floor-admit) so a
+/// typo can never silently weaken the path. The MCP tool schema is unchanged.
+fn cross_space_fusion_from_env() -> (shrike_kernel::actions::CrossSpaceFusionMode, f64, f64) {
     use shrike_kernel::actions::CrossSpaceFusionMode as M;
     let mode = match std::env::var("SHRIKE_CROSS_SPACE_FUSION_MODE")
         .ok()
         .as_deref()
         .map(str::trim)
     {
+        // The historical (pre-#580) eval modes — reproduce the decision tables.
         Some("relative") => M::Relative,
+        Some("relative_floor") => M::RelativeFloor,
         Some("soft_relative") => M::SoftRelative,
         Some("soft_calibrated") => M::SoftCalibrated,
-        // "relative_floor", "", unset, or anything unrecognized → the shipped
-        // production default (the calibrated floor).
+        // #580 floor-admission family (production + the dominated/measurement
+        // siblings).
+        Some("floor_admit") => M::FloorAdmit,
+        Some("floor_admit_budget") => M::FloorAdmitBudget,
+        Some("soft_floor_admit") => M::SoftFloorAdmit,
+        Some("soft_floor_admit_budget") => M::SoftFloorAdmitBudget,
+        // "", unset, or anything unrecognized → the shipped production default
+        // (#580 floor-admit).
         _ => M::default(),
     };
     let tau = std::env::var("SHRIKE_CROSS_SPACE_TAU")
         .ok()
         .and_then(|s| s.trim().parse::<f64>().ok())
         .unwrap_or(0.05);
-    (mode, tau)
+    // The #580 vision-weight budget B; `<= 0` / unset reads as the canonical 1.0
+    // (`SearchArgs::effective_budget`), so a single fired space keeps full weight.
+    let budget = std::env::var("SHRIKE_CROSS_SPACE_BUDGET")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .unwrap_or(1.0);
+    (mode, tau, budget)
 }

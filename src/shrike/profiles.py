@@ -595,6 +595,24 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
             "would bind the single managed llama-server; give all but one an explicit endpoint"
         )
 
+    # At most ONE IMAGE-embedding space (#580). Cross-space fusion admits a
+    # secondary image space on its own calibrated floor (floor-admission, the
+    # production mechanism since #580) — the relative winner-take-all gate that
+    # used to bound MULTIPLICITY is retired. With a single image space there is
+    # no multiplicity to bound, so retiring it is sound; declaring two image
+    # spaces would reintroduce the N≥2 flood the gate guarded against (the eval
+    # showed text recall collapses), with no mechanism left to stop it. So it is
+    # a config error, not a silent degrade.
+    image_entries = [i for i, e in enumerate(caps.embedders) if "image" in e.modalities]
+    if len(image_entries) > 1:
+        raise ProfileError(
+            f"embedders[{', '.join(str(i) for i in image_entries)}] each declare the image "
+            "modality — Shrike supports at most ONE image-embedding space (#580: cross-space "
+            "fusion admits a single image space on its calibrated floor; two would flood the "
+            "fusion with no gate to bound them). Keep one image space; a second text-only space "
+            "is fine"
+        )
+
     for rec in caps.recognizers:
         if rec.source == "asr":
             raise ProfileError(

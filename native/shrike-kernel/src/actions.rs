@@ -550,21 +550,42 @@ pub struct SpaceSemantic {
     pub image_floor: Option<f64>,
 }
 
-/// The cross-space fusion variant (#576). `RelativeFloor` is the SHIPPED
-/// PRODUCTION default: the relative gate composed with a per-space calibrated
-/// intra-modal image floor (the #576 experiment's winner — closes the ∅-gold
-/// over-return leak with no recall loss). The other three are eval-only
-/// measurement modes the `SHRIKE_CROSS_SPACE_FUSION_MODE` seam selects to
-/// reproduce the decision table; they never change production. The relative
-/// gate composes with all of them (it is the negative-control backstop and
-/// never drops out — see #234).
+/// The cross-space fusion variant. `FloorAdmit` is the SHIPPED PRODUCTION
+/// default since #580: the relative winner-take-all gate (#234) is RETIRED from
+/// the production path — a secondary image space is admitted on its OWN
+/// calibrated intra-modal floor (`image_best > z_floor`), independent of how the
+/// text space did, so a strong on-topic CLIP hit reaches RRF and corroborates a
+/// card even when the text space "won" on a spurious filename/lexical match (the
+/// #580 corroboration win, measured on the real MiniLM+CLIP corpus:
+/// `eval/search_quality/RESULTS_580.md`). The floor margin is the precision/
+/// recall dial (`search.cross_space_fusion.margin`, threaded into calibration).
+///
+/// Retiring the relative gate is sound because >1 image-embedding space is a
+/// config error (`profiles.resolve_profile`): with at most ONE image space
+/// there is no multiplicity to guard, which was the relative gate's sole job
+/// (the N≥2 flood — `cross_space_ungated_regresses_text_negative_control` +
+/// `floor_admit_alone_floods_n2_but_budget_holds_it` document the
+/// impossible-by-construction behaviour at the kernel level).
+///
+/// The other modes are EVAL-ONLY (`SHRIKE_CROSS_SPACE_FUSION_MODE`), kept to
+/// reproduce the historical #576/#580 decision tables — they NEVER select in
+/// production: the relative family (`Relative`, `RelativeFloor`, `SoftRelative`,
+/// `SoftCalibrated`) reproduces the pre-#580 gate; `SoftFloorAdmit*` reproduces
+/// the dominated soft variant (#580 §5: zero recall upside, re-opens the
+/// over-return leak with τ); the `*Budget` modes reproduce the N≥2 multiplicity
+/// measurement that justifies the single-image-space invariant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CrossSpaceFusionMode {
-    /// V0+floor (PRODUCTION) — relative AND a per-space calibrated intra-modal
-    /// floor (`image_best > z_floor`): a hard drop of the space's image ranking
-    /// when its best surviving image cosine clears no floor. The shipped #576
-    /// winner; the floor is harness-calibrated per secondary space.
+    /// PRODUCTION (#580) — FLOOR-ADMIT (binary): the relative gate is gone; admit
+    /// a vision space iff its best surviving image cosine clears its OWN
+    /// calibrated floor (`image_best > z_floor`), at full weight 1.0. An
+    /// uncalibrated space (no floor) is admitted (the floor is a no-op). The
+    /// single-image-space invariant (a config error otherwise) means the N≥2
+    /// flood the relative gate used to guard cannot occur.
     #[default]
+    FloorAdmit,
+    /// V0+floor (eval) — the pre-#580 production default: relative gate AND a
+    /// per-space calibrated intra-modal floor. Kept to reproduce the #576 table.
     RelativeFloor,
     /// V0 (eval) — binary relative gate only (`clip_best >= text_best`). The
     /// pre-#576 behaviour; leaks weak image cards when the primary's best cosine
@@ -577,6 +598,22 @@ pub enum CrossSpaceFusionMode {
     /// V2 (eval) — soft-calibrated: weight `w = σ((z_s − z0)/τ)`, composed with
     /// the relative gate. The soft alternative to the hard floor.
     SoftCalibrated,
+    /// #580 (eval) — FLOOR-ADMIT + WEIGHT BUDGET (binary): admit on the absolute
+    /// floor, but bound the TOTAL vision RRF weight when N≥2 spaces fire by
+    /// splitting a budget `B` (default 1.0, `cross_space_budget`) equally across
+    /// the admitted spaces (each gets `B/N`). N=1 keeps full weight `B`. The
+    /// budget held the N≥2 negative control without relative suppression — the
+    /// MEASURED RATIONALE for the single-image-space invariant (moot in
+    /// production, where N≥2 is a config error).
+    FloorAdmitBudget,
+    /// #580 (eval) — SOFT floor-admit (NO budget): drop the relative gate; weight
+    /// each admitted space `w = σ((image_best − z_floor)/τ)`. DOMINATED (#580
+    /// §5): no recall upside over binary, and re-opens the over-return leak as τ
+    /// grows. Kept only to reproduce that finding.
+    SoftFloorAdmit,
+    /// #580 (eval) — SOFT floor-admit + WEIGHT BUDGET: the soft variant with the
+    /// N≥2 budget (sum-scaled to `B`). Also dominated; kept for completeness.
+    SoftFloorAdmitBudget,
 }
 
 /// One secondary space's per-source search result: its per-modality hits plus
@@ -727,6 +764,27 @@ pub struct SearchArgs {
     /// The temperature τ for the soft variants (#576): smaller τ → a sharper
     /// taper (τ→0 is the binary floor limit). Ignored by the binary modes.
     pub cross_space_tau: f64,
+    /// The total vision-WEIGHT BUDGET `B` for the #580 `*Budget` floor-admission
+    /// modes: when N≥2 vision spaces clear their floor, their combined RRF weight
+    /// is bounded to `B` (split equally in the binary mode, sum-scaled in the
+    /// soft mode). N=1 keeps full weight `B`. `<= 0.0` (the `Default`) is read as
+    /// the canonical `1.0` so a space's default weight is unchanged — the budget
+    /// modes only ever DIVIDE down from there. Ignored by the non-budget modes.
+    pub cross_space_budget: f64,
+}
+
+impl SearchArgs {
+    /// The effective vision-weight budget — `<= 0.0` reads as the canonical
+    /// `1.0` (a single fired space then keeps full weight, matching the
+    /// non-budget modes; `Default::default()` zeroes the field, so this keeps
+    /// the eval's `..Default::default()` construction honest).
+    fn effective_budget(&self) -> f64 {
+        if self.cross_space_budget > 0.0 {
+            self.cross_space_budget
+        } else {
+            1.0
+        }
+    }
 }
 
 /// Insertion-ordered candidate cache: Python dict iteration order is part of
@@ -848,6 +906,27 @@ pub const ACTIVATION_MARGIN: f64 = 1.0;
 /// Logistic squash `σ(x) = 1/(1+e^-x)` for the #576 soft-weight variants.
 fn sigmoid(x: f64) -> f64 {
     1.0 / (1.0 + (-x).exp())
+}
+
+/// The PER-NOTE image activation floor (#582): retain in `ranking` only the
+/// notes whose OWN image cosine (`score[id]`) clears `floor`, and prune the
+/// dropped notes from `score` so the displayed-`score` fold and the `image_best`
+/// read stay consistent. The pre-#582 behaviour was a per-SPACE gate (admit the
+/// WHOLE ranking iff the rank-1 cosine cleared the floor); this is the correct
+/// per-note granularity — a below-floor tail card no longer rides in on a
+/// strong rank-1's coat-tails, so it carries no spurious image signal/provenance.
+///
+/// `floor = None` (an uncalibrated space) is a no-op (the floor can't judge).
+/// It can only TIGHTEN: every kept note cleared the floor, and the rank-1 (if
+/// it cleared) is unchanged — so a genuine cross-modal find (above-floor by
+/// construction) is preserved, while an ∅-gold ranking whose best is sub-floor
+/// is emptied exactly as the per-space gate did.
+fn apply_image_floor(ranking: &mut Vec<i64>, score: &mut HashMap<i64, f64>, floor: Option<f64>) {
+    let Some(floor) = floor else {
+        return;
+    };
+    ranking.retain(|nid| score.get(nid).is_some_and(|&c| c > floor));
+    score.retain(|_, &mut c| c > floor);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1183,12 +1262,12 @@ pub fn search_notes(
             args,
             false,
         );
-        if let (Some(first), Some(floor)) = (ranking_image.first(), args.image_floor) {
-            if image_score[first] <= floor {
-                ranking_image.clear(); // no good-enough surviving image match
-                image_score.clear();
-            }
-        }
+        // #582: per-NOTE image floor — keep only the cards whose own image
+        // cosine clears the floor (was a per-space all-or-nothing gate on the
+        // rank-1). A below-floor tail card no longer rides in on the rank-1's
+        // coat-tails. When the rank-1 itself is sub-floor the whole ranking
+        // empties (the old behaviour falls out as the rank-1 case).
+        apply_image_floor(&mut ranking_image, &mut image_score, args.image_floor);
         // Tag-centroid signal (#179): conditionally present — activated tags
         // expand to member notes through the SAME scope/exclusion machinery
         // (synthetic order-preserving distances into a scratch score map, so
@@ -1273,45 +1352,81 @@ pub fn search_notes(
             ("fuzzy".into(), ranking_fuzzy),
         ];
 
-        // ── Cross-space fusion (#234 / #576) ─────────────────────────────────
-        // Each SECONDARY text-capable space contributes its own gated `image`
-        // ranking. EMPTY cross_space (N=1) → this whole block is a no-op and the
-        // rankings vector above is byte-identical to today, so `rrf_fuse` gets
-        // identical inputs. The relative activation gate (the eval's mandatory
-        // finding) fires a vision space ONLY when its best query→match cosine
-        // clears the PRIMARY text space's best for this same source. The #576
-        // fusion mode composes a per-space INTRA-MODAL floor (calibrated on the
-        // space's OWN stats) with the relative gate, closing the over-return
-        // leak when the primary's best cosine → 0 (the relative gate inverts).
+        // ── Cross-space fusion (#234 / #576 / #580) ──────────────────────────
+        // Each SECONDARY image space contributes its own `image` ranking. EMPTY
+        // cross_space (N=1 — the production-common case) → this whole block is a
+        // no-op and the rankings vector above is byte-identical, so `rrf_fuse`
+        // gets identical inputs.
         //
-        // Per-space soft weights (V1/V2) collected here, applied to the
-        // `image#<key>` signal's RRF weight after the canonical weights resolve.
+        // PRODUCTION (#580): FLOOR-ADMIT. The relative winner-take-all gate is
+        // RETIRED — a secondary image space is admitted on its OWN calibrated
+        // intra-modal floor (`image_best > z_floor`), independent of how the text
+        // space did, so a strong on-topic CLIP hit corroborates the card even
+        // when text "won" on a spurious filename lexical match (the #580 win).
+        // Sound because >1 image space is a config error (`profiles`): with at
+        // most one image space there is no multiplicity, which was the relative
+        // gate's only job.
+        //
+        // EVAL-ONLY (`SHRIKE_CROSS_SPACE_FUSION_MODE`): the relative family
+        // (`Relative*`/`*Floor` non-admit) reproduces the pre-#580 gate; the
+        // `Soft*`/`*Budget` modes reproduce the dominated soft variant + the N≥2
+        // multiplicity measurement. `uses_relative_gate` keeps the gate for the
+        // relative family ONLY; the floor-admit family skips it.
+        //
+        // Per-space soft/budget weights (eval modes) collected here, applied to
+        // the `image#<key>` signal's RRF weight after the canonical weights
+        // resolve. Two passes: (1) admit + raw weight per space; (2) the budget
+        // normalization across the admitted set (a no-op for the production
+        // FloorAdmit mode), then fold/push.
         let mut cross_space_weights: std::collections::BTreeMap<String, f64> =
             std::collections::BTreeMap::new();
         if !args.cross_space.is_empty() {
-            // The primary text space's best query cosine (the gate's reference).
-            // The primary's hits are `modality_hits` (this source's row).
+            let mode = args.cross_space_fusion_mode;
+            let uses_relative_gate = matches!(
+                mode,
+                CrossSpaceFusionMode::Relative
+                    | CrossSpaceFusionMode::RelativeFloor
+                    | CrossSpaceFusionMode::SoftRelative
+                    | CrossSpaceFusionMode::SoftCalibrated
+            );
+            let is_budget = matches!(
+                mode,
+                CrossSpaceFusionMode::FloorAdmitBudget | CrossSpaceFusionMode::SoftFloorAdmitBudget
+            );
+            // The primary text space's best query cosine (the relative gate's
+            // reference). The primary's hits are `modality_hits` (this row).
             let primary_best = best_query_cosine_of(modality_hits);
+            // Pass 1: collect each admitted space's ranking, its per-note image
+            // scores (for the displayed-score fold), and its RAW pre-budget
+            // weight.
+            struct Admitted {
+                signal: String,
+                ranking: Vec<i64>,
+                space_score: HashMap<i64, f64>,
+                weight: f64,
+            }
+            let mut admitted: Vec<Admitted> = Vec::new();
             for space in &args.cross_space {
                 let Some(shits) = space.per_source.get(i) else {
                     continue;
                 };
-                // The relative gate (default): the vision space fires only when
-                // its best query cosine ≥ the primary text space's. With the
-                // gate disabled (the negative control), every space fires. The
-                // relative gate composes with EVERY #576 variant — it is the
-                // negative-control backstop and never drops out.
-                let gate_open = args.disable_cross_space_gate
-                    || match (shits.best_query_cosine, primary_best) {
-                        (Some(v), Some(p)) => v >= p,
-                        // No primary text reference → nothing to gate against;
-                        // admit the space (degenerate, lexical-only primary).
-                        (Some(_), None) => true,
-                        // The space itself returned no hits → nothing to add.
-                        (None, _) => false,
-                    };
-                if !gate_open {
-                    continue;
+                // The relative gate (#234) — applied ONLY for the relative
+                // family. With the gate disabled (the negative control), every
+                // space fires. The floor-admit family skips it entirely (the
+                // floor below is the sole admission test).
+                if uses_relative_gate {
+                    let gate_open = args.disable_cross_space_gate
+                        || match (shits.best_query_cosine, primary_best) {
+                            (Some(v), Some(p)) => v >= p,
+                            // No primary text reference → nothing to gate
+                            // against; admit (degenerate, lexical-only primary).
+                            (Some(_), None) => true,
+                            // The space itself returned no hits → nothing to add.
+                            (None, _) => false,
+                        };
+                    if !gate_open {
+                        continue;
+                    }
                 }
                 let (sk, sd) = shits
                     .modality_hits
@@ -1322,7 +1437,7 @@ pub fn search_notes(
                     continue;
                 }
                 let mut space_score: HashMap<i64, f64> = HashMap::new();
-                let ranking_space_image = rank_modality(
+                let mut ranking_space_image = rank_modality(
                     core,
                     sk,
                     sd,
@@ -1335,15 +1450,35 @@ pub fn search_notes(
                 if ranking_space_image.is_empty() {
                     continue;
                 }
-                // The best surviving image cosine — the value the intra-modal
-                // floor judges (exactly the primary's `image_score[first]` rule).
+                // #582 (PRODUCTION FloorAdmit only): a PER-NOTE floor — keep only
+                // the cards whose own image cosine clears this space's floor, so
+                // a below-floor tail card carries no `image#clip`. The eval modes
+                // keep the historical per-SPACE rule below (on `image_best`) so
+                // they reproduce the decision tables unchanged. An uncalibrated
+                // space (no floor) is a no-op either way.
+                if matches!(
+                    mode,
+                    CrossSpaceFusionMode::FloorAdmit | CrossSpaceFusionMode::FloorAdmitBudget
+                ) {
+                    apply_image_floor(
+                        &mut ranking_space_image,
+                        &mut space_score,
+                        space.image_floor,
+                    );
+                    if ranking_space_image.is_empty() {
+                        continue; // every card fell below the floor → nothing to add
+                    }
+                }
+                // The best surviving image cosine — the value the eval modes'
+                // per-space floor judges (exactly the primary's old rank-1 rule).
                 let image_best = ranking_space_image
                     .first()
                     .and_then(|nid| space_score.get(nid).copied());
 
-                // #576: apply the fusion mode. The binary modes hard-drop the
-                // space; the soft modes taper its RRF weight.
-                let weight = match args.cross_space_fusion_mode {
+                // Apply the fusion mode's admission + raw weight. `None` drops
+                // the space; `Some(w)` admits it at raw weight `w` (the budget
+                // pass may scale it down for the `*Budget` modes).
+                let weight = match mode {
                     // V0 — relative only (today): contribute at weight 1.0.
                     CrossSpaceFusionMode::Relative => Some(1.0),
                     // V0+floor — relative AND z_s > z_floor (per-space). Drop
@@ -1376,13 +1511,67 @@ pub fn search_notes(
                             _ => Some(1.0),
                         }
                     }
+                    // #580/#582 FloorAdmit / FloorAdmitBudget — admit on the
+                    // absolute floor alone (relative gate already skipped). The
+                    // PER-NOTE floor filter above already dropped sub-floor cards
+                    // and `continue`d if none survived, so any surviving ranking
+                    // has cleared the floor → raw weight 1.0 (the budget pass
+                    // divides it down for the budget mode).
+                    CrossSpaceFusionMode::FloorAdmit | CrossSpaceFusionMode::FloorAdmitBudget => {
+                        Some(1.0)
+                    }
+                    // #580 SoftFloorAdmit / SoftFloorAdmitBudget — soft admission
+                    // `w = σ((image_best − z_floor)/τ)`, no relative composition.
+                    // An uncalibrated space / τ≤0 falls back to weight 1.0. There
+                    // is no hard drop: a sub-floor hit gets a near-zero weight
+                    // (negligible RRF mass), which the soft taper is for.
+                    CrossSpaceFusionMode::SoftFloorAdmit
+                    | CrossSpaceFusionMode::SoftFloorAdmitBudget => {
+                        match (image_best, space.image_floor, args.cross_space_tau) {
+                            (Some(b), Some(floor), tau) if tau > 0.0 => {
+                                Some(sigmoid((b - floor) / tau))
+                            }
+                            _ => Some(1.0),
+                        }
+                    }
                 };
                 let Some(weight) = weight else {
                     continue; // the floor dropped this space's image ranking
                 };
+                admitted.push(Admitted {
+                    signal: cross_space_signal(&space.space_key),
+                    ranking: ranking_space_image,
+                    space_score,
+                    weight,
+                });
+            }
+
+            // Pass 2: the #580 vision-weight BUDGET. When N≥2 admitted spaces
+            // share a bounded total weight `B`, no flood of always-confident
+            // off-topic spaces can out-fuse the text answer (the negative
+            // control the relative gate used to guard). N=1 keeps full weight
+            // (the production-common case is unpenalized). Two scalings:
+            //   - binary budget (FloorAdmitBudget): every weight is 1.0, so each
+            //     becomes B/N (the equal split).
+            //   - soft budget (SoftFloorAdmitBudget): only scale DOWN, and only
+            //     when the soft weights already sum above B (`B / Σ raw`); a
+            //     confident N=1 hit keeps its near-1.0 weight.
+            if is_budget && admitted.len() >= 2 {
+                let budget = args.effective_budget();
+                let total: f64 = admitted.iter().map(|a| a.weight).sum();
+                if total > budget && total > 0.0 {
+                    let scale = budget / total;
+                    for a in &mut admitted {
+                        a.weight *= scale;
+                    }
+                }
+            }
+
+            // Fold + push each admitted space.
+            for a in admitted {
                 // Fold the space's image cosines into the displayed semantic
                 // `score` (max-over-items, exactly like the primary image).
-                for (nid, isim) in &space_score {
+                for (nid, isim) in &a.space_score {
                     let entry = sem_score.entry(*nid).or_insert(*isim);
                     if *isim > *entry {
                         *entry = *isim;
@@ -1391,13 +1580,12 @@ pub fn search_notes(
                 // A DISTINCT signal name per space so provenance (#182)
                 // identifies which vision space surfaced the note, and each
                 // space fuses as its own RRF signal (weight defaults to 1.0 —
-                // the eval's equal weighting; the soft modes override it below).
+                // the eval's equal weighting; the soft/budget modes override it).
                 // `image#<key>` reads as "the image modality of space <key>".
-                let signal = cross_space_signal(&space.space_key);
-                if (weight - 1.0).abs() > f64::EPSILON {
-                    cross_space_weights.insert(signal.clone(), weight);
+                if (a.weight - 1.0).abs() > f64::EPSILON {
+                    cross_space_weights.insert(a.signal.clone(), a.weight);
                 }
-                rankings.push((signal, ranking_space_image));
+                rankings.push((a.signal, a.ranking));
             }
         }
 
@@ -1800,10 +1988,13 @@ mod search_tests {
 
     #[test]
     fn cross_space_gated_preserves_text_target() {
-        // (a) The eval's "fully preserved": with the relative gate ON, an
-        // OFF-TOPIC vision space (its best image cosine BELOW the primary text
-        // space's best) does NOT fire — the text-target note stays rank-1, the
-        // dedicated-text baseline. The gate is closed because vision < text.
+        // (a) Documents the now-EVAL-ONLY relative gate (retired from production
+        // by #580): under `Relative`, an OFF-TOPIC vision space (its best image
+        // cosine BELOW the primary text space's best) does NOT fire — the
+        // text-target note stays rank-1. Kept as a kernel-level record of the
+        // gate's behaviour now that floor-admission is the default. (Under the
+        // production `FloorAdmit` the off-topic space here would be dropped by
+        // the floor instead; this test exercises the relative path explicitly.)
         let (dir, core) = temp_collection();
         let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
         let image_note = add_note(&core, "unrelated filler card", "misc");
@@ -1827,10 +2018,12 @@ mod search_tests {
         .unwrap();
         assert_eq!(groups[0].matches[0].note.id, text_target, "baseline rank-1");
 
-        // GATED cross-space: the vision space's best image cosine (0.30) is far
-        // BELOW the primary text space's best (0.90) → the relative gate keeps
-        // it OUT. Text-target ranking is byte-for-byte the baseline.
+        // GATED cross-space (eval `Relative`): the vision space's best image
+        // cosine (0.30) is far BELOW the primary text space's best (0.90) → the
+        // relative gate keeps it OUT. Text-target ranking is byte-for-byte the
+        // baseline.
         let mut a = cross_args(10);
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::Relative;
         a.cross_space = vec![vision_space("clip", &[image_note], &[0.70])]; // cos 0.30
         let gated = search_notes(
             &core,
@@ -1858,13 +2051,15 @@ mod search_tests {
     #[test]
     fn cross_space_ungated_regresses_text_negative_control() {
         // (b) THE NEGATIVE CONTROL — the eval's load-bearing finding (text R@1
-        // collapse, the 0.08-vs-1.00 separation), productionized. The query is
-        // ON-TOPIC for text: the text-target is the correct rank-1, and the
-        // off-topic image note's vision cosine is BELOW the text-target's — so
-        // the relative gate SHOULD keep the image note OUT. With the gate
-        // DISABLED, the image note floods in across multiple always-on vision
-        // spaces and out-fuses the correct text note. The gate's whole job is to
-        // prevent exactly this; turning it off reproduces the regression.
+        // collapse, the 0.08-vs-1.00 separation). It documents WHY the relative
+        // gate existed: N=2 off-topic vision spaces flood a text query. #580
+        // RETIRED the gate because >1 image space is a config error
+        // (`profiles.resolve_profile`), so this N=2 shape is IMPOSSIBLE in
+        // production — this test is a kernel-level record of the now-eval-only
+        // relative gate (selected explicitly via `Relative`), not a production
+        // path. The query is ON-TOPIC for text; the off-topic image's vision
+        // cosine is BELOW the text-target's, so the relative gate keeps it OUT;
+        // ungated (or under floor-admit with no floor) it floods.
         let (dir, core) = temp_collection();
         let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
         let off_topic_image = add_note(
@@ -1918,12 +2113,14 @@ mod search_tests {
             "ungated: the text-target is no longer rank-1 (the regression)"
         );
 
-        // THE SAME inputs WITH the relative gate ON: both vision spaces close
-        // (vision 0.70 < text 0.80), the off-topic image note is excluded, and
-        // the text-target is restored to rank-1 — the dedicated-text baseline.
-        // This is the load-bearing contrast: the gate IS what prevents (b).
+        // THE SAME inputs WITH the relative gate ON (eval `Relative`): both
+        // vision spaces close (vision 0.70 < text 0.80), the off-topic image
+        // note is excluded, and the text-target is restored to rank-1. This is
+        // the load-bearing contrast: the gate IS what prevented (b) — the reason
+        // it was safe to retire is that the N=2 input is now a config error.
         let mut gated_args = ungated_args.clone();
         gated_args.disable_cross_space_gate = false;
+        gated_args.cross_space_fusion_mode = CrossSpaceFusionMode::Relative;
         let gated = search_notes(
             &core,
             Some(&index),
@@ -2268,6 +2465,437 @@ mod search_tests {
                 .iter()
                 .any(|m| m.note.id == off_topic_image),
             "the off-topic image stays out (relative gate closed, floor did not re-open it)"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ── #580 floor-based admission (drop the relative gate) ──────────────────
+    //
+    // These pin the floor-admission mechanics against `search_notes` DIRECTLY.
+    // The win they prove: a strong on-topic CLIP hit reaches RRF even when the
+    // text space "won" (the relative gate would close it) — corroboration, not
+    // winner-take-all. The guard they prove: the absolute floor still rejects a
+    // genuinely-weak (spurious-filename) image. The multiplicity tension they
+    // measure: FloorAdmit alone floods the N≥2 negative control (the rationale
+    // for the "no two image spaces" config assertion); the budget holds it.
+
+    #[test]
+    fn floor_admit_corroborates_when_text_wins() {
+        // THE #580 WIN — the filename-collision case at the unit level. A text
+        // query whose answer is in a card's image, where the card's FILENAME
+        // also lexically wins the primary text space (so the relative gate would
+        // shut CLIP out). Here the primary text matches the image card STRONGLY
+        // (cos 0.95 — the "filename won" proxy) while the vision space's image
+        // best (0.85) is BELOW it → the relative gate CLOSES. But 0.85 clears the
+        // floor (0.50), so floor-admission ADMITS the CLIP hit: the card carries
+        // its `image#clip` provenance (the corroborating vote the relative gate
+        // discarded).
+        let (dir, core) = temp_collection();
+        let image_card = add_note(&core, "card whose answer is in heart.png", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        // Primary text wins on the filename token (cos 0.95).
+        index
+            .add("text", &[image_card], &[at_distance(0.05)])
+            .unwrap();
+
+        // BASELINE — RelativeFloor (production): vision 0.85 < text 0.95 → the
+        // relative gate CLOSES, so no `image#clip` reaches the card.
+        let mut rel = cross_args(10);
+        rel.cross_space_fusion_mode = CrossSpaceFusionMode::RelativeFloor;
+        rel.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_card],
+            &[0.15],
+            Some(0.5),
+        )]; // cos 0.85
+        let baseline = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("a labelled diagram of the human heart")],
+            &[vec![1.0, 0.0]],
+            &rel,
+        )
+        .unwrap();
+        let rel_match = baseline[0]
+            .matches
+            .iter()
+            .find(|m| m.note.id == image_card)
+            .expect("the card still surfaces via its text/filename hit");
+        assert!(
+            !rel_match.provenance.iter().any(|p| p.signal == "image#clip"),
+            "RelativeFloor BASELINE: the relative gate (vision 0.85 < text 0.95) discards the CLIP vote"
+        );
+
+        // FLOOR-ADMIT: same inputs, the relative gate dropped. 0.85 > floor 0.50
+        // → CLIP is admitted; the card now carries `image#clip` provenance.
+        let mut fa = rel.clone();
+        fa.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmit;
+        let admitted = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("a labelled diagram of the human heart")],
+            &[vec![1.0, 0.0]],
+            &fa,
+        )
+        .unwrap();
+        let fa_match = admitted[0]
+            .matches
+            .iter()
+            .find(|m| m.note.id == image_card)
+            .expect("the card is present");
+        assert!(
+            fa_match.provenance.iter().any(|p| p.signal == "image#clip"),
+            "FloorAdmit: the on-topic CLIP hit corroborates the card even though text won"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn floor_admit_rejects_spurious_filename_image() {
+        // THE #580 PRECISION GUARD — the homonym/lying-filename case at the unit
+        // level. A card's filename lexically wins the text space, but its IMAGE
+        // is OFF-TOPIC for the query, so the vision space's image best (0.30)
+        // falls BELOW the floor (0.50). Floor-admission must REJECT the CLIP hit:
+        // the card may still surface via its filename text hit, but it carries NO
+        // `image#clip` (the floor is the SOLE discriminator now that the relative
+        // gate is gone — this is the load-bearing test for the thesis).
+        let (dir, core) = temp_collection();
+        let lying_card = add_note(&core, "card with jaguar.png but the image is a car", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add("text", &[lying_card], &[at_distance(0.05)])
+            .unwrap(); // text wins on "jaguar"
+
+        let mut fa = cross_args(10);
+        fa.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmit;
+        // The image is off-topic for "the spotted big cat" → cos 0.30 < floor.
+        fa.cross_space = vec![vision_space_floored(
+            "clip",
+            &[lying_card],
+            &[0.70],
+            Some(0.5),
+        )];
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("a jaguar, the spotted big cat")],
+            &[vec![1.0, 0.0]],
+            &fa,
+        )
+        .unwrap();
+        let m = groups[0]
+            .matches
+            .iter()
+            .find(|m| m.note.id == lying_card)
+            .expect("the card surfaces via its filename text hit");
+        assert!(
+            !m.provenance.iter().any(|p| p.signal == "image#clip"),
+            "FloorAdmit: the floor REJECTS the off-topic image (cos 0.30 ≤ floor 0.50) — \
+             the lying filename does not summon a spurious CLIP vote"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn floor_admit_keeps_the_over_return_leak_closed() {
+        // The #576 over-return leak must STAY closed under floor-admission: an
+        // ∅-gold query, empty primary, one weak off-topic image (cos 0.20 < floor
+        // 0.50). With no relative gate the floor is the only guard — and it holds
+        // (0.20 ≤ 0.50 → dropped). Same outcome as RelativeFloor, different path.
+        let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
+        let mut a = cross_args(10);
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_note],
+            &[0.80],
+            Some(0.5),
+        )]; // cos 0.20
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmit;
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("purple elephant playing chess")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        assert!(
+            !groups[0].matches.iter().any(|m| m.note.id == image_note),
+            "FloorAdmit closes the over-return leak: cos 0.20 ≤ floor 0.50 → dropped"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn floor_admit_alone_floods_n2_but_budget_holds_it() {
+        // THE MEASURED RATIONALE for the "no two image spaces" config assertion
+        // (#580). The N=2 negative control's protection came ENTIRELY from the
+        // relative gate (see `floor_holds_the_negative_control_at_n2`): both
+        // off-topic spaces clear their floor, so dropping the relative gate lets
+        // them flood. FloorAdmit (no budget) REGRESSES text R@1; FloorAdmitBudget
+        // (B=1.0 split 0.5/0.5) restores it. In production this scenario is
+        // IMPOSSIBLE (only one image space exists), so the budget is moot there —
+        // this test documents WHY the relative gate can be dropped: not because
+        // floor-admission handles N≥2, but because N≥2 image spaces never occur.
+        let (dir, core) = temp_collection();
+        let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
+        let off_topic_image = add_note(&core, "an off-topic but confident diagram", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add("text", &[text_target], &[at_distance(0.2)])
+            .unwrap(); // text cos 0.80
+                       // Two intra-modally-confident but off-topic spaces (image best 0.70 >
+                       // floor 0.50) — exactly the shape the relative gate used to close.
+        let spaces = vec![
+            vision_space_floored("clip-a", &[off_topic_image], &[0.30], Some(0.5)), // cos 0.70
+            vision_space_floored("clip-b", &[off_topic_image], &[0.30], Some(0.5)),
+        ];
+
+        // FloorAdmit (no budget): both spaces clear the floor and flood — the
+        // off-topic image accumulates 2× RRF mass and out-fuses the text target.
+        let mut flood = cross_args(10);
+        flood.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmit;
+        flood.cross_space = spaces.clone();
+        let flooded = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("krebs cycle energy metabolism")],
+            &[vec![1.0, 0.0]],
+            &flood,
+        )
+        .unwrap();
+        assert_eq!(
+            flooded[0].matches[0].note.id, off_topic_image,
+            "FloorAdmit (no budget) floods at N=2: the off-topic image out-fuses the text target"
+        );
+
+        // FloorAdmitBudget (B=1.0): the two spaces share the budget (0.5 each),
+        // so their combined RRF mass cannot out-fuse the full-weight text signal
+        // → the text target is restored to rank-1.
+        let mut budgeted = flood.clone();
+        budgeted.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmitBudget;
+        budgeted.cross_space_budget = 1.0;
+        let held = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("krebs cycle energy metabolism")],
+            &[vec![1.0, 0.0]],
+            &budgeted,
+        )
+        .unwrap();
+        assert_eq!(
+            held[0].matches[0].note.id, text_target,
+            "FloorAdmitBudget holds the N=2 negative control: the split budget can't out-fuse text"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn floor_admit_n1_unaffected_by_budget() {
+        // The production-common case: a SINGLE image space. The budget must not
+        // penalize it — N=1 keeps full weight under FloorAdmitBudget (the budget
+        // only divides when N≥2). The on-topic CLIP hit corroborates at full
+        // strength exactly like FloorAdmit.
+        let (dir, core) = temp_collection();
+        let weak_text = add_note(&core, "a loosely related text card", "text");
+        let image_note = add_note(&core, "card whose answer is only in the picture", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add("text", &[weak_text], &[at_distance(0.45)])
+            .unwrap();
+
+        let mut a = cross_args(10);
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmitBudget;
+        a.cross_space_budget = 1.0;
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_note],
+            &[0.08],
+            Some(0.5),
+        )]; // cos 0.92
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("the content shown in the diagram")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        let m = groups[0]
+            .matches
+            .iter()
+            .find(|m| m.note.id == image_note)
+            .expect("the single image space surfaces the image-only card");
+        assert!(
+            m.provenance.iter().any(|p| p.signal == "image#clip"),
+            "N=1 FloorAdmitBudget: the lone image space keeps full weight (no budget penalty)"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn soft_floor_admit_tapers_near_floor() {
+        // SoftFloorAdmit: a borderline-above-floor image (cos 0.55, floor 0.50)
+        // gets a tapered weight `σ((0.55-0.50)/τ)` < 1, while a confident one
+        // (cos 0.92) gets ≈1. Here we assert the confident hit is admitted with
+        // its provenance (the graceful form still corroborates), and a clearly
+        // sub-floor hit (cos 0.20) gets a near-zero weight so it cannot out-rank
+        // a real text card — the soft analogue of the hard floor's drop.
+        let (dir, core) = temp_collection();
+        let weak_text = add_note(&core, "a loosely related text card", "text");
+        let image_note = add_note(&core, "card whose answer is only in the picture", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add("text", &[weak_text], &[at_distance(0.45)])
+            .unwrap();
+
+        let mut a = cross_args(10);
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::SoftFloorAdmit;
+        a.cross_space_tau = 0.05;
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[image_note],
+            &[0.08],
+            Some(0.5),
+        )]; // cos 0.92
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("the content shown in the diagram")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        let m = groups[0]
+            .matches
+            .iter()
+            .find(|m| m.note.id == image_note)
+            .expect("SoftFloorAdmit admits the confident image hit");
+        assert!(
+            m.provenance.iter().any(|p| p.signal == "image#clip"),
+            "SoftFloorAdmit: a confident hit (cos 0.92 ≫ floor) corroborates at ≈full weight"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ── #582 per-note image floor (drop the below-floor tail) ────────────────
+
+    #[test]
+    fn floor_admit_secondary_drops_below_floor_tail() {
+        // #582: the per-NOTE floor on the SECONDARY cross-space image ranking. A
+        // vision space surfaces TWO image cards: one ABOVE the floor (cos 0.92)
+        // and one BELOW it (cos 0.20, floor 0.50). Floor-admission's per-note
+        // filter keeps the above-floor card's `image#clip` and DROPS the
+        // below-floor one — the latter no longer rides in on the rank-1's
+        // coat-tails (the pre-#582 per-space gate admitted the whole ranking).
+        let (dir, core) = temp_collection();
+        let weak_text = add_note(&core, "a loosely related text card", "text");
+        let above = add_note(&core, "card whose image strongly matches", "img");
+        let below = add_note(&core, "card whose image barely matches", "img");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add("text", &[weak_text], &[at_distance(0.45)])
+            .unwrap();
+
+        let mut a = cross_args(10);
+        a.cross_space_fusion_mode = CrossSpaceFusionMode::FloorAdmit;
+        // One space, two image hits: above (cos 0.92) + below (cos 0.20), floor 0.5.
+        a.cross_space = vec![vision_space_floored(
+            "clip",
+            &[above, below],
+            &[0.08, 0.80],
+            Some(0.5),
+        )];
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("the content shown in the diagram")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        let above_m = groups[0].matches.iter().find(|m| m.note.id == above);
+        let below_m = groups[0].matches.iter().find(|m| m.note.id == below);
+        assert!(
+            above_m.is_some_and(|m| m.provenance.iter().any(|p| p.signal == "image#clip")),
+            "the above-floor card keeps its image#clip"
+        );
+        // The below-floor card carries NO image#clip (it may be absent entirely
+        // if it has no other signal).
+        assert!(
+            below_m.is_none_or(|m| !m.provenance.iter().any(|p| p.signal == "image#clip")),
+            "#582: the below-floor tail card carries no image#clip (per-note floor dropped it)"
+        );
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn primary_image_floor_is_per_note() {
+        // #582: the per-NOTE floor on the PRIMARY image ranking (the #201b core,
+        // used by omni/single-space deployments). The primary image modality
+        // returns two cards: one above the floor (cos 0.90) and one below (cos
+        // 0.20, floor 0.50). The above-floor card surfaces via `image`; the
+        // below-floor one does NOT (was: the whole ranking admitted iff the
+        // rank-1 cleared the floor).
+        let (dir, core) = temp_collection();
+        let above = add_note(&core, "card whose image strongly matches", "imgA");
+        let below = add_note(&core, "card whose image barely matches", "imgB");
+        let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
+        index
+            .add(
+                "image",
+                &[above, below],
+                &[at_distance(0.10), at_distance(0.80)],
+            )
+            .unwrap(); // cos 0.90 (above) + cos 0.20 (below)
+
+        let mut a = cross_args(10);
+        a.image_floor = Some(0.5);
+        let groups = search_notes(
+            &core,
+            Some(&index),
+            None,
+            None,
+            &[query("the diagram content")],
+            &[vec![1.0, 0.0]],
+            &a,
+        )
+        .unwrap();
+        let above_m = groups[0].matches.iter().find(|m| m.note.id == above);
+        let below_m = groups[0].matches.iter().find(|m| m.note.id == below);
+        assert!(
+            above_m.is_some_and(|m| m.provenance.iter().any(|p| p.signal == "image")),
+            "the above-floor card surfaces via the primary image signal"
+        );
+        assert!(
+            below_m.is_none_or(|m| !m.provenance.iter().any(|p| p.signal == "image")),
+            "#582: the below-floor card carries no primary image signal (per-note floor)"
         );
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();

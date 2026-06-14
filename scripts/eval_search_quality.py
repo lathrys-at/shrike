@@ -3,13 +3,13 @@
 
 The dogfooding artifact runner: it drives the SAME engine the pytest classes
 assert against (``tests.search_quality.runner.run_search_quality``) — one source
-of truth — and renders the per-class recall/precision numbers, the relative
-cross-space gate behaviour, and the cross-lingual observations to
+of truth — and renders the per-class recall/precision numbers, the cross-space
+floor-admission behaviour (#580), and the cross-lingual observations to
 ``eval/search_quality/RESULTS.md`` (gitignored — a local artifact).
 
 It is the manual suite's reporting half: where the pytest classes assert floors,
-this prints the actual numbers so a human (or #234's tuning) can read where the
-real models land. Same off-CI posture — it needs the cached models + the Commons
+this prints the actual numbers so a human (or #580's margin tuning) can read where
+the real models land. Same off-CI posture — it needs the cached models + the Commons
 corpus, runs nothing in CI.
 
 Run::
@@ -89,17 +89,23 @@ def _render(result, elapsed: float) -> str:
         f"**Overall**: R@k = {_fmt(suite.mean_recall_at_k())}, "
         f"MRR = {_fmt(suite.mean_mrr())}, nDCG@10 = {_fmt(suite.mean_ndcg())}.",
         "",
-        "## The relative cross-space activation gate (#234)",
+        "## Cross-space floor-admission (#580)",
         "",
-        "The gate fires (the `image#clip` signal contributes) only when the CLIP",
-        "space's best query->match cosine clears the dedicated text space's — so a",
-        "purely-visual query opens it, and a query the text answers keeps it shut.",
+        "The `image#clip` signal contributes whenever the CLIP image space clears",
+        "its own calibrated floor for the query (floor-admission, #580 — the",
+        "relative winner-take-all gate is retired). So a card's image corroborates",
+        "it even when the text/filename also won. `top-1` shows the text answer",
+        "still wins for the gate-no-inject fact queries.",
         "",
-        "| Query | gate fired (image#clip) | top-1 |",
+        "| Query | image#clip contributes | top-1 |",
         "| --- | --- | --- |",
     ]
     for q in result.manifest.queries:
-        if q.adversarial_class not in ("modality_gap", "gate_no_inject_portrait"):
+        if q.adversarial_class not in (
+            "modality_gap",
+            "gate_no_inject_portrait",
+            "spurious_filename",
+        ):
             continue
         ms = result.returns.get(q.q, [])
         fired = any(clip_fired(m) for m in ms)
