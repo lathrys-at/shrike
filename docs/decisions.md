@@ -339,10 +339,17 @@ consistency" in `CLAUDE.md` — not duplicated here.
 ### Contextual upsert returns neighbours; it makes no suggestions
 
 `upsert_notes` returns, for each created/updated note, the *k* most similar
-existing notes (`{id, score, tags}`, defaults `top_k_neighbors=5`,
-`neighbor_threshold=0.5`) — the same similarity operation `search_notes` runs,
-queried by the upserted note's own content, with the batch's own notes excluded
-from each other's results.
+existing notes (`{id, score, tags, provenance}`, default `top_k_neighbors=5`) —
+literally the result of running the **same fused `search_notes` pipeline** over
+the upserted note's own content, with the batch's own notes excluded from each
+other's results (#531). There is no bespoke `neighbor_threshold`: an absolute
+cosine cutoff doesn't map onto the RRF ranking (and was the cause of #531 — a
+borderline cosine flipped the gate to empty on aarch64 while ranked search
+stayed green). Instead a *holistic similarity gate* admits a neighbour only when
+a genuine content-similarity signal backs it — a semantic match (clears the
+search's own ~0.5 floor) or an exact-text overlap — so a fuzzy-trigram or
+tag-centroid coincidence never surfaces as a neighbour, and an unrelated note
+returns nothing.
 
 It returns **raw neighbour data and stops there.** The server suggests no tags,
 flags no duplicates, makes no decisions. The reasoning: the server can't know the

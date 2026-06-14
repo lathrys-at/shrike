@@ -254,30 +254,22 @@ class SearchMatch(Note):
 
 
 class Neighbor(BaseModel):
-    """A near-duplicate candidate attached to an upsert result (#204).
+    """A similar-note candidate attached to an upsert result (#204/#531).
 
-    ``score`` is the cosine similarity when the candidate was semantically
-    ranked — ``None`` for a lexical-only hit (#206: a near-verbatim dupe the
-    embedding threshold missed has no meaningful cosine to report).
-    ``provenance`` says which signals surfaced it (#208), in the same
-    ``{signal, rank}`` shape as search provenance (#182): ``text`` for the
-    semantic match, ``fuzzy`` for the trigram lexical overlap.
+    Neighbors are search results: a created/updated note's neighbors are a
+    ``search_notes`` of its own content, so a neighbor carries the same shape
+    a search match does. ``score`` is the cosine similarity when the candidate
+    was semantically ranked — ``None`` for an exact-text-only hit (which has no
+    meaningful cosine to report). ``provenance`` says which signals surfaced it
+    (#208), in the same ``{signal, rank}`` shape as search provenance (#182) —
+    ANY search signal (``text``, ``exact``, ``image``, ``tag``, ``fuzzy``), not
+    just text.
     """
 
     id: int
     score: float | None = None
     tags: list[str] = []
     provenance: list[SignalContribution] = []
-
-
-class UpsertNeighbors(BaseModel):
-    """One draft note's dedup outcome (#391 phase 1): the attached neighbor
-    candidates plus the calibration sample (``best`` semantic cosine, ``None``
-    on no-match) the host's dedup-stats recorder consumes. The internal wire
-    of the kernel's attach-neighbors action."""
-
-    neighbors: list[Neighbor] = []
-    best: float | None = None
 
 
 class TemplateInfo(BaseModel):

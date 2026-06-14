@@ -60,6 +60,7 @@ from shrike.schemas import (
     ListNotesResponse,
     ListProfilesResponse,
     MigrateNoteTypeResponse,
+    Neighbor,
     NoteInput,
     NoteTypeInput,
     ProfileEntry,
@@ -74,7 +75,6 @@ from shrike.schemas import (
     UpdateNoteTypeFieldsResponse,
     UpdateNoteTypeTemplatesResponse,
     UpsertDecksResponse,
-    UpsertNeighbors,
     UpsertNotesResponse,
     UpsertNoteTypesResponse,
 )
@@ -103,22 +103,16 @@ def note_outcome(message: str) -> None:
 # gated (no typing-fragment problem).
 MIN_SEMANTIC_QUERY_CHARS = 3
 
-# The dedup-neighbor threshold (#207) — DELIBERATELY above the search-ranking
-# default (0.5): dedup is a precision answer an agent acts on, and the two
-# error directions cost differently. A false positive (flagging a non-dupe)
-# suppresses a legitimately new card outright; a marginal candidate that IS
-# shown still lets the agent decide. So the cosine gate leans precise (fewer
-# spurious flags), and the recall it gives up on near-verbatim restatements is
-# backstopped by the lexical-overlap signal (#206), which catches exactly the
-# lexically-close dupes a cosine threshold misses. Calibration from dedup's
-# own traffic is the recorded follow-up; this traffic deliberately NEVER feeds
-# the #201 search-gate calibration (which samples stored vectors offline — a
-# different population, structurally separate).
-DEDUP_NEIGHBOR_THRESHOLD = 0.6
-
-# The lexical-overlap policy (#206) — truncation chars, propose-verify ratio
-# floor, and the difflib-faithful similarity itself — lives kernel-side since
-# #391: shrike_kernel::actions (DEDUP_LEXICAL_*) + shrike_kernel::textsim.
+# The semantic floor for neighbor search (#531) — the search pipeline's own
+# default (0.5). Upsert neighbors ARE search results: a draft's neighbors are a
+# `search_notes` of the draft's content (see `_attach_neighbors`), so they use
+# the same semantic floor a real search does. There is no bespoke
+# `neighbor_threshold` any more — an absolute cosine cutoff doesn't map onto the
+# RRF pipeline and was the cause of #531 (a borderline cosine flipped the gate
+# to empty on aarch64). Relevance is the holistic similarity gate in
+# `_attach_neighbors` (a neighbor must be semantic- or exact-backed), not a
+# magic threshold number.
+SEARCH_SEMANTIC_THRESHOLD = 0.5
 
 # Intra-modal activation gate (#201b). A non-text modality's ranking is fed to the fusion only when
 # its best match for the query exceeds `mean + ACTIVATION_MARGIN·std` of that modality's calibrated
@@ -1027,19 +1021,6 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 ),
             ),
         ] = 5,
-        neighbor_threshold: Annotated[
-            float,
-            Field(
-                ge=0.0,
-                le=1.0,
-                description=(
-                    "Minimum cosine similarity for a semantically-ranked neighbor. "
-                    "Default 0.6 — deliberately above the search default: dedup is a "
-                    "precision answer, and near-verbatim dupes below it are still "
-                    "caught by the lexical-overlap signal (no cosine gate)."
-                ),
-            ),
-        ] = DEDUP_NEIGHBOR_THRESHOLD,
         on_duplicate: Annotated[
             Literal["error", "skip", "allow"],
             Field(
@@ -1089,14 +1070,17 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         `skipped`, or `error`; the response echoes `dry_run: true`.
 
         When a vector index is available (and not a dry run), each created or
-        updated result includes `neighbors`: the most similar existing notes
-        ranked by cosine similarity, filtered to those above
-        `neighbor_threshold` (default 0.5) and capped at `top_k_neighbors`
-        (default 5). Use these for tag consistency (adopt tags from nearby
-        notes), spotting near-duplicates by meaning (a high score is a softer
-        signal than the exact `on_duplicate` rule), or understanding where a
-        new note sits in the collection. Neighbors include note ID, similarity
-        score, and tags — use list_notes or search_notes to inspect content.
+        updated result includes `neighbors`: the most similar existing notes,
+        capped at `top_k_neighbors` (default 5). Neighbors are exactly what a
+        `search_notes` of the new note's own content returns (same fused
+        ranking — semantic + exact text + fuzzy), gated to results a genuine
+        similarity signal backs (a semantic match or an exact-text overlap),
+        so an unrelated note simply returns no neighbors. Use these for tag
+        consistency (adopt tags from nearby notes), spotting near-duplicates by
+        meaning (a softer signal than the exact `on_duplicate` rule), or
+        understanding where a new note sits in the collection. Each neighbor
+        carries note ID, similarity score (null for an exact-only match), tags,
+        and provenance — use list_notes or search_notes to inspect content.
 
         If the index update fails transiently (e.g. the embedding service is
         briefly unavailable), the notes are still saved but `neighbors` is
@@ -1153,7 +1137,6 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                     changed_ids,
                     [inp.text for inp in inputs],
                     top_k_neighbors,
-                    neighbor_threshold,
                 )
             except Exception:
                 logger.warning("Failed to compute neighbors after upsert", exc_info=True)
@@ -1201,56 +1184,109 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         changed_ids: list[int],
         texts: list[str],
         top_k: int,
-        threshold: float,
     ) -> bool:
-        """Attach near-duplicate candidates to each upsert result (#204).
+        """Attach similar-note neighbors to each upsert result (#204/#531).
 
-        The policy lives kernel-side since #391 (``actions::attach_neighbors``
-        — semantic + lexical propose-verify signals with ``{signal, rank}``
-        provenance, #206/#208); this binding embeds the drafts (the host's
-        query-embed seam, LRU-cached), runs the action as one collection job,
-        and feeds the calibration recorder (#207) from the returned ``best``
-        samples. Returns True when the neighbor search completed (each
-        created/updated result now carries a ``neighbors`` list, possibly
-        empty), False on failure — the caller then signals a retry.
+        Neighbors ARE search results: a draft's neighbors are the top-``top_k``
+        results of a ``search_notes`` of the draft's own content (self + batch
+        siblings excluded), run through the SAME fused RRF pipeline the search
+        tool uses (``action_search_notes`` — per-modality semantic +
+        exact/substring + fuzzy + tag-centroid + cross-space, fused with the
+        exact-match priority tier). There is no bespoke cosine cutoff: that is
+        what makes the feature platform-robust (#531). The old absolute-cosine
+        gate (0.6) emptied the whole list when one borderline cosine dipped
+        under it — a cross-platform (NEON vs AVX) embedding delta flipped it on
+        aarch64 while ranked search stayed green. RRF doesn't break-empty on a
+        borderline cosine (a ~0.59 match clears the search's 0.5 semantic floor
+        easily — no cliff to flip), so neighbors inherit search's green
+        behaviour on every platform.
+
+        SIMILARITY GATE (the holistic "none relevant → return nothing" rule): a
+        result qualifies as a neighbor only when a genuine *content-similarity*
+        signal backs it — a SEMANTIC match (cleared the search's own ~0.5
+        semantic floor → a non-null ``score``) OR an EXACT/substring overlap
+        (``substring`` present). A fuzzy-trigram-ONLY hit (e.g. the "What is
+        the…" stem coincidence) and a tag-centroid-ONLY hit do NOT qualify —
+        they are lexical/tag coincidences, not real similarity. So an unrelated
+        note in a topical collection returns no neighbors, while a true
+        semantic/near-duplicate is kept.
+
+        The ``best`` calibration sample (#207) stays semantic-cosine-only: the
+        max semantic ``score`` among a draft's neighbors (a lexical hit has
+        ``score=None`` and never pollutes it).
+
+        Returns True when the neighbor search completed (each created/updated
+        result now carries a ``neighbors`` list, possibly empty), False on
+        failure — the caller then signals a retry.
         """
         assert index is not None
         try:
-            # Off the event loop (#445): embedding the changed-note batch
-            # inline froze the loop for the duration of the embed.
+            # Off the event loop (#445): embed blocks on backend inference.
             vectors = await asyncio.to_thread(index.embed_queries, texts)
             if vectors is None:
                 return False  # backend vanished mid-call — retryable
+            # Build the SAME search state a real search_notes call assembles
+            # (#531): one query SOURCE per draft (its content, is_query=True so
+            # the lexical signals fire too), the secondary cross-space rows, the
+            # #201b image activation floor, the index size — and the kernel
+            # handle that carries the tag-centroid state. Neighbors = a self
+            # search, so nothing is disabled. The semantic floor is the search
+            # default (0.5) — no per-call neighbor threshold (#531).
+            sources: list[tuple[str, str, bool]] = [(t, t, True) for t in texts]
+            cross_space_json = None
+            if kernel is not None:
+                cross_space_json = await kernel.build_cross_space_json(texts, top_k)
+            image_floor = activation_floor(index.activation_stats.get("image"), ACTIVATION_MARGIN)
             index_handle = index.engine
             derived_handle = (
                 derived._engine._rust
                 if derived is not None and derived.available and derived._engine is not None
                 else None
             )
+            # Exclude the drafts themselves (self + batch siblings) from every
+            # draft's results — a note is never its own neighbor.
             exclude = sorted(set(changed_ids))
             raw = await wrapper.run(
-                lambda c: shrike_native.action_attach_neighbors(
+                lambda c: shrike_native.action_search_notes(
                     c,
                     index_handle,
                     derived_handle,
-                    texts,
+                    sources,
                     vectors,
-                    exclude,
                     top_k,
-                    threshold,
+                    SEARCH_SEMANTIC_THRESHOLD,
+                    exclude=exclude,
+                    kernel=kernel,
+                    image_floor=image_floor,
+                    semantic=True,
+                    index_size=index.size,
+                    cross_space=cross_space_json,
                 )
             )
-            per_draft = TypeAdapter(list[UpsertNeighbors]).validate_json(raw)
-            if len(per_draft) != len(changed_ids):
+            groups = TypeAdapter(list[SearchResultGroup]).validate_json(raw)
+            if len(groups) != len(changed_ids):
                 raise ValueError(
-                    f"attach_neighbors returned {len(per_draft)} entries "
-                    f"for {len(changed_ids)} drafts"
+                    f"neighbor search returned {len(groups)} groups for {len(changed_ids)} drafts"
                 )
             id_to_neighbors: dict[int, list[dict[str, Any]]] = {}
-            for nid, entry in zip(changed_ids, per_draft, strict=True):
+            for nid, group in zip(changed_ids, groups, strict=True):
+                # The similarity gate: keep only similarity-backed matches — a
+                # semantic hit (non-null score) or an exact/substring overlap.
+                # Drop fuzzy-only / tag-only coincidences (the holistic
+                # relevance read, #531).
+                qualified = [
+                    m for m in group.matches if m.score is not None or m.substring is not None
+                ]
+                neighbors = [
+                    Neighbor(id=m.id, score=m.score, tags=m.tags, provenance=m.provenance)
+                    for m in qualified
+                ]
                 if dedup_stats is not None:
-                    dedup_stats.record(entry.best)
-                id_to_neighbors[nid] = [n.model_dump() for n in entry.neighbors]
+                    # The #207 calibration sample stays semantic-cosine-only:
+                    # the best semantic score, ignoring lexical-only hits.
+                    sem_scores = [m.score for m in qualified if m.score is not None]
+                    dedup_stats.record(max(sem_scores) if sem_scores else None)
+                id_to_neighbors[nid] = [n.model_dump() for n in neighbors]
             for r in results:
                 if r.get("status") in ("created", "updated") and r.get("id") in id_to_neighbors:
                     r["neighbors"] = id_to_neighbors[r["id"]]

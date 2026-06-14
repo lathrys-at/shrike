@@ -607,23 +607,27 @@ class TestUpsertNeighbors:
         neighbors = result["results"][0]["neighbors"]
         assert set(neighbors[0]["tags"]) == {"science", "physics"}
 
-    def test_threshold_filters_low_scores(self, kharness, mcp_sem):
-        existing = kharness.seed_note("Q", back="A")
-        _plant(kharness, [(existing, 0.8)])
-        result = _upsert(kharness, mcp_sem, [BASIC_NOTE], neighbor_threshold=0.5)
-        assert result["results"][0].get("neighbors", []) == []
-
-    def test_default_threshold_filters_irrelevant(self, kharness, mcp_sem):
+    def test_below_semantic_floor_is_not_a_neighbor(self, kharness, mcp_sem):
+        # #531: a candidate below the search semantic floor (0.5) and with no
+        # exact/fuzzy overlap is not similarity-backed → not a neighbor. There
+        # is no neighbor_threshold any more; the search floor + similarity gate
+        # decide. (distance 0.7 → cosine 0.3 < 0.5.)
         existing = kharness.seed_note("Q", back="A")
         _plant(kharness, [(existing, 0.7)])
         result = _upsert(kharness, mcp_sem, [BASIC_NOTE])
         assert result["results"][0].get("neighbors", []) == []
 
-    def test_custom_threshold(self, kharness, mcp_sem):
+    def test_above_semantic_floor_is_a_neighbor(self, kharness, mcp_sem):
+        # The companion: a candidate above the 0.5 floor IS similarity-backed
+        # (semantic) → kept, with its cosine reported. (distance 0.15 → cosine
+        # 0.85.) This is exactly the ~0.59-on-aarch64 case #531 fixes: it clears
+        # the 0.5 floor with margin, no brittle 0.6 cliff to flip.
         existing = kharness.seed_note("Q", back="A")
         _plant(kharness, [(existing, 0.15)])
-        result = _upsert(kharness, mcp_sem, [BASIC_NOTE], neighbor_threshold=0.9)
-        assert result["results"][0].get("neighbors", []) == []
+        result = _upsert(kharness, mcp_sem, [BASIC_NOTE])
+        neighbors = result["results"][0]["neighbors"]
+        assert [n["id"] for n in neighbors] == [existing]
+        assert neighbors[0]["score"] == 0.85
 
     def test_top_k_limits_neighbors(self, kharness, mcp_sem):
         ids = [kharness.seed_note(f"E{i}", back="A") for i in range(5)]
@@ -853,9 +857,12 @@ class TestDedupNeighbors:
     def _neighbors(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         return result["results"][0].get("neighbors", [])
 
-    def test_near_verbatim_dupe_surfaces_lexically(self, kharness, mcp_dedup, derived):
-        # An existing near-verbatim card, planted semantically FAR (cosine 0 —
-        # under any threshold) so only the trigram overlap can catch it.
+    def test_fuzzy_only_hit_is_not_a_neighbor(self, kharness, mcp_dedup, derived):
+        # #531 similarity gate: an existing near-verbatim card planted
+        # semantically FAR (cosine 0) so ONLY the trigram overlap can catch it.
+        # A fuzzy-trigram-only hit is a lexical coincidence, NOT real
+        # content-similarity, so it does NOT qualify as a neighbor — neighbors
+        # are similarity-backed (semantic or exact) results.
         existing = kharness.seed_note("the krebs cycle produces atp in mitochondria")
         _build_derived(kharness, derived)
         _plant(kharness, [(existing, 1.0)])  # distance 1.0 → cosine 0
@@ -874,15 +881,12 @@ class TestDedupNeighbors:
                 }
             ],
         )
-        neighbors = self._neighbors(result)
-        hit = next(n for n in neighbors if n["id"] == existing)
-        assert hit["score"] is None, "lexical-only — no cosine to report"
-        assert [p["signal"] for p in hit["provenance"]] == ["fuzzy"]
+        assert existing not in {n["id"] for n in self._neighbors(result)}
 
     def test_semantic_neighbor_carries_text_provenance(self, kharness, mcp_dedup, derived):
         existing = kharness.seed_note("photosynthesis overview")
         _build_derived(kharness, derived)
-        _plant(kharness, [(existing, 0.1)])  # cosine 0.9 ≥ the 0.6 default
+        _plant(kharness, [(existing, 0.1)])  # cosine 0.9 ≥ the 0.5 search floor
 
         result = _upsert(
             kharness,
@@ -901,6 +905,9 @@ class TestDedupNeighbors:
         assert {p["signal"] for p in hit["provenance"]} == {"text"}
 
     def test_both_signals_merge_on_one_candidate(self, kharness, mcp_dedup, derived):
+        # A semantic-backed candidate (cosine 0.9) that ALSO has trigram
+        # overlap: it qualifies (semantic), and its provenance carries both
+        # signals — the widened provenance (#531: any search signal).
         existing = kharness.seed_note("glycolysis happens in the cytoplasm")
         _build_derived(kharness, derived)
         _plant(kharness, [(existing, 0.1)])
@@ -920,13 +927,14 @@ class TestDedupNeighbors:
         assert hit["score"] == 0.9
         assert {p["signal"] for p in hit["provenance"]} == {"text", "fuzzy"}
 
-    def test_default_threshold_is_precision_oriented(self, kharness, mcp_dedup, derived):
-        # Cosine 0.55: above the old shared 0.5 search default, below the
-        # deliberate 0.6 dedup default (#207) — and lexically unrelated, so
-        # nothing backstops it. It must NOT surface.
+    def test_below_floor_unrelated_is_not_a_neighbor(self, kharness, mcp_dedup, derived):
+        # #531: cosine 0.45 < the 0.5 search semantic floor, and lexically
+        # unrelated — no similarity signal backs it, so it is not a neighbor.
+        # (There is no neighbor_threshold knob any more; the search floor +
+        # similarity gate decide.)
         existing = kharness.seed_note("qq unrelated wording qq")
         _build_derived(kharness, derived)
-        _plant(kharness, [(existing, 0.45)])
+        _plant(kharness, [(existing, 0.55)])  # cosine 0.45 < 0.5 floor
 
         result = _upsert(
             kharness,
@@ -939,26 +947,7 @@ class TestDedupNeighbors:
                 }
             ],
         )
-        # Not a SEMANTIC neighbor at the default gate (an incidental trigram
-        # overlap may still surface it lexically — that's the backstop, and
-        # it reports score None, never a cosine).
-        semantic_ids = [n["id"] for n in self._neighbors(result) if n["score"] is not None]
-        assert existing not in semantic_ids
-        # An explicit lower threshold opts back in (the knob stayed).
-        result = _upsert(
-            kharness,
-            mcp_dedup,
-            [
-                {
-                    "deck": "Test",
-                    "note_type": "Basic",
-                    "fields": {"Front": "zz third thing zz", "Back": "y"},
-                }
-            ],
-            neighbor_threshold=0.5,
-        )
-        hit = next(n for n in self._neighbors(result) if n["id"] == existing)
-        assert hit["score"] == 0.55
+        assert existing not in {n["id"] for n in self._neighbors(result)}
 
 
 class TestDedupStats:

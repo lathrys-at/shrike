@@ -145,31 +145,23 @@ pub struct SearchMatch {
     pub provenance: Vec<SignalContribution>,
 }
 
+/// A similar-note candidate attached to an upsert result (#204/#531).
+/// Neighbors are search results — a created/updated note's neighbors are a
+/// `search_notes` of its own content — so a neighbor mirrors a search match.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct Neighbor {
     pub id: i64,
-    /// Cosine similarity when semantically ranked; None for a lexical-only
-    /// near-verbatim hit (#206).
+    /// Cosine similarity when semantically ranked; None for an exact-text-only
+    /// hit (no meaningful cosine to report).
     #[serde(default)]
     pub score: Option<f64>,
     #[serde(default)]
     pub tags: Vec<String>,
     /// Which signals surfaced the candidate (#208) — the search-provenance
-    /// shape (#182): `text` (semantic) and/or `fuzzy` (lexical overlap).
+    /// shape (#182): ANY search signal (`text`, `exact`, `image`, `tag`,
+    /// `fuzzy`), not just text.
     #[serde(default)]
     pub provenance: Vec<SignalContribution>,
-}
-
-/// One draft note's dedup outcome (#391 phase 1): the attached neighbor
-/// candidates plus the calibration sample (`best` semantic cosine, None on
-/// no-match) the host's dedup-stats recorder consumes. The internal wire of
-/// the kernel's attach-neighbors action.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-pub struct UpsertNeighbors {
-    #[serde(default)]
-    pub neighbors: Vec<Neighbor>,
-    #[serde(default)]
-    pub best: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1333,7 +1325,6 @@ catalog![
     ("SignalContribution", SignalContribution),
     ("SearchMatch", SearchMatch),
     ("Neighbor", Neighbor),
-    ("UpsertNeighbors", UpsertNeighbors),
     ("TemplateInfo", TemplateInfo),
     ("FieldDetail", FieldDetail),
     ("NoteTypeDetail", NoteTypeDetail),

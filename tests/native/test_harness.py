@@ -659,12 +659,14 @@ class TestRecognition:
 
 class TestDedupOverOcr:
     def test_dedup_search_covers_ocr_vectors_max_over_items(self, tmp_path) -> None:
-        # #205: the dedup neighbor path (KernelIndexView.search — the exact
-        # call _attach_neighbors makes) matches a draft against ALL of a
-        # note's text-modality vectors, max-over-items: a card whose content
+        # #205: the text-space semantic ranking (KernelIndexView.search, the
+        # max-over-items dedup the neighbor path relies on) matches a draft
+        # against ALL of a note's text-modality vectors: a card whose content
         # lives ONLY inside an image surfaces as a near-dupe through its OCR
         # vector, while the card's own field text shares nothing with the
-        # draft. Text-to-text — no modality gap, no activation gate.
+        # draft. Text-to-text — no modality gap, no activation gate. (Neighbors
+        # now route through the fused search action, #531, which ranks over the
+        # same text space; this pins the underlying max-over-items property.)
         import hashlib
         from types import SimpleNamespace
 

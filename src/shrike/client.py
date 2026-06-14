@@ -390,7 +390,6 @@ class ShrikeClient:
         notes: Sequence[NoteInput | dict[str, Any]],
         *,
         top_k_neighbors: int = 5,
-        neighbor_threshold: float = 0.5,
         on_duplicate: Literal["error", "skip", "allow"] = "error",
         dry_run: bool = False,
     ) -> UpsertNotesResponse:
@@ -404,7 +403,6 @@ class ShrikeClient:
             batch_size=100,
             extra={
                 "top_k_neighbors": top_k_neighbors,
-                "neighbor_threshold": neighbor_threshold,
                 "on_duplicate": on_duplicate,
                 "dry_run": dry_run,
             },
