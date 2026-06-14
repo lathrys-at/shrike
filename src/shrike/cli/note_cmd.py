@@ -110,20 +110,22 @@ def note_list(
 
     col_path = resolve_collection(ctx.obj["config"]) or "collection"
 
+    # Filter values + collection path can contain brackets → escaped so the
+    # header renders literally rather than crashing on stray markup.
     filter_parts: list[str] = []
     if deck:
-        filter_parts.append(f"in [cyan]{deck}[/cyan]")
+        filter_parts.append(f"in [cyan]{output.esc(deck)}[/cyan]")
     if note_type:
-        filter_parts.append(f"of type [cyan]{note_type}[/cyan]")
+        filter_parts.append(f"of type [cyan]{output.esc(note_type)}[/cyan]")
     if tags:
-        filter_parts.append(f"tagged {', '.join(f'[yellow]{t}[/yellow]' for t in tags)}")
+        filter_parts.append(f"tagged {', '.join(f'[yellow]{output.esc(t)}[/yellow]' for t in tags)}")
     filter_desc = " ".join(filter_parts)
     if filter_desc:
         filter_desc = f" {filter_desc}"
 
     count = f"{len(notes)} of {total}" if total > len(notes) else str(total)
     output.console.print(
-        f"[dim]Showing {count} note(s){filter_desc} from [cyan]{col_path}[/cyan][/dim]"
+        f"[dim]Showing {count} note(s){filter_desc} from [cyan]{output.esc(col_path)}[/cyan][/dim]"
     )
 
     output.console.print()
@@ -459,9 +461,10 @@ def note_replace(
 
     output.console.print(f"[yellow]{preview.notes_changed}[/yellow] note(s) would change:")
     for s in preview.samples:
-        output.console.print(f"  [green]#{s.id}[/green] [cyan]{s.field}[/cyan]")
-        output.console.print(f"    [dim]- {s.before}[/dim]")
-        output.console.print(f"    [dim]+ {s.after}[/dim]")
+        # Field name + before/after field content are collection-authored → escaped.
+        output.console.print(f"  [green]#{s.id}[/green] [cyan]{output.esc(s.field)}[/cyan]")
+        output.console.print(f"    [dim]- {output.esc(s.before)}[/dim]")
+        output.console.print(f"    [dim]+ {output.esc(s.after)}[/dim]")
     extra = preview.notes_changed - len(preview.samples)
     if extra > 0:
         output.console.print(f"  [dim]… and {extra} more[/dim]")
@@ -602,7 +605,7 @@ def note_search(
     # A message can accompany results (e.g. semantic ranking unavailable, exact
     # matches still shown), so print it but don't suppress the results below.
     if result.message:
-        output.console.print(f"[dim]{result.message}[/dim]")
+        output.console.print(f"[dim]{output.esc(result.message)}[/dim]")
 
     if not result.results or not any(g.matches for g in result.results):
         if not result.message:
@@ -610,17 +613,21 @@ def note_search(
         return
 
     for group in result.results:
-        output.console.print(f"\nResults for: [cyan]{group.source}[/cyan]")
+        # The query string and deck/snippet (collection-authored) are escaped so a
+        # bracketed value renders literally — no terminal spoof, no MarkupError crash.
+        output.console.print(f"\nResults for: [cyan]{output.esc(group.source)}[/cyan]")
         for m in group.matches:
             badges = _search_match_badges(m)
             if brief:
                 tag = f"\\[{badges}] " if badges else ""
-                output.console.print(f"  {tag}[green]#{m.id}[/green] ([cyan]{m.deck}[/cyan])")
+                output.console.print(
+                    f"  {tag}[green]#{m.id}[/green] ([cyan]{output.esc(m.deck)}[/cyan])"
+                )
                 # The window a literal (substring) or near-miss (fuzzy) hit matched, so a
                 # text/audio card's match is legible at a glance.
                 snippet = (m.substring and m.substring.snippet) or (m.fuzzy and m.fuzzy.snippet)
                 if snippet:
-                    output.console.print(f"      [dim]{snippet}[/dim]")
+                    output.console.print(f"      [dim]{output.esc(snippet)}[/dim]")
             else:
                 output.note_detail(m, subtitle=f"[{badges}]" if badges else None)
 
@@ -690,16 +697,22 @@ def note_migrate_type(
             list(note_ids), to_type, field_map, dry_run=True, **common
         )
 
+    # Note-type and field names are collection-authored → escaped.
     output.console.print(
         f"[yellow]{len(preview.changed)}[/yellow] note(s): "
-        f"[cyan]{preview.from_note_type}[/cyan] → [cyan]{preview.to_note_type}[/cyan]"
+        f"[cyan]{output.esc(preview.from_note_type)}[/cyan] → "
+        f"[cyan]{output.esc(preview.to_note_type)}[/cyan]"
     )
     if preview.dropped_fields:
         output.console.print(
-            "  [red]drops (content lost):[/red] " + ", ".join(preview.dropped_fields)
+            "  [red]drops (content lost):[/red] "
+            + ", ".join(output.esc(f) for f in preview.dropped_fields)
         )
     if preview.new_empty_fields:
-        output.console.print("  [dim]empty in target:[/dim] " + ", ".join(preview.new_empty_fields))
+        output.console.print(
+            "  [dim]empty in target:[/dim] "
+            + ", ".join(output.esc(f) for f in preview.new_empty_fields)
+        )
 
     if dry_run:
         return
@@ -711,4 +724,6 @@ def note_migrate_type(
         result = client.migrate_note_type(
             list(note_ids), to_type, field_map, dry_run=False, **common
         )
-    output.console.print(f"Migrated {len(result.changed)} note(s) to {result.to_note_type}.")
+    output.console.print(
+        f"Migrated {len(result.changed)} note(s) to {output.esc(result.to_note_type)}."
+    )

@@ -139,18 +139,20 @@ def media_store(
         output.emit_json(result)
         return
 
+    # Media filenames (and any server error text) are collection-authored →
+    # escaped so a bracket-bearing name renders literally, never as markup.
     errors = False
     for r in result.results:
         if r.status == "stored":
             note = " [dim](already present)[/dim]" if r.deduped else ""
             output.console.print(
-                f"[green]+[/green] Stored [cyan]{r.filename}[/cyan] "
+                f"[green]+[/green] Stored [cyan]{output.esc(r.filename)}[/cyan] "
                 f"[dim]({_fmt_size(r.size_bytes)})[/dim]{note}"
             )
         else:
             errors = True
-            label = f" [cyan]{r.filename}[/cyan]" if r.filename else ""
-            output.console.print(f"[bold red]![/bold red]{label} [red]{r.error}[/red]")
+            label = f" [cyan]{output.esc(r.filename)}[/cyan]" if r.filename else ""
+            output.console.print(f"[bold red]![/bold red]{label} [red]{output.esc(r.error)}[/red]")
     if errors:
         ctx.exit(1)
 
@@ -195,11 +197,15 @@ def media_fetch(
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
+    # Media filenames + the (filename-derived) destination path are
+    # collection-authored → escaped so a bracket-bearing name can't inject markup.
     failed = False
     for r in result.results:
         if r.status == "missing":
             failed = True
-            output.console.print(f"[bold red]![/bold red] Not found: [cyan]{r.filename}[/cyan]")
+            output.console.print(
+                f"[bold red]![/bold red] Not found: [cyan]{output.esc(r.filename)}[/cyan]"
+            )
             continue
         # `found`: read the server-side path if we share its disk, else download
         # the file's url over HTTP. The response never carries bytes.
@@ -212,12 +218,13 @@ def media_fetch(
         else:
             failed = True
             output.console.print(
-                f"[bold red]![/bold red] [cyan]{r.filename}[/cyan]: no local path and no URL "
-                "to fetch from"
+                f"[bold red]![/bold red] [cyan]{output.esc(r.filename)}[/cyan]: no local path "
+                "and no URL to fetch from"
             )
             continue
         output.console.print(
-            f"[green]+[/green] Wrote [cyan]{dest}[/cyan] [dim]({_fmt_size(r.size_bytes)})[/dim]"
+            f"[green]+[/green] Wrote [cyan]{output.esc(dest)}[/cyan] "
+            f"[dim]({_fmt_size(r.size_bytes)})[/dim]"
         )
     if failed:
         ctx.exit(1)
@@ -249,14 +256,19 @@ def media_list(ctx: click.Context, pattern: str | None, limit: int | None) -> No
         output.console.print("[dim]No media files found.[/dim]")
         return
 
+    # Glob pattern, media dir, and filenames can contain brackets → escaped.
     shown = len(result.files)
     count = f"{shown} of {result.count}" if result.count > shown else str(result.count)
-    filt = f" matching [cyan]{pattern}[/cyan]" if pattern else ""
+    filt = f" matching [cyan]{output.esc(pattern)}[/cyan]" if pattern else ""
     output.console.print(
-        f"[dim]Showing {count} media file(s){filt} in [cyan]{result.media_dir}[/cyan][/dim]"
+        f"[dim]Showing {count} media file(s){filt} in "
+        f"[cyan]{output.esc(result.media_dir)}[/cyan][/dim]"
     )
     output.console.print()
-    rows = [[f.filename, f.mime or "", _fmt_size(f.size_bytes)] for f in result.files]
+    rows = [
+        [output.esc(f.filename), output.esc(f.mime or ""), _fmt_size(f.size_bytes)]
+        for f in result.files
+    ]
     output.table(["Name", "Type", "Size"], rows)
     output.console.print()
 
@@ -289,9 +301,10 @@ def media_delete(ctx: click.Context, names: tuple[str, ...], yes: bool) -> None:
         output.emit_json(result)
         return
 
+    # Filenames are collection-authored → escaped.
     for n in result.deleted:
-        output.console.print(f"[red]-[/red] Deleted [cyan]{n}[/cyan]")
+        output.console.print(f"[red]-[/red] Deleted [cyan]{output.esc(n)}[/cyan]")
     for n in result.not_found:
-        output.console.print(f"[bold red]![/bold red] Not found: [cyan]{n}[/cyan]")
+        output.console.print(f"[bold red]![/bold red] Not found: [cyan]{output.esc(n)}[/cyan]")
     if result.not_found:
         ctx.exit(1)

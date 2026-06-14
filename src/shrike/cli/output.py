@@ -8,6 +8,7 @@ from typing import Any
 import click
 from pydantic import BaseModel
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -17,6 +18,20 @@ from shrike.schemas import Note, NoteTypeInfo, SearchMatch, UpsertNoteResult
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
 _pretty = True
+
+
+def esc(value: Any) -> str:
+    """Escape untrusted content so Rich renders it literally, never as markup.
+
+    Note field/tag/deck/snippet text and media filenames are authored by anyone
+    who can write the collection (Anki sync, a shared/imported .apkg, an MCP
+    upsert) — so they MUST NOT reach ``console.print`` as live markup. A
+    bracketed value would otherwise restyle the terminal (spoofing) or, if
+    malformed (a stray ``[/tag]``), raise ``rich.errors.MarkupError`` and crash
+    the whole command. Wrap every collection-authored datum that lands in a
+    styled string with this; leave Shrike's own ``[style]`` tags unescaped.
+    """
+    return escape(str(value))
 
 
 class NoteIDType(click.ParamType):
@@ -39,14 +54,18 @@ NOTE_ID = NoteIDType()
 
 
 def _append_template_field(lines: list[str], label: str, value: str) -> None:
-    """Append a template field — inline if single-line, indented block if multiline."""
+    """Append a template field — inline if single-line, indented block if multiline.
+
+    ``value`` is collection-authored (template HTML) → escaped so it can't inject
+    markup. ``label`` is Shrike's own copy and stays as live markup.
+    """
     parts = value.splitlines()
     if len(parts) <= 1:
-        lines.append(f"    [dim]{label}:[/dim] {value}")
+        lines.append(f"    [dim]{label}:[/dim] {esc(value)}")
     else:
         lines.append(f"    [dim]{label}:[/dim]")
         for p in parts:
-            lines.append(f"      {p}")
+            lines.append(f"      {esc(p)}")
 
 
 def set_pretty(enabled: bool) -> None:
@@ -157,30 +176,39 @@ def kv(label: str, value: Any, indent: int = 0) -> None:
 
 
 def note_summary_row(note: Note) -> list[str]:
-    """Format a note as a table row."""
-    tags = ", ".join(note.tags)
+    """Format a note as a table row.
+
+    Note type/deck/tags are collection-authored → escaped so a bracketed value
+    is shown literally and can neither restyle the terminal nor crash the render.
+    """
+    tags = ", ".join(esc(t) for t in note.tags)
     modified = note.modified
     if "T" in modified:
         modified = modified.split("T")[0]
     return [
         f"[green]#{note.id}[/green]",
-        note.note_type,
-        note.deck,
+        esc(note.note_type),
+        esc(note.deck),
         tags,
-        modified,
+        esc(modified),
     ]
 
 
 def note_type_table(note_types: list[NoteTypeInfo], col_path: str) -> None:
-    """Render a note types table with header. Shared by 'type list' and 'info --types'."""
-    console.print(f"[dim]Showing {len(note_types)} note type(s) in [cyan]{col_path}[/cyan][/dim]")
+    """Render a note types table with header. Shared by 'type list' and 'info --types'.
+
+    Note-type names/kinds/fields are collection-authored → escaped.
+    """
+    console.print(
+        f"[dim]Showing {len(note_types)} note type(s) in [cyan]{esc(col_path)}[/cyan][/dim]"
+    )
     console.print()
     rows = [
         [
             f"[green]#{nt.id}[/green]",
-            f"[cyan]{nt.name}[/cyan]",
-            f"[dim]{nt.type}[/dim]",
-            ", ".join(nt.fields),
+            f"[cyan]{esc(nt.name)}[/cyan]",
+            f"[dim]{esc(nt.type)}[/dim]",
+            ", ".join(esc(f) for f in nt.fields),
         ]
         for nt in note_types
     ]
@@ -195,20 +223,22 @@ def note_detail(note: Note | SearchMatch, *, subtitle: str | None = None) -> Non
     if subtitle:
         header.append(f"  {subtitle}", style="dim")
 
+    # Type/deck/tags/field names + values + modified are collection-authored →
+    # escaped so bracketed content renders literally (no terminal spoof, no crash).
     lines: list[str] = []
-    lines.append(f"[dim]Type:[/dim] [cyan]{note.note_type}[/cyan]")
-    lines.append(f"[dim]Deck:[/dim] [cyan]{note.deck}[/cyan]")
+    lines.append(f"[dim]Type:[/dim] [cyan]{esc(note.note_type)}[/cyan]")
+    lines.append(f"[dim]Deck:[/dim] [cyan]{esc(note.deck)}[/cyan]")
     if note.tags:
-        tags = " ".join(f"[yellow]{t}[/yellow]" for t in note.tags)
+        tags = " ".join(f"[yellow]{esc(t)}[/yellow]" for t in note.tags)
         lines.append(f"[dim]Tags:[/dim] {tags}")
-    lines.append(f"[dim]Modified:[/dim] {note.modified}")
+    lines.append(f"[dim]Modified:[/dim] {esc(note.modified)}")
 
     if note.content:
         lines.append("")
         for field_name, value in note.content.items():
-            lines.append(f"[cyan]{field_name}[/cyan]")
+            lines.append(f"[cyan]{esc(field_name)}[/cyan]")
             for line in str(value).splitlines():
-                lines.append(f"  {line}")
+                lines.append(f"  {esc(line)}")
 
     console.print(
         Panel(
@@ -227,32 +257,34 @@ def note_type_detail(nt: NoteTypeInfo) -> None:
     header.append("Note Type ", style="bold")
     header.append(nt.name, style="cyan")
 
+    # Type/field names/metadata/template names + CSS are collection-authored →
+    # escaped (template front/back via _append_template_field).
     lines: list[str] = []
     lines.append(f"[dim]ID:[/dim] [green]#{nt.id}[/green]")
-    lines.append(f"[dim]Type:[/dim] {nt.type}")
-    lines.append(f"[dim]Fields:[/dim] {', '.join(nt.fields)}")
+    lines.append(f"[dim]Type:[/dim] {esc(nt.type)}")
+    lines.append(f"[dim]Fields:[/dim] {', '.join(esc(f) for f in nt.fields)}")
 
     if nt.detail is not None:
         if nt.detail.fields:
             lines.append("")
             lines.append("[bold]Fields[/bold]")
             for fd in nt.detail.fields:
-                meta = f"{fd.font} {fd.size}px"
+                meta = f"{esc(fd.font)} {esc(fd.size)}px"
                 if fd.description:
-                    meta += f' · "{fd.description}"'
-                lines.append(f"  [cyan]{fd.name}[/cyan] [dim]{meta}[/dim]")
+                    meta += f' · "{esc(fd.description)}"'
+                lines.append(f"  [cyan]{esc(fd.name)}[/cyan] [dim]{meta}[/dim]")
 
         lines.append("")
         lines.append("[bold]Templates[/bold]")
         for tmpl in nt.detail.templates:
-            lines.append(f"  [cyan]{tmpl.name}[/cyan]")
+            lines.append(f"  [cyan]{esc(tmpl.name)}[/cyan]")
             _append_template_field(lines, "Front", tmpl.front)
             _append_template_field(lines, "Back", tmpl.back)
 
         lines.append("")
         lines.append("[bold]CSS[/bold]")
         for css_line in nt.detail.css.splitlines():
-            lines.append(f"  {css_line}")
+            lines.append(f"  {esc(css_line)}")
 
     console.print(
         Panel(
@@ -273,7 +305,7 @@ def result_status(results: list[UpsertNoteResult]) -> None:
         elif r.status == "updated":
             console.print(f"[yellow]~[/yellow] Updated note [green]#{r.id}[/green]")
         elif r.status == "error":
-            console.print(f"[bold red]![/bold red] [red]{r.error or 'Unknown error'}[/red]")
+            console.print(f"[bold red]![/bold red] [red]{esc(r.error or 'Unknown error')}[/red]")
         else:
             console.print(str(r))
 

@@ -106,9 +106,11 @@ def export(
                 {"note_count": result.note_count, "bytes": result.bytes, "path": result.path}
             )
             return
+        # The destination path can contain brackets → escaped so it renders
+        # literally rather than crashing on stray markup.
         output.console.print(
             f"[green]+[/green] Exported [green]{result.note_count}[/green] note(s) "
-            f"-> [cyan]{result.path}[/cyan] ({result.bytes} bytes, on the server)"
+            f"-> [cyan]{output.esc(result.path)}[/cyan] ({result.bytes} bytes, on the server)"
         )
         return
 
@@ -124,5 +126,5 @@ def export(
         return
     output.console.print(
         f"[green]+[/green] Exported [green]{result.note_count}[/green] note(s) "
-        f"-> [cyan]{dest}[/cyan] ({len(data)} bytes)"
+        f"-> [cyan]{output.esc(dest)}[/cyan] ({len(data)} bytes)"
     )
