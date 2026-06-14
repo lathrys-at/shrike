@@ -289,9 +289,9 @@ impl DerivedEngine {
     /// Indexed row count. Errors are surfaced (`unavailable`), never folded
     /// to 0 — a locked/corrupt store must not read as an empty one (#396).
     pub fn count(&self) -> NativeResult<i64> {
+        // #650 TOGGLE: retry a transient SQLITE_BUSY (facade status/size read).
         let conn = self.lock();
-        conn.query_row("SELECT count(*) FROM rowmap", [], |r| r.get(0))
-            .map_err(db_err)
+        with_busy_retry(|| conn.query_row("SELECT count(*) FROM rowmap", [], |r| r.get(0)))
     }
 
     /// Above this, an id set is staged in a TEMP table instead of an inline
@@ -590,12 +590,17 @@ impl DerivedEngine {
 
     /// A free-form meta value (e.g. the recognizer fingerprint, #228).
     pub fn meta_get(&self, key: &str) -> NativeResult<Option<String>> {
+        // #650 TOGGLE: retry a transient SQLITE_BUSY; a genuine no-row is None.
         let conn = self.lock();
-        Ok(conn
-            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
+        with_busy_retry(|| {
+            match conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
                 r.get::<_, String>(0)
-            })
-            .ok())
+            }) {
+                Ok(v) => Ok(Some(v)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e),
+            }
+        })
     }
 
     pub fn meta_set(&self, key: &str, value: &str) -> NativeResult<()> {
@@ -648,16 +653,15 @@ impl DerivedEngine {
     /// the sweep's pending diff needs the complete set, and the pairs are
     /// small. Bounding belongs to the sweep's batching, not this query.
     pub fn refs_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String)>> {
+        // #650 TOGGLE: retry a transient SQLITE_BUSY (sweep pending-set read).
         let conn = self.lock();
-        let mut stmt = conn
-            .prepare("SELECT note_id, ref FROM rowmap WHERE source = ?1")
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(db_err)?
-            .collect::<Result<Vec<(i64, String)>, _>>()
-            .map_err(db_err)?;
-        Ok(rows)
+        with_busy_retry(|| {
+            let mut stmt = conn.prepare("SELECT note_id, ref FROM rowmap WHERE source = ?1")?;
+            let rows = stmt
+                .query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<(i64, String)>, _>>()?;
+            Ok(rows)
+        })
     }
 
     /// Record below-gate outcomes (#416): each (note_id, ref) was recognized
@@ -682,16 +686,15 @@ impl DerivedEngine {
     /// All below-gate (note_id, ref) markers for one source — unioned with
     /// [`Self::refs_for_source`] by the pending sweep's done-set diff (#416).
     pub fn gated_refs_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String)>> {
+        // #650 TOGGLE: retry a transient SQLITE_BUSY (sweep pending-set read).
         let conn = self.lock();
-        let mut stmt = conn
-            .prepare("SELECT note_id, ref FROM gated WHERE source = ?1")
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(db_err)?
-            .collect::<Result<Vec<(i64, String)>, _>>()
-            .map_err(db_err)?;
-        Ok(rows)
+        with_busy_retry(|| {
+            let mut stmt = conn.prepare("SELECT note_id, ref FROM gated WHERE source = ?1")?;
+            let rows = stmt
+                .query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<(i64, String)>, _>>()?;
+            Ok(rows)
+        })
     }
 
     /// Drop ALL below-gate markers for one source — the recognizer-fingerprint
@@ -709,19 +712,18 @@ impl DerivedEngine {
     /// Deliberately a full-set read (the composition consumes the whole set);
     /// volume is bounded by recognized-text size, not media size.
     pub fn texts_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String, String)>> {
+        // #650 TOGGLE: retry a transient SQLITE_BUSY (two engines share the file).
         let conn = self.lock();
-        let mut stmt = conn
-            .prepare(
+        with_busy_retry(|| {
+            let mut stmt = conn.prepare(
                 "SELECT m.note_id, m.ref, idx.txt FROM idx \
                  JOIN rowmap m ON m.rowid = idx.rowid WHERE m.source = ?1",
-            )
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([source], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .map_err(db_err)?
-            .collect::<Result<Vec<(i64, String, String)>, _>>()
-            .map_err(db_err)?;
-        Ok(rows)
+            )?;
+            let rows = stmt
+                .query_map([source], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<(i64, String, String)>, _>>()?;
+            Ok(rows)
+        })
     }
 
     /// `texts_for_source` scoped to a note set (#445): the per-upsert embed
@@ -737,12 +739,6 @@ impl DerivedEngine {
         }
         let conn = self.lock();
         let (id_clause, id_params) = Self::note_id_clause(&conn, "m.note_id", note_ids)?;
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT m.note_id, m.ref, idx.txt FROM idx \
-                 JOIN rowmap m ON m.rowid = idx.rowid WHERE m.source = ?1 AND {id_clause}"
-            ))
-            .map_err(db_err)?;
         let mut params: Vec<Box<dyn rusqlite::ToSql>> =
             vec![Box::new(source.to_string()) as Box<dyn rusqlite::ToSql>];
         params.extend(
@@ -750,15 +746,21 @@ impl DerivedEngine {
                 .iter()
                 .map(|n| Box::new(*n) as Box<dyn rusqlite::ToSql>),
         );
-        let rows = stmt
-            .query_map(
-                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .map_err(db_err)?
-            .collect::<Result<Vec<(i64, String, String)>, _>>()
-            .map_err(db_err)?;
-        Ok(rows)
+        // #650 TOGGLE: retry a transient SQLITE_BUSY on the VECTOR-MINTING read
+        // (the H-D1 read — un-retried before, swallowed at kernel lib.rs:1276).
+        with_busy_retry(|| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT m.note_id, m.ref, idx.txt FROM idx \
+                 JOIN rowmap m ON m.rowid = idx.rowid WHERE m.source = ?1 AND {id_clause}"
+            ))?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?
+                .collect::<Result<Vec<(i64, String, String)>, _>>()?;
+            Ok(rows)
+        })
     }
 
     /// One FTS5 MATCH (rank-ordered), returning provenance + snippet rows.
