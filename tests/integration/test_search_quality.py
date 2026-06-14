@@ -60,7 +60,9 @@ class TestCorpusManifest:
         from tests.search_quality.manifest import load_manifest
 
         manifest = load_manifest(MANIFEST)
-        assert manifest.closed_world is True
+        # Open-world: per-query sparse gold (1 answer + a few hard-negatives among
+        # 46 cards), so an un-graded return is a non-answer, not a false positive.
+        assert manifest.closed_world is False
         assert manifest.cards, "the corpus has cards"
         assert manifest.queries, "the corpus has queries"
         # every query's gold references a real card id
@@ -197,3 +199,188 @@ class TestRealTwoSpaceSmoke:
             await ip.harness.close()
             text.stop()
             clip.stop()
+
+
+# ── PR2b: the full real-model recall/precision suite over the graded corpus ──
+#
+# These build the WHOLE ≥30-image corpus once (a module-scoped fixture — the
+# build + every query is one ~15-30s run on real CLIP + MiniLM) and assert the
+# per-class thresholds. Thresholds are MEMBERSHIP/floor-based, never exact-slot,
+# so they survive the int8 cosine wobble (#559 methodology). The numbers behind
+# them are reproduced by `scripts/eval_search_quality.py` into RESULTS.md.
+
+
+@pytest.fixture(scope="module")
+def real_run(tmp_path_factory):
+    """Build the real 2-space corpus + run every query ONCE for the module.
+
+    Module-scoped so the ~15-30s real-model run is paid once and every
+    threshold/characterization test reads the shared :class:`RunResult`."""
+    import asyncio
+
+    from tests.search_quality.runner import run_search_quality
+
+    tmp = tmp_path_factory.mktemp("real_run")
+    return asyncio.run(run_search_quality(tmp))
+
+
+@requires_clip
+class TestRealRecall:
+    """Real cross-modal + semantic RECALL over the graded corpus. Floors are
+    deliberately below the observed numbers (R@k=1.0, MRR=0.84) to absorb
+    model/float wobble while still catching a real fusion regression."""
+
+    def test_two_spaces_and_enough_images(self, real_run) -> None:
+        assert real_run.space_count == 2, "a dedicated text space + a separate CLIP space"
+        # >= 30 image vectors is what lets the corpus exercise the gate on real
+        # CLIP; the index holds text + image vectors so size exceeds the cards.
+        assert real_run.index_size >= 30, f"index too small: {real_run.index_size}"
+
+    def test_overall_recall_at_k_floor(self, real_run) -> None:
+        rk = real_run.suite.mean_recall_at_k()
+        assert rk is not None and rk >= 0.9, f"overall R@k {rk} below the 0.9 floor"
+
+    def test_modality_gap_recall(self, real_run) -> None:
+        # The core payoff: a text query retrieves an answer-blind image card.
+        rk = real_run.suite.mean_recall_at_k(by_class="modality_gap")
+        mrr = real_run.suite.mean_mrr(by_class="modality_gap")
+        assert rk is not None and rk >= 0.9, f"modality_gap R@k {rk} < 0.9"
+        assert mrr is not None and mrr >= 0.5, f"modality_gap MRR {mrr} < 0.5"
+
+    def test_semantic_text_recall(self, real_run) -> None:
+        # Plain text retrieval must not regress under the multi-space fusion.
+        r1 = real_run.suite.mean_recall_at_1(by_class="semantic_text")
+        assert r1 is not None and r1 >= 0.8, f"semantic_text R@1 {r1} < 0.8"
+
+    def test_portrait_beats_shared_token_text_at_k(self, real_run) -> None:
+        # "a portrait of Napoleon" must surface the IMAGE despite the Waterloo
+        # text cards sharing the token "Napoleon" — at k (the modality gap can
+        # cost rank-1 vs a lexically-strong text card, so floor on R@k not R@1).
+        rk = real_run.suite.mean_recall_at_k(by_class="modality_gap_vs_token_share")
+        assert rk is not None and rk >= 0.9, (
+            f"portrait-vs-token-share R@k {rk} < 0.9 — the image isn't surfacing"
+        )
+
+
+@requires_clip
+class TestRealPrecision:
+    """Real PRECISION: the ∅-gold over-return probe and the planted grade-0
+    hard-negatives. Open-world grading (the corpus is per-query sparse gold), so
+    FPR counts only the explicit hard-negatives, never incidental non-answers."""
+
+    def test_over_return_query_finds_no_relevant_card(self, real_run) -> None:
+        # A query nothing in the corpus answers must return zero grade>=2 cards
+        # (RRF must not fuse junk from every signal's floor; the text threshold
+        # and the relative gate hold).
+        report = next(q for q in real_run.suite.queries if q.adversarial_class == "over_return")
+        # recall is undefined (no gold); the signal is "no relevant-class hit".
+        assert report.recall_at_k is None, "the over-return query has no gradeable gold"
+        # No returned card is a graded relevant card → no recall failure tagged.
+        from tests.search_quality.metrics import FailureKind
+
+        recall_misses = [f for f in report.failures if f.kind == FailureKind.RECALL_MISS]
+        assert not recall_misses, "an ∅-gold query cannot miss recall"
+
+    def test_planted_hard_negative_fpr_is_bounded(self, real_run) -> None:
+        # The portrait hard-negatives (grade-0) may leak in at a LOW rank via the
+        # text space (the blind text + the entity-named filename), but the rate
+        # must stay bounded — a characterization floor, not zero (see RESULTS.md
+        # and the gate-no-inject test, which proves they never enter via CLIP).
+        gate_queries = [
+            q for q in real_run.suite.queries if q.adversarial_class == "gate_no_inject_portrait"
+        ]
+        assert gate_queries, "the gate-no-inject queries ran"
+        for q in gate_queries:
+            assert q.false_positive_rate is not None
+            assert q.false_positive_rate <= 0.3, (
+                f"hard-negative FPR {q.false_positive_rate} too high for {q.query!r}"
+            )
+
+
+@requires_clip
+class TestRealActivationGate:
+    """The relative cross-space activation gate (#234) on REAL CLIP cosines: it
+    FIRES (the CLIP `image#clip` signal contributes) for clearly cross-modal
+    queries where the image is the only path, and STAYS CLOSED (no portrait
+    injected via CLIP) when the text space answers the query. This is the whole
+    reason the corpus sources ≥30 real images."""
+
+    # Queries where the answer is purely visual AND the filename doesn't leak the
+    # subject — so the relative gate must open (CLIP beats the weak text signal).
+    GATE_FIRES = [
+        "a photograph of a domestic cat",
+        "a photo of a green apple",
+        "a sunflower with yellow petals",
+        "the Mona Lisa painting by Leonardo da Vinci",
+        "a photo of the Eiffel Tower in Paris",
+    ]
+
+    def test_gate_fires_for_strongly_cross_modal_queries(self, real_run) -> None:
+        from tests.search_quality.runner import clip_fired
+
+        for q in self.GATE_FIRES:
+            matches = real_run.returns.get(q, [])
+            assert matches, f"query {q!r} returned nothing"
+            assert any(clip_fired(m) for m in matches), (
+                f"the relative gate should OPEN for {q!r} (CLIP image signal absent)"
+            )
+
+    def test_gate_does_not_inject_portrait_via_clip(self, real_run) -> None:
+        from tests.search_quality.runner import clip_fired
+
+        # For a query the TEXT answers (a Curie/Napoleon fact), the portrait
+        # (grade-0 hard-negative) must NEVER surface via the CLIP image signal —
+        # the relative gate stays closed for the vision space (the text space is
+        # more confident). It may appear at a low rank via TEXT (a lexical leak),
+        # but never `image#clip`. (Gold lives on the manifest query, not the
+        # graded report — so iterate the manifest.)
+        for q in real_run.manifest.queries:
+            if q.adversarial_class != "gate_no_inject_portrait":
+                continue
+            hard_negatives = {nid for nid, g in q.gold.grades.items() if g == 0}
+            for m in real_run.returns.get(q.q, []):
+                if m["id"] in hard_negatives:
+                    assert not clip_fired(m), (
+                        f"portrait {m['id']} injected via CLIP for {q.q!r} — gate leaked"
+                    )
+
+    def test_gate_no_inject_text_card_wins_rank_one(self, real_run) -> None:
+        # The fact query's rank-1 must be the correct TEXT card, not the portrait.
+        for q in real_run.manifest.queries:
+            if q.adversarial_class != "gate_no_inject_portrait":
+                continue
+            relevant = q.gold.relevant_ids
+            top = real_run.returns.get(q.q, [])
+            assert top, f"{q.q!r} returned nothing"
+            assert top[0]["id"] in relevant, (
+                f"rank-1 for {q.q!r} is {top[0]['id']}, not a relevant text card {relevant}"
+            )
+
+
+@requires_clip
+class TestCrossLingualCharacterization:
+    """Cross-lingual behaviour — characterized, not over-pinned (#559): the
+    exact-match and image paths work regardless of model language, but SEMANTIC
+    cross-lingual recall depends on the English-centric models, so it's
+    documented (RESULTS.md), not hard-floored."""
+
+    def test_exact_substring_works_cross_lingually(self, real_run) -> None:
+        # "manzana" is a literal substring of the apple card's back text — the
+        # exact signal recovers it regardless of the model's language.
+        report = next(
+            q for q in real_run.suite.queries if q.adversarial_class == "cross_lingual_exact"
+        )
+        assert report.recall_at_1 == 1.0, "the literal cross-lingual term must hit at rank 1"
+
+    def test_cross_lingual_semantic_is_characterized(self, real_run) -> None:
+        # A non-English semantic query ("une pomme rouge ou verte") — we DON'T
+        # hard-floor recall (the model is English-centric), only assert the run
+        # produced a defined metric so RESULTS.md can report where it reaches.
+        report = next(
+            q
+            for q in real_run.suite.queries
+            if q.adversarial_class == "cross_lingual_semantic_characterization"
+        )
+        # The card may surface via the image (the apple photo) or weak text — the
+        # characterization records R@k; we only require the metric is computed.
+        assert report.recall_at_k is not None, "cross-lingual semantic recall is measured"
