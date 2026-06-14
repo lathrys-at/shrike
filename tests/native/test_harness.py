@@ -1256,13 +1256,6 @@ class TestFacadeReadinessBootWindow:
     instead of racing for it under load.
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="#650: DerivedTextStore.search_substring silently returns None "
-        "for already-present recognition rows while state==BUILDING (the boot "
-        "fire-and-forget rebuild window). Remove this xfail when the readiness "
-        "gate no longer drops present data during BUILDING.",
-    )
     def test_search_substring_serves_present_rows_during_building(self, tmp_path) -> None:
         import hashlib
 

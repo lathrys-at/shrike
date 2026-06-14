@@ -188,6 +188,13 @@ class DerivedTextStore:
         self._state = IndexState.UNAVAILABLE
         self._col_mod: int | None = None
         self._build_thread: threading.Thread | None = None
+        # True only while BUILDING was claimed for a build that runs *outside* this store
+        # (the kernel's `rebuild_derived` against its own connection — `claim_external_build`).
+        # In that window this facade's `_engine` is idle and the rows are already committed, so
+        # reads can be served from already-present data; a host-side `build()` keeps it False
+        # because the host engine is then mid-transaction under its own mutex (reads must stay
+        # gated). Read/written only under `_state_lock`, paired with the `_state` transition.
+        self._external_build = False
         self._open()
 
     # ── lifecycle ────────────────────────────────────────────────────────────────────────────────
@@ -268,6 +275,25 @@ class DerivedTextStore:
     def available(self) -> bool:
         """True when the store can serve lookups (FTS5 present, schema ready, a build has run)."""
         return self._available and self._state == IndexState.READY
+
+    def _can_serve_reads(self) -> bool:
+        """Whether a *read* (substring/fuzzy) may run against the engine right now.
+
+        Looser than :attr:`available`: it also serves during the **external-build** BUILDING
+        window (#650). There the kernel rebuilds against its OWN connection while this facade's
+        ``_engine`` is idle and the relevant rows are already committed in ``shrike.db`` — so a
+        host read is safe and consistent, and must NOT silently field-fall-back already-present
+        recognition rows during the boot/reload rebuild. A *host-side* ``build()`` stays gated
+        (``_external_build`` False): the host's own engine is then mid ``DELETE``+``INSERT`` under
+        its engine mutex, so a concurrent read would block the event loop on that mutex.
+
+        Writes/drift keep gating on :attr:`available` — this relaxation is read-only.
+        """
+        if not self._available or self._engine is None:
+            return False
+        if self._state == IndexState.READY:
+            return True
+        return self._state == IndexState.BUILDING and self._external_build
 
     @property
     def state(self) -> IndexState:
@@ -358,6 +384,9 @@ class DerivedTextStore:
             if self._state == IndexState.BUILDING:
                 return False
             self._state = IndexState.BUILDING
+            # The build runs on the kernel's own connection; this facade's engine stays idle and
+            # the rows are already committed, so reads may be served during this window (#650).
+            self._external_build = True
         return True
 
     def settle_external_build(self, col_mod: int | None) -> None:
@@ -369,6 +398,7 @@ class DerivedTextStore:
             else:
                 self._col_mod = col_mod
                 self._state = IndexState.READY
+            self._external_build = False
 
     def build_in_background(self, rows: Iterable[tuple[int, str, str, str]], col_mod: int) -> None:
         """Run :meth:`build` on a daemon thread (``rows`` are materialized first — they cross)."""
@@ -425,7 +455,7 @@ class DerivedTextStore:
         caller to use the ``find_notes`` fallback — when the store is unavailable/not-ready or the
         query is shorter than a trigram (FTS5 trigram can't match < 3 chars).
         """
-        if not self.available or self._engine is None:
+        if not self._can_serve_reads() or self._engine is None:
             return None
         try:
             # The MATCH policy is the Rust engine's (single implementation,
@@ -447,7 +477,7 @@ class DerivedTextStore:
         candidate must share at least ``FUZZY_MIN_SHARED`` of them (drops one-trigram noise). Empty
         when the store can't serve it (the fuzzy signal is simply absent — graceful).
         """
-        if not self.available or self._engine is None:
+        if not self._can_serve_reads() or self._engine is None:
             return []
         try:
             # The trigram/overlap policy is the Rust engine's (single
