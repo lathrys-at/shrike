@@ -131,14 +131,34 @@ jobs:
   # Prune superseded bazel-disk-* entries (#645). The disk cache is keyed on the
   # run id (a fresh ~0.5 GB superset every run, by design — it must accumulate
   # so an unchanged test replays as a hit), so without a cap the entries pile up
-  # and, against the 10 GB per-repo budget, evict each other — including the
-  # freshly-warmed main-scoped one a PR needs to restore. This keeps only the
-  # newest KEEP entries (the warmer's just-saved one + a little slack) and
-  # deletes the rest, so main's scope always carries a restorable disk cache for
-  # PRs. Runs AFTER the warm save (needs: warm-bazel) so it never deletes the
-  # entry that run just created. Deletes are scoped to this repo's own caches;
-  # the bazel-repo/bazel-models entries are key-stable (one per pin/lock) and
-  # left untouched.
+  # and, against the 10 GB per-repo budget, evict each other.
+  #
+  # PRUNE PER CACHE-SCOPE, NOT GLOBALLY (#645 durability fix). The ONLY bazel-disk
+  # a PR can restore is the main-scoped one for its own os/arch (a run reads its
+  # own ref + base + default branch, never a sibling PR's ref — so PR-ref disks
+  # are unreadable by any other PR and by this warmer). The original prune sorted
+  # ALL bazel-disk-* entries globally by createdAt and kept the newest KEEP — but
+  # PR lanes save a disk on their OWN ref every run (far more often than the
+  # daily warmer), so the global newest-KEEP filled with PR-ref entries and the
+  # warmer's main-scoped seed (older by createdAt) fell into the delete tail.
+  # That deleted the one entry PRs actually restore, in the same cycle the
+  # over-budget warmer failed to save a replacement — turning a transient save
+  # failure into a durable cold-build state (every PR then rebuilt the whole Rust
+  # cone). A failed save is non-destructive; it was the prune that lost the seed.
+  #
+  # So: keep the newest KEEP entries WITHIN EACH SCOPE independently, where a
+  # scope is (main-vs-not, os/arch). The os/arch axis matters because the
+  # cross-platform lane saves bazel-disk-<os>-<arch>-<run> under PR refs for its
+  # own arm64/macOS keys, which the linux-x64 warmer never seeds — without it,
+  # linux-x64 PR-ref churn would evict an rc PR's macOS/arm64 disk. So we keep:
+  # the newest KEEP main-scoped disks PER os/arch (the seed every PR restores,
+  # never evicted by PR churn) AND the newest KEEP non-main disks PER os/arch
+  # (bounds PR-ref accumulation per platform). This also makes the job safe under
+  # a FAILED warm save: with no new main entry minted this run, the newest
+  # main-scoped disk is the prior one, which is kept (`needs: warm-bazel` + `if:
+  # always()` still runs it, but it can no longer delete the seed). Deletes are
+  # scoped to this repo's own caches; the bazel-repo/bazel-models entries are
+  # key-stable (one per pin/lock) and left untouched.
   prune-disk-cache:
     name: Prune superseded bazel-disk caches
     needs: warm-bazel
@@ -148,16 +168,23 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       KEEP: "2"
     steps:
-      - name: Delete all but the newest bazel-disk-* entries
+      - name: Delete all but the newest bazel-disk-* entries per scope
         run: |
           set -euo pipefail
-          # Newest-first by createdAt; keep the newest $KEEP, delete the rest.
-          # jq sorts by createdAt descending and emits the cache ids to delete.
+          # Group bazel-disk-* by scope = (main-vs-not, os/arch from the key's
+          # bazel-disk-<os>-<arch>- prefix), sort each newest-first by createdAt,
+          # and emit the ids beyond the newest $KEEP IN EACH group. The
+          # main-scoped seed is pruned only against same-scope entries, so
+          # frequent PR-ref saves can never evict it (the #645 ref-blind bug),
+          # and linux-x64 PR churn can't evict an rc PR's macOS/arm64 disk.
           mapfile -t stale < <(
             gh cache list --repo "$GITHUB_REPOSITORY" --limit 100 \
-              --json key,id,createdAt \
+              --json key,id,createdAt,ref \
               --jq "[.[] | select(.key | startswith(\"bazel-disk-\"))]
-                    | sort_by(.createdAt) | reverse | .[($KEEP | tonumber):] | .[].id"
+                    | group_by([(.ref == \"refs/heads/main\"), (.key | split(\"-\") | .[2:4] | join(\"-\"))])
+                    | map(sort_by(.createdAt) | reverse | .[($KEEP | tonumber):])
+                    | add // []
+                    | .[].id"
           )
           if [ "${#stale[@]}" -eq 0 ]; then
             echo "No superseded bazel-disk caches to prune."
