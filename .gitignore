@@ -44,3 +44,8 @@ eval/multimodal/cache/
 eval/search_quality/cache/
 # The PR2b runner's generated report (a local artifact, not committed).
 eval/search_quality/RESULTS.md
+
+# MobileCLIP2 spike (#568): model bytes are NEVER committed — fetched on demand
+# into this gitignored scratch cache. Only the verify script + RESULTS.md +
+# ASSETS.md (pinned URLs/attribution) are committed.
+eval/mobileclip/cache/
