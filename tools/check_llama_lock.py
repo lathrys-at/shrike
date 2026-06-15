@@ -49,7 +49,7 @@ def _repo_root() -> Path:
         ).is_file():
             return parent
     raise FileNotFoundError(
-        "could not locate scripts/llama-server.lock + MODULE.bazel from " f"{here}"
+        f"could not locate scripts/llama-server.lock + MODULE.bazel from {here}"
     )
 
 
@@ -100,9 +100,7 @@ def check(lock_text: str, module_text: str) -> list[str]:
     expected_names = {name for name, _ in _PLATFORMS.values()}
     missing = expected_names - set(archives)
     if missing:
-        problems.append(
-            "MODULE.bazel is missing llama_server http_archive(s): " f"{sorted(missing)}"
-        )
+        problems.append(f"MODULE.bazel is missing llama_server http_archive(s): {sorted(missing)}")
 
     for lock_key, (archive_name, suffix) in _PLATFORMS.items():
         sha_key = f"SHA256_{lock_key}"
@@ -129,9 +127,7 @@ def check(lock_text: str, module_text: str) -> list[str]:
             f"llama-{tag}-bin-{suffix}.tar.gz"
         )
         if arch["url"] != expected_url:
-            problems.append(
-                f"{archive_name}: url {arch['url']!r} != expected {expected_url!r}"
-            )
+            problems.append(f"{archive_name}: url {arch['url']!r} != expected {expected_url!r}")
 
     return problems
 
