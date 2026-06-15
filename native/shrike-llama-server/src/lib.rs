@@ -41,15 +41,59 @@ pub const RESERVED_FLAGS: &[&str] = &[
     "--embeddings",
     "--embedding",
     "--mmproj",
+    // Router mode (#566) is Shrike-owned: the model-loading shape (single vs
+    // router) is chosen by `ModelSpec`, never smuggled through the passthrough.
+    "--models-dir",
+    "--models-max",
 ];
 /// Of the reserved flags, those that consume a following value token (so a
 /// rejected `--host 0.0.0.0` drops the value too, not just the flag).
-pub const RESERVED_VALUE_FLAGS: &[&str] = &["--model", "-m", "--host", "--port", "--mmproj"];
+pub const RESERVED_VALUE_FLAGS: &[&str] = &[
+    "--model",
+    "-m",
+    "--host",
+    "--port",
+    "--mmproj",
+    "--models-dir",
+    "--models-max",
+];
+
+/// What the server loads: one model (single-model mode, the default) or a
+/// directory of models served by llama.cpp's *router* mode (#566), where the
+/// request's `model` field selects among them. The two are mutually exclusive
+/// — `--model` and `--models-dir` cannot coexist — so they are an enum, not a
+/// bag of optionals.
+pub enum ModelSpec {
+    /// `--model <path>`: a single model loaded at spawn.
+    Single(String),
+    /// `--models-dir <dir>` (+ optional `--models-max <N>`): router mode (one
+    /// process, many models, request-`model`-field routing). Models load
+    /// lazily on first request — `/health` is 200 once the router is listening,
+    /// before any model loads, so the health-wait is unchanged.
+    Router {
+        dir: String,
+        /// Max models loaded simultaneously (`--models-max`); `None` = the
+        /// server default (LRU-evicts beyond it).
+        max: Option<u32>,
+    },
+}
+
+impl std::fmt::Display for ModelSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModelSpec::Single(path) => write!(f, "{path}"),
+            ModelSpec::Router { dir, max } => match max {
+                Some(n) => write!(f, "router:{dir} (max {n})"),
+                None => write!(f, "router:{dir}"),
+            },
+        }
+    }
+}
 
 pub struct LlamaServerConfig {
     /// Explicit binary override (`--llama-server`); beats env and PATH.
     pub binary: Option<String>,
-    pub model: String,
+    pub model: ModelSpec,
     pub host: String,
     pub port: u16,
     pub log_dir: Option<PathBuf>,
@@ -547,20 +591,33 @@ impl LlamaServerManager {
     /// user can't shadow Shrike's args by ordering; reserved flags are
     /// stripped regardless).
     pub fn build_command(&self, binary: &str) -> Vec<String> {
-        let mut cmd: Vec<String> = vec![
-            binary.to_string(),
-            "--model".into(),
-            self.cfg.model.clone(),
+        let mut cmd: Vec<String> = vec![binary.to_string()];
+        match &self.cfg.model {
+            ModelSpec::Single(path) => {
+                cmd.extend(["--model".into(), path.clone()]);
+            }
+            ModelSpec::Router { dir, max } => {
+                cmd.extend(["--models-dir".into(), dir.clone()]);
+                if let Some(n) = max {
+                    cmd.extend(["--models-max".into(), n.to_string()]);
+                }
+            }
+        }
+        cmd.extend([
             "--host".into(),
             self.cfg.host.clone(),
             "--port".into(),
             self.cfg.port.to_string(),
-        ];
+        ]);
         if self.embeddings {
             cmd.push("--embeddings".into());
         }
-        for mmproj in &self.mmprojs {
-            cmd.extend(["--mmproj".into(), mmproj.clone()]);
+        // mmprojs are model-specific (a router serves many models, so no single
+        // projector applies globally) — emit them only in single-model mode.
+        if matches!(self.cfg.model, ModelSpec::Single(_)) {
+            for mmproj in &self.mmprojs {
+                cmd.extend(["--mmproj".into(), mmproj.clone()]);
+            }
         }
         if let Some(n) = self.cfg.context_size {
             cmd.extend(["--ctx-size".into(), n.to_string()]);
@@ -837,9 +894,13 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn manager(extra: &[&str]) -> LlamaServerManager {
+        manager_with_model(ModelSpec::Single("/models/test.gguf".into()), extra)
+    }
+
+    fn manager_with_model(model: ModelSpec, extra: &[&str]) -> LlamaServerManager {
         LlamaServerManager::new(LlamaServerConfig {
             binary: None,
-            model: "/models/test.gguf".into(),
+            model,
             host: "127.0.0.1".into(),
             port: 18373,
             log_dir: None,
@@ -878,6 +939,85 @@ mod tests {
                 "256",
             ]
         );
+    }
+
+    #[test]
+    fn router_mode_emits_models_dir_and_max_not_model() {
+        // #566: router mode loads a directory of models (request-`model`-field
+        // routing), so `--models-dir`/`--models-max` replace `--model`. Global
+        // defaults (--embeddings, --ctx-size, passthrough) still apply.
+        let mut m = manager_with_model(
+            ModelSpec::Router {
+                dir: "/models/router".into(),
+                max: Some(3),
+            },
+            &["--flash-attn"],
+        );
+        m.cfg.context_size = Some(2048);
+        let cmd = m.build_command("/bin/llama-server");
+        assert_eq!(
+            cmd,
+            vec![
+                "/bin/llama-server",
+                "--models-dir",
+                "/models/router",
+                "--models-max",
+                "3",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "18373",
+                "--embeddings",
+                "--ctx-size",
+                "2048",
+                "--flash-attn",
+            ]
+        );
+        // Never a `--model` in router mode (the two are mutually exclusive).
+        assert!(!cmd.contains(&"--model".to_string()), "{cmd:?}");
+        assert!(!cmd.contains(&"-m".to_string()), "{cmd:?}");
+    }
+
+    #[test]
+    fn router_mode_omits_models_max_when_unset() {
+        // `max: None` → let the server pick its default; emit just --models-dir.
+        let m = manager_with_model(
+            ModelSpec::Router {
+                dir: "/models/router".into(),
+                max: None,
+            },
+            &[],
+        );
+        let cmd = m.build_command("/bin/llama-server");
+        assert!(cmd.contains(&"--models-dir".to_string()), "{cmd:?}");
+        assert!(!cmd.contains(&"--models-max".to_string()), "{cmd:?}");
+        let i = cmd.iter().position(|t| t == "--models-dir").unwrap();
+        assert_eq!(cmd[i + 1], "/models/router");
+    }
+
+    #[test]
+    fn router_mode_omits_model_specific_mmprojs() {
+        // mmprojs are per-model; a router serves many, so no single projector
+        // applies globally — they're suppressed in router mode (a passthrough
+        // --mmproj is reserved-stripped regardless, tested elsewhere).
+        let m = manager_with_model(
+            ModelSpec::Router {
+                dir: "/models/router".into(),
+                max: None,
+            },
+            &[],
+        )
+        .with_mmprojs(vec!["/models/vision.mmproj.gguf".into()]);
+        let cmd = m.build_command("/bin/llama-server");
+        assert!(!cmd.contains(&"--mmproj".to_string()), "{cmd:?}");
+    }
+
+    #[test]
+    fn router_flags_are_reserved_from_passthrough() {
+        // The single-vs-router shape is `ModelSpec`-owned: a passthrough can't
+        // smuggle --models-dir/--models-max (or their values) past the guard.
+        let m = manager(&["--models-dir /evil --models-max 99 --flash-attn"]);
+        assert_eq!(m.passthrough_tokens(false), vec!["--flash-attn"]);
     }
 
     #[test]

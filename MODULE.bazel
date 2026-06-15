@@ -265,36 +265,42 @@ http_file(
 # The pinned llama-server binary (+ its shared libs, flat beside it) as a per-platform
 # http_archive — tag + shas from scripts/llama-server.lock. The conftest puts the
 # host one on PATH + the lib path for the embedding_server fixture. Lazily fetched.
+#
+# The tag + 4 shas are DUPLICATED here from scripts/llama-server.lock (Bazel can't
+# read the lock at module-resolution time). //:llama_lock_in_sync_test is the
+# tripwire: it parses the lock and asserts every value below matches, failing CI on
+# drift. To bump: `scripts/update-llama-lock.sh <TAG>` then mirror the values here
+# (the test names the exact mismatch).
 _LLAMA_FILES = 'filegroup(name = "files", srcs = glob(["**"]), visibility = ["//visibility:public"])'
 
 http_archive(
     name = "llama_server_macos_arm64",
     build_file_content = _LLAMA_FILES,
-    sha256 = "edf417cd8dd148fd423ea758953caa43376df98d8f027b7748ea0399a9a8023f",
-    strip_prefix = "llama-b9415",
-    urls = ["https://github.com/ggml-org/llama.cpp/releases/download/b9415/llama-b9415-bin-macos-arm64.tar.gz"],
+    sha256 = "72a93f3e68c31de3e438d462669aad1fcdb423b995e9c41033cc7d27a9a3ac69",
+    strip_prefix = "llama-b9637",
+    urls = ["https://github.com/ggml-org/llama.cpp/releases/download/b9637/llama-b9637-bin-macos-arm64.tar.gz"],
 )
 
 http_archive(
     name = "llama_server_macos_amd64",
     build_file_content = _LLAMA_FILES,
-    sha256 = "7c07ab8bb59e249340ed15afe03d5f164521242942a406661d6c499efc186a84",
-    strip_prefix = "llama-b9415",
-    urls = ["https://github.com/ggml-org/llama.cpp/releases/download/b9415/llama-b9415-bin-macos-x64.tar.gz"],
+    sha256 = "71743f8db0958e7c266cceb7add7b16aa418a964667e471094aa6ae65b9c8298",
+    strip_prefix = "llama-b9637",
+    urls = ["https://github.com/ggml-org/llama.cpp/releases/download/b9637/llama-b9637-bin-macos-x64.tar.gz"],
 )
 
 http_archive(
     name = "llama_server_linux_amd64",
     build_file_content = _LLAMA_FILES,
-    sha256 = "df22e2447cd16dc2ae039d6dccd3b734efac109e315fa61ec8e1d5000bcbee00",
-    strip_prefix = "llama-b9415",
-    urls = ["https://github.com/ggml-org/llama.cpp/releases/download/b9415/llama-b9415-bin-ubuntu-x64.tar.gz"],
+    sha256 = "a50ee14f021a9d8e92e30f622f7e3be1318ee1125bb9a9ba8d2025388df48743",
+    strip_prefix = "llama-b9637",
+    urls = ["https://github.com/ggml-org/llama.cpp/releases/download/b9637/llama-b9637-bin-ubuntu-x64.tar.gz"],
 )
 
 http_archive(
     name = "llama_server_linux_arm64",
     build_file_content = _LLAMA_FILES,
-    sha256 = "bf01d2ce3ea74402c757fa992388ef10987a6cdc0231b0c43353c1e5722ae22c",
-    strip_prefix = "llama-b9415",
-    urls = ["https://github.com/ggml-org/llama.cpp/releases/download/b9415/llama-b9415-bin-ubuntu-arm64.tar.gz"],
+    sha256 = "211d9e9ee738698beb7ca271be82661ae2b5da3fbb489cf7d9e4e6ed601be106",
+    strip_prefix = "llama-b9637",
+    urls = ["https://github.com/ggml-org/llama.cpp/releases/download/b9637/llama-b9637-bin-ubuntu-arm64.tar.gz"],
 )
