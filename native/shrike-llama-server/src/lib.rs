@@ -870,6 +870,35 @@ mod tests {
         // terminate_pid_confirms_death_via_pid_not_port, so the SIGTERM'd
         // process is reaped by init rather than zombied (a direct child would
         // linger as a zombie that `kill(pid, 0)` still reports alive).
+        // Capability gate (#652): this test verifies a *positive* reap, which
+        // needs to confirm ownership via `port_owner_pids` (lsof on unix). The
+        // bazel darwin-sandbox provides no `lsof`, so ownership can never be
+        // established there and the setup precondition below could never hold.
+        // Probe the capability *positively* — bind an in-process listener and
+        // ask whether we can observe our OWN PID owning it. If we cannot, the
+        // platform can't introspect port ownership here, so skip cleanly (a
+        // returning Rust test is reported PASSED). Keying the skip on this
+        // positive incapability — not on catching the would-be setup failure —
+        // keeps a genuine reap regression FAILING rather than silently skipped:
+        // wherever lsof exists (dev machines, CI Linux) the probe passes and the
+        // full reap is exercised. The production reap is unaffected — it already
+        // treats "ownership unprovable" as "never kill" (fail-open, gated).
+        {
+            let self_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let self_port = self_listener.local_addr().unwrap().port();
+            let self_pid = std::process::id() as i64;
+            let observable = pid_owns_port(self_pid, self_port);
+            drop(self_listener);
+            if !observable {
+                eprintln!(
+                    "SKIP a_real_orphan_holding_our_port_is_still_reaped: port ownership is \
+                     not observable here (no lsof/netstat in this sandbox) — the positive-reap \
+                     assertion cannot be verified. See #652."
+                );
+                return;
+            }
+        }
+
         let dir = std::env::temp_dir().join(format!("shrike-s12-orphan-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let pid_file = dir.join("embedding.pid");
