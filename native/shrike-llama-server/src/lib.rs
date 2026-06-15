@@ -179,7 +179,7 @@ fn port_owner_pids(port: u16) -> Option<Vec<i64>> {
         // found no LISTEN owner"), None when it could not be read at all.
         #[cfg(target_os = "linux")]
         {
-            return proc_net_owner_pids(port);
+            proc_net_owner_pids(port)
         }
         // Step 3: no mechanism could run (no lsof; not Linux, so no /proc).
         #[cfg(not(target_os = "linux"))]
