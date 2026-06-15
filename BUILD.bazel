@@ -41,7 +41,7 @@ py_test(
     main = "tools/check_llama_lock.py",
     data = [
         "MODULE.bazel",
-        "scripts/llama-server.lock",
+        "//scripts:llama-server.lock",
     ],
 )
 

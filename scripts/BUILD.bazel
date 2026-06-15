@@ -2,6 +2,10 @@ load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 load("@shrike_pip//:requirements.bzl", "requirement")
 load("//tools/bazel:defs.bzl", "pytest_test")
 
+# The pinned llama.cpp lock, consumed as `data` by //:llama_lock_in_sync_test —
+# the de-dup tripwire that asserts it matches MODULE.bazel's http_archives (#566).
+exports_files(["llama-server.lock"])
+
 # //scripts:serve — the consolidated dogfooding launcher (#565/#656).
 #
 #   ./bazel run //scripts:serve -- --profile text-onnx [--seed qa] [--foreground|--daemon]
