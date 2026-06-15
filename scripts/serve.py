@@ -40,6 +40,8 @@ from typing import Any
 
 import yaml
 
+from shrike.embedding_onnx_common import resolve_execution_providers
+
 logger = logging.getLogger("shrike.serve")
 
 # The repo root: scripts/serve.py → repo root is one level up. Under Bazel this
@@ -165,6 +167,103 @@ def materialize_model(dir_name: str, models_root: Path) -> Path:
     return Path(fetched)
 
 
+# -- ONNX execution-provider auto-detect (#569) --------------------------------
+#
+# Profiles are provider-FREE (portable, one file per capability shape — provider
+# is orthogonal to a profile's identity). The launcher detects the providers at
+# materialize time and overlays them onto every ONNX entry, so a GPU host gets
+# GPU acceleration with zero per-platform profile drift. Detection rides the SAME
+# source the backend uses (`onnxruntime.get_available_providers` →
+# `resolve_execution_providers`), so the printed list can't disagree with what
+# the backend will actually run; detection failure degrades to CPU (slower but
+# correct), never a crash or wrong vectors.
+
+#: GPU/accelerated execution providers in PRIORITY order — the candidate request
+#: list before intersecting with what onnxruntime actually has. CPU is appended
+#: by the shared resolver, never listed here. Mirrors the native EP mapping the
+#: backends document (CUDA→TensorRT on onnxruntime-gpu; CoreML on the macOS base
+#: wheel; DirectML on onnxruntime-directml).
+_PROVIDER_PRIORITY = (
+    "CUDAExecutionProvider",
+    "TensorrtExecutionProvider",
+    "CoreMLExecutionProvider",
+    "DmlExecutionProvider",
+)
+
+#: Accelerated providers whose ABSENCE on a GPU-looking host means the wrong
+#: onnxruntime carrier is installed (the one thing auto-detect can't fix).
+_NVIDIA_PROVIDERS = frozenset({"CUDAExecutionProvider", "TensorrtExecutionProvider"})
+
+
+def _available_providers() -> list[str] | None:
+    """``onnxruntime.get_available_providers()``, or ``None`` if onnxruntime is
+    absent. The single source of truth the backend intersects against too."""
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return None
+    return list(ort.get_available_providers())
+
+
+def _nvidia_gpu_present() -> bool:
+    """A best-effort 'this host has an NVIDIA GPU' probe — ``nvidia-smi`` on PATH.
+
+    Used ONLY to decide whether to emit the carrier-mismatch remedy; it never
+    changes the resolved provider list (detection rides onnxruntime, not this)."""
+    return shutil.which("nvidia-smi") is not None
+
+
+def detect_providers() -> list[str]:
+    """The resolved ONNX execution-provider list for this host (priority,
+    intersected with what onnxruntime has, CPU last).
+
+    Returns ``["CPUExecutionProvider"]`` when onnxruntime is absent (the backend
+    would fail to start anyway, but the list stays well-formed). Emits the
+    carrier-mismatch warning when a GPU-looking host lacks its GPU EP."""
+    available = _available_providers()
+    if available is None:
+        logger.warning(
+            "onnxruntime not importable — defaulting ONNX providers to CPU "
+            "(the embedding backend needs the onnxruntime wheel to start)"
+        )
+        return ["CPUExecutionProvider"]
+    # The shared resolver is the same code the backend runs: keep requested-and-
+    # available in priority order, append CPU, dedup. So the printed list IS the
+    # backend's list.
+    resolved, _dropped = resolve_execution_providers(available, list(_PROVIDER_PRIORITY))
+    _warn_on_carrier_mismatch(available)
+    return resolved
+
+
+def _warn_on_carrier_mismatch(available: list[str]) -> None:
+    """Warn when the host looks GPU-capable but the installed onnxruntime carrier
+    can't use it — the one failure auto-detect cannot repair, so it must tell the
+    user the exact remedy."""
+    has_nvidia_ep = any(p in available for p in _NVIDIA_PROVIDERS)
+    if _nvidia_gpu_present() and not has_nvidia_ep:
+        logger.warning(
+            "an NVIDIA GPU is present (nvidia-smi) but the installed onnxruntime has no "
+            "CUDA/TensorRT execution provider — embedding will run on CPU. Install the GPU "
+            "carrier to use it:  pip uninstall onnxruntime && pip install onnxruntime-gpu"
+        )
+
+
+def resolve_providers(args: argparse.Namespace) -> list[str] | None:
+    """The launcher's provider decision for this run, or ``None`` to leave a
+    profile's own ``providers:`` untouched (an explicit profile choice wins).
+
+    ``--cpu`` forces CPU-only; ``--providers A,B`` forces an explicit list
+    (skipping detection); otherwise auto-detect. The return is the list to
+    OVERLAY onto onnx entries that don't already declare ``providers:``."""
+    if args.cpu:
+        return ["CPUExecutionProvider"]
+    if args.providers:
+        # Explicit override: take the user's order verbatim (the backend still
+        # intersects + CPU-falls-back at start, so a typo degrades, not crashes).
+        return list(args.providers)
+    return detect_providers()
+
+
 # -- Profile loading + effective-config composition ----------------------------
 
 
@@ -219,7 +318,9 @@ def _model_names_in_profile(profile: Mapping[str, Any]) -> list[str]:
 
 
 def compose_effective_config(
-    profile: Mapping[str, Any], resolved_models: Mapping[str, str]
+    profile: Mapping[str, Any],
+    resolved_models: Mapping[str, str],
+    providers: list[str] | None = None,
 ) -> dict[str, Any]:
     """Rewrite a path-free profile into a server-ready effective config.
 
@@ -227,6 +328,12 @@ def compose_effective_config(
     absolute materialized path from *resolved_models*. Everything else passes
     through unchanged. A model with no resolved path is a programming error
     (the caller materializes every name from :func:`_model_names_in_profile`).
+
+    *providers* (when not ``None``) is the launcher-resolved ONNX execution
+    provider list (#569), overlaid onto every **onnx** entry that does not
+    already declare its own ``providers:`` — an explicit profile choice wins over
+    detection. Remote/platform entries are untouched (``providers:`` is onnx-only,
+    mirroring the guard at ``profiles.py:291``).
     """
     config: dict[str, Any] = {k: v for k, v in profile.items() if k != "embedders"}
     embedders: list[Any] = []
@@ -239,6 +346,10 @@ def compose_effective_config(
                     if model not in resolved_models:
                         raise KeyError(f"no materialized path for model {model!r}")
                     new_entry["model"] = resolved_models[model]
+                # Overlay detected providers ONLY when the profile didn't set its
+                # own (a checked-in profile carries none; an explicit one wins).
+                if providers is not None and "providers" not in new_entry:
+                    new_entry["providers"] = list(providers)
             embedders.append(new_entry)
         else:
             embedders.append(entry)
@@ -343,7 +454,68 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override the run log dir (default: <run>/logs).",
     )
+    prov = parser.add_mutually_exclusive_group()
+    prov.add_argument(
+        "--providers",
+        type=_split_providers,
+        default=None,
+        metavar="A,B",
+        help="Override ONNX execution-provider auto-detect with an explicit "
+        "comma-separated list in priority order (e.g. "
+        "CUDAExecutionProvider,CPUExecutionProvider). The backend still "
+        "intersects + falls back to CPU, so a typo degrades, not crashes.",
+    )
+    prov.add_argument(
+        "--cpu",
+        action="store_true",
+        help="Force CPU-only ONNX execution (sugar for "
+        "--providers CPUExecutionProvider); skips auto-detect.",
+    )
     return parser
+
+
+def _split_providers(value: str) -> list[str]:
+    """Parse ``--providers A,B`` into a clean list (empty entries dropped)."""
+    items = [p.strip() for p in value.split(",")]
+    return [p for p in items if p]
+
+
+def _status_port(profile: Mapping[str, Any]) -> int:
+    """The port the server will listen on — a profile's ``server.port`` else the
+    default 8372 (the launcher doesn't pass --port, so the CLI uses this same
+    resolution). Used to poll /status for the active-provider readback."""
+    server = profile.get("server")
+    if isinstance(server, Mapping) and isinstance(server.get("port"), int):
+        return int(server["port"])
+    return 8372
+
+
+def read_active_providers(port: int, *, timeout: float = 30.0) -> list[str] | None:
+    """Poll ``GET /status`` until the daemon responds, then return its embedding
+    ``active_providers`` (what onnxruntime ACTUALLY loaded — GPU or CPU).
+
+    Returns ``None`` if the server never responds in *timeout* or carries no
+    active providers (e.g. embedding off). Best-effort: a readback failure is a
+    visibility gap, never a launch failure."""
+    import time
+
+    import httpx
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            resp = httpx.get(f"http://127.0.0.1:{port}/status", timeout=5.0)
+            resp.raise_for_status()
+        except (httpx.HTTPError, httpx.TransportError):
+            time.sleep(0.5)
+            continue
+        emb = resp.json().get("embedding") or {}
+        active = emb.get("active_providers")
+        if active:
+            return list(active)
+        # Server up but no active providers yet (engine still starting) — retry.
+        time.sleep(0.5)
+    return None
 
 
 def _server_argv(
@@ -408,7 +580,14 @@ def main(argv: list[str] | None = None) -> int:
         if name not in resolved_models:
             resolved_models[name] = str(materialize_model(name, models_root))
 
-    config = compose_effective_config(profile, resolved_models)
+    # Resolve ONNX execution providers for this host (auto-detect, or the
+    # --providers/--cpu override) and overlay them onto onnx entries (#569). The
+    # BEFORE readout: print what we'll request, so the after-readback from
+    # /status makes "did the GPU engage?" unambiguous.
+    providers = resolve_providers(args)
+    if providers is not None and _model_names_in_profile(profile):
+        logger.info("ONNX execution providers (resolved, priority order): %s", ", ".join(providers))
+    config = compose_effective_config(profile, resolved_models, providers=providers)
     config_path = root / "config.yml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
     logger.info("wrote effective config → %s", config_path)
@@ -425,13 +604,43 @@ def main(argv: list[str] | None = None) -> int:
     )
     logger.info("launching: shrike %s", " ".join(server_argv))
 
+    has_onnx = bool(_model_names_in_profile(profile))
+    if args.foreground and has_onnx:
+        # Foreground blocks on the server, so we can't poll /status after — point
+        # the user at where the ACTIVE provider lives (the before-readout above is
+        # the resolved request; `shrike server status` shows what actually loaded).
+        logger.info(
+            "foreground mode: the ACTIVE ONNX provider (what onnxruntime loaded — "
+            "GPU vs the CPU fallback) is in `shrike server status` once it's up"
+        )
+
     # Invoke the CLI in-process: under `bazel run` this keeps the runfiles
     # interpreter (so foreground main() and a daemon's `-m shrike.server` spawn
     # both resolve the shrike package). standalone_mode=False so Click returns
     # instead of calling sys.exit, letting us return a clean code.
     from shrike.cli import cli
 
-    return int(cli.main(args=server_argv, prog_name="shrike", standalone_mode=False) or 0)
+    rc = int(cli.main(args=server_argv, prog_name="shrike", standalone_mode=False) or 0)
+
+    # Daemon mode returns once the child is up — poll /status for the AFTER
+    # readback so the before/after provider comparison is visible in one run.
+    if not args.foreground and has_onnx and rc == 0:
+        active = read_active_providers(_status_port(profile))
+        if active:
+            logger.info("ONNX execution providers (ACTIVE — what onnxruntime loaded): %s", ", ".join(active))
+            if providers and active[0] != providers[0]:
+                logger.warning(
+                    "active provider %s differs from the resolved first choice %s — "
+                    "onnxruntime fell back (see `shrike server status` / the server log)",
+                    active[0],
+                    providers[0],
+                )
+        else:
+            logger.info(
+                "could not read back the active provider from /status — check "
+                "`shrike server status` (a visibility gap, not a launch failure)"
+            )
+    return rc
 
 
 if __name__ == "__main__":

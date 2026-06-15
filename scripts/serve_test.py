@@ -229,6 +229,184 @@ def test_compose_roundtrips_text_onnx_profile() -> None:
     assert reloaded["embedders"][0]["runtime"] == "onnx"
 
 
+# -- ONNX provider auto-detect + overlay (#569) --------------------------------
+#
+# Download-free: stub onnxruntime.get_available_providers / nvidia-smi presence /
+# the active-provider readback. No GPU and no real onnxruntime call.
+
+
+def _stub_ort(monkeypatch: pytest.MonkeyPatch, available: list[str]) -> None:
+    """Make serve._available_providers return *available* (stubs the onnxruntime
+    query at serve's seam, so no real onnxruntime call)."""
+    monkeypatch.setattr(serve, "_available_providers", lambda: list(available))
+
+
+def test_detect_priority_intersected_cpu_last(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A CUDA host: CUDA wins, TensorRT next, CPU always last; CoreML/Dml absent.
+    _stub_ort(
+        monkeypatch,
+        ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+    monkeypatch.setattr(serve, "_nvidia_gpu_present", lambda: True)
+    assert serve.detect_providers() == [
+        "CUDAExecutionProvider",
+        "TensorrtExecutionProvider",
+        "CPUExecutionProvider",
+    ]
+
+
+def test_detect_coreml_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_ort(monkeypatch, ["CoreMLExecutionProvider", "CPUExecutionProvider"])
+    monkeypatch.setattr(serve, "_nvidia_gpu_present", lambda: False)
+    assert serve.detect_providers() == ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+
+
+def test_detect_cpu_only_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_ort(monkeypatch, ["CPUExecutionProvider"])
+    monkeypatch.setattr(serve, "_nvidia_gpu_present", lambda: False)
+    assert serve.detect_providers() == ["CPUExecutionProvider"]
+
+
+def test_detect_onnxruntime_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # onnxruntime not importable → CPU, well-formed (the backend would fail later).
+    monkeypatch.setattr(serve, "_available_providers", lambda: None)
+    assert serve.detect_providers() == ["CPUExecutionProvider"]
+
+
+def test_gpu_mismatch_warning_emitted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # NVIDIA GPU present but the base wheel (no CUDA EP) → the carrier remedy.
+    _stub_ort(monkeypatch, ["CPUExecutionProvider"])
+    monkeypatch.setattr(serve, "_nvidia_gpu_present", lambda: True)
+    with caplog.at_level("WARNING", logger="shrike.serve"):
+        resolved = serve.detect_providers()
+    assert resolved == ["CPUExecutionProvider"]
+    assert any("onnxruntime-gpu" in r.message for r in caplog.records)
+
+
+def test_no_mismatch_warning_when_cuda_present(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # NVIDIA GPU present AND the CUDA EP is there → no carrier warning.
+    _stub_ort(monkeypatch, ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    monkeypatch.setattr(serve, "_nvidia_gpu_present", lambda: True)
+    with caplog.at_level("WARNING", logger="shrike.serve"):
+        serve.detect_providers()
+    assert not any("onnxruntime-gpu" in r.message for r in caplog.records)
+
+
+def test_resolve_providers_cpu_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --cpu wins over detection (would otherwise pick up CUDA).
+    _stub_ort(monkeypatch, ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    args = serve.build_parser().parse_args(["--profile", "text-onnx", "--cpu"])
+    assert serve.resolve_providers(args) == ["CPUExecutionProvider"]
+
+
+def test_resolve_providers_explicit_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --providers takes the user's list verbatim, skipping detection.
+    _stub_ort(monkeypatch, ["CPUExecutionProvider"])  # detection would yield CPU
+    args = serve.build_parser().parse_args(
+        ["--profile", "text-onnx", "--providers", "CUDAExecutionProvider,CPUExecutionProvider"]
+    )
+    assert serve.resolve_providers(args) == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+
+def test_resolve_providers_autodetect_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_ort(monkeypatch, ["CoreMLExecutionProvider", "CPUExecutionProvider"])
+    monkeypatch.setattr(serve, "_nvidia_gpu_present", lambda: False)
+    args = serve.build_parser().parse_args(["--profile", "text-onnx"])
+    assert serve.resolve_providers(args) == ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+
+
+def test_compose_overlays_providers_onto_onnx() -> None:
+    profile = {"embedders": [{"runtime": "onnx", "modalities": ["text"], "model": "/m"}]}
+    config = serve.compose_effective_config(
+        profile, {}, providers=["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    )
+    assert config["embedders"][0]["providers"] == [
+        "CoreMLExecutionProvider",
+        "CPUExecutionProvider",
+    ]
+
+
+def test_compose_explicit_profile_providers_wins() -> None:
+    # A profile that already declares providers: keeps them — detection never
+    # overrides an explicit choice.
+    profile = {
+        "embedders": [
+            {
+                "runtime": "onnx",
+                "modalities": ["text"],
+                "model": "/m",
+                "providers": ["DmlExecutionProvider", "CPUExecutionProvider"],
+            }
+        ]
+    }
+    config = serve.compose_effective_config(
+        profile, {}, providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+    )
+    assert config["embedders"][0]["providers"] == [
+        "DmlExecutionProvider",
+        "CPUExecutionProvider",
+    ]
+
+
+def test_compose_does_not_overlay_remote_or_platform() -> None:
+    # providers: is onnx-only (profiles.py:291) — never injected onto remote or
+    # platform entries.
+    profile = {
+        "embedders": [
+            {"runtime": "remote", "modalities": ["text"], "endpoint": "http://x"},
+            {"runtime": "platform", "modalities": ["text"]},
+        ]
+    }
+    config = serve.compose_effective_config(
+        profile, {}, providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+    )
+    assert "providers" not in config["embedders"][0]
+    assert "providers" not in config["embedders"][1]
+
+
+def test_compose_no_providers_arg_leaves_entries_unchanged() -> None:
+    # providers=None (the pre-#569 call shape) injects nothing.
+    profile = {"embedders": [{"runtime": "onnx", "modalities": ["text"], "model": "/m"}]}
+    config = serve.compose_effective_config(profile, {}, providers=None)
+    assert "providers" not in config["embedders"][0]
+
+
+def test_read_active_providers_reads_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The after-readback parses embedding.active_providers from /status.
+    import httpx
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"embedding": {"active_providers": ["CoreMLExecutionProvider"]}}
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    assert serve.read_active_providers(8372, timeout=1.0) == ["CoreMLExecutionProvider"]
+
+
+def test_read_active_providers_unreachable_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    def _boom(*a: object, **k: object) -> object:
+        raise httpx.ConnectError("nope")
+
+    monkeypatch.setattr(httpx, "get", _boom)
+    # A near-zero timeout so the poll loop exits fast (no real sleep needed).
+    assert serve.read_active_providers(8372, timeout=0.01) is None
+
+
+def test_status_port_from_profile_or_default() -> None:
+    assert serve._status_port({"server": {"port": 9999}}) == 9999
+    assert serve._status_port({}) == 8372
+    assert serve._status_port({"server": {}}) == 8372
+
+
 # -- argument parsing ----------------------------------------------------------
 
 
