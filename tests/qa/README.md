@@ -61,19 +61,22 @@ and are ignored by the generator.
 
 ## Usage
 
+The QA fixture is now a seed of the consolidated dogfooding launcher
+(`//scripts:serve`, #565/#656) — `serve --seed qa` rebuilds the synthetic
+collection into a fresh per-run dir and boots a server against it with the
+profile's real embedder:
+
 ```bash
-# Clean rebuild + start as a daemon (default port 8372):
-scripts/launch-qa-server.sh
+# Clean rebuild + serve with the text-only ONNX profile (foreground by default):
+./bazel run //scripts:serve -- --profile text-onnx --seed qa
 
-# Foreground (watch logs live, Ctrl+C to stop):
-scripts/launch-qa-server.sh -f
-
-# Reuse the existing run without wiping/rebuilding (e.g. to inspect a persisted index):
-scripts/launch-qa-server.sh --keep
-
-# No embeddings (tests the non-semantic paths only):
-scripts/launch-qa-server.sh --no-embedding
+# Background daemon instead of foreground:
+./bazel run //scripts:serve -- --profile text-onnx --seed qa --daemon
 ```
+
+A llama-server / GGUF profile (the embedding model this README discusses) is a
+later wave of the offline-integration epic; until then the manual eval harness
+under `eval/` still drives a GGUF model via `SHRIKE_EMBEDDING_MODEL` directly.
 
 The server runs on the default port, so the plain CLI talks to it directly:
 

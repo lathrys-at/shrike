@@ -11,11 +11,10 @@ These are **manual**. Nothing here runs in `pytest` or CI.
 
 1. Start a **fresh** QA server so the fixture is in a known state:
    ```bash
-   export LLAMA_SERVER_PATH="$PWD/.cache/llama-server/llama-server"
-   export SHRIKE_EMBEDDING_MODEL="$PWD/.cache/models/bge-m3-Q8_0.gguf"
-   scripts/launch-qa-server.sh
+   ./bazel run //scripts:serve -- --profile text-onnx --seed qa --daemon
    ```
-   (See `../README.md` for the model prerequisites.)
+   (Or, for a GGUF model, drive the eval harness `eval/run.py`, which sets up
+   the fixture + server with `SHRIKE_EMBEDDING_MODEL`. See `../README.md`.)
 2. In a session that has the **anki-cards** skill loaded and can reach the QA
    server (the `shrike` CLI, or the MCP tools via `mcp-remote`), paste the
    scenario's **Prompt**.

@@ -25,8 +25,11 @@ src/shrike/_version.py
 # (crate_universe resolves against it); only the build dir is ignored.
 target/
 
-# QA harness working dir — regenerated each launch (see scripts/launch-qa-server.sh)
+# QA harness working dir — regenerated each launch (eval/run.py)
 tests/qa/run/
+
+# //scripts:serve launcher per-run output (script-fallback lane; #656)
+scripts/.run/
 
 # Packaged skills (scripts/package-skill.py)
 dist/

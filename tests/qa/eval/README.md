@@ -70,7 +70,8 @@ interactive session spawning a sub-agent) and just use the deterministic steps:
 
 ```
 B=tests/qa/eval/runs/<batch>; D=$B/<scenario>/<config>/r<n>
-scripts/launch-qa-server.sh                                   # 1. fresh fixture
+tests/qa/eval/run.py --scenarios <id> --repeats 1            # 1. fresh fixture + server
+#    (run.py resets the fixture itself; or do the build_collection + server start by hand)
 tests/qa/eval/harness.py baseline --out "$D"                  # 2. snapshot before
 tests/qa/eval/harness.py prompt --scenario <id> --config <config>
 #    → spawn a COLD Haiku agent with that prompt; write its final report to $D/transcript.txt

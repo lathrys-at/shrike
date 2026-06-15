@@ -2,7 +2,7 @@
 #
 # Run-specific paths (collection, cache dir, log dir) are NOT set here — config
 # paths resolve against the current working directory, not this file, so they're
-# unsafe to commit. scripts/launch-qa-server.sh passes them as absolute flags
+# unsafe to commit. The eval harness (eval/run.py) passes them as absolute flags
 # instead. Machine-specific embedding paths come from the environment:
 #   SHRIKE_EMBEDDING_MODEL=/path/to/embedding-model.gguf
 #   LLAMA_SERVER_PATH=/path/to/llama-server     # or on PATH

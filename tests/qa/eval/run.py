@@ -44,7 +44,6 @@ from prompts import SHRIKE_BIN, baseline_prompt, with_skill_prompt
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]  # tests/qa/eval -> repo root
-LAUNCH = ROOT / "scripts" / "launch-qa-server.sh"
 HARNESS = HERE / "harness.py"
 PY = sys.executable
 
@@ -103,12 +102,58 @@ def _read_prompt_md(sid: str) -> str:
 
 
 def _reset_fixture() -> None:
-    """Clean rebuild + restart the QA server (stops any running one first)."""
-    _log("reset: launching clean QA server…")
-    proc = subprocess.run(["bash", str(LAUNCH)], capture_output=True, text=True, cwd=str(ROOT))
-    if proc.returncode != 0:
-        sys.stderr.write(proc.stdout + proc.stderr)
-        raise SystemExit("launch-qa-server.sh failed")
+    """Clean rebuild + restart the QA server (stops any running one first).
+
+    Inlines what scripts/launch-qa-server.sh did before it was retired (#656):
+    stop any running server, wipe the run dir, rebuild the synthetic fixture
+    from the corpus, and start the server against run-local paths. The eval is a
+    pip-lane manual harness with its own GGUF model (SHRIKE_EMBEDDING_MODEL +
+    LLAMA_SERVER_PATH, asserted in _preflight); the //scripts:serve launcher with
+    a llama profile supersedes this in a later wave of the offline-integration
+    epic (#565)."""
+    _log("reset: rebuilding fixture + launching clean QA server…")
+    qa = ROOT / "tests" / "qa"
+    run_dir = qa / "run"
+    collection = run_dir / "working.anki2"
+
+    subprocess.run([SHRIKE_BIN, "server", "stop"], capture_output=True, text=True)
+
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    (run_dir / "cache").mkdir(parents=True, exist_ok=True)
+    (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+
+    build = subprocess.run(
+        [PY, str(qa / "build_collection.py"), "--out", str(collection)],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+    )
+    if build.returncode != 0:
+        sys.stderr.write(build.stdout + build.stderr)
+        raise SystemExit("fixture build failed")
+
+    start = subprocess.run(
+        [
+            SHRIKE_BIN,
+            "--config",
+            str(qa / "config.yml"),
+            "server",
+            "start",
+            "--collection",
+            str(collection),
+            "--cache-dir",
+            str(run_dir / "cache"),
+            "--log-dir",
+            str(run_dir / "logs"),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+    )
+    if start.returncode != 0:
+        sys.stderr.write(start.stdout + start.stderr)
+        raise SystemExit("QA server start failed")
 
 
 def _wait_index_ready(timeout: float = INDEX_TIMEOUT) -> None:
