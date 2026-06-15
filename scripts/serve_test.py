@@ -68,6 +68,121 @@ def test_model_names_empty_profile() -> None:
     assert serve._model_names_in_profile({"embedders": []}) == []
 
 
+# -- model materialization (the adversarial-case regression guards) ------------
+#
+# Download-free: monkeypatch serve._runfiles / serve._model_sources so no model
+# externals or HuggingFace fetch is touched.
+
+
+class _FakeRunfiles:
+    """A stub Bazel runfiles resolver: Rlocation returns a real path only for the
+    runfiles keys in *present*; everything else resolves to None (not in this
+    binary's runfiles)."""
+
+    def __init__(self, present: dict[str, str]) -> None:
+        self._present = present
+
+    def Rlocation(self, key: str) -> str | None:  # noqa: N802 - mirrors the runfiles API
+        return self._present.get(key)
+
+
+def test_materialize_unknown_model_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An unknown dir-name must fail loud, naming the model + the model-source table.
+    monkeypatch.setattr(
+        serve, "_model_sources", lambda: {"known-model": {"bazel": {}, "fetch": None}}
+    )
+    with pytest.raises(SystemExit) as exc:
+        serve.materialize_model("unknown-xyz", tmp_path)
+    msg = str(exc.value)
+    assert "unknown-xyz" in msg
+    assert "model-source table" in msg
+
+
+def test_materialize_partial_runfiles_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # F1 repro: a model declares two files, but only ONE Rlocation resolves.
+    # materialize_model must raise (NOT return a one-file dir) — the partial dir
+    # would only blow up late + cryptically at the backend's _resolve_files.
+    real = tmp_path / "runfiles_text_model.onnx"
+    real.write_bytes(b"x")
+    monkeypatch.setattr(
+        serve,
+        "_model_sources",
+        lambda: {
+            "two-file-model": {
+                "bazel": {
+                    "model_x_text/file/text_model.onnx": "text_model.onnx",
+                    "model_x_tok/file/tokenizer.json": "tokenizer.json",  # NOT in runfiles
+                },
+                "fetch": None,
+            }
+        },
+    )
+    # Only the text graph resolves; the tokenizer is a forgotten data dep.
+    monkeypatch.setattr(
+        serve, "_runfiles", lambda: _FakeRunfiles({"model_x_text/file/text_model.onnx": str(real)})
+    )
+    models_root = tmp_path / "models"
+    with pytest.raises(SystemExit) as exc:
+        serve.materialize_model("two-file-model", models_root)
+    msg = str(exc.value)
+    # Names the missing file + the data-dep remedy; does not silently return.
+    assert "model_x_tok/file/tokenizer.json" in msg
+    assert "data` deps" in msg
+    # And it did NOT leave a usable-looking one-file dir behind as a return value:
+    # the function raised before returning, so no caller ever sees a partial dir.
+
+
+def test_materialize_all_present_returns_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The happy path: every declared file resolves → the populated dir is returned
+    # (proves the F1 fix doesn't over-reject when the deps ARE complete).
+    text = tmp_path / "rf_text.onnx"
+    tok = tmp_path / "rf_tok.json"
+    text.write_bytes(b"t")
+    tok.write_bytes(b"k")
+    monkeypatch.setattr(
+        serve,
+        "_model_sources",
+        lambda: {
+            "complete-model": {
+                "bazel": {
+                    "model_x_text/file/text_model.onnx": "text_model.onnx",
+                    "model_x_tok/file/tokenizer.json": "tokenizer.json",
+                },
+                "fetch": None,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        serve,
+        "_runfiles",
+        lambda: _FakeRunfiles(
+            {
+                "model_x_text/file/text_model.onnx": str(text),
+                "model_x_tok/file/tokenizer.json": str(tok),
+            }
+        ),
+    )
+    models_root = tmp_path / "models"
+    out = serve.materialize_model("complete-model", models_root)
+    assert out == models_root / "complete-model"
+    assert (out / "text_model.onnx").read_bytes() == b"t"
+    assert (out / "tokenizer.json").read_bytes() == b"k"
+
+
+def test_materialize_absolute_model_name_points_at_path_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # F2: an absolute model: name violates the path-free rule — fail with a pointed
+    # message, not the misleading "don't know how to materialize".
+    monkeypatch.setattr(serve, "_model_sources", lambda: {})
+    with pytest.raises(SystemExit, match="path-free"):
+        serve.materialize_model("/abs/models/minilm", tmp_path)
+
+
 # -- effective-config composition ----------------------------------------------
 
 

@@ -111,6 +111,15 @@ def materialize_model(dir_name: str, models_root: Path) -> Path:
     vanish). Off Bazel, delegate to the matching ``model_cache`` fetcher (the
     single Python download source). Returns the materialized model dir.
     """
+    if Path(dir_name).is_absolute():
+        # A profile must name a model by bare dir-name, not a machine path — the
+        # path-free invariant the launcher exists to enforce. Catch it here with a
+        # pointed message rather than the misleading "don't know how to materialize".
+        raise SystemExit(
+            f"profile names model {dir_name!r} as an absolute path — profiles are path-free; "
+            f"name the model by its bare dir-name (the launcher materializes it and rewrites "
+            f"the path)"
+        )
     sources = _model_sources()
     if dir_name not in sources:
         raise SystemExit(
@@ -124,26 +133,31 @@ def materialize_model(dir_name: str, models_root: Path) -> Path:
     r = _runfiles()
     if r is not None:
         model_dir.mkdir(parents=True, exist_ok=True)
-        found = False
+        missing: list[str] = []
         for src, file_name in spec["bazel"].items():
             loc = r.Rlocation(src)
             if not loc or not os.path.exists(loc):
+                missing.append(src)
                 continue
             dest = model_dir / file_name
             if not (dest.exists() and dest.stat().st_size > 0):
                 tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
                 shutil.copy(loc, tmp)
                 os.replace(tmp, dest)
-            found = True
-        if found:
-            logger.info("materialized model %s from Bazel runfiles → %s", dir_name, model_dir)
-            return model_dir
-        # Under Bazel but the external isn't in this binary's runfiles: that's a
-        # missing `data` dep — loud, not a silent download.
-        raise SystemExit(
-            f"model {dir_name!r} not found in Bazel runfiles — add its @model_* externals to "
-            f"//scripts:serve's `data` deps (and to scripts/serve.py's model-source table)"
-        )
+        # EVERY declared file must be present, or the materialized dir is partial
+        # and the failure would surface late + cryptically at the backend's
+        # _resolve_files ("no tokenizer.json" / "no text+vision pair"). Fail loud
+        # HERE — a missing file means a forgotten @model_* data dep (bites the
+        # 4-file CLIP dir of the profile-(c) wave; harmless silent for 2-file MVP).
+        if missing:
+            raise SystemExit(
+                f"model {dir_name!r}: {len(missing)}/{len(spec['bazel'])} file(s) not found in "
+                f"Bazel runfiles ({', '.join(missing)}) — add the corresponding @model_* "
+                f"external(s) to //scripts:serve's `data` deps (and confirm scripts/serve.py's "
+                f"model-source table names them)"
+            )
+        logger.info("materialized model %s from Bazel runfiles → %s", dir_name, model_dir)
+        return model_dir
 
     # Non-Bazel: fetch via model_cache (the single download source).
     logger.info("materializing model %s via model_cache fetch → %s", dir_name, model_dir)

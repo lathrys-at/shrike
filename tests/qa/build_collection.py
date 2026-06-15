@@ -2,9 +2,9 @@
 """Build the QA fixture collection from a declarative JSON corpus.
 
 Reads ``collection.json`` (decks, note types, notes + tags) and writes a fresh
-``collection.anki2`` by routing every note through Shrike's own
-``CollectionWrapper._upsert_notes`` — the same write path the server uses — so
-the fixture is built exactly the way real notes are.
+``collection.anki2`` by routing every note through the native core's
+``upsert_notes`` — the same write path the server uses — so the fixture is built
+exactly the way real notes are.
 
 The corpus is the checked-in source of truth; the built collection is a
 disposable, gitignored artifact regenerated on every QA launch. There is no
