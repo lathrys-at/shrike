@@ -1,0 +1,8 @@
+# The checked-in, path-free capability profiles (#565/#656). A filegroup so
+# //scripts:serve can data-dep the whole set (it resolves a profile by name at
+# run time from runfiles / the source tree).
+filegroup(
+    name = "profiles",
+    srcs = glob(["*.yml"]),
+    visibility = ["//visibility:public"],
+)

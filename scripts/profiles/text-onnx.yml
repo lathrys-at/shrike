@@ -1,0 +1,17 @@
+# text-onnx — the minimal dogfooding profile (#565/#656).
+#
+# A single text-only ONNX embedding space over the already-pinned MiniLM int8
+# export (@model_minilm_int8_onnx + @model_minilm_tokenizer; the same model the
+# integration suite uses). Zero new model fetch, zero new Bazel externals — it
+# proves the whole serve pipeline end to end on a tiny model.
+#
+# PATH-FREE (the hard invariant): no collection:, no machine-absolute paths. The
+# embedder's model: is a bare DIR-NAME (model_cache's ONNX_MODEL_DIR_NAME); the
+# launcher materializes that dir from the Bazel external (or model_cache fetch)
+# and rewrites model: to its absolute path before the server reads the config.
+# Run paths (collection / cache / logs) ride as flags, not config.
+
+embedders:
+  - modalities: [text]
+    runtime: onnx
+    model: all-MiniLM-L6-v2-onnx-int8

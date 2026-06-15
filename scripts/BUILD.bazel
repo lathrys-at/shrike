@@ -1,0 +1,69 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+load("@shrike_pip//:requirements.bzl", "requirement")
+load("//tools/bazel:defs.bzl", "pytest_test")
+
+# //scripts:serve — the consolidated dogfooding launcher (#565/#656).
+#
+#   ./bazel run //scripts:serve -- --profile text-onnx [--seed qa] [--foreground|--daemon]
+#
+# Boots a real Shrike server against a fresh collection from a checked-in,
+# path-free capability profile, with the profile's models materialized from the
+# pinned Bazel externals (zero new download code).
+
+# The launcher logic as a library so the non-manual unit test can import it
+# (`import serve`, via imports=["."]) without pulling the heavy model `data`.
+py_library(
+    name = "serve_lib",
+    srcs = ["serve.py"],
+    imports = ["."],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/shrike:cli",
+        # The pinned-model fetch util (script-fallback download source) + its
+        # *_DIR_NAME constants; the QA fixture builder for --seed qa.
+        "//tests/integration:model_cache",
+        "//tests/qa:build_collection",
+        # Runfiles resolver: locate the model externals under `bazel run`.
+        "@rules_python//python/runfiles",
+        requirement("pyyaml"),
+    ],
+)
+
+# The runnable launcher. Tagged `manual` so the per-PR `./bazel test //...` lane
+# (which builds non-test targets too) never force-fetches the model externals;
+# the non-manual :serve_logic_test below is what CI exercises.
+py_binary(
+    name = "serve",
+    srcs = ["serve.py"],
+    main = "serve.py",
+    imports = ["."],
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    data = [
+        # The path-free profile YAMLs (read by dir-name at run time).
+        "//scripts/profiles",
+        # The MVP model: the already-pinned MiniLM int8 ONNX external. Materialized
+        # from runfiles into the per-run model tree (no new fetch). Add a profile's
+        # externals here (and a row to serve.py's model-source table) to wire it.
+        "@model_minilm_int8_onnx//file",
+        "@model_minilm_tokenizer//file",
+    ],
+    deps = [
+        ":serve_lib",
+        # onnxruntime carries the shared runtime the in-process ort engine dlopens
+        # (foreground serve loads the onnx backend itself).
+        requirement("onnxruntime"),
+    ],
+)
+
+# The launcher's pure logic — profile resolution, the path-free invariant, arg
+# parsing, and effective-config composition — with NO model download. This is the
+# non-manual target CI actually runs (`./bazel test //...` picks it up).
+pytest_test(
+    name = "serve_logic_test",
+    srcs = ["serve_test.py"],
+    deps = [
+        ":serve_lib",
+        requirement("pyyaml"),
+    ],
+)
