@@ -772,7 +772,7 @@ requires_clip = pytest.mark.skipif(
 # segfaults during image-embedding extraction (text embeds fine). So this
 # fixture can't be pinned into CI: it needs a binary built from
 # jina-ai/llama.cpp `feat-v5-omni`. The MODEL itself rides the shared
-# test-model cache like every other fixture (scripts/fetch-multimodal-model.sh
+# test-model cache like every other fixture (model_cache.cached_multimodal_model_dir
 # pre-seeds it; the fixture fetches on demand otherwise). The one thing that
 # can't be cached/downloaded is the patched BINARY, so it stays an env var and
 # IS the gate: the harness skips everywhere it isn't set (CI always; a dev box
@@ -826,13 +826,14 @@ requires_search_quality = pytest.mark.skipif(
 @pytest.fixture()
 def multimodal_paths() -> dict[str, str]:
     """The patched binary (env-gated) + the model & vision mmproj (from the
-    shared test-model cache, fetched on demand or pre-seeded by
-    scripts/fetch-multimodal-model.sh). Guarded by ``requires_multimodal``, so
-    the binary is non-None whenever a consuming test runs.
+    shared test-model cache, fetched on demand or pre-seeded via
+    ``model_cache.cached_multimodal_model_dir``). Guarded by
+    ``requires_multimodal``, so the binary is non-None whenever a consuming
+    test runs.
 
     The cache base is ``$SHRIKE_TEST_MODEL_DIR`` else the persistent
     ``~/.cache/shrike-test-models`` (NOT a throwaway tmp — this 625 MB model
-    shouldn't re-download per session), matching the scripts/ convention."""
+    shouldn't re-download per session)."""
     from tests.integration.model_cache import (
         MULTIMODAL_TEXT_NAME,
         MULTIMODAL_VISION_MMPROJ_NAME,

@@ -26,13 +26,16 @@ and are ignored by the generator.
 - The repo installed into `.venv` (`pip install -e ".[dev]"`). The launch script
   prefers `.venv/bin/shrike`, so a stale global `shrike` won't interfere.
 - For semantic search and upsert neighbors (the interesting half), the
-  `llama-server` binary and an embedding model. `scripts/fetch-llama-server.sh`
-  fetches a pinned `llama-server` (and prints the export lines for it).
+  `llama-server` binary and an embedding model. The pinned `llama-server` is a
+  sha256-pinned Bazel external (`MODULE.bazel`); the Bazel embedding lane
+  (`./bazel test //tests/integration:embedding_core`) fetches it hermetically.
+  For a non-Bazel manual run, bring your own `llama-server` on `PATH` (or set
+  `LLAMA_SERVER_PATH`) and point `SHRIKE_EMBEDDING_MODEL` at a GGUF.
 
-- **Model choice matters for QA.** That fetch script's default —
-  `all-MiniLM-L6-v2` (384-dim) — is what CI uses: small and fast, but weak at
-  telling a near-duplicate from a merely-related card, which is exactly the
-  signal this skill leans on. For realistic QA, use a stronger model. The
+- **Model choice matters for QA.** The CI default — `all-MiniLM-L6-v2`
+  (384-dim) — is small and fast but weak at telling a near-duplicate from a
+  merely-related card, which is exactly the signal this skill leans on. For
+  realistic QA, use a stronger model. The
   recommended default is **bge-m3** (BERT-family, multilingual so it also covers
   the Spanish deck, a clean drop-in through the same launch path):
 
@@ -41,7 +44,7 @@ and are ignored by the generator.
   curl -L "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf?download=true" \
     -o .cache/models/bge-m3-Q8_0.gguf
 
-  export LLAMA_SERVER_PATH="$PWD/.cache/llama-server/llama-server"   # from fetch-llama-server.sh
+  export LLAMA_SERVER_PATH=/path/to/llama-server   # or have it on PATH
   export SHRIKE_EMBEDDING_MODEL="$PWD/.cache/models/bge-m3-Q8_0.gguf"
   ```
 

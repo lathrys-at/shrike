@@ -97,8 +97,7 @@ CLIP_MODEL_FILES = {
 #      without `--pooling last`; F16 keeps the table readable. The harness
 #      also passes `--pooling last` (jina-v5-omni is a last-token model).
 # This entry exists so the model is fetched into the SAME cache as every other
-# fixture (and pre-seeded by scripts/fetch-multimodal-model.sh), not so CI
-# downloads it.
+# fixture (pre-seed it with cached_multimodal_model_dir), not so CI downloads it.
 MULTIMODAL_MODEL_DIR_NAME = "jina-embeddings-v5-omni-nano"
 MULTIMODAL_TEXT_NAME = "jina-embeddings-v5-omni-nano-classification-F16.gguf"
 MULTIMODAL_VISION_MMPROJ_NAME = "jina-embeddings-v5-omni-nano-classification-vision-mmproj-F16.gguf"
@@ -220,7 +219,7 @@ def cached_clip_model_dir(fallback_dir: Path) -> Path:
 def cached_multimodal_model_dir(fallback_dir: Path) -> Path:
     """The jina-v5-omni nano dir (text GGUF + vision mmproj) for the #501 manual
     image-embed harness. ~625 MB; only fetched when the harness actually runs
-    (a patched llama-server is present) or via scripts/fetch-multimodal-model.sh.
-    Returns the dir; the two files are named by MULTIMODAL_TEXT_NAME /
+    (a patched llama-server is present) or when called directly to pre-seed the
+    shared cache. Returns the dir; the two files are named by MULTIMODAL_TEXT_NAME /
     MULTIMODAL_VISION_MMPROJ_NAME."""
     return _cached_model_dir(fallback_dir, MULTIMODAL_MODEL_DIR_NAME, MULTIMODAL_MODEL_FILES)

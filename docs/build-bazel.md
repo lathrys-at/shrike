@@ -64,6 +64,24 @@ that is what keeps the default lane from fetching hundreds of MB of models.
 Name them explicitly when you want them (the embedding halves need ~1 GB of
 externals on first fetch, then they're cached).
 
+**Running the embedding tests locally.** The Bazel embedding lane *is* the local
+embedding-test path (it replaced the old `scripts/test-embedding.sh` +
+`scripts/fetch-llama-server.sh` — #657). It's hermetic: the pinned llama-server
+(`MODULE.bazel` http_archive) and the GGUF/ONNX fixtures (sha256-pinned
+http_files) ride in as `data` deps, the conftest puts llama-server on `PATH` and
+assembles the models into `$SHRIKE_TEST_MODEL_DIR`, so there is **no separate
+fetch step**:
+
+```bash
+./bazel test //tests/integration:embedding_core      # llama-server + GGUF semantic/neighbor lane
+./bazel test //tests/integration:embedding_backends  # the onnx/clip/llama backend zoo
+```
+
+For a non-Bazel manual run (the QA harness, a `serve --profile` with a llama
+model) the single Python fetch source is `tests/integration/model_cache.py` (its
+`cached_*_model_dir` / `download_with_retry` — no URL is spelled anywhere else);
+bring your own `llama-server` on `PATH` or set `LLAMA_SERVER_PATH`.
+
 **Read the full summary.** Bazel prints per-target results and an
 `Executed N out of M` line — read that, not just the tail. A green tail with
 a failed target above it has shipped breakage before.

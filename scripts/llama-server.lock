@@ -1,4 +1,5 @@
-# Pinned llama.cpp release, shared by scripts/fetch-llama-server.sh and CI.
+# Pinned llama.cpp release, consumed by MODULE.bazel's llama-server http_archive
+# shas and the CI model-cache keys (.github/actions/bazel-setup).
 #
 # We pin a known tag and verify a per-platform SHA256 instead of pulling
 # `releases/latest` unverified — a release could be re-tagged or a mirror

@@ -41,7 +41,8 @@ trap 'rm -rf "$TMP"' EXIT
 # Build the file in a buffer first (avoids bash-3.2 associative arrays, so this
 # also runs on stock macOS bash).
 {
-    echo "# Pinned llama.cpp release, shared by scripts/fetch-llama-server.sh and CI."
+    echo "# Pinned llama.cpp release, consumed by MODULE.bazel's llama-server http_archive"
+    echo "# shas and the CI model-cache keys (.github/actions/bazel-setup)."
     echo "#"
     echo "# We pin a known tag and verify a per-platform SHA256 instead of pulling"
     echo "# \`releases/latest\` unverified — a release could be re-tagged or a mirror"

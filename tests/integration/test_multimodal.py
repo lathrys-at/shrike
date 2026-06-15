@@ -42,8 +42,12 @@ HOW TO RUN IT
 2. Download a small multimodal embedding model + its vision projector, e.g.
    jinaai/jina-embeddings-v5-omni-nano-classification-GGUF: the
    ``*-F16.gguf`` (text — must be unquantized, see above) and
-   ``*-vision-mmproj-F16.gguf`` files. ``scripts/fetch-multimodal-model.sh``
-   pre-seeds both into the shared test-model cache.
+   ``*-vision-mmproj-F16.gguf`` files. The fixture fetches both on demand; to
+   pre-seed the shared test-model cache (no re-spelled URLs), run::
+
+       python -c "from pathlib import Path; \
+         from tests.integration.model_cache import cached_multimodal_model_dir; \
+         print(cached_multimodal_model_dir(Path('/tmp/unused')))"
 
 3. Point the harness at them and run::
 
