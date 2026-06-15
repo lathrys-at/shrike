@@ -320,9 +320,11 @@ def test_resolve_providers_autodetect_default(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_compose_overlays_providers_onto_onnx() -> None:
-    profile = {"embedders": [{"runtime": "onnx", "modalities": ["text"], "model": "/m"}]}
+    profile = {"embedders": [{"runtime": "onnx", "modalities": ["text"], "model": "minilm"}]}
     config = serve.compose_effective_config(
-        profile, {}, providers=["CoreMLExecutionProvider", "CPUExecutionProvider"]
+        profile,
+        {"minilm": "/abs/minilm"},
+        providers=["CoreMLExecutionProvider", "CPUExecutionProvider"],
     )
     assert config["embedders"][0]["providers"] == [
         "CoreMLExecutionProvider",
@@ -338,13 +340,15 @@ def test_compose_explicit_profile_providers_wins() -> None:
             {
                 "runtime": "onnx",
                 "modalities": ["text"],
-                "model": "/m",
+                "model": "minilm",
                 "providers": ["DmlExecutionProvider", "CPUExecutionProvider"],
             }
         ]
     }
     config = serve.compose_effective_config(
-        profile, {}, providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+        profile,
+        {"minilm": "/abs/minilm"},
+        providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
     )
     assert config["embedders"][0]["providers"] == [
         "DmlExecutionProvider",
@@ -370,8 +374,8 @@ def test_compose_does_not_overlay_remote_or_platform() -> None:
 
 def test_compose_no_providers_arg_leaves_entries_unchanged() -> None:
     # providers=None (the pre-#569 call shape) injects nothing.
-    profile = {"embedders": [{"runtime": "onnx", "modalities": ["text"], "model": "/m"}]}
-    config = serve.compose_effective_config(profile, {}, providers=None)
+    profile = {"embedders": [{"runtime": "onnx", "modalities": ["text"], "model": "minilm"}]}
+    config = serve.compose_effective_config(profile, {"minilm": "/abs/minilm"}, providers=None)
     assert "providers" not in config["embedders"][0]
 
 

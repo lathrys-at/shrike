@@ -627,7 +627,9 @@ def main(argv: list[str] | None = None) -> int:
     if not args.foreground and has_onnx and rc == 0:
         active = read_active_providers(_status_port(profile))
         if active:
-            logger.info("ONNX execution providers (ACTIVE — what onnxruntime loaded): %s", ", ".join(active))
+            logger.info(
+                "ONNX execution providers (ACTIVE — what onnxruntime loaded): %s", ", ".join(active)
+            )
             if providers and active[0] != providers[0]:
                 logger.warning(
                     "active provider %s differs from the resolved first choice %s — "
