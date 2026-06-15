@@ -47,7 +47,11 @@ def build(spec_path: Path, out_path: Path) -> int:
 
     wrapper = CollectionWrapper(str(out_path))
     try:
-        results = wrapper.run_sync(lambda _col: wrapper._upsert_notes(notes))
+        # The same write path the server uses: the native core's upsert_notes,
+        # which resolves decks/note types and returns the per-item result JSON.
+        results = wrapper.run_sync(
+            lambda core: json.loads(core.upsert_notes(json.dumps(notes), "error", False))
+        )
     finally:
         wrapper.close()
 

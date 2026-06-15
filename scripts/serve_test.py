@@ -11,10 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import yaml
-
 import serve
-
+import yaml
 
 # -- profile loading + the path-free invariant ---------------------------------
 
@@ -41,14 +39,14 @@ def test_unknown_profile_errors_with_available_list() -> None:
     assert "text-onnx" in msg
 
 
-def test_profile_with_collection_key_is_rejected(tmp_path: Path) -> None:
-    bad = serve._PROFILES_DIR / "_test_bad_collection.yml"
-    bad.write_text("collection: /some/path.anki2\nembedders: []\n")
-    try:
-        with pytest.raises(SystemExit, match="path-free"):
-            serve.load_profile("_test_bad_collection")
-    finally:
-        bad.unlink()
+def test_profile_with_collection_key_is_rejected() -> None:
+    with pytest.raises(SystemExit, match="path-free"):
+        serve.check_path_free("bad", {"collection": "/some/path.anki2", "embedders": []})
+
+
+def test_path_free_profile_passes() -> None:
+    # A profile with no collection: key is accepted (no raise).
+    serve.check_path_free("ok", {"embedders": [{"runtime": "onnx", "model": "m"}]})
 
 
 # -- model-name extraction -----------------------------------------------------
@@ -156,7 +154,16 @@ def test_profile_is_required() -> None:
 
 def test_path_overrides_parse() -> None:
     args = serve.build_parser().parse_args(
-        ["--profile", "text-onnx", "--collection", "/c.anki2", "--cache-dir", "/c", "--log-dir", "/l"]
+        [
+            "--profile",
+            "text-onnx",
+            "--collection",
+            "/c.anki2",
+            "--cache-dir",
+            "/c",
+            "--log-dir",
+            "/l",
+        ]
     )
     assert args.collection == "/c.anki2"
     assert args.cache_dir == "/c"

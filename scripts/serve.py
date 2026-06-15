@@ -92,12 +92,12 @@ def _model_sources() -> dict[str, dict[str, Any]]:
     }
 
 
-def _runfiles():  # noqa: ANN202 - the runfiles object is third-party/optional
-    """The Bazel runfiles resolver, or ``None`` off Bazel."""
+def _runfiles() -> Any | None:
+    """The Bazel runfiles resolver, or ``None`` off Bazel (the script lane)."""
     if not (os.environ.get("RUNFILES_DIR") or os.environ.get("RUNFILES_MANIFEST_FILE")):
         return None
     try:
-        from python.runfiles import runfiles
+        from python.runfiles import runfiles  # type: ignore[import-not-found]
     except ImportError:
         return None
     return runfiles.Create()
@@ -166,20 +166,25 @@ def profile_path(name: str) -> Path:
     return path
 
 
-def load_profile(name: str) -> dict[str, Any]:
-    """Load a profile YAML and enforce the path-free invariant.
+def check_path_free(name: str, raw: Mapping[str, Any]) -> None:
+    """Enforce the path-free invariant on a loaded profile mapping.
 
-    A profile must not carry a ``collection:`` key or any absolute path: run
-    paths ride as flags, models are bare dir-names rewritten at compose time.
+    A profile must not carry a ``collection:`` key: run paths ride as flags,
+    models are bare dir-names rewritten to absolute paths at compose time.
     """
-    raw = yaml.safe_load(profile_path(name).read_text()) or {}
-    if not isinstance(raw, dict):
-        raise SystemExit(f"profile {name!r} must be a YAML mapping")
     if "collection" in raw:
         raise SystemExit(
             f"profile {name!r} declares collection: — profiles are path-free; the "
             f"launcher supplies the run collection as a flag"
         )
+
+
+def load_profile(name: str) -> dict[str, Any]:
+    """Load a profile YAML and enforce the path-free invariant."""
+    raw = yaml.safe_load(profile_path(name).read_text()) or {}
+    if not isinstance(raw, dict):
+        raise SystemExit(f"profile {name!r} must be a YAML mapping")
+    check_path_free(name, raw)
     return raw
 
 
@@ -241,7 +246,9 @@ def run_root() -> Path:
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     test_tmp = os.environ.get("TEST_TMPDIR")
     if _runfiles() is not None:
-        base = Path(test_tmp) if test_tmp else Path(os.environ.get("TMPDIR", "/tmp")) / "shrike-serve"
+        base = (
+            Path(test_tmp) if test_tmp else Path(os.environ.get("TMPDIR", "/tmp")) / "shrike-serve"
+        )
     else:
         base = _SCRIPT_RUN_ROOT
     root = base / ts
