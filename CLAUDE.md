@@ -257,7 +257,7 @@ mypy src/shrike/                                                 # Type check
 (`native/shrike-py/python/` is the extension's Python shim — outside `src/`, so
 it must be named explicitly or it sits in no lint scope at all, #437.)
 
-All three must pass cleanly. CI (`.github/workflows/test.yml`) is **gated on the `ci` label** — no test lane runs on a PR until it carries `ci` (or `rc`, which implies full CI for a release candidate), so a PR churning through code review doesn't re-run the suite on every push. Add `ci` once review is complete. The gate lives on the `changes` job's `if` (every test lane `needs: changes`, so skipping it cascades); `ci-ok` (the single required status check) **fails** with an actionable message until the label is present — CI is *deferred, not skipped* (it must still pass before merge). When labelled (Linux x64): a `lint` job and a `tests` job — ONE `bazel test` invocation over the full graph plus the `manual` embedding halves; Bazel's dependency analysis + the disk cache decide what re-executes (an unchanged target replays as "(cached) PASSED"). macOS and ARM run the full integration suite via the `cross-platform` job, gated by **two labels with distinct intents**: `rc` selects the **full os matrix** (apply before tagging a release); **`macOS`** selects **only the macos-latest leg** (apply on a macOS-specific change — Swift/Vision glue, the PyO3 link path — without the broader rc treatment; it doesn't imply `ci`, so a normal merge needs both). Neither leg runs on plain PRs or on merge to `main`.
+All three must pass cleanly. CI (`.github/workflows/test.yml`) **always runs on every PR** — there is no `ci`-label gate (retired in #678). On every push (Linux x64): a `lint` job and a `tests` job — ONE `bazel test` invocation over the full graph plus the `manual` embedding halves; Bazel's dependency analysis + the disk cache decide what re-executes (an unchanged target replays as "(cached) PASSED"). The `ci-ok` job emits the single required status check (`CI passed`); it always runs and is success iff every lane passed or legitimately skipped (it must stay a real *declared* job — a ruleset check pinned to the GitHub Actions integration is **not** satisfied by an API-posted check run, #664). Because CI actually runs, a PR is pending/blocked until it goes green — combined with **drafts-by-default** (see the PR loop below) nothing is mergeable before CI has run. The expensive **cross-platform ARM legs** stay opt-in by label: `rc` selects **all legs** (apply before tagging a release — it subsumes the per-leg labels), **`macos`** selects **only the macos-latest leg** (Apple-Silicon/ARM macOS — Swift/Vision glue, the PyO3 link path), and **`linux-arm`** selects **only the ubuntu-24.04-arm leg**. None of the ARM legs run on a plain PR or on merge to `main`.
 
 The bazel/cross-platform lanes **cache** the pinned llama-server and GGUF test model (`actions/cache`). But a cache entry is only restorable from the run's own branch or the **default branch**, and `test.yml` runs on PRs only — so a **cache-warmer** (`.github/workflows/warm-cache.yml`) runs the *same* `bazel test` invocation on `main` (daily + on lock-changing merges + on demand), seeding the compiled graph, **test results**, and embedding externals into `main`'s scope for every PR to restore (also warms the cargo-side `rust-lint`/`rust-coverage` caches). Same composite/cache keys as the tests lane (`.github/actions/bazel-setup`); llama-server pinned via `scripts/llama-server.lock`, the model via `EMBEDDING_MODEL_*` in `tests/integration/model_cache.py` (both bumped manually). The fixture's `download_with_retry` (backoff on `429`/5xx) is the backstop for a cold/evicted run.
 
@@ -562,7 +562,11 @@ working summary.
 
 - **Trunk-based.** `main` is always releasable and protected; every change goes
   through a `‹type›/‹issue#›-‹slug›` branch → PR → **squash merge**. No direct
-  pushes to `main`.
+  pushes to `main`. **Open every PR as a draft** (`gh pr create --draft`); take it
+  out of draft (`gh pr ready`) only once it is complete *and* past initial review.
+  A draft can't be merged or auto-merged, so this guarantees CI has run and the
+  change has been reviewed before anything can land — the structural backstop a
+  status-check gate alone doesn't give (a PR slipped in pre-CI when it didn't, #678).
 - **SemVer**, `vX.Y.Z` annotated tags. `0.x` may break the public surface (MCP
   schemas, CLI, config) between minor versions. The version is **derived from the
   git tag** by hatch-vcs (no `__version__` constant to bump): the build writes
@@ -601,19 +605,20 @@ a change crosses one of these thresholds and to act on the findings.
 For work the user has delegated, the agent owns the whole PR cycle and keeps it
 pipelined rather than serial:
 
-- **PR at each natural checkpoint.** Don't contort in-progress work to make it
-  mergeable when going a bit further lands a larger, coherent section — but
-  don't hoard mergeable work either.
-- **Self-review before the `ci` label, not after.** Run a self-check code
-  review against the requirements on the ready PR — via a **subagent
-  (prefer the latest Opus model)** — *before* labeling, so review findings
-  never burn a CI re-run. Keep working while the review is in flight.
-- **Then label, auto-merge, move on.** Apply `ci` once review findings are
-  addressed and immediately set the PR to merge when green
-  (`gh pr merge --auto --squash`) — don't poll for green; move on while CI runs.
-  Labeling right after a push is safe (the workflow's concurrency group keys on
-  the ci/rc label state, so the label-less `synchronize` sentinel and the
-  `labeled` run can't cancel each other).
+- **PR at each natural checkpoint, as a DRAFT.** Open every PR with
+  `gh pr create --draft` (CI runs on it immediately — there is no `ci` gate).
+  Don't contort in-progress work to make it mergeable when going a bit further
+  lands a larger, coherent section — but don't hoard mergeable work either.
+- **Self-review while it's still a draft.** Run a self-check code review against
+  the requirements — via a **subagent (prefer the latest Opus model)** — for
+  substantive changes (skip it for mechanical PRs). Keep working while the review
+  is in flight.
+- **Mark ready, then auto-merge, move on.** Once review findings are addressed and
+  CI is green, take it out of draft (`gh pr ready`) and set it to merge when green
+  (`gh pr merge --auto --squash`) — don't poll; move on. **Never enable auto-merge
+  on a draft or before CI has run** (that's how a PR slipped in pre-CI, #678). Add a
+  cross-platform label (`rc`, or `macos`/`linux-arm`) when the change warrants that
+  coverage.
 - **Subagents assist with research, orientation, and review — never
   authorship.** All code and tests are developed by the agent itself; use
   subagents wherever they speed up or improve the work (codebase orientation,

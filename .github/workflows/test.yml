@@ -5,17 +5,16 @@ on:
   # push-to-main trigger would just re-run what the PR already validated — pure
   # redundant spend.
   #
-  # CI is GATED on the `ci` label: nothing but the tiny `ci-ok` sentinel runs
-  # until a PR carries `ci` (or `rc`, which implies full CI for a release
-  # candidate). This defers every remote run until code review is complete, so a
-  # PR that churns through review doesn't re-run the whole suite on each push —
-  # the suite runs once, at the end, when you add `ci`. (Public repo: standard
-  # runners bill nothing — the deferral buys wall-clock/queue/noise, and keeps
-  # the posture safe if the repo ever goes private.)
-  # `labeled` is in the trigger types so adding `ci`/`rc`/`macOS` re-fires the
-  # workflow (the default types don't fire on label changes); `unlabeled` so
-  # removing the label re-evaluates the `ci-ok` gate (flips it back to "add the
-  # ci label").
+  # CI ALWAYS runs on every PR — there is no `ci`-label gate (retired in #678).
+  # A draft PR triggers `pull_request` events too, so the suite runs while the PR
+  # is still a draft; combined with drafts-by-default that means nothing is ever
+  # mergeable before CI has actually run (a draft can't merge, and once marked
+  # ready the required `CI passed` check is the real suite's verdict). Public
+  # repo: standard runners bill nothing, and the Bazel disk cache replays
+  # unchanged targets, so running on every push is cheap.
+  # `labeled`/`unlabeled` are in the trigger types so adding/removing a
+  # cross-platform label (`rc`/`macos`/`linux-arm`) re-fires the workflow to add
+  # or drop those legs (the default types don't fire on label changes).
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, labeled, unlabeled]
@@ -34,40 +33,23 @@ permissions:
 # PRs. The release workflow deliberately has no such group (a tag build must run
 # to completion).
 #
-# The group is ALSO keyed on the ci/rc label state (#400): pushing then labeling
-# delivers a `synchronize` event whose payload lacks the label moments before
-# the `labeled` event, and in one shared group whichever run starts second
-# cancels the first — when the label-less sentinel won, it killed the full suite
-# and left the fail-closed `ci-ok` as the survivor (the "every job skipping"
-# shape that needed a label toggle and a whole re-run). With the label state in
-# the key, sentinel runs (no label → only `ci-ok`, fails fast) and full runs
-# never cancel each other; a push to an already-labeled PR still cancels that
-# PR's stale full run (its `synchronize` payload carries the label). The
-# `action == 'unlabeled'` clause joins the labeled group so REMOVING ci/rc still
-# cancels an in-flight suite — the gate flips back to fail-closed instead of a
-# doomed run finishing green.
+# Keyed on the ref ALONE — the ci/rc label-state keying went away with the gate
+# (#678). Without a label-gated "sentinel" run there's no sentinel-vs-full race to
+# avoid: a new push cancels the stale run; adding a cross-platform label
+# (`rc`/`macos`/`linux-arm`) re-fires and cancels the base run so the replacement
+# covers base + the new legs in one go (the base lanes replay from the Bazel cache).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'rc') || github.event.action == 'unlabeled' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # The ci-label gate root, plus the lint job's path filters. The `tests` job
-  # carries NO path outputs — Bazel's own dependency analysis decides what
-  # re-executes there (#422); the filters here only gate the lint lane, whose
-  # cargo/ruff/mypy steps live outside the Bazel graph. NOTE: the per-job `if`s
-  # mean jobs get *skipped*, not run-and-passed, so the single required status
-  # check for branch protection must be `ci-ok` (below), never the individual
-  # jobs — a skipped required check blocks the merge forever.
+  # Path-filter probe for the lint lane. The `tests` job carries NO path outputs
+  # — Bazel's own dependency analysis decides what re-executes there (#422); the
+  # filters here only gate the lint lane, whose cargo/ruff/mypy steps live outside
+  # the Bazel graph. Always runs (the `ci`-label gate that used to live on this
+  # job's `if` was retired in #678); `lint`/`tests` `needs: changes`.
   changes:
     name: Detect changed paths
-    # The `ci`-label gate. `changes` is the root of the dependency graph
-    # (lint/tests `needs: changes`), so skipping it here when the PR lacks
-    # `ci`/`rc` cascades — every downstream lane is skipped too, and not a
-    # single test runner spins up. `cross-platform` is the only lane outside
-    # this graph; it is `rc`/`macOS`-gated on its own (`rc` is part of this
-    # condition anyway; a bare `macOS` label adds the macos leg without
-    # implying `ci`).
-    if: contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
@@ -211,13 +193,16 @@ jobs:
         with:
           save: pr
 
-  # macOS + ARM never run on plain PRs or on merges to main — only by label.
-  # Two labels gate this lane, by intent:
-  #   - `rc` (release candidate): the FULL os matrix. Apply when you're about
-  #     to tag a release and want complete cross-platform coverage first.
-  #   - `macOS`: just the macos-latest leg, for a PR whose change is
-  #     macOS-specific (the Swift/Vision platform glue, the PyO3 link path)
-  #     and needs a macOS CI proof without the broader rc treatment.
+  # The expensive cross-platform ARM legs — macOS (Apple Silicon) and Linux ARM.
+  # These never run on a plain PR; they're opt-in by label (the only label gate
+  # left after #678 retired the `ci` gate) because each runs the whole Bazel graph
+  # on a second/third runner:
+  #   - `rc` (release candidate): ALL legs. Apply before tagging a release for
+  #     complete cross-platform coverage. `rc` SUBSUMES the per-leg labels below.
+  #   - `macos`: just the macos-latest leg (Apple Silicon / ARM macOS) — for a
+  #     macOS-specific change (Swift/Vision glue, the PyO3 link path) without the
+  #     broader rc treatment.
+  #   - `linux-arm`: just the ubuntu-24.04-arm leg.
   # Runs the whole Bazel graph (including the `manual` embedding target + the
   # Rust/PyO3 seam) for each selected platform — the macOS-only PyO3 link path
   # (-undefined dynamic_lookup) + the .so rename can't be reached on the
@@ -227,14 +212,18 @@ jobs:
     name: Cross-platform (${{ matrix.os }})
     if: >-
       contains(github.event.pull_request.labels.*.name, 'rc') ||
-      contains(github.event.pull_request.labels.*.name, 'macOS')
+      contains(github.event.pull_request.labels.*.name, 'macos') ||
+      contains(github.event.pull_request.labels.*.name, 'linux-arm')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # `rc` selects the full matrix; a bare `macOS` label selects only the
-        # macos-latest leg.
-        os: ${{ fromJSON(contains(github.event.pull_request.labels.*.name, 'rc') && '["ubuntu-24.04-arm", "macos-latest"]' || '["macos-latest"]') }}
+        # Build the leg list from the labels present: `rc` (or BOTH per-leg
+        # labels) → the full matrix; otherwise just the requested leg. `&&` binds
+        # tighter than `||`, so this reads as
+        #   (rc || (macos && linux-arm)) ? [both] : linux-arm ? [linux] : [macos]
+        # and the job `if` above guarantees at least one of the three is present.
+        os: ${{ fromJSON((contains(github.event.pull_request.labels.*.name, 'rc') || (contains(github.event.pull_request.labels.*.name, 'macos') && contains(github.event.pull_request.labels.*.name, 'linux-arm'))) && '["ubuntu-24.04-arm", "macos-latest"]' || contains(github.event.pull_request.labels.*.name, 'linux-arm') && '["ubuntu-24.04-arm"]' || '["macos-latest"]') }}
     steps:
       - uses: actions/checkout@v6
       # Same composite as every Bazel lane (different os/arch key scope, so no
@@ -255,28 +244,24 @@ jobs:
       - uses: ./.github/actions/bazel-save
         if: always()
 
-  # Single required status check. Always runs, and passes iff every gated job
-  # either succeeded or was legitimately skipped (its paths didn't change / not
-  # an rc PR). This is what branch protection should require — it turns the
-  # conditional jobs into one stable check that never deadlocks a merge.
+  # The single required status check (the `protect main` ruleset requires the
+  # GitHub Actions context "CI passed"). It ALWAYS runs and is success iff every
+  # lane either succeeded or legitimately skipped (lint skipped by path filter; a
+  # cross-platform leg not requested by label). The lanes can individually skip,
+  # and a ruleset reads a skipped required check as PASSING — which is exactly why
+  # the verdict is centralised in this aggregator and IT, never the individual
+  # jobs, is the required context. It must stay a real DECLARED job: a check run
+  # posted via the API does NOT satisfy a ruleset check pinned to the Actions
+  # integration (learned in #664).
+  #
+  # Coverage is intentionally NOT aggregated here — it lives in its own workflow
+  # (coverage.yml) and only ever reports, never gates, so it must not block the merge.
   ci-ok:
     name: CI passed
     if: ${{ always() }}
-    # Coverage is intentionally NOT aggregated here — it lives in its own workflow
-    # (coverage.yml) and only ever reports, never gates, so it must not block the merge.
     needs: [changes, lint, tests, cross-platform]
     runs-on: ubuntu-latest
     steps:
-      # Gate: CI must be opted in via the `ci` (or `rc`) label. Without it the
-      # whole graph above is skipped, so this required check fails with an
-      # actionable message — the PR can't merge until someone adds `ci` and the
-      # suite actually runs. This is the enforcement half of the deferral: CI is
-      # deferred, not skipped — it must still pass before merge.
-      - name: Require the ci (or rc) label
-        if: ${{ !(contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'rc')) }}
-        run: |
-          echo "::error::CI is gated on the 'ci' label — add the 'ci' label once code review is complete to run the suite (or 'rc' for a release candidate)."
-          exit 1
       - name: Verify gated jobs passed or were skipped
         run: |
           if [ "${{ needs.changes.result }}" != "success" ]; then
