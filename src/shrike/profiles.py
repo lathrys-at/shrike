@@ -85,7 +85,20 @@ class RecognizerEntry:
 
 @dataclass(frozen=True)
 class ManagedLlama:
-    """llama-server as a manage-class component — orthogonal to engines."""
+    """llama-server as a manage-class component — orthogonal to engines.
+
+    The model-loading shape is the typed single-vs-router split (#567),
+    mirroring the native ``ModelSpec`` enum: ``models_dir`` unset = a
+    SINGLE-model server (the entry's ``model`` is the GGUF path Shrike loads —
+    today's N=1 behavior, byte-for-byte); ``models_dir`` set = llama.cpp
+    **router** mode, ONE process serving that directory of GGUFs with the
+    request ``model`` field routing among them, so N remote/no-endpoint
+    embedder spaces share one spawn. In router mode each consuming entry's
+    ``model`` names a model WITHIN the directory (the routing key), not a path.
+    The two are mutually exclusive — a single ``model`` path and a router
+    ``models_dir`` can't both load — so the consumers' ``model`` semantics flip
+    with this one field, never overlapping.
+    """
 
     manage: str = "auto"  # auto = spawn/own a child; attach = existing; off = cloud
     binary: str | None = None
@@ -97,6 +110,14 @@ class ManagedLlama:
     # Per-modality multimodal projectors (#501) — loaded with the managed
     # server so it can embed images/audio. Empty for a text-only server.
     mmprojs: tuple[str, ...] = ()
+    # Router mode (#567): the directory of GGUFs llama.cpp serves under
+    # `--models-dir`, request-`model`-field routed. Unset = single-model mode
+    # (the entry's `model` is the GGUF path). Set = N consumers share ONE
+    # spawn, each pinning its own `model` (a name in this dir).
+    models_dir: str | None = None
+    # Router `--models-max`: the max models loaded simultaneously (LRU-evicts
+    # beyond it); None = the server default. Router-only.
+    models_max: int | None = None
 
 
 @dataclass(frozen=True)
@@ -351,6 +372,8 @@ def _parse_managed(raw: Any) -> tuple[ManagedLlama | None, ManagedSync | None]:
                 "threads",
                 "gpu_layers",
                 "mmprojs",
+                "models_dir",
+                "models_max",
             ),
             where,
         )
@@ -374,6 +397,8 @@ def _parse_managed(raw: Any) -> tuple[ManagedLlama | None, ManagedSync | None]:
             threads=_opt_int(lraw, "threads", where),
             gpu_layers=_opt_int(lraw, "gpu_layers", where),
             mmprojs=tuple(str(m) for m in mmprojs_raw),
+            models_dir=_opt_str(lraw, "models_dir", where),
+            models_max=_opt_int(lraw, "models_max", where),
         )
 
     sync = None
@@ -594,16 +619,57 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
                     "attached server owns its own pooling"
                 )
 
-    # At most ONE managed llama-server backs the embedder set: a remote
-    # no-endpoint entry consumes it. Two such entries would both bind the one
-    # managed server, which is ambiguous — reject rather than silently share.
-    managed_remote_entries = sum(
-        1 for e in caps.embedders if e.runtime == "remote" and e.endpoint is None
-    )
-    if managed_remote_entries > 1:
+    # The managed llama-server backs the remote/no-endpoint entries that consume
+    # it. In SINGLE-model mode (managed.llama_server.models_dir unset) exactly
+    # ONE may bind it — two would both load on the one port, which is ambiguous.
+    # In ROUTER mode (models_dir set) llama.cpp serves a directory of GGUFs and
+    # routes by the request `model` field, so N consumers share ONE spawn, each
+    # pinning its own model (#567). The guard therefore depends on the shape.
+    managed_consumers = [
+        i for i, e in enumerate(caps.embedders) if e.runtime == "remote" and e.endpoint is None
+    ]
+    llama_for_router = caps.managed_llama or ManagedLlama()
+    router_mode = llama_for_router.models_dir is not None
+    if router_mode:
+        # Router mode is Shrike-launched — meaningless on an attached/off server
+        # (we don't spawn it, so we can't choose its model-loading shape).
+        if llama_for_router.manage != "auto":
+            raise ProfileError(
+                "managed.llama_server.models_dir is router mode, which Shrike launches — "
+                f"it cannot apply to manage: {llama_for_router.manage} (an existing/off server "
+                "owns its own model loading); set manage: auto or drop models_dir"
+            )
+        # Each consumer needs a `model` (the routing key into the directory) and
+        # they must be distinct — the `model` field is what disambiguates both
+        # the request routing AND the per-space vector identity, so two consumers
+        # naming the same model would be one indistinguishable space.
+        missing = [i for i in managed_consumers if not caps.embedders[i].model]
+        if missing:
+            raise ProfileError(
+                f"embedders[{', '.join(str(i) for i in missing)}] are remote with no endpoint "
+                "under router mode (managed.llama_server.models_dir) but declare no model — each "
+                "needs a model naming the GGUF within the directory (the request-routing key)"
+            )
+        # Every consumer's model is non-empty (the `missing` check above), so
+        # this list is all-str — narrowed for the distinctness test + message.
+        models = [m for i in managed_consumers if (m := caps.embedders[i].model)]
+        if len(set(models)) != len(models):
+            raise ProfileError(
+                "two or more router consumers (embedders: remote, no endpoint) name the SAME "
+                "model — the model field routes the request and identifies the vector space, so "
+                f"the router consumers must name distinct models (got {sorted(models)})"
+            )
+    elif len(managed_consumers) > 1:
         raise ProfileError(
-            f"{managed_remote_entries} embedder entries are remote with no endpoint — each "
-            "would bind the single managed llama-server; give all but one an explicit endpoint"
+            f"{len(managed_consumers)} embedder entries are remote with no endpoint — each would "
+            "bind the single managed llama-server. Set managed.llama_server.models_dir to run "
+            "ONE router serving them all (each entry's model names a GGUF in that directory), or "
+            "give all but one an explicit endpoint"
+        )
+    if llama_for_router.models_max is not None and not router_mode:
+        raise ProfileError(
+            "managed.llama_server.models_max is a router knob (the max models loaded at once) — "
+            "set models_dir to enable router mode, or drop models_max"
         )
 
     # At most ONE IMAGE-embedding space (#580). Cross-space fusion admits a
@@ -766,6 +832,17 @@ def _entry_to_runtime_params(
     endpoint — or under ``manage: attach`` — is the unmanaged ``remote``
     backend (Shrike never spawns/stops that server); a remote entry without
     one is the managed llama-server (``manage: auto``, today's behavior).
+
+    Router mode (#567 — ``managed.llama_server.models_dir`` set): every
+    remote/no-endpoint consumer becomes a ``remote`` backend pointed at the
+    shared router's loopback endpoint, each pinning its own ``model`` (the
+    request-routing key). The dict carries a ``router`` sub-mapping with the
+    ONE shared spawn's parameters — identical across the consumers — so the
+    construction layer spawns a single ``LlamaServerManager.router(...)`` and
+    points every router-remote backend at it (one server, N model-pinned
+    clients). ``router_model`` flags the backend as router-managed so its
+    fingerprint/dim derive from the pinned model, never the shared endpoint's
+    ``/v1/models[0]`` (which lists many models — a vector-space collapse).
     """
     # The space's modalities flow to the backend (#501): an image space
     # composes the image half + reports image coverage.
@@ -782,6 +859,33 @@ def _entry_to_runtime_params(
         }
     if e.runtime == "remote":
         llama = managed_llama or ManagedLlama()
+        if e.endpoint is None and llama.models_dir is not None:
+            # Router mode: a `remote` backend on the shared router's loopback
+            # endpoint, pinning this space's model. The `router` sub-mapping is
+            # the single shared spawn's params (same for every consumer); the
+            # construction layer dedups it to one manager. `router_model` is the
+            # pinned name — the authoritative source for THIS space's identity
+            # and dim (the endpoint's /v1/models[0] is not this model).
+            port = llama.port or ATTACH_DEFAULT_PORT
+            return {
+                "backend": "remote",
+                "model": e.model,
+                "router_model": e.model,
+                "endpoint": f"http://127.0.0.1:{port}",
+                "api_key_env": None,
+                "batch_size": e.batch_size,
+                "modalities": modalities,
+                "router": {
+                    "models_dir": llama.models_dir,
+                    "models_max": llama.models_max,
+                    "port": port,
+                    "binary": llama.binary,
+                    "extra_args": list(llama.args),
+                    "context_size": llama.context_size,
+                    "threads": llama.threads,
+                    "gpu_layers": llama.gpu_layers,
+                },
+            }
         if e.endpoint is not None or llama.manage == "attach":
             endpoint = e.endpoint or f"http://127.0.0.1:{llama.port or ATTACH_DEFAULT_PORT}"
             return {

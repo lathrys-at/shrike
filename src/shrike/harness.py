@@ -297,10 +297,20 @@ class Harness:
         owns_runtime: bool = True,
         secondary_runtimes: Sequence[EmbeddingRuntime] | None = None,
         cross_space_floor_margin: float = ACTIVATION_MARGIN,
+        shared_llama_manager: Any = None,
     ) -> None:
         self.kernel = kernel
         self.wrapper = wrapper
         self.runtime = runtime
+        # The shared llama.cpp ROUTER manager (#567): when N remote/no-endpoint
+        # embedder spaces share ONE managed server (managed.llama_server.
+        # models_dir), this is the single `LlamaServerManager.router(...)` they
+        # all talk to over loopback — spawned once, owned here, stopped only by
+        # the owner on close(). None = no router (the N=1 / single-managed /
+        # endpoint / onnx cases — every shape but the shared router). It is
+        # started at the top of start_embedding, BEFORE any router-managed
+        # remote backend (whose connectivity-proof embed needs it listening).
+        self._shared_llama_manager = shared_llama_manager
         # The cross-space image floor margin (#580): the precision/recall dial
         # folded into the secondary floor's `mean + margin·std` at calibration.
         # Default 1.0 (ACTIVATION_MARGIN) = today's behaviour; resolved harness-
@@ -357,6 +367,7 @@ class Harness:
         owns_runtime: bool = True,
         secondary_runtimes: Sequence[EmbeddingRuntime] | None = None,
         cross_space_floor_margin: float = ACTIVATION_MARGIN,
+        shared_llama_manager: Any = None,
     ) -> Harness:
         """Open the kernel on the running loop. Scheduling is the kernel's
         own (#374 — the owned tokio runtime spawns the collection actor);
@@ -411,6 +422,7 @@ class Harness:
             owns_runtime=owns_runtime,
             secondary_runtimes=secondary_runtimes,
             cross_space_floor_margin=cross_space_floor_margin,
+            shared_llama_manager=shared_llama_manager,
         )
 
     # -- boot ------------------------------------------------------------------
@@ -645,6 +657,12 @@ class Harness:
                 "status": "already_running",
                 "embedding": await asyncio.to_thread(self.runtime.health),
             }
+        # Spawn the shared llama.cpp router ONCE before any router-managed remote
+        # backend (#567): the primary + secondary remote spaces all talk to it
+        # over loopback, and their connectivity-proof embed at start() needs it
+        # already healthy. router /health is 200 before any model lazy-loads, so
+        # this is a fast health-wait. Owned here; stopped only on owner close().
+        await self._ensure_shared_router()
         try:
             backend = await asyncio.to_thread(lambda: self.runtime.start(**overrides))
         except (ValueError, ImportError) as e:
@@ -661,6 +679,18 @@ class Harness:
             "embedding": await asyncio.to_thread(self.runtime.health),
             "index": self._index_status(),
         }
+
+    async def _ensure_shared_router(self) -> None:
+        """Spawn the shared llama.cpp router manager if one is configured and
+        not yet running (#567). Idempotent — the native manager's own ``start``
+        no-ops a live child, and we additionally guard so a repeat call doesn't
+        block on the health-wait. Off the loop (spawn + health-wait blocks)."""
+        mgr = self._shared_llama_manager
+        if mgr is None:
+            return
+        if await asyncio.to_thread(mgr.running):
+            return
+        await asyncio.to_thread(mgr.start)
 
     async def _attach_secondaries(self, overrides: dict[str, Any]) -> None:
         """Start + attach every SECONDARY embedding space (#233), best-effort:
@@ -963,6 +993,11 @@ class Harness:
         # cleared their kernel slots; this releases their backend resources.
         for rt in self.secondary_runtimes:
             await asyncio.to_thread(rt.stop)
+        # Stop the shared router too (#567): `embedding stop` frees GPU/RAM, and
+        # the router process is the resource the remote spaces held. start_
+        # embedding re-spawns it (idempotent) on the next cycle.
+        if self._shared_llama_manager is not None:
+            await asyncio.to_thread(self._shared_llama_manager.stop)
         return {"status": "stopped", "index": self._index_status()}
 
     # -- lifecycle ----------------------------------------------------------------
@@ -1001,6 +1036,13 @@ class Harness:
             # the primary; a shared (#68) harness leaves them to the owner.
             for rt in self.secondary_runtimes:
                 await asyncio.to_thread(rt.stop)
+            # Stop the shared llama.cpp router LAST (#567): the router-managed
+            # remote backends (now stopped) talked to it, so the process they
+            # depend on outlives them by exactly this teardown. Owner-only —
+            # a shared (#68) routed harness never owns the runtime, so it never
+            # reaches here and never kills the router out from under siblings.
+            if self._shared_llama_manager is not None:
+                await asyncio.to_thread(self._shared_llama_manager.stop)
         self.wrapper.close()
         # kernel.close drains the collection actor (#374): nothing in flight
         # when this returns — the interpreter-teardown guard.

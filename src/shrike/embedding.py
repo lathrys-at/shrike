@@ -410,12 +410,21 @@ class RemoteBackend:
         api_key_env: str | None = None,
         batch_size: int | None = None,
         modalities: frozenset[str] = frozenset({TEXT}),
+        router_managed: bool = False,
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._model = model
         self._api_key_env = api_key_env
         self._batch_cap = batch_size
         self._modalities = modalities
+        # Router-managed (#567): this remote talks to a SHARED llama.cpp router
+        # serving many models, so the endpoint's `/v1/models[0]` is NOT this
+        # space's model. The pinned `model` is the authoritative identity, and
+        # the embedding dim must come from an actual embed of THIS model (the
+        # returned vector length), never `model_info().meta.n_embd`. A
+        # router-managed remote therefore REQUIRES an explicit model (the
+        # routing key), which profiles.py guarantees.
+        self._router_managed = router_managed
         self._safe_batch = 1
         self._model_name: str | None = None
         self._remote: Any = None
@@ -453,9 +462,16 @@ class RemoteBackend:
                     "server's environment (secrets are referenced, never inline)"
                 )
 
-        probe_client = shrike_native.RemoteEmbedder(self._endpoint, api_key=api_key)
-        ident, _meta = probe_client.model_info()
-        self._model_name = self._model or ident
+        if self._router_managed:
+            # The shared router lists MANY models at /v1/models; data[0] is not
+            # ours (and our model may not be loaded yet — lazy load). The pinned
+            # `model` IS the identity, so skip the unpinned model_info probe and
+            # pin directly. profiles.py guarantees a router consumer has a model.
+            self._model_name = self._model
+        else:
+            probe_client = shrike_native.RemoteEmbedder(self._endpoint, api_key=api_key)
+            ident, _meta = probe_client.model_info()
+            self._model_name = self._model or ident
         remote = shrike_native.RemoteEmbedder(
             self._endpoint, api_key=api_key, model=self._model_name
         )
@@ -513,6 +529,17 @@ class RemoteBackend:
         return {"id": ident, "meta": meta}
 
     def embedding_dim(self) -> int | None:
+        if self._router_managed:
+            # The shared router's /v1/models[0] is NOT this space's model, so
+            # meta.n_embd would be the WRONG dimension whenever two router
+            # models differ in width (#567). The pinned `_remote` client embeds
+            # THIS model, so the returned vector length is authoritative — probe
+            # it, never read the shared metadata.
+            try:
+                vectors = self.embed_texts([" "])
+            except Exception:
+                return None
+            return len(vectors[0]) if vectors and vectors[0] else None
         meta = self.model_info().get("meta") or {}
         n_embd = meta.get("n_embd")
         if n_embd:
@@ -532,13 +559,20 @@ class RemoteBackend:
         names one embedding space), and there is no file on disk to fall back
         to. The endpoint URL is deliberately excluded: two endpoints serving
         the same model share a vector space. ``textprep`` appended as always.
+
+        A router-managed remote (#567) is pinned to ``remote:{model_name}``
+        unconditionally: the shared router's ``/v1/models[0]`` lists MANY models
+        and is not this space's, so the ``meta:`` recipe would be IDENTICAL
+        across every space sharing the router — collapsing their distinct vector
+        spaces. The pinned model name is the per-space discriminator.
         """
-        meta = self.model_info().get("meta") or {}
-        fields = ("n_params", "n_embd", "n_vocab", "n_ctx_train", "size")
-        if any(meta.get(f) is not None for f in fields):
-            base = "meta:" + ":".join(str(meta.get(f, "")) for f in fields)
-        else:
-            base = f"remote:{self._model_name or self._model or 'default'}"
+        if not self._router_managed:
+            meta = self.model_info().get("meta") or {}
+            fields = ("n_params", "n_embd", "n_vocab", "n_ctx_train", "size")
+            if any(meta.get(f) is not None for f in fields):
+                base = "meta:" + ":".join(str(meta.get(f, "")) for f in fields)
+                return f"{base}:textprep={EMBED_TEXT_VERSION}"
+        base = f"remote:{self._model_name or self._model or 'default'}"
         return f"{base}:textprep={EMBED_TEXT_VERSION}"
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -628,10 +662,15 @@ class EmbeddingRuntime:
         api_key_env: str | None = None,
         modalities: frozenset[str] = frozenset({TEXT}),
         mmprojs: Sequence[str] | None = None,
+        router_managed: bool = False,
     ) -> None:
         self._backend_kind = BACKEND_ALIASES.get(backend, backend)
         self._endpoint = endpoint
         self._api_key_env = api_key_env
+        # Router-managed remote (#567): the `remote` backend talks to a SHARED
+        # llama.cpp router (spawned once, owned by the harness), so its
+        # fingerprint/dim derive from the pinned model, not the shared endpoint.
+        self._router_managed = router_managed
         self._modalities = modalities
         # Per-modality multimodal projectors for a managed omni embeddings
         # server (#501); empty for text-only or the in-process backends.
@@ -815,6 +854,7 @@ class EmbeddingRuntime:
                 api_key_env=self._api_key_env,
                 batch_size=self._batch_size,
                 modalities=self._modalities,
+                router_managed=self._router_managed,
             )
         assert self._model is not None  # callers check before constructing
         if self._backend_kind == "onnx":

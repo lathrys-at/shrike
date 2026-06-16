@@ -834,8 +834,10 @@ class TestMultiSpace:
         assert len(plan.embedders) == 2
 
     def test_two_managed_remote_no_endpoint_entries_are_rejected(self):
-        # At most one entry may bind the single managed llama-server (a remote
-        # entry with no endpoint). Two is ambiguous → a named error.
+        # In SINGLE-model mode (no managed.llama_server.models_dir) at most one
+        # entry may bind the single managed llama-server (a remote entry with no
+        # endpoint). Two is ambiguous → a named error that now points at router
+        # mode (models_dir) as the way to share ONE server (#567).
         config = {
             "embedders": [
                 {"modalities": ["text"], "runtime": "remote", "model": "a.gguf"},
@@ -844,6 +846,8 @@ class TestMultiSpace:
             "managed": {"llama_server": {"manage": "auto"}},
         }
         with pytest.raises(ProfileError, match="bind the single managed llama-server"):
+            _resolve(config)
+        with pytest.raises(ProfileError, match="models_dir"):
             _resolve(config)
 
     def test_text_onnx_plus_remote_endpoint_space_resolves(self):
@@ -866,3 +870,167 @@ class TestMultiSpace:
         dicts = plan_to_runtime_params_set(plan)
         assert [d["backend"] for d in dicts] == ["onnx", "remote"]
         assert dicts[1]["endpoint"] == "https://api.example.com/v1"
+
+
+class TestRouterMode:
+    """Shared managed llama-server router (#567): N remote/no-endpoint spaces
+    collapse onto ONE spawn + N model-pinned clients, driven by
+    managed.llama_server.models_dir. The N=1 single-managed path is unchanged
+    (its own dedicated test below proves byte-equality)."""
+
+    def test_two_router_consumers_collapse_onto_one_remote_set(self):
+        # The payoff: two remote/no-endpoint spaces under models_dir resolve to
+        # TWO `remote` backends, each pinned to its own model, both pointed at
+        # ONE loopback router endpoint — never two `llama` spawns.
+        config = {
+            "embedders": [
+                {"modalities": ["text"], "runtime": "remote", "model": "text-a.gguf"},
+                {"modalities": ["text"], "runtime": "remote", "model": "text-b.gguf"},
+            ],
+            "managed": {
+                "llama_server": {"models_dir": "/models/router", "port": 8500, "models_max": 2}
+            },
+        }
+        plan = _resolve(config)
+        dicts = plan_to_runtime_params_set(plan)
+        assert [d["backend"] for d in dicts] == ["remote", "remote"]
+        # Both hit the SAME loopback endpoint (one shared router on the port).
+        assert {d["endpoint"] for d in dicts} == {"http://127.0.0.1:8500"}
+        # Each pins its OWN model (the request-routing key + space discriminator).
+        assert [d["model"] for d in dicts] == ["text-a.gguf", "text-b.gguf"]
+        assert [d["router_model"] for d in dicts] == ["text-a.gguf", "text-b.gguf"]
+        # Each carries the identical shared-spawn router sub-map.
+        assert dicts[0]["router"] == dicts[1]["router"]
+        assert dicts[0]["router"]["models_dir"] == "/models/router"
+        assert dicts[0]["router"]["models_max"] == 2
+        assert dicts[0]["router"]["port"] == 8500
+        # Never a `llama` (spawn-my-own) backend in router mode.
+        assert all(d["backend"] != "llama" for d in dicts)
+
+    def test_single_router_consumer_is_valid(self):
+        # models_dir with ONE consumer is fine — a router serving one model.
+        config = {
+            "embedders": [{"modalities": ["text"], "runtime": "remote", "model": "only.gguf"}],
+            "managed": {"llama_server": {"models_dir": "/models/router", "port": 8500}},
+        }
+        params = plan_to_runtime_params(_resolve(config))
+        assert params["backend"] == "remote"
+        assert params["endpoint"] == "http://127.0.0.1:8500"
+        assert params["model"] == "only.gguf"
+        assert params["router"]["models_dir"] == "/models/router"
+        # models_max unset → None in the sub-map (server default).
+        assert params["router"]["models_max"] is None
+
+    def test_n1_single_managed_is_byte_unchanged_no_router(self):
+        # BOUNDARY #1: a single managed-server config (no models_dir) still maps
+        # to exactly ONE `llama` backend with NO router sub-map — today's
+        # behavior, untouched. This is the N=1 proof.
+        config = {
+            "embedders": [
+                {"modalities": ["text"], "runtime": "remote", "model": "~/m.gguf", "pooling": "last"}
+            ],
+            "managed": {"llama_server": {"binary": "/opt/llama-server", "port": 8474}},
+        }
+        params = plan_to_runtime_params(_resolve(config))
+        assert params["backend"] == "llama"
+        assert params["llama_server"] == "/opt/llama-server"
+        assert params["port"] == 8474
+        assert params["pooling"] == "last"
+        # The new keys are ABSENT on the single-managed shape (not None) — the
+        # dict is the pre-#567 shape verbatim.
+        assert "router" not in params
+        assert "router_model" not in params
+
+    def test_router_consumer_without_a_model_is_rejected(self):
+        # The model is the routing key into the directory — a router consumer
+        # without one can't be routed. Named error.
+        config = {
+            "embedders": [{"modalities": ["text"], "runtime": "remote"}],
+            "managed": {"llama_server": {"models_dir": "/models/router"}},
+        }
+        with pytest.raises(ProfileError, match="declare no model"):
+            _resolve(config)
+
+    def test_two_router_consumers_naming_the_same_model_are_rejected(self):
+        # BOUNDARY #3: the model disambiguates BOTH the request routing and the
+        # vector space, so two consumers naming the same model is one
+        # indistinguishable space → a config error, not a silent collapse.
+        config = {
+            "embedders": [
+                {"modalities": ["text"], "runtime": "remote", "model": "dup.gguf"},
+                {"modalities": ["text"], "runtime": "remote", "model": "dup.gguf"},
+            ],
+            "managed": {"llama_server": {"models_dir": "/models/router"}},
+        }
+        with pytest.raises(ProfileError, match="name the SAME model"):
+            _resolve(config)
+
+    def test_router_with_attach_is_rejected(self):
+        # Router mode is Shrike-launched — meaningless on an attached server.
+        config = {
+            "embedders": [{"modalities": ["text"], "runtime": "remote", "model": "m.gguf"}],
+            "managed": {"llama_server": {"manage": "attach", "models_dir": "/models/router"}},
+        }
+        with pytest.raises(ProfileError, match="cannot apply to manage: attach"):
+            _resolve(config)
+
+    def test_router_with_manage_off_is_rejected(self):
+        # manage: off means no managed server at all, so a remote/no-endpoint
+        # entry is rejected by the earlier per-entry check ("manage is off")
+        # before the router-shape check even runs — a clearer error (the entry
+        # can't consume an off server, router or not). Either way: rejected.
+        config = {
+            "embedders": [{"modalities": ["text"], "runtime": "remote", "model": "m.gguf"}],
+            "managed": {"llama_server": {"manage": "off", "models_dir": "/models/router"}},
+        }
+        with pytest.raises(ProfileError, match="manage is off"):
+            _resolve(config)
+
+    def test_models_max_without_models_dir_is_rejected(self):
+        # models_max is a router-only knob — set without models_dir it's a
+        # silent no-op, which the no-cross-talk rule forbids.
+        config = {
+            "embedders": [{"modalities": ["text"], "runtime": "remote", "model": "m.gguf"}],
+            "managed": {"llama_server": {"models_max": 4}},
+        }
+        with pytest.raises(ProfileError, match="models_max is a router knob"):
+            _resolve(config)
+
+    def test_router_parse_round_trips_the_fields(self):
+        caps = parse_capabilities(
+            {
+                "embedders": [{"modalities": ["text"], "runtime": "remote", "model": "m.gguf"}],
+                "managed": {
+                    "llama_server": {"models_dir": "/d", "models_max": 3, "port": 9001}
+                },
+            }
+        )
+        assert caps.managed_llama == ManagedLlama(
+            manage="auto", models_dir="/d", models_max=3, port=9001
+        )
+
+    def test_router_plus_separate_endpoint_space_coexist(self):
+        # Two router-shared spaces AND a separate cloud-endpoint space — the
+        # router collapses only its own no-endpoint consumers; the endpoint
+        # space is untouched.
+        config = {
+            "embedders": [
+                {"modalities": ["text"], "runtime": "remote", "model": "r-a.gguf"},
+                {"modalities": ["text"], "runtime": "remote", "model": "r-b.gguf"},
+                {
+                    "modalities": ["text"],
+                    "runtime": "remote",
+                    "model": "cloud-1",
+                    "endpoint": "https://api.example.com/v1",
+                },
+            ],
+            "managed": {"llama_server": {"models_dir": "/models/router", "port": 8500}},
+        }
+        dicts = plan_to_runtime_params_set(_resolve(config))
+        assert [d["backend"] for d in dicts] == ["remote", "remote", "remote"]
+        # The two router consumers share the loopback router; the endpoint space
+        # keeps its own external endpoint and carries NO router sub-map.
+        assert dicts[0]["endpoint"] == dicts[1]["endpoint"] == "http://127.0.0.1:8500"
+        assert dicts[2]["endpoint"] == "https://api.example.com/v1"
+        assert "router" in dicts[0] and "router" in dicts[1]
+        assert "router" not in dicts[2]

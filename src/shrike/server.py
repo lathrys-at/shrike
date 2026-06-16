@@ -1103,6 +1103,11 @@ def main() -> None:
             batch_size=params.get("batch_size"),
             endpoint=params.get("endpoint"),
             api_key_env=params.get("api_key_env"),
+            # A router-managed remote (#567) is flagged by the `router` sub-map
+            # profiles.py attaches to each shared-router consumer; the flag makes
+            # the RemoteBackend derive its fingerprint/dim from the pinned model,
+            # not the shared endpoint's /v1/models[0].
+            router_managed=params.get("router") is not None,
             **(
                 {"modalities": params["modalities"]} if params.get("modalities") is not None else {}
             ),
@@ -1121,6 +1126,36 @@ def main() -> None:
         _runtime_from_params({**p, "backend": p.get("backend") or DEFAULT_BACKEND}, pid_file=None)
         for p in secondary_param_sets
     ]
+
+    # The shared llama.cpp ROUTER (#567): when N remote/no-endpoint spaces share
+    # one managed server (managed.llama_server.models_dir), profiles.py attaches
+    # an identical `router` sub-map to each consumer's params. Build ONE
+    # `LlamaServerManager.router(...)` from it — the harness spawns it once,
+    # every router-managed RemoteBackend talks to it over loopback, and only the
+    # owner stops it. None in every other shape (N=1, single-managed, endpoint,
+    # onnx) → the harness path is byte-identical. The consumers carry identical
+    # `router` maps (same dir/port/knobs), so the first one found is canonical.
+    shared_llama_manager = None
+    router_cfg = next(
+        (p["router"] for p in (emb_params, *secondary_param_sets) if p.get("router") is not None),
+        None,
+    )
+    if router_cfg is not None:
+        shared_llama_manager = shrike_native.LlamaServerManager.router(
+            os.path.expanduser(str(router_cfg["models_dir"])),
+            host="127.0.0.1",
+            port=router_cfg["port"],
+            models_max=router_cfg.get("models_max"),
+            binary=(
+                os.path.expanduser(str(router_cfg["binary"])) if router_cfg.get("binary") else None
+            ),
+            log_dir=str(log_dir) if log_dir else None,
+            context_size=router_cfg.get("context_size"),
+            threads=router_cfg.get("threads"),
+            gpu_layers=router_cfg.get("gpu_layers"),
+            extra_args=list(router_cfg.get("extra_args") or []),
+            pid_file=str(resolved_state_dir / "embedding.pid"),
+        )
 
     # The derived-text store (FTS5 trigram sidecar) is built by Harness.assemble
     # AFTER the kernel opens the collection (#547/#562) — NOT here, before open.
@@ -1308,6 +1343,7 @@ def main() -> None:
             index_save_threshold=args.index_save_threshold,
             secondary_runtimes=secondary_runtimes,
             cross_space_floor_margin=cross_space_floor_margin,
+            shared_llama_manager=shared_llama_manager,
         )
         # Embedding starts at boot when anything configures it: a model (flag
         # or config entry) OR a bare endpoint (#498 — a remote/attach entry's
