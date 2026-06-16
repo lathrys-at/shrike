@@ -239,9 +239,7 @@ class TestSharedRouterWiring:
     models_dir; both spaces embed identically, which is fine (the point is the
     one-server / two-pinned-clients plumbing, not two distinct models)."""
 
-    def test_one_router_serves_two_pinned_clients_on_one_port(
-        self, embedding_model, tmp_path
-    ):
+    def test_one_router_serves_two_pinned_clients_on_one_port(self, embedding_model, tmp_path):
         import shutil
         import socket
 

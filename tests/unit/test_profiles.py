@@ -927,7 +927,12 @@ class TestRouterMode:
         # behavior, untouched. This is the N=1 proof.
         config = {
             "embedders": [
-                {"modalities": ["text"], "runtime": "remote", "model": "~/m.gguf", "pooling": "last"}
+                {
+                    "modalities": ["text"],
+                    "runtime": "remote",
+                    "model": "~/m.gguf",
+                    "pooling": "last",
+                }
             ],
             "managed": {"llama_server": {"binary": "/opt/llama-server", "port": 8474}},
         }
@@ -1000,9 +1005,7 @@ class TestRouterMode:
         caps = parse_capabilities(
             {
                 "embedders": [{"modalities": ["text"], "runtime": "remote", "model": "m.gguf"}],
-                "managed": {
-                    "llama_server": {"models_dir": "/d", "models_max": 3, "port": 9001}
-                },
+                "managed": {"llama_server": {"models_dir": "/d", "models_max": 3, "port": 9001}},
             }
         )
         assert caps.managed_llama == ManagedLlama(
