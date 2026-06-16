@@ -21,9 +21,17 @@ as ``--embedding-pooling`` does for llama). Normalization only changes a vector'
 never changes ranking and is deliberately *not* in the fingerprint — the same
 reasoning that makes llama's ``--embd-normalize`` moot.
 
-Model layout: ``model`` points either at a directory holding ``model.onnx`` (or
-``onnx/model.onnx``) plus ``tokenizer.json``, or directly at a ``.onnx`` file with
-``tokenizer.json`` beside it — the standard sentence-transformers ONNX export.
+Model layout: ``model`` points either at a directory holding a ``model*.onnx``
+graph (or ``onnx/model*.onnx``) plus ``tokenizer.json``, or directly at a ``.onnx``
+file with ``tokenizer.json`` beside it — the standard sentence-transformers ONNX
+export. The ``model*`` is a *variant-suffix* match (``model.onnx``, then
+``model_fp16.onnx``, ``model_quantized.onnx``, …) mirroring ``ClipBackend``'s graph
+discovery, so a quant-only export (e.g. ``embeddinggemma-300m`` ships only
+``model_quantized.onnx`` + its external data) loads without a fetch-time rename. A
+graph that references **external weight data** (a sibling ``model*.onnx_data`` /
+named external file) loads transparently: onnxruntime resolves external data
+relative to the graph file's directory, so the materializer only has to co-locate
+both files in the model dir — no name ever crosses into code here.
 """
 
 from __future__ import annotations
@@ -42,6 +50,17 @@ logger = logging.getLogger("shrike.embedding")
 
 DEFAULT_MAX_LENGTH = 256
 DEFAULT_PROVIDERS = ("CPUExecutionProvider",)
+# A text ONNX export ships ``model.onnx`` at one or more precisions; auto-discovery
+# prefers full precision (best quality, and it batches deterministically) and falls
+# back to a quantized one. The empty suffix (``model.onnx``) is tried first, so the
+# existing renamed-to-``model.onnx`` fixtures still resolve unchanged; a quant-only
+# export (no plain ``model.onnx`` — e.g. ``embeddinggemma-300m`` ships only
+# ``model_quantized.onnx`` + external data) resolves its quant graph without a
+# fetch-time rename. Mirrors ``ClipBackend._VARIANT_SUFFIXES`` (kept in lock-step so
+# both backends discover the same precision names). int8 (``_quantized``/``_int8``)
+# is batch-variant — the startup batch-safety probe catches that and embeds serially,
+# so loading a quant variant never breaks the reconcile==rebuild invariant.
+_VARIANT_SUFFIXES = ("", "_fp16", "_quantized", "_int8", "_uint8", "_q4", "_q4f16", "_bnb4")
 # Pooling strategies this backend implements (llama also offers "none", which is
 # meaningless for a single per-note vector and is rejected here).
 _POOLINGS = frozenset({"mean", "cls", "last"})
@@ -122,15 +141,34 @@ class OnnxBackend:
         return self._native_engine is not None
 
     def _resolve_files(self) -> tuple[Path, Path]:
-        """Locate the ``.onnx`` graph and its ``tokenizer.json``."""
+        """Locate the ``model*.onnx`` graph and its ``tokenizer.json``.
+
+        In a model *directory*, the graph is auto-discovered across precisions
+        (``_VARIANT_SUFFIXES``, full precision first), tried both flat and under an
+        ``onnx/`` subdir — so a plain ``model.onnx`` export and a quant-only export
+        (only ``model_quantized.onnx`` present, e.g. ``embeddinggemma-300m``) both
+        resolve without a rename. A ``model*.onnx`` that references external weight
+        data (a sibling ``*.onnx_data``/named external file) needs no special
+        handling: onnxruntime loads external data relative to the graph file's dir,
+        and the materializer co-locates them. A directly-named ``.onnx`` file (the
+        non-directory form) is used verbatim — the operator chose the precision.
+        """
         p = Path(self._model)
         if p.is_dir():
             onnx_path = next(
-                (p / rel for rel in ("model.onnx", "onnx/model.onnx") if (p / rel).is_file()),
+                (
+                    p / rel
+                    for suffix in _VARIANT_SUFFIXES
+                    for rel in (f"model{suffix}.onnx", f"onnx/model{suffix}.onnx")
+                    if (p / rel).is_file()
+                ),
                 None,
             )
             if onnx_path is None:
-                raise FileNotFoundError(f"No model.onnx found under {p}")
+                raise FileNotFoundError(
+                    f"No model*.onnx graph found under {p} (looked for model.onnx and the "
+                    f"variant suffixes {[s for s in _VARIANT_SUFFIXES if s]}, flat and under onnx/)"
+                )
             tok_path = next(
                 (
                     p / rel
