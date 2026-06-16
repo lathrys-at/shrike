@@ -564,9 +564,11 @@ working summary.
   through a `‹type›/‹issue#›-‹slug›` branch → PR → **squash merge**. No direct
   pushes to `main`. **Open every PR as a draft** (`gh pr create --draft`); take it
   out of draft (`gh pr ready`) only once it is complete *and* past initial review.
-  A draft can't be merged or auto-merged, so this guarantees CI has run and the
-  change has been reviewed before anything can land — the structural backstop a
-  status-check gate alone doesn't give (a PR slipped in pre-CI when it didn't, #678).
+  A draft can't be merged or auto-merged, so the draft discipline is what stops a
+  PR landing before it's ready and reviewed (a PR slipped in pre-CI when it didn't,
+  #678). What's *structurally* enforced is narrower — CI always runs, so an
+  un-tested PR can't merge; the ruleset requires no approvals, so review-before-
+  merge rides on this draft convention, not a hard gate. Keep PRs drafts until reviewed.
 - **SemVer**, `vX.Y.Z` annotated tags. `0.x` may break the public surface (MCP
   schemas, CLI, config) between minor versions. The version is **derived from the
   git tag** by hatch-vcs (no `__version__` constant to bump): the build writes

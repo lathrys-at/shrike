@@ -10,8 +10,11 @@ Trunk-based. `main` is always releasable — no `develop` branch, no Gitflow.
 
 - Every change lands through a short-lived branch and a pull request. No direct
   pushes to `main`. **Open PRs as drafts** (`gh pr create --draft`) and take them
-  out of draft only once complete and past initial review — a draft can't merge,
-  so CI has always run and the change has been reviewed before anything can land.
+  out of draft only once complete and past initial review. A draft can't merge or
+  auto-merge — the discipline that stops a PR landing before it's reviewed.
+  (Enforced: CI always runs, so an *un-tested* PR can't merge. Review-before-merge
+  is convention — the ruleset requires no approvals — so keep PRs drafts until
+  reviewed.)
 - **Squash merge** PRs, so `main` keeps a linear, one-commit-per-change history
   that bisects cleanly.
 - `main` is protected: the single required status check is `ci-ok` (`CI passed`).
