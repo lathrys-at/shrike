@@ -222,3 +222,76 @@ class TestAttachMode:
             collection_server.url.rsplit("/", 1)[0] + "/status", timeout=5.0
         ).json()
         assert upstream["embedding"]["available"] is True
+
+
+class TestSharedRouterWiring:
+    """The shared managed router (#567): ONE LlamaServerManager.router serving a
+    directory of GGUFs, with N model-pinned RemoteEmbedder clients routing by
+    the request `model` field.
+
+    The router/single ModelSpec command construction is pinned by the Rust
+    tests; per-request model pinning by the shrike-embed-remote tests; the
+    profiles collapse + the harness owner-only stop by the unit/native suites.
+    What only this lane proves is the live WIRING: one spawn (not N) on one
+    port serving two distinct model names without a collision, both pinned
+    clients embedding, owner-only stop. Without Wave-2 model materialization we
+    have one real GGUF — so we serve it under TWO filenames in a temp
+    models_dir; both spaces embed identically, which is fine (the point is the
+    one-server / two-pinned-clients plumbing, not two distinct models)."""
+
+    def test_one_router_serves_two_pinned_clients_on_one_port(
+        self, embedding_model, tmp_path
+    ):
+        import shutil
+        import socket
+
+        # A models_dir with the single test GGUF under two distinct names — the
+        # router lists both; each pinned client routes to its own.
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        for name in ("text-a.gguf", "text-b.gguf"):
+            shutil.copy(embedding_model, models_dir / name)
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+        mgr = shrike_native.LlamaServerManager.router(
+            str(models_dir),
+            host="127.0.0.1",
+            port=port,
+            log_dir=str(tmp_path / "log"),
+            pid_file=str(tmp_path / "embedding.pid"),
+        )
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            # ONE spawn for the whole directory; /health is 200 before any model
+            # lazy-loads, so this returns quickly.
+            mgr.start()
+            assert mgr.running()
+            first_pid = mgr.pid()
+
+            # The router's /v1/models lists the served model names — pin each
+            # client to one so the test is robust to the exact alias convention.
+            models = httpx.get(f"{base_url}/v1/models", timeout=30.0).json()["data"]
+            served = [m["id"] for m in models]
+            assert len(served) >= 2, f"router should list both GGUFs: {served}"
+
+            # Two model-pinned clients against the ONE endpoint — both embed,
+            # proving request-`model`-field routing works over a shared server.
+            dims = []
+            for model_name in served[:2]:
+                client = shrike_native.RemoteEmbedder(base_url, model=model_name)
+                vectors = client.embed_chunk(["hello router"])
+                assert vectors and vectors[0], f"no vector for {model_name}"
+                dims.append(len(vectors[0]))
+            # Same underlying GGUF → same dim; the wiring is what we assert.
+            assert dims[0] == dims[1]
+
+            # Still ONE process — no second spawn, no port collision.
+            assert mgr.running()
+            assert mgr.pid() == first_pid
+        finally:
+            mgr.stop()
+        # Owner stop terminated the single router.
+        assert not mgr.running()

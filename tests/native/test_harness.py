@@ -214,6 +214,84 @@ class TestHarness:
         asyncio.run(flow())
 
 
+class _FakeRouterManager:
+    """A stand-in for shrike_native.LlamaServerManager.router(...) — records
+    start/stop calls and reports running across them, so the harness's
+    spawn-once / owner-only-stop lifecycle (#567) is provable without a real
+    llama-server."""
+
+    def __init__(self) -> None:
+        self.starts = 0
+        self.stops = 0
+        self._running = False
+
+    def running(self) -> bool:
+        return self._running
+
+    def start(self) -> None:
+        self.starts += 1
+        self._running = True
+
+    def stop(self) -> None:
+        self.stops += 1
+        self._running = False
+
+
+class TestSharedRouterLifecycle:
+    """#567: the shared llama.cpp router manager is spawned ONCE and stopped
+    only by the OWNER — never N spawns, never killed out from under a routed
+    (non-owning) harness."""
+
+    async def _assemble_with_router(self, tmp_path, mgr, *, owns_runtime: bool) -> Harness:
+        runtime = EmbeddingRuntime(model=None)
+        derived = DerivedTextStore(
+            path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
+        )
+        return await Harness.assemble(
+            collection_path=str(tmp_path / "collection.anki2"),
+            cache_dir=str(tmp_path / "cache"),
+            runtime=runtime,
+            derived=derived,
+            cooperative=False,
+            hold_seconds=5.0,
+            media_read=None,
+            media_exists=None,
+            owns_runtime=owns_runtime,
+            shared_llama_manager=mgr,
+        )
+
+    def test_ensure_router_spawns_once_then_owner_stops_it(self, tmp_path) -> None:
+        async def flow():
+            mgr = _FakeRouterManager()
+            harness = await self._assemble_with_router(tmp_path, mgr, owns_runtime=True)
+            # First ensure spawns it; a second ensure is a no-op (already up) —
+            # this is what prevents N spawns when N spaces each trigger a start.
+            await harness._ensure_shared_router()
+            await harness._ensure_shared_router()
+            assert mgr.starts == 1
+            assert mgr.running()
+            # The owner stops it exactly once on close.
+            await harness.close()
+            assert mgr.stops == 1
+            assert not mgr.running()
+
+        asyncio.run(flow())
+
+    def test_non_owner_close_never_stops_the_shared_router(self, tmp_path) -> None:
+        async def flow():
+            mgr = _FakeRouterManager()
+            harness = await self._assemble_with_router(tmp_path, mgr, owns_runtime=False)
+            await harness._ensure_shared_router()
+            assert mgr.starts == 1
+            # A routed (#68) harness does not own the runtime, so its close must
+            # leave the shared router running for the owner + siblings.
+            await harness.close()
+            assert mgr.stops == 0
+            assert mgr.running()
+
+        asyncio.run(flow())
+
+
 class TestEmbedQueryCache:
     def test_repeat_queries_reuse_the_vector(self, tmp_path) -> None:
         from types import SimpleNamespace

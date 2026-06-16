@@ -27,6 +27,12 @@ class _FakeRemoteEmbedder:
     ident: str | None = "served-model"
     fail_embed: Exception | None = None
     vision: bool = False
+    # Router fakes (#567): a pinned-model → embedding-dim map. When a chunk is
+    # embedded the vector length is taken from the INSTANCE's pinned model, so a
+    # shared router serving two different-width models returns the right dim per
+    # space. Empty (the default) = the legacy fixed dim-3 vector, so every
+    # pre-#567 test is unchanged.
+    model_dims: dict[str, int] = {}
 
     def __init__(self, base_url: str, *, api_key: str | None = None, model: str | None = None):
         self.base_url = base_url
@@ -40,7 +46,8 @@ class _FakeRemoteEmbedder:
     def embed_chunk(self, texts: list[str]) -> list[list[float]]:
         if type(self).fail_embed is not None:
             raise type(self).fail_embed
-        return [[0.1, 0.2, 0.3] for _ in texts]
+        dim = type(self).model_dims.get(self.model or "", 3)
+        return [[0.1] * dim for _ in texts]
 
     def embed_image_chunk(self, images: list[bytes]) -> list[list[float]]:
         return [[0.4, 0.5, 0.6] for _ in images]
@@ -59,6 +66,7 @@ def _fake_native(monkeypatch):
     _FakeRemoteEmbedder.ident = "served-model"
     _FakeRemoteEmbedder.fail_embed = None
     _FakeRemoteEmbedder.vision = False
+    _FakeRemoteEmbedder.model_dims = {}
     with patch("shrike.embedding.shrike_native") as native:
         native.RemoteEmbedder = _FakeRemoteEmbedder
         yield native
@@ -216,3 +224,79 @@ class TestRemoteImagePath:
         be.native_embedder()
         _, kwargs = _fake_native.NativeEmbedder.from_remote.call_args
         assert kwargs["images"] is False
+
+
+class TestRouterManagedRemoteBackend:
+    """Router-managed remote (#567): N spaces share ONE llama.cpp router, each
+    pinning its own model. The endpoint's /v1/models[0] is NOT this space's
+    model, so dim + fingerprint MUST come from the pinned model — never the
+    shared metadata (a dimension + vector-space collapse otherwise)."""
+
+    def test_two_router_models_with_different_dims_each_get_their_own(self):
+        # The HARD requirement: the index is built at THIS model's width. A
+        # router-managed backend probes its pinned model (the returned vector
+        # length is authoritative), never reads meta.n_embd from the shared
+        # endpoint's data[0]. Two models of different widths on one endpoint
+        # each report their own dim.
+        _FakeRemoteEmbedder.model_dims = {"text-a": 384, "text-b": 768}
+        # A shared-endpoint /v1/models[0] meta that would be WRONG for at least
+        # one space if it were (incorrectly) consulted.
+        _FakeRemoteEmbedder.meta = {"n_embd": 384}
+
+        a = RemoteBackend(endpoint="http://127.0.0.1:8500", model="text-a", router_managed=True)
+        b = RemoteBackend(endpoint="http://127.0.0.1:8500", model="text-b", router_managed=True)
+        a.start()
+        b.start()
+        assert a.embedding_dim() == 384
+        assert b.embedding_dim() == 768  # NOT 384 (the shared meta) — probed
+
+    def test_distinct_fingerprints_from_pinned_names_on_one_endpoint(self):
+        # Two router spaces share an endpoint whose /v1/models[0] meta is
+        # identical for both — the `meta:` recipe would collapse them. Router
+        # spaces pin remote:{pinned_model}, so the fingerprints stay distinct.
+        _FakeRemoteEmbedder.meta = {"n_params": 7, "n_embd": 384, "n_vocab": 1, "size": 9}
+        a = RemoteBackend(endpoint="http://127.0.0.1:8500", model="text-a", router_managed=True)
+        b = RemoteBackend(endpoint="http://127.0.0.1:8500", model="text-b", router_managed=True)
+        a.start()
+        b.start()
+        fp_a = a.model_fingerprint()
+        fp_b = b.model_fingerprint()
+        assert fp_a != fp_b
+        assert fp_a.startswith("remote:text-a")
+        assert fp_b.startswith("remote:text-b")
+        # The shared meta: recipe is NOT used for a router space (it would be
+        # identical across both).
+        assert not fp_a.startswith("meta:")
+
+    def test_router_space_pins_configured_model_not_data0_id(self):
+        # _model_name for a router space is the configured pin, never the shared
+        # endpoint's data[0] id (which names some OTHER served model).
+        _FakeRemoteEmbedder.ident = "some-other-served-model"
+        be = RemoteBackend(endpoint="http://127.0.0.1:8500", model="my-model", router_managed=True)
+        be.start()
+        assert be.health()["model"] == "my-model"
+        # The pinned native client carries the configured model, not data[0].
+        assert _FakeRemoteEmbedder.instances[-1].model == "my-model"
+
+    def test_non_router_remote_still_uses_meta_recipe(self):
+        # Control: a NON-router remote (an attached llama-server) keeps the
+        # meta: fingerprint recipe + meta.n_embd dim — unchanged by #567.
+        _FakeRemoteEmbedder.meta = {"n_params": 7, "n_embd": 512, "n_vocab": 1, "size": 9}
+        be = RemoteBackend(endpoint="http://127.0.0.1:9000", model="attached")
+        be.start()
+        assert be.model_fingerprint().startswith("meta:7:512:1::9")
+        assert be.embedding_dim() == 512  # read from meta, not probed
+
+    def test_runtime_threads_router_managed_through_to_backend(self):
+        # EmbeddingRuntime carries router_managed onto the constructed backend.
+        _FakeRemoteEmbedder.meta = {"n_params": 7, "n_embd": 384, "n_vocab": 1, "size": 9}
+        rt = EmbeddingRuntime(
+            backend="remote",
+            endpoint="http://127.0.0.1:8500",
+            model="r-model",
+            router_managed=True,
+        )
+        be = rt.start()
+        # The fingerprint proves the flag reached the backend (router → pinned
+        # name, not the meta: recipe the shared endpoint would otherwise give).
+        assert be.model_fingerprint().startswith("remote:r-model")
