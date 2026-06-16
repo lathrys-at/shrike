@@ -845,6 +845,31 @@ class TestJinaTextClip:
         image_spaces = [e for e in plan.embedders if "image" in e.modalities]
         assert len(image_spaces) == 1
 
+    def test_mmprojs_on_the_text_only_managed_leg_is_rejected(self):
+        # #609: the managed llama_server's OWN consumer is the jina-text leg
+        # (remote, no endpoint), which is TEXT-ONLY — images ride the off-server
+        # ONNX CLIP leg, not the managed server. So a projector on the managed
+        # server would load onto a text-only server that never embeds an image (a
+        # silent no-op + a needless TEXT rebuild via the fingerprint fold). The
+        # committed profile carries NO mmprojs (structurally pinned by
+        # serve_test.py); this pins the resolve-LAYER guarantee that adding one to
+        # this shape is rejected, not silently accepted. (Contrast jina-omni,
+        # where the managed consumer IS image-capable, so its mmprojs are valid.)
+        config = {
+            "embedders": [
+                {
+                    "modalities": ["text"],
+                    "runtime": "remote",
+                    "model": "jina.gguf",
+                    "pooling": "last",
+                },
+                {"modalities": ["text", "image"], "runtime": "onnx", "model": "~/clip"},
+            ],
+            "managed": {"llama_server": {"manage": "auto", "mmprojs": ["~/v.mmproj"]}},
+        }
+        with pytest.raises(ProfileError, match="does not declare an image modality"):
+            _resolve(config)
+
 
 # ── Multi-space embedding (#233 — the substrate's config half) ────────────────
 
