@@ -108,20 +108,23 @@ EMBEDDINGGEMMA_MODEL_FILES = {
     "tokenizer.json": f"{_EMBEDDINGGEMMA_BASE}/tokenizer.json",
 }
 
-# MobileCLIP2-S0 ONNX (text+image, 512-dim shared space) — the image leg of the
+# MobileCLIP2-S2 ONNX (text+image, 512-dim shared space) — the image leg of the
 # onnx-multispace profile. Spike #568 verified plhery/mobileclip2-onnx rev ba95759a
 # loads through ClipBackend AS-IS (flat text_model.onnx + vision_model.onnx +
-# preprocessor_config.json per size subdir, a repo-root tokenizer.json). S0 is the
-# cheapest size (45 MB vision + 254 MB text). fp32 graphs (batch-cleared). Apple
-# Sample Code License (apple-amlr) on the base weights. Pinned to the spike's exact
-# revision so the bytes never drift.
-MOBILECLIP2_MODEL_DIR_NAME = "mobileclip2-s0-onnx"
+# preprocessor_config.json per size subdir, a repo-root tokenizer.json) for BOTH S0
+# and S2. S2 is the better default for dogfooding: same 254 MB text encoder, a
+# larger/better 143 MB vision encoder (vs S0's 45 MB) — +98 MB buys cleaner
+# cross-modal separation (the spike's grid: cat↔cat +0.2932 S2 vs +0.2657 S0). fp32
+# graphs (batch-cleared). Apple Sample Code License (apple-amlr) on the base weights.
+# Pinned to the spike's exact revision so the bytes never drift. The preprocessor +
+# repo-root tokenizer are shared across sizes (byte-identical to S0).
+MOBILECLIP2_MODEL_DIR_NAME = "mobileclip2-s2-onnx"
 _MOBILECLIP2_REV = "ba95759a5bdbaca53e9111e2550a76ec09c8fd9e"
 _MOBILECLIP2_BASE = f"https://huggingface.co/plhery/mobileclip2-onnx/resolve/{_MOBILECLIP2_REV}"
 MOBILECLIP2_MODEL_FILES = {
-    "text_model.onnx": f"{_MOBILECLIP2_BASE}/onnx/s0/text_model.onnx",
-    "vision_model.onnx": f"{_MOBILECLIP2_BASE}/onnx/s0/vision_model.onnx",
-    "preprocessor_config.json": f"{_MOBILECLIP2_BASE}/onnx/s0/preprocessor_config.json",
+    "text_model.onnx": f"{_MOBILECLIP2_BASE}/onnx/s2/text_model.onnx",
+    "vision_model.onnx": f"{_MOBILECLIP2_BASE}/onnx/s2/vision_model.onnx",
+    "preprocessor_config.json": f"{_MOBILECLIP2_BASE}/onnx/s2/preprocessor_config.json",
     "tokenizer.json": f"{_MOBILECLIP2_BASE}/tokenizer.json",
 }
 
@@ -290,10 +293,10 @@ def cached_embeddinggemma_model_dir(fallback_dir: Path) -> Path:
 
 
 def cached_mobileclip2_model_dir(fallback_dir: Path) -> Path:
-    """The MobileCLIP2-S0 ONNX dir (text+image, 512-dim shared space; ClipBackend).
+    """The MobileCLIP2-S2 ONNX dir (text+image, 512-dim shared space; ClipBackend).
 
     Flat text_model.onnx + vision_model.onnx + preprocessor_config.json + tokenizer.json
-    (the layout spike #568 verified loads through ClipBackend as-is). ~301 MB."""
+    (the layout spike #568 verified loads through ClipBackend as-is). ~399 MB."""
     return _cached_model_dir(fallback_dir, MOBILECLIP2_MODEL_DIR_NAME, MOBILECLIP2_MODEL_FILES)
 
 

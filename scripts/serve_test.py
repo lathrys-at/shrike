@@ -47,7 +47,7 @@ def test_load_onnx_multispace_profile_is_path_free() -> None:
     image = embedders[1]
     assert image["runtime"] == "onnx"
     assert image["modalities"] == ["text", "image"]
-    assert image["model"] == "mobileclip2-s0-onnx"
+    assert image["model"] == "mobileclip2-s2-onnx"
     assert not Path(image["model"]).is_absolute()
     # Exactly one entry declares the image modality (the #580 single-image-space rule).
     image_entries = [e for e in embedders if "image" in e["modalities"]]
@@ -58,7 +58,7 @@ def test_onnx_multispace_model_names_both_legs() -> None:
     profile = serve.load_profile("onnx-multispace")
     assert serve._model_names_in_profile(profile) == [
         "embeddinggemma-300m-onnx-int8",
-        "mobileclip2-s0-onnx",
+        "mobileclip2-s2-onnx",
     ]
 
 
@@ -225,7 +225,7 @@ def test_materialize_absolute_model_name_points_at_path_free(
 
 def test_model_sources_covers_onnx_multispace_models() -> None:
     sources = serve._model_sources()
-    for name in ("embeddinggemma-300m-onnx-int8", "mobileclip2-s0-onnx"):
+    for name in ("embeddinggemma-300m-onnx-int8", "mobileclip2-s2-onnx"):
         assert name in sources, f"{name} missing from _model_sources()"
         spec = sources[name]
         assert spec["bazel"], f"{name} has no bazel runfiles map"
@@ -258,7 +258,7 @@ def test_embeddinggemma_external_data_is_registered() -> None:
 def test_mobileclip2_clip_layout_is_registered() -> None:
     # ClipBackend needs text + vision graphs + tokenizer + preprocessor flat in one
     # dir (spike #568's verified layout).
-    spec = serve._model_sources()["mobileclip2-s0-onnx"]
+    spec = serve._model_sources()["mobileclip2-s2-onnx"]
     dest_names = set(spec["bazel"].values())
     assert {
         "text_model.onnx",

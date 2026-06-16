@@ -109,7 +109,7 @@ def _model_sources() -> dict[str, dict[str, Any]]:
             },
             "fetch": mc.cached_embeddinggemma_model_dir,
         },
-        # MobileCLIP2-S0 image leg: text + vision graphs + preprocessor + tokenizer
+        # MobileCLIP2-S2 image leg: text + vision graphs + preprocessor + tokenizer
         # (the flat ClipBackend layout spike #568 verified loads as-is).
         mc.MOBILECLIP2_MODEL_DIR_NAME: {
             "bazel": {

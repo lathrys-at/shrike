@@ -59,7 +59,7 @@ py_binary(
         "@model_embeddinggemma_int8_onnx//file",
         "@model_embeddinggemma_int8_onnx_data//file",
         "@model_embeddinggemma_tokenizer//file",
-        # MobileCLIP2-S0: text + vision graphs + preprocessor + tokenizer (4 files).
+        # MobileCLIP2-S2: text + vision graphs + preprocessor + tokenizer (4 files).
         "@model_mobileclip2_text_onnx//file",
         "@model_mobileclip2_vision_onnx//file",
         "@model_mobileclip2_preprocessor//file",

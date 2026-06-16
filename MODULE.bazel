@@ -296,30 +296,33 @@ http_file(
     urls = ["https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/resolve/main/tokenizer.json"],
 )
 
-# MobileCLIP2-S0 ONNX (text+image, 512-dim) — the onnx-multispace image leg. Spike
+# MobileCLIP2-S2 ONNX (text+image, 512-dim) — the onnx-multispace image leg. Spike
 # #568 verified plhery/mobileclip2-onnx @ ba95759a loads through ClipBackend as-is
 # (flat text_model.onnx + vision_model.onnx + per-size preprocessor_config.json + a
-# repo-root tokenizer.json). Pinned to the spike's exact revision. tokenizer.json +
-# preprocessor_config.json are git-stored (non-LFS) → byte sha256.
+# repo-root tokenizer.json) for both S0 and S2. S2 is the better dogfooding default:
+# same text encoder, a larger/better vision graph (143 MB vs S0's 45 MB) for cleaner
+# cross-modal separation. Pinned to the spike's exact revision. tokenizer.json +
+# preprocessor_config.json are git-stored (non-LFS) → byte sha256 (shared across
+# sizes — byte-identical to S0).
 http_file(
     name = "model_mobileclip2_text_onnx",
     downloaded_file_path = "text_model.onnx",
-    sha256 = "df590d47744f2ee9f3ccb67c4414d17419568c05bca0c4d166f2faeedf8b92f3",
-    urls = ["https://huggingface.co/plhery/mobileclip2-onnx/resolve/ba95759a5bdbaca53e9111e2550a76ec09c8fd9e/onnx/s0/text_model.onnx"],
+    sha256 = "622f10372bca71b5017f2efc5f8c2886610a2592b636de8984d717f03213f031",
+    urls = ["https://huggingface.co/plhery/mobileclip2-onnx/resolve/ba95759a5bdbaca53e9111e2550a76ec09c8fd9e/onnx/s2/text_model.onnx"],
 )
 
 http_file(
     name = "model_mobileclip2_vision_onnx",
     downloaded_file_path = "vision_model.onnx",
-    sha256 = "13d20ebfa8a8f63890eb2727fe4dc63009ff970f43e0f7d9d2ed999659f70c8a",
-    urls = ["https://huggingface.co/plhery/mobileclip2-onnx/resolve/ba95759a5bdbaca53e9111e2550a76ec09c8fd9e/onnx/s0/vision_model.onnx"],
+    sha256 = "a841f72c5a5085748bbe271a1d5718aba877822a15cba865bdbd0d37036b849e",
+    urls = ["https://huggingface.co/plhery/mobileclip2-onnx/resolve/ba95759a5bdbaca53e9111e2550a76ec09c8fd9e/onnx/s2/vision_model.onnx"],
 )
 
 http_file(
     name = "model_mobileclip2_preprocessor",
     downloaded_file_path = "preprocessor_config.json",
     sha256 = "8c1c02280bd0edb8257c70c475e1cf06d936f5ff3a37bc13d1e9db9674356803",
-    urls = ["https://huggingface.co/plhery/mobileclip2-onnx/resolve/ba95759a5bdbaca53e9111e2550a76ec09c8fd9e/onnx/s0/preprocessor_config.json"],
+    urls = ["https://huggingface.co/plhery/mobileclip2-onnx/resolve/ba95759a5bdbaca53e9111e2550a76ec09c8fd9e/onnx/s2/preprocessor_config.json"],
 )
 
 http_file(
