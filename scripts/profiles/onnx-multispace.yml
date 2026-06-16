@@ -1,0 +1,37 @@
+# onnx-multispace — the pure-ONNX multi-space dogfooding profile (#667/#565 (c)).
+#
+# Two in-process ONNX embedding spaces, no subprocess, no port, no llama-server:
+#   - embeddinggemma-300m (TEXT, 768-dim, mean pooling) — the primary text space.
+#   - MobileCLIP2-S0      (TEXT + IMAGE, 512-dim shared space) — the image leg, so
+#     a text query retrieves a card by the content of its image (the CLIP path;
+#     spike #568 verified this export loads through ClipBackend as-is).
+#
+# Exactly ONE image-embedding space (#580): MobileCLIP2 is the single image leg;
+# embeddinggemma is text-only. resolve_profile enforces the one-image-space rule.
+# Both spaces feed search as distinct per-modality RRF signals (the CLIP modality
+# gap is invisible to the rank-based combiner; the image leg joins on its activation
+# floor). Cross-space text↔image search lights up with #234.
+#
+# PATH-FREE (the hard invariant): no collection:, no machine-absolute paths. Each
+# embedder's model: is a bare DIR-NAME (model_cache's *_DIR_NAME); the launcher
+# materializes it from the Bazel external (or model_cache fetch) and rewrites
+# model: to its absolute path before the server reads the config. Run paths
+# (collection / cache / logs) ride as flags, not config. Providers are detected by
+# the launcher per host (#569) — none declared here.
+#
+# embeddinggemma ships ONLY a quantized graph + EXTERNAL weight data
+# (model_quantized.onnx + model_quantized.onnx_data): OnnxBackend's variant-suffix
+# resolver finds the quant graph, and onnxruntime loads the external data from the
+# materialized dir. int8 → batch-variant → the startup probe embeds it serially.
+
+embedders:
+  # The primary text space.
+  - modalities: [text]
+    runtime: onnx
+    model: embeddinggemma-300m-onnx-int8
+    pooling: mean
+  # The image leg (text + image into one shared space). No pooling — a CLIP
+  # dual-encoder emits a pre-pooled, projected vector.
+  - modalities: [text, image]
+    runtime: onnx
+    model: mobileclip2-s0-onnx

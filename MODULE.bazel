@@ -261,6 +261,100 @@ http_file(
     urls = ["https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-Q4_K_M.gguf"],
 )
 
+# ── Wave-2 offline-integration profile models (#667, epic #565) ──────────────
+# Back the pure-ONNX multi-space profile (embeddinggemma text + MobileCLIP2 image)
+# and the stacked jina-text-clip profile. Materialized by //scripts:serve from
+# runfiles (its `data` deps below) under `bazel run`. Lazily fetched, NOT pulled by
+# the per-PR test lane (only :serve data-deps them and :serve is `manual`). shas are
+# HuggingFace LFS oids, or the byte sha256 for a git-stored (non-LFS) file. Mirrored
+# in tests/integration/model_cache.py (the script-fallback fetch source) and
+# scripts/serve.py's _model_sources() table — keep all three in sync.
+
+# EmbeddingGemma-300m ONNX (text, 768-dim) — the onnx-multispace text leg. The
+# export ships ONLY quantized graphs as a tiny graph stub + an EXTERNAL weight-data
+# file: BOTH must materialize (the graph references model_quantized.onnx_data by
+# that exact name; onnxruntime loads it relative to the graph dir). OnnxBackend's
+# variant-suffix resolver finds model_quantized.onnx with no rename.
+http_file(
+    name = "model_embeddinggemma_int8_onnx",
+    downloaded_file_path = "model_quantized.onnx",
+    sha256 = "172efde319fe1542dc41f31be6154910b05b78f7a861c265c4600eec906bd6d8",
+    urls = ["https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/resolve/main/onnx/model_quantized.onnx"],
+)
+
+http_file(
+    name = "model_embeddinggemma_int8_onnx_data",
+    downloaded_file_path = "model_quantized.onnx_data",
+    sha256 = "705626e28e4c23c82ade34566b4197d97f534c12275fa406dfb71e9937d388c0",
+    urls = ["https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/resolve/main/onnx/model_quantized.onnx_data"],
+)
+
+http_file(
+    name = "model_embeddinggemma_tokenizer",
+    downloaded_file_path = "tokenizer.json",
+    sha256 = "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47",
+    urls = ["https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/resolve/main/tokenizer.json"],
+)
+
+# MobileCLIP2-S0 ONNX (text+image, 512-dim) — the onnx-multispace image leg. Spike
+# #568 verified plhery/mobileclip2-onnx @ ba95759a loads through ClipBackend as-is
+# (flat text_model.onnx + vision_model.onnx + per-size preprocessor_config.json + a
+# repo-root tokenizer.json). Pinned to the spike's exact revision. tokenizer.json +
+# preprocessor_config.json are git-stored (non-LFS) → byte sha256.
+http_file(
+    name = "model_mobileclip2_text_onnx",
+    downloaded_file_path = "text_model.onnx",
+    sha256 = "df590d47744f2ee9f3ccb67c4414d17419568c05bca0c4d166f2faeedf8b92f3",
+    urls = ["https://huggingface.co/plhery/mobileclip2-onnx/resolve/ba95759a5bdbaca53e9111e2550a76ec09c8fd9e/onnx/s0/text_model.onnx"],
+)
+
+http_file(
+    name = "model_mobileclip2_vision_onnx",
+    downloaded_file_path = "vision_model.onnx",
+    sha256 = "13d20ebfa8a8f63890eb2727fe4dc63009ff970f43e0f7d9d2ed999659f70c8a",
+    urls = ["https://huggingface.co/plhery/mobileclip2-onnx/resolve/ba95759a5bdbaca53e9111e2550a76ec09c8fd9e/onnx/s0/vision_model.onnx"],
+)
+
+http_file(
+    name = "model_mobileclip2_preprocessor",
+    downloaded_file_path = "preprocessor_config.json",
+    sha256 = "8c1c02280bd0edb8257c70c475e1cf06d936f5ff3a37bc13d1e9db9674356803",
+    urls = ["https://huggingface.co/plhery/mobileclip2-onnx/resolve/ba95759a5bdbaca53e9111e2550a76ec09c8fd9e/onnx/s0/preprocessor_config.json"],
+)
+
+http_file(
+    name = "model_mobileclip2_tokenizer",
+    downloaded_file_path = "tokenizer.json",
+    sha256 = "b556ac8c99757ffb677208af34bc8c6721572114111a6e0aaf5fa69ff0b8d842",
+    urls = ["https://huggingface.co/plhery/mobileclip2-onnx/resolve/ba95759a5bdbaca53e9111e2550a76ec09c8fd9e/tokenizer.json"],
+)
+
+# jina-clip-v2 ONNX — registered for the STACKED jina-text-clip stream. The
+# published export is a SINGLE FUSED model.onnx (text+image on every call), NOT the
+# split text_model/vision_model graphs ClipBackend wants, so it is not a ClipBackend
+# drop-in as-published (see model_cache.py for the caveat). tokenizer.json is LFS;
+# preprocessor_config.json is git-stored → byte sha256.
+http_file(
+    name = "model_jina_clip_v2_int8_onnx",
+    downloaded_file_path = "model_quantized.onnx",
+    sha256 = "65c6423fc82eecffb7f7f813730c6a6f0d28e2dc908e414250733b1416ed30bf",
+    urls = ["https://huggingface.co/jinaai/jina-clip-v2/resolve/main/onnx/model_quantized.onnx"],
+)
+
+http_file(
+    name = "model_jina_clip_v2_tokenizer",
+    downloaded_file_path = "tokenizer.json",
+    sha256 = "6601c4120779a1a3863897ba332fe3481d548e363bec2c91eba10ef8640a5e93",
+    urls = ["https://huggingface.co/jinaai/jina-clip-v2/resolve/main/tokenizer.json"],
+)
+
+http_file(
+    name = "model_jina_clip_v2_preprocessor",
+    downloaded_file_path = "preprocessor_config.json",
+    sha256 = "920bc482e3dad0de2bffe4e534181a1f61a4a6baefa1aee53b75849557786301",
+    urls = ["https://huggingface.co/jinaai/jina-clip-v2/resolve/main/preprocessor_config.json"],
+)
+
 
 # The pinned llama-server binary (+ its shared libs, flat beside it) as a per-platform
 # http_archive — tag + shas from scripts/llama-server.lock. The conftest puts the

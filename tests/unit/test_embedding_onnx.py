@@ -160,6 +160,44 @@ class TestResolveFiles:
         with pytest.raises(FileNotFoundError):
             OnnxBackend(model=str(tmp_path / "nope"))._resolve_files()
 
+    def test_resolves_quantized_variant_when_no_plain_model(self, tmp_path: Path) -> None:
+        # A quant-only export (#667): only model_quantized.onnx present, no plain
+        # model.onnx — the variant-suffix resolver finds it (no fetch-time rename).
+        (tmp_path / "model_quantized.onnx").write_bytes(b"x")
+        (tmp_path / "tokenizer.json").write_text("{}")
+        onnx_path, tok_path = OnnxBackend(model=str(tmp_path))._resolve_files()
+        assert onnx_path.name == "model_quantized.onnx"
+        assert tok_path.name == "tokenizer.json"
+
+    def test_plain_model_wins_over_variant(self, tmp_path: Path) -> None:
+        # Full precision is preferred: model.onnx (the "" suffix, tried first) wins
+        # over a quantized sibling. So the renamed-to-model.onnx fixtures are unchanged.
+        (tmp_path / "model.onnx").write_bytes(b"x")
+        (tmp_path / "model_quantized.onnx").write_bytes(b"x")
+        (tmp_path / "tokenizer.json").write_text("{}")
+        onnx_path, _ = OnnxBackend(model=str(tmp_path))._resolve_files()
+        assert onnx_path.name == "model.onnx"
+
+    def test_resolves_variant_under_onnx_subdir(self, tmp_path: Path) -> None:
+        (tmp_path / "onnx").mkdir()
+        (tmp_path / "onnx" / "model_fp16.onnx").write_bytes(b"x")
+        (tmp_path / "onnx" / "tokenizer.json").write_text("{}")
+        onnx_path, _ = OnnxBackend(model=str(tmp_path))._resolve_files()
+        assert onnx_path.name == "model_fp16.onnx"
+        assert onnx_path.parent.name == "onnx"
+
+    def test_external_data_companion_is_left_on_disk(self, tmp_path: Path) -> None:
+        # The external-data invariant (#667): _resolve_files returns the .onnx graph;
+        # the sibling .onnx_data is NOT named in code (onnxruntime loads it relative
+        # to the graph dir). The resolver must not trip over the extra file.
+        (tmp_path / "model_quantized.onnx").write_bytes(b"x")
+        (tmp_path / "model_quantized.onnx_data").write_bytes(b"weights")
+        (tmp_path / "tokenizer.json").write_text("{}")
+        onnx_path, _ = OnnxBackend(model=str(tmp_path))._resolve_files()
+        assert onnx_path.name == "model_quantized.onnx"
+        # The companion is co-located (what makes onnxruntime's external-data load work).
+        assert (onnx_path.parent / "model_quantized.onnx_data").is_file()
+
 
 # -- Fingerprint --------------------------------------------------------------
 

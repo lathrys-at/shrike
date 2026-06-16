@@ -51,6 +51,23 @@ py_binary(
         # externals here (and a row to serve.py's model-source table) to wire it.
         "@model_minilm_int8_onnx//file",
         "@model_minilm_tokenizer//file",
+        # Wave-2 profile models (#667): the onnx-multispace legs (embeddinggemma
+        # text + MobileCLIP2 image) + jina-clip-v2 (for the stacked stream). Each
+        # file here MUST have a matching row in serve.py's _model_sources() table,
+        # or materialize_model fails loud (a missing runfile = a forgotten dep).
+        # embeddinggemma: graph stub + its EXTERNAL .onnx_data + tokenizer (3 files).
+        "@model_embeddinggemma_int8_onnx//file",
+        "@model_embeddinggemma_int8_onnx_data//file",
+        "@model_embeddinggemma_tokenizer//file",
+        # MobileCLIP2-S0: text + vision graphs + preprocessor + tokenizer (4 files).
+        "@model_mobileclip2_text_onnx//file",
+        "@model_mobileclip2_vision_onnx//file",
+        "@model_mobileclip2_preprocessor//file",
+        "@model_mobileclip2_tokenizer//file",
+        # jina-clip-v2: combined graph + tokenizer + preprocessor (3 files).
+        "@model_jina_clip_v2_int8_onnx//file",
+        "@model_jina_clip_v2_tokenizer//file",
+        "@model_jina_clip_v2_preprocessor//file",
     ],
     deps = [
         ":serve_lib",

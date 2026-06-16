@@ -30,6 +30,38 @@ def test_load_text_onnx_profile_is_path_free() -> None:
     assert not Path(entry["model"]).is_absolute()
 
 
+def test_load_onnx_multispace_profile_is_path_free() -> None:
+    # The pure-ONNX multi-space profile (#667): embeddinggemma text + MobileCLIP2
+    # image, both onnx, path-free, distinct image leg.
+    profile = serve.load_profile("onnx-multispace")
+    assert "collection" not in profile
+    embedders = profile["embedders"]
+    assert len(embedders) == 2
+    # The text leg.
+    text = embedders[0]
+    assert text["runtime"] == "onnx"
+    assert text["modalities"] == ["text"]
+    assert text["model"] == "embeddinggemma-300m-onnx-int8"
+    assert not Path(text["model"]).is_absolute()
+    # The image leg (text + image into one shared space; one image space, #580).
+    image = embedders[1]
+    assert image["runtime"] == "onnx"
+    assert image["modalities"] == ["text", "image"]
+    assert image["model"] == "mobileclip2-s0-onnx"
+    assert not Path(image["model"]).is_absolute()
+    # Exactly one entry declares the image modality (the #580 single-image-space rule).
+    image_entries = [e for e in embedders if "image" in e["modalities"]]
+    assert len(image_entries) == 1
+
+
+def test_onnx_multispace_model_names_both_legs() -> None:
+    profile = serve.load_profile("onnx-multispace")
+    assert serve._model_names_in_profile(profile) == [
+        "embeddinggemma-300m-onnx-int8",
+        "mobileclip2-s0-onnx",
+    ]
+
+
 def test_unknown_profile_errors_with_available_list() -> None:
     with pytest.raises(SystemExit) as exc:
         serve.load_profile("does-not-exist")
@@ -181,6 +213,59 @@ def test_materialize_absolute_model_name_points_at_path_free(
     monkeypatch.setattr(serve, "_model_sources", lambda: {})
     with pytest.raises(SystemExit, match="path-free"):
         serve.materialize_model("/abs/models/minilm", tmp_path)
+
+
+# -- the Wave-2 model-source registrations (#667) ------------------------------
+#
+# These exercise the real _model_sources() table (imports model_cache) — a
+# registration regression guard: every profile model dir-name must resolve, name a
+# matching @model_* runfiles set, and carry a fetch fn. No download (the fetch fns
+# are referenced, never called).
+
+
+def test_model_sources_covers_onnx_multispace_models() -> None:
+    sources = serve._model_sources()
+    for name in ("embeddinggemma-300m-onnx-int8", "mobileclip2-s0-onnx"):
+        assert name in sources, f"{name} missing from _model_sources()"
+        spec = sources[name]
+        assert spec["bazel"], f"{name} has no bazel runfiles map"
+        assert callable(spec["fetch"]), f"{name} has no fetch fn"
+
+
+def test_model_sources_registers_jina_clip_v2_for_stacked_stream() -> None:
+    # jina-clip-v2 is registered HERE (this stream owns the registration surface)
+    # so the stacked jina-text-clip stream doesn't touch the shared files.
+    sources = serve._model_sources()
+    assert "jina-clip-v2-onnx-int8" in sources
+    assert callable(sources["jina-clip-v2-onnx-int8"]["fetch"])
+
+
+def test_embeddinggemma_external_data_is_registered() -> None:
+    # The external-data landmine: the graph stub AND its .onnx_data companion must
+    # both be in the runfiles map (or the graph won't load). Both materialize into
+    # the SAME dir under their exact names (onnxruntime resolves .onnx_data by name
+    # relative to the graph dir).
+    spec = serve._model_sources()["embeddinggemma-300m-onnx-int8"]
+    dest_names = set(spec["bazel"].values())
+    assert "model_quantized.onnx" in dest_names
+    assert "model_quantized.onnx_data" in dest_names
+    assert "tokenizer.json" in dest_names
+    # The .onnx_data dest name is exact (the graph references it by that name).
+    data_srcs = [s for s, d in spec["bazel"].items() if d == "model_quantized.onnx_data"]
+    assert data_srcs and data_srcs[0].endswith("/model_quantized.onnx_data")
+
+
+def test_mobileclip2_clip_layout_is_registered() -> None:
+    # ClipBackend needs text + vision graphs + tokenizer + preprocessor flat in one
+    # dir (spike #568's verified layout).
+    spec = serve._model_sources()["mobileclip2-s0-onnx"]
+    dest_names = set(spec["bazel"].values())
+    assert {
+        "text_model.onnx",
+        "vision_model.onnx",
+        "preprocessor_config.json",
+        "tokenizer.json",
+    } <= dest_names
 
 
 # -- effective-config composition ----------------------------------------------

@@ -91,6 +91,49 @@ def _model_sources() -> dict[str, dict[str, Any]]:
             },
             "fetch": mc.cached_onnx_model_dir,
         },
+        # Wave-2 profile models (#667). Each model's bazel map MUST name every file
+        # the backend's _resolve_files needs, and a matching @model_* data dep MUST
+        # be in //scripts:serve's `data` (else materialize_model fails loud).
+        # embeddinggemma text leg: graph stub + its EXTERNAL weight data + tokenizer.
+        # The .onnx_data MUST land beside the graph under its exact name — onnxruntime
+        # loads it relative to the graph file's dir (the external-data invariant).
+        mc.EMBEDDINGGEMMA_MODEL_DIR_NAME: {
+            "bazel": {
+                "model_embeddinggemma_int8_onnx/file/model_quantized.onnx": (
+                    "model_quantized.onnx"
+                ),
+                "model_embeddinggemma_int8_onnx_data/file/model_quantized.onnx_data": (
+                    "model_quantized.onnx_data"
+                ),
+                "model_embeddinggemma_tokenizer/file/tokenizer.json": "tokenizer.json",
+            },
+            "fetch": mc.cached_embeddinggemma_model_dir,
+        },
+        # MobileCLIP2-S0 image leg: text + vision graphs + preprocessor + tokenizer
+        # (the flat ClipBackend layout spike #568 verified loads as-is).
+        mc.MOBILECLIP2_MODEL_DIR_NAME: {
+            "bazel": {
+                "model_mobileclip2_text_onnx/file/text_model.onnx": "text_model.onnx",
+                "model_mobileclip2_vision_onnx/file/vision_model.onnx": "vision_model.onnx",
+                "model_mobileclip2_preprocessor/file/preprocessor_config.json": (
+                    "preprocessor_config.json"
+                ),
+                "model_mobileclip2_tokenizer/file/tokenizer.json": "tokenizer.json",
+            },
+            "fetch": mc.cached_mobileclip2_model_dir,
+        },
+        # jina-clip-v2 (combined graph) — registered for the stacked jina-text-clip
+        # stream; not consumed by onnx-multispace (see model_cache.py caveat).
+        mc.JINA_CLIP_V2_MODEL_DIR_NAME: {
+            "bazel": {
+                "model_jina_clip_v2_int8_onnx/file/model_quantized.onnx": ("model_quantized.onnx"),
+                "model_jina_clip_v2_tokenizer/file/tokenizer.json": "tokenizer.json",
+                "model_jina_clip_v2_preprocessor/file/preprocessor_config.json": (
+                    "preprocessor_config.json"
+                ),
+            },
+            "fetch": mc.cached_jina_clip_v2_model_dir,
+        },
     }
 
 
