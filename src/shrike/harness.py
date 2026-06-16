@@ -995,8 +995,10 @@ class Harness:
             await asyncio.to_thread(rt.stop)
         # Stop the shared router too (#567): `embedding stop` frees GPU/RAM, and
         # the router process is the resource the remote spaces held. start_
-        # embedding re-spawns it (idempotent) on the next cycle.
-        if self._shared_llama_manager is not None:
+        # embedding re-spawns it (idempotent) on the next cycle. Owner-only
+        # (mirrors close()): a routed (#68) harness never owns the runtime, so it
+        # must not kill the shared router out from under the owner + siblings.
+        if self.owns_runtime and self._shared_llama_manager is not None:
             await asyncio.to_thread(self._shared_llama_manager.stop)
         return {"status": "stopped", "index": self._index_status()}
 

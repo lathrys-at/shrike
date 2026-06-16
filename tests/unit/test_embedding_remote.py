@@ -300,3 +300,32 @@ class TestRouterManagedRemoteBackend:
         # The fingerprint proves the flag reached the backend (router → pinned
         # name, not the meta: recipe the shared endpoint would otherwise give).
         assert be.model_fingerprint().startswith("remote:r-model")
+
+    def test_router_wide_pooling_folds_into_the_fingerprint(self):
+        # The router-wide pooling is vector-affecting, so it must fold into the
+        # fingerprint — a pooling change rebuilds the space. Two backends on the
+        # same pinned model but different pooling get DIFFERENT fingerprints.
+        a = RemoteBackend(
+            endpoint="http://127.0.0.1:8500", model="m", router_managed=True, pooling="last"
+        )
+        b = RemoteBackend(
+            endpoint="http://127.0.0.1:8500", model="m", router_managed=True, pooling="mean"
+        )
+        a.start()
+        b.start()
+        assert a.model_fingerprint() != b.model_fingerprint()
+        assert ":pool=last" in a.model_fingerprint()
+        assert ":pool=mean" in b.model_fingerprint()
+
+    def test_runtime_threads_router_pooling_to_the_backend(self):
+        # EmbeddingRuntime(pooling=...) reaches a router-managed RemoteBackend's
+        # fingerprint (the server passes the router-wide pooling here).
+        rt = EmbeddingRuntime(
+            backend="remote",
+            endpoint="http://127.0.0.1:8500",
+            model="r-model",
+            router_managed=True,
+            pooling="last",
+        )
+        be = rt.start()
+        assert ":pool=last" in be.model_fingerprint()

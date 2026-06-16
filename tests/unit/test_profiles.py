@@ -921,6 +921,47 @@ class TestRouterMode:
         # models_max unset → None in the sub-map (server default).
         assert params["router"]["models_max"] is None
 
+    def test_router_wide_pooling_threads_to_consumers_and_spawn(self):
+        # A router applies ONE --pooling across every model (last-token models
+        # like Jina v5 need it). managed.llama_server.pooling is the router-wide
+        # setting: it threads onto each consumer (folds into its fingerprint)
+        # AND onto the shared spawn's router sub-map (the --pooling launch flag).
+        config = {
+            "embedders": [
+                {"modalities": ["text"], "runtime": "remote", "model": "a.gguf"},
+                {"modalities": ["text"], "runtime": "remote", "model": "b.gguf"},
+            ],
+            "managed": {
+                "llama_server": {"models_dir": "/models/router", "port": 8500, "pooling": "last"}
+            },
+        }
+        dicts = plan_to_runtime_params_set(_resolve(config))
+        assert [d["pooling"] for d in dicts] == ["last", "last"]
+        assert all(d["router"]["pooling"] == "last" for d in dicts)
+
+    def test_per_entry_pooling_on_a_router_consumer_is_rejected(self):
+        # A router applies ONE pooling to every model, so a per-entry pooling is
+        # unexpressible per-model — a silent no-op, which is rejected. The fix is
+        # the router-wide managed.llama_server.pooling.
+        config = {
+            "embedders": [
+                {"modalities": ["text"], "runtime": "remote", "model": "a.gguf", "pooling": "last"},
+            ],
+            "managed": {"llama_server": {"models_dir": "/models/router"}},
+        }
+        with pytest.raises(ProfileError, match="cannot be set on a router consumer"):
+            _resolve(config)
+
+    def test_managed_pooling_without_models_dir_is_rejected(self):
+        # The router-wide pooling is router-only; in single-model mode pooling
+        # rides the consuming entry. Set without models_dir → a named error.
+        config = {
+            "embedders": [{"modalities": ["text"], "runtime": "remote", "model": "a.gguf"}],
+            "managed": {"llama_server": {"pooling": "last"}},
+        }
+        with pytest.raises(ProfileError, match="router-wide setting"):
+            _resolve(config)
+
     def test_n1_single_managed_is_byte_unchanged_no_router(self):
         # BOUNDARY #1: a single managed-server config (no models_dir) still maps
         # to exactly ONE `llama` backend with NO router sub-map — today's

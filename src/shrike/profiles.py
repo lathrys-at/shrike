@@ -118,6 +118,13 @@ class ManagedLlama:
     # Router `--models-max`: the max models loaded simultaneously (LRU-evicts
     # beyond it); None = the server default. Router-only.
     models_max: int | None = None
+    # Router-wide `--pooling` (#567): a router applies ONE pooling type across
+    # every model it serves, so pooling is a router-scoped setting here, not a
+    # per-entry one (a single consumer's pooling is unexpressible per-model on a
+    # router). Required when the router serves last-token models (Jina v5,
+    # Qwen3-Embedding), whose pooling isn't in the GGUF metadata. Vector-
+    # affecting → folds into each consumer's fingerprint. Router-only.
+    pooling: str | None = None
 
 
 @dataclass(frozen=True)
@@ -374,6 +381,7 @@ def _parse_managed(raw: Any) -> tuple[ManagedLlama | None, ManagedSync | None]:
                 "mmprojs",
                 "models_dir",
                 "models_max",
+                "pooling",
             ),
             where,
         )
@@ -399,6 +407,7 @@ def _parse_managed(raw: Any) -> tuple[ManagedLlama | None, ManagedSync | None]:
             mmprojs=tuple(str(m) for m in mmprojs_raw),
             models_dir=_opt_str(lraw, "models_dir", where),
             models_max=_opt_int(lraw, "models_max", where),
+            pooling=_opt_str(lraw, "pooling", where),
         )
 
     sync = None
@@ -618,6 +627,16 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
                     "(managed llama_server, manage: auto) — an external endpoint or an "
                     "attached server owns its own pooling"
                 )
+            if llama.models_dir is not None:
+                # Router mode applies ONE --pooling across every served model, so
+                # a per-entry pooling is unexpressible per-model — declaring it
+                # on a consumer would be a silent no-op (the same cross-talk
+                # rule). The router-wide setting is managed.llama_server.pooling.
+                raise ProfileError(
+                    f"embedders[{index}].pooling cannot be set on a router consumer "
+                    "(managed.llama_server.models_dir) — a router applies ONE pooling type "
+                    "to every model it serves; set managed.llama_server.pooling instead"
+                )
 
     # The managed llama-server backs the remote/no-endpoint entries that consume
     # it. In SINGLE-model mode (managed.llama_server.models_dir unset) exactly
@@ -670,6 +689,14 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
         raise ProfileError(
             "managed.llama_server.models_max is a router knob (the max models loaded at once) — "
             "set models_dir to enable router mode, or drop models_max"
+        )
+    if llama_for_router.pooling is not None and not router_mode:
+        # In single-model mode pooling rides the consuming entry's own `pooling`
+        # (the existing path); the router-wide setting only applies to a router.
+        raise ProfileError(
+            "managed.llama_server.pooling is a router-wide setting (one pooling type across "
+            "every served model) — set models_dir to enable router mode, or move pooling onto "
+            "the embedders: entry for a single-model managed server"
         )
 
     # At most ONE IMAGE-embedding space (#580). Cross-space fusion admits a
@@ -875,6 +902,10 @@ def _entry_to_runtime_params(
                 "api_key_env": None,
                 "batch_size": e.batch_size,
                 "modalities": modalities,
+                # The router-wide pooling (#567) is vector-affecting and shared
+                # across consumers; carried per-consumer so it folds into each
+                # space's fingerprint (a pooling change must rebuild every space).
+                "pooling": llama.pooling,
                 "router": {
                     "models_dir": llama.models_dir,
                     "models_max": llama.models_max,
@@ -884,6 +915,7 @@ def _entry_to_runtime_params(
                     "context_size": llama.context_size,
                     "threads": llama.threads,
                     "gpu_layers": llama.gpu_layers,
+                    "pooling": llama.pooling,
                 },
             }
         if e.endpoint is not None or llama.manage == "attach":

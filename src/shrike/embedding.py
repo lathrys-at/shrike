@@ -411,6 +411,7 @@ class RemoteBackend:
         batch_size: int | None = None,
         modalities: frozenset[str] = frozenset({TEXT}),
         router_managed: bool = False,
+        pooling: str | None = None,
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._model = model
@@ -425,6 +426,12 @@ class RemoteBackend:
         # router-managed remote therefore REQUIRES an explicit model (the
         # routing key), which profiles.py guarantees.
         self._router_managed = router_managed
+        # The router-wide pooling (#567): vector-affecting, so it folds into the
+        # router fingerprint (`remote:{model}:pool={pooling}`) — a pooling change
+        # rebuilds every router space. Only meaningful for a router-managed
+        # remote (the router launches with --pooling); None for any other remote
+        # (an endpoint/attached server owns its own pooling, rejected upstream).
+        self._pooling = pooling
         self._safe_batch = 1
         self._model_name: str | None = None
         self._remote: Any = None
@@ -564,7 +571,10 @@ class RemoteBackend:
         unconditionally: the shared router's ``/v1/models[0]`` lists MANY models
         and is not this space's, so the ``meta:`` recipe would be IDENTICAL
         across every space sharing the router — collapsing their distinct vector
-        spaces. The pinned model name is the per-space discriminator.
+        spaces. The pinned model name is the per-space discriminator, and the
+        router-wide pooling (vector-affecting) folds in as ``:pool={pooling}`` so
+        a pooling change rebuilds every router space (mirroring the llama
+        facade's pooling fold).
         """
         if not self._router_managed:
             meta = self.model_info().get("meta") or {}
@@ -573,6 +583,8 @@ class RemoteBackend:
                 base = "meta:" + ":".join(str(meta.get(f, "")) for f in fields)
                 return f"{base}:textprep={EMBED_TEXT_VERSION}"
         base = f"remote:{self._model_name or self._model or 'default'}"
+        if self._router_managed and self._pooling:
+            base = f"{base}:pool={self._pooling}"
         return f"{base}:textprep={EMBED_TEXT_VERSION}"
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -855,6 +867,9 @@ class EmbeddingRuntime:
                 batch_size=self._batch_size,
                 modalities=self._modalities,
                 router_managed=self._router_managed,
+                # The router-wide pooling (#567) folds into a router space's
+                # fingerprint; harmless (and None) for any non-router remote.
+                pooling=self._pooling if self._router_managed else None,
             )
         assert self._model is not None  # callers check before constructing
         if self._backend_kind == "onnx":

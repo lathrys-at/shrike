@@ -291,6 +291,26 @@ class TestSharedRouterLifecycle:
 
         asyncio.run(flow())
 
+    def test_ensure_router_respawns_after_a_stop(self, tmp_path) -> None:
+        # The stop→start cycle (embedding stop then start): once the router is
+        # stopped, a later _ensure_shared_router must respawn it (the guard keys
+        # on running(), so a stopped manager starts again).
+        async def flow():
+            mgr = _FakeRouterManager()
+            harness = await self._assemble_with_router(tmp_path, mgr, owns_runtime=True)
+            await harness._ensure_shared_router()
+            assert mgr.starts == 1 and mgr.running()
+            # Simulate `embedding stop` freeing the router.
+            mgr.stop()
+            assert not mgr.running()
+            # The next start cycle respawns it (not a no-op against a dead one).
+            await harness._ensure_shared_router()
+            assert mgr.starts == 2 and mgr.running()
+            await harness.close()
+            assert not mgr.running()
+
+        asyncio.run(flow())
+
 
 class TestEmbedQueryCache:
     def test_repeat_queries_reuse_the_vector(self, tmp_path) -> None:

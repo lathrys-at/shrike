@@ -1153,6 +1153,7 @@ def main() -> None:
             context_size=router_cfg.get("context_size"),
             threads=router_cfg.get("threads"),
             gpu_layers=router_cfg.get("gpu_layers"),
+            pooling=router_cfg.get("pooling"),
             extra_args=list(router_cfg.get("extra_args") or []),
             pid_file=str(resolved_state_dir / "embedding.pid"),
         )
