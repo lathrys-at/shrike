@@ -30,6 +30,21 @@ py_test(
     deps = ["//src/shrike:shrike"],
 )
 
+# De-dup tripwire (#566): scripts/llama-server.lock and MODULE.bazel duplicate the
+# pinned llama.cpp tag + the four per-platform SHA256s (Bazel can't read the lock at
+# module-resolution time). This fails CI the moment they drift — a bump applied to
+# one but not the other. Pure stdlib, so it's also a plain pytest unit (pip lane).
+py_test(
+    name = "llama_lock_in_sync_test",
+    size = "small",
+    srcs = ["tools/check_llama_lock.py"],
+    main = "tools/check_llama_lock.py",
+    data = [
+        "MODULE.bazel",
+        "//scripts:llama-server.lock",
+    ],
+)
+
 # The release wheel (#245; platform-tagged since #497). Version is stamped from the
 # git tag (STABLE_VERSION via tools/workspace_status.sh) — the exact tag version on a
 # clean release/rc tag, replacing hatch-vcs as the artifact builder.

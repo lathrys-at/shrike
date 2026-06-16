@@ -201,6 +201,22 @@ class LlamaServerManager:
         pid_file: str | None = None,
         mmprojs: list[str] = ...,
     ) -> LlamaServerManager: ...
+    @staticmethod
+    def router(
+        models_dir: str,
+        *,
+        host: str,
+        port: int,
+        models_max: int | None = None,
+        binary: str | None = None,
+        log_dir: str | None = None,
+        context_size: int | None = None,
+        threads: int | None = None,
+        gpu_layers: int | None = None,
+        pooling: str | None = None,
+        extra_args: list[str] = ...,
+        pid_file: str | None = None,
+    ) -> LlamaServerManager: ...
     def start(self) -> None: ...
     def stop(self) -> None: ...
     def running(self) -> bool: ...

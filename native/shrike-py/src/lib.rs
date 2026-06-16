@@ -531,7 +531,7 @@ impl LlamaServerManager {
     ) -> Self {
         let cfg = shrike_llama_server::LlamaServerConfig {
             binary,
-            model,
+            model: shrike_llama_server::ModelSpec::Single(model),
             host,
             port,
             log_dir: log_dir.map(std::path::PathBuf::from),
@@ -546,6 +546,52 @@ impl LlamaServerManager {
         // an embeddings server (not chat_mode) that loads vision/audio
         // mmprojs to embed media. Empty = a text-only embeddings server.
         let manager = shrike_llama_server::LlamaServerManager::new(cfg).with_mmprojs(mmprojs);
+        Self {
+            pid_cell: manager.pid_cell(),
+            passthrough: manager.passthrough_tokens(false),
+            inner: std::sync::Mutex::new(manager),
+        }
+    }
+
+    /// Router mode (#566): ONE llama-server serving a directory of models, with
+    /// the request's `model` field selecting among them (`--models-dir` +
+    /// optional `--models-max`, no `--model`). A separate constructor so the
+    /// single-model `new` stays byte-for-byte unchanged. mmprojs are
+    /// model-specific and have no router meaning, so this shape omits them.
+    #[staticmethod]
+    #[pyo3(signature = (models_dir, *, host, port, models_max=None, binary=None, log_dir=None, context_size=None, threads=None, gpu_layers=None, pooling=None, extra_args=vec![], pid_file=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn router(
+        models_dir: String,
+        host: String,
+        port: u16,
+        models_max: Option<u32>,
+        binary: Option<String>,
+        log_dir: Option<String>,
+        context_size: Option<u32>,
+        threads: Option<u32>,
+        gpu_layers: Option<i32>,
+        pooling: Option<String>,
+        extra_args: Vec<String>,
+        pid_file: Option<String>,
+    ) -> Self {
+        let cfg = shrike_llama_server::LlamaServerConfig {
+            binary,
+            model: shrike_llama_server::ModelSpec::Router {
+                dir: models_dir,
+                max: models_max,
+            },
+            host,
+            port,
+            log_dir: log_dir.map(std::path::PathBuf::from),
+            context_size,
+            threads,
+            gpu_layers,
+            pooling,
+            extra_args,
+            pid_file: pid_file.map(std::path::PathBuf::from),
+        };
+        let manager = shrike_llama_server::LlamaServerManager::new(cfg);
         Self {
             pid_cell: manager.pid_cell(),
             passthrough: manager.passthrough_tokens(false),
