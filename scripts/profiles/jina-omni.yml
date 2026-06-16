@@ -1,0 +1,58 @@
+# jina-omni — the single-omni multimodal dogfooding profile (#565/#668).
+#
+# ONE embedding space (text + image) over jina-embeddings-v5-omni-nano on a
+# managed llama-server. A text query can retrieve a card by the content of its
+# image: text AND images embed into the SAME vector space (no modality gap, no
+# second sub-index — unlike the CLIP-shaped profiles).
+#
+# MANUAL / LOCAL-ONLY — NEVER run in CI.
+# ------------------------------------------------------------------------------
+# This profile works ONLY with a hand-built llama-server and an unquantized
+# model. Both are OPERATOR-PROVIDED — they are NOT Bazel externals and are never
+# fetched on the CI lane (the patched binary can't be pinned/cached). The three
+# hard constraints (verified end to end; see scripts/profiles/README.md and the
+# [[jina-v5-omni-image-embed]] note):
+#
+#   1. PATCHED BINARY. The official/pinned llama-server loads the model and
+#      serves TEXT embeds, then SEGFAULTS on image-embed extraction. Build the
+#      jina-ai/llama.cpp `feat-v5-omni` fork (the README has the recipe) and
+#      point managed.llama_server.binary at it.
+#   2. F16 GGUF, NOT a quant. The fork reads the token-embedding tensor with
+#      ggml_get_f32_1d, which ABORTS on a block-quantized type — Q4_K_M and
+#      Q5_K_M (the quant jina's own card recommends) both crash on the first
+#      image embed. The *-F16.gguf text variant keeps the table readable.
+#   3. `--pooling last`. jina-v5-omni is a last-token model whose pooling isn't
+#      in the GGUF metadata; without this llama-server defaults to mean and
+#      produces WRONG embeddings.
+#
+# PATH-FREE (the hard invariant): no collection:, no machine-absolute paths in
+# the committed file. The three operator-provided paths ride as ${ENV} so this
+# template stays portable; instantiate it for a run by exporting the vars and
+# expanding them into a local config the daemon reads (the README has the
+# one-liner). Run paths (collection / cache / logs) ride as flags, not config.
+
+embedders:
+  # runtime: remote with no endpoint = the managed llama-server below (#501:
+  # remote + mmprojs is the multimodal managed shape). modalities text+image →
+  # the backend composes the image half and embeds both into one space.
+  - modalities: [text, image]
+    runtime: remote
+    # The text GGUF — must be the *-F16.gguf (constraint 2). Operator-provided.
+    model: ${SHRIKE_JINA_OMNI_MODEL}
+    # jina-v5-omni is a last-token model (constraint 3). On a single-model
+    # managed:auto server pooling is a per-entry knob (it's router-wide only in
+    # router mode); Shrike launches this server, so the knob applies here.
+    pooling: last
+
+managed:
+  llama_server:
+    manage: auto
+    # The PATCHED llama-server (constraint 1). Operator-provided — built from
+    # the jina-ai/llama.cpp feat-v5-omni fork, NEVER a pinned/cached binary.
+    binary: ${SHRIKE_JINA_OMNI_LLAMA_SERVER}
+    # The vision projector (loaded so the server can embed images).
+    mmprojs:
+      - ${SHRIKE_JINA_OMNI_VISION_MMPROJ}
+    # An image is many vision tokens; give the server room (an embed needs the
+    # whole sequence in one ubatch).
+    context_size: 8192

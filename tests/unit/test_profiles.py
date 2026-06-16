@@ -746,6 +746,72 @@ class TestMultimodalRemote:
         assert params["backend"] == "clip"
         assert params["modalities"] == frozenset({"text", "image"})
 
+    def test_jina_omni_profile_shape_resolves_with_last_pooling(self):
+        # #668: the committed `scripts/profiles/jina-omni.yml` shape — ONE
+        # text+image space on a managed (manage: auto, operator-patched binary)
+        # llama-server with `pooling: last`. This pins the resolution contract
+        # the profile relies on (the YAML file itself is structurally pinned by
+        # scripts/serve_test.py; this is the equivalent config dict resolved
+        # through profiles.py, paths substituted as the operator would).
+        config = {
+            "embedders": [
+                {
+                    "modalities": ["text", "image"],
+                    "runtime": "remote",  # no endpoint = the managed server below
+                    "model": "/run/jina-...-F16.gguf",
+                    "pooling": "last",  # jina-v5-omni is a last-token model
+                }
+            ],
+            "managed": {
+                "llama_server": {
+                    "manage": "auto",  # Shrike launches the patched binary
+                    "binary": "/run/llama.cpp/build/bin/llama-server",
+                    "mmprojs": ["/run/jina-...-vision-mmproj-F16.gguf"],
+                    "context_size": 8192,
+                }
+            },
+        }
+        params = plan_to_runtime_params(_resolve(config))
+        assert params["backend"] == "llama"
+        assert params["modalities"] == frozenset({"text", "image"})
+        assert params["pooling"] == "last"
+        assert params["llama_server"] == "/run/llama.cpp/build/bin/llama-server"
+        assert params["mmprojs"] == ["/run/jina-...-vision-mmproj-F16.gguf"]
+        assert params["context_size"] == 8192
+
+    def test_jina_omni_pooling_last_folds_into_the_fingerprint(self):
+        # The last-token pooling is vector-affecting; on a single-model managed
+        # server it is a per-entry knob (NOT router-wide), so it must reach the
+        # backend (above) AND a change must rebuild — guarded here by asserting
+        # it survives onto the params (the index folds set pooling into model_id).
+        with_last = plan_to_runtime_params(
+            _resolve(
+                {
+                    "embedders": [
+                        {
+                            "modalities": ["text", "image"],
+                            "runtime": "remote",
+                            "model": "m.gguf",
+                            "pooling": "last",
+                        }
+                    ],
+                    "managed": {"llama_server": {"manage": "auto", "mmprojs": ["~/v.mmproj"]}},
+                }
+            )
+        )
+        without = plan_to_runtime_params(
+            _resolve(
+                {
+                    "embedders": [
+                        {"modalities": ["text", "image"], "runtime": "remote", "model": "m.gguf"}
+                    ],
+                    "managed": {"llama_server": {"manage": "auto", "mmprojs": ["~/v.mmproj"]}},
+                }
+            )
+        )
+        assert with_last["pooling"] == "last"
+        assert without["pooling"] is None
+
 
 class TestJinaTextClip:
     """#669: the committed `scripts/profiles/jina-text-clip.yml` shape — a HYBRID

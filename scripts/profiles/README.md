@@ -11,6 +11,7 @@ as flags; bundled models are bare dir-names the launcher materializes).
 | `text-onnx` | one text-only ONNX space (pinned MiniLM int8) | runs in CI |
 | `onnx-multispace` | two ONNX spaces: embeddinggemma text + MobileCLIP2 image | runs in CI |
 | `jina-text-clip` | a managed-llama text space (jina-v5-text-nano) + an ONNX CLIP image space (MobileCLIP2) | **manual / local-only** |
+| `jina-omni` | one text+image space on a managed llama-server (jina-v5-omni) | **manual / local-only** |
 
 The CI-running profiles boot directly under the launcher:
 
@@ -19,9 +20,9 @@ The CI-running profiles boot directly under the launcher:
 ./bazel run //scripts:serve -- --profile onnx-multispace [--seed qa]
 ```
 
-`jina-text-clip` is **not** served via `serve --profile` (see below) — its
-binary and models are operator-provided, so it's instantiated and run via
-`shrike server start --config`.
+`jina-text-clip` and `jina-omni` are **not** served via `serve --profile` (see
+their sections below) — their binaries and models are operator-provided, so each
+is instantiated and run via `shrike server start --config`.
 
 ## `jina-text-clip` — manual / local-only (never in CI)
 
@@ -144,3 +145,94 @@ CI today).
 
 [model]: https://huggingface.co/jinaai/jina-embeddings-v5-text-nano-retrieval-GGUF
 [fork]: https://github.com/jina-ai/llama.cpp
+
+## `jina-omni` — manual / local-only (never in CI)
+
+`jina-omni` runs **one multimodal embedding space** (text + image) over
+[jina-embeddings-v5-omni-nano][omni-model] on a managed llama-server: a text query
+can retrieve a card by the content of its image, because text and images embed
+into the **same** vector space (no modality gap, no second sub-index — unlike
+the CLIP-shaped profiles).
+
+It is **manual and local-only**: it needs a hand-built llama-server and an
+unquantized model, both **operator-provided**. Neither is a Bazel external and
+neither is fetched on the CI lane — the patched binary can't be pinned or
+cached, so this profile is gated out of CI exactly like the `#501`
+image-embedding harness (`tests/integration/test_multimodal.py`).
+
+### The three hard constraints
+
+Verified end to end (macOS/Metal); the full forensics live in the
+`jina-v5-omni-image-embed` memory note.
+
+1. **Patched binary.** The official / pinned llama-server loads the model and
+   serves *text* embeds, then **segfaults** during image-embed extraction
+   (verified on `b9415` and `b9616`). You must build the
+   [`jina-ai/llama.cpp` `feat-v5-omni`][omni-fork] fork.
+2. **F16 GGUF, not a quant.** The fork reads the token-embedding tensor
+   element-by-element with `ggml_get_f32_1d`, which **aborts** on a
+   block-quantized type. `Q4_K_M` *and* `Q5_K_M` (the quant jina's own GGUF card
+   recommends) both crash on the first image embed; the `*-F16.gguf` text
+   variant keeps the table readable.
+3. **`--pooling last`.** jina-v5-omni is a last-token model whose pooling type
+   isn't in the GGUF metadata; without `pooling: last` llama-server defaults to
+   mean and produces **wrong** embeddings. The profile sets it.
+
+### 1. Build the patched llama-server
+
+```bash
+git clone --branch feat-v5-omni https://github.com/jina-ai/llama.cpp.git
+cd llama.cpp && cmake -B build && cmake --build build --config Release -j
+# the binary lands at build/bin/llama-server
+# (macOS: it needs DYLD_LIBRARY_PATH=<build>/bin for the sibling dylibs;
+#  Hopper GPUs need GGML_CUDA_DISABLE_GRAPHS=1; CPU/Metal/Vulkan are fine)
+```
+
+### 2. Get the F16 text GGUF + vision projector
+
+From [`jinaai/jina-embeddings-v5-omni-nano-classification-GGUF`][omni-model] download
+the `*-F16.gguf` (text — **must be unquantized**, constraint 2) and the
+`*-vision-mmproj-F16.gguf` (the vision projector). Place them anywhere local;
+nothing commits these bytes. The shared test-model cache already knows how to
+fetch them (`tests/integration/model_cache.cached_multimodal_model_dir`) if you
+prefer one download home:
+
+```bash
+python -c "from pathlib import Path; \
+  from tests.integration.model_cache import cached_multimodal_model_dir; \
+  print(cached_multimodal_model_dir(Path.home() / '.cache' / 'shrike-test-models'))"
+```
+
+### 3. Point the profile at them and run
+
+The committed `jina-omni.yml` is **path-free**: the three operator-provided
+paths are `${ENV}` placeholders, so the template stays portable. Export the vars
+and expand them into a local (gitignored) config the daemon reads:
+
+```bash
+export SHRIKE_JINA_OMNI_LLAMA_SERVER=/path/to/llama.cpp/build/bin/llama-server
+export SHRIKE_JINA_OMNI_MODEL=/path/to/jina-...-classification-F16.gguf
+export SHRIKE_JINA_OMNI_VISION_MMPROJ=/path/to/jina-...-vision-mmproj-F16.gguf
+
+# Instantiate the path-free template into a local config (envsubst expands the
+# three vars); the committed YAML stays placeholder-only and path-free.
+envsubst < scripts/profiles/jina-omni.yml > /tmp/jina-omni.local.yml
+
+# Boot a server against a fresh empty collection with that config.
+shrike --config /tmp/jina-omni.local.yml \
+  server start --collection /tmp/jina-omni-run/collection.anki2 --foreground
+```
+
+> The `//scripts:serve` launcher only materializes **onnx** model dir-names from
+> Bazel externals; it leaves managed/remote entries untouched. Because
+> `jina-omni`'s binary and model are operator-provided (not externals), serve it
+> via `shrike server start --config` with the instantiated config above, not
+> `serve --profile jina-omni`.
+
+When a multimodal embedding model becomes a server default (the #237 eval) **and**
+the fork's patches land upstream, this profile graduates to a pinned-fixture CI
+test (re-test the quant question against the then-current fork — the
+`ggml_get_f32_1d` abort may get fixed, re-enabling a smaller quant).
+
+[omni-model]: https://huggingface.co/jinaai/jina-embeddings-v5-omni-nano-classification-GGUF
+[omni-fork]: https://github.com/jina-ai/llama.cpp/tree/feat-v5-omni

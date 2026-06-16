@@ -175,6 +175,75 @@ def test_path_free_profile_passes() -> None:
     serve.check_path_free("ok", {"embedders": [{"runtime": "onnx", "model": "m"}]})
 
 
+# -- jina-omni (#668): the manual/local-only single-omni profile ---------------
+#
+# Download-free, server-free structural checks on the committed profile: it is
+# path-free, declares ONE text+image space on a managed (manage: auto)
+# llama-server, sets `pooling: last`, and references the three operator-provided
+# paths (binary / model / vision mmproj) as ${ENV} placeholders — NEVER as
+# machine-absolute paths (so the file stays portable + can't leak a dev path).
+# The model is operator-provided, not a Bazel external, so the launcher leaves it
+# untouched: _model_names_in_profile (onnx-only) skips it.
+
+_JINA_OMNI_ENV_VARS = (
+    "SHRIKE_JINA_OMNI_LLAMA_SERVER",
+    "SHRIKE_JINA_OMNI_MODEL",
+    "SHRIKE_JINA_OMNI_VISION_MMPROJ",
+)
+
+
+def test_jina_omni_profile_is_path_free_managed_omni() -> None:
+    profile = serve.load_profile("jina-omni")
+    assert "collection" not in profile
+    embedders = profile["embedders"]
+    assert len(embedders) == 1, "jina-omni is ONE shared text+image space"
+    entry = embedders[0]
+    # remote with no endpoint = the managed llama-server below (#501 multimodal
+    # managed shape); text+image into one space; last-token pooling.
+    assert entry["runtime"] == "remote"
+    assert "endpoint" not in entry
+    assert entry["modalities"] == ["text", "image"]
+    assert entry["pooling"] == "last"
+    llama = profile["managed"]["llama_server"]
+    assert llama["manage"] == "auto", "Shrike launches the patched binary"
+    assert llama["mmprojs"], "a vision projector is loaded for image embeds"
+
+
+def test_jina_omni_operator_paths_are_env_placeholders() -> None:
+    # The three operator-provided paths are ${ENV} placeholders, never absolute
+    # paths — the path-free invariant for a profile whose binary + model can't be
+    # Bazel externals (the patched fork + F16 GGUF are hand-built/operator-local).
+    profile = serve.load_profile("jina-omni")
+    entry = profile["embedders"][0]
+    llama = profile["managed"]["llama_server"]
+    for value in (entry["model"], llama["binary"], llama["mmprojs"][0]):
+        assert value.startswith("${") and value.endswith("}"), (
+            f"{value!r} must be an ${{ENV}} placeholder, not a baked path"
+        )
+        assert not Path(value).is_absolute()
+    # Exactly the three documented vars (so the README one-liner stays accurate).
+    referenced = {entry["model"], llama["binary"], llama["mmprojs"][0]}
+    assert referenced == {f"${{{name}}}" for name in _JINA_OMNI_ENV_VARS}
+
+
+def test_jina_omni_has_no_materializable_onnx_model() -> None:
+    # The launcher materializes ONLY onnx model dir-names from externals; the
+    # operator-provided GGUF is a remote/managed entry it must leave alone (so
+    # `serve` never tries to fetch it). _model_names_in_profile is onnx-only.
+    profile = serve.load_profile("jina-omni")
+    assert serve._model_names_in_profile(profile) == []
+
+
+def test_jina_omni_compose_leaves_managed_entry_untouched() -> None:
+    # compose_effective_config rewrites only onnx dir-names; jina-omni's managed
+    # entry (binary/model/mmprojs) passes through byte-for-byte (the operator's
+    # instantiated config supplies the real paths, not the launcher).
+    profile = serve.load_profile("jina-omni")
+    config = serve.compose_effective_config(profile, {})
+    assert config["embedders"][0]["model"] == profile["embedders"][0]["model"]
+    assert config["managed"] == profile["managed"]
+
+
 # -- model-name extraction -----------------------------------------------------
 
 
