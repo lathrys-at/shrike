@@ -1155,6 +1155,10 @@ def main() -> None:
             gpu_layers=router_cfg.get("gpu_layers"),
             pooling=router_cfg.get("pooling"),
             extra_args=list(router_cfg.get("extra_args") or []),
+            # Reuses the SAME embedding.pid as the single-managed primary above —
+            # safe because the two shapes are mutually exclusive per profile: a
+            # router primary is a `remote` backend (writes no pid file), a single-
+            # managed primary is `llama` (it does), so only one ever owns it.
             pid_file=str(resolved_state_dir / "embedding.pid"),
         )
 

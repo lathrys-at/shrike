@@ -678,6 +678,24 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
                 "model — the model field routes the request and identifies the vector space, so "
                 f"the router consumers must name distinct models (got {sorted(models)})"
             )
+        # Router mode does NOT support image embedding (#567). A multimodal
+        # projector is per-model (`--mmproj`), but a router serves MANY models, so
+        # no single projector applies — the native router deliberately suppresses
+        # mmprojs (#663). Accepting an image consumer (or a non-empty `mmprojs`)
+        # would spawn a projector-less server that then fails the image-embed
+        # start with a confusing "endpoint does not serve image embeddings". Make
+        # the illegal state unrepresentable: reject at resolve time. (This mirrors
+        # the native router's suppression; an image model belongs in single-
+        # managed mode, where `mmprojs` loads onto its one server.)
+        image_consumers = [i for i in managed_consumers if "image" in caps.embedders[i].modalities]
+        if image_consumers or llama_for_router.mmprojs:
+            raise ProfileError(
+                "router mode (managed.llama_server.models_dir) does not support image "
+                "embedding: a router serves many models, so no single multimodal projector "
+                "(mmprojs) applies — the router consumers must be text-only. Use single-"
+                "managed mode (drop models_dir) for an image model, or drop the image "
+                "modality / mmprojs"
+            )
     elif len(managed_consumers) > 1:
         raise ProfileError(
             f"{len(managed_consumers)} embedder entries are remote with no endpoint — each would "

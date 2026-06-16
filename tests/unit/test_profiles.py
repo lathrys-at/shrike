@@ -1042,6 +1042,60 @@ class TestRouterMode:
         with pytest.raises(ProfileError, match="models_max is a router knob"):
             _resolve(config)
 
+    def test_router_with_image_or_mmprojs_is_rejected(self):
+        # Router mode does NOT support image embedding (#567): a multimodal
+        # projector is per-model, but a router serves MANY models, so no single
+        # mmproj applies (the native router suppresses them, #663). Accepting an
+        # image consumer (or a non-empty mmprojs) would spawn a projector-less
+        # server that fails the image-embed start — the "registry that didn't get
+        # the new entry" shape. Reject at resolve time so the illegal state is
+        # unrepresentable, instead of accept-then-silently-drop.
+        msg = "does not support image embedding"
+        # (a) an image consumer WITH mmprojs declared.
+        with pytest.raises(ProfileError, match=msg):
+            _resolve(
+                {
+                    "embedders": [
+                        {"modalities": ["text", "image"], "runtime": "remote", "model": "a.gguf"}
+                    ],
+                    "managed": {"llama_server": {"models_dir": "/d", "mmprojs": ["/v.mmproj"]}},
+                }
+            )
+        # (b) an image consumer with NO mmprojs — the image modality alone is the
+        # footgun (the server would have no projector to load anyway).
+        with pytest.raises(ProfileError, match=msg):
+            _resolve(
+                {
+                    "embedders": [
+                        {"modalities": ["text", "image"], "runtime": "remote", "model": "a.gguf"}
+                    ],
+                    "managed": {"llama_server": {"models_dir": "/d"}},
+                }
+            )
+        # (c) mmprojs set even with a TEXT-only consumer — projectors can't apply
+        # on a router, so declaring them is the same illegal shape.
+        with pytest.raises(ProfileError, match=msg):
+            _resolve(
+                {
+                    "embedders": [{"modalities": ["text"], "runtime": "remote", "model": "a.gguf"}],
+                    "managed": {"llama_server": {"models_dir": "/d", "mmprojs": ["/v.mmproj"]}},
+                }
+            )
+
+    def test_router_text_only_consumers_stay_valid(self):
+        # The boundary: text-only router consumers with no mmprojs are the
+        # supported router shape — the image rejection must not regress them.
+        plan = _resolve(
+            {
+                "embedders": [
+                    {"modalities": ["text"], "runtime": "remote", "model": "a.gguf"},
+                    {"modalities": ["text"], "runtime": "remote", "model": "b.gguf"},
+                ],
+                "managed": {"llama_server": {"models_dir": "/d", "port": 8500}},
+            }
+        )
+        assert [d["backend"] for d in plan_to_runtime_params_set(plan)] == ["remote", "remote"]
+
     def test_router_parse_round_trips_the_fields(self):
         caps = parse_capabilities(
             {
