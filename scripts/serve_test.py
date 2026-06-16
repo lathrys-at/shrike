@@ -232,9 +232,11 @@ def test_model_sources_covers_onnx_multispace_models() -> None:
         assert callable(spec["fetch"]), f"{name} has no fetch fn"
 
 
-def test_model_sources_registers_jina_clip_v2_for_stacked_stream() -> None:
-    # jina-clip-v2 is registered HERE (this stream owns the registration surface)
-    # so the stacked jina-text-clip stream doesn't touch the shared files.
+def test_model_sources_registers_jina_clip_v2_for_673() -> None:
+    # jina-clip-v2 is pre-staged for #673 (native fused-graph ClipBackend support),
+    # which will consume exactly this fused export. It is NOT consumed by any current
+    # profile — jina-text-clip uses MobileCLIP2 — but is registered here (this stream
+    # owns the registration surface) so the #673 follow-up doesn't touch these files.
     sources = serve._model_sources()
     assert "jina-clip-v2-onnx-int8" in sources
     assert callable(sources["jina-clip-v2-onnx-int8"]["fetch"])

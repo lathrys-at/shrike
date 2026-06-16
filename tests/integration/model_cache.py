@@ -83,9 +83,11 @@ CLIP_MODEL_FILES = {
 
 # -- Wave-2 offline-integration profile models (#667, epic #565) --------------
 #
-# These back the pure-ONNX multi-space profile (scripts/profiles/onnx-multispace.yml)
-# and the stacked jina-text-clip profile. They are NOT used by any CI test (the
-# per-PR lane never downloads multi-GB models); they exist so //scripts:serve can
+# These back the pure-ONNX multi-space profile (scripts/profiles/onnx-multispace.yml:
+# embeddinggemma + MobileCLIP2), plus jina-clip-v2 pre-staged for #673 (native
+# fused-graph ClipBackend support; not consumed by any current profile). They are
+# NOT used by any CI test (the per-PR lane never downloads multi-GB models); they
+# exist so //scripts:serve can
 # materialize them by dir-name (Bazel runfiles under `bazel run`, this fetch source
 # off Bazel). Each is sha-pinned (the sha256s are the HuggingFace LFS oids, or the
 # byte sha256 for a git-stored file) and warm-cache restorable like the other
@@ -128,15 +130,15 @@ MOBILECLIP2_MODEL_FILES = {
     "tokenizer.json": f"{_MOBILECLIP2_BASE}/tokenizer.json",
 }
 
-# jina-clip-v2 ONNX (text+image) — registered here for the STACKED jina-text-clip
-# stream to consume (this stream owns the Wave-2 registration surface). NOTE: the
-# canonical jinaai/jina-clip-v2 ONNX export is a SINGLE FUSED model.onnx that takes
-# text AND image inputs on every call — it does NOT ship the separate
-# text_model.onnx + vision_model.onnx graphs ClipBackend requires, so it is NOT a
-# drop-in for the dual-encoder contract as-published. The dir/files below pin the
-# combined int8 export + the root tokenizer/preprocessor; whether the jina-text-clip
-# stream uses it through ClipBackend (needs a split export / native change — out of
-# scope here) or another path is that stream's call. ~874 MB int8. Apache-2.0/CC.
+# jina-clip-v2 ONNX (text+image) — pre-staged for #673 (native fused-graph
+# ClipBackend support). NOTE: the canonical jinaai/jina-clip-v2 ONNX export is a
+# SINGLE FUSED model.onnx that takes text AND image inputs on every call — it does
+# NOT ship the separate text_model.onnx + vision_model.onnx graphs ClipBackend
+# requires, so it is NOT a drop-in for the dual-encoder contract as-published.
+# #673 is the deferred native work to drive that fused graph, and it will consume
+# exactly this export. It is NOT consumed by any current profile — jina-text-clip
+# uses MobileCLIP2 for its image leg. The dir/files below pin the combined int8
+# export + the root tokenizer/preprocessor. ~874 MB int8. Apache-2.0/CC.
 JINA_CLIP_V2_MODEL_DIR_NAME = "jina-clip-v2-onnx-int8"
 _JINA_CLIP_V2_BASE = "https://huggingface.co/jinaai/jina-clip-v2/resolve/main"
 JINA_CLIP_V2_MODEL_FILES = {
@@ -303,9 +305,10 @@ def cached_mobileclip2_model_dir(fallback_dir: Path) -> Path:
 def cached_jina_clip_v2_model_dir(fallback_dir: Path) -> Path:
     """The jina-clip-v2 int8 ONNX dir (combined model.onnx + tokenizer + preprocessor).
 
-    Registered for the stacked jina-text-clip stream. NOTE the combined-graph caveat
-    in the module-level declaration: the published export is NOT a ClipBackend
-    drop-in (single fused graph, not split text/vision). ~874 MB."""
+    Pre-staged for #673 (native fused-graph ClipBackend support); not consumed by
+    any current profile. NOTE the combined-graph caveat in the module-level
+    declaration: the published export is NOT a ClipBackend drop-in (single fused
+    graph, not split text/vision). ~874 MB."""
     return _cached_model_dir(fallback_dir, JINA_CLIP_V2_MODEL_DIR_NAME, JINA_CLIP_V2_MODEL_FILES)
 
 

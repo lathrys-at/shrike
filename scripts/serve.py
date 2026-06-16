@@ -122,8 +122,9 @@ def _model_sources() -> dict[str, dict[str, Any]]:
             },
             "fetch": mc.cached_mobileclip2_model_dir,
         },
-        # jina-clip-v2 (combined graph) — registered for the stacked jina-text-clip
-        # stream; not consumed by onnx-multispace (see model_cache.py caveat).
+        # jina-clip-v2 (combined graph) — pre-staged for #673 (native fused-graph
+        # ClipBackend support); not consumed by any current profile — jina-text-clip
+        # uses MobileCLIP2 (see model_cache.py caveat).
         mc.JINA_CLIP_V2_MODEL_DIR_NAME: {
             "bazel": {
                 "model_jina_clip_v2_int8_onnx/file/model_quantized.onnx": ("model_quantized.onnx"),
