@@ -62,6 +62,100 @@ def test_onnx_multispace_model_names_both_legs() -> None:
     ]
 
 
+# -- jina-text-clip (#669): the manual/local-only hybrid multi-space profile ---
+#
+# Download-free, server-free structural checks on the committed profile: it is
+# path-free, declares TWO embedding spaces — a dedicated TEXT space on a managed
+# (manage: auto) llama-server with `pooling: last`, plus an in-process ONNX CLIP
+# (text+image) image leg — and references the three operator-provided paths
+# (binary / jina-text GGUF / MobileCLIP2 dir) as ${ENV} placeholders, NEVER as
+# machine-absolute paths. Both the patched binary and the model are
+# operator-provided (jina-v5-text-nano is a custom arch the stock llama-server
+# lacks), so this profile is consumed via `shrike server start --config`, NOT
+# `serve --profile`: the launcher (onnx-only materializer) leaves the managed
+# entry untouched AND its onnx leg names an operator ${ENV} path, not a bare
+# registered dir-name — so the launcher materializes nothing here.
+
+_JINA_TEXT_CLIP_ENV_VARS = (
+    "SHRIKE_JINA_TEXT_LLAMA_SERVER",
+    "SHRIKE_JINA_TEXT_MODEL",
+    "SHRIKE_JINA_TEXT_CLIP_MOBILECLIP2",
+)
+
+
+def test_jina_text_clip_profile_is_path_free_hybrid() -> None:
+    profile = serve.load_profile("jina-text-clip")
+    assert "collection" not in profile
+    embedders = profile["embedders"]
+    assert len(embedders) == 2, "jina-text-clip is a TWO-space hybrid"
+    # The dedicated TEXT leg: remote with no endpoint = the managed llama-server
+    # below; text-only; last-token pooling on the ENTRY (single-managed mode).
+    text = embedders[0]
+    assert text["runtime"] == "remote"
+    assert "endpoint" not in text
+    assert text["modalities"] == ["text"]
+    assert text["pooling"] == "last"
+    # The IMAGE leg: in-process ONNX CLIP (text + image into one shared space) —
+    # the single image-embedding space (#580).
+    image = embedders[1]
+    assert image["runtime"] == "onnx"
+    assert image["modalities"] == ["text", "image"]
+    assert "pooling" not in image, "a CLIP dual-encoder emits a pre-pooled vector"
+    image_entries = [e for e in embedders if "image" in e["modalities"]]
+    assert len(image_entries) == 1, "exactly ONE image-embedding space (#580)"
+    llama = profile["managed"]["llama_server"]
+    assert llama["manage"] == "auto", "Shrike launches the patched binary"
+    assert "models_dir" not in llama, "single-managed, NOT #567's router mode"
+    assert "mmprojs" not in llama, "no image-embed via the managed server (CLIP leg does it)"
+
+
+def test_jina_text_clip_operator_paths_are_env_placeholders() -> None:
+    # The three operator-provided paths are ${ENV} placeholders, never absolute
+    # paths — the path-free invariant for a profile whose binary + models can't
+    # be Bazel externals (the patched fork + the operator-local model dirs).
+    profile = serve.load_profile("jina-text-clip")
+    text = profile["embedders"][0]
+    image = profile["embedders"][1]
+    llama = profile["managed"]["llama_server"]
+    for value in (text["model"], image["model"], llama["binary"]):
+        assert value.startswith("${") and value.endswith("}"), (
+            f"{value!r} must be an ${{ENV}} placeholder, not a baked path"
+        )
+        assert not Path(value).is_absolute()
+    # Exactly the three documented vars (so the README one-liner stays accurate).
+    referenced = {text["model"], image["model"], llama["binary"]}
+    assert referenced == {f"${{{name}}}" for name in _JINA_TEXT_CLIP_ENV_VARS}
+
+
+def test_jina_text_clip_onnx_leg_is_not_a_registered_dir_name() -> None:
+    # The CLIP leg's model is an operator ${ENV} path, NOT a bare registered
+    # dir-name (e.g. mobileclip2-s2-onnx) — this profile is `--config`-consumed,
+    # so the launcher never materializes it. _model_names_in_profile DOES collect
+    # any onnx entry's model string (it's onnx), but here that string is the
+    # ${ENV} placeholder, which the operator's envsubst replaces with a real dir.
+    profile = serve.load_profile("jina-text-clip")
+    names = serve._model_names_in_profile(profile)
+    assert names == ["${SHRIKE_JINA_TEXT_CLIP_MOBILECLIP2}"]
+    # It is NOT a known materializable dir-name, so a stray `serve --profile`
+    # would fail loud at materialize_model rather than silently fetch — the
+    # placeholder can't collide with a registered model.
+    assert "mobileclip2-s2-onnx" not in names
+
+
+def test_jina_text_clip_compose_leaves_managed_text_entry_untouched() -> None:
+    # compose_effective_config rewrites only onnx dir-names it can resolve; the
+    # managed text entry (remote/no-endpoint, the GGUF) passes through
+    # byte-for-byte (the operator's instantiated config supplies the real path).
+    profile = serve.load_profile("jina-text-clip")
+    # Resolve the placeholder onnx leg so compose doesn't KeyError on it (the
+    # operator's envsubst does this for real; here a stub path stands in).
+    onnx_name = profile["embedders"][1]["model"]
+    config = serve.compose_effective_config(profile, {onnx_name: "/run/mobileclip2"})
+    # The managed text entry is unchanged (still the placeholder).
+    assert config["embedders"][0]["model"] == profile["embedders"][0]["model"]
+    assert config["managed"] == profile["managed"]
+
+
 def test_unknown_profile_errors_with_available_list() -> None:
     with pytest.raises(SystemExit) as exc:
         serve.load_profile("does-not-exist")

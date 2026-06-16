@@ -1,0 +1,80 @@
+# jina-text-clip — the dedicated-text + CLIP multi-space profile (#565/#669, (b)).
+#
+# A HYBRID over TWO embedding spaces, RRF-fused at search time:
+#   - jina-text  (TEXT only)  — jina-embeddings-v5-text-nano on a managed
+#     llama-server: a dedicated, high-quality text space.
+#   - MobileCLIP2 (TEXT+IMAGE) — the in-process ONNX ClipBackend: a text query
+#     retrieves a card by the content of its IMAGE (the CLIP path, with the
+#     modality gap fusion handles as distinct per-modality signals).
+#
+# This is the multi-space alternative to `jina-omni`'s SINGLE shared text+image
+# space: jina-omni embeds text and images into one space (no modality gap) but
+# needs a multimodal omni model; jina-text-clip pairs a dedicated *text* model
+# (better text recall) with a separate ONNX CLIP image leg (off-server, no GPU
+# subprocess for images) — two spaces, fused. Exactly ONE image-embedding space
+# (#580): MobileCLIP2 is the single image leg; jina-text is text-only.
+#
+# MANUAL / LOCAL-ONLY — NEVER run in CI.
+# ------------------------------------------------------------------------------
+# The jina-text leg works ONLY with a hand-built llama-server: jina-v5-text-nano
+# is a CUSTOM architecture (`JinaEmbeddingsV5Model`) the official/pinned
+# llama-server does NOT recognize (its GGUF arch tag isn't in upstream
+# llama.cpp). Both the binary and the model are OPERATOR-PROVIDED — neither is a
+# Bazel external nor fetched on the CI lane (the patched binary can't be
+# pinned/cached), so this profile is gated out of CI exactly like `jina-omni` and
+# the #501 image-embed harness. The two hard constraints for the jina-text leg
+# (see scripts/profiles/README.md):
+#
+#   1. PATCHED BINARY. Build the jina-ai/llama.cpp fork — upstream llama.cpp does
+#      not yet support the jina-embeddings-v5-text architecture. Point
+#      managed.llama_server.binary at it.
+#   2. `--pooling last`. jina-v5-text-nano is a last-token model whose pooling
+#      isn't in the GGUF metadata; without this llama-server defaults to mean and
+#      produces WRONG embeddings. Set on the ENTRY (single-managed mode, not
+#      router): Shrike launches this server, so the per-entry knob applies.
+#
+# Unlike jina-omni there is NO image-embed via the managed server (no mmproj, no
+# F16-vs-quant abort): images go through the ONNX CLIP leg, so the jina-text GGUF
+# may be a quant (Q5_K_M recommended for nano parity; see the README).
+#
+# The MobileCLIP2 leg is in-process ONNX — no subprocess, no patched binary. The
+# operator points it at a local MobileCLIP2-S2 ONNX dir (text + vision graphs +
+# preprocessor + tokenizer, the flat ClipBackend layout).
+#
+# PATH-FREE (the hard invariant): no collection:, no machine-absolute paths in
+# the committed file. The three operator-provided paths ride as ${ENV} so this
+# template stays portable; instantiate it for a run by exporting the vars and
+# expanding them into a local config the daemon reads (the README has the
+# one-liner). This profile is consumed via `shrike server start --config`, NOT
+# `serve --profile`: the launcher only materializes onnx *dir-name* externals,
+# and the patched binary can't be injected via `serve --profile` anyway, so the
+# MobileCLIP2 model is an operator-provided ${ENV} path here (not a bare
+# registered dir-name). Run paths (collection / cache / logs) ride as flags.
+
+embedders:
+  # The dedicated TEXT space. runtime: remote with no endpoint = the managed
+  # llama-server below. modalities text-only (image is the CLIP leg's job).
+  - modalities: [text]
+    runtime: remote
+    # The jina-text GGUF — operator-provided (a quant is fine, e.g. Q5_K_M).
+    model: ${SHRIKE_JINA_TEXT_MODEL}
+    # jina-v5-text-nano is a last-token model (constraint 2). On a single-model
+    # managed:auto server pooling is a per-entry knob (router-wide only in router
+    # mode); Shrike launches this server, so the knob applies here.
+    pooling: last
+  # The IMAGE leg: an in-process ONNX CLIP dual-encoder (text + image into one
+  # shared space). The single image-embedding space (#580). Operator points it at
+  # a local MobileCLIP2-S2 ONNX dir. No pooling — a CLIP dual-encoder emits a
+  # pre-pooled, projected vector.
+  - modalities: [text, image]
+    runtime: onnx
+    model: ${SHRIKE_JINA_TEXT_CLIP_MOBILECLIP2}
+
+managed:
+  llama_server:
+    manage: auto
+    # The PATCHED llama-server (constraint 1). Operator-provided — built from the
+    # jina-ai/llama.cpp fork, NEVER a pinned/cached binary. Serves ONLY the
+    # jina-text leg (single-model managed mode, NOT #567's router — MobileCLIP2 is
+    # off-server ONNX).
+    binary: ${SHRIKE_JINA_TEXT_LLAMA_SERVER}

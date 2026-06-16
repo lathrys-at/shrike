@@ -747,6 +747,105 @@ class TestMultimodalRemote:
         assert params["modalities"] == frozenset({"text", "image"})
 
 
+class TestJinaTextClip:
+    """#669: the committed `scripts/profiles/jina-text-clip.yml` shape — a HYBRID
+    of TWO embedding spaces: a dedicated TEXT space (jina-v5-text-nano on a
+    managed, single-model llama-server with `pooling: last`) PLUS a separate
+    in-process ONNX CLIP (text+image) image leg. This pins the resolution
+    contract the profile relies on (the YAML is structurally pinned by
+    scripts/serve_test.py; this is the equivalent config dict resolved through
+    profiles.py, paths substituted as the operator would via envsubst)."""
+
+    def test_jina_text_clip_shape_resolves_to_two_spaces(self):
+        # Single-managed (NOT #567's router): the managed server serves ONLY the
+        # jina-text leg; MobileCLIP2 is off-server ONNX. The set resolves to two
+        # backend dicts: managed `llama` (text, pooling: last) + `clip`
+        # (text+image, the single image space, #580).
+        config = {
+            "embedders": [
+                {
+                    "modalities": ["text"],
+                    "runtime": "remote",  # no endpoint = the managed server below
+                    "model": "/run/jina-text-nano-Q5_K_M.gguf",
+                    "pooling": "last",  # jina-v5-text-nano is a last-token model
+                },
+                {
+                    "modalities": ["text", "image"],
+                    "runtime": "onnx",  # in-process CLIP — off-server
+                    "model": "/run/mobileclip2-s2-onnx",
+                },
+            ],
+            "managed": {
+                "llama_server": {
+                    "manage": "auto",  # Shrike launches the patched fork
+                    "binary": "/run/jina-llama.cpp/build/bin/llama-server",
+                    # NO mmprojs: the managed server is text-only here (images go
+                    # through the ONNX CLIP leg), and NO models_dir (single-model).
+                }
+            },
+        }
+        plan = _resolve(config)
+        assert len(plan.embedders) == 2
+        dicts = plan_to_runtime_params_set(plan)
+        assert [d["backend"] for d in dicts] == ["llama", "clip"]
+        # The TEXT leg: managed llama, last-token pooling, text-only, the patched
+        # binary; no projectors (no image-embed on the managed server).
+        text = dicts[0]
+        assert text["modalities"] == frozenset({"text"})
+        assert text["pooling"] == "last"
+        assert text["llama_server"] == "/run/jina-llama.cpp/build/bin/llama-server"
+        assert text["mmprojs"] == []
+        # The IMAGE leg: in-process CLIP, text+image (the single image space).
+        image = dicts[1]
+        assert image["modalities"] == frozenset({"text", "image"})
+        assert image["model"] == "/run/mobileclip2-s2-onnx"
+        # The set's first dict equals the primary accessor's (N>1, primary = first).
+        assert dicts[0] == plan_to_runtime_params(plan)
+
+    def test_jina_text_pooling_last_folds_into_the_fingerprint(self):
+        # The last-token pooling is vector-affecting; on a single-model managed
+        # server it is a per-entry knob (NOT router-wide), so it must reach the
+        # backend AND a change must rebuild — guarded by asserting it survives
+        # onto the managed text leg's params (the index folds set pooling into
+        # model_id). The onnx CLIP leg is identical in both, isolating the delta.
+        def _resolve_text(pooling):
+            text_entry = {
+                "modalities": ["text"],
+                "runtime": "remote",
+                "model": "jina.gguf",
+            }
+            if pooling is not None:
+                text_entry["pooling"] = pooling
+            config = {
+                "embedders": [
+                    text_entry,
+                    {"modalities": ["text", "image"], "runtime": "onnx", "model": "~/clip"},
+                ],
+                "managed": {"llama_server": {"manage": "auto"}},
+            }
+            # The managed text leg is the PRIMARY (first declared) → the N=1 accessor.
+            return plan_to_runtime_params(_resolve(config))
+
+        assert _resolve_text("last")["pooling"] == "last"
+        assert _resolve_text(None)["pooling"] is None
+
+    def test_jina_text_clip_keeps_one_image_space(self):
+        # #580: MobileCLIP2 is the single image leg; jina-text is text-only. The
+        # shape resolves without the one-image-space ProfileError. (A second
+        # image space would be rejected — guarded elsewhere; this is the control
+        # that the hybrid's single image space is accepted.)
+        config = {
+            "embedders": [
+                {"modalities": ["text"], "runtime": "remote", "model": "jina.gguf"},
+                {"modalities": ["text", "image"], "runtime": "onnx", "model": "~/clip"},
+            ],
+            "managed": {"llama_server": {"manage": "auto"}},
+        }
+        plan = _resolve(config)
+        image_spaces = [e for e in plan.embedders if "image" in e.modalities]
+        assert len(image_spaces) == 1
+
+
 # ── Multi-space embedding (#233 — the substrate's config half) ────────────────
 
 
