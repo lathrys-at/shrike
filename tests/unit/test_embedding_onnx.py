@@ -198,6 +198,17 @@ class TestResolveFiles:
         # The companion is co-located (what makes onnxruntime's external-data load work).
         assert (onnx_path.parent / "model_quantized.onnx_data").is_file()
 
+    def test_only_external_data_no_graph_stub_raises(self, tmp_path: Path) -> None:
+        # The external-data landmine (#667, joint-review ADV-2): a HALF-materialized
+        # dir holding ONLY the `.onnx_data` companion (a forgotten graph-stub data
+        # dep) must raise FileNotFoundError — the resolver must NEVER mistake the
+        # `.onnx_data` file for a graph (no variant suffix produces a `.onnx_data`
+        # name, so the suffix loop finds nothing and the dir is correctly rejected).
+        (tmp_path / "model_quantized.onnx_data").write_bytes(b"weights")
+        (tmp_path / "tokenizer.json").write_text("{}")
+        with pytest.raises(FileNotFoundError, match="model"):
+            OnnxBackend(model=str(tmp_path))._resolve_files()
+
 
 # -- Fingerprint --------------------------------------------------------------
 

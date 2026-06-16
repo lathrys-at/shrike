@@ -56,9 +56,11 @@ DEFAULT_PROVIDERS = ("CPUExecutionProvider",)
 # existing renamed-to-``model.onnx`` fixtures still resolve unchanged; a quant-only
 # export (no plain ``model.onnx`` — e.g. ``embeddinggemma-300m`` ships only
 # ``model_quantized.onnx`` + external data) resolves its quant graph without a
-# fetch-time rename. Mirrors ``ClipBackend._VARIANT_SUFFIXES`` (kept in lock-step so
-# both backends discover the same precision names). int8 (``_quantized``/``_int8``)
-# is batch-variant — the startup batch-safety probe catches that and embeds serially,
+# fetch-time rename. This is a SUPERSET of ``ClipBackend._VARIANT_SUFFIXES`` (the
+# shared precision names, in the same order) plus ``_q4f16`` — a real combined
+# 4-bit-weights/fp16-activations export some text models (embeddinggemma) ship but
+# the CLIP exports don't, so it lives only here. int8 (``_quantized``/``_int8``) is
+# batch-variant — the startup batch-safety probe catches that and embeds serially,
 # so loading a quant variant never breaks the reconcile==rebuild invariant.
 _VARIANT_SUFFIXES = ("", "_fp16", "_quantized", "_int8", "_uint8", "_q4", "_q4f16", "_bnb4")
 # Pooling strategies this backend implements (llama also offers "none", which is
