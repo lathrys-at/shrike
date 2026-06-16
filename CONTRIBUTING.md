@@ -9,20 +9,23 @@ versioning, releasing, and how defects get captured. The agent-facing summary in
 Trunk-based. `main` is always releasable — no `develop` branch, no Gitflow.
 
 - Every change lands through a short-lived branch and a pull request. No direct
-  pushes to `main`.
+  pushes to `main`. **Open PRs as drafts** (`gh pr create --draft`) and take them
+  out of draft only once complete and past initial review — a draft can't merge,
+  so CI has always run and the change has been reviewed before anything can land.
 - **Squash merge** PRs, so `main` keeps a linear, one-commit-per-change history
   that bisects cleanly.
-- `main` is protected: the single required status check is `ci-ok`. CI is
-  **gated on the `ci` label** — no test lane runs on a PR until it carries `ci`
-  (or `rc`), and `ci-ok` fails with an actionable message until then, so CI is
-  deferred while a PR churns through review, never skipped. Add the label once
-  review is complete; toggling it re-evaluates the gate.
-- The cross-platform lanes (macOS + ARM) run only on labelled PRs: `rc`
-  (release candidate) selects the full OS matrix — apply it before tagging a
-  release; `macOS` selects just the macOS leg, for changes to the
-  macOS-specific platform glue. Neither runs on plain PRs or on merge to
-  `main` — the gating keeps the iterate-and-merge loop fast and the signal
-  clean. See [`.github/workflows/test.yml`](.github/workflows/test.yml).
+- `main` is protected: the single required status check is `ci-ok` (`CI passed`).
+  **CI always runs on every PR** — there is no `ci` label gate (retired in #678);
+  the suite runs on every push, including on drafts, and `CI passed` reports the
+  real verdict. Because CI actually runs, a PR is pending/blocked until it goes
+  green.
+- The cross-platform lanes (macOS + Linux ARM) stay opt-in by label: `rc`
+  (release candidate) selects **all** legs — apply it before tagging a release;
+  `macos` selects just the macos-latest leg (for macOS-specific platform-glue
+  changes); `linux-arm` selects just the ubuntu-24.04-arm leg. `rc` subsumes the
+  per-leg labels. None run on plain PRs or on merge to `main` — the gating keeps
+  the iterate-and-merge loop fast and the signal clean. See
+  [`.github/workflows/test.yml`](.github/workflows/test.yml).
 - Branch names are `‹type›/‹issue#›-‹slug›`, where `‹type›` is one of `feat`,
   `fix`, `docs`, `chore`, `refactor`, `test`, `xfail` — e.g.
   `fix/44-version-tag-drift`, `feat/33-ankiweb-sync`,

@@ -197,25 +197,27 @@ pytest tests/unit -q
    next-steps, no instructions (those belong in chat, never in commit/PR bodies).
    End the commit message with:
    `Co-Authored-By: Claude <noreply@anthropic.com>`
-3. Open the PR. The body links the advisory and the tracking issue, names the
+3. Open the PR **as a draft** (`gh pr create --draft`) — CI runs on it
+   immediately. The body links the advisory and the tracking issue, names the
    surfaces/lockfiles touched, and (if you used the escape hatch) links the
    cleanup issue. End the PR body with:
    `🤖 Generated with [Claude Code](https://claude.com/claude-code)`
 4. **Self-review the diff against this scope.** A clean dep bump is: a version
    string + one or more regenerated lockfiles + at most a minimal compat shim. If
    the diff is larger than that, you have exceeded scope — stop and reassess.
-5. Apply the **`ci`** label, then set the PR to auto-merge:
+5. Once the diff is reviewed and CI is green, take the PR **out of draft** and set
+   it to auto-merge:
    ```bash
-   gh pr edit <pr#> --add-label ci
+   gh pr ready <pr#>
    gh pr merge <pr#> --auto --squash
    ```
-   **CI is gated on the `ci` label** — nothing runs until it is applied, so a PR
-   showing "CI skipped / failing" *before* you label it is the expected gate, not
-   a failure. `--auto` respects branch protection: the PR merges only once
-   required checks are green. Do not poll for green — labeling and arming
-   auto-merge is the end of your active work. (If branch protection requires a
-   human review that you cannot satisfy, leave the PR armed and note on the
-   tracking issue that it awaits review.)
+   **CI always runs on every PR** (no `ci` label — that gate was retired in #678),
+   including while the PR is a draft, so you get results immediately. A draft can't
+   merge, which is what keeps a dep bump from landing before it's vetted. `--auto`
+   respects branch protection: the PR merges only once the required `CI passed`
+   check is green. Do not poll for green — arming auto-merge is the end of your
+   active work. (If branch protection requires a human review you cannot satisfy,
+   leave the PR armed and note on the tracking issue that it awaits review.)
 6. The tracking issue closes when the PR merges (reference it with `Fixes
    #<issue#>` in the PR body); if you opened a cleanup issue, it stays open by
    design.
