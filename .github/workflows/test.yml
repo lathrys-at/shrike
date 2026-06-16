@@ -40,13 +40,12 @@ permissions:
 # cancels the first — when the label-less sentinel won, it killed the full suite
 # and left the fail-closed `ci-ok` as the survivor (the "every job skipping"
 # shape that needed a label toggle and a whole re-run). With the label state in
-# the key, an unlabelled run (every job — `changes`…`ci-ok` — skips, so nothing
-# executes) and a full labelled run never cancel each other; a push to an
-# already-labeled PR still cancels that PR's stale full run (its `synchronize`
-# payload carries the label). The `action == 'unlabeled'` clause joins the labeled
-# group so REMOVING ci/rc still cancels an in-flight suite — the gate reverts to
-# the skipped (neutral, mergeable-by-convention) state instead of a doomed run
-# finishing green.
+# the key, sentinel runs (no label → only `ci-ok`, fails fast) and full runs
+# never cancel each other; a push to an already-labeled PR still cancels that
+# PR's stale full run (its `synchronize` payload carries the label). The
+# `action == 'unlabeled'` clause joins the labeled group so REMOVING ci/rc still
+# cancels an in-flight suite — the gate flips back to fail-closed instead of a
+# doomed run finishing green.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'rc') || github.event.action == 'unlabeled' }}
   cancel-in-progress: true
@@ -256,33 +255,28 @@ jobs:
       - uses: ./.github/actions/bazel-save
         if: always()
 
-  # The single required status check. It is a REAL job, because the "protect main"
-  # ruleset requires the GitHub Actions context "CI passed" — and a check run
-  # created via the API from the Actions integration does NOT satisfy a ruleset
-  # check that the integration's workflow never declared as a job (learned the hard
-  # way in #664: a manual "CI passed" check shows green in the rollup yet the merge
-  # is rejected with `Required status check "CI passed" is expected`).
-  #
-  # Gated on the `ci`/`rc` label via `if:`, so on an unlabelled PR the whole graph
-  # above is skipped and THIS job is SKIPPED too — which renders neutral/grey, not a
-  # red ❌, so a freshly pushed PR that isn't ready for review doesn't look broken.
-  # The deliberate tradeoff (chosen in #664): GitHub treats a SKIPPED required check
-  # as PASSING, so an unlabelled PR is *technically* mergeable — the deferral relies
-  # on the convention "review, then add `ci`, then merge", not on a hard block. Once
-  # labelled, the job runs for real and reports success/failure (a genuine failure
-  # is red, as it should be once you've opted in).
-  #
-  # `always()` so it still runs when a gated job FAILED (to report that failure);
-  # the `&& <label>` is what makes it SKIP rather than run when unlabelled.
-  #
-  # Coverage is intentionally NOT aggregated here — it lives in its own workflow
-  # (coverage.yml) and only ever reports, never gates, so it must not block the merge.
+  # Single required status check. Always runs, and passes iff every gated job
+  # either succeeded or was legitimately skipped (its paths didn't change / not
+  # an rc PR). This is what branch protection should require — it turns the
+  # conditional jobs into one stable check that never deadlocks a merge.
   ci-ok:
     name: CI passed
-    if: ${{ always() && (contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'rc')) }}
+    if: ${{ always() }}
+    # Coverage is intentionally NOT aggregated here — it lives in its own workflow
+    # (coverage.yml) and only ever reports, never gates, so it must not block the merge.
     needs: [changes, lint, tests, cross-platform]
     runs-on: ubuntu-latest
     steps:
+      # Gate: CI must be opted in via the `ci` (or `rc`) label. Without it the
+      # whole graph above is skipped, so this required check fails with an
+      # actionable message — the PR can't merge until someone adds `ci` and the
+      # suite actually runs. This is the enforcement half of the deferral: CI is
+      # deferred, not skipped — it must still pass before merge.
+      - name: Require the ci (or rc) label
+        if: ${{ !(contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'rc')) }}
+        run: |
+          echo "::error::CI is gated on the 'ci' label — add the 'ci' label once code review is complete to run the suite (or 'rc' for a release candidate)."
+          exit 1
       - name: Verify gated jobs passed or were skipped
         run: |
           if [ "${{ needs.changes.result }}" != "success" ]; then
