@@ -135,6 +135,32 @@ def test_cross_core_write_parity(tmp_path, native_core):
     assert native_core.get_note(nid)[2][0] == "omega"
 
 
+def test_set_note_tags_bulk_replaces_tags_and_preserves_fields(native_core):
+    """The set_tags (replace) path rides set_note_tags_bulk, which (since #716)
+    rebuilds each UpdateNotes row from one batched DB read instead of a GetNote
+    per note. Pin the behavior that read must preserve: tags are replaced
+    exactly across the whole set, and every note's fields/notetype survive."""
+    basic = native_core.notetype_id("Basic")
+    a = native_core.create_note(basic, 1, ["a-front", "a-back"], ["old1", "old2"])
+    b = native_core.create_note(basic, 1, ["b-front", "b-back"], ["keep"])
+
+    out = json.loads(native_core.update_note_tags([a, b], set_tags=["fresh", "new"]))
+    assert out["notes_modified"] == 2
+    assert out["not_found"] == []
+
+    # Tags replaced exactly (order-independent), fields + notetype untouched.
+    for nid, fields in ((a, ["a-front", "a-back"]), (b, ["b-front", "b-back"])):
+        _id, notetype_id, got_fields, got_tags = native_core.get_note(nid)
+        assert notetype_id == basic
+        assert got_fields == fields
+        assert sorted(got_tags) == ["fresh", "new"]
+
+    # Empty set clears every tag (still one read + one write).
+    cleared = json.loads(native_core.update_note_tags([a], set_tags=[]))
+    assert cleared["notes_modified"] == 1
+    assert native_core.get_note(a)[3] == []
+
+
 def test_delete_note_types(native_core):
     basic = native_core.notetype_id("Basic")
     native_core.create_note(basic, 1, ["a", "b"], [])
