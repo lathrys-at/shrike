@@ -680,6 +680,7 @@ class TestEmbeddingLifecycle:
         runner = CLIRunner(lifecycle_server.url, str(cfg))
         started = runner.invoke(
             [
+                "server",
                 "embedding",
                 "start",
                 "--embedding-model",
