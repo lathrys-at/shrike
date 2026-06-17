@@ -17,7 +17,7 @@ use futures::future::BoxFuture;
 use pyo3::prelude::*;
 
 use shrike_engine_api::{Embedder, ImageEmbedder, ImageResolver, MediaItem};
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 
 type VecResult = NativeResult<Vec<Vec<f32>>>;
 
@@ -82,12 +82,12 @@ impl PyEmbedderHandle {
                 let arg: Py<PyAny> = match payload {
                     EmbedPayload::Texts(texts) => texts
                         .into_pyobject(py)
-                        .map_err(|e| NativeError::internal(format!("payload convert: {e}")))?
+                        .context(ErrorKind::Internal, "payload convert")?
                         .into_any()
                         .unbind(),
                     EmbedPayload::Images(images) => images
                         .into_pyobject(py)
-                        .map_err(|e| NativeError::internal(format!("payload convert: {e}")))?
+                        .context(ErrorKind::Internal, "payload convert")?
                         .into_any()
                         .unbind(),
                 };
@@ -102,7 +102,7 @@ impl PyEmbedderHandle {
         Box::pin(async move {
             handle
                 .await
-                .map_err(|e| NativeError::internal(format!("embed task failed: {e}")))?
+                .context(ErrorKind::Internal, "embed task failed")?
         })
     }
 }

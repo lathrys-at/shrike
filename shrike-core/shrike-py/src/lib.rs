@@ -2,13 +2,36 @@
 //!
 //! The ONE crate that depends on `pyo3` (epic #265 convention 5, enforced by
 //! `//shrike-core:layering_check`). Every native compute crate (pure Rust) is bound
-//! to Python here, following the `shrike-error` conventions:
+//! to Python here.
 //!
-//! - coarse, batched calls; only strings, bytes, f32 vectors, i64 key arrays,
-//!   and small JSON-able dicts cross the boundary
-//! - all compute under `py.detach` (GIL released; pyo3 ≥0.26 name for allow_threads)
-//! - `shrike_error::NativeError` kinds map to the exception classes below, which
-//!   the Python facades translate into Shrike's existing error surface
+//! # Marshaling rules (epic #265 convention 6)
+//!
+//! Only these types cross the Python↔Rust boundary:
+//!
+//! - strings (`String`/`&str`) and byte buffers (`Vec<u8>`/`&[u8]`)
+//! - f32 vectors / vector batches (zero-copy numpy interchange where arrays
+//!   must cross, via the `numpy` crate)
+//! - i64 key arrays
+//! - small JSON-able maps (stats, health blocks)
+//!
+//! Never a live Python object, callback, or handle — calls are coarse and
+//! batched so the boundary is crossed per *batch*, not per item.
+//!
+//! # Threading rules
+//!
+//! - All compute runs under `py.detach` (GIL released; pyo3 ≥0.26's name for
+//!   `allow_threads`).
+//! - No Python handle may cross into a worker thread; compute crates receive
+//!   owned data only.
+//!
+//! # Error taxonomy
+//!
+//! `shrike_error::NativeError`'s [`ErrorKind`] maps to the exception classes
+//! below ([`to_py_err`]), which the Python facades translate into Shrike's
+//! existing error surface. The wire shape is `(kind, message, trace)`: the kind
+//! selects the class, the message is the text, and the captured native span
+//! trace rides along as a PEP 678 note. The error's Rust-side `#[source]` chain
+//! does NOT cross — it's for native logging/`{:?}` only.
 //!
 //! The module is internal: production code reaches it only through the
 //! `shrike_native` package facade, and **no test file imports it** — tests go

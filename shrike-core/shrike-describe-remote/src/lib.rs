@@ -39,7 +39,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde::Deserialize;
 use shrike_engine_api::{MediaItem, Recognition, RecognizeMedia};
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 
 /// Bump whenever [`DESCRIBE_PROMPT_V1`] (or whichever template ships)
 /// changes: the prompt is part of the output space, so a change must
@@ -439,7 +439,7 @@ impl RemoteDescriber {
 
         let body: ChatResponse = resp
             .into_json()
-            .map_err(|e| NativeError::internal(format!("malformed describe response: {e}")))?;
+            .context(ErrorKind::Internal, "malformed describe response")?;
         let text = body
             .choices
             .first()

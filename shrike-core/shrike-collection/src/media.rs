@@ -184,7 +184,7 @@ impl CollectionCore {
         index: i64,
         path_roots: &[String],
     ) -> NativeResult<StoreMediaResult> {
-        use shrike_error::NativeError;
+        use shrike_error::{ErrorKind, NativeError, ResultExt};
         if path_roots.is_empty() {
             return Err(NativeError::invalid_input(
                 "server-local paths are not enabled (set --media-path-root on a \
@@ -205,8 +205,7 @@ impl CollectionCore {
             )));
         }
         let base = safe_media_name(&target_str);
-        let data = std::fs::read(&target)
-            .map_err(|e| NativeError::invalid_input(format!("read failed: {e}")))?;
+        let data = std::fs::read(&target).context(ErrorKind::InvalidInput, "read failed")?;
         self.write_media_bytes(index, base, &data, None)
     }
 

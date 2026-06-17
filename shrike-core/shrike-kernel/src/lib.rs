@@ -46,7 +46,7 @@ use tracing::Instrument;
 
 use shrike_collection::CollectionCore;
 use shrike_derived::DerivedEngine;
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 use shrike_index::MultiModalIndex;
 use shrike_store_api::{Collection, CreateOutcome, DerivedStore, DuplicatePolicy, VectorIndex};
 
@@ -425,8 +425,7 @@ impl Kernel {
         // The derived store opens its file under cache_dir before assemble
         // runs, so the dir must exist first (assemble re-creates idempotently
         // for composed callers).
-        std::fs::create_dir_all(cache_dir)
-            .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
+        std::fs::create_dir_all(cache_dir).context(ErrorKind::Internal, "cache dir")?;
         let collection = Arc::new(SerializedCollection::open(collection_path.to_string()).await?);
         let engine: Arc<dyn VectorIndex> = Arc::new(MultiModalIndex::new(
             NOTE_MODALITIES
@@ -444,8 +443,7 @@ impl Kernel {
         cache_layout::migrate_flat_derived(cache_dir, collection_path);
         let derived_path = cache_layout::derived_db_path(cache_dir, collection_path);
         if let Some(parent) = derived_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| NativeError::internal(format!("derived dir: {e}")))?;
+            std::fs::create_dir_all(parent).context(ErrorKind::Internal, "derived dir")?;
         }
         let derived_path = derived_path.to_str().ok_or_else(|| {
             NativeError::internal(format!(
@@ -515,10 +513,8 @@ impl Kernel {
         save_delay: Option<f64>,
         save_threshold: Option<u64>,
     ) -> NativeResult<Self> {
-        std::fs::create_dir_all(cache_dir)
-            .map_err(|e| NativeError::internal(format!("cache dir: {e}")))?;
-        std::fs::create_dir_all(&index_layout.dir)
-            .map_err(|e| NativeError::internal(format!("index dir: {e}")))?;
+        std::fs::create_dir_all(cache_dir).context(ErrorKind::Internal, "cache dir")?;
+        std::fs::create_dir_all(&index_layout.dir).context(ErrorKind::Internal, "index dir")?;
         // The N-space index coordinator (#232): the PRIMARY space is the engine
         // built/injected above, opened at the base index dir DIRECTLY (no
         // subdir → the in-place migration rule, byte-identical to pre-#232).
@@ -1351,7 +1347,7 @@ impl Kernel {
         let derived = Arc::clone(&self.derived);
         tokio::task::spawn_blocking(move || derived.build(&rows, dmod))
             .await
-            .map_err(|e| NativeError::internal(format!("derived build task: {e}")))??;
+            .context(ErrorKind::Internal, "derived build task")??;
         let now = self.collection.run(|core| core.col_mod()).await??;
         Ok((n, dmod, now))
     }
@@ -1686,7 +1682,7 @@ impl Kernel {
                         .push((name.clone(), recognition.text.clone()));
                     if !recognition.segments.is_empty() {
                         let json = serde_json::to_string(&recognition.segments)
-                            .map_err(|e| NativeError::internal(format!("segments: {e}")))?;
+                            .context(ErrorKind::Internal, "segments")?;
                         segments.push((*note_id, name.clone(), json));
                     }
                     stored_count += 1;
@@ -2331,7 +2327,7 @@ impl Kernel {
             prepared.push(
                 handle
                     .await
-                    .map_err(|e| NativeError::internal(format!("media prepare task: {e}")))?,
+                    .context(ErrorKind::Internal, "media prepare task")?,
             );
         }
         self.collection

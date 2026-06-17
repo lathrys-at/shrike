@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeResult, ResultExt};
 
 // ── media items ──────────────────────────────────────────────────────────────
 
@@ -417,7 +417,7 @@ fn run_blocking<T: Send + 'static>(
     Box::pin(async move {
         handle
             .await
-            .map_err(|e| NativeError::internal(format!("blocking engine task failed: {e}")))?
+            .context(ErrorKind::Internal, "blocking engine task failed")?
     })
 }
 

@@ -312,8 +312,7 @@ impl MultiModalIndex {
             index
                 .save(&tmp.to_string_lossy())
                 .context(ErrorKind::Internal, "usearch save")?;
-            std::fs::rename(&tmp, &file)
-                .context(ErrorKind::Internal, "usearch save rename")?;
+            std::fs::rename(&tmp, &file).context(ErrorKind::Internal, "usearch save rename")?;
         }
         for modality in &self.modalities {
             if !loaded.contains(modality) {

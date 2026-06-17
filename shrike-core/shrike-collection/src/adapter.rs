@@ -15,7 +15,7 @@
 
 use anki::backend::{init_backend, Backend};
 use prost::Message;
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 
 // In test builds every dispatch is recorded, so the method-constant
 // coverage tripwire (#394) can assert each declared index is genuinely
@@ -180,9 +180,8 @@ impl ServiceAdapter {
         };
         let mut buf = Vec::new();
         init.encode(&mut buf)
-            .map_err(|e| NativeError::internal(format!("encode init: {e}")))?;
-        let backend = init_backend(&buf)
-            .map_err(|e| NativeError::unavailable(format!("backend init: {e}")))?;
+            .context(ErrorKind::Internal, "encode init")?;
+        let backend = init_backend(&buf).context(ErrorKind::Unavailable, "backend init")?;
         Ok(Self { backend })
     }
 
@@ -196,15 +195,14 @@ impl ServiceAdapter {
         let mut buf = Vec::new();
         request
             .encode(&mut buf)
-            .map_err(|e| NativeError::internal(format!("encode request: {e}")))?;
+            .context(ErrorKind::Internal, "encode request")?;
         #[cfg(test)]
         record_dispatch(service, method);
         let out = self
             .backend
             .run_service_method(service, method, &buf)
             .map_err(|err_bytes| decode_backend_error(&err_bytes))?;
-        Resp::decode(out.as_slice())
-            .map_err(|e| NativeError::internal(format!("decode response: {e}")))
+        Resp::decode(out.as_slice()).context(ErrorKind::Internal, "decode response")
     }
 
     // ── lifecycle ────────────────────────────────────────────────────────────
@@ -248,7 +246,7 @@ impl ServiceAdapter {
             .backend
             .run_db_command_bytes(req.to_string().as_bytes())
             .map_err(|err_bytes| decode_backend_error(&err_bytes))?;
-        serde_json::from_slice(&out).map_err(|e| NativeError::internal(format!("db response: {e}")))
+        serde_json::from_slice(&out).context(ErrorKind::Internal, "db response")
     }
 
     /// `col.mod` — the drift watermark. The service layer has no RPC for the
@@ -465,8 +463,7 @@ impl ServiceAdapter {
         request: &Req,
     ) -> NativeResult<serde_json::Value> {
         let resp: anki_proto::generic::Json = self.call(SVC_NOTETYPES, method, request)?;
-        serde_json::from_slice(&resp.json)
-            .map_err(|e| NativeError::internal(format!("notetype json: {e}")))
+        serde_json::from_slice(&resp.json).context(ErrorKind::Internal, "notetype json")
     }
 
     /// The stock Basic notetype as a schema11 dict (the donor pylib's

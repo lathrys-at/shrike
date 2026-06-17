@@ -15,7 +15,7 @@
 //! The request/scope/format/outcome types are the store contract's
 //! (`shrike_store_api`), shared with the kernel and any other store impl.
 
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 use shrike_store_api::{ExportOutcome, ExportRequest, ExportScope, PackageFormat};
 
 use crate::CollectionCore;
@@ -62,15 +62,14 @@ impl CollectionCore {
         })?;
         // The parent must exist (the host gate already required it). Create it
         // defensively so the mkdtemp below can't fail on a missing dir.
-        std::fs::create_dir_all(parent)
-            .map_err(|e| NativeError::internal(format!("export parent dir: {e}")))?;
+        std::fs::create_dir_all(parent).context(ErrorKind::Internal, "export parent dir")?;
 
         // (1) A securely-random, exclusively-created temp dir in the parent.
         // `tempfile` removes it on drop, so any error path cleans up too.
         let temp_dir = tempfile::Builder::new()
             .prefix(".shrike-export-")
             .tempdir_in(parent)
-            .map_err(|e| NativeError::internal(format!("export temp dir: {e}")))?;
+            .context(ErrorKind::Internal, "export temp dir")?;
         // (2) Export into a fixed name inside the server-owned dir.
         let temp_path = temp_dir.path().join("package");
         let temp_str = temp_path.to_str().ok_or_else(|| {

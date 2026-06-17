@@ -184,7 +184,8 @@ pub(crate) fn action_search_notes(
         let groups = shrike_kernel::actions::search_notes(
             inner, index, derived, tag_keys, &sources, &vectors, &args,
         )?;
-        serde_json::to_string(&groups).map_err(|e| shrike_error::NativeError::internal(e.to_string()))
+        serde_json::to_string(&groups)
+            .map_err(|e| shrike_error::NativeError::internal(e.to_string()))
     })
     .map_err(to_py_err)
 }

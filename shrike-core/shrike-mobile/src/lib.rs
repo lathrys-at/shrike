@@ -37,13 +37,23 @@
 //!   nothing it didn't allocate; the entry point exists for the typed-result
 //!   surface a later slice adds).
 //!
+//! ## Marshaling rules (epic #265 convention 6)
+//!
+//! As on the PyO3 side, only coarse, batched data crosses the C ABI: C strings
+//! (UTF-8) and byte buffers, with structured payloads carried as a single JSON
+//! string per call — never a live host object, callback handle, or per-item
+//! crossing. Compute crates receive owned data; no host handle enters a worker
+//! thread.
+//!
 //! ## Errors
 //!
 //! Every result the callback receives is a JSON object: `{"ok": <value>}` on
 //! success, or `{"error": {"kind": "...", "message": "..."}}` on failure,
-//! where `kind` is the [`shrike_error::ErrorKind`] discriminant string. A
-//! synchronous misuse (a null handle, a non-UTF-8 C string) is reported the
-//! same way through the callback, never a panic across the FFI boundary.
+//! where `kind` is the [`shrike_error::ErrorKind`] discriminant string. (The
+//! error's Rust-side `#[source]` chain stays native — only `kind`/`message`
+//! cross.) A synchronous misuse (a null handle, a non-UTF-8 C string) is
+//! reported the same way through the callback, never a panic across the FFI
+//! boundary.
 
 #![allow(clippy::missing_safety_doc)]
 
@@ -54,7 +64,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 #[cfg(feature = "anki-core")]
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 #[cfg(feature = "anki-core")]
 use shrike_kernel::Kernel;
 
@@ -871,16 +881,14 @@ unsafe fn cstr_opt(p: *const c_char) -> Option<String> {
 /// `invalid_input` (it is the caller's request, not a bug).
 #[cfg(feature = "anki-core")]
 fn parse<T: serde::de::DeserializeOwned>(params: &str) -> NativeResult<T> {
-    serde_json::from_str(params)
-        .map_err(|e| NativeError::invalid_input(format!("params JSON: {e}")))
+    serde_json::from_str(params).context(ErrorKind::InvalidInput, "params JSON")
 }
 
 /// Serialize a typed result to JSON, mapping a (never-expected) failure to an
 /// internal error.
 #[cfg(feature = "anki-core")]
 fn to_json<T: serde::Serialize>(value: &T) -> NativeResult<String> {
-    serde_json::to_string(value)
-        .map_err(|e| NativeError::internal(format!("serialize result: {e}")))
+    serde_json::to_string(value).context(ErrorKind::Internal, "serialize result")
 }
 
 /// Spawn an op onto the kernel runtime and fire the completion when it

@@ -18,7 +18,7 @@ use futures::future::BoxFuture;
 use pyo3::prelude::*;
 
 use shrike_engine_api::{MediaItem, Recognition, Recognizer, Segment};
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 
 type RecResult = NativeResult<Vec<Recognition>>;
 
@@ -90,7 +90,7 @@ impl Recognizer for PyRecognizerHandle {
         Box::pin(async move {
             handle
                 .await
-                .map_err(|e| NativeError::internal(format!("recognize task failed: {e}")))?
+                .context(ErrorKind::Internal, "recognize task failed")?
         })
     }
 

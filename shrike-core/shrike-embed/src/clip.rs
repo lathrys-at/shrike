@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use image::imageops::FilterType;
 use shrike_engine_api::MediaItem;
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 use tokenizers::Tokenizer;
 
 use crate::{l2_normalize_rows, GraphInput};
@@ -76,7 +76,7 @@ impl ClipEmbedder {
             .ok_or_else(|| NativeError::invalid_input("vision graph declares no inputs"))?;
 
         let mut tokenizer = Tokenizer::from_file(&cfg.tokenizer_path)
-            .map_err(|e| NativeError::unavailable(format!("loading tokenizer: {e}")))?;
+            .context(ErrorKind::Unavailable, "loading tokenizer")?;
         // CLIP uses a fixed context: truncate and pad to exactly `context`
         // (pad token defaults match the Python tokenizers enable_padding()).
         tokenizer
@@ -84,7 +84,7 @@ impl ClipEmbedder {
                 max_length: cfg.context,
                 ..Default::default()
             }))
-            .map_err(|e| NativeError::internal(format!("truncation: {e}")))?;
+            .context(ErrorKind::Internal, "truncation")?;
         tokenizer.with_padding(Some(tokenizers::PaddingParams {
             strategy: tokenizers::PaddingStrategy::Fixed(cfg.context),
             ..Default::default()
@@ -121,7 +121,7 @@ impl ClipEmbedder {
         let encodings = self
             .tokenizer
             .encode_batch(texts.to_vec(), true)
-            .map_err(|e| NativeError::invalid_input(format!("tokenization failed: {e}")))?;
+            .context(ErrorKind::InvalidInput, "tokenization failed")?;
         let batch = encodings.len();
         let seq = encodings[0].get_ids().len();
         let mut ids = Vec::with_capacity(batch * seq);
@@ -149,7 +149,7 @@ impl ClipEmbedder {
         }
         let outputs = session
             .run(feed)
-            .map_err(|e| NativeError::invalid_input(format!("clip text run failed: {e}")))?;
+            .context(ErrorKind::InvalidInput, "clip text run failed")?;
         let vectors = crate::extract_2d(&outputs)?;
         let vectors = l2_normalize_rows(vectors);
         *self.dim.lock().expect("dim lock poisoned") = Some(vectors.ncols());
@@ -169,7 +169,7 @@ impl ClipEmbedder {
             pixels.extend(self.preprocess(&item.bytes)?);
         }
         let tensor = ort::value::Tensor::from_array(([images.len(), 3, c, c], pixels))
-            .map_err(|e| NativeError::internal(format!("pixel tensor: {e}")))?;
+            .context(ErrorKind::Internal, "pixel tensor")?;
 
         let mut session = self
             .vision_session
@@ -179,7 +179,7 @@ impl ClipEmbedder {
             vec![(self.vision_input_name.clone(), tensor.into_dyn())];
         let outputs = session
             .run(feed)
-            .map_err(|e| NativeError::invalid_input(format!("clip vision run failed: {e}")))?;
+            .context(ErrorKind::InvalidInput, "clip vision run failed")?;
         let vectors = crate::extract_2d(&outputs)?;
         let vectors = l2_normalize_rows(vectors);
         *self.dim.lock().expect("dim lock poisoned") = Some(vectors.ncols());
@@ -221,7 +221,7 @@ fn preprocess(
     std: &[f32],
 ) -> NativeResult<Vec<f32>> {
     let img = image::load_from_memory(bytes)
-        .map_err(|e| NativeError::invalid_input(format!("image decode failed: {e}")))?
+        .context(ErrorKind::InvalidInput, "image decode failed")?
         .to_rgb8();
     let (w, h) = img.dimensions();
     if w == 0 || h == 0 {

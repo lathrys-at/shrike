@@ -27,7 +27,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde::Deserialize;
 use shrike_engine_api::{EmbedImages, EmbedText, MediaItem};
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 
 /// Per-request ceiling, matching the Python backend's httpx timeout.
 const EMBED_TIMEOUT: Duration = Duration::from_secs(60);
@@ -358,7 +358,7 @@ impl EmbedText for RemoteEmbedder {
         let resp = self.post_json_with_retry("/v1/embeddings", &payload)?;
         let body: EmbeddingsResponse = resp
             .into_json()
-            .map_err(|e| NativeError::internal(format!("malformed embeddings response: {e}")))?;
+            .context(ErrorKind::Internal, "malformed embeddings response")?;
         if body.data.len() != texts.len() {
             return Err(NativeError::internal(format!(
                 "endpoint returned {} embeddings for {} inputs",
@@ -443,9 +443,9 @@ impl RemoteEmbedder {
             }
         });
         let resp = self.post_json_with_retry("/embeddings", &payload)?;
-        let mut body: Vec<NativeEmbeddingItem> = resp.into_json().map_err(|e| {
-            NativeError::internal(format!("malformed native embeddings response: {e}"))
-        })?;
+        let mut body: Vec<NativeEmbeddingItem> = resp
+            .into_json()
+            .context(ErrorKind::Internal, "malformed native embeddings response")?;
         // One sequence per request → exactly one outer item, exactly one
         // pooled inner vector. A multi-inner response means the server is
         // running `--pooling none` (per-token vectors), which would silently

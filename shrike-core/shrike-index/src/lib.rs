@@ -24,7 +24,9 @@ pub fn new_index(ndim: usize) -> NativeResult<Index> {
         ..Default::default()
     };
     let index = Index::new(&options).context(ErrorKind::Internal, "usearch new")?;
-    index.reserve(64).context(ErrorKind::Internal, "usearch reserve")?;
+    index
+        .reserve(64)
+        .context(ErrorKind::Internal, "usearch reserve")?;
     Ok(index)
 }
 

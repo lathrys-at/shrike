@@ -22,7 +22,7 @@ use blake2::digest::consts::U8;
 use blake2::{Blake2b, Digest};
 use serde::{Deserialize, Serialize};
 
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 use shrike_store_api::VectorIndex;
 
 /// The on-disk schema version of a freshly built index (mirrors
@@ -518,7 +518,7 @@ impl IndexOrchestrator {
                         hashes.iter().map(|(k, v)| (k.to_string(), v)).collect();
                     Some(
                         serde_json::to_string(&as_strings)
-                            .map_err(|e| NativeError::internal(format!("hashes encode: {e}")))?,
+                            .context(ErrorKind::Internal, "hashes encode")?,
                     )
                 }
                 None => None,
@@ -533,23 +533,21 @@ impl IndexOrchestrator {
             };
             (hashes_json, meta)
         };
-        std::fs::create_dir_all(&self.dir)
-            .map_err(|e| NativeError::internal(format!("index dir: {e}")))?;
+        std::fs::create_dir_all(&self.dir).context(ErrorKind::Internal, "index dir")?;
         // A non-UTF-8 cache dir must error, not silently save to the cwd (#382).
         let dir_str = self.dir.to_str().ok_or_else(|| {
             NativeError::internal(format!("non-UTF-8 index dir: {}", self.dir.display()))
         })?;
         self.engine
             .save(dir_str)
-            .map_err(|e| NativeError::internal(format!("engine save: {e}")))?;
+            .context(ErrorKind::Internal, "engine save")?;
         if let Some(hashes_json) = hashes_json {
             write_atomic(&self.dir.join("index.hashes.json"), &hashes_json)
-                .map_err(|e| NativeError::internal(format!("hashes write: {e}")))?;
+                .context(ErrorKind::Internal, "hashes write")?;
         }
-        let meta_json = serde_json::to_string(&meta)
-            .map_err(|e| NativeError::internal(format!("meta encode: {e}")))?;
+        let meta_json = serde_json::to_string(&meta).context(ErrorKind::Internal, "meta encode")?;
         write_atomic(&self.dir.join("index.meta.json"), &meta_json)
-            .map_err(|e| NativeError::internal(format!("meta write: {e}")))?;
+            .context(ErrorKind::Internal, "meta write")?;
         Ok(())
     }
 
@@ -580,12 +578,10 @@ impl IndexOrchestrator {
                 activation: shared.activation.clone(),
             }
         };
-        std::fs::create_dir_all(&self.dir)
-            .map_err(|e| NativeError::internal(format!("index dir: {e}")))?;
-        let meta_json = serde_json::to_string(&meta)
-            .map_err(|e| NativeError::internal(format!("meta encode: {e}")))?;
+        std::fs::create_dir_all(&self.dir).context(ErrorKind::Internal, "index dir")?;
+        let meta_json = serde_json::to_string(&meta).context(ErrorKind::Internal, "meta encode")?;
         write_atomic(&self.dir.join("index.meta.json"), &meta_json)
-            .map_err(|e| NativeError::internal(format!("meta write: {e}")))?;
+            .context(ErrorKind::Internal, "meta write")?;
         Ok(())
     }
 }

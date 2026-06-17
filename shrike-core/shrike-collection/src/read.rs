@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 use shrike_schemas::{
     CollectionInfo, DeckInfo, DeckStat, FieldDetail, ListNotesResponse, Note, NoteTypeDetail,
     NoteTypeInfo, Stats, Summary, TemplateInfo,
@@ -472,10 +472,7 @@ impl CollectionCore {
     pub fn note_dicts(&self, note_ids: &[i64], with_fields: bool) -> NativeResult<Vec<Value>> {
         self.typed_notes(note_ids, with_fields)?
             .iter()
-            .map(|note| {
-                serde_json::to_value(note)
-                    .map_err(|e| NativeError::internal(format!("note wire shape: {e}")))
-            })
+            .map(|note| serde_json::to_value(note).context(ErrorKind::Internal, "note wire shape"))
             .collect()
     }
 

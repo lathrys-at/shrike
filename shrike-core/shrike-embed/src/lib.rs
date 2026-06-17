@@ -18,7 +18,7 @@ use std::sync::Mutex;
 pub use clip::{ClipEmbedder, ClipEmbedderConfig, IMAGE_PREP_VERSION_RS};
 
 use ndarray::{s, Array1, Array2, ArrayD, Axis, Ix3};
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 use tokenizers::Tokenizer;
 
 /// Pooling strategies (mirrors `_POOLINGS` in embedding_onnx.py; "none" is
@@ -52,7 +52,7 @@ pub fn init_runtime(dylib_path: &str) -> NativeResult<()> {
     // commit() returns false when an environment is already committed — fine,
     // init is process-wide and idempotent for our single-dylib use.
     ort::init_from(dylib_path)
-        .map_err(|e| NativeError::unavailable(format!("onnxruntime init failed: {e}")))?
+        .context(ErrorKind::Unavailable, "onnxruntime init failed")?
         .commit();
     Ok(())
 }
@@ -137,13 +137,15 @@ pub(crate) fn build_session(
             "ONNX model not found: {model_path}"
         )));
     }
-    let mut builder = ort::session::Session::builder()
-        .map_err(|e| NativeError::internal(format!("session builder: {e}")))?;
+    let mut builder =
+        ort::session::Session::builder().context(ErrorKind::Internal, "session builder")?;
     let mut active: Vec<String> = Vec::new();
     for name in providers {
         // The list is already resolved Python-side; mapping is defence in
         // depth (an unmappable name degrades to CPU, which is always last).
         if let Some(ep) = map_provider(name) {
+            // ort's builder errors embed the (non-'static) SessionBuilder, so
+            // they aren't Into<BoxError> — render with Display, no source chain.
             builder = builder
                 .with_execution_providers([ep])
                 .map_err(|e| NativeError::unavailable(format!("provider {name}: {e}")))?;
@@ -187,11 +189,11 @@ pub(crate) fn int_tensor(
     let value = if int32 {
         let v32: Vec<i32> = data.iter().map(|&v| v as i32).collect();
         ort::value::Tensor::from_array(([batch, seq], v32))
-            .map_err(|e| NativeError::internal(format!("int tensor: {e}")))?
+            .context(ErrorKind::Internal, "int tensor")?
             .into_dyn()
     } else {
         ort::value::Tensor::from_array(([batch, seq], data.to_vec()))
-            .map_err(|e| NativeError::internal(format!("int tensor: {e}")))?
+            .context(ErrorKind::Internal, "int tensor")?
             .into_dyn()
     };
     Ok(value)
@@ -201,11 +203,11 @@ pub(crate) fn int_tensor(
 pub(crate) fn extract_2d(outputs: &ort::session::SessionOutputs<'_>) -> NativeResult<Array2<f32>> {
     let array: ArrayD<f32> = outputs[0]
         .try_extract_array::<f32>()
-        .map_err(|e| NativeError::internal(format!("output extract: {e}")))?
+        .context(ErrorKind::Internal, "output extract")?
         .to_owned();
     array
         .into_dimensionality::<ndarray::Ix2>()
-        .map_err(|e| NativeError::invalid_input(format!("expected a rank-2 output: {e}")))
+        .context(ErrorKind::InvalidInput, "expected a rank-2 output")
 }
 
 /// Backwards-compat alias used by both engines.
@@ -218,7 +220,7 @@ impl TextEmbedder {
         let inputs = Self::inspect_inputs(&session);
 
         let mut tokenizer = Tokenizer::from_file(&cfg.tokenizer_path)
-            .map_err(|e| NativeError::unavailable(format!("loading tokenizer: {e}")))?;
+            .context(ErrorKind::Unavailable, "loading tokenizer")?;
         // Pad-token resolution across conventions, mirroring the Python backend:
         // BERT/WordPiece "[PAD]", RoBERTa/BART BPE "<pad>", else id 0.
         let (pad_id, pad_token) = match tokenizer.token_to_id("[PAD]") {
@@ -239,7 +241,7 @@ impl TextEmbedder {
                 max_length: cfg.max_length,
                 ..Default::default()
             }))
-            .map_err(|e| NativeError::internal(format!("truncation: {e}")))?;
+            .context(ErrorKind::Internal, "truncation")?;
 
         Ok(Self {
             session: Mutex::new(session),
@@ -332,7 +334,7 @@ impl TextEmbedder {
         let encodings = self
             .tokenizer
             .encode_batch(texts.to_vec(), true)
-            .map_err(|e| NativeError::invalid_input(format!("tokenization failed: {e}")))?;
+            .context(ErrorKind::InvalidInput, "tokenization failed")?;
 
         let batch = encodings.len();
         let seq = encodings[0].get_ids().len();
@@ -346,7 +348,7 @@ impl TextEmbedder {
         }
 
         let mask_arr = Array2::from_shape_vec((batch, seq), mask.clone())
-            .map_err(|e| NativeError::internal(format!("mask shape: {e}")))?;
+            .context(ErrorKind::Internal, "mask shape")?;
 
         let mut session = self.session.lock().expect("session lock poisoned");
         let mut feed: Vec<(String, ort::value::DynValue)> = Vec::new();
@@ -376,24 +378,24 @@ impl TextEmbedder {
 
         let outputs = session
             .run(feed)
-            .map_err(|e| NativeError::invalid_input(format!("onnx run failed: {e}")))?;
+            .context(ErrorKind::InvalidInput, "onnx run failed")?;
         // The first output, by position — mirroring the Python backend's
         // `session.run(None, feed)[0]`. Pooling reads the borrowed view
         // directly: no owned copy of the full [B,S,H] token tensor (#384).
         let array = outputs[0]
             .try_extract_array::<f32>()
-            .map_err(|e| NativeError::internal(format!("output extract: {e}")))?;
+            .context(ErrorKind::Internal, "output extract")?;
 
         let vectors: Array2<f32> = match array.ndim() {
             3 => {
                 let tokens = array
                     .into_dimensionality::<Ix3>()
-                    .map_err(|e| NativeError::internal(format!("rank-3 view: {e}")))?;
+                    .context(ErrorKind::Internal, "rank-3 view")?;
                 pool(tokens, &mask_arr, self.pooling)
             }
             2 => array
                 .into_dimensionality::<ndarray::Ix2>()
-                .map_err(|e| NativeError::internal(format!("rank-2 view: {e}")))?
+                .context(ErrorKind::Internal, "rank-2 view")?
                 .to_owned(),
             n => {
                 return Err(NativeError::invalid_input(format!(

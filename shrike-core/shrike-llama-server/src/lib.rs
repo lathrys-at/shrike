@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 /// 50ms, not 250 (#426): a localhost health GET costs ~1ms, and every service
@@ -763,7 +763,7 @@ impl LlamaServerManager {
             .stdout(Stdio::null())
             .stderr(stderr)
             .spawn()
-            .map_err(|e| NativeError::unavailable(format!("could not spawn llama-server: {e}")))?;
+            .context(ErrorKind::Unavailable, "could not spawn llama-server")?;
         *self.pid_cell.lock().expect("pid cell poisoned") = Some(child.id());
         self.child = Some(child);
         self.write_pid_file();

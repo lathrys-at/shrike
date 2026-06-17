@@ -29,17 +29,20 @@
 //! The chain is for Rust-side diagnostics (logging, `{:?}`, `Display`); it does
 //! **not** cross the FFI boundary — only `(kind, message, trace)` does.
 //!
-//! # Leaf-error `From` impls are feature-gated
+//! # Only lightweight leaves get a `From`
 //!
 //! This is a layer-floor crate every native crate depends on, including the
-//! kernel. An *unconditional* `From<ort::Error>` / `From<rusqlite::Error>` /
-//! `From<ureq::Error>` would pull those heavy/engine leaf crates into every
-//! crate's build, defeating the "kernel embeds never enter ort" purity. So only
-//! the lightweight, ubiquitous leaves (`serde_json`, `io`) are unconditional;
-//! the heavy leaves are behind the `from-ort` / `from-rusqlite` / `from-ureq`
-//! cargo features, enabled ONLY by the crate that actually touches that leaf.
-//! Anything without a dedicated `From` becomes a source via [`NativeError::with_source`]
-//! or the [`ResultExt::context`] extension.
+//! kernel. Only the lightweight, ubiquitous leaves (`serde_json`, `io`) get an
+//! unconditional `From` here. The HEAVY/ENGINE leaves (`ort`, `rusqlite`,
+//! `ureq`) deliberately get NONE — not even feature-gated: under Cargo workspace
+//! feature unification a single `shrike-error` is built for the whole graph, so
+//! a `from-ort` feature turned on by any crate would activate this crate's
+//! optional `ort` dep for everyone and pull `ort` into the kernel
+//! (`shrike-error -> shrike-collection -> shrike-kernel`), the exact bloat the
+//! "kernel embeds never enter ort" firewall must prevent. A using crate instead
+//! attaches its heavy leaf as the recoverable `#[source]` via
+//! [`ResultExt::context`] / [`NativeError::with_source`], which boxes through
+//! `Into<BoxError>` and needs no leaf dependency in this crate.
 
 use std::error::Error;
 
@@ -247,33 +250,10 @@ impl From<std::io::Error> for NativeError {
     }
 }
 
-// Feature-gated: heavy/engine leaves. The feature is enabled ONLY by the crate
-// that touches the leaf, so the floor crate doesn't pull ort/rusqlite/ureq into
-// every native build (the kernel must not gain ort/rusqlite). All default to
-// Internal — a leaf failure here (an inference, a DB op, an HTTP call) is a
-// runtime fault the caller didn't cause; `.context(ErrorKind::Unavailable, ..)`
-// at the using site re-tiers it where "the backend is down" is the right read.
-
-#[cfg(feature = "from-ort")]
-impl From<ort::Error> for NativeError {
-    fn from(e: ort::Error) -> Self {
-        Self::with_source(ErrorKind::Internal, e.to_string(), e)
-    }
-}
-
-#[cfg(feature = "from-rusqlite")]
-impl From<rusqlite::Error> for NativeError {
-    fn from(e: rusqlite::Error) -> Self {
-        Self::with_source(ErrorKind::Internal, e.to_string(), e)
-    }
-}
-
-#[cfg(feature = "from-ureq")]
-impl From<ureq::Error> for NativeError {
-    fn from(e: ureq::Error) -> Self {
-        Self::with_source(ErrorKind::Internal, e.to_string(), e)
-    }
-}
+// The heavy/engine leaves (ort, rusqlite, ureq) get NO `From` — see the
+// crate-level docs: a using crate attaches them as `#[source]` via
+// `ResultExt::context` / `with_source`, keeping them out of this floor crate's
+// dependency closure (and thus out of the kernel).
 
 #[cfg(test)]
 mod tests {
