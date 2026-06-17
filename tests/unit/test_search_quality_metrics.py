@@ -24,7 +24,11 @@ from tests.manual.search_quality.metrics import (
 )
 
 FIXTURE = (
-    Path(__file__).resolve().parents[1] / "search_quality" / "fixtures" / "example_manifest.json"
+    Path(__file__).resolve().parents[1]
+    / "manual"
+    / "search_quality"
+    / "fixtures"
+    / "example_manifest.json"
 )
 
 
