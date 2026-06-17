@@ -1,4 +1,4 @@
-"""Build-time model assembly + per-profile launcher targets for `//scripts:serve` (#699).
+"""Build-time model assembly + per-profile launcher targets for `//scripts:serve_<profile>` (#699).
 
 The dogfooding launcher (`scripts/serve.py`) boots a real Shrike server from a
 checked-in, path-free capability *profile*. Each profile names its onnx models by
@@ -29,17 +29,17 @@ load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_python//python:defs.bzl", "py_binary")
 
-# -- The model-assembly table: dir-name -> list of (external file target, canonical
-# name within the dir). The downloaded_file_path of each `http_file` (in
-# MODULE.bazel) is the canonical name, so the copy is a pure relocation into the
-# per-model dir. This is the SINGLE source of truth the macro derives copy_file
-# rules AND per-profile `data` from (no serve.py-side mirror).
 # The per-model-dir sentinel file name. serve.py resolves this FILE's runfiles
 # path and takes its parent to get the model dir (a directory has no reliable
 # Rlocation entry in manifest-based runfiles). Kept in sync with serve.py's
 # _SENTINEL_NAME.
 _SENTINEL_NAME = ".shrike_model_dir"
 
+# -- The model-assembly table: dir-name -> list of (external file target, canonical
+# name within the dir). The downloaded_file_path of each `http_file` (in
+# MODULE.bazel) is the canonical name, so the copy is a pure relocation into the
+# per-model dir. This is the SINGLE source of truth the macro derives copy_file
+# rules AND per-profile `data` from (no serve.py-side mirror).
 _MODEL_FILES = {
     # MiniLM int8 text (the text-onnx profile; the same model the integration suite uses).
     "all-MiniLM-L6-v2-onnx-int8": [
