@@ -138,7 +138,7 @@ the `shrike` package so a binary's output path never collides with a package
 subdir — *not* cruft). `tools/` = **invoked by the build** (Bazel macros under
 `//tools/bazel`, the version-pin locks + their writers/checkers, the sdist/wheel/
 requirements builders, `workspace_status.sh`, the hermetic-toolchain CI smoke
-tests `//:import_spike`/`//:library_smoke`). `scripts/` = **human-facing
+tests `//tools:import_spike`/`//tools:library_smoke`). `scripts/` = **human-facing
 dev/maintenance entry points** (`dev-setup.sh`, `build-native.sh`, the coverage
 runners, the `//scripts:serve` dogfooding launcher). A file follows its strongest
 coupling: a version-pin **lock** is consumed by the build, so the lock AND its

@@ -1,49 +1,11 @@
-load("@rules_python//python:defs.bzl", "py_test")
 load("@rules_python//python:packaging.bzl", "py_wheel")
-load("@shrike_pip//:requirements.bzl", "requirement")
 load("//tools/bazel:sdist.bzl", "py_sdist")
 
-# Phase 0 make-or-break spike (#242): the native-dependency wheels must import and
-# run on Bazel's hermetic CPython toolchain, on every target platform. If this
-# fails, the "consume native deps as wheels" assumption is wrong. See
-# tools/import_spike.py for what it exercises.
-py_test(
-    name = "import_spike",
-    size = "small",
-    srcs = ["tools/import_spike.py"],
-    main = "tools/import_spike.py",
-    deps = [
-        requirement("anki"),
-        requirement("usearch"),
-        requirement("onnxruntime"),
-        requirement("numpy"),
-    ],
-)
-
-# Phase 1 smoke (#243): the shrike library + its declared deps import cleanly and
-# a pure function runs. Broader pytest migration is Phase 2 (#244).
-py_test(
-    name = "library_smoke",
-    size = "small",
-    srcs = ["tools/library_smoke.py"],
-    main = "tools/library_smoke.py",
-    deps = ["//src/shrike:shrike"],
-)
-
-# De-dup tripwire (#566): tools/llama-server.lock and MODULE.bazel duplicate the
-# pinned llama.cpp tag + the four per-platform SHA256s (Bazel can't read the lock at
-# module-resolution time). This fails CI the moment they drift — a bump applied to
-# one but not the other. Pure stdlib, so it's also a plain pytest unit (pip lane).
-py_test(
-    name = "llama_lock_in_sync_test",
-    size = "small",
-    srcs = ["tools/check_llama_lock.py"],
-    main = "tools/check_llama_lock.py",
-    data = [
-        "MODULE.bazel",
-        "//tools:llama-server.lock",
-    ],
-)
+# Consumed as `data` by //tools:llama_lock_in_sync_test (the de-dup tripwire that
+# asserts MODULE.bazel matches tools/llama-server.lock, #566). The tripwire moved
+# to //tools alongside its source + the lock (#695); it reads MODULE.bazel from
+# the root package, so it's exported here.
+exports_files(["MODULE.bazel"])
 
 # The release wheel (#245; platform-tagged since #497). Version is stamped from the
 # git tag (STABLE_VERSION via tools/workspace_status.sh) — the exact tag version on a

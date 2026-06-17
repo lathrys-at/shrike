@@ -33,7 +33,7 @@ fix up their environment lives in `scripts/`, even if its output feeds a build.
 ### Version-pin locks
 - `llama-server.lock` — the pinned llama.cpp release tag + per-platform SHA256s. Consumed by `MODULE.bazel`'s `llama_server_*` http_archives (duplicated there because Bazel can't read the lock at module-resolution time) and by the CI model-cache keys.
 - `update-llama-lock.sh` — regenerates `llama-server.lock` (pins a tag, hashes each platform tarball). Mirrors `update-bazel-lock.sh`.
-- `check_llama_lock.py` — the de-dup tripwire (#566): asserts `llama-server.lock` and `MODULE.bazel` pin the same tag + shas. Runs both as a Bazel `py_test` (`//:llama_lock_in_sync_test`) and as a pip-lane pytest unit (`tests/unit/test_llama_lock_sync.py`).
+- `check_llama_lock.py` — the de-dup tripwire (#566): asserts `llama-server.lock` and `MODULE.bazel` pin the same tag + shas. Runs both as a Bazel `py_test` (`//tools:llama_lock_in_sync_test`) and as a pip-lane pytest unit (`tests/unit/test_llama_lock_sync.py`).
 
 > The llama-lock concern was previously split — writer + data in `scripts/`,
 > checker here. #695 reunited it in `tools/`, beside its sibling build-pin
@@ -47,8 +47,8 @@ fix up their environment lives in `scripts/`, even if its output feeds a build.
 - `sdist-requirements.in` — the sdist builder's build-tool deps (kept out of the runtime lock).
 
 ### Hermetic-toolchain CI smoke tests
-- `import_spike.py` — `//:import_spike` (#242): the native-dependency wheels (`anki`, `usearch`, `onnxruntime`) import and *run* on Bazel's hermetic CPython, on every target platform.
-- `library_smoke.py` — `//:library_smoke` (#243): the `shrike` package + its declared deps import cleanly and a pure function runs.
+- `import_spike.py` — `//tools:import_spike` (#242): the native-dependency wheels (`anki`, `usearch`, `onnxruntime`) import and *run* on Bazel's hermetic CPython, on every target platform.
+- `library_smoke.py` — `//tools:library_smoke` (#243): the `shrike` package + its declared deps import cleanly and a pure function runs.
 
   These two began as one-off Phase 0/Phase 1 spikes, but they are **live,
   non-`manual` `py_test` targets** — every `./bazel test //...` runs them, and

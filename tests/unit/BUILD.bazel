@@ -46,7 +46,7 @@ _PIP_ONLY = [
     "test_version.py",
     # Reads tools/check_llama_lock.py + MODULE.bazel + tools/llama-server.lock by repo-relative
     # path (none in a unit target's runfiles); under Bazel the dedicated
-    # //:llama_lock_in_sync_test is the authoritative tripwire (#566).
+    # //tools:llama_lock_in_sync_test is the authoritative tripwire (#566).
     "test_llama_lock_sync.py",
 ]
 

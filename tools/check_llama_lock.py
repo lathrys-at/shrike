@@ -48,9 +48,7 @@ def _repo_root() -> Path:
             parent / "MODULE.bazel"
         ).is_file():
             return parent
-    raise FileNotFoundError(
-        f"could not locate tools/llama-server.lock + MODULE.bazel from {here}"
-    )
+    raise FileNotFoundError(f"could not locate tools/llama-server.lock + MODULE.bazel from {here}")
 
 
 def parse_lock(text: str) -> dict[str, str]:
