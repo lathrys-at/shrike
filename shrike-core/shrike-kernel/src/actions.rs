@@ -228,13 +228,17 @@ mod tests {
 // availability, the #201b image activation floor, the index size for the
 // over-fetch clamp) is injected per call until S3 internalizes it.
 
-use std::collections::{HashMap, HashSet};
-
-use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use shrike_derived::MIN_TRIGRAM;
-use shrike_schemas::SearchResultGroup;
+use shrike_schemas::{
+    FuzzyMatch, Note, SearchMatch, SearchResultGroup, SignalContribution, SubstringInfo,
+};
 use shrike_store_api::{DerivedStore, VectorIndex};
+
+/// A note's field map (`Note.content`): the "full" projection's fields, absent
+/// in "meta" mode. The literal-substring authority reads it.
+type NoteContent = BTreeMap<String, String>;
 
 /// One source's per-modality semantic rankings (`search_by_modality`'s row).
 type ModalityHits = std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>;
@@ -367,46 +371,50 @@ fn escape_anki_text(text: &str) -> String {
 /// code-point index math included: find runs over the lowered text, the
 /// snippet slices the original by those indices).
 ///
-/// `Some(&Value::Null)` behaves exactly like `None` (the `Object` match arm
-/// is the only productive path): note dicts serialize with plain serde since
-/// the #391 to_wire retirement, so a meta-mode note carries an explicit
-/// `"content": null` and `data.get("content")` yields `Some(Null)`, not
-/// `None` — both mean "no content", and both return `Null` here.
-pub fn substring_info(content: Option<&Value>, text: &str) -> Value {
+/// `None` content (a meta-mode note dict carries no fields) yields `None`, the
+/// "no literal match" answer — exactly the pre-#391 `Value::Null` behaviour,
+/// now expressed in the type.
+pub fn substring_info(content: Option<&NoteContent>, text: &str) -> Option<SubstringInfo> {
     let needle: Vec<char> = text.to_lowercase().chars().collect();
-    let mut matched: Vec<&str> = Vec::new();
+    let mut matched: Vec<String> = Vec::new();
     let mut snippet: Option<String> = None;
-    if let Some(Value::Object(fields)) = content {
-        for (name, value) in fields {
-            let v = value.as_str().unwrap_or("");
-            let chars: Vec<char> = v.chars().collect();
-            let lowered: Vec<char> = v.to_lowercase().chars().collect();
-            let idx = match find_subsequence(&lowered, &needle) {
-                Some(i) => i,
-                None => continue,
-            };
-            matched.push(name);
-            if snippet.is_none() {
-                let start = idx.saturating_sub(30);
-                let end = (idx + needle.len() + 30).min(chars.len());
-                // Python slices the ORIGINAL with lowered-string indices; on
-                // length-changing lowercasings the window drifts identically.
-                let end = end.min(chars.len());
-                let mut frag: String = chars[start.min(chars.len())..end].iter().collect();
-                if start > 0 {
-                    frag = format!("…{frag}");
-                }
-                if idx + needle.len() + 30 < chars.len() {
-                    frag.push('…');
-                }
-                snippet = Some(frag);
+    let fields = content?;
+    for (name, value) in fields {
+        let chars: Vec<char> = value.chars().collect();
+        let lowered: Vec<char> = value.to_lowercase().chars().collect();
+        let idx = match find_subsequence(&lowered, &needle) {
+            Some(i) => i,
+            None => continue,
+        };
+        matched.push(name.clone());
+        if snippet.is_none() {
+            let start = idx.saturating_sub(30);
+            let end = (idx + needle.len() + 30).min(chars.len());
+            // Python slices the ORIGINAL with lowered-string indices; on
+            // length-changing lowercasings the window drifts identically.
+            let end = end.min(chars.len());
+            let mut frag: String = chars[start.min(chars.len())..end].iter().collect();
+            if start > 0 {
+                frag = format!("…{frag}");
             }
+            if idx + needle.len() + 30 < chars.len() {
+                frag.push('…');
+            }
+            snippet = Some(frag);
         }
     }
     if matched.is_empty() {
-        Value::Null
+        None
     } else {
-        json!({"matched_fields": matched, "snippet": snippet})
+        Some(SubstringInfo {
+            matched_fields: matched,
+            snippet,
+            // A field hit's source/ref are the schema defaults (`source:
+            // "field"`, `ref: None`), matching the pre-#391 dict that carried
+            // neither key and so deserialized them from those serde defaults.
+            source: crate::FIELD_SOURCE.to_owned(),
+            r#ref: None,
+        })
     }
 }
 
@@ -505,10 +513,31 @@ impl SearchArgs {
     }
 }
 
+/// One search candidate: the typed note record plus the working substring
+/// annotation accumulated as the candidate is ranked. The score / provenance /
+/// fuzzy evidence are NOT held here — they are assembled once, at the edge,
+/// into a [`SearchMatch`] (this is the working model; that is the wire shape).
+///
+/// `substring` is `Some` once a literal-substring authority has annotated the
+/// candidate (a field hit, or a derived OCR/ASR-row hit), `None` until then.
+struct Candidate {
+    note: Note,
+    substring: Option<SubstringInfo>,
+}
+
+impl Candidate {
+    fn new(note: Note) -> Self {
+        Self {
+            note,
+            substring: None,
+        }
+    }
+}
+
 /// Insertion-ordered candidate cache: Python dict iteration order is part of
 /// the exact ranking's contract, so the order log rides along.
 struct NoteData {
-    map: HashMap<i64, Value>,
+    map: HashMap<i64, Candidate>,
     order: Vec<i64>,
 }
 
@@ -522,25 +551,21 @@ impl NoteData {
     fn contains(&self, nid: i64) -> bool {
         self.map.contains_key(&nid)
     }
-    fn insert(&mut self, nid: i64, data: Value) {
-        if self.map.insert(nid, data).is_none() {
+    fn insert(&mut self, nid: i64, candidate: Candidate) {
+        if self.map.insert(nid, candidate).is_none() {
             self.order.push(nid);
         }
     }
 }
 
-fn in_scope(data: &Value, deck: Option<&str>, tags: &[String]) -> bool {
+fn in_scope(note: &Note, deck: Option<&str>, tags: &[String]) -> bool {
     if let Some(d) = deck {
-        if data.get("deck").and_then(Value::as_str) != Some(d) {
+        if note.deck != d {
             return false;
         }
     }
     if !tags.is_empty() {
-        let note_tags: HashSet<&str> = data
-            .get("tags")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
+        let note_tags: HashSet<&str> = note.tags.iter().map(String::as_str).collect();
         if !tags.iter().all(|t| note_tags.contains(t.as_str())) {
             return false;
         }
@@ -548,17 +573,19 @@ fn in_scope(data: &Value, deck: Option<&str>, tags: &[String]) -> bool {
     true
 }
 
-/// Batch-hydrate candidate dicts (#445): ONE `note_dicts` call per ranking
-/// replaces the old one-call-per-candidate shape (each singleton paid two
-/// DB-proxy queries plus a full `deck_names` RPC plus a full notetype proto —
-/// per candidate, hundreds of times per search). Returns `nid -> dict` for
-/// ids not already hydrated; a missing/unreadable id is simply absent (the
-/// per-note skip the singleton path had).
+/// Batch-hydrate candidates (#445): ONE `note_dicts` call per ranking replaces
+/// the old one-call-per-candidate shape (each singleton paid two DB-proxy
+/// queries plus a full `deck_names` RPC plus a full notetype proto — per
+/// candidate, hundreds of times per search). Each wire dict is parsed into the
+/// typed [`Note`] once here (it is exactly a serialized `Note`), so the ranking
+/// works a typed model rather than a stringly-indexed `Value`. Returns `nid ->
+/// Candidate` for ids not already hydrated; a missing/unreadable id is simply
+/// absent (the per-note skip the singleton path had).
 fn read_notes_batch(
     core: &dyn Collection,
     note_data: &NoteData,
     ids: &[i64],
-) -> HashMap<i64, Value> {
+) -> HashMap<i64, Candidate> {
     let missing: Vec<i64> = ids
         .iter()
         .copied()
@@ -570,7 +597,16 @@ fn read_notes_batch(
     match core.note_dicts(&missing, true) {
         Ok(dicts) => dicts
             .into_iter()
-            .filter_map(|d| d.get("id").and_then(Value::as_i64).map(|id| (id, d)))
+            .filter_map(|d| match serde_json::from_value::<Note>(d) {
+                Ok(note) => Some((note.id, Candidate::new(note))),
+                Err(e) => {
+                    // A dict that won't parse as a Note is a core/schema
+                    // disagreement (a bug), but a search must degrade rather
+                    // than fail — skip the candidate, exactly like a missing id.
+                    tracing::debug!(error = ?e, "search: candidate dict is not a Note; skipped");
+                    None
+                }
+            })
             .collect(),
         Err(e) => {
             tracing::debug!(error = ?e, "search: batch hydrate failed; candidates skipped");
@@ -647,29 +683,71 @@ fn apply_image_floor(ranking: &mut Vec<i64>, score: &mut HashMap<i64, f64>, floo
     score.retain(|_, &mut c| c > floor);
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The read-only context every ranking/collection helper threads identically:
+/// the collection handle, the exclusion set, and the per-call args. Grouping
+/// these retires the `too_many_arguments` suppressions the search helpers
+/// carried (they each took `core`, `exclude`, and `args` as three separate
+/// positional params).
+#[derive(Clone, Copy)]
+struct SearchCtx<'a> {
+    core: &'a dyn Collection,
+    exclude: &'a HashSet<i64>,
+    args: &'a SearchArgs,
+}
+
+/// One modality's `search_by_modality` row as a borrowed pair (note keys +
+/// distance-ascending distances), the unit `rank_modality` ranks. A typed pair
+/// rather than two positional slices.
+#[derive(Clone, Copy)]
+struct ModalitySlice<'a> {
+    keys: &'a [i64],
+    distances: &'a [f32],
+}
+
+impl<'a> ModalitySlice<'a> {
+    fn empty() -> Self {
+        Self {
+            keys: &[],
+            distances: &[],
+        }
+    }
+}
+
+/// Look up modality `name`'s `(keys, distances)` row as a [`ModalitySlice`],
+/// the empty slice when the modality is absent.
+fn modality_slice<'a>(hits: &'a ModalityHits, name: &str) -> ModalitySlice<'a> {
+    hits.get(name)
+        .map_or_else(ModalitySlice::empty, |(k, d)| ModalitySlice {
+            keys: k,
+            distances: d,
+        })
+}
+
 fn rank_modality(
-    core: &dyn Collection,
-    hits_keys: &[i64],
-    hits_distances: &[f32],
+    ctx: SearchCtx,
+    slice: ModalitySlice,
     note_data: &mut NoteData,
     sem_score: &mut HashMap<i64, f64>,
-    exclude: &HashSet<i64>,
-    args: &SearchArgs,
     thresholded: bool,
 ) -> Vec<i64> {
+    let SearchCtx {
+        core,
+        exclude,
+        args,
+    } = ctx;
     // Prospective candidates (exclude/threshold pass) hydrate in ONE batch;
     // the loop below then filters scope and ranks exactly as before.
-    let prospective: Vec<i64> = hits_keys
+    let prospective: Vec<i64> = slice
+        .keys
         .iter()
-        .zip(hits_distances.iter())
+        .zip(slice.distances.iter())
         .filter(|(nid, _)| !exclude.contains(nid))
         .take_while(|(_, dist)| !thresholded || round3(1.0 - f64::from(**dist)) >= args.threshold)
         .map(|(nid, _)| *nid)
         .collect();
     let mut hydrated = read_notes_batch(core, note_data, &prospective);
     let mut ranking: Vec<i64> = Vec::new();
-    for (nid, dist) in hits_keys.iter().zip(hits_distances.iter()) {
+    for (nid, dist) in slice.keys.iter().zip(slice.distances.iter()) {
         let nid = *nid;
         if exclude.contains(&nid) {
             continue;
@@ -679,14 +757,14 @@ fn rank_modality(
             break; // distance-ascending → the rest are below threshold
         }
         if !note_data.contains(nid) {
-            let data = match hydrated.remove(&nid) {
-                Some(d) => d,
+            let candidate = match hydrated.remove(&nid) {
+                Some(c) => c,
                 None => continue,
             };
-            if !in_scope(&data, args.deck.as_deref(), &args.tags) {
+            if !in_scope(&candidate.note, args.deck.as_deref(), &args.tags) {
                 continue; // out of scope — keep it out of note_data entirely
             }
-            note_data.insert(nid, data);
+            note_data.insert(nid, candidate);
         }
         ranking.push(nid);
         let entry = sem_score.entry(nid).or_insert(score);
@@ -701,14 +779,17 @@ fn rank_modality(
 }
 
 fn collect_substring_candidates(
-    core: &dyn Collection,
+    ctx: SearchCtx,
     derived: Option<&dyn DerivedStore>,
     text: &str,
     note_data: &mut NoteData,
-    exclude: &HashSet<i64>,
-    args: &SearchArgs,
     scope: Option<&[i64]>,
 ) -> NativeResult<()> {
+    let SearchCtx {
+        core,
+        exclude,
+        args,
+    } = ctx;
     // The store serves scoped queries too (#177 retirement of the wildcard
     // scan): the scope id set — from anki's INDEXED deck:/tag: search — is
     // pushed into the FTS5 query, so a scoped literal search reads no note
@@ -760,16 +841,15 @@ fn collect_substring_candidates(
             if note_data.contains(nid) {
                 continue;
             }
-            let mut data = match hydrated.remove(&nid) {
-                Some(d) => d,
+            let mut candidate = match hydrated.remove(&nid) {
+                Some(c) => c,
                 None => continue,
             };
-            let info = substring_info(data.get("content"), text);
-            if info.is_null() {
+            let Some(info) = substring_info(candidate.note.content.as_ref(), text) else {
                 continue; // Anki matched across markup/normalization; not literal
-            }
-            data["substring"] = info;
-            note_data.insert(nid, data);
+            };
+            candidate.substring = Some(info);
+            note_data.insert(nid, candidate);
             added += 1;
             if added >= args.top_k {
                 break;
@@ -789,11 +869,11 @@ fn collect_substring_candidates(
         if exclude.contains(&nid) || note_data.contains(nid) {
             continue; // store may return a row per field
         }
-        let mut data = match hydrated.remove(&nid) {
-            Some(d) => d,
+        let mut candidate = match hydrated.remove(&nid) {
+            Some(c) => c,
             None => continue,
         };
-        if !in_scope(&data, args.deck.as_deref(), &args.tags) {
+        if !in_scope(&candidate.note, args.deck.as_deref(), &args.tags) {
             continue;
         }
         // A derived-source row is its own authority (#199/#388): FTS5
@@ -801,16 +881,17 @@ fn collect_substring_candidates(
         // re-check below would wrongly reject a literal living only in an
         // OCR/ASR row. Provenance carries the source + ref so the result can
         // say where it hit; field rows stay with the substring_info
-        // authority over rendered content.
+        // authority over rendered content (their `substring` is computed in
+        // the exact loop, so it stays `None` here).
         if source != crate::FIELD_SOURCE {
-            data["substring"] = json!({
-                "matched_fields": Vec::<String>::new(),
-                "snippet": snippet,
-                "source": source,
-                "ref": reference,
+            candidate.substring = Some(SubstringInfo {
+                matched_fields: Vec::new(),
+                snippet,
+                source,
+                r#ref: Some(reference),
             });
         }
-        note_data.insert(nid, data);
+        note_data.insert(nid, candidate);
         added += 1;
         if added >= args.top_k {
             break;
@@ -819,19 +900,37 @@ fn collect_substring_candidates(
     Ok(())
 }
 
-type FuzzyEvidence = HashMap<i64, (String, String, Option<String>)>;
+/// A fuzzy ranking plus its per-note evidence (the `fuzzy` annotation each
+/// surfaced note carries, keyed by note id). The evidence is the wire
+/// [`FuzzyMatch`] directly — no intermediate tuple to misread.
+struct FuzzyRanking {
+    ranking: Vec<i64>,
+    evidence: HashMap<i64, FuzzyMatch>,
+}
+
+impl FuzzyRanking {
+    fn empty() -> Self {
+        Self {
+            ranking: Vec::new(),
+            evidence: HashMap::new(),
+        }
+    }
+}
 
 fn collect_fuzzy(
-    core: &dyn Collection,
+    ctx: SearchCtx,
     derived: Option<&dyn DerivedStore>,
     text: &str,
     note_data: &mut NoteData,
-    exclude: &HashSet<i64>,
-    args: &SearchArgs,
     scope: Option<&[i64]>,
-) -> NativeResult<(Vec<i64>, FuzzyEvidence)> {
+) -> NativeResult<FuzzyRanking> {
+    let SearchCtx {
+        core,
+        exclude,
+        args,
+    } = ctx;
     let Some(d) = derived else {
-        return Ok((Vec::new(), HashMap::new()));
+        return Ok(FuzzyRanking::empty());
     };
     let hidden: Vec<&str> = args
         .hidden_lexical_sources
@@ -848,29 +947,286 @@ fn collect_fuzzy(
         .filter(|nid| !exclude.contains(nid))
         .collect();
     let mut hydrated = read_notes_batch(core, note_data, &hit_ids);
-    let mut ranking: Vec<i64> = Vec::new();
-    let mut evidence: FuzzyEvidence = HashMap::new();
-    for (nid, source, r, snippet) in hits {
-        if exclude.contains(&nid) || evidence.contains_key(&nid) {
+    let mut out = FuzzyRanking::empty();
+    for (nid, source, r#ref, snippet) in hits {
+        if exclude.contains(&nid) || out.evidence.contains_key(&nid) {
             continue;
         }
         if !note_data.contains(nid) {
-            let data = match hydrated.remove(&nid) {
-                Some(d2) => d2,
+            let candidate = match hydrated.remove(&nid) {
+                Some(c) => c,
                 None => continue,
             };
-            if !in_scope(&data, args.deck.as_deref(), &args.tags) {
+            if !in_scope(&candidate.note, args.deck.as_deref(), &args.tags) {
                 continue;
             }
-            note_data.insert(nid, data);
+            note_data.insert(nid, candidate);
         }
-        ranking.push(nid);
-        evidence.insert(nid, (source, r, snippet));
-        if ranking.len() >= args.top_k {
+        out.ranking.push(nid);
+        out.evidence.insert(
+            nid,
+            FuzzyMatch {
+                source,
+                r#ref,
+                snippet,
+            },
+        );
+        if out.ranking.len() >= args.top_k {
             break;
         }
     }
-    Ok((ranking, evidence))
+    Ok(out)
+}
+
+/// The inputs to one source's cross-space fusion pass: the shared search
+/// context, the source's position (to pick each space's per-source row), and
+/// the PRIMARY text space's modality hits (the relative gate's reference).
+struct CrossSpaceInput<'a> {
+    ctx: SearchCtx<'a>,
+    source_index: usize,
+    primary_hits: &'a ModalityHits,
+}
+
+/// What a source's cross-space fusion contributes: the per-space `image#<key>`
+/// rankings to append to `rankings`, and any non-default per-space RRF weights
+/// (the eval soft/budget modes) to fold into the weight map. Empty/empty for
+/// the N=1 production-common case (no secondary spaces), so the fused inputs
+/// are byte-identical to the no-cross-space path.
+struct CrossSpaceContribution {
+    rankings: Vec<(String, Vec<i64>)>,
+    weights: BTreeMap<String, f64>,
+}
+
+/// One admitted secondary space's pre-budget contribution.
+struct AdmittedSpace {
+    signal: String,
+    ranking: Vec<i64>,
+    space_score: HashMap<i64, f64>,
+    weight: f64,
+}
+
+/// Cross-space fusion (#234 / #576 / #580) for one source. Each SECONDARY image
+/// space contributes its own `image#<key>` ranking, folding its per-note image
+/// cosines into `sem_score` (the displayed-score max-over-items) and hydrating
+/// its candidates into `note_data`. EMPTY `cross_space` (N=1 — the
+/// production-common case) returns an empty contribution, so the caller's
+/// rankings/weights are byte-identical to the no-cross-space path.
+///
+/// PRODUCTION (#580): FLOOR-ADMIT. The relative winner-take-all gate is RETIRED
+/// — a secondary image space is admitted on its OWN calibrated intra-modal
+/// floor (`image_best > z_floor`), independent of how the text space did, so a
+/// strong on-topic CLIP hit corroborates the card even when text "won" on a
+/// spurious filename lexical match (the #580 win). Sound because >1 image space
+/// is a config error (`profiles`): with at most one image space there is no
+/// multiplicity, which was the relative gate's only job.
+///
+/// EVAL-ONLY (`SHRIKE_CROSS_SPACE_FUSION_MODE`): the relative family
+/// (`Relative*`/`*Floor` non-admit) reproduces the pre-#580 gate; the
+/// `Soft*`/`*Budget` modes reproduce the dominated soft variant + the N≥2
+/// multiplicity measurement. `uses_relative_gate` keeps the gate for the
+/// relative family ONLY; the floor-admit family skips it.
+///
+/// Two passes: (1) admit + raw weight per space; (2) the budget normalization
+/// across the admitted set (a no-op for the production FloorAdmit mode), then
+/// fold/push.
+fn fuse_cross_spaces(
+    input: CrossSpaceInput,
+    note_data: &mut NoteData,
+    sem_score: &mut HashMap<i64, f64>,
+) -> CrossSpaceContribution {
+    let CrossSpaceInput {
+        ctx,
+        source_index: i,
+        primary_hits,
+    } = input;
+    let args = ctx.args;
+    let mut contribution = CrossSpaceContribution {
+        rankings: Vec::new(),
+        weights: BTreeMap::new(),
+    };
+    if args.cross_space.is_empty() {
+        return contribution;
+    }
+    let mode = args.cross_space_fusion_mode;
+    let uses_relative_gate = matches!(
+        mode,
+        CrossSpaceFusionMode::Relative
+            | CrossSpaceFusionMode::RelativeFloor
+            | CrossSpaceFusionMode::SoftRelative
+            | CrossSpaceFusionMode::SoftCalibrated
+    );
+    let is_budget = matches!(
+        mode,
+        CrossSpaceFusionMode::FloorAdmitBudget | CrossSpaceFusionMode::SoftFloorAdmitBudget
+    );
+    // The primary text space's best query cosine (the relative gate's
+    // reference). The primary's hits are `primary_hits` (this source's row).
+    let primary_best = best_query_cosine_of(primary_hits);
+    // Pass 1: collect each admitted space's ranking, its per-note image
+    // scores (for the displayed-score fold), and its RAW pre-budget weight.
+    let mut admitted: Vec<AdmittedSpace> = Vec::new();
+    for space in &args.cross_space {
+        let Some(shits) = space.per_source.get(i) else {
+            continue;
+        };
+        // The relative gate (#234) — applied ONLY for the relative family.
+        // With the gate disabled (the negative control), every space fires.
+        // The floor-admit family skips it entirely (the floor below is the sole
+        // admission test).
+        if uses_relative_gate {
+            let gate_open = args.disable_cross_space_gate
+                || match (shits.best_query_cosine, primary_best) {
+                    (Some(v), Some(p)) => v >= p,
+                    // No primary text reference → nothing to gate against;
+                    // admit (degenerate, lexical-only primary).
+                    (Some(_), None) => true,
+                    // The space itself returned no hits → nothing to add.
+                    (None, _) => false,
+                };
+            if !gate_open {
+                continue;
+            }
+        }
+        let slice = modality_slice(&shits.modality_hits, "image");
+        if slice.keys.is_empty() {
+            continue;
+        }
+        let mut space_score: HashMap<i64, f64> = HashMap::new();
+        let mut ranking_space_image = rank_modality(ctx, slice, note_data, &mut space_score, false);
+        if ranking_space_image.is_empty() {
+            continue;
+        }
+        // #582 (PRODUCTION FloorAdmit only): a PER-NOTE floor — keep only the
+        // cards whose own image cosine clears this space's floor, so a
+        // below-floor tail card carries no `image#clip`. The eval modes keep
+        // the historical per-SPACE rule below (on `image_best`) so they
+        // reproduce the decision tables unchanged. An uncalibrated space (no
+        // floor) is a no-op either way.
+        if matches!(
+            mode,
+            CrossSpaceFusionMode::FloorAdmit | CrossSpaceFusionMode::FloorAdmitBudget
+        ) {
+            apply_image_floor(
+                &mut ranking_space_image,
+                &mut space_score,
+                space.image_floor,
+            );
+            if ranking_space_image.is_empty() {
+                continue; // every card fell below the floor → nothing to add
+            }
+        }
+        // The best surviving image cosine — the value the eval modes' per-space
+        // floor judges (exactly the primary's old rank-1 rule).
+        let image_best = ranking_space_image
+            .first()
+            .and_then(|nid| space_score.get(nid).copied());
+
+        // Apply the fusion mode's admission + raw weight. `None` drops the
+        // space; `Some(w)` admits it at raw weight `w` (the budget pass may
+        // scale it down for the `*Budget` modes).
+        let weight = match mode {
+            // V0 — relative only (today): contribute at weight 1.0.
+            CrossSpaceFusionMode::Relative => Some(1.0),
+            // V0+floor — relative AND z_s > z_floor (per-space). Drop the space
+            // when its best surviving image cosine clears no floor; an
+            // uncalibrated space (no floor) is admitted (the floor is a no-op,
+            // the relative gate alone governs).
+            CrossSpaceFusionMode::RelativeFloor => match (image_best, space.image_floor) {
+                (Some(b), Some(floor)) if b <= floor => None,
+                _ => Some(1.0),
+            },
+            // V1 — soft-relative: w = σ((clip_best − text_best)/τ). The
+            // calibration-free CONTROL (expected to still leak).
+            CrossSpaceFusionMode::SoftRelative => {
+                match (shits.best_query_cosine, primary_best, args.cross_space_tau) {
+                    (Some(v), Some(p), tau) if tau > 0.0 => Some(sigmoid((v - p) / tau)),
+                    // No reference / τ≤0 → fall back to the binary contribution
+                    // (the σ→step limit).
+                    _ => Some(1.0),
+                }
+            }
+            // V2 — soft-calibrated: w = σ((z_s − z0)/τ), composed with the
+            // relative gate (already applied above). The ren proposal — taper
+            // near the per-space floor instead of a hard drop. An uncalibrated
+            // space falls back to weight 1.0.
+            CrossSpaceFusionMode::SoftCalibrated => {
+                match (image_best, space.image_floor, args.cross_space_tau) {
+                    (Some(b), Some(floor), tau) if tau > 0.0 => Some(sigmoid((b - floor) / tau)),
+                    _ => Some(1.0),
+                }
+            }
+            // #580/#582 FloorAdmit / FloorAdmitBudget — admit on the absolute
+            // floor alone (relative gate already skipped). The PER-NOTE floor
+            // filter above already dropped sub-floor cards and `continue`d if
+            // none survived, so any surviving ranking has cleared the floor →
+            // raw weight 1.0 (the budget pass divides it down for the budget
+            // mode).
+            CrossSpaceFusionMode::FloorAdmit | CrossSpaceFusionMode::FloorAdmitBudget => Some(1.0),
+            // #580 SoftFloorAdmit / SoftFloorAdmitBudget — soft admission
+            // `w = σ((image_best − z_floor)/τ)`, no relative composition. An
+            // uncalibrated space / τ≤0 falls back to weight 1.0. There is no
+            // hard drop: a sub-floor hit gets a near-zero weight (negligible RRF
+            // mass), which the soft taper is for.
+            CrossSpaceFusionMode::SoftFloorAdmit | CrossSpaceFusionMode::SoftFloorAdmitBudget => {
+                match (image_best, space.image_floor, args.cross_space_tau) {
+                    (Some(b), Some(floor), tau) if tau > 0.0 => Some(sigmoid((b - floor) / tau)),
+                    _ => Some(1.0),
+                }
+            }
+        };
+        let Some(weight) = weight else {
+            continue; // the floor dropped this space's image ranking
+        };
+        admitted.push(AdmittedSpace {
+            signal: cross_space_signal(&space.space_key),
+            ranking: ranking_space_image,
+            space_score,
+            weight,
+        });
+    }
+
+    // Pass 2: the #580 vision-weight BUDGET. When N≥2 admitted spaces share a
+    // bounded total weight `B`, no flood of always-confident off-topic spaces
+    // can out-fuse the text answer (the negative control the relative gate used
+    // to guard). N=1 keeps full weight (the production-common case is
+    // unpenalized). Two scalings:
+    //   - binary budget (FloorAdmitBudget): every weight is 1.0, so each becomes
+    //     B/N (the equal split).
+    //   - soft budget (SoftFloorAdmitBudget): only scale DOWN, and only when the
+    //     soft weights already sum above B (`B / Σ raw`); a confident N=1 hit
+    //     keeps its near-1.0 weight.
+    if is_budget && admitted.len() >= 2 {
+        let budget = args.effective_budget();
+        let total: f64 = admitted.iter().map(|a| a.weight).sum();
+        if total > budget && total > 0.0 {
+            let scale = budget / total;
+            for a in &mut admitted {
+                a.weight *= scale;
+            }
+        }
+    }
+
+    // Fold + push each admitted space.
+    for a in admitted {
+        // Fold the space's image cosines into the displayed semantic `score`
+        // (max-over-items, exactly like the primary image).
+        for (nid, isim) in &a.space_score {
+            let entry = sem_score.entry(*nid).or_insert(*isim);
+            if *isim > *entry {
+                *entry = *isim;
+            }
+        }
+        // A DISTINCT signal name per space so provenance (#182) identifies which
+        // vision space surfaced the note, and each space fuses as its own RRF
+        // signal (weight defaults to 1.0 — the eval's equal weighting; the
+        // soft/budget modes override it). `image#<key>` reads as "the image
+        // modality of space <key>".
+        if (a.weight - 1.0).abs() > f64::EPSILON {
+            contribution.weights.insert(a.signal.clone(), a.weight);
+        }
+        contribution.rankings.push((a.signal, a.ranking));
+    }
+    contribution
 }
 
 /// The fused search assembly (see module-section comment). `vectors` carries
@@ -926,20 +1282,25 @@ pub fn search_notes(
         None
     };
 
-    let mut results: Vec<Value> = Vec::new();
+    let mut results: Vec<SearchResultGroup> = Vec::new();
     for (i, source) in sources.iter().enumerate() {
         let mut note_data = NoteData::new();
+        // The read-only context every helper threads (collection + exclusion +
+        // args), grouped so the helpers take it as one param.
+        let ctx = SearchCtx {
+            core,
+            exclude: &exclude,
+            args,
+        };
 
         // Literal-substring candidates (query sources only): a fast pre-filter;
         // substring_info below is the authority that confirms + annotates.
         if source.is_query {
             collect_substring_candidates(
-                core,
+                ctx,
                 derived,
                 &source.text,
                 &mut note_data,
-                &exclude,
-                args,
                 lex_scope.as_deref(),
             )?;
         }
@@ -950,35 +1311,21 @@ pub fn search_notes(
         let empty = ModalityHits::new();
         let modality_hits = sem_by_source.get(i).unwrap_or(&empty);
         let mut sem_score: HashMap<i64, f64> = HashMap::new();
-        let (tk, td) = modality_hits
-            .get("text")
-            .map(|(k, d)| (k.as_slice(), d.as_slice()))
-            .unwrap_or((&[], &[]));
         let ranking_text = rank_modality(
-            core,
-            tk,
-            td,
+            ctx,
+            modality_slice(modality_hits, "text"),
             &mut note_data,
             &mut sem_score,
-            &exclude,
-            args,
             true,
         );
         // Image modality into a scratch score first: the gate is judged on the
         // best hit that SURVIVES exclusion + scope, not the raw rank-1.
         let mut image_score: HashMap<i64, f64> = HashMap::new();
-        let (ik, idists) = modality_hits
-            .get("image")
-            .map(|(k, d)| (k.as_slice(), d.as_slice()))
-            .unwrap_or((&[], &[]));
         let mut ranking_image = rank_modality(
-            core,
-            ik,
-            idists,
+            ctx,
+            modality_slice(modality_hits, "image"),
             &mut note_data,
             &mut image_score,
-            &exclude,
-            args,
             false,
         );
         // #582: per-NOTE image floor — keep only the cards whose own image
@@ -1005,13 +1352,13 @@ pub fn search_notes(
                 let synth: Vec<f32> = (0..member_ids.len()).map(|r| r as f32 * 1e-4).collect();
                 let mut scratch: HashMap<i64, f64> = HashMap::new();
                 ranking_tag = rank_modality(
-                    core,
-                    &member_ids,
-                    &synth,
+                    ctx,
+                    ModalitySlice {
+                        keys: &member_ids,
+                        distances: &synth,
+                    },
                     &mut note_data,
                     &mut scratch,
-                    &exclude,
-                    args,
                     false,
                 );
             }
@@ -1026,18 +1373,16 @@ pub fn search_notes(
 
         // Fuzzy ranking + evidence (query sources only), before the exact loop
         // so a fuzzy candidate that also literally matches joins the exact tier.
-        let (mut ranking_fuzzy, mut fuzzy_evidence) = if source.is_query {
+        let mut fuzzy = if source.is_query {
             collect_fuzzy(
-                core,
+                ctx,
                 derived,
                 &source.text,
                 &mut note_data,
-                &exclude,
-                args,
                 lex_scope.as_deref(),
             )?
         } else {
-            (Vec::new(), HashMap::new())
+            FuzzyRanking::empty()
         };
 
         // Exact ranking = every candidate whose content literally contains the
@@ -1045,11 +1390,12 @@ pub fn search_notes(
         let mut exact_ids: Vec<i64> = Vec::new();
         if source.is_query {
             for nid in &note_data.order {
-                let data = note_data.map.get_mut(nid).expect("ordered key present");
-                if data.get("substring").is_none() {
-                    data["substring"] = substring_info(data.get("content"), &source.text);
+                let candidate = note_data.map.get_mut(nid).expect("ordered key present");
+                if candidate.substring.is_none() {
+                    candidate.substring =
+                        substring_info(candidate.note.content.as_ref(), &source.text);
                 }
-                if !data["substring"].is_null() {
+                if candidate.substring.is_some() {
                     exact_ids.push(*nid);
                 }
             }
@@ -1057,10 +1403,10 @@ pub fn search_notes(
 
         // An exact note is trivially also a fuzzy match — drop it from the
         // fuzzy signal so `fuzzy` means the DISTINGUISHING lexical signal.
-        if !exact_ids.is_empty() && !ranking_fuzzy.is_empty() {
+        if !exact_ids.is_empty() && !fuzzy.ranking.is_empty() {
             let exact_set: HashSet<i64> = exact_ids.iter().copied().collect();
-            ranking_fuzzy.retain(|nid| !exact_set.contains(nid));
-            fuzzy_evidence.retain(|nid, _| !exact_set.contains(nid));
+            fuzzy.ranking.retain(|nid| !exact_set.contains(nid));
+            fuzzy.evidence.retain(|nid, _| !exact_set.contains(nid));
         }
 
         let mut rankings: Vec<(String, Vec<i64>)> = vec![
@@ -1068,245 +1414,22 @@ pub fn search_notes(
             ("image".into(), ranking_image),
             ("tag".into(), ranking_tag),
             ("exact".into(), exact_ids),
-            ("fuzzy".into(), ranking_fuzzy),
+            ("fuzzy".into(), fuzzy.ranking),
         ];
 
-        // ── Cross-space fusion (#234 / #576 / #580) ──────────────────────────
-        // Each SECONDARY image space contributes its own `image` ranking. EMPTY
-        // cross_space (N=1 — the production-common case) → this whole block is a
-        // no-op and the rankings vector above is byte-identical, so `rrf_fuse`
-        // gets identical inputs.
-        //
-        // PRODUCTION (#580): FLOOR-ADMIT. The relative winner-take-all gate is
-        // RETIRED — a secondary image space is admitted on its OWN calibrated
-        // intra-modal floor (`image_best > z_floor`), independent of how the text
-        // space did, so a strong on-topic CLIP hit corroborates the card even
-        // when text "won" on a spurious filename lexical match (the #580 win).
-        // Sound because >1 image space is a config error (`profiles`): with at
-        // most one image space there is no multiplicity, which was the relative
-        // gate's only job.
-        //
-        // EVAL-ONLY (`SHRIKE_CROSS_SPACE_FUSION_MODE`): the relative family
-        // (`Relative*`/`*Floor` non-admit) reproduces the pre-#580 gate; the
-        // `Soft*`/`*Budget` modes reproduce the dominated soft variant + the N≥2
-        // multiplicity measurement. `uses_relative_gate` keeps the gate for the
-        // relative family ONLY; the floor-admit family skips it.
-        //
-        // Per-space soft/budget weights (eval modes) collected here, applied to
-        // the `image#<key>` signal's RRF weight after the canonical weights
-        // resolve. Two passes: (1) admit + raw weight per space; (2) the budget
-        // normalization across the admitted set (a no-op for the production
-        // FloorAdmit mode), then fold/push.
-        let mut cross_space_weights: std::collections::BTreeMap<String, f64> =
-            std::collections::BTreeMap::new();
-        if !args.cross_space.is_empty() {
-            let mode = args.cross_space_fusion_mode;
-            let uses_relative_gate = matches!(
-                mode,
-                CrossSpaceFusionMode::Relative
-                    | CrossSpaceFusionMode::RelativeFloor
-                    | CrossSpaceFusionMode::SoftRelative
-                    | CrossSpaceFusionMode::SoftCalibrated
-            );
-            let is_budget = matches!(
-                mode,
-                CrossSpaceFusionMode::FloorAdmitBudget | CrossSpaceFusionMode::SoftFloorAdmitBudget
-            );
-            // The primary text space's best query cosine (the relative gate's
-            // reference). The primary's hits are `modality_hits` (this row).
-            let primary_best = best_query_cosine_of(modality_hits);
-            // Pass 1: collect each admitted space's ranking, its per-note image
-            // scores (for the displayed-score fold), and its RAW pre-budget
-            // weight.
-            struct Admitted {
-                signal: String,
-                ranking: Vec<i64>,
-                space_score: HashMap<i64, f64>,
-                weight: f64,
-            }
-            let mut admitted: Vec<Admitted> = Vec::new();
-            for space in &args.cross_space {
-                let Some(shits) = space.per_source.get(i) else {
-                    continue;
-                };
-                // The relative gate (#234) — applied ONLY for the relative
-                // family. With the gate disabled (the negative control), every
-                // space fires. The floor-admit family skips it entirely (the
-                // floor below is the sole admission test).
-                if uses_relative_gate {
-                    let gate_open = args.disable_cross_space_gate
-                        || match (shits.best_query_cosine, primary_best) {
-                            (Some(v), Some(p)) => v >= p,
-                            // No primary text reference → nothing to gate
-                            // against; admit (degenerate, lexical-only primary).
-                            (Some(_), None) => true,
-                            // The space itself returned no hits → nothing to add.
-                            (None, _) => false,
-                        };
-                    if !gate_open {
-                        continue;
-                    }
-                }
-                let (sk, sd) = shits
-                    .modality_hits
-                    .get("image")
-                    .map(|(k, d)| (k.as_slice(), d.as_slice()))
-                    .unwrap_or((&[], &[]));
-                if sk.is_empty() {
-                    continue;
-                }
-                let mut space_score: HashMap<i64, f64> = HashMap::new();
-                let mut ranking_space_image = rank_modality(
-                    core,
-                    sk,
-                    sd,
-                    &mut note_data,
-                    &mut space_score,
-                    &exclude,
-                    args,
-                    false,
-                );
-                if ranking_space_image.is_empty() {
-                    continue;
-                }
-                // #582 (PRODUCTION FloorAdmit only): a PER-NOTE floor — keep only
-                // the cards whose own image cosine clears this space's floor, so
-                // a below-floor tail card carries no `image#clip`. The eval modes
-                // keep the historical per-SPACE rule below (on `image_best`) so
-                // they reproduce the decision tables unchanged. An uncalibrated
-                // space (no floor) is a no-op either way.
-                if matches!(
-                    mode,
-                    CrossSpaceFusionMode::FloorAdmit | CrossSpaceFusionMode::FloorAdmitBudget
-                ) {
-                    apply_image_floor(
-                        &mut ranking_space_image,
-                        &mut space_score,
-                        space.image_floor,
-                    );
-                    if ranking_space_image.is_empty() {
-                        continue; // every card fell below the floor → nothing to add
-                    }
-                }
-                // The best surviving image cosine — the value the eval modes'
-                // per-space floor judges (exactly the primary's old rank-1 rule).
-                let image_best = ranking_space_image
-                    .first()
-                    .and_then(|nid| space_score.get(nid).copied());
-
-                // Apply the fusion mode's admission + raw weight. `None` drops
-                // the space; `Some(w)` admits it at raw weight `w` (the budget
-                // pass may scale it down for the `*Budget` modes).
-                let weight = match mode {
-                    // V0 — relative only (today): contribute at weight 1.0.
-                    CrossSpaceFusionMode::Relative => Some(1.0),
-                    // V0+floor — relative AND z_s > z_floor (per-space). Drop
-                    // the space when its best surviving image cosine clears no
-                    // floor; an uncalibrated space (no floor) is admitted (the
-                    // floor is a no-op, the relative gate alone governs).
-                    CrossSpaceFusionMode::RelativeFloor => match (image_best, space.image_floor) {
-                        (Some(b), Some(floor)) if b <= floor => None,
-                        _ => Some(1.0),
-                    },
-                    // V1 — soft-relative: w = σ((clip_best − text_best)/τ). The
-                    // calibration-free CONTROL (expected to still leak).
-                    CrossSpaceFusionMode::SoftRelative => {
-                        match (shits.best_query_cosine, primary_best, args.cross_space_tau) {
-                            (Some(v), Some(p), tau) if tau > 0.0 => Some(sigmoid((v - p) / tau)),
-                            // No reference / τ≤0 → fall back to the binary
-                            // contribution (the σ→step limit).
-                            _ => Some(1.0),
-                        }
-                    }
-                    // V2 — soft-calibrated: w = σ((z_s − z0)/τ), composed with
-                    // the relative gate (already applied above). The ren
-                    // proposal — taper near the per-space floor instead of a
-                    // hard drop. An uncalibrated space falls back to weight 1.0.
-                    CrossSpaceFusionMode::SoftCalibrated => {
-                        match (image_best, space.image_floor, args.cross_space_tau) {
-                            (Some(b), Some(floor), tau) if tau > 0.0 => {
-                                Some(sigmoid((b - floor) / tau))
-                            }
-                            _ => Some(1.0),
-                        }
-                    }
-                    // #580/#582 FloorAdmit / FloorAdmitBudget — admit on the
-                    // absolute floor alone (relative gate already skipped). The
-                    // PER-NOTE floor filter above already dropped sub-floor cards
-                    // and `continue`d if none survived, so any surviving ranking
-                    // has cleared the floor → raw weight 1.0 (the budget pass
-                    // divides it down for the budget mode).
-                    CrossSpaceFusionMode::FloorAdmit | CrossSpaceFusionMode::FloorAdmitBudget => {
-                        Some(1.0)
-                    }
-                    // #580 SoftFloorAdmit / SoftFloorAdmitBudget — soft admission
-                    // `w = σ((image_best − z_floor)/τ)`, no relative composition.
-                    // An uncalibrated space / τ≤0 falls back to weight 1.0. There
-                    // is no hard drop: a sub-floor hit gets a near-zero weight
-                    // (negligible RRF mass), which the soft taper is for.
-                    CrossSpaceFusionMode::SoftFloorAdmit
-                    | CrossSpaceFusionMode::SoftFloorAdmitBudget => {
-                        match (image_best, space.image_floor, args.cross_space_tau) {
-                            (Some(b), Some(floor), tau) if tau > 0.0 => {
-                                Some(sigmoid((b - floor) / tau))
-                            }
-                            _ => Some(1.0),
-                        }
-                    }
-                };
-                let Some(weight) = weight else {
-                    continue; // the floor dropped this space's image ranking
-                };
-                admitted.push(Admitted {
-                    signal: cross_space_signal(&space.space_key),
-                    ranking: ranking_space_image,
-                    space_score,
-                    weight,
-                });
-            }
-
-            // Pass 2: the #580 vision-weight BUDGET. When N≥2 admitted spaces
-            // share a bounded total weight `B`, no flood of always-confident
-            // off-topic spaces can out-fuse the text answer (the negative
-            // control the relative gate used to guard). N=1 keeps full weight
-            // (the production-common case is unpenalized). Two scalings:
-            //   - binary budget (FloorAdmitBudget): every weight is 1.0, so each
-            //     becomes B/N (the equal split).
-            //   - soft budget (SoftFloorAdmitBudget): only scale DOWN, and only
-            //     when the soft weights already sum above B (`B / Σ raw`); a
-            //     confident N=1 hit keeps its near-1.0 weight.
-            if is_budget && admitted.len() >= 2 {
-                let budget = args.effective_budget();
-                let total: f64 = admitted.iter().map(|a| a.weight).sum();
-                if total > budget && total > 0.0 {
-                    let scale = budget / total;
-                    for a in &mut admitted {
-                        a.weight *= scale;
-                    }
-                }
-            }
-
-            // Fold + push each admitted space.
-            for a in admitted {
-                // Fold the space's image cosines into the displayed semantic
-                // `score` (max-over-items, exactly like the primary image).
-                for (nid, isim) in &a.space_score {
-                    let entry = sem_score.entry(*nid).or_insert(*isim);
-                    if *isim > *entry {
-                        *entry = *isim;
-                    }
-                }
-                // A DISTINCT signal name per space so provenance (#182)
-                // identifies which vision space surfaced the note, and each
-                // space fuses as its own RRF signal (weight defaults to 1.0 —
-                // the eval's equal weighting; the soft/budget modes override it).
-                // `image#<key>` reads as "the image modality of space <key>".
-                if (a.weight - 1.0).abs() > f64::EPSILON {
-                    cross_space_weights.insert(a.signal.clone(), a.weight);
-                }
-                rankings.push((a.signal, a.ranking));
-            }
-        }
+        // Cross-space fusion (#234 / #576 / #580) — each SECONDARY image space
+        // contributes its own `image#<key>` ranking + (eval) weight; empty for
+        // the N=1 production-common case, so the inputs stay byte-identical.
+        let cross = fuse_cross_spaces(
+            CrossSpaceInput {
+                ctx,
+                source_index: i,
+                primary_hits: modality_hits,
+            },
+            &mut note_data,
+            &mut sem_score,
+        );
+        rankings.extend(cross.rankings);
 
         // Host-supplied weights override; empty means the kernel's canonical
         // set (#388 — the one source of truth in `fusion`).
@@ -1317,43 +1440,41 @@ pub fn search_notes(
         };
         // #576 soft variants: the per-space `image#<key>` weight (a per-query
         // taper) overrides the canonical default of 1.0 for that signal.
-        weights.extend(cross_space_weights);
+        weights.extend(cross.weights);
         let priority: HashSet<String> =
             std::iter::once(crate::fusion::PRIORITY_SIGNAL.to_owned()).collect();
         let fused = crate::fusion::rrf_fuse(&rankings, &weights, crate::fusion::RRF_K, &priority);
 
         // Provenance (#182): best (lowest) rank first, ties by signal name.
-        let mut matches: Vec<Value> = Vec::new();
+        // Assemble the typed wire match from the candidate + the per-note score,
+        // provenance, and fuzzy evidence (serialization happens once, at the
+        // host edge).
+        let mut matches: Vec<SearchMatch> = Vec::new();
         for (nid, _score, signals) in fused.into_iter().take(args.top_k) {
-            let mut m = note_data
+            let candidate = note_data
                 .map
-                .get(&nid)
-                .expect("fused hit was a candidate")
-                .clone();
-            m["score"] = match sem_score.get(&nid) {
-                Some(s) => json!(s),
-                None => Value::Null,
-            };
+                .remove(&nid)
+                .expect("fused hit was a candidate");
             let mut prov: Vec<(String, i64)> = signals;
             prov.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-            m["provenance"] = Value::Array(
-                prov.into_iter()
-                    .map(|(sig, rank)| json!({"signal": sig, "rank": rank}))
+            matches.push(SearchMatch {
+                note: candidate.note,
+                score: sem_score.get(&nid).copied(),
+                substring: candidate.substring,
+                fuzzy: fuzzy.evidence.remove(&nid),
+                provenance: prov
+                    .into_iter()
+                    .map(|(signal, rank)| SignalContribution { signal, rank })
                     .collect(),
-            );
-            if let Some((src, r, snippet)) = fuzzy_evidence.get(&nid) {
-                m["fuzzy"] = json!({"source": src, "ref": r, "snippet": snippet});
-            }
-            matches.push(m);
+            });
         }
-        results.push(json!({"source": source.label, "matches": matches}));
+        results.push(SearchResultGroup {
+            source: source.label.clone(),
+            matches,
+        });
     }
 
-    serde_json::from_value(Value::Array(results)).map_err(|e| {
-        NativeError::internal(format!(
-            "SearchResultGroup: assembly does not match the schema: {e}"
-        ))
-    })
+    Ok(results)
 }
 
 /// The minimum query length the derived store's trigram index can serve —
@@ -1422,7 +1543,7 @@ mod search_tests {
             ]"#,
         )
         .unwrap();
-        let results: Vec<Value> = serde_json::from_str(
+        let results: Vec<serde_json::Value> = serde_json::from_str(
             &serde_json::to_string(
                 &core
                     .upsert_notes(
@@ -1827,18 +1948,21 @@ mod search_tests {
 
     #[test]
     fn substring_info_authority_and_snippet_window() {
-        let content = serde_json::json!({"Front": "x".repeat(50) + "NEEDLE" + &"y".repeat(50)});
-        let info = substring_info(Some(&content), "needle");
-        assert!(!info.is_null());
-        assert_eq!(info["matched_fields"], serde_json::json!(["Front"]));
-        let snippet = info["snippet"].as_str().unwrap();
+        let content: NoteContent = BTreeMap::from([(
+            "Front".to_owned(),
+            "x".repeat(50) + "NEEDLE" + &"y".repeat(50),
+        )]);
+        let info = substring_info(Some(&content), "needle").expect("literal hit");
+        assert_eq!(info.matched_fields, vec!["Front".to_owned()]);
+        // A field hit carries the schema defaults (source "field", no ref).
+        assert_eq!(info.source, crate::FIELD_SOURCE);
+        assert!(info.r#ref.is_none());
+        let snippet = info.snippet.as_deref().unwrap();
         assert!(snippet.starts_with('…') && snippet.ends_with('…'));
         assert!(snippet.contains("NEEDLE"));
-        assert!(substring_info(Some(&content), "absent").is_null());
-        assert!(substring_info(None, "x").is_null());
-        // An explicit-null content (a meta-mode note dict under plain serde,
-        // #391 to_wire retirement) is treated exactly like absent.
-        assert!(substring_info(Some(&serde_json::Value::Null), "x").is_null());
+        assert!(substring_info(Some(&content), "absent").is_none());
+        // Absent content (a meta-mode note dict carries no fields) is no match.
+        assert!(substring_info(None, "x").is_none());
     }
 
     // ── Cross-space fusion + the relative activation gate (#234) ─────────────

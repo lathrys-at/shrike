@@ -743,7 +743,14 @@ mod tests {
         assert_eq!(meta.ndim, 384);
         assert_eq!(meta.schema, 2);
         let stat = meta.activation.as_ref().unwrap().get("image").unwrap();
-        assert_eq!(*stat, ActivationStat { mean: 0.2, n: 40.0, std: 0.05 });
+        assert_eq!(
+            *stat,
+            ActivationStat {
+                mean: 0.2,
+                n: 40.0,
+                std: 0.05
+            }
+        );
         // The typed stat re-serializes byte-for-byte as the prior
         // BTreeMap<String, f64> did: keys in sorted order (mean, n, std) and
         // `n` as a float, so the on-disk activation block is unchanged.
