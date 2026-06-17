@@ -60,8 +60,7 @@ ENGINE_CRATES = {
 # floor crate are constrained.
 #
 # As the #703 reorg adds further low-utility crates (the coming
-# shrike-process / shrike-media / shrike-cache), extend this set — one line per
-# crate.
+# shrike-process / shrike-media), extend this set — one line per crate.
 LAYER_FLOOR = {
     "shrike-cache",  # per-collection cache layout (#712) — index/derived subdirs + namespacing
     "shrike-error",
