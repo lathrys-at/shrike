@@ -108,14 +108,14 @@ jobs:
           cache-dependency-glob: pyproject.toml
       - name: Install dependencies
         run: uv pip install --system -e ".[dev]"
-      # shrike-core/shrike-py/python is the extension's Python shim package (#437):
+      # shrike-core/shrike-pyo3/python is the extension's Python shim package (#437):
       # outside src/, so it was in no ruff scope anywhere and lint debt
       # accumulated invisibly. (Its .pyi stubs are additionally
       # stubtest-validated under Bazel in the tests lane.)
       - name: Ruff check
-        run: ruff check src/shrike/ tests/ shrike-core/shrike-py/python/
+        run: ruff check src/shrike/ tests/ shrike-core/shrike-pyo3/python/
       - name: Ruff format check
-        run: ruff format --check src/shrike/ tests/ shrike-core/shrike-py/python/
+        run: ruff format --check src/shrike/ tests/ shrike-core/shrike-pyo3/python/
       - name: Mypy
         run: mypy src/shrike/
       # Rust lint (#304): the idiomatic gates for the native workspace —

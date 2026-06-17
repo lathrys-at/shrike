@@ -109,7 +109,7 @@ jobs:
         run: cd shrike-core && cargo clippy --workspace --all-targets -- -D warnings
 
   # The coverage lane's Rust cache (#422): coverage.yml builds the native
-  # extension with a debug `cargo build -p shrike-py` under the `rust-coverage`
+  # extension with a debug `cargo build -p shrike-pyo3` under the `rust-coverage`
   # shared-key. Its scheduled runs (Mon/Wed/Fri, on main) self-seed that key —
   # but a Cargo.lock bump merged between schedules would leave the next
   # coverage run (or an rc PR's) cold. This job runs the same build on the same
@@ -123,10 +123,10 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           shared-key: rust-coverage
-      - name: Build shrike-py (warms the dependency build)
+      - name: Build shrike-pyo3 (warms the dependency build)
         env:
           DESCRIPTORS_BIN: ${{ github.workspace }}/shrike-core/third_party/anki/anki_descriptors.bin
-        run: cd shrike-core && cargo build -p shrike-py
+        run: cd shrike-core && cargo build -p shrike-pyo3
 
   # Prune superseded bazel-disk-* entries (#645). The disk cache is keyed on the
   # run id (a fresh ~0.5 GB superset every run, by design — it must accumulate

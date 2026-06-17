@@ -34,19 +34,19 @@ for arg in "$@"; do
   esac
 done
 
-(cd shrike-core && cargo build -p shrike-py ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"})
+(cd shrike-core && cargo build -p shrike-pyo3 ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"})
 
 case "$(uname -s)" in
-  Darwin) LIB="shrike-core/target/${PROFILE}/libshrike_py.dylib" ;;
-  *)      LIB="shrike-core/target/${PROFILE}/libshrike_py.so" ;;
+  Darwin) LIB="shrike-core/target/${PROFILE}/libshrike_pyo3.dylib" ;;
+  *)      LIB="shrike-core/target/${PROFILE}/libshrike_pyo3.so" ;;
 esac
-DEST="shrike-core/shrike-py/python/shrike_native/_native.so"
+DEST="shrike-core/shrike-pyo3/python/shrike_native/_native.so"
 cp "$LIB" "$DEST"
 echo "built $DEST (${PROFILE})"
 
 # Plain (non-editable) install: hatchling editables use an import hook that
 # mypy/stubtest cannot resolve, and the .so changes each rebuild anyway.
-python -m pip install -q --force-reinstall shrike-core/shrike-py/python
+python -m pip install -q --force-reinstall shrike-core/shrike-pyo3/python
 python - <<'PY'
 import shrike_native
 print(f"shrike_native {shrike_native.version()} — {shrike_native.build_info()}")
