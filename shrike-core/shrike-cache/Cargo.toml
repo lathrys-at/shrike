@@ -1,0 +1,26 @@
+[package]
+name = "shrike-cache"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Per-collection cache layout: the index/derived subdir scheme + path-derived namespacing the kernel's stores key against (#67, #547, #712)."
+
+[lib]
+name = "shrike_cache"
+
+# A layer-FLOOR crate (#704): it encodes the kernel's cache layout (the
+# `index`/`derived` subdir scheme + per-collection namespacing) but names
+# NEITHER the kernel NOR any engine — its closure is std/blake2/serde_json/
+# tracing only, so both the kernel and (downstream) the stores may depend on it
+# without inverting the layer graph. Enforced by //shrike-core:layering_check.
+#
+# blake2: the per-collection namespace is a blake2b-16 digest of the
+# canonicalized collection path, bit-identical to Python's mirror
+# (`shrike.cache_layout`). serde_json: reads the flat index meta's `collection`
+# owner field during migration. tracing: best-effort migration logging (no
+# subscriber installed here — the harness injects the sink, #308).
+[dependencies]
+blake2 = "0.10"
+serde_json = "1"
+tracing = "0.1"

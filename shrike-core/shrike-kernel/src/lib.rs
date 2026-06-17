@@ -26,7 +26,6 @@
 //! transitional Python schedulers from #275.
 
 pub mod actions;
-pub mod cache_layout;
 pub mod embed_set;
 pub mod fusion;
 pub mod index_orchestrator;
@@ -441,8 +440,8 @@ impl Kernel {
         // cross-contaminate substring/fuzzy/OCR search). Migrate an existing
         // flat `<cache_dir>/shrike.db` into this collection's namespace first,
         // so the single-collection user keeps their built derived data.
-        cache_layout::migrate_flat_derived(cache_dir, collection_path);
-        let derived_path = cache_layout::derived_db_path(cache_dir, collection_path);
+        shrike_cache::migrate_flat_derived(cache_dir, collection_path);
+        let derived_path = shrike_cache::derived_db_path(cache_dir, collection_path);
         if let Some(parent) = derived_path.parent() {
             std::fs::create_dir_all(parent).context(ErrorKind::Internal, "derived dir")?;
         }
@@ -463,7 +462,7 @@ impl Kernel {
         // also migrates an existing flat (single-collection) layout into this
         // collection's namespace, losslessly, so the long-standing text-only
         // user never pays a spurious rebuild on upgrade.
-        let layout = cache_layout::IndexLayout::for_collection(cache_dir, collection_path);
+        let layout = shrike_cache::IndexLayout::for_collection(cache_dir, collection_path);
         Self::assemble(
             collection,
             engine,
@@ -493,7 +492,7 @@ impl Kernel {
         // so it can't derive a per-collection index namespace (#67): the index
         // stays flat under `cache_dir`. The composing caller owns multiplexing
         // if it ever serves several collections through this seam.
-        let layout = cache_layout::IndexLayout::flat(cache_dir);
+        let layout = shrike_cache::IndexLayout::flat(cache_dir);
         Self::assemble(
             collection,
             index,
@@ -510,7 +509,7 @@ impl Kernel {
         engine: Arc<dyn VectorIndex>,
         derived: Arc<dyn DerivedStore>,
         cache_dir: &str,
-        index_layout: cache_layout::IndexLayout,
+        index_layout: shrike_cache::IndexLayout,
         save_delay: Option<f64>,
         save_threshold: Option<u64>,
     ) -> NativeResult<Self> {

@@ -53,6 +53,7 @@ rust_shared_library(
         "manage-llama",
     ],
     deps = [
+        "//shrike-core/shrike-cache:shrike_cache",
         "//shrike-core/shrike-collection:shrike_collection",
         "//shrike-core/shrike-derived:shrike_derived",
         "//shrike-core/shrike-describe-remote:shrike_describe_remote",

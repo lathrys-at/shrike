@@ -10,6 +10,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "shrike-cache",
     "shrike-collection",
     "shrike-derived",
     "shrike-embed",
@@ -49,6 +50,7 @@ license = "AGPL-3.0-or-later"
 # interpreter — the key property for a hermetic Bazel build (and one wheel works
 # across 3.12+). Matches the hermetic toolchain's minor.
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
+shrike-cache = { path = "shrike-cache" }
 shrike-error = { path = "shrike-error" }
 shrike-network = { path = "shrike-network" }
 shrike-store = { path = "shrike-store" }

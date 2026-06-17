@@ -18,6 +18,7 @@ py_test(
     main = "layering_check.py",
     data = [
         "Cargo.toml",
+        "//shrike-core/shrike-cache:Cargo.toml",
         "//shrike-core/shrike-collection:Cargo.toml",
         "//shrike-core/shrike-derived:Cargo.toml",
         "//shrike-core/shrike-embed:Cargo.toml",

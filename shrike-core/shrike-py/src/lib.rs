@@ -948,27 +948,27 @@ fn rrf_fuse(
 }
 
 /// The path-derived per-collection index identity (#67). The single
-/// implementation lives in the kernel (`shrike_kernel::cache_layout`); this
-/// binds it so the host can resolve the same `<cache_dir>/index/<namespace>/`
+/// implementation lives in `shrike-cache` (cracked out of the kernel, #712);
+/// this binds it so the host can resolve the same `<cache_dir>/index/<namespace>/`
 /// the kernel writes (the routing capstone #68, status reporting, tests). A
 /// Python parity test pins the two byte-for-byte.
 #[cfg(feature = "anki-core")]
 #[pyfunction]
 fn index_namespace(py: Python<'_>, collection_path: String) -> String {
-    py.detach(move || shrike_kernel::cache_layout::index_namespace(&collection_path))
+    py.detach(move || shrike_cache::index_namespace(&collection_path))
 }
 
 /// The path-derived per-collection derived-store path (#547):
-/// `<cache_dir>/derived/<namespace>/shrike.db`. Binds the kernel's single
-/// implementation so the host `DerivedTextStore` opens exactly the file the
-/// kernel's `DerivedEngine` writes (they share one db). A Python parity test
-/// pins the two byte-for-byte. Returns a lossy-UTF-8 string (paths the host
-/// hands in are already UTF-8).
+/// `<cache_dir>/derived/<namespace>/shrike.db`. Binds `shrike-cache`'s single
+/// implementation (cracked out of the kernel, #712) so the host
+/// `DerivedTextStore` opens exactly the file the kernel's `DerivedEngine`
+/// writes (they share one db). A Python parity test pins the two byte-for-byte.
+/// Returns a lossy-UTF-8 string (paths the host hands in are already UTF-8).
 #[cfg(feature = "anki-core")]
 #[pyfunction]
 fn derived_db_path(py: Python<'_>, cache_dir: String, collection_path: String) -> String {
     py.detach(move || {
-        shrike_kernel::cache_layout::derived_db_path(&cache_dir, &collection_path)
+        shrike_cache::derived_db_path(&cache_dir, &collection_path)
             .to_string_lossy()
             .into_owned()
     })

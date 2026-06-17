@@ -17,6 +17,10 @@ name = "shrike_kernel"
 # contract lives in shrike-engine-api, and hosts attach whatever engines the
 # deployment composes (the layering check pins this structurally).
 [dependencies]
+# Per-collection cache layout (#712): the index/derived subdir scheme +
+# path-derived namespacing the kernel's stores key against (cracked out of the
+# kernel as a layer-floor crate — no kernel/engine coupling).
+shrike-cache = { workspace = true }
 shrike-collection = { path = "../shrike-collection" }
 shrike-derived = { path = "../shrike-derived" }
 shrike-engine-api = { path = "../shrike-engine-api" }

@@ -54,6 +54,10 @@ manage-llama = ["dep:shrike-llama-server"]
 
 [dependencies]
 pyo3 = { workspace = true }
+# Per-collection cache layout (#712): binds index_namespace/derived_db_path for
+# the host (the Python-parity mirror). A pure-Rust floor crate — non-optional
+# (the parity pyfunctions are themselves gated on `anki-core`).
+shrike-cache = { workspace = true }
 shrike-collection = { path = "../shrike-collection", optional = true }
 shrike-kernel = { path = "../shrike-kernel", optional = true }
 serde = "1"

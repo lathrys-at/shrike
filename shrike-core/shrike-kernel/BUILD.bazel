@@ -16,6 +16,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     deps = [
+        "//shrike-core/shrike-cache:shrike_cache",
         "//shrike-core/shrike-collection:shrike_collection",
         "//shrike-core/shrike-derived:shrike_derived",
         "//shrike-core/shrike-engine-api:shrike_engine_api",

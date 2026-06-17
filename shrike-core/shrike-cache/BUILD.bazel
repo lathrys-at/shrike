@@ -1,0 +1,28 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//shrike-core:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# The per-collection cache-layout crate (#712): the index/derived subdir scheme
+# (`INDEX_SUBDIR`/`DERIVED_SUBDIR`) + path-derived namespacing the kernel's
+# stores key against (#67, #547). A layer-FLOOR crate (enforced by
+# //shrike-core:layering_check) — std/blake2/serde_json/tracing only, NO kernel
+# or engine coupling. The blake2b digest is bit-identical to the Python mirror
+# (`shrike.cache_layout`), pinned by a Python parity test.
+rust_library(
+    name = "shrike_cache",
+    srcs = ["src/lib.rs"],
+    edition = "2021",
+    deps = [
+        "@crates//:blake2",
+        "@crates//:serde_json",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "shrike_cache_test",
+    size = "small",
+    crate = ":shrike_cache",
+)

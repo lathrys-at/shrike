@@ -63,6 +63,7 @@ ENGINE_CRATES = {
 # shrike-process / shrike-media / shrike-cache), extend this set — one line per
 # crate.
 LAYER_FLOOR = {
+    "shrike-cache",  # per-collection cache layout (#712) — index/derived subdirs + namespacing
     "shrike-error",
     "shrike-network",
     "shrike-schemas",
