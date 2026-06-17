@@ -73,12 +73,26 @@ def assemble_model_dirs():
     its scattered externals into ``models/<dir-name>/<file>`` and a `filegroup`
     (``model_dir_<dir-name>``) collecting them. Call ONCE per BUILD package.
     """
+    # Guard against two (dir, file) pairs sanitizing to the SAME copy rule name.
+    # The out paths use the UNsanitized canonical name so they're always distinct,
+    # but the rule name replaces both `/` and `.` with `_`, so e.g. `a.b`/`a_b` (or
+    # `a/b`/`a_b`) would collide to one rule name — a confusing duplicate-target
+    # error far from the table. Inert for the current `_MODEL_FILES`; this turns a
+    # future colliding addition into an actionable macro-eval `fail()`.
+    seen_rules = {}
     for dir_name, files in _MODEL_FILES.items():
         outs = []
         for (src, canonical) in files:
             # A copy rule name unique per (model, file). The out path is package-
             # relative, so under runfiles it lands at _main/scripts/models/<dir>/<file>.
             rule = "copy_{}_{}".format(dir_name, canonical).replace("/", "_").replace(".", "_")
+            if rule in seen_rules:
+                fail((
+                    "serve.bzl: model files {} and {} both sanitize to copy rule " +
+                    "name '{}' (`/` and `.` both map to `_`). Rename one canonical " +
+                    "file or disambiguate the rule name in assemble_model_dirs()."
+                ).format(seen_rules[rule], (dir_name, canonical), rule))
+            seen_rules[rule] = (dir_name, canonical)
             out = "models/{}/{}".format(dir_name, canonical)
             copy_file(
                 name = rule,
