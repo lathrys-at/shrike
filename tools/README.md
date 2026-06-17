@@ -46,6 +46,14 @@ fix up their environment lives in `scripts/`, even if its output feeds a build.
 - `update-requirements.sh` — regenerates the pinned `requirements*.txt` from the lock inputs.
 - `sdist-requirements.in` — the sdist builder's build-tool deps (kept out of the runtime lock).
 
+### Coverage hook
+- `coverage_subprocess.pth` — the single committed coverage subprocess-capture
+  hook (the one-line `.pth` that imports coverage only when
+  `COVERAGE_PROCESS_START` is set). Copied into site-packages by
+  `scripts/coverage.sh` and by CLAUDE.md's by-hand recipe — one hook, one home
+  (#700). It lives in `tools/` because it's build/test-lane plumbing, not a
+  human entry point.
+
 ### Hermetic-toolchain CI smoke tests
 - `import_spike.py` — `//tools:import_spike` (#242): the native-dependency wheels (`anki`, `usearch`, `onnxruntime`) import and *run* on Bazel's hermetic CPython, on every target platform.
 - `library_smoke.py` — `//tools:library_smoke` (#243): the `shrike` package + its declared deps import cleanly and a pure function runs.
@@ -57,9 +65,32 @@ fix up their environment lives in `scripts/`, even if its output feeds a build.
   term move under `tests/` is deferred so it doesn't collide with the in-flight
   test-layout reshape, epic #694.)
 
-## Not Bazel-ified (yet)
+## Not Bazel-ified, and why (#700 verdict)
 
-Several shell helpers here are still plain scripts rather than `sh_binary`/
-`sh_test`/`genrule` targets; expressing the dev/maintenance scripts as Bazel
-idioms is tracked separately (#700). Categorizing a file into `tools/` does not
+Several shell helpers here are plain scripts rather than `sh_binary`/`sh_test`/
+`genrule` targets, and the #700 spike concluded that's the right state for this
+wave. The findings:
+
+- **`sh_binary`/`sh_test`/`sh_library` are not free in our pinned Bazel
+  (9.1.1).** Bazel 7+ removed them from the native global namespace; they now
+  live in `rules_shell`, which is not a `bazel_dep` here and isn't transitively
+  visible. Wrapping these scripts as `bazel run` targets would mean *adding*
+  `rules_shell` (a new dep + a `MODULE.bazel.lock` churn) for marginal
+  runfiles/toolchain convenience — out of scope for a cleanup wave.
+- **The two `genrule`+tripwire candidates are infeasible as hermetic genrules.**
+  `update-anki-descriptors.sh` regenerates `shrike-core/third_party/anki/anki_descriptors.bin`,
+  which requires a `cargo build -p anki_proto` (the Bazel build deliberately
+  *consumes* the checked-in descriptor rather than running protoc) — non-hermetic,
+  and it lives in the separate `shrike-core/` Rust workspace, not `tools/`.
+  `update-llama-lock.sh` (the lock *writer*)
+  downloads the four platform tarballs over the network to hash them — also
+  non-hermetic — and the lock is **already** tripwired against `MODULE.bazel` by
+  `//tools:llama_lock_in_sync_test` (#566), so a writer-determinism genrule would
+  add nothing.
+
+`genrule`+`diff_test` (from the already-present `bazel_skylib`) *does* work with
+no new dep where a committed artifact has a hermetic generator — there just
+isn't one among these scripts today. The realized #700 change was collapsing the
+duplicated coverage `.pth` hook into a single committed source
+(`coverage_subprocess.pth`, above). Categorizing a file into `tools/` does not
 require rewriting it as a Bazel rule.

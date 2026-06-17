@@ -236,7 +236,7 @@ hand it's:
 
 ```bash
 SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
-echo 'import os; os.getenv("COVERAGE_PROCESS_START") and __import__("coverage").process_startup()' > "$SITE/coverage_subprocess.pth"
+cp tools/coverage_subprocess.pth "$SITE/coverage_subprocess.pth"   # the one committed hook (also used by scripts/coverage.sh)
 export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
 coverage run --parallel-mode -m pytest tests/unit tests/integration tests/native -q -m "not embedding" -n auto
 coverage combine && coverage report      # exits non-zero below fail_under
