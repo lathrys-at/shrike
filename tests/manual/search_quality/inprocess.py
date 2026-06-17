@@ -40,10 +40,10 @@ from typing import Any
 
 import shrike_native
 
-from shrike.derived import DerivedTextStore, NativeDerivedEngine
-from shrike.embedding import EmbeddingRuntime
-from shrike.embedding_base import IMAGE, TEXT
-from shrike.harness import Harness, KernelIndexView
+from shrike.harness.derived import DerivedTextStore, NativeDerivedEngine
+from shrike.harness.engines.embedding.runtime import EmbeddingRuntime
+from shrike.harness.engines.embedding.base import IMAGE, TEXT
+from shrike.harness.harness import Harness, KernelIndexView
 
 _MARKER_RE = re.compile(r"@@P:([A-Za-z0-9_-]+)@@")
 
@@ -243,7 +243,7 @@ async def build_harness(
 
     from mcp.server.fastmcp import FastMCP
 
-    from shrike.tools import register_tools
+    from shrike.api.tools import register_tools
 
     media_map: dict[str, bytes] = dict(media or {})
     runtime = EmbeddingRuntime(model=None)
@@ -317,7 +317,7 @@ async def build_harness_real(
 
     from mcp.server.fastmcp import FastMCP
 
-    from shrike.tools import register_tools
+    from shrike.api.tools import register_tools
 
     media_map: dict[str, bytes] = dict(media or {})
     runtime = EmbeddingRuntime(model=None)

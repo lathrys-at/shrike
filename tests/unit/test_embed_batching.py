@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from shrike.embed_batching import (
+from shrike.harness.engines.embedding.batching import (
     BATCH_DRIFT_TOL,
     BATCH_PROBE_IMAGES,
     BATCH_PROBE_TEXTS,

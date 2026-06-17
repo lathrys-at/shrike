@@ -6,9 +6,9 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
-from shrike.collection import CollectionBusyError
+from shrike.harness.collection import CollectionBusyError
 from shrike.schemas import COLLECTION_BUSY_CODE
-from shrike.tools import register_tools
+from shrike.api.tools import register_tools
 
 
 def test_busy_surfaces_as_tool_error_with_code(kharness, monkeypatch):

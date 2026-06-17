@@ -14,8 +14,8 @@ import os
 
 import pytest
 
-from shrike.actions import ActionContext, ToolInputError, build_actions
-from shrike.export_store import ExportStore
+from shrike.api.actions import ActionContext, ToolInputError, build_actions
+from shrike.server.export_store import ExportStore
 
 
 def _export_action(kharness, **ctx_kwargs):

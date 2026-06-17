@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from shrike.derived import DerivedTextStore
+from shrike.harness.derived import DerivedTextStore
 
 requires_shrike_native = pytest.mark.skipif(
     importlib.util.find_spec("shrike_native") is None,
@@ -41,7 +41,7 @@ def _assert_store_serves(store: DerivedTextStore) -> None:
 @requires_shrike_native
 class TestNativeDerivedEngine:
     def test_native_engine_selected_and_serves(self, tmp_path: Path) -> None:
-        from shrike.derived import NativeDerivedEngine
+        from shrike.harness.derived import NativeDerivedEngine
 
         store = DerivedTextStore(path=tmp_path / "shrike.db")
         assert isinstance(store._engine, NativeDerivedEngine)

@@ -14,17 +14,17 @@ import pytest
 
 shrike_native = pytest.importorskip("shrike_native")
 
-from shrike import cache_layout  # noqa: E402
+from shrike.harness import cache_layout  # noqa: E402
 from shrike.cli.config import load_config, save_config  # noqa: E402
-from shrike.derived import DerivedTextStore, NativeDerivedEngine  # noqa: E402
-from shrike.embedding import EmbeddingRuntime  # noqa: E402
-from shrike.harness import (  # noqa: E402
+from shrike.harness.derived import DerivedTextStore, NativeDerivedEngine  # noqa: E402
+from shrike.harness.engines.embedding.runtime import EmbeddingRuntime  # noqa: E402
+from shrike.harness.harness import (  # noqa: E402
     CollectionManager,
     Harness,
     HarnessParams,
     RoutingError,
 )
-from shrike.registry import Registry  # noqa: E402
+from shrike.harness.registry import Registry  # noqa: E402
 
 
 async def _default_harness(cache_dir, default_path, runtime):

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from shrike.collection import CollectionWrapper
+from shrike.harness.collection import CollectionWrapper
 
 
 def make_notes(wrapper: CollectionWrapper, notes: list[dict]) -> list[dict]:

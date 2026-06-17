@@ -17,8 +17,8 @@ from collections.abc import Iterator
 import numpy as np
 import pytest
 
-from shrike.embed_batching import BATCH_PROBE_TEXTS
-from shrike.embedding_base import IMAGE, TEXT, EmbedderBackend
+from shrike.harness.engines.embedding.batching import BATCH_PROBE_TEXTS
+from shrike.harness.engines.embedding.base import IMAGE, TEXT, EmbedderBackend
 from tests.integration.backend_cases import (
     PARITY_TEXTS,
     BackendCase,

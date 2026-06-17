@@ -14,7 +14,7 @@ from contextlib import contextmanager
 
 import pytest
 
-from shrike.collection import CollectionBusyError, CollectionWrapper
+from shrike.harness.collection import CollectionBusyError, CollectionWrapper
 from shrike.schemas import COLLECTION_BUSY_CODE
 
 # Holds the collection (open + held) until stdin closes.
@@ -92,8 +92,8 @@ class TestKernelBusyNormalization:
         import pytest
         import shrike_native
 
-        from shrike.collection import CollectionBusyError
-        from shrike.mcp_adapter import _safe_tool
+        from shrike.harness.collection import CollectionBusyError
+        from shrike.api.mcp_adapter import _safe_tool
         from shrike.schemas import COLLECTION_BUSY_CODE
 
         @_safe_tool

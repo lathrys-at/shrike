@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from shrike.derived import DerivedTextStore
-from shrike.index import IndexState
+from shrike.harness.derived import DerivedTextStore
+from shrike.harness.index import IndexState
 
 # (note_id, source, ref, text) — the build-row shape (CollectionWrapper.derived_field_rows).
 ROWS = [
@@ -232,7 +232,7 @@ class TestConcurrentBuildGuard:
         def boom(*a, **k):
             raise RuntimeError("can't spawn")
 
-        monkeypatch.setattr("shrike.derived.threading.Thread", boom)
+        monkeypatch.setattr("shrike.harness.derived.threading.Thread", boom)
         store.build_in_background(ROWS, col_mod=200)
         assert store.state == IndexState.READY  # col_mod is set, so idle == READY
         # The guard no longer refuses a retry.

@@ -16,7 +16,7 @@ from click.testing import CliRunner
 
 from shrike.cli import cli
 from shrike.cli.config import load_config
-from shrike.registry import Registry
+from shrike.harness.registry import Registry
 
 
 def _run(tmp_path, args, **kwargs):

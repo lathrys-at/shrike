@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from shrike.profiles import (
+from shrike.harness.profiles import (
     EmbedderEntry,
     ManagedLlama,
     ProfileError,

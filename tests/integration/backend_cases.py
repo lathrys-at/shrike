@@ -30,7 +30,7 @@ from typing import Any
 
 import pytest
 
-from shrike.embedding_base import EmbedderBackend
+from shrike.harness.engines.embedding.base import EmbedderBackend
 
 # A small, deliberately varied corpus for parity comparisons: plain prose, unicode,
 # symbols/numbers, a long entry, and an empty-ish one — the shapes that shake out
@@ -80,7 +80,7 @@ class BackendCase:
 
 def _make_onnx(model_fixture: str) -> Callable[[pytest.FixtureRequest], EmbedderBackend]:
     def make(request: pytest.FixtureRequest) -> EmbedderBackend:
-        from shrike.embedding_onnx import OnnxBackend
+        from shrike.harness.engines.embedding.onnx import OnnxBackend
 
         model: Path = request.getfixturevalue(model_fixture)
         return OnnxBackend(model=str(model))
@@ -89,14 +89,14 @@ def _make_onnx(model_fixture: str) -> Callable[[pytest.FixtureRequest], Embedder
 
 
 def _make_clip(request: pytest.FixtureRequest) -> EmbedderBackend:
-    from shrike.embedding_clip import ClipBackend
+    from shrike.harness.engines.embedding.clip import ClipBackend
 
     model: Path = request.getfixturevalue("clip_model")
     return ClipBackend(model=str(model))
 
 
 def _make_llama(request: pytest.FixtureRequest) -> EmbedderBackend:
-    from shrike.embedding import LlamaServerBackend
+    from shrike.harness.engines.embedding.runtime import LlamaServerBackend
     from tests.integration.conftest import _free_port
 
     model: Path = request.getfixturevalue("embedding_model")

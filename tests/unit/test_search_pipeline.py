@@ -14,7 +14,7 @@ import random
 
 import pytest
 
-from shrike.search_fusion import (
+from shrike.harness.search_fusion import (
     RRF_K,
     NativeSearchPipeline,
     ReferenceSearchPipeline,

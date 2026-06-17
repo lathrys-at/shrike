@@ -75,8 +75,8 @@ PIL = pytest.importorskip("PIL")
 
 from PIL import Image  # noqa: E402
 
-from shrike.embedding import LlamaServerBackend  # noqa: E402
-from shrike.embedding_base import IMAGE, TEXT  # noqa: E402
+from shrike.harness.engines.embedding.runtime import LlamaServerBackend  # noqa: E402
+from shrike.harness.engines.embedding.base import IMAGE, TEXT  # noqa: E402
 
 
 def _png(color: tuple[int, int, int], size: int = 224) -> bytes:

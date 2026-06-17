@@ -11,7 +11,7 @@ must show text↔audio as via-derived-text, never native).
 
 from __future__ import annotations
 
-from shrike.harness import _coverage_matrix
+from shrike.harness.harness import _coverage_matrix
 from shrike.schemas import CoverageCell, CoverageMatrix
 
 NATIVE = CoverageCell.NATIVE.value

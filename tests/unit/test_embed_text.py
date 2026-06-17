@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from shrike.embed_text import EMBED_TEXT_VERSION
+from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
 from tests.oracles.embed_text_oracle import normalize_for_embedding
 
 

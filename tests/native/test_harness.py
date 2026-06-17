@@ -16,9 +16,9 @@ import pytest
 
 shrike_native = pytest.importorskip("shrike_native")
 
-from shrike.derived import DerivedTextStore, NativeDerivedEngine  # noqa: E402
-from shrike.embedding import EmbeddingRuntime  # noqa: E402
-from shrike.harness import Harness, KernelConfigError  # noqa: E402
+from shrike.harness.derived import DerivedTextStore, NativeDerivedEngine  # noqa: E402
+from shrike.harness.engines.embedding.runtime import EmbeddingRuntime  # noqa: E402
+from shrike.harness.harness import Harness, KernelConfigError  # noqa: E402
 
 
 async def _assemble(tmp_path, *, cooperative: bool = False) -> Harness:
@@ -58,7 +58,7 @@ class TestDerivedNamespaceParity:
         # /var/folders -> /private/var/...). With the pre-open build, the host
         # store landed in the abspath namespace; post-open it realpaths to the
         # kernel's namespace.
-        from shrike import cache_layout
+        from shrike.harness import cache_layout
 
         real = tmp_path / "real"
         real.mkdir()
@@ -316,7 +316,7 @@ class TestEmbedQueryCache:
     def test_repeat_queries_reuse_the_vector(self, tmp_path) -> None:
         from types import SimpleNamespace
 
-        from shrike.harness import KernelIndexView
+        from shrike.harness.harness import KernelIndexView
 
         class _Counting:
             def __init__(self) -> None:
@@ -436,7 +436,7 @@ class TestRecognition:
         import hashlib
         from types import SimpleNamespace
 
-        from shrike.harness import KernelIndexView
+        from shrike.harness.harness import KernelIndexView
 
         class _TokenHash:
             def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -601,7 +601,7 @@ class TestRecognition:
 
         from PIL import Image, ImageDraw
 
-        from shrike.recognition import make_recognizer
+        from shrike.harness.engines.recognition import make_recognizer
 
         img = Image.new("RGB", (640, 120), "white")
         ImageDraw.Draw(img).text((20, 40), "oxaloacetate condenses", fill="black", font_size=28)
@@ -768,7 +768,7 @@ class TestDedupOverOcr:
         import hashlib
         from types import SimpleNamespace
 
-        from shrike.harness import KernelIndexView
+        from shrike.harness.harness import KernelIndexView
 
         class _TokenHash:
             """Token-overlap cosine: shared words → similarity."""
@@ -877,7 +877,7 @@ class TestDescribeAttach:
         import hashlib
         from types import SimpleNamespace
 
-        from shrike.harness import KernelIndexView
+        from shrike.harness.harness import KernelIndexView
 
         class _TokenHash:
             """Token-overlap cosine: shared words → similarity (no model)."""
@@ -1019,8 +1019,8 @@ class TestDescribeAttach:
 
         from mcp.server.fastmcp import FastMCP
 
-        from shrike.harness import KernelIndexView
-        from shrike.tools import register_tools
+        from shrike.harness.harness import KernelIndexView
+        from shrike.api.tools import register_tools
 
         class _TokenHash:
             def embed_texts(self, texts: list[str]) -> list[list[float]]:

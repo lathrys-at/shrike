@@ -14,7 +14,7 @@ import os
 
 import pytest
 
-from shrike import pathsafety
+from shrike.platform import pathsafety
 
 
 class TestServerIsPurelyLocal:

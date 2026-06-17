@@ -22,7 +22,7 @@ pytestmark = requires_anki_core
 # Holds the collection until stdin closes (the parent controls the window).
 _HOLDER = r"""
 import sys
-from shrike.collection import CollectionWrapper
+from shrike.harness.collection import CollectionWrapper
 w = CollectionWrapper(sys.argv[1])
 print("HELD", flush=True)
 sys.stdin.readline()  # parent closes stdin to release

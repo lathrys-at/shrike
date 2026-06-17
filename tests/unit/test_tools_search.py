@@ -24,9 +24,9 @@ from unittest.mock import MagicMock
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from shrike.harness import KernelIndexView
-from shrike.index import IndexState
-from shrike.tools import register_tools
+from shrike.harness.harness import KernelIndexView
+from shrike.harness.index import IndexState
+from shrike.api.tools import register_tools
 from tests.unit.conftest import KernelHarness
 
 BASIC_NOTE = {
@@ -527,7 +527,7 @@ class TestDerivedSearch:
 
     @pytest.fixture()
     def derived(self, tmp_path):
-        from shrike.derived import DerivedTextStore
+        from shrike.harness.derived import DerivedTextStore
 
         s = DerivedTextStore(path=tmp_path / "shrike.db")
         yield s
@@ -877,7 +877,7 @@ class TestDedupNeighbors:
 
     @pytest.fixture()
     def derived(self, tmp_path):
-        from shrike.derived import DerivedTextStore
+        from shrike.harness.derived import DerivedTextStore
 
         s = DerivedTextStore(path=tmp_path / "shrike.db")
         yield s
@@ -992,7 +992,7 @@ class TestDedupStats:
     upsert draft, recorded from dedup's OWN traffic (never the #201 gate)."""
 
     def test_recorder_buckets_and_no_match(self):
-        from shrike.harness import DedupStatsRecorder
+        from shrike.harness.harness import DedupStatsRecorder
 
         rec = DedupStatsRecorder()
         assert rec.snapshot() is None  # empty → absent from /status
@@ -1009,7 +1009,7 @@ class TestDedupStats:
 
     @pytest.fixture()
     def stats(self):
-        from shrike.harness import DedupStatsRecorder
+        from shrike.harness.harness import DedupStatsRecorder
 
         return DedupStatsRecorder()
 

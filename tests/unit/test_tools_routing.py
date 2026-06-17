@@ -13,7 +13,7 @@ import logging
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from shrike.actions import ActionContext, CollectionBundle, ToolInputError, build_actions
+from shrike.api.actions import ActionContext, CollectionBundle, ToolInputError, build_actions
 
 
 def _bundle(kharness) -> CollectionBundle:
@@ -35,7 +35,7 @@ class TestResolverPlumbing:
             return _bundle(kharness)
 
         mcp = FastMCP("test")
-        from shrike.tools import register_tools
+        from shrike.api.tools import register_tools
 
         register_tools(mcp, kharness.wrapper, kernel=kharness.kernel, resolver=resolver)
         # A routed call carries the selector through to the resolver.
@@ -50,7 +50,7 @@ class TestResolverPlumbing:
             return _bundle(kharness)
 
         mcp = FastMCP("test")
-        from shrike.tools import register_tools
+        from shrike.api.tools import register_tools
 
         register_tools(mcp, kharness.wrapper, kernel=kharness.kernel, resolver=resolver)
         kharness.call_tool(mcp, "collection_info", {})
@@ -64,7 +64,7 @@ class TestResolverPlumbing:
             return _bundle(kharness)
 
         mcp = FastMCP("test")
-        from shrike.tools import register_tools
+        from shrike.api.tools import register_tools
 
         register_tools(mcp, kharness.wrapper, kernel=kharness.kernel, resolver=resolver)
         res = kharness.call_tool(
@@ -99,7 +99,7 @@ class TestSingleCollectionRejectsSelector:
         # No resolver (single-collection / standalone): a selector has nothing
         # to route to → a clean ToolInputError (surfaced as an MCP isError).
         mcp = FastMCP("test")
-        from shrike.tools import register_tools
+        from shrike.api.tools import register_tools
 
         register_tools(mcp, kharness.wrapper, kernel=kharness.kernel)  # resolver=None
         with pytest.raises(Exception) as ei:
@@ -110,7 +110,7 @@ class TestSingleCollectionRejectsSelector:
         # The default path is unchanged: no resolver + no selector → the fixed
         # bundle, exactly as before #68.
         mcp = FastMCP("test")
-        from shrike.tools import register_tools
+        from shrike.api.tools import register_tools
 
         register_tools(mcp, kharness.wrapper, kernel=kharness.kernel)
         info = kharness.call_tool(mcp, "collection_info", {})
@@ -141,7 +141,7 @@ class TestSelectorInLogLine:
             return _bundle(kharness)
 
         mcp = FastMCP("test")
-        from shrike.tools import register_tools
+        from shrike.api.tools import register_tools
 
         register_tools(mcp, kharness.wrapper, kernel=kharness.kernel, resolver=resolver)
         with caplog.at_level(logging.INFO, logger="shrike.tools"):

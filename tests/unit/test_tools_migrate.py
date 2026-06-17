@@ -14,7 +14,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
-from shrike.tools import register_tools
+from shrike.api.tools import register_tools
 from tests.unit.conftest import EmbedRecorder
 
 

@@ -81,7 +81,7 @@ class TestEmbeddingServiceViaShrike:
     tests stub."""
 
     def test_embed_method_types_and_dims(self, collection_server):
-        from shrike.embedding import EmbeddingService
+        from shrike.harness.engines.embedding.runtime import EmbeddingService
 
         svc = EmbeddingService.__new__(EmbeddingService)
         svc._base_url = collection_server.embedding_url
@@ -122,7 +122,7 @@ class TestOrphanReaping:
         import sys
         import time
 
-        from shrike.embedding import EmbeddingService
+        from shrike.harness.engines.embedding.runtime import EmbeddingService
 
         # Pick a free port for the stub orphan and the real service to contend over.
         with socket.socket() as s:

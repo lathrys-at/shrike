@@ -20,10 +20,10 @@ from unittest.mock import patch
 
 import pytest
 
-from shrike.embed_batching import BATCH_PROBE_TEXTS
-from shrike.embedding_base import IMAGE, TEXT
-from shrike.embedding_clip import ClipBackend
-from shrike.embedding_onnx_common import resolve_execution_providers
+from shrike.harness.engines.embedding.batching import BATCH_PROBE_TEXTS
+from shrike.harness.engines.embedding.base import IMAGE, TEXT
+from shrike.harness.engines.embedding.clip import ClipBackend
+from shrike.harness.engines.embedding.onnx_common import resolve_execution_providers
 
 _DIM = 8
 
@@ -112,7 +112,7 @@ def _start(
 
     with (
         patch.dict(sys.modules, {"onnxruntime": fake_ort, "shrike_native": fake_native}),
-        patch("shrike.embedding_onnx.locate_ort_dylib", lambda: Path("/fake/libort.so")),
+        patch("shrike.harness.engines.embedding.onnx.locate_ort_dylib", lambda: Path("/fake/libort.so")),
     ):
         be.start()
 

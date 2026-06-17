@@ -8,7 +8,7 @@ import os
 import pytest
 
 from shrike.cli.config import load_config, save_config
-from shrike.registry import CollectionProfile, Registry, RegistryError
+from shrike.harness.registry import CollectionProfile, Registry, RegistryError
 
 
 class TestRegistryModel:

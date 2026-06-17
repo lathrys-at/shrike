@@ -12,8 +12,8 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from shrike import daemon
-from shrike.daemon import (
+from shrike.platform import daemon
+from shrike.platform.daemon import (
     AlreadyRunningError,
     ServerLock,
     _force_kill,

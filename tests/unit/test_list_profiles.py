@@ -7,8 +7,8 @@ for an enumeration that touches neither the kernel nor the wrapper).
 
 from __future__ import annotations
 
-from shrike.actions import ActionContext, build_actions
-from shrike.registry import Registry
+from shrike.api.actions import ActionContext, build_actions
+from shrike.harness.registry import Registry
 
 
 def _list_profiles_action(kharness, registry):

@@ -20,7 +20,7 @@ import sys
 import pytest
 import shrike_native
 
-from shrike.recognition import make_recognizer
+from shrike.harness.engines.recognition import make_recognizer
 
 _HAS_ENGINE = hasattr(shrike_native, "AppleVisionRecognizer")
 

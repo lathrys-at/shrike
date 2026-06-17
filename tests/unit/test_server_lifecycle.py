@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from shrike.collection import collect_embed_inputs
+from shrike.harness.collection import collect_embed_inputs
 from shrike.server import main
 
 
@@ -36,7 +36,7 @@ class TestNonLoopbackGuard:
         ]
         with (
             patch("sys.argv", argv),
-            patch("shrike.server.configure_logging", return_value=tmp_path),
+            patch("shrike.server.server.configure_logging", return_value=tmp_path),
             pytest.raises(SystemExit) as exc,
         ):
             main()

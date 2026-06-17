@@ -8,9 +8,9 @@ import logging
 
 import pytest
 
-from shrike.actions import ToolInputError, note_outcome
-from shrike.collection import CollectionBusyError
-from shrike.mcp_adapter import _safe_tool
+from shrike.api.actions import ToolInputError, note_outcome
+from shrike.harness.collection import CollectionBusyError
+from shrike.api.mcp_adapter import _safe_tool
 
 
 def _ok_tool(x: int) -> int:

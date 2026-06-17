@@ -20,9 +20,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from shrike.embedding_clip import ClipBackend
-from shrike.index import CALIB_MIN, activation_floor
-from shrike.tools import ACTIVATION_MARGIN
+from shrike.harness.engines.embedding.clip import ClipBackend
+from shrike.harness.index import CALIB_MIN, activation_floor
+from shrike.harness.index import ACTIVATION_MARGIN
 from tests.integration.conftest import requires_clip, requires_shrike_native
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedding]

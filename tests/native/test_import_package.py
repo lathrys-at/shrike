@@ -88,7 +88,7 @@ def _lexical_hits(tmp_path, query: str) -> list:
     fresh engine on the same namespaced shrike.db the kernel's import rebuild
     committed to. This is the surface that, before the #72 derived-rebuild fix,
     stayed empty after an import until an unrelated drift trigger."""
-    from shrike import cache_layout
+    from shrike.harness import cache_layout
 
     db_path = cache_layout.derived_db_path(
         str(tmp_path / "cache"), str(tmp_path / "collection.anki2")

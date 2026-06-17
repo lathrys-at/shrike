@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import shrike_native
 
-from shrike.embed_text import EMBED_TEXT_VERSION
-from shrike.embedding import EmbeddingRuntime, EmbeddingService
+from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
+from shrike.harness.engines.embedding.runtime import EmbeddingRuntime, EmbeddingService
 
 
 @pytest.fixture()
@@ -121,7 +121,7 @@ class TestStart:
         svc._manager = manager
         with (
             patch.object(svc, "model_info", return_value={"id": "m.gguf", "meta": {}}),
-            patch("shrike.embedding.probe_max_safe_batch", return_value=16),
+            patch("shrike.harness.engines.embedding.runtime.probe_max_safe_batch", return_value=16),
         ):
             svc.start()
         assert manager.start_calls == 1
@@ -139,7 +139,7 @@ class TestStart:
         svc._manager = _StubManager()
         with (
             patch.object(svc, "model_info", return_value={}),
-            patch("shrike.embedding.probe_max_safe_batch", side_effect=RuntimeError("hiccup")),
+            patch("shrike.harness.engines.embedding.runtime.probe_max_safe_batch", side_effect=RuntimeError("hiccup")),
         ):
             svc.start()
         assert svc._safe_batch == 1
@@ -156,14 +156,14 @@ class TestStart:
         # #501B: a managed image entry whose server loaded no vision projector
         # must NOT leave the spawned llama-server orphaned — start() stops it
         # before re-raising (a degraded boot has no later start() to reap it).
-        from shrike.embedding_base import IMAGE, TEXT
+        from shrike.harness.engines.embedding.base import IMAGE, TEXT
 
         svc = EmbeddingService(model="/omni.gguf", modalities=frozenset({TEXT, IMAGE}))
         manager = _StubManager()
         svc._manager = manager
         with (
             patch(
-                "shrike.embedding.shrike_native.RemoteEmbedder",
+                "shrike.harness.engines.embedding.runtime.shrike_native.RemoteEmbedder",
                 return_value=_StubClient(vision=False),
             ),
             patch.object(svc, "model_info", return_value={"id": "omni", "meta": {}}),
@@ -331,7 +331,7 @@ class TestModelFingerprint:
         # #501B: the projector set is vector-affecting; folded as name:size
         # (size disambiguates two projectors sharing a basename), sorted, and
         # omitted entirely when none (a text-only fingerprint is unchanged).
-        from shrike.embedding_base import IMAGE, TEXT
+        from shrike.harness.engines.embedding.base import IMAGE, TEXT
 
         proj = tmp_path / "vision.mmproj.gguf"
         proj.write_bytes(b"y" * 42)
@@ -391,8 +391,8 @@ class TestEmbedModelPinning:
         svc._manager = _StubManager()
         with (
             patch.object(svc, "model_info", return_value={"id": "m.gguf", "meta": {}}),
-            patch("shrike.embedding.probe_max_safe_batch", return_value=16),
-            patch("shrike.embedding.shrike_native.RemoteEmbedder", _CapturingCtor),
+            patch("shrike.harness.engines.embedding.runtime.probe_max_safe_batch", return_value=16),
+            patch("shrike.harness.engines.embedding.runtime.shrike_native.RemoteEmbedder", _CapturingCtor),
         ):
             svc.start()
         assert captured["model"] == "m.gguf"
@@ -404,7 +404,7 @@ class TestEmbeddingRuntime:
         runtime = EmbeddingRuntime(model="/m.gguf")
         fake_svc = MagicMock()
         fake_svc.running = True
-        with patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc) as ctor:
+        with patch("shrike.harness.engines.embedding.runtime.LlamaServerBackend", return_value=fake_svc) as ctor:
             runtime.start()
         ctor.assert_called_once()
         fake_svc.start.assert_called_once()
@@ -420,7 +420,7 @@ class TestEmbeddingRuntime:
         runtime = EmbeddingRuntime(model=None)
         fake_svc = MagicMock()
         fake_svc.running = True
-        with patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc):
+        with patch("shrike.harness.engines.embedding.runtime.LlamaServerBackend", return_value=fake_svc):
             runtime.start(model="/override.gguf")
         assert runtime.model == "/override.gguf"
 
@@ -428,7 +428,7 @@ class TestEmbeddingRuntime:
         runtime = EmbeddingRuntime(model="/m.gguf", extra_args=["--flash-attn"])
         fake_svc = MagicMock()
         fake_svc.running = True
-        with patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc) as ctor:
+        with patch("shrike.harness.engines.embedding.runtime.LlamaServerBackend", return_value=fake_svc) as ctor:
             runtime.start()
         assert ctor.call_args.kwargs["extra_args"] == ["--flash-attn"]
 
@@ -437,7 +437,7 @@ class TestEmbeddingRuntime:
         existing = MagicMock()
         existing.running = True
         runtime._backend = existing
-        with patch("shrike.embedding.LlamaServerBackend") as ctor:
+        with patch("shrike.harness.engines.embedding.runtime.LlamaServerBackend") as ctor:
             svc = runtime.start()
         ctor.assert_not_called()
         assert svc is existing
@@ -472,7 +472,7 @@ class TestEmbeddingRuntime:
         fake_svc = MagicMock()
         fake_svc.start.side_effect = RuntimeError("boom")
         with (
-            patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc),
+            patch("shrike.harness.engines.embedding.runtime.LlamaServerBackend", return_value=fake_svc),
             pytest.raises(RuntimeError),
         ):
             runtime.start()
@@ -501,7 +501,7 @@ class TestEmbeddingRuntime:
         fake_be.running = True
         # _make_backend does `from shrike.embedding_onnx import OnnxBackend`, so
         # the patch target is the source module.
-        with patch("shrike.embedding_onnx.OnnxBackend", return_value=fake_be):
+        with patch("shrike.harness.engines.embedding.onnx.OnnxBackend", return_value=fake_be):
             runtime.start(backend="onnx-rs")
         assert runtime.backend_kind == "onnx"
 
@@ -516,7 +516,7 @@ class TestEmbeddingRuntime:
             raise RuntimeError("model load failed")
 
         with (
-            patch("shrike.embedding_onnx.OnnxBackend", side_effect=_boom),
+            patch("shrike.harness.engines.embedding.onnx.OnnxBackend", side_effect=_boom),
             pytest.raises(RuntimeError) as ei,
         ):
             runtime.start(backend="onnx-rs")
@@ -547,7 +547,7 @@ class TestEmbeddingRuntime:
             runtime.start(endpoint="http://evil.example/v1")
         fake_svc = MagicMock()
         fake_svc.running = True
-        with patch("shrike.embedding.LlamaServerBackend", return_value=fake_svc):
+        with patch("shrike.harness.engines.embedding.runtime.LlamaServerBackend", return_value=fake_svc):
             runtime.start()
         assert runtime.running is True
 
@@ -560,6 +560,6 @@ class TestEmbeddingRuntime:
         # attempt (it proceeds to the configured-check / backend construction).
         fake_be = MagicMock()
         fake_be.running = True
-        with patch("shrike.embedding.RemoteBackend", return_value=fake_be):
+        with patch("shrike.harness.engines.embedding.runtime.RemoteBackend", return_value=fake_be):
             runtime.start()
         assert runtime.running is True

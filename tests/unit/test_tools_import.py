@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from shrike.actions import ActionContext, ToolInputError, build_actions
+from shrike.api.actions import ActionContext, ToolInputError, build_actions
 
 
 class _StubKernel:

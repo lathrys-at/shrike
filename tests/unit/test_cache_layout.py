@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import os
 
-from shrike import cache_layout
+from shrike.harness import cache_layout
 
 
 def test_namespace_is_stable() -> None:

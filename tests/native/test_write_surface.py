@@ -39,7 +39,7 @@ UPSERT_BATCH = [
 
 _PIP_SIDE = r"""
 import asyncio, json, sys
-from shrike.collection import CollectionWrapper
+from shrike.harness.collection import CollectionWrapper
 
 BATCH = json.loads(sys.argv[2])
 

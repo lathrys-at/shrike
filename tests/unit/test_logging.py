@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from shrike.log import configure_logging, get_log_file, style_log_line
+from shrike.platform.log import configure_logging, get_log_file, style_log_line
 
 
 @pytest.fixture(autouse=True)

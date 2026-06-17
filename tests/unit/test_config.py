@@ -493,7 +493,7 @@ class TestEmbeddingProfileResolution:
 
     def test_v2_config_rejects_legacy_flags(self) -> None:
         from shrike.cli.config import resolve_embedding_profile
-        from shrike.profiles import ProfileError
+        from shrike.harness.profiles import ProfileError
 
         with pytest.raises(ProfileError, match="only home"):
             resolve_embedding_profile(dict(self.V2), {"model": "/elsewhere.gguf"})
@@ -586,7 +586,7 @@ class TestLegacyConfigSameOutcomeBothPaths:
         # Establishes the divergence existed: the same caps that the legacy path
         # degrades WOULD raise via resolve_profile on the mismatched build (the
         # old daemon --config behavior).
-        from shrike.profiles import ProfileError, parse_capabilities, resolve_profile
+        from shrike.harness.profiles import ProfileError, parse_capabilities, resolve_profile
 
         caps = parse_capabilities(dict(self.LEGACY))
         assert caps.legacy is True
@@ -609,7 +609,7 @@ class TestLegacyConfigSameOutcomeBothPaths:
         # post-fix the legacy branch degrades and boot proceeds to building the
         # EmbeddingRuntime — which we intercept with a sentinel to stop main()
         # before it opens a collection / starts asyncio.
-        import shrike.server as server
+        import shrike.server.server as server
 
         config_path = tmp_path / "legacy.yml"
         save_config(dict(self.LEGACY), config_path)
@@ -672,7 +672,7 @@ class TestLegacyConfigSameOutcomeBothPaths:
         # The boundary: a REAL v2-config error must still refuse-boot (resolve_profile
         # validation is unchanged for v2). A v2 onnx entry on a build without the onnx
         # engine raises ProfileError → parser.error → SystemExit.
-        import shrike.server as server
+        import shrike.server.server as server
 
         v2 = {"embedders": [{"modalities": ["text"], "runtime": "onnx", "model": "/m"}]}
         config_path = tmp_path / "v2.yml"

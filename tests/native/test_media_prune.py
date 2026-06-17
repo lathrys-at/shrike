@@ -22,7 +22,7 @@ pytestmark = requires_anki_core
 
 _PIP_SIDE = r"""
 import asyncio, base64, json, sys
-from shrike.collection import CollectionWrapper
+from shrike.harness.collection import CollectionWrapper
 
 async def main():
     w = CollectionWrapper(sys.argv[1])

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from shrike.collection import substring_info
+from shrike.harness.collection import substring_info
 
 
 async def _note(wrapper, deck: str, front: str, back: str = "x", tags=None) -> int:

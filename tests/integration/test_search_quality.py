@@ -147,8 +147,8 @@ class TestRealTwoSpaceSmoke:
 
     @pytest.mark.asyncio
     async def test_text_query_retrieves_image_note_via_clip_space(self, tmp_path) -> None:
-        from shrike.embedding_clip import ClipBackend
-        from shrike.embedding_onnx import OnnxBackend
+        from shrike.harness.engines.embedding.clip import ClipBackend
+        from shrike.harness.engines.embedding.onnx import OnnxBackend
         from tests.integration.model_cache import (
             cached_clip_model_dir,
             cached_onnx_model_dir,

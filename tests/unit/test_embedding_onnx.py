@@ -19,10 +19,10 @@ from unittest.mock import patch
 
 import pytest
 
-from shrike.embed_batching import BATCH_PROBE_TEXTS
-from shrike.embed_text import EMBED_TEXT_VERSION
-from shrike.embedding_base import TEXT
-from shrike.embedding_onnx import OnnxBackend
+from shrike.harness.engines.embedding.batching import BATCH_PROBE_TEXTS
+from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
+from shrike.harness.engines.embedding.base import TEXT
+from shrike.harness.engines.embedding.onnx import OnnxBackend
 
 # -- Fakes for onnxruntime (the carrier wheel) / shrike_native (the engine) ----
 
@@ -267,7 +267,7 @@ class TestLifecycleAndEmbed:
         fake_native.OnnxTextEmbedder = engine_cls  # type: ignore[attr-defined]
         with (
             patch.dict(sys.modules, {"onnxruntime": fake_ort, "shrike_native": fake_native}),
-            patch("shrike.embedding_onnx.locate_ort_dylib", lambda: Path("/fake/libort.so")),
+            patch("shrike.harness.engines.embedding.onnx.locate_ort_dylib", lambda: Path("/fake/libort.so")),
         ):
             be.start()
 
@@ -315,7 +315,7 @@ class TestLifecycleAndEmbed:
 
     def test_variant_model_warns_when_batch_requested(self, tmp_path: Path) -> None:
         be = OnnxBackend(model=str(_model_dir(tmp_path)), batch_size=8)
-        with patch("shrike.embedding_onnx.logger.warning") as warn:
+        with patch("shrike.harness.engines.embedding.onnx.logger.warning") as warn:
             self._start(be, _FakeEngineVariant)
         assert be._safe_batch == 1
         assert any("batch-variant" in str(c.args) for c in warn.call_args_list)
@@ -323,7 +323,7 @@ class TestLifecycleAndEmbed:
     def test_cap_above_ceiling_clamps_to_probe_size(self, tmp_path: Path) -> None:
         # The probe-set size is the batch ceiling; a cap *above* it is logged once and clamped.
         be = OnnxBackend(model=str(_model_dir(tmp_path)), batch_size=len(BATCH_PROBE_TEXTS) * 2)
-        with patch("shrike.embedding_onnx.logger.info") as info:
+        with patch("shrike.harness.engines.embedding.onnx.logger.info") as info:
             self._start(be)
         assert be._safe_batch == len(BATCH_PROBE_TEXTS)
         assert any("exceeds the probe-verified ceiling" in str(c.args) for c in info.call_args_list)
@@ -391,7 +391,7 @@ class TestLifecycleAndEmbed:
 
     def test_unavailable_provider_falls_back_to_cpu_with_warning(self, tmp_path: Path) -> None:
         be = OnnxBackend(model=str(_model_dir(tmp_path)), providers=["CUDAExecutionProvider"])
-        with patch("shrike.embedding_onnx.logger.warning") as warn:
+        with patch("shrike.harness.engines.embedding.onnx.logger.warning") as warn:
             self._start(be, available_providers=["CPUExecutionProvider"])
         assert be.health()["active_providers"] == ["CPUExecutionProvider"]
         assert be.health()["provider"] == "CPUExecutionProvider"
@@ -399,7 +399,7 @@ class TestLifecycleAndEmbed:
 
     def test_available_provider_is_resolved_and_surfaced(self, tmp_path: Path) -> None:
         be = OnnxBackend(model=str(_model_dir(tmp_path)), providers=["CoreMLExecutionProvider"])
-        with patch("shrike.embedding_onnx.logger.warning") as warn:
+        with patch("shrike.harness.engines.embedding.onnx.logger.warning") as warn:
             self._start(be, available_providers=["CoreMLExecutionProvider", "CPUExecutionProvider"])
         h = be.health()
         assert h["requested_providers"] == ["CoreMLExecutionProvider"]
@@ -412,7 +412,7 @@ class TestLifecycleAndEmbed:
         # Requested + available, but the engine reports it didn't load (init failed) → warn,
         # and health shows the CPU reality, not the request.
         be = OnnxBackend(model=str(_model_dir(tmp_path)), providers=["CUDAExecutionProvider"])
-        with patch("shrike.embedding_onnx.logger.warning") as warn:
+        with patch("shrike.harness.engines.embedding.onnx.logger.warning") as warn:
             self._start(
                 be,
                 _FakeEngineDropsProvider,

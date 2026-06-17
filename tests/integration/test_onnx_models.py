@@ -27,8 +27,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from shrike.embed_batching import BATCH_DRIFT_TOL, max_probe_drift
-from shrike.embedding_onnx import OnnxBackend
+from shrike.harness.engines.embedding.batching import BATCH_DRIFT_TOL, max_probe_drift
+from shrike.harness.engines.embedding.onnx import OnnxBackend
 from tests.integration.conftest import requires_onnxruntime
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedding]

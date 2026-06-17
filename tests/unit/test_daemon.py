@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from shrike import daemon
+from shrike.platform import daemon
 
 
 @pytest.fixture()

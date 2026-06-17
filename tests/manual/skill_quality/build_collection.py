@@ -29,7 +29,7 @@ _SRC = _ROOT / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from shrike.collection import CollectionWrapper  # noqa: E402
+from shrike.harness.collection import CollectionWrapper  # noqa: E402
 
 
 def build(spec_path: Path, out_path: Path) -> int:

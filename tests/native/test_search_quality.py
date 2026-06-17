@@ -345,8 +345,8 @@ class TestActivationGate:
         # and the on-topic query's best image cosine (1.0) clears it while the
         # off-topic's (~0) does not. Pins the gate's decision boundary.
         async def flow() -> None:
-            from shrike.actions import ACTIVATION_MARGIN
-            from shrike.index import activation_floor
+            from shrike.harness.index import ACTIVATION_MARGIN
+            from shrike.harness.index import activation_floor
 
             ip, _ = await TestActivationGate._build(tmp_path)
             try:

@@ -14,7 +14,7 @@ import sys
 
 import pytest
 
-from shrike.paths import (
+from shrike.platform.paths import (
     AnkiProfile,
     anki_base_dir,
     anki_prefs_db,

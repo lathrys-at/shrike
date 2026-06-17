@@ -109,8 +109,8 @@ async def build_real_collection(
     filename), and finalizes (full rebuild of both spaces + their calibration).
     Returns the driver, the ``{manifest_id: anki_id}`` map, and the
     ``(text, clip)`` backends (the caller stops them at teardown)."""
-    from shrike.embedding_clip import ClipBackend
-    from shrike.embedding_onnx import OnnxBackend
+    from shrike.harness.engines.embedding.clip import ClipBackend
+    from shrike.harness.engines.embedding.onnx import OnnxBackend
     from tests.integration.model_cache import cached_clip_model_dir, cached_onnx_model_dir
 
     cache = cache or CommonsCache(RESOLVED, CACHE)

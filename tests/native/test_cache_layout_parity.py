@@ -16,7 +16,7 @@ import os
 
 import pytest
 
-from shrike import cache_layout
+from shrike.harness import cache_layout
 
 shrike_native = pytest.importorskip("shrike_native")
 

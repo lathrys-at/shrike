@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from shrike.collection import CollectionWrapper
+from shrike.harness.collection import CollectionWrapper
 
 
 @pytest.fixture()

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from shrike.index import IndexState, activation_floor
+from shrike.harness.index import IndexState, activation_floor
 
 
 class TestActivationFloor:

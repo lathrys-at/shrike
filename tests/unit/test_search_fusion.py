@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from shrike.search_fusion import RRF_K, FusedHit, rrf_fuse
+from shrike.harness.search_fusion import RRF_K, FusedHit, rrf_fuse
 
 
 def _order(hits: list[FusedHit]) -> list[int]:

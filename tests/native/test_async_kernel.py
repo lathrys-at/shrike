@@ -59,7 +59,7 @@ class TestRebuildDerived:
     cross the FFI; the op returns (row_count, the build's col_mod snapshot)."""
 
     def test_rebuild_derived_builds_and_returns_snapshot(self, tmp_path) -> None:
-        from shrike import cache_layout
+        from shrike.harness import cache_layout
 
         async def flow():
             collection_path = str(tmp_path / "collection.anki2")
@@ -99,7 +99,7 @@ class TestSaverTuning:
     def test_save_threshold_flushes_immediately(self, tmp_path) -> None:
         # threshold=1: the first indexed change forces a flush, so the index
         # lands on disk without an explicit save_index() or close().
-        from shrike import cache_layout
+        from shrike.harness import cache_layout
 
         async def flow():
             backend = _Backend()
@@ -712,7 +712,7 @@ class TestNamedUpsert:
 
 class TestWrapperOverKernel:
     def test_wrapper_ops_serialize_through_the_kernel(self, tmp_path) -> None:
-        from shrike.collection import CollectionWrapper
+        from shrike.harness.collection import CollectionWrapper
 
         async def flow():
             kernel = await shrike_native.async_kernel_open(

@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from shrike.embedding import EmbeddingRuntime, RemoteBackend
+from shrike.harness.engines.embedding.runtime import EmbeddingRuntime, RemoteBackend
 
 
 class _FakeRemoteEmbedder:
@@ -67,7 +67,7 @@ def _fake_native(monkeypatch):
     _FakeRemoteEmbedder.fail_embed = None
     _FakeRemoteEmbedder.vision = False
     _FakeRemoteEmbedder.model_dims = {}
-    with patch("shrike.embedding.shrike_native") as native:
+    with patch("shrike.harness.engines.embedding.runtime.shrike_native") as native:
         native.RemoteEmbedder = _FakeRemoteEmbedder
         yield native
 
@@ -175,12 +175,12 @@ class TestRemoteImagePath:
     dialect, gated on the endpoint actually loading vision."""
 
     def _entry(self, **kw):
-        from shrike.embedding_base import IMAGE, TEXT
+        from shrike.harness.engines.embedding.base import IMAGE, TEXT
 
         return RemoteBackend(endpoint="http://e", modalities=frozenset({TEXT, IMAGE}), **kw)
 
     def test_image_entry_advertises_image_modality(self):
-        from shrike.embedding_base import IMAGE
+        from shrike.harness.engines.embedding.base import IMAGE
 
         assert IMAGE in self._entry().modalities
 

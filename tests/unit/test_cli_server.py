@@ -545,7 +545,7 @@ class TestWaitForServer:
         try:
             with (
                 patch(f"{SC}.is_server_alive", return_value=False),
-                patch("shrike.server.main", main),
+                patch("shrike.server.server.main", main),
             ):
                 result = run(
                     "server",

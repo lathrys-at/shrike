@@ -90,7 +90,7 @@ def test_extract_image_refs_parity(native_core):
 # collection_info, and note_texts as JSON. Separate process + collection file.
 _PIP_SIDE = r"""
 import asyncio, json, sys
-from shrike.collection import CollectionWrapper
+from shrike.harness.collection import CollectionWrapper
 
 async def main():
     w = CollectionWrapper(sys.argv[1])

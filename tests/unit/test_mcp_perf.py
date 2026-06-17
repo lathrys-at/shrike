@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import jsonschema
 
-from shrike import _mcp_perf
-from shrike._mcp_perf import _CachingJsonschema, install_validator_cache
+from shrike.server import _mcp_perf
+from shrike.server._mcp_perf import _CachingJsonschema, install_validator_cache
 
 _SCHEMA = {
     "type": "object",

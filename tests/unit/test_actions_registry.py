@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import inspect
 
-from shrike.actions import ActionContext, build_actions
+from shrike.api.actions import ActionContext, build_actions
 
 EXPECTED_ACTIONS = {
     "collection_info",
