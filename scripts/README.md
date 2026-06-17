@@ -30,14 +30,11 @@ consumes the lock.
 - `serve.py` / `serve_test.py` — the consolidated `//scripts:serve` launcher (boots a real server against a fresh collection from a path-free capability profile) and its logic test.
 - `profiles/` — the checked-in, path-free capability profiles `serve` reads.
 
-### Eval runners
-- `eval_search_quality.py` / `eval_search_quality_corpus.py` / `eval_cross_space_floor.py` / `eval_cross_space_floor_admit.py` — search-quality / cross-space-floor eval drivers.
-
 ### Packaging
 - `package-skill.py` — bundles the `anki-cards` skill into a `.skill` package.
 
-> Several of these are being reshaped by the layout epic (#694): the eval
-> runners consolidate with their harness/data (#697), `serve` becomes
-> canonically Bazel (#699), the dev/maintenance shell scripts grow Bazel idioms
-> (#700), and the skill packager moves into its skill unit (#701). This README
-> describes the **current** homes; those issues move individual files.
+> Several of these are being reshaped by the layout epic (#694): `serve`
+> becomes canonically Bazel (#699), the dev/maintenance shell scripts grow
+> Bazel idioms (#700), and the skill packager moves into its skill unit
+> (#701). This README describes the **current** homes; those issues move
+> individual files.
