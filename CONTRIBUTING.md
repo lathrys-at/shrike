@@ -168,8 +168,8 @@ build (e.g. `build-native.sh`).
 ## Local checks before a PR
 
 ```bash
-ruff check src/shrike/ tests/ native/shrike-py/python/
-ruff format --check src/shrike/ tests/ native/shrike-py/python/
+ruff check src/shrike/ tests/ shrike-core/shrike-py/python/
+ruff format --check src/shrike/ tests/ shrike-core/shrike-py/python/
 mypy src/shrike/
 pytest tests/unit -q
 pytest tests/integration -q -m "integration and not embedding"
@@ -178,15 +178,15 @@ pytest tests/integration -q -m "integration and not embedding"
 For a change touching the Rust workspace, also run the native gate:
 
 ```bash
-(cd native && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings)
-(cd native && cargo test --workspace)
+(cd shrike-core && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings)
+(cd shrike-core && cargo test --workspace)
 scripts/build-native.sh && pytest tests/unit tests/native -q
 ./bazel test //...     # the authoritative CI lane
 ```
 
 `pip install` doesn't build the `shrike_native` extension (a separate cargo step
 in `scripts/build-native.sh`), so a stale `.so` used to slip into a pytest run
-silently after a `native/` change. That's structurally closed now (#573): run
+silently after a `shrike-core/` change. That's structurally closed now (#573): run
 `scripts/dev-setup.sh` once for the whole setup, then rebuilds are automatic with
 direnv (`.envrc` rebuilds a stale extension on `cd`) and `pytest` fails loud
 (before importing the extension) if you skip the rebuild without direnv. The

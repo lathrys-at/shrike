@@ -72,7 +72,7 @@ jobs:
       # descriptor set through; the checked-in pin keeps the build hermetic.
       - name: Build native extension
         env:
-          DESCRIPTORS_BIN: ${{ github.workspace }}/native/third_party/anki/anki_descriptors.bin
+          DESCRIPTORS_BIN: ${{ github.workspace }}/shrike-core/third_party/anki/anki_descriptors.bin
         run: scripts/build-native.sh
       - name: Enable subprocess coverage
         # The integration suite runs the server as a `python -m shrike.server`

@@ -121,7 +121,7 @@ Three lock layers, three triggers:
 - **Python deps changed** (`pyproject.toml`): run
   `tools/update-requirements.sh` (uv pip compile, universal, hashed) and
   commit `requirements_lock.txt` + `requirements_sdist_lock.txt`.
-- **Rust deps changed** (`native/Cargo.lock` moved): the next Bazel run
+- **Rust deps changed** (`shrike-core/Cargo.lock` moved): the next Bazel run
   re-splices the crate graph and refreshes `MODULE.bazel.lock` — commit it.
   If the splice hangs (~600s then "Timed out") run with
   `CARGO_BAZEL_ISOLATED=0 ./bazel test //...` to reuse your warm `~/.cargo`.

@@ -44,7 +44,7 @@ Several advisories can fire at once, spawning several copies of you in parallel.
 The **tracking issue is the claim** — use it as a lock so two agents never
 perform the same bump. The claim key for an advisory is the pair **(advisory id,
 manifest/lockfile path)**: the *same* package vulnerable in two *different*
-lockfiles (e.g. `native/Cargo.lock` vs a standalone `eval/<name>/Cargo.lock`) is
+lockfiles (e.g. `shrike-core/Cargo.lock` vs a standalone `eval/<name>/Cargo.lock`) is
 two separate jobs; the same advisory in the same manifest is one job.
 
 1. **Check for an existing claim** before you create anything. List open
@@ -86,7 +86,7 @@ two separate jobs; the same advisory in the same manifest is one job.
 
 Shrike manages Anki collections headlessly through an MCP server + CLI. It is
 **polyglot**: a Python harness (`src/shrike/`) over a Rust compute core
-(`native/`, a Cargo workspace), with **Bazel** as the build system over both.
+(`shrike-core/`, a Cargo workspace), with **Bazel** as the build system over both.
 Trunk-based: `main` is protected and releasable, every change lands through a
 short-lived branch → PR → **squash merge**. No direct pushes to `main`. License
 AGPL-3.0.
@@ -102,7 +102,7 @@ is regenerated and committed**. The surfaces:
 
 | Surface | Manifest(s) | Lockfile(s) to regenerate |
 |---|---|---|
-| **Rust kernel workspace** | `native/Cargo.toml` + each `native/<crate>/Cargo.toml` | `native/Cargo.lock` **and** the Bazel mirror `MODULE.bazel.lock` (+ `MODULE.bazel` if a `[patch]`/source line changes) |
+| **Rust kernel workspace** | `shrike-core/Cargo.toml` + each `shrike-core/<crate>/Cargo.toml` | `shrike-core/Cargo.lock` **and** the Bazel mirror `MODULE.bazel.lock` (+ `MODULE.bazel` if a `[patch]`/source line changes) |
 | **Python** | `pyproject.toml` (`[project].dependencies` / `[project.optional-dependencies]`) | `requirements_lock.txt` |
 | **GitHub Actions** | `.github/workflows/*.yml` (pinned action majors/SHAs) | none |
 | **Standalone eval spikes** | a self-contained spike under `eval/<name>/Cargo.toml` (none in-tree today) | that spike's **own** `Cargo.lock` only — such spikes carry their own `[workspace]`, are deliberately **outside** the kernel resolution and the Bazel build, so they need **no** `MODULE.bazel.lock` repin |
@@ -110,22 +110,22 @@ is regenerated and committed**. The surfaces:
 
 Identify which surface the advisory's manifest path points at *before* you touch
 anything. (A Dependabot alert names the manifest, e.g. a standalone
-`eval/<name>/Cargo.lock` vs the kernel's `native/Cargo.lock`.)
+`eval/<name>/Cargo.lock` vs the kernel's `shrike-core/Cargo.lock`.)
 
 ## How to perform the bump, by surface
 
-**Rust — kernel workspace (`native/`):**
+**Rust — kernel workspace (`shrike-core/`):**
 ```bash
 # 1. Set the target version in the owning Cargo.toml (workspace dep table or the crate's).
 # 2. Refresh the Cargo lock:
-(cd native && cargo update -p <crate> --precise <version>)
+(cd shrike-core && cargo update -p <crate> --precise <version>)
 # 3. Refresh the Bazel crate-universe mirror and commit BOTH locks:
 CARGO_BAZEL_ISOLATED=0 CARGO_BAZEL_REPIN=1 ./bazel build @crates//:<crate>
 ```
-Commit the refreshed `native/Cargo.lock` **and** `MODULE.bazel.lock`. Note: on a
+Commit the refreshed `shrike-core/Cargo.lock` **and** `MODULE.bazel.lock`. Note: on a
 cold cache the crate-universe **splice can hang ~600s then "Timed out"** —
 running with `CARGO_BAZEL_ISOLATED=0` against a warm `~/.cargo` is the
-workaround; do a warming `cargo fetch`/`cargo build` in `native/` first if you
+workaround; do a warming `cargo fetch`/`cargo build` in `shrike-core/` first if you
 hit it.
 
 **Rust — a standalone spike (a self-contained `eval/<name>/` project, should one exist):**
@@ -152,10 +152,10 @@ version — only the version-range metadata is stale. **Do not vendor the patche
 source into this repo.** The established, owner-preferred pattern (worked
 example: PR #520, cleanup issue #519) is:
 
-1. Point `[patch.crates-io]` in `native/Cargo.toml` at a **minimal git fork** of
+1. Point `[patch.crates-io]` in `shrike-core/Cargo.toml` at a **minimal git fork** of
    the blocking crate: its release tag plus **one** commit that widens only the
    version bound. Pin it by `rev`.
-2. Repin the locks (`native/Cargo.lock`, `MODULE.bazel.lock`); a comment in
+2. Repin the locks (`shrike-core/Cargo.lock`, `MODULE.bazel.lock`); a comment in
    `MODULE.bazel` may be needed beside `crate.from_cargo`.
 3. **File a cleanup issue** (`--label deps`) modelled on #519: the trigger
    ("waiting on upstream X to ship a release admitting version Y"), the exact
@@ -172,7 +172,7 @@ Run the gate that matches the surface you changed; everything must be green.
 
 **Rust kernel change:**
 ```bash
-(cd native && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace)
+(cd shrike-core && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace)
 scripts/build-native.sh && pytest tests/unit tests/native -q
 CARGO_BAZEL_ISOLATED=0 ./bazel test //...
 ```
@@ -182,7 +182,7 @@ wired into the repo gate above.
 
 **Python change:**
 ```bash
-ruff check src/shrike/ tests/ native/shrike-py/python/
+ruff check src/shrike/ tests/ shrike-core/shrike-py/python/
 mypy src/shrike/
 pytest tests/unit -q
 ```
