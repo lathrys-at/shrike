@@ -436,6 +436,25 @@ class TestUnifiedSearch:
         )
         assert [x["id"] for x in result["results"][0]["matches"]] == [strong]
 
+    def test_limit_zero_returns_all_across_two_spaces(self, kharness, mcp_sem, sem_view):
+        # `limit=0` == "return all" (#685) on a TWO-SPACE (text+image) index — the
+        # #685 x #684 seam. #684 split the index into per-modality sub-indexes;
+        # the limit=0 clamp reads `index.size`, which is the AGGREGATE across all
+        # sub-indexes (text count + image count). If it ever read only one
+        # sub-index's size, limit=0 would under-fetch and silently drop results.
+        # Six notes, each vectored in BOTH spaces, so the aggregate size (12)
+        # exceeds the note count (6); limit=0 must still return all six and not
+        # hang on a runaway over-fetch.
+        sem_view.stats_override = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
+        nids = [kharness.seed_note(f"shared subject card {i}") for i in range(6)]
+        _plant(kharness, [(n, 0.05) for n in nids])  # strong text sim (~0.95)
+        _plant(kharness, [(n, 0.30) for n in nids], modality="image")  # image sim 0.70 > floor
+        result = kharness.call_tool(
+            mcp_sem, "search_notes", {"queries": ["shared subject"], "limit": 0}
+        )
+        got = {m["id"] for m in result["results"][0]["matches"]}
+        assert got == set(nids)
+
 
 class TestProvenance:
     """Per-result provenance (#182): which signals surfaced each match, at what rank."""
