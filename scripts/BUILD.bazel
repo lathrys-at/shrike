@@ -1,14 +1,25 @@
-load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+load("@rules_python//python:defs.bzl", "py_library")
 load("@shrike_pip//:requirements.bzl", "requirement")
+load("//scripts:serve.bzl", "assemble_model_dirs", "serve_profile")
 load("//tools/bazel:defs.bzl", "pytest_test")
 
-# //scripts:serve — the consolidated dogfooding launcher (#565/#656).
+# //scripts:serve_<profile> — the consolidated dogfooding launchers (#565/#656/#699).
 #
-#   ./bazel run //scripts:serve -- --profile text-onnx [--seed qa] [--foreground|--daemon]
+#   ./bazel run //scripts:serve_text_onnx -- [--seed qa] [--foreground|--daemon]
+#   ./bazel run //scripts:serve_onnx_multispace -- [--seed qa]
 #
 # Boots a real Shrike server against a fresh collection from a checked-in,
-# path-free capability profile, with the profile's models materialized from the
-# pinned Bazel externals (zero new download code).
+# path-free capability profile. Each profile's models are assembled from the
+# pinned Bazel externals into a per-model dir AT BUILD TIME (no runtime copy, no
+# new download), and each launcher's `data` is scoped to JUST its own profile +
+# models (#699 deleted the old single all-models target + its serve.py-side
+# `_model_sources()`↔`data` hand-sync). The serve.bzl `_MODEL_FILES` table is the
+# one source of truth for what assembles each model dir.
+
+# Assemble each profile model's scattered http_file externals into a per-model
+# `models/<dir-name>/` runfiles dir (one `copy_file` per file + a `model_dir_*`
+# filegroup). The per-profile launchers below data-dep only the dirs they need.
+assemble_model_dirs()
 
 # The launcher logic as a library so the non-manual unit test can import it
 # (`import serve`, via imports=["."]) without pulling the heavy model `data`.
@@ -19,63 +30,48 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/shrike:cli",
-        # The pinned-model fetch util (script-fallback download source) + its
-        # *_DIR_NAME constants; the QA fixture builder for --seed qa.
+        # The pinned-model fetch util (the off-Bazel script-fallback download
+        # source) + its *_DIR_NAME constants; the QA fixture builder for --seed qa.
         "//tests/integration:model_cache",
         "//tests/manual/skill_quality:build_collection",
-        # Runfiles resolver: locate the model externals under `bazel run`.
+        # Runfiles resolver: locate the assembled per-model dirs under `bazel run`.
         "@rules_python//python/runfiles",
         requirement("pyyaml"),
     ],
 )
 
-# The runnable launcher. Tagged `manual` so the per-PR `./bazel test //...` lane
-# (which builds non-test targets too) never force-fetches the model externals;
-# the non-manual :serve_logic_test below is what CI exercises.
-py_binary(
-    name = "serve",
-    srcs = ["serve.py"],
-    main = "serve.py",
-    imports = ["."],
-    tags = ["manual"],
-    visibility = ["//visibility:public"],
-    data = [
-        # The path-free profile YAMLs (read by dir-name at run time).
-        "//scripts/profiles",
-        # The MVP model: the already-pinned MiniLM int8 ONNX external. Materialized
-        # from runfiles into the per-run model tree (no new fetch). Add a profile's
-        # externals here (and a row to serve.py's model-source table) to wire it.
-        "@model_minilm_int8_onnx//file",
-        "@model_minilm_tokenizer//file",
-        # Wave-2 profile models (#667): the onnx-multispace legs (embeddinggemma
-        # text + MobileCLIP2 image) + jina-clip-v2 (for the stacked stream). Each
-        # file here MUST have a matching row in serve.py's _model_sources() table,
-        # or materialize_model fails loud (a missing runfile = a forgotten dep).
-        # embeddinggemma: graph stub + its EXTERNAL .onnx_data + tokenizer (3 files).
-        "@model_embeddinggemma_int8_onnx//file",
-        "@model_embeddinggemma_int8_onnx_data//file",
-        "@model_embeddinggemma_tokenizer//file",
-        # MobileCLIP2-S2: text + vision graphs + preprocessor + tokenizer (4 files).
-        "@model_mobileclip2_text_onnx//file",
-        "@model_mobileclip2_vision_onnx//file",
-        "@model_mobileclip2_preprocessor//file",
-        "@model_mobileclip2_tokenizer//file",
-        # jina-clip-v2: combined graph + tokenizer + preprocessor (3 files).
-        "@model_jina_clip_v2_int8_onnx//file",
-        "@model_jina_clip_v2_tokenizer//file",
-        "@model_jina_clip_v2_preprocessor//file",
+# The shared deps every per-profile launcher needs: the logic library + the
+# onnxruntime carrier the in-process ort engine dlopens (foreground serve loads
+# the onnx backend itself).
+_SERVE_DEPS = [
+    ":serve_lib",
+    requirement("onnxruntime"),
+]
+
+# text-onnx — the minimal MiniLM-int8 text-only profile (the MVP end-to-end proof).
+serve_profile(
+    name = "text_onnx",
+    profile = "text-onnx",
+    models = ["all-MiniLM-L6-v2-onnx-int8"],
+    deps = _SERVE_DEPS,
+)
+
+# onnx-multispace — the pure-ONNX multi-space profile (#667): embeddinggemma text
+# + MobileCLIP2 image, two in-process ONNX spaces.
+serve_profile(
+    name = "onnx_multispace",
+    profile = "onnx-multispace",
+    models = [
+        "embeddinggemma-300m-onnx-int8",
+        "mobileclip2-s2-onnx",
     ],
-    deps = [
-        ":serve_lib",
-        # onnxruntime carries the shared runtime the in-process ort engine dlopens
-        # (foreground serve loads the onnx backend itself).
-        requirement("onnxruntime"),
-    ],
+    deps = _SERVE_DEPS,
 )
 
 # The launcher's pure logic — profile resolution, the path-free invariant, arg
-# parsing, and effective-config composition — with NO model download. This is the
-# non-manual target CI actually runs (`./bazel test //...` picks it up).
+# parsing, model-dir resolution, and effective-config composition — with NO model
+# download. This is the non-manual target CI actually runs (`./bazel test //...`
+# picks it up).
 pytest_test(
     name = "serve_logic_test",
     srcs = ["serve_test.py"],
