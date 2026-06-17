@@ -1,46 +1,60 @@
-//! FFI conventions shared by every Shrike native crate (#269, epic #265).
+//! The shared error taxonomy every Shrike native crate returns across the FFI
+//! seam (#269, epic #265; rewritten to thiserror in #705).
 //!
-//! This crate is **pure Rust** — no `pyo3` — and defines the two things every
-//! native module shares: the error taxonomy and (in documentation) the
-//! marshaling rules. The Python-facing half of these conventions (exception
-//! classes, `allow_threads` wrapping) lives in `shrike-py`, the one crate
-//! allowed to depend on `pyo3` (enforced by `//shrike-core:layering_check`).
-//!
-//! # Marshaling rules (epic #265 convention 6)
-//!
-//! Only these types cross the Python↔Rust boundary:
-//!
-//! - strings (`String`/`&str`) and byte buffers (`Vec<u8>`/`&[u8]`)
-//! - f32 vectors / vector batches (zero-copy numpy interchange where arrays
-//!   must cross, via the `numpy` crate in `shrike-py`)
-//! - i64 key arrays
-//! - small JSON-able maps (stats, health blocks)
-//!
-//! Never a live Python object, callback, or handle — calls are coarse and
-//! batched so the boundary is crossed per *batch*, not per item.
-//!
-//! # Threading rules
-//!
-//! - All compute runs under `py.allow_threads` (GIL released) in `shrike-py`.
-//! - No Python handle may cross into a worker thread; compute crates receive
-//!   owned data only.
+//! This crate is **pure Rust** — no `pyo3`. It defines one thing: [`NativeError`],
+//! the error every native compute crate returns, and its [`ErrorKind`] projection.
+//! The Python-facing half (exception classes, the `kind` → exception mapping) lives
+//! in `shrike-py`, the one crate allowed to depend on `pyo3` (enforced by
+//! `//shrike-core:layering_check`); the marshaling/threading conventions are
+//! documented on the binding crates that enforce them (`shrike-py`,
+//! `shrike-mobile`), not here.
 //!
 //! # Error taxonomy
 //!
 //! Mirrors Shrike's Python-side expected-vs-bug split (`ToolInputError` vs a
 //! genuine bug): [`ErrorKind::InvalidInput`] is expected bad input (surfaced to
 //! Python without traceback noise), [`ErrorKind::Unavailable`] is a runtime
-//! resource that isn't up (model not loaded, file missing), and
-//! [`ErrorKind::Internal`] is a bug. `shrike-py` maps each kind to a distinct
-//! Python exception class, and the Python facades translate those into the
-//! existing error surface.
+//! resource that isn't up (model not loaded, file missing), [`ErrorKind::Busy`]
+//! is collection-lock contention (retryable), and [`ErrorKind::Internal`] is a
+//! bug. `shrike-py` maps each kind to a distinct Python exception class, and the
+//! Python facades translate those into the existing error surface.
+//!
+//! # Source chain
+//!
+//! `NativeError` carries an optional `#[source]` cause, so a failure that wraps a
+//! leaf error (`serde_json`, `io`, and — feature-gated — `ort`/`rusqlite`/`ureq`)
+//! keeps that cause recoverable Rust-side via [`std::error::Error::source`]: the
+//! `?` operator converts the leaf in (the `From` impls below), and the context
+//! label rides in [`NativeError::message`] while the leaf rides as the source.
+//! The chain is for Rust-side diagnostics (logging, `{:?}`, `Display`); it does
+//! **not** cross the FFI boundary — only `(kind, message, trace)` does.
+//!
+//! # Leaf-error `From` impls are feature-gated
+//!
+//! This is a layer-floor crate every native crate depends on, including the
+//! kernel. An *unconditional* `From<ort::Error>` / `From<rusqlite::Error>` /
+//! `From<ureq::Error>` would pull those heavy/engine leaf crates into every
+//! crate's build, defeating the "kernel embeds never enter ort" purity. So only
+//! the lightweight, ubiquitous leaves (`serde_json`, `io`) are unconditional;
+//! the heavy leaves are behind the `from-ort` / `from-rusqlite` / `from-ureq`
+//! cargo features, enabled ONLY by the crate that actually touches that leaf.
+//! Anything without a dedicated `From` becomes a source via [`NativeError::with_source`]
+//! or the [`ResultExt::context`] extension.
 
 use std::error::Error;
-use std::fmt;
 
 use tracing_error::SpanTrace;
 
+/// The boxed source carrier for any leaf error not given a dedicated `From`.
+pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
+
 /// The expected-vs-bug split every native error declares.
+///
+/// Deliberately a CLOSED set: the four kinds map 1:1 onto the four Python
+/// exception classes in `shrike-py`, so exhaustive matching there is the gate
+/// that a new kind forces a new exception mapping. (`NativeError` itself is
+/// closed by its private fields — the analog of `#[non_exhaustive]` for a
+/// struct — so it stays extensible without breaking callers.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     /// Expected bad input — the caller's request can't be honored as given.
@@ -60,6 +74,7 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
+    /// The stable wire string for this kind (matched in `shrike-py`'s mapping).
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorKind::InvalidInput => "invalid_input",
@@ -70,56 +85,87 @@ impl ErrorKind {
     }
 }
 
-/// The error type every Shrike native crate returns across the FFI seam.
-///
-/// Constructors capture the current `tracing` span trace (#308): with the
-/// harness-installed subscriber active, [`NativeError::trace`] renders the
-/// span context the error crossed (which op, which batch, which engine), and
-/// the binding layer attaches it to the Python exception (PEP 678 notes) — so
-/// a native failure is debuggable from the harness without native logging.
-#[derive(Debug, Clone)]
-pub struct NativeError {
-    pub kind: ErrorKind,
-    pub message: String,
-    span_trace: SpanTrace,
-}
-
-impl PartialEq for NativeError {
-    fn eq(&self, other: &Self) -> bool {
-        // The captured trace is diagnostics, not identity.
-        self.kind == other.kind && self.message == other.message
+impl std::fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
-impl Eq for NativeError {}
+/// The error type every Shrike native crate returns across the FFI seam.
+///
+/// Constructors capture the current `tracing` span trace (#308): with the
+/// harness-installed subscriber active, [`NativeError::trace`] renders the span
+/// context the error crossed (which op, which batch, which engine), and the
+/// binding layer attaches it to the Python exception (PEP 678 notes) — so a
+/// native failure is debuggable from the harness without native logging.
+///
+/// The `#[source]` cause keeps a wrapped leaf error recoverable Rust-side; it
+/// does not cross the FFI boundary. `message` is the public, human-readable
+/// context (the only string the boundary carries besides `kind`/`trace`).
+#[derive(Debug, thiserror::Error)]
+#[error("{kind}: {message}")]
+pub struct NativeError {
+    kind: ErrorKind,
+    /// The human-readable context. Public: the binding layers move it onto the
+    /// Python/JSON wire shape, and it's the field tests assert on.
+    pub message: String,
+    #[source]
+    source: Option<BoxError>,
+    span_trace: SpanTrace,
+}
 
 impl NativeError {
-    fn new(kind: ErrorKind, message: String) -> Self {
+    /// The shared private constructor: every public path captures the span trace
+    /// here, so a `NativeError` always carries one.
+    fn build(kind: ErrorKind, message: String, source: Option<BoxError>) -> Self {
         Self {
             kind,
             message,
+            source,
             span_trace: SpanTrace::capture(),
         }
     }
 
+    /// Expected bad input ([`ErrorKind::InvalidInput`]), no wrapped cause.
     pub fn invalid_input(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::InvalidInput, message.into())
+        Self::build(ErrorKind::InvalidInput, message.into(), None)
     }
 
+    /// A runtime dependency isn't up ([`ErrorKind::Unavailable`]), no cause.
     pub fn unavailable(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Unavailable, message.into())
+        Self::build(ErrorKind::Unavailable, message.into(), None)
     }
 
+    /// A native-side bug ([`ErrorKind::Internal`]), no wrapped cause.
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Internal, message.into())
+        Self::build(ErrorKind::Internal, message.into(), None)
     }
 
+    /// Collection-lock contention ([`ErrorKind::Busy`]), no wrapped cause.
     pub fn busy(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Busy, message.into())
+        Self::build(ErrorKind::Busy, message.into(), None)
     }
 
-    /// The rendered span trace, or None when no spans were active (no
-    /// subscriber installed, or the error arose outside any span).
+    /// Build a `NativeError` of `kind` whose `message` is the context label and
+    /// whose `#[source]` is `cause` — the explicit form behind [`ResultExt`] and
+    /// the dedicated `From` impls. Use this (or `.context`) instead of
+    /// `format!("label: {e}")` so the leaf cause stays recoverable.
+    pub fn with_source(
+        kind: ErrorKind,
+        message: impl Into<String>,
+        cause: impl Into<BoxError>,
+    ) -> Self {
+        Self::build(kind, message.into(), Some(cause.into()))
+    }
+
+    /// This error's taxonomy kind — the cheap projection the binding layer maps
+    /// to a Python exception class.
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    /// The rendered span trace, or None when no spans were active (no subscriber
+    /// installed, or the error arose outside any span).
     pub fn trace(&self) -> Option<String> {
         let rendered = self.span_trace.to_string();
         if rendered.is_empty() {
@@ -130,16 +176,104 @@ impl NativeError {
     }
 }
 
-impl fmt::Display for NativeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.kind.as_str(), self.message)
+/// The result type native compute functions return.
+pub type NativeResult<T> = Result<T, NativeError>;
+
+/// Add a `NativeError` context to a `Result`, keeping the original error as the
+/// recoverable `#[source]` cause.
+///
+/// This is the idiomatic replacement for the old `.map_err(|e| NativeError::kind(
+/// format!("label: {e}")))` closures: the context label becomes
+/// [`NativeError::message`] and the leaf error becomes the source, so the cause
+/// survives instead of being flattened into the string.
+///
+/// ```
+/// use shrike_error::{ErrorKind, ResultExt};
+///
+/// fn parse(s: &str) -> shrike_error::NativeResult<u32> {
+///     s.parse::<u32>()
+///         .context(ErrorKind::InvalidInput, "not a count")
+/// }
+/// assert!(parse("x").is_err());
+/// ```
+pub trait ResultExt<T> {
+    /// Map any error into a `NativeError` of `kind` with `message` as the label
+    /// and the original error as the source.
+    fn context(self, kind: ErrorKind, message: impl Into<String>) -> NativeResult<T>;
+
+    /// Map any error into a `NativeError` of `kind`, building the label lazily
+    /// (only on the error path).
+    fn with_context<F, S>(self, kind: ErrorKind, message: F) -> NativeResult<T>
+    where
+        F: FnOnce() -> S,
+        S: Into<String>;
+}
+
+impl<T, E> ResultExt<T> for Result<T, E>
+where
+    E: Into<BoxError>,
+{
+    fn context(self, kind: ErrorKind, message: impl Into<String>) -> NativeResult<T> {
+        self.map_err(|e| NativeError::with_source(kind, message, e))
+    }
+
+    fn with_context<F, S>(self, kind: ErrorKind, message: F) -> NativeResult<T>
+    where
+        F: FnOnce() -> S,
+        S: Into<String>,
+    {
+        self.map_err(|e| NativeError::with_source(kind, message().into(), e))
     }
 }
 
-impl Error for NativeError {}
+// --- Leaf-error `From` impls -------------------------------------------------
+//
+// Unconditional: lightweight, ubiquitous leaves. A bare `?` lands here, taking
+// the leaf's own message as the context (use `.context(..)` where a richer label
+// is wanted). serde_json defaults to InvalidInput (malformed input is the common
+// case; a serialize-side failure that is really a bug should use
+// `NativeError::internal`/`.context(ErrorKind::Internal, ..)` explicitly).
+// io defaults to Unavailable (the common case is a missing/unreadable file).
 
-/// The result type native compute functions return.
-pub type NativeResult<T> = Result<T, NativeError>;
+impl From<serde_json::Error> for NativeError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::with_source(ErrorKind::InvalidInput, e.to_string(), e)
+    }
+}
+
+impl From<std::io::Error> for NativeError {
+    fn from(e: std::io::Error) -> Self {
+        Self::with_source(ErrorKind::Unavailable, e.to_string(), e)
+    }
+}
+
+// Feature-gated: heavy/engine leaves. The feature is enabled ONLY by the crate
+// that touches the leaf, so the floor crate doesn't pull ort/rusqlite/ureq into
+// every native build (the kernel must not gain ort/rusqlite). All default to
+// Internal — a leaf failure here (an inference, a DB op, an HTTP call) is a
+// runtime fault the caller didn't cause; `.context(ErrorKind::Unavailable, ..)`
+// at the using site re-tiers it where "the backend is down" is the right read.
+
+#[cfg(feature = "from-ort")]
+impl From<ort::Error> for NativeError {
+    fn from(e: ort::Error) -> Self {
+        Self::with_source(ErrorKind::Internal, e.to_string(), e)
+    }
+}
+
+#[cfg(feature = "from-rusqlite")]
+impl From<rusqlite::Error> for NativeError {
+    fn from(e: rusqlite::Error) -> Self {
+        Self::with_source(ErrorKind::Internal, e.to_string(), e)
+    }
+}
+
+#[cfg(feature = "from-ureq")]
+impl From<ureq::Error> for NativeError {
+    fn from(e: ureq::Error) -> Self {
+        Self::with_source(ErrorKind::Internal, e.to_string(), e)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -151,17 +285,79 @@ mod tests {
         assert_eq!(ErrorKind::Unavailable.as_str(), "unavailable");
         assert_eq!(ErrorKind::Internal.as_str(), "internal");
         assert_eq!(ErrorKind::Busy.as_str(), "busy");
+        // Display agrees with as_str (the format string interpolates it).
+        assert_eq!(ErrorKind::Busy.to_string(), "busy");
     }
 
     #[test]
     fn constructors_set_kind_and_message() {
         let e = NativeError::invalid_input("bad batch");
-        assert_eq!(e.kind, ErrorKind::InvalidInput);
+        assert_eq!(e.kind(), ErrorKind::InvalidInput);
         assert_eq!(e.to_string(), "invalid_input: bad batch");
         assert_eq!(
-            NativeError::unavailable("no model").kind,
+            NativeError::unavailable("no model").kind(),
             ErrorKind::Unavailable
         );
-        assert_eq!(NativeError::internal("oops").kind, ErrorKind::Internal);
+        assert_eq!(NativeError::internal("oops").kind(), ErrorKind::Internal);
+        assert_eq!(NativeError::busy("locked").kind(), ErrorKind::Busy);
+    }
+
+    #[test]
+    fn plain_constructors_have_no_source() {
+        let e = NativeError::internal("oops");
+        assert!(e.source().is_none());
+    }
+
+    #[test]
+    fn with_source_keeps_the_cause_recoverable() {
+        let leaf: BoxError = "leaf boom".into();
+        let e = NativeError::with_source(ErrorKind::Internal, "wrapping context", leaf);
+        assert_eq!(e.kind(), ErrorKind::Internal);
+        // The context is the message; the leaf is the recoverable source.
+        assert_eq!(e.to_string(), "internal: wrapping context");
+        assert_eq!(e.source().unwrap().to_string(), "leaf boom");
+    }
+
+    #[test]
+    fn context_extension_wraps_label_and_source() {
+        let r: Result<(), std::io::Error> =
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "nope"));
+        let e = r.context(ErrorKind::Unavailable, "open index").unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::Unavailable);
+        assert_eq!(e.message, "open index");
+        assert_eq!(e.source().unwrap().to_string(), "nope");
+    }
+
+    #[test]
+    fn with_context_builds_label_lazily() {
+        let ok: Result<u32, std::io::Error> = Ok(3);
+        // The closure must not run on the Ok path.
+        let v = ok
+            .with_context(ErrorKind::Internal, || -> String {
+                unreachable!("only on error")
+            })
+            .unwrap();
+        assert_eq!(v, 3);
+    }
+
+    #[test]
+    fn from_serde_json_flows_with_questionmark() {
+        fn parse(s: &str) -> NativeResult<serde_json::Value> {
+            Ok(serde_json::from_str(s)?)
+        }
+        let e = parse("{not json").unwrap_err();
+        // serde_json defaults to InvalidInput; the leaf rides as the source.
+        assert_eq!(e.kind(), ErrorKind::InvalidInput);
+        assert!(e.source().is_some());
+    }
+
+    #[test]
+    fn from_io_flows_with_questionmark() {
+        fn read() -> NativeResult<String> {
+            Ok(std::fs::read_to_string("/no/such/path/at/all")?)
+        }
+        let e = read().unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::Unavailable);
+        assert!(e.source().is_some());
     }
 }

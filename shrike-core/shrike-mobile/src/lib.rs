@@ -216,7 +216,7 @@ fn outcome_json(outcome: NativeResult<String>) -> String {
                 .unwrap_or_else(|_| "\"<unprintable>\"".to_string());
             format!(
                 r#"{{"error":{{"kind":"{}","message":{}}}}}"#,
-                e.kind.as_str(),
+                e.kind().as_str(),
                 msg
             )
         }

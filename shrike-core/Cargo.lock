@@ -5088,8 +5088,13 @@ dependencies = [
 name = "shrike-error"
 version = "0.0.0"
 dependencies = [
+ "ort",
+ "rusqlite",
+ "serde_json",
+ "thiserror 2.0.18",
  "tracing",
  "tracing-error",
+ "ureq",
 ]
 
 [[package]]

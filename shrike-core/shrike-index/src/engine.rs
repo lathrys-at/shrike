@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 use usearch::Index;
 
 use crate::new_index;
@@ -109,7 +109,7 @@ fn ensure_capacity(index: &Index, extra: usize) -> NativeResult<()> {
         let target = needed.max(index.capacity() + index.capacity() / 2).max(64);
         index
             .reserve(target)
-            .map_err(|e| NativeError::internal(format!("usearch reserve: {e}")))?;
+            .context(ErrorKind::Internal, "usearch reserve")?;
     }
     Ok(())
 }
@@ -294,7 +294,7 @@ impl MultiModalIndex {
         let _mutation = self.lock_save_mutation();
         let base = Path::new(dir);
         std::fs::create_dir_all(base)
-            .map_err(|e| NativeError::internal(format!("mkdir {dir}: {e}")))?;
+            .with_context(ErrorKind::Internal, || format!("mkdir {dir}"))?;
         // Snapshot under the state lock, then release it before any I/O.
         let (to_write, loaded): (Vec<(String, Arc<Index>)>, std::collections::HashSet<String>) = {
             let state = self.lock();
@@ -311,9 +311,9 @@ impl MultiModalIndex {
             let tmp = tmp_path(&file);
             index
                 .save(&tmp.to_string_lossy())
-                .map_err(|e| NativeError::internal(format!("usearch save: {e}")))?;
+                .context(ErrorKind::Internal, "usearch save")?;
             std::fs::rename(&tmp, &file)
-                .map_err(|e| NativeError::internal(format!("usearch save rename: {e}")))?;
+                .context(ErrorKind::Internal, "usearch save rename")?;
         }
         for modality in &self.modalities {
             if !loaded.contains(modality) {
@@ -360,7 +360,7 @@ impl MultiModalIndex {
         for (key, vector) in keys.iter().zip(vectors) {
             sub.index
                 .add(*key as u64, vector)
-                .map_err(|e| NativeError::invalid_input(format!("usearch add: {e}")))?;
+                .context(ErrorKind::InvalidInput, "usearch add")?;
             *sub.counts.entry(*key).or_insert(0) += 1;
         }
         Ok(())
@@ -382,7 +382,7 @@ impl MultiModalIndex {
                 let n = sub
                     .index
                     .remove(*key as u64)
-                    .map_err(|e| NativeError::internal(format!("usearch remove: {e}")))?;
+                    .context(ErrorKind::Internal, "usearch remove")?;
                 count += n;
                 if n > 0 {
                     sub.counts.remove(key);
@@ -435,7 +435,7 @@ impl MultiModalIndex {
                 let hits = sub
                     .index
                     .search(query, fetch)
-                    .map_err(|e| NativeError::internal(format!("usearch search: {e}")))?;
+                    .context(ErrorKind::Internal, "usearch search")?;
                 let mut keys: Vec<i64> = Vec::new();
                 let mut distances: Vec<f32> = Vec::new();
                 let mut seen = std::collections::HashSet::new();
@@ -648,7 +648,7 @@ impl MultiModalIndex {
                     let hits = sub
                         .index
                         .search(qvec, k.min(sub.index.size()))
-                        .map_err(|e| NativeError::internal(format!("usearch search: {e}")))?;
+                        .context(ErrorKind::Internal, "usearch search")?;
                     hits.keys
                         .iter()
                         .zip(hits.distances.iter())

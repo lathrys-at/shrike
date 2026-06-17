@@ -301,7 +301,7 @@ impl ServiceAdapter {
         match self.call::<_, anki_proto::decks::DeckId>(SVC_DECKS, DECKS_GET_DECK_ID_BY_NAME, &req)
         {
             Ok(resp) => Ok(Some(resp.did)),
-            Err(e) if e.kind == shrike_error::ErrorKind::InvalidInput => Ok(None),
+            Err(e) if e.kind() == shrike_error::ErrorKind::InvalidInput => Ok(None),
             Err(e) => Err(e),
         }
     }

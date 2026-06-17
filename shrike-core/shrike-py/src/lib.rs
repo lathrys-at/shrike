@@ -81,7 +81,7 @@ pyo3::create_exception!(
 /// native context shows up in the Python traceback the Pythonic way.
 pub(crate) fn to_py_err(e: NativeError) -> PyErr {
     let trace = e.trace();
-    let err = match e.kind {
+    let err = match e.kind() {
         ErrorKind::InvalidInput => NativeInputError::new_err(e.message),
         ErrorKind::Unavailable => NativeUnavailableError::new_err(e.message),
         ErrorKind::Busy => NativeBusyError::new_err(e.message),

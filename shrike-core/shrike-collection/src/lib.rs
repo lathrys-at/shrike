@@ -742,7 +742,7 @@ mod tests {
         let err = core
             .create_note(basic, DEFAULT_DECK, &fields, &[], DuplicatePolicy::Error)
             .unwrap_err();
-        assert_eq!(err.kind, shrike_error::ErrorKind::InvalidInput);
+        assert_eq!(err.kind(), shrike_error::ErrorKind::InvalidInput);
         // skip: not written, reported as skipped
         let skipped = core
             .create_note(basic, DEFAULT_DECK, &fields, &[], DuplicatePolicy::Skip)
@@ -771,7 +771,7 @@ mod tests {
                 DuplicatePolicy::Allow, // policy never overrides structural errors
             )
             .unwrap_err();
-        assert_eq!(err.kind, shrike_error::ErrorKind::InvalidInput);
+        assert_eq!(err.kind(), shrike_error::ErrorKind::InvalidInput);
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
@@ -929,7 +929,7 @@ mod tests {
         let err = core
             .list_notes(None, None, None, None, None, false, 50)
             .unwrap_err();
-        assert_eq!(err.kind, shrike_error::ErrorKind::InvalidInput);
+        assert_eq!(err.kind(), shrike_error::ErrorKind::InvalidInput);
 
         // collection_info: all sections, summary/stats/decks coherent.
         let info = serde_json::to_value(
@@ -1096,7 +1096,7 @@ mod tests {
             {"op": "remove", "name": "Ghost"},
         ]);
         let err = field_ops_json(&core, "Custom", &bad_ops.to_string()).unwrap_err();
-        assert_eq!(err.kind, shrike_error::ErrorKind::InvalidInput);
+        assert_eq!(err.kind(), shrike_error::ErrorKind::InvalidInput);
         assert_eq!(
             core.notetype_field_names(custom_id).unwrap(),
             vec!["C", "A2", "D"]
@@ -1599,7 +1599,7 @@ mod tests {
 
         // reopen while held → the BUSY tier, message intact.
         let err = core.reopen().unwrap_err();
-        assert_eq!(err.kind, shrike_error::ErrorKind::Busy);
+        assert_eq!(err.kind(), shrike_error::ErrorKind::Busy);
         assert!(err.message.contains("in use by another process"));
 
         // holder leaves → reopen succeeds and ops work again.
@@ -1778,7 +1778,7 @@ mod tests {
         assert_eq!(core.find_notes("alpha").unwrap().len(), 1);
         // A malformed expression is the expected-input error tier.
         let err = core.find_notes("added:notanumber").unwrap_err();
-        assert_eq!(err.kind, shrike_error::ErrorKind::InvalidInput);
+        assert_eq!(err.kind(), shrike_error::ErrorKind::InvalidInput);
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
     }

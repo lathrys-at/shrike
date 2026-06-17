@@ -24,7 +24,7 @@
 use std::sync::Mutex;
 
 use rusqlite::Connection;
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::{ErrorKind, NativeError, NativeResult};
 
 /// Mirrors `shrike.derived.SNIPPET_TOKENS` (the facade doesn't pass it — it's
 /// part of the pinned engine behaviour).
@@ -57,7 +57,10 @@ pub struct DerivedEngine {
 }
 
 fn db_err(e: rusqlite::Error) -> NativeError {
-    NativeError::unavailable(format!("sqlite: {e}"))
+    // Every SQLite failure here is a runtime-resource fault, not a bug — keep
+    // the explicit Unavailable kind, but carry the rusqlite error as the
+    // recoverable `#[source]` cause instead of flattening it into the message.
+    NativeError::with_source(ErrorKind::Unavailable, "sqlite", e)
 }
 
 /// True for a transient SQLite lock contention (`SQLITE_BUSY`/`SQLITE_LOCKED`,
@@ -1036,7 +1039,7 @@ mod tests {
         // kernel caller then propagates it rather than silently degrading to a
         // fallback that can't serve OCR/ASR text (#644).
         let err = with_busy_retry::<i32>(|| Err(busy_err())).unwrap_err();
-        assert_eq!(err.kind, shrike_error::ErrorKind::Unavailable);
+        assert_eq!(err.kind(), shrike_error::ErrorKind::Unavailable);
     }
 
     #[test]
@@ -1051,7 +1054,7 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(calls.get(), 1, "a non-busy error is not retried");
-        assert_eq!(err.kind, shrike_error::ErrorKind::Unavailable); // db_err maps all to unavailable
+        assert_eq!(err.kind(), shrike_error::ErrorKind::Unavailable); // db_err maps all to unavailable
     }
 
     #[test]
@@ -1304,7 +1307,7 @@ mod tests {
         e.build(&[(1, "field".into(), "F".into(), "abc".into())], 1)
             .unwrap();
         let err = e.match_rows("AND AND (", 10, false, None, &[]).unwrap_err();
-        assert_eq!(err.kind, shrike_error::ErrorKind::InvalidInput);
+        assert_eq!(err.kind(), shrike_error::ErrorKind::InvalidInput);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1738,7 +1741,7 @@ mod hardening_tests {
             raw.execute("DROP TABLE rowmap", []).unwrap();
         }
         let err = e.count().unwrap_err();
-        assert_eq!(err.kind, shrike_error::ErrorKind::Unavailable);
+        assert_eq!(err.kind(), shrike_error::ErrorKind::Unavailable);
         std::fs::remove_dir_all(dir).ok();
     }
 

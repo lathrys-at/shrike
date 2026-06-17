@@ -12,6 +12,8 @@ rust_library(
     srcs = ["src/lib.rs"],
     edition = "2021",
     deps = [
+        "@crates//:serde_json",
+        "@crates//:thiserror",
         "@crates//:tracing",
         "@crates//:tracing-error",
     ],

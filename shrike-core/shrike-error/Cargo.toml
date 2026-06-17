@@ -16,6 +16,32 @@ name = "shrike_error"
 # tracing (#308): native code emits spans/events with NO subscriber installed —
 # the harness injects the sink. tracing-error captures span traces into
 # NativeError so failures carry context out through the FFI.
+#
+# The leaf-error `From` impls are feature-gated so this layer-floor crate (every
+# native crate depends on it, including the kernel) does NOT pull heavy/engine
+# leaf crates into every build. Only the crate that USES a leaf turns on its
+# feature: `from-ort` (the onnx engine), `from-rusqlite` (the derived store),
+# `from-ureq` (the kernel media fetch + remote engines + llama lifecycle + net).
+# `serde_json`/`io` stay unconditional (ubiquitous, lightweight). VERIFY with
+# `cargo tree -i ort -p shrike-kernel` — the kernel must not gain ort/rusqlite.
 [dependencies]
+serde_json = "1"
+thiserror = "2"
 tracing = "0.1"
 tracing-error = "0.2"
+
+# Optional leaf-error crates, pulled in ONLY by the matching feature (below).
+# Versions pinned to the workspace's existing resolutions (shrike-embed's ort,
+# shrike-derived's rusqlite, the ureq family) so feature unification reuses the
+# one copy rather than building a second. We need only the `Error` type — no
+# default features, so an off feature pulls in nothing.
+ort = { version = "=2.0.0-rc.12", default-features = false, optional = true }
+rusqlite = { version = "0.36", default-features = false, optional = true }
+ureq = { version = "2", default-features = false, optional = true }
+
+[features]
+# Each feature adds one `From<LeafError>` impl so `?` flows from that leaf into
+# NativeError. Off by default; enabled by the crate that touches the leaf.
+from-ort = ["dep:ort"]
+from-rusqlite = ["dep:rusqlite"]
+from-ureq = ["dep:ureq"]
