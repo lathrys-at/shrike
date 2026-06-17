@@ -41,11 +41,11 @@ consumes the lock.
 ### Packaging
 - `package-skill.py` — bundles the `create-cards` skill into a `.skill` package (a symlink into the `shrike-skills/` unit, where the real file lives).
 
-> Several of these are being reshaped by the layout epic (#694): `serve`
-> becomes canonically Bazel (#699) and the skill packager moves into its skill
-> unit (#701). The dev/maintenance-scripts Bazel-ification (#700) spiked to a
-> narrow outcome — the coverage `.pth` hook was de-duplicated into one committed
-> source, but `sh_binary`/`genrule` conversion was declined this wave (it would
-> need a new `rules_shell` dep or touch the held `native/` tree; see
+> The layout epic (#694) reshaped this directory: `serve` is canonically Bazel
+> (#699), the skill packager moved into the `shrike-skills/` unit (#701), and the
+> native-build trio moved to `shrike-core/scripts/` (symlinked back, above; #696).
+> The dev/maintenance-scripts Bazel-ification (#700) came out narrow — the coverage
+> `.pth` hook was de-duplicated into one committed source, but `sh_binary`/`genrule`
+> conversion was declined (it would need a new `rules_shell` dep or touch the
+> `shrike-core/` tree; see
 > [`tools/README.md`](../tools/README.md#not-bazel-ified-and-why-700-verdict)).
-> This README describes the **current** homes; those issues move individual files.

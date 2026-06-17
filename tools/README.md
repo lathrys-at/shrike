@@ -78,10 +78,11 @@ wave. The findings:
   `rules_shell` (a new dep + a `MODULE.bazel.lock` churn) for marginal
   runfiles/toolchain convenience — out of scope for a cleanup wave.
 - **The two `genrule`+tripwire candidates are infeasible as hermetic genrules.**
-  `update-anki-descriptors.sh` regenerates `native/third_party/anki/anki_descriptors.bin`,
+  `update-anki-descriptors.sh` regenerates `shrike-core/third_party/anki/anki_descriptors.bin`,
   which requires a `cargo build -p anki_proto` (the Bazel build deliberately
-  *consumes* the checked-in descriptor rather than running protoc) — non-hermetic
-  and inside the held `native/` tree. `update-llama-lock.sh` (the lock *writer*)
+  *consumes* the checked-in descriptor rather than running protoc) — non-hermetic,
+  and it lives in the separate `shrike-core/` Rust workspace, not `tools/`.
+  `update-llama-lock.sh` (the lock *writer*)
   downloads the four platform tarballs over the network to hash them — also
   non-hermetic — and the lock is **already** tripwired against `MODULE.bazel` by
   `//tools:llama_lock_in_sync_test` (#566), so a writer-determinism genrule would
