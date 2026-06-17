@@ -1103,7 +1103,7 @@ class CollectionManager:
 
     Selection is **per-call and stateless** (consistent with ``stateless_http``):
     a selector resolves name → path via a **live, re-readable** registry view
-    (contract #2 — re-read on demand so a ``profile add`` in one session routes
+    (contract #2 — re-read on demand so a ``profile create`` in one session routes
     in the same session), defaulting to the registry's active profile; no
     server-side mutable "current collection". The registry's stored path is
     routed THROUGH :mod:`shrike.cache_layout` (contract #1) so canonicalization
@@ -1202,7 +1202,7 @@ class CollectionManager:
             if profile is None:
                 raise RoutingError(
                     f"unknown collection {selector!r} — register it with "
-                    "`shrike profile add`, or omit the selector for the default"
+                    "`shrike profile create`, or omit the selector for the default"
                 )
             return (profile.name, os.path.abspath(os.path.expanduser(profile.path)))
         # No selector: the registry default, else the daemon's boot collection.

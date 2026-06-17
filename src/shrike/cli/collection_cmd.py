@@ -64,7 +64,7 @@ def _render_preview(r: CollectionPruneResponse) -> int:
 @click.option("--empty-notes", is_flag=True, help="Delete notes whose every field is blank.")
 @click.option("--empty-cards", is_flag=True, help="Remove cards that render empty.")
 @click.option("--unused-media", is_flag=True, help="Trash media files no note references.")
-@click.option("--apply", "apply_", is_flag=True, help="Apply the changes (default: preview only).")
+@click.option("--dry-run", is_flag=True, help="Preview the cleanups without applying them.")
 @click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
 @click.pass_context
 def prune(
@@ -73,15 +73,15 @@ def prune(
     empty_notes: bool,
     empty_cards: bool,
     unused_media: bool,
-    apply_: bool,
+    dry_run: bool,
     yes: bool,
 ) -> None:
     """Tidy up the collection: unused tags, empty notes/cards, and unused media.
 
     Select cleanups with --unused-tags / --empty-notes / --empty-cards /
-    --unused-media; with none selected, all run. By default this only previews
-    what would be removed. Pass --apply to actually remove (it previews, asks
-    for confirmation, then applies); --yes skips the prompt.
+    --unused-media; with none selected, all run. By default this previews what
+    would be removed, asks for confirmation, then applies; --dry-run only
+    previews, --yes skips the prompt.
 
     An empty note has every field blank, where a field is blank only if it has
     no text and no media — an image- or audio-only note is kept. Unused media
@@ -90,10 +90,10 @@ def prune(
 
     \b
     Examples:
-      shrike collection prune                        # preview everything
-      shrike collection prune --unused-tags --apply  # clear unused tags
-      shrike collection prune --unused-media --apply # trash orphaned media
-      shrike collection prune --apply --yes          # prune all, no prompt
+      shrike collection prune --dry-run            # preview everything
+      shrike collection prune --unused-tags        # clear unused tags
+      shrike collection prune --unused-media        # trash orphaned media
+      shrike collection prune --yes                # prune all, no prompt
     """
     client = ctx.obj["client"]
     selected: dict[str, bool] = {
@@ -103,9 +103,9 @@ def prune(
         "unused_media": unused_media,
     }
 
-    # JSON mode is non-interactive: --apply applies, otherwise preview.
+    # JSON mode is non-interactive: --dry-run previews, otherwise apply directly.
     if ctx.obj["json"]:
-        result = client.prune(dry_run=not apply_, **selected)
+        result = client.prune(dry_run=dry_run, **selected)
         output.emit_json(result)
         return
 
@@ -117,8 +117,7 @@ def prune(
         output.console.print("[dim]Nothing to prune.[/dim]")
         return
 
-    if not apply_:
-        output.console.print("[dim]Preview only — pass --apply to remove.[/dim]")
+    if dry_run:
         return
     if not yes and not click.confirm("Remove these?"):
         output.console.print("Cancelled.")

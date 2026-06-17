@@ -754,7 +754,7 @@ class PruneUnusedMedia(BaseModel):
 
 
 class CollectionPruneResponse(BaseModel):
-    dry_run: bool = True
+    dry_run: bool = False
     unused_tags: PruneUnusedTags | None = None  # None = cleanup not requested
     empty_notes: PruneEmptyNotes | None = None
     empty_cards: PruneEmptyCards | None = None

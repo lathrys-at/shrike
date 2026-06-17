@@ -553,7 +553,7 @@ class ShrikeClient:
         empty_notes: bool = False,
         empty_cards: bool = False,
         unused_media: bool = False,
-        dry_run: bool = True,
+        dry_run: bool = False,
     ) -> CollectionPruneResponse:
         return CollectionPruneResponse.model_validate(
             self._call(

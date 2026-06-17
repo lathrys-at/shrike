@@ -708,9 +708,10 @@ Three shape decisions:
   whole risk here is silent content loss, so the caller states intent and the
   response shows exactly what was dropped. (Maps are by name for the caller;
   `_migrate_note_type` translates to the ordinal `fmap`/`cmap` Anki's API takes.)
-- **Apply-by-default with a `dry_run` preview**, CLI confirms — same posture as
-  `find_replace_notes` (a targeted note-data edit with explicit inputs), not the
-  preview-by-default posture of `collection_prune` (unscoped, collection-wide).
+- **Apply-by-default with a `dry_run` preview**, CLI confirms — the same posture
+  as `find_replace_notes` (a targeted note-data edit with explicit inputs) and,
+  since #686, `collection_prune` too (every mutating verb now shares this default;
+  see the prune section below for why prune was brought in line).
 - **"migrate", not "change".** The verb names the intent — carrying content and
   scheduling to a new home — which is the feature's whole reason to exist over
   delete+recreate. The object stays in the name (`migrate_note_type` /
@@ -737,13 +738,22 @@ land.
 
 Three decisions worth recording:
 
-- **Preview by default — the opposite of `find_replace_notes`.** `dry_run`
-  defaults **true**; the CLI previews unless `--apply`. The note find/replace
-  applies by default (it's scoped to an explicit selector, and the edit is
-  undoable in Anki). Prune is collection-wide *and* deletes notes and cards, with
-  no per-call scope to contain a mistake — so it errs the safe way and makes you
-  ask for the mutation. Same two primitives (`dry_run` / a confirm flow), opposite
-  default, chosen per blast radius.
+- **Apply by default, with a `--dry-run` preview — unified with the rest (#686).**
+  `dry_run` defaults **false** on both the CLI (`shrike collection prune`, which
+  previews → confirms → applies unless `--dry-run`, `--yes` to skip the prompt)
+  and the MCP tool (`collection_prune`, which applies; pass `dry_run: true` to
+  preview). This **reverses** the original preview-by-default choice recorded
+  here. The earlier reasoning was blast-radius: prune is collection-wide and
+  deletes notes and cards with no per-call scope, so it erred safe and made you
+  ask for the mutation — the opposite default from `find_replace_notes`. The
+  reversal trades that for a single, predictable preview model across every
+  mutating verb (`find_replace_notes`, `migrate_note_type`, and now prune all
+  apply-by-default with `--dry-run`/`dry_run:true` to preview): an inconsistent
+  default is its own footgun, and on the CLI the destructive blast radius is now
+  contained by the preview-and-confirm gate (which still runs by default) rather
+  than by the default value. The MCP default also flips to `false` so the
+  programmatic surface matches — a deliberate acceptance that the API now applies
+  without an interactive gate, with `dry_run: true` the explicit preview.
 
 - **"Empty" is media-safe.** A note is empty only if *every* field is blank by
   `embed_text.field_is_blank` — no text **and** no media reference. This is

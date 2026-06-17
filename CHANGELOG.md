@@ -63,6 +63,15 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
   - `shrike profile` stays at the top level.
   - Every group now lists its subcommands in a fixed, task-ordered sequence in
     `--help` and shell completions instead of alphabetically.
+- Profile and prune verbs are unified with the rest of the CLI (#686).
+  **Breaking:** `shrike profile add`/`remove` are now `shrike profile
+  create`/`delete`, and a new `shrike profile rename OLD NEW` relabels a
+  registered profile in place (keeping its path and overrides, and following
+  the active default). `shrike collection prune` now **applies by default**
+  with a `--dry-run` to preview (it still previews, confirms, then applies),
+  matching `shrike note replace`/`migrate-type`; the `--apply` flag is gone.
+  The MCP `collection_prune` tool's `dry_run` default likewise flips to `false`
+  (pass `dry_run: true` to preview).
 - `onnxruntime` is now a regular dependency — it ships with every install as
   the runtime the in-process embedding engines load. **Breaking for install
   scripts:** the `onnx` and `clip` extras are gone (no longer needed — plain

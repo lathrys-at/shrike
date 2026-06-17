@@ -71,6 +71,76 @@ class TestRegistryModel:
         reg.remove("b")
         assert reg.default == "a"
 
+    def test_rename_preserves_position_and_fields(self):
+        reg = Registry()
+        reg.add("a", "/a.anki2")
+        reg.add("work", "/w.anki2", embedding={"model": "/m.gguf"}, cache_dir="~/cache")
+        reg.add("c", "/c.anki2")
+        renamed = reg.rename("work", "job")
+        # Same list position (registration order preserved).
+        assert reg.names() == ["a", "job", "c"]
+        # Path + overrides carried across unchanged.
+        assert renamed.path == reg.get("job").path == "/w.anki2"
+        assert renamed.embedding == {"model": "/m.gguf"}
+        assert renamed.cache_dir == os.path.abspath(os.path.expanduser("~/cache"))
+        # Old name is gone.
+        assert reg.get("work") is None
+
+    def test_rename_follows_default(self):
+        reg = Registry()
+        reg.add("a", "/a.anki2")  # implicit default
+        reg.add("b", "/b.anki2")
+        assert reg.default == "a"
+        reg.rename("a", "primary")
+        assert reg.default == "primary"
+        assert reg.resolve_default().name == "primary"
+
+    def test_rename_non_default_keeps_default(self):
+        reg = Registry()
+        reg.add("a", "/a.anki2")  # default
+        reg.add("b", "/b.anki2")
+        reg.rename("b", "second")
+        assert reg.default == "a"
+
+    def test_rename_unknown_errors(self):
+        reg = Registry()
+        reg.add("a", "/a.anki2")
+        with pytest.raises(RegistryError, match="not registered"):
+            reg.rename("ghost", "x")
+
+    def test_rename_to_empty_errors(self):
+        reg = Registry()
+        reg.add("a", "/a.anki2")
+        with pytest.raises(RegistryError, match="name must not be empty"):
+            reg.rename("a", "   ")
+
+    def test_rename_to_taken_name_errors(self):
+        reg = Registry()
+        reg.add("a", "/a.anki2")
+        reg.add("b", "/b.anki2")
+        with pytest.raises(RegistryError, match="already registered"):
+            reg.rename("a", "b")
+        # Both unchanged.
+        assert reg.names() == ["a", "b"]
+
+    def test_rename_to_same_name_is_noop(self):
+        reg = Registry()
+        reg.add("a", "/a.anki2", embedding={"model": "/m.gguf"})
+        same = reg.rename("a", "a")
+        assert same.name == "a"
+        assert reg.names() == ["a"]
+        assert reg.get("a").embedding == {"model": "/m.gguf"}
+
+    def test_rename_round_trips_through_config(self):
+        reg = Registry()
+        reg.add("work", "/w.anki2", cache_dir="/c")
+        reg.add("home", "/h.anki2", make_default=True)
+        reg.rename("home", "personal")
+        back = Registry.from_config({"profiles": reg.to_config_section()})
+        assert back.names() == ["work", "personal"]
+        assert back.default == "personal"
+        assert back.get("work").cache_dir == "/c"
+
     def test_set_default_unknown_errors(self):
         reg = Registry()
         reg.add("a", "/a.anki2")

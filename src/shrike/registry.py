@@ -137,6 +137,43 @@ class Registry:
             self.default = name
         return profile
 
+    def rename(self, old: str, new: str) -> CollectionProfile:
+        """Rename a registered profile ``old`` to ``new``, in place. Raises
+        :class:`RegistryError` if ``old`` isn't registered, ``new`` is empty, or
+        ``new`` is already taken by a different profile.
+
+        The entry keeps its list position and every other field — ``path``,
+        ``embedding``, ``cache_dir`` — so a rename is purely a relabel. The
+        active default follows the rename if it named ``old``. There is **no
+        index/cache impact**: index identity keys on the collection *path*, never
+        the profile name (#67), so this is a pure config edit.
+        """
+        new = new.strip()
+        if not new:
+            raise RegistryError("profile name must not be empty")
+        existing = self.get(old)
+        if existing is None:
+            raise RegistryError(f"profile {old!r} is not registered")
+        if new == old:
+            # A no-op rename — nothing taken, nothing to change.
+            return existing
+        if self.get(new) is not None:
+            raise RegistryError(
+                f"profile {new!r} already registered (remove it first to re-point it)"
+            )
+
+        renamed = CollectionProfile(
+            name=new,
+            path=existing.path,
+            embedding=dict(existing.embedding) if existing.embedding else None,
+            cache_dir=existing.cache_dir,
+        )
+        # Replace in place so list position (registration order) is preserved.
+        self.profiles[self.profiles.index(existing)] = renamed
+        if self.default == old:
+            self.default = new
+        return renamed
+
     def remove(self, name: str) -> CollectionProfile:
         """Unregister a profile by name. Raises :class:`RegistryError` if it
         isn't registered.

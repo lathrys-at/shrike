@@ -93,7 +93,7 @@ shrike collection import deck.apkg --update-notes always
 
 ### `shrike collection prune`
 
-Tidy up the collection: remove unused tags, empty notes, empty cards, and unused media. Select cleanups with the flags below; **with none selected, all four run.** By default this only **previews** what would be removed — pass `--apply` to actually remove (it previews, asks for confirmation, then applies). An empty note has every field blank, where a field is blank only if it has no text **and** no media, so an image- or audio-only note is kept.
+Tidy up the collection: remove unused tags, empty notes, empty cards, and unused media. Select cleanups with the flags below; **with none selected, all four run.** By default this previews what would be removed, asks for confirmation, then **applies** (matching `note replace` / `migrate-type`) — pass `--dry-run` to only preview. An empty note has every field blank, where a field is blank only if it has no text **and** no media, so an image- or audio-only note is kept.
 
 | Option | Description |
 |---|---|
@@ -101,17 +101,17 @@ Tidy up the collection: remove unused tags, empty notes, empty cards, and unused
 | `--empty-notes` | Delete notes whose every field is blank (text- and media-free). |
 | `--empty-cards` | Remove cards that render empty; a note that loses its last card is deleted. |
 | `--unused-media` | Move media files no note references to Anki's recoverable trash. |
-| `--apply` | Apply the changes. Without it, the command only previews. |
-| `-y, --yes` | Skip the confirmation prompt (with `--apply`). |
+| `--dry-run` | Preview the cleanups without applying them. |
+| `-y, --yes` | Skip the confirmation prompt. |
 
 ```bash
-shrike collection prune                          # preview every cleanup
-shrike collection prune --unused-tags            # preview just unused tags
-shrike collection prune --apply                  # preview, confirm, then prune all
-shrike collection prune --empty-notes --apply -y # remove empty notes, no prompt
+shrike collection prune --dry-run                # preview every cleanup
+shrike collection prune --unused-tags --dry-run  # preview just unused tags
+shrike collection prune                          # preview, confirm, then prune all
+shrike collection prune --empty-notes -y         # remove empty notes, no prompt
 ```
 
-`--apply` is destructive (deleted notes and cards cannot be recovered; trashed media can, from Anki's media trash); preview first.
+Prune is destructive (deleted notes and cards cannot be recovered; trashed media can, from Anki's media trash), so it previews and confirms before applying; pass `--dry-run` to preview without the apply step.
 
 ### `shrike collection reload`
 
@@ -644,13 +644,14 @@ Shorthand for `type list <IDENTIFIER>`.
 
 ## `shrike profile`
 
-Register collections by a friendly name, set an active default, and list them. The registry lives in the config file and is managed entirely client-side — these commands never talk to the server. (Verb names are unchanged in this release.)
+Register collections by a friendly name, set an active default, rename or delete entries, and list them. The registry lives in the config file and is managed entirely client-side — these commands never talk to the server. `rename` keeps the collection path and any per-profile overrides, and the active default follows the rename; it has no index/cache impact (the index keys on the collection path, never the profile name).
 
 ```bash
-shrike profile add work ~/Anki2/Work/collection.anki2 --default
+shrike profile create work ~/Anki2/Work/collection.anki2 --default
 shrike profile list
 shrike profile default personal
-shrike profile remove old
+shrike profile rename work job
+shrike profile delete old
 ```
 
 ---

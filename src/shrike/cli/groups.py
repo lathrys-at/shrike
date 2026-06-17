@@ -36,7 +36,7 @@ CANONICAL_ORDER: dict[str, list[str]] = {
     "note": ["create", "update", "delete", "list", "show", "tag", "replace", "migrate-type"],
     "type": ["create", "update", "delete", "list", "show"],
     "deck": ["create", "rename", "delete"],
-    "profile": ["add", "remove", "default", "list"],
+    "profile": ["create", "rename", "delete", "list", "default"],
     "search": ["query", "coverage"],
     "collection": ["info", "check", "export", "import", "prune", "reload", "tag", "media"],
     "media": ["store", "fetch", "list", "delete"],

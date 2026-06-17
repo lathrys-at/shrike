@@ -49,8 +49,9 @@ def _orphan_tag(kharness) -> None:
 
 
 class TestCollectionPruneTool:
-    def test_no_flags_runs_all_in_dry_run(self, kharness, mcp_app):
-        result = kharness.call_tool(mcp_app, "collection_prune", {})
+    def test_no_flags_runs_all(self, kharness, mcp_app):
+        # No cleanup flags -> all cleanups run. dry_run:true previews them all.
+        result = kharness.call_tool(mcp_app, "collection_prune", {"dry_run": True})
         assert result["dry_run"] is True
         # All three sections present (all cleanups ran).
         assert result["unused_tags"] is not None
@@ -79,9 +80,11 @@ class TestCollectionPruneTool:
         assert kharness.index_status()["col_mod"] == kharness.col_mod()
         assert kharness.reindex_if_needed() is False
 
-    def test_dry_run_default_does_not_mutate(self, kharness, mcp_app):
+    def test_dry_run_does_not_mutate(self, kharness, mcp_app):
         blank = _blank_note(kharness)
-        result = kharness.call_tool(mcp_app, "collection_prune", {"empty_notes": True})
+        result = kharness.call_tool(
+            mcp_app, "collection_prune", {"empty_notes": True, "dry_run": True}
+        )
         assert result["dry_run"] is True
         assert result["empty_notes"]["removed"] == [blank]
         # Still there; index untouched.
@@ -89,8 +92,21 @@ class TestCollectionPruneTool:
         assert found
         assert kharness.engine.contains(blank)
 
-    def test_unrequested_cleanup_absent_from_response(self, kharness, mcp_app):
+    def test_applies_by_default(self, kharness, mcp_app):
+        # dry_run defaults to false now — omitting it applies the cleanup.
+        blank = _blank_note(kharness)
         result = kharness.call_tool(mcp_app, "collection_prune", {"empty_notes": True})
+        assert result["dry_run"] is False
+        assert result["empty_notes"]["removed"] == [blank]
+        # Gone; its vectors left the index too.
+        found = kharness.run(kharness.wrapper.run(lambda c: c.find_notes(f"nid:{blank}")))
+        assert not found
+        assert not kharness.engine.contains(blank)
+
+    def test_unrequested_cleanup_absent_from_response(self, kharness, mcp_app):
+        result = kharness.call_tool(
+            mcp_app, "collection_prune", {"empty_notes": True, "dry_run": True}
+        )
         assert result["empty_notes"] is not None
         assert result["unused_tags"] is None
         assert result["empty_cards"] is None

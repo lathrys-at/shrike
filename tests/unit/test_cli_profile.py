@@ -55,9 +55,9 @@ def _write_anki_base(base, names, *, make_collections=()):
         (base / name / "collection.anki2").write_bytes(b"SQLite format 3\x00")
 
 
-class TestProfileAdd:
-    def test_add_persists_and_normalizes(self, tmp_path):
-        result, cfg = _run(tmp_path, ["add", "work", "~/decks/work.anki2"])
+class TestProfileCreate:
+    def test_create_persists_and_normalizes(self, tmp_path):
+        result, cfg = _run(tmp_path, ["create", "work", "~/decks/work.anki2"])
         assert result.exit_code == 0, result.output
         reg = _registry(cfg)
         assert reg.names() == ["work"]
@@ -65,52 +65,86 @@ class TestProfileAdd:
         # First profile is the implicit default.
         assert reg.default == "work"
 
-    def test_add_default_flag(self, tmp_path):
-        _run(tmp_path, ["add", "work", "/a/work.anki2"])
-        result, cfg = _run(tmp_path, ["add", "home", "/a/home.anki2", "--default"])
+    def test_create_default_flag(self, tmp_path):
+        _run(tmp_path, ["create", "work", "/a/work.anki2"])
+        result, cfg = _run(tmp_path, ["create", "home", "/a/home.anki2", "--default"])
         assert result.exit_code == 0, result.output
         assert _registry(cfg).default == "home"
 
-    def test_add_duplicate_errors(self, tmp_path):
-        _run(tmp_path, ["add", "work", "/a/work.anki2"])
-        result, cfg = _run(tmp_path, ["add", "work", "/b/work.anki2"])
+    def test_create_duplicate_errors(self, tmp_path):
+        _run(tmp_path, ["create", "work", "/a/work.anki2"])
+        result, cfg = _run(tmp_path, ["create", "work", "/b/work.anki2"])
         assert result.exit_code != 0
         assert "already registered" in result.output.lower()
         # Original path unchanged.
         assert _registry(cfg).get("work").path == "/a/work.anki2"
 
-    def test_add_json(self, tmp_path):
-        result, _ = _run(tmp_path, ["add", "work", "/a/work.anki2", "--json"])
+    def test_create_json(self, tmp_path):
+        result, _ = _run(tmp_path, ["create", "work", "/a/work.anki2", "--json"])
         assert result.exit_code == 0, result.output
         assert '"name": "work"' in result.output
 
 
-class TestProfileRemove:
-    def test_remove_persists(self, tmp_path):
-        _run(tmp_path, ["add", "work", "/a/work.anki2"])
-        _run(tmp_path, ["add", "home", "/a/home.anki2"])
-        result, cfg = _run(tmp_path, ["remove", "work"])
+class TestProfileRename:
+    def test_rename_persists_and_preserves(self, tmp_path):
+        _run(tmp_path, ["create", "work", "/a/work.anki2"])
+        _run(tmp_path, ["create", "home", "/a/home.anki2"])
+        result, cfg = _run(tmp_path, ["rename", "work", "job"])
+        assert result.exit_code == 0, result.output
+        reg = _registry(cfg)
+        # In-place: list order preserved, path carried across.
+        assert reg.names() == ["job", "home"]
+        assert reg.get("job").path == "/a/work.anki2"
+        # Default (the first-registered "work") follows the rename.
+        assert reg.default == "job"
+
+    def test_rename_unknown_errors(self, tmp_path):
+        result, _ = _run(tmp_path, ["rename", "ghost", "x"])
+        assert result.exit_code != 0
+        assert "not registered" in result.output.lower()
+
+    def test_rename_to_taken_errors(self, tmp_path):
+        _run(tmp_path, ["create", "work", "/a/work.anki2"])
+        _run(tmp_path, ["create", "home", "/a/home.anki2"])
+        result, cfg = _run(tmp_path, ["rename", "work", "home"])
+        assert result.exit_code != 0
+        assert "already registered" in result.output.lower()
+        # Both unchanged.
+        assert _registry(cfg).names() == ["work", "home"]
+
+    def test_rename_json(self, tmp_path):
+        _run(tmp_path, ["create", "work", "/a/work.anki2"])
+        result, _ = _run(tmp_path, ["rename", "work", "job", "--json"])
+        assert result.exit_code == 0, result.output
+        assert '"renamed": "job"' in result.output
+
+
+class TestProfileDelete:
+    def test_delete_persists(self, tmp_path):
+        _run(tmp_path, ["create", "work", "/a/work.anki2"])
+        _run(tmp_path, ["create", "home", "/a/home.anki2"])
+        result, cfg = _run(tmp_path, ["delete", "work"])
         assert result.exit_code == 0, result.output
         assert _registry(cfg).names() == ["home"]
         # Sole survivor became the default.
         assert _registry(cfg).default == "home"
 
-    def test_remove_unknown_errors(self, tmp_path):
-        result, _ = _run(tmp_path, ["remove", "ghost"])
+    def test_delete_unknown_errors(self, tmp_path):
+        result, _ = _run(tmp_path, ["delete", "ghost"])
         assert result.exit_code != 0
         assert "not registered" in result.output.lower()
 
 
 class TestProfileDefault:
     def test_default_switches(self, tmp_path):
-        _run(tmp_path, ["add", "work", "/a/work.anki2"])
-        _run(tmp_path, ["add", "home", "/a/home.anki2"])
+        _run(tmp_path, ["create", "work", "/a/work.anki2"])
+        _run(tmp_path, ["create", "home", "/a/home.anki2"])
         result, cfg = _run(tmp_path, ["default", "home"])
         assert result.exit_code == 0, result.output
         assert _registry(cfg).default == "home"
 
     def test_default_unknown_errors(self, tmp_path):
-        _run(tmp_path, ["add", "work", "/a/work.anki2"])
+        _run(tmp_path, ["create", "work", "/a/work.anki2"])
         result, _ = _run(tmp_path, ["default", "ghost"])
         assert result.exit_code != 0
         assert "not registered" in result.output.lower()
@@ -123,8 +157,8 @@ class TestProfileList:
         assert "no profiles registered" in result.output.lower()
 
     def test_list_marks_default(self, tmp_path):
-        _run(tmp_path, ["add", "work", "/a/work.anki2"])
-        _run(tmp_path, ["add", "home", "/a/home.anki2", "--default"])
+        _run(tmp_path, ["create", "work", "/a/work.anki2"])
+        _run(tmp_path, ["create", "home", "/a/home.anki2", "--default"])
         result, _ = _run(tmp_path, ["list"])
         assert result.exit_code == 0, result.output
         assert "work" in result.output
@@ -132,7 +166,7 @@ class TestProfileList:
         assert "active default" in result.output.lower()
 
     def test_list_json(self, tmp_path):
-        _run(tmp_path, ["add", "work", "/a/work.anki2"])
+        _run(tmp_path, ["create", "work", "/a/work.anki2"])
         result, _ = _run(tmp_path, ["list", "--json"])
         assert result.exit_code == 0, result.output
         assert '"default": "work"' in result.output
@@ -158,7 +192,7 @@ class TestProfileListDiscover:
         # Register the same collection under a *different* friendly name —
         # membership is path-based, so it still reads as registered.
         coll = str(anki / "Work" / "collection.anki2")
-        _run(tmp_path, ["add", "myhandle", coll])
+        _run(tmp_path, ["create", "myhandle", coll])
         result, _ = _run(tmp_path, ["list", "--discover"])
         assert result.exit_code == 0, result.output
         assert "registered" in result.output.lower()

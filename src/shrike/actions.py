@@ -1985,10 +1985,11 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             Field(
                 description=(
                     "Preview only — report what would be removed without changing "
-                    "anything. Defaults to true; pass false to apply."
+                    "anything. Defaults to false (the cleanups apply); pass true to "
+                    "preview first."
                 )
             ),
-        ] = True,
+        ] = False,
         collection: Annotated[
             str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
         ] = None,
@@ -2000,12 +2001,13 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         cleanup is reported in its own section of the response; a section is
         absent when its cleanup was not requested.
 
-        `dry_run` defaults to **true**, so by default this only previews — it
-        reports the unused tag names, the empty note IDs, the empty card count
-        (with any notes that would be deleted), and the unused media filenames
-        without mutating anything. Pass `dry_run: false` to actually remove them.
-        This is destructive (media goes to Anki's recoverable trash; notes/cards
-        do not) so preview first.
+        This **applies by default** — it removes the unused tags, empty notes,
+        empty cards, and unused media it finds. Pass `dry_run: true` to preview
+        instead: it reports the unused tag names, the empty note IDs, the empty
+        card count (with any notes that would be deleted), and the unused media
+        filenames without mutating anything. The op is destructive (media goes
+        to Anki's recoverable trash; deleted notes/cards do not), so preview
+        with `dry_run: true` first if unsure.
 
         An empty note is one whose every field is blank, where a field is blank
         only if it has no text *and* no media — so a card that is just an image

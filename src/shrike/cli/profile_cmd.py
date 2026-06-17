@@ -41,20 +41,21 @@ def profile() -> None:
 
     \b
     Examples:
-      shrike profile add work ~/Anki2/Work/collection.anki2 --default
+      shrike profile create work ~/Anki2/Work/collection.anki2 --default
       shrike profile list
       shrike profile default personal
-      shrike profile remove old
+      shrike profile rename work job
+      shrike profile delete old
     """
 
 
-@profile.command("add", short_help="Register a collection under a name")
+@profile.command("create", short_help="Register a collection under a name")
 @output_options
 @click.argument("name")
 @click.argument("path", type=click.Path())
 @click.option("--default", "make_default", is_flag=True, help="Make this the active default.")
 @click.pass_context
-def profile_add(ctx: click.Context, name: str, path: str, make_default: bool) -> None:
+def profile_create(ctx: click.Context, name: str, path: str, make_default: bool) -> None:
     """Register the collection at PATH under NAME.
 
     The path is expanded and absolutized but is not required to exist yet (a
@@ -63,8 +64,8 @@ def profile_add(ctx: click.Context, name: str, path: str, make_default: bool) ->
 
     \b
     Examples:
-      shrike profile add work ~/Anki2/Work/collection.anki2
-      shrike profile add personal /data/anki/personal.anki2 --default
+      shrike profile create work ~/Anki2/Work/collection.anki2
+      shrike profile create personal /data/anki/personal.anki2 --default
     """
     config = ctx.obj["config"]
     registry = Registry.from_config(config)
@@ -84,19 +85,52 @@ def profile_add(ctx: click.Context, name: str, path: str, make_default: bool) ->
     )
 
 
-@profile.command("remove", short_help="Unregister a profile")
+@profile.command("rename", short_help="Rename a registered profile")
+@output_options
+@click.argument("old")
+@click.argument("new")
+@click.pass_context
+def profile_rename(ctx: click.Context, old: str, new: str) -> None:
+    """Rename the registered profile OLD to NEW.
+
+    The collection path and any per-profile overrides are kept; only the handle
+    changes. The active default follows the rename if it named OLD. This is a
+    pure config edit — the collection file and its search index are untouched
+    (the index keys on the collection path, never the profile name).
+
+    \b
+    Examples:
+      shrike profile rename work job
+    """
+    config = ctx.obj["config"]
+    registry = Registry.from_config(config)
+    try:
+        renamed = registry.rename(old, new)
+    except RegistryError as err:
+        raise click.ClickException(str(err)) from err
+    _save(ctx, registry)
+
+    if ctx.obj["json"]:
+        output.emit_json({"renamed": renamed.name, "from": old, "default": registry.default})
+        return
+    output.console.print(
+        f"[yellow]~[/yellow] Renamed profile [cyan]{old}[/cyan] -> [cyan]{renamed.name}[/cyan]"
+    )
+
+
+@profile.command("delete", short_help="Unregister a profile")
 @output_options
 @click.argument("name")
 @click.pass_context
-def profile_remove(ctx: click.Context, name: str) -> None:
+def profile_delete(ctx: click.Context, name: str) -> None:
     """Unregister the profile NAME.
 
-    Removing the current default clears it (unless one profile remains, which
+    Deleting the current default clears it (unless one profile remains, which
     then becomes the default). The collection file itself is never touched.
 
     \b
     Examples:
-      shrike profile remove old
+      shrike profile delete old
     """
     config = ctx.obj["config"]
     registry = Registry.from_config(config)
@@ -182,7 +216,7 @@ def profile_list(ctx: click.Context, discover: bool) -> None:
     if not registry.profiles:
         output.console.print(
             "[dim]No profiles registered. Add one with "
-            "[/dim][cyan]shrike profile add <name> <path>[/cyan][dim].[/dim]"
+            "[/dim][cyan]shrike profile create <name> <path>[/cyan][dim].[/dim]"
         )
         return
 
@@ -237,7 +271,7 @@ def _list_discovered(ctx: click.Context, registry: Registry) -> None:
             f"[dim]No Anki profiles found under [/dim][cyan]{base}[/cyan][dim] "
             "(no prefs21.db, or Anki's base directory is elsewhere — set ANKI_BASE, "
             "or register collections manually with [/dim]"
-            "[cyan]shrike profile add[/cyan][dim]).[/dim]"
+            "[cyan]shrike profile create[/cyan][dim]).[/dim]"
         )
         return
 
@@ -258,5 +292,6 @@ def _list_discovered(ctx: click.Context, registry: Registry) -> None:
         )
     output.table(["Name", "Collection", ""], rows)
     output.console.print(
-        "\n[dim]Register one with [/dim][cyan]shrike profile add <name> <path>[/cyan][dim].[/dim]"
+        "\n[dim]Register one with [/dim]"
+        "[cyan]shrike profile create <name> <path>[/cyan][dim].[/dim]"
     )

@@ -14,15 +14,14 @@ from click.testing import CliRunner
 
 from shrike.cli import cli
 
-# The canonical per-group order from epic #682 §G (post-rehome). `profile` keeps
-# its current add/remove/default/list verbs — the #686 rename to
-# create/rename/delete updates this list when it lands.
+# The canonical per-group order from epic #682 §G (post-rehome). `profile` uses
+# the #686 create/rename/delete/list/default verbs.
 EXPECTED_ORDER = {
     (): ["collection", "search", "server", "note", "deck", "type", "profile", "completion"],
     ("note",): ["create", "update", "delete", "list", "show", "tag", "replace", "migrate-type"],
     ("type",): ["create", "update", "delete", "list", "show"],
     ("deck",): ["create", "rename", "delete"],
-    ("profile",): ["add", "remove", "default", "list"],
+    ("profile",): ["create", "rename", "delete", "list", "default"],
     ("search",): ["query", "coverage"],
     ("collection",): ["info", "check", "export", "import", "prune", "reload", "tag", "media"],
     ("collection", "media"): ["store", "fetch", "list", "delete"],

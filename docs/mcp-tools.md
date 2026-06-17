@@ -648,7 +648,7 @@ Rename a tag, collection-wide or on a set of notes. With no `note_ids`, the tag 
 
 Tidy up the collection with one or more cleanups: remove **unused tags** (tag-registry names no note uses any more), **empty notes** (notes whose every field is blank), **empty cards** (cards that render empty, e.g. a cloze card with no matching deletion), and **unused media** (media files no note references). Enable the cleanups you want; **if you set none of them, all run.**
 
-This is destructive and cannot be undone through this tool, so `dry_run` defaults to **true** — by default it only **previews**, reporting what would be removed without changing anything. Pass `dry_run: false` to apply. Notes and cards are deleted outright; unused media goes to Anki's recoverable trash. To inspect media issues without pruning, use [`collection_check`](#collection_check).
+This **applies by default** (`dry_run` defaults to **false**) — it removes what it finds. Pass `dry_run: true` to only **preview**, reporting what would be removed without changing anything. It is destructive and cannot be undone through this tool: notes and cards are deleted outright; unused media goes to Anki's recoverable trash — so preview with `dry_run: true` first if unsure. To inspect media issues without pruning, use [`collection_check`](#collection_check).
 
 An **empty note** has every field blank, where a field is blank only if it has no text **and** no media — so a card that is just an image or audio clip is never removed. On apply, empty notes are removed first, then empty cards, then unused tags, then unused media (so tags and media freed by the deletions are cleared in the same call). Because the dry-run previews each cleanup independently, an apply may clear a few more tags/media than the preview showed.
 
@@ -660,7 +660,7 @@ An **empty note** has every field blank, where a field is blank only if it has n
 | `empty_notes` | `boolean` | no | Delete notes whose every field is blank (text- and media-free). Default `false`. |
 | `empty_cards` | `boolean` | no | Remove cards that render empty; a note that loses its last card is deleted. Default `false`. |
 | `unused_media` | `boolean` | no | Move media files no note references to Anki's trash. Default `false`. |
-| `dry_run` | `boolean` | no | Preview only — report without mutating. Default `true`. |
+| `dry_run` | `boolean` | no | Preview only — report without mutating. Default `false` (the cleanups apply). |
 
 If none of `unused_tags`/`empty_notes`/`empty_cards`/`unused_media` is set, all run.
 
