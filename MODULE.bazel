@@ -262,7 +262,7 @@ http_file(
 
 # ── Wave-2 offline-integration profile models (#667, epic #565) ──────────────
 # Back the pure-ONNX multi-space profile (embeddinggemma text + MobileCLIP2 image)
-# and the stacked jina-text-clip profile. Materialized by //scripts:serve from
+# and the stacked jina-text-clip profile. Assembled by //scripts:serve.bzl from
 # runfiles (its `data` deps below) under `bazel run`. Lazily fetched, NOT pulled by
 # the per-PR test lane (only :serve data-deps them and :serve is `manual`). shas are
 # HuggingFace LFS oids, or the byte sha256 for a git-stored (non-LFS) file. Mirrored

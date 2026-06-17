@@ -140,7 +140,7 @@ subdir — *not* cruft). `tools/` = **invoked by the build** (Bazel macros under
 requirements builders, `workspace_status.sh`, the hermetic-toolchain CI smoke
 tests `//tools:import_spike`/`//tools:library_smoke`). `scripts/` = **human-facing
 dev/maintenance entry points** (`dev-setup.sh`, `build-native.sh`, the coverage
-runners, the `//scripts:serve` dogfooding launcher). A file follows its strongest
+runners, the `//scripts:serve_<profile>` dogfooding launcher). A file follows its strongest
 coupling: a version-pin **lock** is consumed by the build, so the lock AND its
 regenerator AND its tripwire all live in `tools/` — the **llama-lock concern**
 (`tools/llama-server.lock` + `tools/update-llama-lock.sh` + `tools/check_llama_lock.py`)

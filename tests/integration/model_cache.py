@@ -87,7 +87,7 @@ CLIP_MODEL_FILES = {
 # embeddinggemma + MobileCLIP2), plus jina-clip-v2 pre-staged for #673 (native
 # fused-graph ClipBackend support; not consumed by any current profile). They are
 # NOT used by any CI test (the per-PR lane never downloads multi-GB models); they
-# exist so //scripts:serve can
+# exist so //scripts:serve_<profile> can
 # materialize them by dir-name (Bazel runfiles under `bazel run`, this fetch source
 # off Bazel). Each is sha-pinned (the sha256s are the HuggingFace LFS oids, or the
 # byte sha256 for a git-stored file) and warm-cache restorable like the other
@@ -287,7 +287,7 @@ def cached_embeddinggemma_model_dir(fallback_dir: Path) -> Path:
 
     Fetches BOTH model_quantized.onnx and its model_quantized.onnx_data companion
     (the external-data landmine) plus tokenizer.json. ~329 MB; only fetched when
-    //scripts:serve materializes the onnx-multispace profile off Bazel, or when
+    //scripts:serve_onnx_multispace fetches the onnx-multispace profile off Bazel, or when
     called directly to pre-seed the shared cache."""
     return _cached_model_dir(
         fallback_dir, EMBEDDINGGEMMA_MODEL_DIR_NAME, EMBEDDINGGEMMA_MODEL_FILES

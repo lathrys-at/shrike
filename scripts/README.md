@@ -27,7 +27,7 @@ consumes the lock.
 - `coverage-bazel.sh` — the Bazel-lane coverage equivalent.
 
 ### Dogfooding launcher
-- `serve.py` / `serve_test.py` — the consolidated `//scripts:serve` launcher (boots a real server against a fresh collection from a path-free capability profile) and its logic test.
+- `serve.py` / `serve_test.py` / `serve.bzl` — the consolidated `//scripts:serve_<profile>` launcher (boots a real server against a fresh collection from a path-free capability profile; one per-profile target per profile, models assembled from the pinned externals at build time) and its logic test + the model-assembly macro.
 - `profiles/` — the checked-in, path-free capability profiles `serve` reads.
 
 ### Packaging

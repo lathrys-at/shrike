@@ -1,7 +1,7 @@
 load("@rules_python//python:defs.bzl", "py_library")
 
 # The QA fixture builder + its declarative corpus, as a non-testonly library so
-# the //scripts:serve launcher can reuse it for `--seed qa` (the seed seam that
+# the //scripts:serve_<profile> launcher can reuse it for `--seed qa` (the seed seam that
 # retires scripts/launch-qa-server.sh). build_collection.build() routes every
 # corpus note through CollectionWrapper — the same write path the server uses.
 # imports=["../../.."] so it resolves as tests.manual.skill_quality.build_collection.

@@ -1,7 +1,7 @@
 # Capability profiles (`scripts/profiles/*.yml`)
 
 Checked-in, **path-free** capability declarations the offline-integration
-dogfooding launcher (`//scripts:serve`, #565) boots a real Shrike server from.
+dogfooding launcher (the `//scripts:serve_<profile>` targets, #565) boots a real Shrike server from.
 Each profile names a capability *shape* — what embedding spaces and recognizers
 to run — with no machine-absolute paths and no `collection:` key (run paths ride
 as flags; bundled models are bare dir-names the launcher materializes).
@@ -16,8 +16,8 @@ as flags; bundled models are bare dir-names the launcher materializes).
 The CI-running profiles boot directly under the launcher:
 
 ```bash
-./bazel run //scripts:serve -- --profile text-onnx [--seed qa] [--foreground|--daemon]
-./bazel run //scripts:serve -- --profile onnx-multispace [--seed qa]
+./bazel run //scripts:serve_text_onnx -- [--seed qa] [--foreground|--daemon]
+./bazel run //scripts:serve_onnx_multispace -- [--seed qa]
 ```
 
 `jina-text-clip` and `jina-omni` are **not** served via `serve --profile` (see
@@ -131,7 +131,7 @@ shrike --config /tmp/jina-text-clip.local.yml \
   server start --collection /tmp/jina-text-clip-run/collection.anki2 --foreground
 ```
 
-> The `//scripts:serve` launcher only materializes **onnx** model dir-names from
+> The `//scripts:serve_<profile>` launcher only materializes **onnx** model dir-names from
 > Bazel externals and leaves managed/remote entries untouched; it also can't
 > inject the operator-provided patched binary (no env-substitution for v2 config
 > values). So serve this profile via `shrike server start --config` with the
@@ -223,7 +223,7 @@ shrike --config /tmp/jina-omni.local.yml \
   server start --collection /tmp/jina-omni-run/collection.anki2 --foreground
 ```
 
-> The `//scripts:serve` launcher only materializes **onnx** model dir-names from
+> The `//scripts:serve_<profile>` launcher only materializes **onnx** model dir-names from
 > Bazel externals; it leaves managed/remote entries untouched. Because
 > `jina-omni`'s binary and model are operator-provided (not externals), serve it
 > via `shrike server start --config` with the instantiated config above, not

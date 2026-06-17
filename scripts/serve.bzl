@@ -78,12 +78,19 @@ def assemble_model_dirs():
                 src = src,
                 out = out,
                 allow_symlink = False,
+                # manual so a plain `./bazel build //...` (the per-PR lane builds
+                # non-test targets too) never force-fetches the model externals;
+                # only an explicit per-profile launcher build / run pulls them.
+                tags = ["manual"],
             )
             outs.append(out)
         native.filegroup(
             name = "model_dir_" + dir_name,
             srcs = outs,
             visibility = ["//visibility:private"],
+            # manual: same reason as the copy rules — keep the big externals off
+            # the default `//...` build expansion (the per-profile target pulls it).
+            tags = ["manual"],
         )
 
 def serve_profile(name, profile, models, deps):
