@@ -1,7 +1,7 @@
 """tools/llama-server.lock and MODULE.bazel must pin the same llama.cpp (#566).
 
 The de-dup tripwire (tools/check_llama_lock.py) also runs as a Bazel py_test
-(//:llama_lock_in_sync_test); this is its pip-lane twin so a drifted bump fails
+(//tools:llama_lock_in_sync_test); this is its pip-lane twin so a drifted bump fails
 `pytest tests/unit` too. The parser logic lives in the tool; this just drives it
 against the real checked-in files and exercises the parsers on fixtures.
 """
