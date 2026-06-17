@@ -53,12 +53,15 @@ pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
 /// The expected-vs-bug split every native error declares.
 ///
-/// Deliberately a CLOSED set: the four kinds map 1:1 onto the four Python
-/// exception classes in `shrike-py`, so exhaustive matching there is the gate
-/// that a new kind forces a new exception mapping. (`NativeError` itself is
-/// closed by its private fields — the analog of `#[non_exhaustive]` for a
-/// struct — so it stays extensible without breaking callers.)
+/// `#[non_exhaustive]`: adding a kind is a non-breaking change, so every match
+/// on `ErrorKind` outside this crate carries a wildcard arm. The pyo3 mapping in
+/// `shrike-py` (`to_py_err`) routes a future-unknown kind to the runtime/bug
+/// exception — the safe default — so a new kind degrades gracefully rather than
+/// failing to compile downstream. (`NativeError` itself stays extensible the
+/// struct way: construct it only via the constructors / `.context()`, never a
+/// struct literal, so adding a field later is also non-breaking.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorKind {
     /// Expected bad input — the caller's request can't be honored as given.
     /// Python side: an input-error exception, logged without a traceback.

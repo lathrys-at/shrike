@@ -109,6 +109,10 @@ pub(crate) fn to_py_err(e: NativeError) -> PyErr {
         ErrorKind::Unavailable => NativeUnavailableError::new_err(e.message),
         ErrorKind::Busy => NativeBusyError::new_err(e.message),
         ErrorKind::Internal => NativeInternalError::new_err(e.message),
+        // ErrorKind is #[non_exhaustive]: a future kind we don't yet map falls
+        // back to the runtime/bug exception (the safe default) rather than
+        // failing to compile here.
+        _ => NativeInternalError::new_err(e.message),
     };
     if let Some(trace) = trace {
         Python::attach(|py| {

@@ -35,11 +35,22 @@ def test_invalid_input_maps_to_input_error() -> None:
 
 
 def test_exception_taxonomy_bases() -> None:
+    # The kind → exception-class mapping (`to_py_err`) is the FFI wire contract:
     # InvalidInput is expected-bad-input → ValueError family (facades translate
-    # it to the ToolInputError surface); the rest are runtime errors.
+    # it to the ToolInputError surface); the rest are runtime errors. All four
+    # kinds map to a distinct class, asserted here so a remap is caught.
     assert issubclass(shrike_native.NativeInputError, ValueError)
     assert issubclass(shrike_native.NativeUnavailableError, RuntimeError)
+    assert issubclass(shrike_native.NativeBusyError, RuntimeError)
     assert issubclass(shrike_native.NativeInternalError, RuntimeError)
+    # The four classes are distinct (no two kinds collapse to one exception).
+    classes = {
+        shrike_native.NativeInputError,
+        shrike_native.NativeUnavailableError,
+        shrike_native.NativeBusyError,
+        shrike_native.NativeInternalError,
+    }
+    assert len(classes) == 4
 
 
 if __name__ == "__main__":
