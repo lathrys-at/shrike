@@ -26,7 +26,7 @@ py_library(
         # The pinned-model fetch util (script-fallback download source) + its
         # *_DIR_NAME constants; the QA fixture builder for --seed qa.
         "//tests/integration:model_cache",
-        "//tests/qa:build_collection",
+        "//tests/manual/skill_quality:build_collection",
         # Runfiles resolver: locate the model externals under `bazel run`.
         "@rules_python//python/runfiles",
         requirement("pyyaml"),

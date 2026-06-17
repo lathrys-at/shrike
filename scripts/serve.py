@@ -426,16 +426,17 @@ def run_root() -> Path:
 
 
 def seed_qa_collection(collection_path: Path) -> None:
-    """Generate the ``tests/qa`` synthetic fixture into *collection_path*.
+    """Generate the ``tests/manual/skill_quality`` synthetic fixture into
+    *collection_path*.
 
-    Reuses ``tests/qa/build_collection.py``'s ``build`` — the same write path
-    ``launch-qa-server.sh`` drove, now a launcher seed.
+    Reuses ``tests/manual/skill_quality/build_collection.py``'s ``build`` — the
+    same write path ``launch-qa-server.sh`` drove, now a launcher seed.
     """
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from tests.qa.build_collection import build
+    from tests.manual.skill_quality.build_collection import build
 
-    spec = _REPO_ROOT / "tests" / "qa" / "collection.json"
+    spec = _REPO_ROOT / "tests" / "manual" / "skill_quality" / "collection.json"
     logger.info("seeding qa fixture from %s → %s", spec, collection_path)
     rc = build(spec, collection_path)
     if rc != 0:
@@ -460,7 +461,8 @@ def build_parser() -> argparse.ArgumentParser:
     seed.add_argument(
         "--seed",
         choices=["qa"],
-        help="Seed the fresh collection with a named fixture (qa = the tests/qa corpus).",
+        help="Seed the fresh collection with a named fixture "
+        "(qa = the tests/manual/skill_quality corpus).",
     )
     seed.add_argument(
         "--import",

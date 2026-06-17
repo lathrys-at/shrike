@@ -10,8 +10,9 @@ The corpus is the checked-in source of truth; the built collection is a
 disposable, gitignored artifact regenerated on every QA launch. There is no
 binary fixture in git.
 
-Usage:
-    python tests/manual/skill_quality/build_collection.py --out tests/manual/skill_quality/run/working.anki2
+Usage (run from the repo root):
+    python tests/manual/skill_quality/build_collection.py \
+        --out tests/manual/skill_quality/run/working.anki2
     python tests/manual/skill_quality/build_collection.py --out /tmp/c.anki2 --spec other.json
 """
 
