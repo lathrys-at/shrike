@@ -1496,6 +1496,74 @@ mod tests {
     }
 
     #[test]
+    fn note_roundtrip_lossless_full_and_meta() {
+        // #715 rests on `read_notes_batch` parsing each `note_dicts` wire dict
+        // via `from_value::<Note>` losslessly — the dict IS a serialized `Note`.
+        // Pin that round-trip value-for-value across the edges the search path
+        // hydrates: full mode, meta mode (no content), an embedded 0x1f field
+        // separator, multibyte unicode, and empty tags.
+        let full = Note {
+            id: 42,
+            note_type: "Basic".into(),
+            deck: "Deck::Sub".into(),
+            tags: vec!["t1".into(), "t2".into()],
+            modified: "2026-01-01T00:00:00".into(),
+            content: Some(BTreeMap::from([
+                // An embedded 0x1f survives the JSON round-trip verbatim (it is
+                // not a JSON metacharacter); multibyte unicode survives too.
+                ("Front".into(), "a\u{1f}b — 日本語 🎴".into()),
+                ("Back".into(), String::new()),
+            ])),
+        };
+        let meta = Note {
+            tags: vec![],
+            content: None,
+            ..full.clone()
+        };
+        for note in [&full, &meta] {
+            let json = serde_json::to_string(note).unwrap();
+            let back: Note = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, note, "Note must round-trip value-for-value");
+        }
+    }
+
+    #[test]
+    fn searchmatch_wire_shape_absent_equals_null() {
+        // The exact equivalence #715 rests on: the new typed edge emits
+        // score/substring/fuzzy as explicit null when None, AND a wire object
+        // that OMITS those keys (the pre-#715 shape, where they were never set)
+        // deserializes to the IDENTICAL struct — so old-omit ≡ new-null once
+        // each side passes through `SearchMatch` (de)serialization.
+        let none = SearchMatch {
+            note: Note {
+                id: 1,
+                note_type: "Basic".into(),
+                deck: "D".into(),
+                tags: vec![],
+                modified: "m".into(),
+                content: None,
+            },
+            score: None,
+            substring: None,
+            fuzzy: None,
+            provenance: vec![],
+        };
+        // (1) None serializes as explicit null (keys present), the model_dump wire.
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&none).unwrap()).unwrap();
+        let obj = value.as_object().unwrap();
+        for key in ["score", "substring", "fuzzy"] {
+            assert!(obj.contains_key(key), "{key} key must be present");
+            assert!(value[key].is_null(), "{key} must serialize as null");
+        }
+        // (2) A wire object OMITTING those keys deserializes to the same struct.
+        let omitted = r#"{"id":1,"note_type":"Basic","deck":"D","tags":[],
+                          "modified":"m","content":null,"provenance":[]}"#;
+        let from_omitted: SearchMatch = serde_json::from_str(omitted).unwrap();
+        assert_eq!(from_omitted, none, "omitted keys must equal explicit null");
+    }
+
+    #[test]
     fn bool_tagged_stop_response_discriminates() {
         let ok: StopResponse =
             serde_json::from_str(r#"{"stopped":true,"pid":42,"forced":false}"#).unwrap();
