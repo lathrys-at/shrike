@@ -1314,3 +1314,73 @@ to wasm32 on an un-gateable transitive non-wasm dependency (step zero would
 flip), or (b) the list-virtualization / component-ecosystem gap proves a
 sustained drag on building the real client rather than a one-time
 hand-rolled-component cost. Neither holds today.
+
+
+## The `src/shrike` package reorganized into layered subpackages (#730, June 2026)
+
+**The flat ~30-module package became layered subpackages, each importing only
+from below.** The order is `platform/` (paths, log, daemon, pathsafety — near-leaf
+process infra) ← the top-level contract (`schemas`, `errors`) + standalone
+`client` ← `harness/` (the kernel-wrapping assembly + the engine bindings under
+`engines/{embedding,recognition}/`) ← `api/` (the verb surface: `actions`,
+`tools`, `mcp_adapter`) ← `server/` (the FastMCP host + custom routes) ← `cli/`.
+The buckets were derived from the *real* intra-package import graph, not an
+aesthetic one — each edge in the layering is an edge that already existed. This
+mirrors the Rust workspace's grouping (#703: `contracts/` = schemas + error,
+`engines/`), so the polyglot package reads consistently on both sides of the
+pyo3 seam.
+
+**`daemon` lives in `platform/`, not with the host, because `client` consumes
+it.** The standalone `client` (a top-level peer of the CLI, not part of the
+server) imports `daemon` for liveness probing; if `daemon` sat in `server/`,
+`client → server` would invert the layering. As near-leaf infra (`daemon →
+paths`) it belongs beside `paths`/`log`.
+
+**Two cleanups were folded in, both severing or preventing a folder cycle.**
+(1) `pathsafety` went to `platform/` (not `server/`): it is shared by
+`api/actions` (the export gate) and `server`, so a `server/` home would invert
+`api/ → server/`. A stdlib-only path-safety leaf belongs in `platform/`.
+(2) `ACTIVATION_MARGIN` (#580) moved from `api/actions` to `harness/index`,
+beside `activation_floor` (the gate math it parameterizes). It was the *only*
+**eager** (module-level) import from `harness` into `api`, so moving it makes
+module load order clean and the layering read top-down. The folder still has a
+`harness → api` edge, but only through a pre-existing **lazy** seam
+(`harness.resolve_bundle` imports `CollectionBundle` inside the function, the
+#68 routing-resolver pattern) — the same shape as the lazy `harness →
+cli.config` seam. The reorg relocates these lazy seams; it does not try to
+remove them (that would be redesign, not reorg).
+
+**Public surface is unchanged.** Import name `shrike`, the `shrike` CLI,
+`ShrikeClient`'s path (top-level `shrike.client`), and `python -m shrike.server`
+all hold. The last needed work because `server` became a package:
+`server/__init__.py` re-exports `main` (so `from shrike.server import main` and
+the `//bin` launcher keep working) and `server/__main__.py` runs it. Only `main`
+is re-exported — the server's other module-level names (`create_mcp`,
+`_build_transport_security`, …) are internal, so the handful of call sites that
+reached them via `from shrike.server import …` were repointed to
+`shrike.server.server`, not re-exported. `argparse`'s `prog` is pinned to
+`shrike.server` so help text is stable across the three entry points (the `-m`
+shim, the `//bin` launcher, the foreground CLI path) rather than surfacing
+`__main__.py`.
+
+**`engines/recognition/` is a package (one module today) for symmetry with
+`engines/embedding/`** — room for ASR/describe facades as siblings. Its
+`__init__.py` re-exports the OCR facade so callers import
+`shrike.harness.engines.recognition`. `embed_text` landed at
+`engines/embedding/text.py`: its only importers are the three embedding backends
+(`runtime`/`onnx`/`clip`); nothing outside the embedding cluster depends on it
+(`collection` imports `engines/embedding/base`, not `text`), so no hoist to
+`harness/` top-level was warranted.
+
+**Bazel kept the flat per-module labels.** The fine-grained `py_library` targets
+(#259 — one per module/cluster, so a test invalidates only on edits to its real
+deps) stay in one `src/shrike/BUILD.bazel` with flat names
+(`//src/shrike:collection`, not `//src/shrike/harness:collection`); only each
+target's `srcs` points at the new subpath. Per-subpackage BUILD files were
+rejected: they would rewrite ~30 `//src/shrike:<lib>` deps across `tests/`/`bin/`
+for no gain, since the reorg is about module *placement*, not the build graph's
+slicing. The subpackage `__init__.py` markers ride `:pkg` (everything depends on
+it); the two `__init__.py` files that carry code (`server/`, `recognition/`) ride
+their own targets with the right deps. Logger names (`getLogger("shrike.collection")`
+etc.) were deliberately left unchanged — they are an operational contract
+(`config logging.levels.*` keys on them), not import paths.
