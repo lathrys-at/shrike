@@ -1,0 +1,31 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//shrike-core:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# The llama-server lifecycle manager (#342 P4b): spawn/health-wait/reap/stop.
+# NOT an embedder — a `manage`-class capability (#338); composes with
+# shrike-embed-remote host-side, no dep between them.
+rust_library(
+    name = "shrike_llama_server",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        "//shrike-core/shrike-ffi:shrike_ffi",
+        "@crates//:shlex",
+        "@crates//:tracing",
+        "@crates//:ureq",
+    ] + select({
+        "@platforms//os:macos": ["@crates//:libc"],
+        "@platforms//os:linux": ["@crates//:libc"],
+        "//conditions:default": [],
+    }),
+)
+
+# medium: the SIGTERM-escalation test waits out the real 5s shutdown tier.
+rust_test(
+    name = "shrike_llama_server_test",
+    size = "medium",
+    crate = ":shrike_llama_server",
+)

@@ -7,7 +7,7 @@ llama-server is not available.
 Audited for cost (#441): the read-only classes share the session
 `collection_server` (no dedicated boot), each class is one test against one
 response, and the orphan-reap test fakes the orphan — the reap LOGIC is pinned
-by native/shrike-llama-server's Rust tests; this lane proves only the wiring,
+by shrike-core/shrike-llama-server's Rust tests; this lane proves only the wiring,
 which needs one real boot, not two.
 """
 
@@ -108,7 +108,7 @@ class TestOrphanReaping:
 
     The reap decision logic (recycled-PID guard, bind/held probes, SIGTERM →
     SIGKILL escalation, pid-file lifecycle) is pinned by the Rust tests in
-    native/shrike-llama-server. What only this lane can prove is the WIRING:
+    shrike-core/shrike-llama-server. What only this lane can prove is the WIRING:
     pid_file threads into the native manager, the reap runs inside start()
     before binding, and the new PID is written. That needs one real boot; the
     orphan itself only needs to be a process that holds the port with its PID

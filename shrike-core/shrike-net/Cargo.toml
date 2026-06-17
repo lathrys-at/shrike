@@ -1,0 +1,24 @@
+# A kernel-unaware, low-level networking-safety crate (#592): the SSRF
+# classifier (Python `ipaddress.is_global` parity), the resolve-and-vet helper,
+# and the IP-pinned ureq agent builder. It is SHARED by the kernel
+# (shrike-kernel's media_fetch) AND the remote engine crates
+# (shrike-embed-remote, shrike-describe-remote) — so the one SSRF control lives
+# in one place, not copied per consumer. Pure Rust, depends on NO engine crate
+# and NOT on shrike-kernel (it sits BELOW both), so the //shrike-core:layering_check
+# kernel-purity and engine-purity rules both stay satisfied.
+[package]
+name = "shrike-net"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[lib]
+name = "shrike_net"
+
+[dependencies]
+shrike-ffi = { workspace = true }
+# SYNCHRONOUS client — no tokio, no runtime (the workspace's runtime-less HTTP
+# precedent, same as the kernel's media fetch and the remote engines).
+ureq = "2"
+url = "2"
+tracing = "0.1"

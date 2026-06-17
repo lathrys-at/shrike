@@ -2,7 +2,7 @@
 
 The native-staleness backstop (#573): `pip install -e ".[dev]"` builds only the
 Python harness, never the Rust `shrike_native` extension (a separate cargo step
-in scripts/build-native.sh). After a pull that touches native/, an unguarded
+in scripts/build-native.sh). After a pull that touches shrike-core/, an unguarded
 pytest run would silently import a stale `_native.so` and fail with confusing
 ABI/import errors. This hook runs the same git-content staleness check the
 .envrc auto-rebuild uses and, when the extension is stale or unbuilt, aborts the

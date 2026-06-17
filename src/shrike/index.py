@@ -1,7 +1,7 @@
 """Host-side vector-index policy: the state enum + the activation-gate floor.
 
 The index itself lives in the kernel since the harness rebase (#332/#353):
-``shrike-kernel``'s ``IndexOrchestrator`` (``native/shrike-kernel/src/
+``shrike-kernel``'s ``IndexOrchestrator`` (``shrike-core/shrike-kernel/src/
 index_orchestrator.rs``) owns the per-modality USearch engine, drift detection,
 incremental reconcile, per-note fingerprints, persistence, the debounced saver,
 and activation calibration. The ``VectorIndex``/``IndexSaver`` facade that
