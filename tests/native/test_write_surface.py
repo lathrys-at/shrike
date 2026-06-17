@@ -135,6 +135,93 @@ def test_cross_core_write_parity(tmp_path, native_core):
     assert native_core.get_note(nid)[2][0] == "omega"
 
 
+def test_set_note_tags_bulk_replaces_tags_and_preserves_fields(native_core):
+    """The set_tags (replace) path rides set_note_tags_bulk, which (since #716)
+    rebuilds each UpdateNotes row from one batched DB read instead of a GetNote
+    per note. Pin the behavior that read must preserve: tags are replaced
+    exactly across the whole set, and every note's fields/notetype survive."""
+    basic = native_core.notetype_id("Basic")
+    a = native_core.create_note(basic, 1, ["a-front", "a-back"], ["old1", "old2"])
+    b = native_core.create_note(basic, 1, ["b-front", "b-back"], ["keep"])
+
+    out = json.loads(native_core.update_note_tags([a, b], set_tags=["fresh", "new"]))
+    assert out["notes_modified"] == 2
+    assert out["not_found"] == []
+
+    # Tags replaced exactly (order-independent), fields + notetype untouched.
+    for nid, fields in ((a, ["a-front", "a-back"]), (b, ["b-front", "b-back"])):
+        _id, notetype_id, got_fields, got_tags = native_core.get_note(nid)
+        assert notetype_id == basic
+        assert got_fields == fields
+        assert sorted(got_tags) == ["fresh", "new"]
+
+    # Empty set clears every tag (still one read + one write).
+    cleared = json.loads(native_core.update_note_tags([a], set_tags=[]))
+    assert cleared["notes_modified"] == 1
+    assert native_core.get_note(a)[3] == []
+
+
+def test_set_note_tags_bulk_tags_never_reach_sql(native_core):
+    """#716 guard: the batched read interpolates only integer ids into the SQL
+    (ids_sql_list); tag strings ride the UpdateNotes proto, never the query. So
+    SQL metacharacters in a tag are stored as data, not parsed as syntax, and
+    the collection stays intact. (Anki may canonify a tag; the load-bearing
+    assertion is the collection survives + the tag round-trips stably.)"""
+    basic = native_core.notetype_id("Basic")
+    a = native_core.create_note(basic, 1, ["safe-front", "safe-back"], ["orig"])
+    b = native_core.create_note(basic, 1, ["other-front", "other-back"], [])
+    before = set(native_core.find_notes("deck:*"))
+
+    nasty = ["a';drop", 'b"quote', "c)paren", "d--comment"]
+    out = json.loads(native_core.update_note_tags([a], set_tags=nasty))
+    assert out["notes_modified"] == 1
+
+    # Collection intact: both notes still present, nothing dropped/corrupted.
+    assert set(native_core.find_notes("deck:*")) == before
+    # b (untouched, different note) is unharmed.
+    assert native_core.get_note(b)[2] == ["other-front", "other-back"]
+    # a's fields survive; its tags round-trip stably (re-setting the same list
+    # is a no-op on the stored set — proves they're stored as opaque data).
+    assert native_core.get_note(a)[2] == ["safe-front", "safe-back"]
+    stored = sorted(native_core.get_note(a)[3])
+    native_core.update_note_tags([a], set_tags=stored)
+    assert sorted(native_core.get_note(a)[3]) == stored
+
+
+def test_set_note_tags_bulk_preserves_unicode_and_empty_trailing_field(native_core):
+    """#716 guard: the DB-read reconstruction splits anki's 0x1f field blob the
+    same way anki's split_fields does, so multibyte text and an empty trailing
+    field survive a tag-set exactly (an empty trailing field is the classic
+    split/join round-trip trap)."""
+    basic = native_core.notetype_id("Basic")
+    fields = ["日本語 — café 🎴", ""]
+    nid = native_core.create_note(basic, 1, fields, ["t"])
+
+    native_core.update_note_tags([nid], set_tags=["x"])
+    assert native_core.get_note(nid)[2] == fields
+    assert native_core.get_note(nid)[3] == ["x"]
+
+
+def test_set_note_tags_bulk_at_the_1000_note_cap(native_core):
+    """#716 guard: a cap-scale tag-set rides ONE batched read + ONE UpdateNotes
+    write; assert tags + fields are correct across the whole range (the read is
+    one `IN (…)` round trip, not 1000 GetNote RPCs)."""
+    basic = native_core.notetype_id("Basic")
+    ids = [
+        native_core.create_note(basic, 1, [f"front-{i}", f"back-{i}"], [f"pre-{i}"])
+        for i in range(1000)
+    ]
+    out = json.loads(native_core.update_note_tags(ids, set_tags=["bulk"]))
+    assert out["notes_modified"] == 1000
+    assert out["not_found"] == []
+    # Spot-check the range ends + middle: tags replaced, fields intact.
+    for i in (0, 1, 499, 998, 999):
+        _id, ntid, got_fields, got_tags = native_core.get_note(ids[i])
+        assert ntid == basic
+        assert got_fields == [f"front-{i}", f"back-{i}"]
+        assert got_tags == ["bulk"]
+
+
 def test_delete_note_types(native_core):
     basic = native_core.notetype_id("Basic")
     native_core.create_note(basic, 1, ["a", "b"], [])

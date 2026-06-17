@@ -717,22 +717,64 @@ impl ServiceAdapter {
         Ok(proto_to_note(resp))
     }
 
-    /// Set the exact tag list on many notes in ONE `UpdateNotes` call
-    /// (#445): one transaction + one undo entry, instead of a get+update
-    /// round trip and a journal commit per note (the 1000-note tag-set op
-    /// previously paid 3 RPCs and an fsync each). Each note's proto is
-    /// fetched current (mtime/usn stay authoritative) and only its tags
-    /// overwritten.
+    /// Set the exact tag list on many notes in ONE read + ONE `UpdateNotes`
+    /// write (#445/#716): one batched DB read for the current note rows, then
+    /// one transaction + one undo entry — instead of the get+update round trip
+    /// and a journal commit per note (the 1000-note tag-set op previously paid
+    /// 3 RPCs and an fsync each). The read side used to fan out to one
+    /// `GetNote` RPC per note (the N+1 the "ONE call" framing hid), but the
+    /// service layer has no batched `GetNotes`; the DB proxy does (the same
+    /// `db_rows` surface `col_mod`/the prune reads use), so the whole read is
+    /// one `SELECT … WHERE id IN (…)` round trip.
+    ///
+    /// `UpdateNotes` re-loads each note from storage by id (anki's
+    /// `update_note_inner`); `note_differs_from_db` is only a skip-if-identical
+    /// short-circuit, NOT a guard — a row whose `guid`/`notetype_id`/`fields`
+    /// differ from storage is APPLIED/written through (a changed notetype even
+    /// regenerates cards), and anki re-stamps `mtime`/`usn` itself. So a wrong
+    /// value here would silently CORRUPT the note (it does not error) —
+    /// therefore the row we send MUST carry each note's *current*
+    /// guid/notetype_id/fields verbatim (only `tags` is overwritten), exactly
+    /// as the prior `GetNote` fetch did. `flds` is anki's 0x1f-separated field
+    /// blob, split the same way anki's `split_fields` (and our `typed_notes`)
+    /// does.
+    ///
+    /// Contract: callers must pre-filter to existing ids — an absent id is
+    /// silently skipped here (the `IN (…)` read just omits it; no per-note
+    /// `GetNote`-style not-found error), mirroring the old per-note skip.
     pub fn set_note_tags_bulk(&self, note_ids: &[i64], tags: &[String]) -> NativeResult<usize> {
-        let mut notes = Vec::with_capacity(note_ids.len());
-        for nid in note_ids {
-            let mut current: anki_proto::notes::Note = self.call(
-                SVC_NOTES,
-                NOTES_GET_NOTE,
-                &anki_proto::notes::NoteId { nid: *nid },
-            )?;
-            current.tags = tags.to_vec();
-            notes.push(current);
+        if note_ids.is_empty() {
+            return Ok(0);
+        }
+        // Integer ids (never user strings) → safe to inline, like the other
+        // db_rows reads in this crate; no proxy parameterization needed.
+        let id_list = crate::read::ids_sql_list(note_ids);
+        let rows = self.db_rows(&format!(
+            "select id, guid, mid, mod, usn, flds from notes where id in ({id_list})"
+        ))?;
+        let mut notes = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (Some(id), Some(guid), Some(mid), Some(modt), Some(usn), Some(flds)) = (
+                row.first().and_then(serde_json::Value::as_i64),
+                row.get(1).and_then(serde_json::Value::as_str),
+                row.get(2).and_then(serde_json::Value::as_i64),
+                row.get(3).and_then(serde_json::Value::as_i64),
+                row.get(4).and_then(serde_json::Value::as_i64),
+                row.get(5).and_then(serde_json::Value::as_str),
+            ) else {
+                return Err(NativeError::internal(
+                    "unexpected db row shape for notes".to_string(),
+                ));
+            };
+            notes.push(anki_proto::notes::Note {
+                id,
+                guid: guid.to_string(),
+                notetype_id: mid,
+                mtime_secs: modt as u32,
+                usn: usn as i32,
+                tags: tags.to_vec(),
+                fields: flds.split('\u{1f}').map(str::to_string).collect(),
+            });
         }
         if notes.is_empty() {
             return Ok(0);
