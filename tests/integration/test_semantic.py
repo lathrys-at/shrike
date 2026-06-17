@@ -474,12 +474,13 @@ class TestIndexCLI:
         assert data["state"] == "ready"
         assert data["size"] >= 50
         assert data["ndim"] is not None
-        # Per-modality breakdown (#684): a text-only index reports a single
-        # `text` sub-index whose size/ndim mirror the aggregate.
+        # Per-modality breakdown (#684): the breakdown carries a `text`
+        # sub-index whose ndim mirrors the aggregate (the aggregate ndim IS the
+        # text modality's), and the per-modality sizes sum to the aggregate.
         mods = {m["modality"]: m for m in data["modalities"]}
         assert "text" in mods
-        assert mods["text"]["size"] == data["size"]
         assert mods["text"]["ndim"] == data["ndim"]
+        assert sum(m["size"] for m in data["modalities"]) == data["size"]
         result = semantic_runner.invoke(["server", "index", "status"])
         assert result.exit_code == 0
         # §B reshape (#684): the header is the section identity, `Status:` is its
