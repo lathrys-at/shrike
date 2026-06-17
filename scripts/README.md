@@ -29,7 +29,9 @@ consumes the lock.
 > `scripts/build-native.sh` invocation still resolves.
 
 ### Coverage
-- `coverage.sh` — the full local coverage run; enforces `fail_under`.
+- `coverage.sh` — the full local coverage run; enforces `fail_under`. Copies the
+  single committed subprocess-capture hook (`tools/coverage_subprocess.pth`) into
+  site-packages rather than carrying the hook string inline (#700).
 - `coverage-bazel.sh` — the Bazel-lane coverage equivalent.
 
 ### Dogfooding launcher
@@ -40,7 +42,10 @@ consumes the lock.
 - `package-skill.py` — bundles the `create-cards` skill into a `.skill` package (a symlink into the `shrike-skills/` unit, where the real file lives).
 
 > Several of these are being reshaped by the layout epic (#694): `serve`
-> becomes canonically Bazel (#699), the dev/maintenance shell scripts grow
-> Bazel idioms (#700), and the skill packager moves into its skill unit
-> (#701). This README describes the **current** homes; those issues move
-> individual files.
+> becomes canonically Bazel (#699) and the skill packager moves into its skill
+> unit (#701). The dev/maintenance-scripts Bazel-ification (#700) spiked to a
+> narrow outcome — the coverage `.pth` hook was de-duplicated into one committed
+> source, but `sh_binary`/`genrule` conversion was declined this wave (it would
+> need a new `rules_shell` dep or touch the held `native/` tree; see
+> [`tools/README.md`](../tools/README.md#not-bazel-ified-and-why-700-verdict)).
+> This README describes the **current** homes; those issues move individual files.
