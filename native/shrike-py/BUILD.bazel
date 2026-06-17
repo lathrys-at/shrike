@@ -21,7 +21,7 @@ SHRIKE_PY_SRCS = [
 ]
 
 # On macOS the Python symbols stay undefined at link time (resolved by the
-# host at import), same as the _demo proof.
+# host interpreter at import).
 SHRIKE_PY_LINK_FLAGS = select({
     "@platforms//os:macos": [
         "-Clink-arg=-undefined",

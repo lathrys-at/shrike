@@ -3,14 +3,13 @@
 # Every native crate lives here; Bazel's crate_universe resolves third-party
 # crates from this workspace's single Cargo.lock (MODULE.bazel points at it).
 # Crate layering (epic convention 5): `pyo3` may appear ONLY in the binding
-# crates (`shrike-py`, and the `_demo` polyglot proof) — kernel/compute crates
-# stay pure Rust so the stretch end-state (zero necessary CPython) is
-# structural. Enforced by //native:layering_check.
+# crate `shrike-py` — kernel/compute crates stay pure Rust so the stretch
+# end-state (zero necessary CPython) is structural. Enforced by
+# //native:layering_check.
 
 [workspace]
 resolver = "2"
 members = [
-    "_demo",
     "shrike-collection",
     "shrike-derived",
     "shrike-embed",
