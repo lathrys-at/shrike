@@ -262,12 +262,15 @@ http_file(
 
 # ── Wave-2 offline-integration profile models (#667, epic #565) ──────────────
 # Back the pure-ONNX multi-space profile (embeddinggemma text + MobileCLIP2 image)
-# and the stacked jina-text-clip profile. Assembled by //scripts:serve.bzl from
-# runfiles (its `data` deps below) under `bazel run`. Lazily fetched, NOT pulled by
-# the per-PR test lane (only :serve data-deps them and :serve is `manual`). shas are
-# HuggingFace LFS oids, or the byte sha256 for a git-stored (non-LFS) file. Mirrored
-# in tests/integration/model_cache.py (the script-fallback fetch source) and
-# scripts/serve.py's _model_sources() table — keep all three in sync.
+# and the stacked jina-text-clip profile. Assembled into per-model dirs by
+# scripts/serve.bzl's `assemble_model_dirs` (from these externals) and read from
+# runfiles under `bazel run`. Lazily fetched, NOT pulled by the per-PR test lane
+# (only the per-profile `serve_<profile>` targets + their copy/model_dir rules
+# data-dep them, and all of those are `manual`). shas are HuggingFace LFS oids, or
+# the byte sha256 for a git-stored (non-LFS) file. The external name + file layout
+# is mirrored in scripts/serve.bzl's `_MODEL_FILES` table (the build-time assembly
+# source of truth) and tests/integration/model_cache.py (the off-Bazel
+# script-fallback fetch source) — keep all three in sync.
 
 # EmbeddingGemma-300m ONNX (text, 768-dim) — the onnx-multispace text leg. The
 # export ships ONLY quantized graphs as a tiny graph stub + an EXTERNAL weight-data
