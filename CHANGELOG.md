@@ -47,6 +47,22 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
   could not start the server.
 
 ### Changed
+- The CLI command tree is reorganized so each command sits under its natural
+  parent (#683). **Breaking:** several top-level commands moved and the old
+  spellings are gone (they now error).
+  - `shrike note search` is now `shrike search` (the new top-level retrieval
+    group). `shrike search <query>` searches; `shrike collection query` moved
+    to `shrike search query`; the cross-modal coverage matrix has its own home,
+    `shrike search coverage` (it no longer appears in `shrike server status`).
+  - `shrike info`, `shrike export`, `shrike import`, `shrike tag rename`, and
+    `shrike media …` moved under `shrike collection` (`shrike collection info`,
+    `shrike collection export`, `shrike collection import`, `shrike collection
+    tag rename`, `shrike collection media …`).
+  - `shrike embedding …` and `shrike index …` moved under `shrike server`
+    (`shrike server embedding …`, `shrike server index …`).
+  - `shrike profile` stays at the top level.
+  - Every group now lists its subcommands in a fixed, task-ordered sequence in
+    `--help` and shell completions instead of alphabetically.
 - `onnxruntime` is now a regular dependency — it ships with every install as
   the runtime the in-process embedding engines load. **Breaking for install
   scripts:** the `onnx` and `clip` extras are gone (no longer needed — plain

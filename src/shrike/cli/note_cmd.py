@@ -9,8 +9,8 @@ from click.core import ParameterSource
 
 from shrike.cli import output
 from shrike.cli.config import resolve_collection
-from shrike.cli.output import NOTE_ID, output_options
-from shrike.schemas import SearchMatch
+from shrike.cli.groups import OrderedGroup
+from shrike.cli.output import NOTE_ID, output_options, parse_comma_separated
 
 
 def _parse_field(value: str) -> tuple[str, str]:
@@ -23,21 +23,12 @@ def _parse_field(value: str) -> tuple[str, str]:
     return key.strip(), val.strip()
 
 
-def _parse_comma_separated(
-    ctx: click.Context,
-    param: click.Parameter,
-    value: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Split comma-separated values so --tags a,b and --tags a --tags b both work."""
-    result: list[str] = []
-    for v in value:
-        result.extend(part.strip() for part in v.split(",") if part.strip())
-    return tuple(result)
-
-
-@click.group("note", short_help="Manage notes")
+@click.group("note", cls=OrderedGroup, short_help="Manage notes")
 def note() -> None:
-    """Create, list, update, search, and delete notes."""
+    """Create, list, update, and delete notes.
+
+    For text or semantic search, use 'shrike search'.
+    """
 
 
 @note.command("list", short_help="List notes by filters")
@@ -46,7 +37,7 @@ def note() -> None:
 @click.option(
     "--tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Filter by tag (repeatable, comma-separated, ANDed).",
 )
@@ -69,7 +60,7 @@ def note_list(
     """List notes matching structured filters.
 
     At least one filter is required. Use --brief for compact output. For text or
-    semantic search, use 'shrike note search'.
+    semantic search, use 'shrike search'.
 
     \b
     Examples:
@@ -179,7 +170,7 @@ def note_show(ctx: click.Context, note_id: int) -> None:
 @click.option(
     "--tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Tags for the note (repeatable, comma-separated).",
 )
@@ -259,7 +250,7 @@ def note_create(
 @click.option(
     "--tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Replace all tags (repeatable, comma-separated).",
 )
@@ -313,7 +304,7 @@ def note_update(
     "--set",
     "set_tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Replace all tags with this set (repeatable, comma-separated). "
     'Pass --set "" to clear all tags. Mutually exclusive with --add/--remove.',
@@ -322,7 +313,7 @@ def note_update(
     "--add",
     "add_tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Add these tags, leaving other tags intact (repeatable, comma-separated).",
 )
@@ -330,7 +321,7 @@ def note_update(
     "--remove",
     "remove_tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Remove these tags, leaving other tags intact (repeatable, comma-separated).",
 )
@@ -396,7 +387,7 @@ def note_tag(
 @click.option(
     "--tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Scope to notes with these tags (repeatable, comma-separated).",
 )
@@ -519,120 +510,6 @@ def note_delete(ctx: click.Context, note_ids: tuple[int, ...], yes: bool) -> Non
     if not_found:
         ids_str = ", ".join(str(i) for i in not_found)
         output.console.print(f"[dim]Not found: {ids_str}[/dim]")
-
-
-def _search_match_badges(m: SearchMatch) -> str:
-    """The ` · `-joined evidence badges for one search match (`note search` pretty output).
-
-    Provenance (#182) surfaces only the signals the other badges don't already imply — `text` is
-    covered by the score, `exact` by the `match:` field list — so the new, otherwise-invisible facet
-    (a non-text modality like `image`, or a future lexical signal `fuzzy`/`tag`) shows on its own.
-    """
-    bits = []
-    facet = [p.signal for p in m.provenance if p.signal not in ("text", "exact")]
-    if facet:
-        bits.append(", ".join(facet))
-    if m.score is not None:
-        bits.append(f"{m.score:.2f}")
-    if m.substring is not None:
-        bits.append("match: " + ", ".join(m.substring.matched_fields))
-    return " · ".join(bits)
-
-
-@note.command("search", short_help="Semantic search over notes")
-@output_options
-@click.argument("queries", nargs=-1)
-@click.option(
-    "--similar-to",
-    multiple=True,
-    type=NOTE_ID,
-    metavar="ID",
-    help="Find notes similar to this note ID.",
-)
-@click.option("--top-k", type=int, default=10, help="Results per query (default: 10).")
-@click.option(
-    "--threshold", type=float, default=0.5, help="Minimum similarity score (default: 0.5)."
-)
-@click.option("--deck", help="Restrict search to this deck.")
-@click.option(
-    "--tags",
-    multiple=True,
-    callback=_parse_comma_separated,
-    expose_value=True,
-    help="Restrict search to notes with these tags.",
-)
-@click.option("--brief", is_flag=True, help="Show only IDs and scores, not full note content.")
-@click.pass_context
-def note_search(
-    ctx: click.Context,
-    queries: tuple[str, ...],
-    similar_to: tuple[int, ...],
-    top_k: int,
-    threshold: float,
-    deck: str | None,
-    tags: tuple[str, ...],
-    brief: bool,
-) -> None:
-    """Semantic similarity search over the collection.
-
-    \b
-    Examples:
-      shrike note search "electron transport chain"
-      shrike note search --similar-to 170000123
-      shrike note search "mitochondria" --deck Biochemistry
-    """
-    if not queries and not similar_to:
-        raise click.UsageError("Provide query strings and/or --similar-to note IDs.")
-
-    client = ctx.obj["client"]
-
-    kwargs: dict[str, Any] = {"top_k": top_k, "threshold": threshold}
-    if queries:
-        kwargs["queries"] = list(queries)
-    if similar_to:
-        kwargs["ids"] = list(similar_to)
-    if deck:
-        kwargs["deck"] = deck
-    if tags:
-        kwargs["tags"] = list(tags)
-
-    with output.spinner("Searching notes…"):
-        result = client.search_notes(**kwargs)
-
-    if ctx.obj["json"]:
-        output.emit_json(result)
-        return
-
-    # A message can accompany results (e.g. semantic ranking unavailable, exact
-    # matches still shown), so print it but don't suppress the results below.
-    if result.message:
-        output.console.print(f"[dim]{output.esc(result.message)}[/dim]")
-
-    if not result.results or not any(g.matches for g in result.results):
-        if not result.message:
-            output.console.print("[dim]No results.[/dim]")
-        return
-
-    for group in result.results:
-        # The query string and deck/snippet (collection-authored) are escaped so a
-        # bracketed value renders literally — no terminal spoof, no MarkupError crash.
-        output.console.print(f"\nResults for: [cyan]{output.esc(group.source)}[/cyan]")
-        for m in group.matches:
-            badges = _search_match_badges(m)
-            if brief:
-                tag = f"\\[{badges}] " if badges else ""
-                output.console.print(
-                    f"  {tag}[green]#{m.id}[/green] ([cyan]{output.esc(m.deck)}[/cyan])"
-                )
-                # The window a literal (substring) or near-miss (fuzzy) hit matched, so a
-                # text/audio card's match is legible at a glance.
-                snippet = (m.substring and m.substring.snippet) or (m.fuzzy and m.fuzzy.snippet)
-                if snippet:
-                    output.console.print(f"      [dim]{output.esc(snippet)}[/dim]")
-            else:
-                output.note_detail(m, subtitle=f"[{badges}]" if badges else None)
-
-    output.console.print()
 
 
 @note.command("migrate-type", short_help="Change notes' note type with a field map")

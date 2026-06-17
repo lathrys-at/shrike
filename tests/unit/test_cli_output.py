@@ -222,7 +222,7 @@ def test_info_decks_renders_bracketed_deck_name_literally(cli_run) -> None:
     cli_run.fake.collection_info.return_value = CollectionInfo(
         decks=[DeckInfo(name="[red]PWNED[/red]", id=1, note_count=3)]
     )
-    result = cli_run("info", "--decks")
+    result = cli_run("collection", "info", "--decks")
     assert result.exit_code == 0, result.output
     assert "[red]PWNED[/red]" in result.output
 
@@ -233,11 +233,11 @@ def test_info_decks_and_tags_malformed_markup_does_not_crash(cli_run) -> None:
         decks=[DeckInfo(name="Deck [/notreal]", id=1, note_count=0)],
         tags=["[/x]"],
     )
-    decks = cli_run("info", "--decks")
+    decks = cli_run("collection", "info", "--decks")
     assert decks.exit_code == 0, decks.output
     assert "[/notreal]" in decks.output
 
-    tags = cli_run("info", "--tags")
+    tags = cli_run("collection", "info", "--tags")
     assert tags.exit_code == 0, tags.output
     assert "[/x]" in tags.output
 
@@ -274,7 +274,7 @@ def test_json_pretty_conflict_errors_regardless_of_order(cli_run, flags) -> None
     # A valid response is stubbed so the command would otherwise succeed — the
     # only thing that can make it fail is the mutual-exclusion guard itself.
     cli_run.fake.collection_info.return_value = CollectionInfo()
-    result = cli_run("info", *flags)
+    result = cli_run("collection", "info", *flags)
     assert result.exit_code != 0, result.output
     assert _MUTEX in result.output
 
@@ -290,6 +290,6 @@ def test_json_pretty_conflict_errors_regardless_of_order(cli_run, flags) -> None
 def test_json_with_no_pretty_is_allowed(cli_run, flags) -> None:
     # --json + --no-pretty both mean "no styling": compatible, never an error.
     cli_run.fake.collection_info.return_value = CollectionInfo()
-    result = cli_run("info", *flags)
+    result = cli_run("collection", "info", *flags)
     assert result.exit_code == 0, result.output
     assert _MUTEX not in result.output

@@ -1,4 +1,4 @@
-"""`shrike export` CLI (#71 S2): the dual download/server-path strategy + flags.
+"""`shrike collection export` CLI (#71 S2): the dual download/server-path strategy + flags.
 
 The CLI talks to a mocked client; the export action + route are covered in
 test_tools_export.py / test_export.py (integration). These pin the CLI's own
@@ -41,7 +41,10 @@ class TestDownloadDelivery:
     def test_downloads_url_to_dest(self, tmp_path):
         dest = tmp_path / "out.apkg"
         result, fake = _run(
-            tmp_path, ["export", str(dest)], export_return=_url_result(), download_bytes=b"ZIPDATA"
+            tmp_path,
+            ["collection", "export", str(dest)],
+            export_return=_url_result(),
+            download_bytes=b"ZIPDATA",
         )
         assert result.exit_code == 0, result.output
         # The CLI called export (no output_path → download), then wrote DEST.
@@ -51,14 +54,18 @@ class TestDownloadDelivery:
 
     def test_format_inferred_from_dest_extension(self, tmp_path):
         dest = tmp_path / "backup.colpkg"
-        result, fake = _run(tmp_path, ["export", str(dest)], export_return=_url_result("colpkg"))
+        result, fake = _run(
+            tmp_path, ["collection", "export", str(dest)], export_return=_url_result("colpkg")
+        )
         assert result.exit_code == 0, result.output
         assert fake.export_package.call_args.kwargs["format"] == "colpkg"
 
     def test_deck_scope_passed_through(self, tmp_path):
         dest = tmp_path / "d.apkg"
         result, fake = _run(
-            tmp_path, ["export", str(dest), "--deck", "Spanish"], export_return=_url_result()
+            tmp_path,
+            ["collection", "export", str(dest), "--deck", "Spanish"],
+            export_return=_url_result(),
         )
         assert result.exit_code == 0, result.output
         assert fake.export_package.call_args.kwargs["deck"] == "Spanish"
@@ -67,7 +74,7 @@ class TestDownloadDelivery:
         dest = tmp_path / "out.apkg"
         result, _ = _run(
             tmp_path,
-            ["--json", "export", str(dest)],
+            ["--json", "collection", "export", str(dest)],
             export_return=_url_result(),
             download_bytes=b"ABCD",
         )
@@ -80,7 +87,7 @@ class TestServerPathDelivery:
     def test_server_path_no_download(self, tmp_path):
         result, fake = _run(
             tmp_path,
-            ["export", "--server-path", "/srv/exports/b.colpkg"],
+            ["collection", "export", "--server-path", "/srv/exports/b.colpkg"],
             export_return=_path_result("/srv/exports/b.colpkg"),
         )
         assert result.exit_code == 0, result.output
@@ -92,16 +99,18 @@ class TestServerPathDelivery:
 
 class TestValidation:
     def test_deck_and_note_id_mutually_exclusive(self, tmp_path):
-        result, _ = _run(tmp_path, ["export", "x.apkg", "--deck", "A", "--note-id", "1"])
+        result, _ = _run(
+            tmp_path, ["collection", "export", "x.apkg", "--deck", "A", "--note-id", "1"]
+        )
         assert result.exit_code != 0
         assert "at most one of --deck or --note-id" in result.output
 
     def test_colpkg_with_deck_rejected(self, tmp_path):
-        result, _ = _run(tmp_path, ["export", "x.colpkg", "--deck", "A"])
+        result, _ = _run(tmp_path, ["collection", "export", "x.colpkg", "--deck", "A"])
         assert result.exit_code != 0
         assert "whole-collection backup" in result.output
 
     def test_requires_dest_or_server_path(self, tmp_path):
-        result, _ = _run(tmp_path, ["export"])
+        result, _ = _run(tmp_path, ["collection", "export"])
         assert result.exit_code != 0
         assert "DEST" in result.output or "server-path" in result.output

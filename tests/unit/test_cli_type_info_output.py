@@ -233,7 +233,7 @@ class TestInfo:
             summary=summary, note_types=_note_types(), tags=["marked"]
         )
 
-        result = run("info", "--types", "--tags", "--json")
+        result = run("collection", "info", "--types", "--tags", "--json")
 
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)

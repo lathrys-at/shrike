@@ -3,6 +3,7 @@ from __future__ import annotations
 import click
 
 from shrike.cli import output
+from shrike.cli.groups import OrderedGroup
 from shrike.cli.output import output_options
 from shrike.schemas import DeckInfo, UpsertDecksResponse
 
@@ -23,7 +24,7 @@ def _match_deck(decks: list[DeckInfo], ref: str) -> DeckInfo | None:
     return next((d for d in decks if d.name == ref), None)
 
 
-@click.group("deck", short_help="Manage decks")
+@click.group("deck", cls=OrderedGroup, short_help="Manage decks")
 def deck() -> None:
     """Create, rename, and delete decks.
 

@@ -100,9 +100,9 @@ class TestServerStatus:
             result = run("server", "status")
         assert "boom" in result.output
 
-    def test_coverage_matrix_rendered(self, run):
-        # text-only space + OCR: text→text native, text→image via derived text,
-        # the rest unavailable. The renderer shows the matrix legibly.
+    def test_coverage_matrix_not_in_status(self, run):
+        # The coverage matrix moved to `shrike search coverage` (#683): even when
+        # /status still carries `coverage`, `server status` must not render it.
         coverage = CoverageMatrix(
             text=CoverageRow(
                 text=CoverageCell.NATIVE,
@@ -115,9 +115,8 @@ class TestServerStatus:
         with patch(f"{SC}.ShrikeClient", return_value=fake):
             result = run("server", "status")
         assert result.exit_code == 0
-        assert "Coverage" in result.output
-        assert "native" in result.output
-        assert "via text" in result.output
+        assert "Coverage" not in result.output
+        assert "via text" not in result.output
 
     def test_running_but_unresponsive(self, run):
         fake = MagicMock()

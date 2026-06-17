@@ -470,11 +470,11 @@ class TestIndexCLI:
     def test_index_status_json_and_pretty(self, semantic_runner, collection_server):
         # Same response, two renderings — one settled index, two invocations.
         _wait_for_index_ready(collection_server)
-        data = semantic_runner.json(["index", "status"])
+        data = semantic_runner.json(["server", "index", "status"])
         assert data["state"] == "ready"
         assert data["size"] >= 50
         assert data["ndim"] is not None
-        result = semantic_runner.invoke(["index", "status"])
+        result = semantic_runner.invoke(["server", "index", "status"])
         assert result.exit_code == 0
         assert "Index:" in result.output
         assert "ready" in result.output.lower()
@@ -483,45 +483,45 @@ class TestIndexCLI:
         # ONE rebuild via the CLI, json mode (the richer assertion), waited out
         # before returning (#441 — rebuild leaks were the CI race). The pretty
         # variant added only exit-code/format checks, covered by status above.
-        data = semantic_runner.json(["index", "rebuild", "--background"])
+        data = semantic_runner.json(["server", "index", "rebuild", "--background"])
         assert "status" in data or "total" in data
         _wait_for_index_ready(collection_server)
 
     def test_index_save_json_and_pretty(self, semantic_runner, collection_server):
         _wait_for_index_ready(collection_server)
-        data = semantic_runner.json(["index", "save"])
+        data = semantic_runner.json(["server", "index", "save"])
         assert data["status"] == "saved"
         assert data["size"] >= 50
-        result = semantic_runner.invoke(["index", "save"])
+        result = semantic_runner.invoke(["server", "index", "save"])
         assert result.exit_code == 0
         assert "saved" in result.output.lower()
 
 
 class TestEmbeddingCLI:
-    """Test shrike embedding status via CLI."""
+    """Test shrike server embedding status via CLI."""
 
     def test_embedding_status_json_and_pretty(self, semantic_runner):
-        data = semantic_runner.json(["embedding", "status"])
+        data = semantic_runner.json(["server", "embedding", "status"])
         assert data["available"] is True
         assert "url" in data
-        result = semantic_runner.invoke(["embedding", "status"])
+        result = semantic_runner.invoke(["server", "embedding", "status"])
         assert result.exit_code == 0
         assert "Embedding:" in result.output
         assert "available" in result.output.lower()
 
 
 class TestNoteSearchCLI:
-    """Test shrike note search via CLI."""
+    """Test shrike search via CLI."""
 
     def test_search_pretty(self, semantic_runner, collection_server):
         _wait_for_index_ready(collection_server)
-        result = semantic_runner.invoke(["note", "search", "mitochondria energy"])
+        result = semantic_runner.invoke(["search", "mitochondria energy"])
         assert result.exit_code == 0
         assert "Results for:" in result.output
 
     def test_search_json(self, semantic_runner, collection_server):
         _wait_for_index_ready(collection_server)
-        data = semantic_runner.json(["note", "search", "DNA genetics"])
+        data = semantic_runner.json(["search", "DNA genetics"])
         assert "results" in data
         assert len(data["results"]) > 0
         assert len(data["results"][0]["matches"]) > 0
@@ -531,14 +531,14 @@ class TestNoteSearchCLI:
         listed = semantic_runner.json(["note", "list", "--tags", "mechanics"])
         note_id = str(listed["notes"][0]["id"])
 
-        data = semantic_runner.json(["note", "search", "--similar-to", note_id])
+        data = semantic_runner.json(["search", "--similar-to", note_id])
         assert len(data["results"]) > 0
         result_ids = [m["id"] for m in data["results"][0]["matches"]]
         assert int(note_id) not in result_ids
 
     def test_search_with_deck_filter(self, semantic_runner, collection_server):
         _wait_for_index_ready(collection_server)
-        data = semantic_runner.json(["note", "search", "energy", "--deck", "Physics"])
+        data = semantic_runner.json(["search", "energy", "--deck", "Physics"])
         for m in data["results"][0]["matches"]:
             assert m["deck"] == "Physics"
 
@@ -680,6 +680,7 @@ class TestEmbeddingLifecycle:
         runner = CLIRunner(lifecycle_server.url, str(cfg))
         started = runner.invoke(
             [
+                "server",
                 "embedding",
                 "start",
                 "--embedding-model",
@@ -704,7 +705,7 @@ class TestEmbeddingLifecycle:
         assert idx.get("model_id", "").startswith("meta:")
 
         # (h) CLI stop — the other half of the CLI wiring.
-        stopped = runner.invoke(["embedding", "stop"])
+        stopped = runner.invoke(["server", "embedding", "stop"])
         assert stopped.exit_code == 0, stopped.output
         assert "stopped" in stopped.output.lower()
         status = httpx.get(f"{base}/status", timeout=5.0).json()

@@ -1,4 +1,4 @@
-"""CLI handling for `shrike collection query` (#97), with the client stubbed."""
+"""CLI handling for `shrike search query` (#97; rehomed from `collection query` in #683)."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ _RESULT = ListNotesResponse(
 
 def _run(args, **kwargs):
     with patch("shrike.client.ShrikeClient.query", return_value=_RESULT) as m:
-        result = CliRunner().invoke(cli, ["collection", "query", *args], **kwargs)
+        result = CliRunner().invoke(cli, ["search", "query", *args], **kwargs)
     return result, m
 
 

@@ -307,6 +307,7 @@ py_library(
     srcs = [
         "cli/__init__.py",
         "cli/config.py",
+        "cli/groups.py",  # OrderedGroup, imported by the root group in __init__.py
         "cli/output.py",
     ],
     imports = [".."],
@@ -363,6 +364,7 @@ py_library(
         exclude = [
             "cli/__init__.py",
             "cli/config.py",
+            "cli/groups.py",  # lives in :cli_core (the root group imports it)
             "cli/output.py",
         ],
     ),

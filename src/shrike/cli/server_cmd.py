@@ -24,6 +24,9 @@ from shrike.cli.config import (
     save_config,
     transport_args,
 )
+from shrike.cli.embedding_cmd import embedding
+from shrike.cli.groups import OrderedGroup
+from shrike.cli.index_cmd import index
 from shrike.cli.output import output_options
 from shrike.client import ShrikeClient
 from shrike.daemon import (
@@ -36,31 +39,7 @@ from shrike.daemon import (
 )
 from shrike.embedding import BACKEND_ALIASES, SUPPORTED_BACKENDS
 from shrike.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
-from shrike.schemas import CoverageCell, CoverageMatrix, CoverageRow, ServerStatus
-
-# The cross-modal coverage cells, styled for the status table (#235): native is
-# the strong (green) form, via-derived-text the weaker (yellow) reachability,
-# unavailable a dim dash so the matrix reads at a glance.
-_COVERAGE_CELL_STYLE: dict[CoverageCell, str] = {
-    CoverageCell.NATIVE: "[green]native[/green]",
-    CoverageCell.VIA_DERIVED_TEXT: "[yellow]via text[/yellow]",
-    CoverageCell.UNAVAILABLE: "[dim]—[/dim]",
-}
-
-# The modalities the matrix is scoped to (mirrors profiles.MODALITIES; the CLI
-# renders from the wire model, which is fixed at these three).
-_COVERAGE_MODALITIES = ("text", "image", "audio")
-
-
-def _render_coverage(coverage: CoverageMatrix) -> None:
-    """Render the cross-modal coverage matrix (#235) as a query×target table."""
-    output.section("Coverage (query → target)")
-    rows: list[list[str]] = []
-    for q in _COVERAGE_MODALITIES:
-        row: CoverageRow = getattr(coverage, q)
-        cells = [_COVERAGE_CELL_STYLE[getattr(row, t)] for t in _COVERAGE_MODALITIES]
-        rows.append([q, *cells])
-    output.table(["query \\ target", *_COVERAGE_MODALITIES], rows)
+from shrike.schemas import ServerStatus
 
 
 def _render_status(status: ServerStatus) -> None:
@@ -159,14 +138,9 @@ def _render_status(status: ServerStatus) -> None:
     else:
         output.kv("Recognition", "[dim]none (no recognizer attached)[/dim]")
 
-    # The cross-modal coverage matrix (#498/#235): for each (query, target)
-    # modality pair, how the target is reachable — native (one space embeds
-    # both), via derived text (a recognizer derives text from the target into
-    # the text space), or unavailable. Rendered as a small table (rows = query
-    # modality, columns = target modality) so the honest cross-modal contract is
-    # legible: e.g. text→audio reads "via text" when only ASR reaches it.
-    if status.coverage is not None:
-        _render_coverage(status.coverage)
+    # The cross-modal coverage matrix moved to `shrike search coverage` (#683):
+    # it's a retrieval concern, not a daemon-status one. `/status` still carries
+    # `coverage`, but `server status` no longer renders it.
 
     # Multi-collection routing (#68): per-collection rows. The figures above
     # (embedding/index/derived) are the DEFAULT collection's — the one the
@@ -220,9 +194,19 @@ def _wait_for_server(
     return None
 
 
-@click.group("server", short_help="Manage the Shrike daemon")
+@click.group("server", cls=OrderedGroup, short_help="Manage the Shrike daemon")
 def server() -> None:
-    """Start, stop, and check the status of the Shrike MCP server."""
+    """Start, stop, and check the status of the Shrike MCP server.
+
+    Embedding-service and vector-index control live under this group too
+    ('shrike server embedding …', 'shrike server index …').
+    """
+
+
+# Rehomed under `server` (#683): the embedding service and vector index are
+# daemon-control surfaces, so they live beneath the server group.
+server.add_command(embedding)
+server.add_command(index)
 
 
 @server.command("start", short_help="Start the MCP server")

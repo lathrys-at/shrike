@@ -7,6 +7,7 @@ import click
 
 from shrike.cli import output
 from shrike.cli.config import resolve_collection
+from shrike.cli.groups import OrderedGroup
 from shrike.cli.output import output_options
 
 
@@ -51,7 +52,7 @@ def _parse_template(value: str) -> dict:
     return {"name": parts[0], "front": parts[1], "back": parts[2]}
 
 
-@click.group("type", short_help="Manage note types")
+@click.group("type", cls=OrderedGroup, short_help="Manage note types")
 def type_group() -> None:
     """Create, list, show, and update note type definitions."""
 

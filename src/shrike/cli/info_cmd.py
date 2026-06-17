@@ -34,10 +34,10 @@ def info(
 
     \b
     Examples:
-      shrike info
-      shrike info --types
-      shrike info --decks --stats
-      shrike info --type-details Basic
+      shrike collection info
+      shrike collection info --types
+      shrike collection info --decks --stats
+      shrike collection info --type-details Basic
     """
     client = ctx.obj["client"]
     has_detail_flags = show_types or show_decks or show_tags or show_stats or type_details

@@ -17,6 +17,7 @@ import click
 
 from shrike.cli import output
 from shrike.cli.config import save_config
+from shrike.cli.groups import OrderedGroup
 from shrike.cli.output import output_options
 from shrike.registry import Registry, RegistryError
 
@@ -29,7 +30,7 @@ def _save(ctx: click.Context, registry: Registry) -> None:
     save_config(config, config_path)
 
 
-@click.group("profile", short_help="Manage the collection/profile registry")
+@click.group("profile", cls=OrderedGroup, short_help="Manage the collection/profile registry")
 def profile() -> None:
     """Register collections by name and pick an active default.
 

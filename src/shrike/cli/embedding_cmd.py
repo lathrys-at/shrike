@@ -4,6 +4,7 @@ import click
 
 from shrike.cli import output
 from shrike.cli.config import resolve_embedding_profile
+from shrike.cli.groups import OrderedGroup
 from shrike.cli.index_cmd import _poll_progress
 from shrike.cli.output import output_options
 from shrike.client import ShrikeClient
@@ -11,7 +12,7 @@ from shrike.embedding import BACKEND_ALIASES, SUPPORTED_BACKENDS
 from shrike.schemas import EmbeddingStatus
 
 
-@click.group("embedding", short_help="Manage the embedding service")
+@click.group("embedding", cls=OrderedGroup, short_help="Manage the embedding service")
 def embedding() -> None:
     """Start, stop, and inspect the embedding service used for semantic search."""
 
@@ -24,8 +25,8 @@ def embedding_status(ctx: click.Context) -> None:
 
     \b
     Examples:
-      shrike embedding status
-      shrike --json embedding status
+      shrike server embedding status
+      shrike --json server embedding status
     """
     client: ShrikeClient = ctx.obj["client"]
     json_out: bool = ctx.obj["json"]
@@ -122,9 +123,9 @@ def embedding_start(
 
     \b
     Examples:
-      shrike embedding start
-      shrike embedding start --embedding-model ~/models/embed.gguf
-      shrike embedding start --background
+      shrike server embedding start
+      shrike server embedding start --embedding-model ~/models/embed.gguf
+      shrike server embedding start --background
     """
     config = ctx.obj["config"]
     client: ShrikeClient = ctx.obj["client"]
@@ -202,8 +203,8 @@ def embedding_stop(ctx: click.Context) -> None:
 
     \b
     Examples:
-      shrike embedding stop
-      shrike --json embedding stop
+      shrike server embedding stop
+      shrike --json server embedding stop
     """
     client: ShrikeClient = ctx.obj["client"]
     json_out: bool = ctx.obj["json"]
