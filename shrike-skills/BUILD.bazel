@@ -13,6 +13,10 @@ pkg_files(
     srcs = glob(
         ["create-cards/**"],
         exclude = [
+            # Keep any skill-local evals/ (quality-eval scaffolding, not shipped
+            # content) out of the bundle. None exists today; this mirrors
+            # package-skill.py's ROOT_EXCLUDE_DIRS so both packagers ship the same
+            # tree if one is added later (the two are meant to stay in lockstep).
             "create-cards/evals/**",
             "**/__pycache__/**",
             "**/*.pyc",
