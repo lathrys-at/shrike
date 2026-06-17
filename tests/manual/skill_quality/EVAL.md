@@ -5,13 +5,13 @@ scenario prompt to a cold weak agent (Haiku 4.5), with the skill and without it,
 and grade what actually lands in the collection. Reusable as the skill evolves.
 
 Manual — not part of `pytest`/CI. (The pure grader has its own quick test:
-`pytest tests/qa/eval/test_grade.py`.)
+`pytest tests/manual/skill_quality/test_grade.py`.)
 
 ## Pieces
 
 | File | Role |
 |---|---|
-| `scenarios.yaml` | Machine spec: per-scenario `assert` block (deterministic checks) + `judge` rubric. Prompts are read from `../scenarios/<id>-*.md` (single source). |
+| `scenarios.yaml` | Machine spec: per-scenario `assert` block (deterministic checks) + `judge` rubric. Prompts are read from `scenarios/<id>-*.md` (single source). |
 | `grade.py` | Pure grader: `(run record, assert spec) → per-assertion pass/fail`. No I/O. |
 | `judge.py` | Advisory LLM judge: builds a rubric+cards prompt, runs `claude -p` (Sonnet by default), parses a verdict. Never gates. |
 | `prompts.py` | Canonical `with_skill` / `baseline` agent prompts (so runs are comparable). |
@@ -35,16 +35,16 @@ needs its own fresh fixture.
 **Automated (`run.py`)** — the whole matrix, hands-free:
 
 ```
-export LLAMA_SERVER_PATH=... SHRIKE_EMBEDDING_MODEL=...   # see ../README.md
+export LLAMA_SERVER_PATH=... SHRIKE_EMBEDDING_MODEL=...   # see README.md
 
 # 1x sweep, with_skill only, Sonnet judge (the defaults):
-tests/qa/eval/run.py --repeats 1 --configs with_skill
+tests/manual/skill_quality/run.py --repeats 1 --configs with_skill
 
 # 3x depth on two scenarios, mechanical only (fast, no judge):
-tests/qa/eval/run.py --scenarios 01,03 --repeats 3 --no-judge
+tests/manual/skill_quality/run.py --scenarios 01,03 --repeats 3 --no-judge
 
 # plain Haiku with no reasoning, to compare against the thinking default:
-tests/qa/eval/run.py --author-thinking 0
+tests/manual/skill_quality/run.py --author-thinking 0
 ```
 
 Per cell it resets the fixture, waits for the index, snapshots the baseline,
@@ -69,14 +69,14 @@ autonomous agent loop, so run it deliberately.
 interactive session spawning a sub-agent) and just use the deterministic steps:
 
 ```
-B=tests/qa/eval/runs/<batch>; D=$B/<scenario>/<config>/r<n>
-tests/qa/eval/run.py --scenarios <id> --repeats 1            # 1. fresh fixture + server
+B=tests/manual/skill_quality/runs/<batch>; D=$B/<scenario>/<config>/r<n>
+tests/manual/skill_quality/run.py --scenarios <id> --repeats 1            # 1. fresh fixture + server
 #    (run.py resets the fixture itself; or do the build_collection + server start by hand)
-tests/qa/eval/harness.py baseline --out "$D"                  # 2. snapshot before
-tests/qa/eval/harness.py prompt --scenario <id> --config <config>
+tests/manual/skill_quality/harness.py baseline --out "$D"                  # 2. snapshot before
+tests/manual/skill_quality/harness.py prompt --scenario <id> --config <config>
 #    → spawn a COLD Haiku agent with that prompt; write its final report to $D/transcript.txt
-tests/qa/eval/harness.py grade --scenario <id> --dir "$D" --transcript "$D/transcript.txt"
-tests/qa/eval/harness.py report --batch "$B"                  # after all cells → $B/report.md
+tests/manual/skill_quality/harness.py grade --scenario <id> --dir "$D" --transcript "$D/transcript.txt"
+tests/manual/skill_quality/harness.py report --batch "$B"                  # after all cells → $B/report.md
 ```
 
 `grade` runs the advisory judge too (Sonnet); add `--no-judge` to skip it or
@@ -125,5 +125,5 @@ sub-group before/after in `references/examples.md`, took Haiku's 01 judge from
 **1/5 to 5/5**, with per-chamber deletions confirmed in the transcripts. The
 lesson this skill is built on: **weak models follow surface checks they can
 apply, not concepts they must reason out** — so prefer the former. (The A/B run
-that established this is reproducible via `tests/qa/eval/variants/use-variant.sh`;
+that established this is reproducible via `tests/manual/skill_quality/variants/use-variant.sh`;
 the per-variant skill copies are gitignored.)

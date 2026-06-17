@@ -202,7 +202,7 @@ in-process tracking can't see. So always do a full `pytest` run before you push.
 ## Skill changes (QA eval)
 
 The `anki-cards` skill (`skills/anki-cards/**`) is **not covered by `pytest`/CI** —
-only the pure grader (`tests/qa/eval/test_grade.py`) runs there. A change to the
+only the pure grader (`tests/manual/skill_quality/test_grade.py`) runs there. A change to the
 skill's guidance or references can pass every CI check while silently regressing
 card quality, so the regression guard is the manual eval harness, not the test
 suite. (For scale: rewording one rule from an abstraction into a surface check
@@ -214,10 +214,10 @@ and costs real tokens, so it can't be a CI gate — it's expected practice, not 
 hard merge blocker.
 
 ```bash
-tests/qa/eval/run.py        # see tests/qa/eval/README.md for flags
+tests/manual/skill_quality/run.py   # see tests/manual/skill_quality/EVAL.md for flags
 ```
 
 Scope is your judgment: run the scenarios the change plausibly affects (a targeted
 `--scenarios …` sweep is fine for a narrow edit; a fuller matrix before a release).
 The harness, scenarios, and grading are documented in
-[`tests/qa/eval/README.md`](tests/qa/eval/README.md).
+[`tests/manual/skill_quality/EVAL.md`](tests/manual/skill_quality/EVAL.md).

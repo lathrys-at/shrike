@@ -31,9 +31,9 @@ from judge import DEFAULT_JUDGE_MODEL, DEFAULT_JUDGE_THINKING, run_judge
 from prompts import SHRIKE_BIN, baseline_prompt, with_skill_prompt
 
 HERE = Path(__file__).resolve().parent
-SCENARIOS_DIR = HERE.parent / "scenarios"
+SCENARIOS_DIR = HERE / "scenarios"
 SCENARIOS_YAML = HERE / "scenarios.yaml"
-LOG_PATH = HERE.parent / "run" / "logs" / "shrike.log"
+LOG_PATH = HERE / "run" / "logs" / "shrike.log"
 
 
 def _shrike_json(*args: str) -> Any:

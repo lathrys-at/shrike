@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Swap a staged skill variant into the live skill dir, so the QA eval (which
 # reads skills/anki-cards/{SKILL.md,references/examples.md} from a hardcoded
-# path) runs against it. Variants live in tests/qa/eval/variants/<name>/.
+# path) runs against it. Variants live in tests/manual/skill_quality/variants/<name>/.
 #
 #   use-variant.sh v0      # restore the control (current/main skill)
 #   use-variant.sh a|b|c   # apply a tightening variant
@@ -11,7 +11,7 @@ set -euo pipefail
 
 name="${1:?usage: use-variant.sh <v0|a|b|c>}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-src="$root/tests/qa/eval/variants/$name"
+src="$root/tests/manual/skill_quality/variants/$name"
 dst="$root/skills/anki-cards"
 
 [ -f "$src/SKILL.md" ] || { echo "no SKILL.md in $src" >&2; exit 1; }

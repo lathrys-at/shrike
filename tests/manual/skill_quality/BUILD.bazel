@@ -4,12 +4,12 @@ load("@rules_python//python:defs.bzl", "py_library")
 # the //scripts:serve launcher can reuse it for `--seed qa` (the seed seam that
 # retires scripts/launch-qa-server.sh). build_collection.build() routes every
 # corpus note through CollectionWrapper — the same write path the server uses.
-# imports=["../.."] so it resolves as tests.qa.build_collection.
+# imports=["../../.."] so it resolves as tests.manual.skill_quality.build_collection.
 py_library(
     name = "build_collection",
     srcs = ["build_collection.py"],
     data = ["collection.json"],
-    imports = ["../.."],
+    imports = ["../../.."],
     visibility = ["//visibility:public"],
     deps = ["//src/shrike:collection"],
 )

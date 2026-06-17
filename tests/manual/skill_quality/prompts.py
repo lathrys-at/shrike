@@ -17,7 +17,7 @@ from pathlib import Path
 # Paths derive from the repo root so the eval runs from any checkout; the prompt
 # *wording* below stays fixed (that's what makes runs comparable), the absolute
 # prefix is just where this clone happens to live.
-_ROOT = Path(__file__).resolve().parents[3]  # tests/qa/eval -> repo root
+_ROOT = Path(__file__).resolve().parents[3]  # tests/manual/skill_quality -> repo root
 
 SKILL_PATH = str(_ROOT / "skills" / "anki-cards" / "SKILL.md")
 SHRIKE_BIN = str(_ROOT / ".venv" / "bin" / "shrike")
