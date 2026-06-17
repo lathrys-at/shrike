@@ -39,7 +39,7 @@ def _run(tmp_path, args, **kwargs):
 
 class TestProfileSelector:
     def test_profile_passed_as_collection_to_client(self, tmp_path):
-        result, ctor = _run(tmp_path, ["--profile", "work", "info"])
+        result, ctor = _run(tmp_path, ["--profile", "work", "collection", "info"])
         assert result.exit_code == 0, result.output
         # The client is constructed with the selector as its `collection`.
         _, kwargs = ctor.call_args
@@ -47,13 +47,13 @@ class TestProfileSelector:
 
     def test_collection_alias_passed_as_collection(self, tmp_path):
         # --collection is an alias of --profile at the root (routes by name).
-        result, ctor = _run(tmp_path, ["--collection", "home", "info"])
+        result, ctor = _run(tmp_path, ["--collection", "home", "collection", "info"])
         assert result.exit_code == 0, result.output
         _, kwargs = ctor.call_args
         assert kwargs["collection"] == "home"
 
     def test_no_selector_is_none(self, tmp_path):
-        result, ctor = _run(tmp_path, ["info"])
+        result, ctor = _run(tmp_path, ["collection", "info"])
         assert result.exit_code == 0, result.output
         _, kwargs = ctor.call_args
         assert kwargs["collection"] is None

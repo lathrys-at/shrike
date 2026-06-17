@@ -24,29 +24,29 @@ def _unique_front() -> str:
 
 class TestInfo:
     def test_summary_default(self, runner):
-        result = runner.invoke(["info"])
+        result = runner.invoke(["collection", "info"])
         assert result.exit_code == 0
         assert "Collection" in result.output
         assert "Notes" in result.output
 
     def test_summary_json(self, runner):
-        data = runner.json(["info"])
+        data = runner.json(["collection", "info"])
         assert "summary" in data
         assert "notes" in data["summary"]
         assert "cards" in data["summary"]
 
     def test_decks_only(self, runner):
-        result = runner.invoke(["info", "--decks"])
+        result = runner.invoke(["collection", "info", "--decks"])
         assert result.exit_code == 0
         assert "Default" in result.output
 
     def test_types_only(self, runner):
-        result = runner.invoke(["info", "--types"])
+        result = runner.invoke(["collection", "info", "--types"])
         assert result.exit_code == 0
         assert "Basic" in result.output
 
     def test_stats_only(self, runner):
-        result = runner.invoke(["info", "--stats"])
+        result = runner.invoke(["collection", "info", "--stats"])
         assert result.exit_code == 0
 
     def test_stats_reflect_notes(self, runner):
@@ -64,7 +64,7 @@ class TestInfo:
                 "Back=A",
             ]
         )
-        data = runner.json(["info", "--stats"])
+        data = runner.json(["collection", "info", "--stats"])
         assert data["stats"]["total_notes"] >= 1
 
     def test_tags_reflect_notes(self, runner):
@@ -84,7 +84,7 @@ class TestInfo:
                 "mytag",
             ]
         )
-        data = runner.json(["info", "--tags"])
+        data = runner.json(["collection", "info", "--tags"])
         assert "mytag" in data["tags"]
 
 
@@ -546,14 +546,14 @@ class TestTagGroup:
         id1 = self._make(runner, "history::ww2")
         id2 = self._make(runner, "history::ww2,other")
 
-        data = runner.json(["tag", "rename", "history::ww2", "history::wwii"])
+        data = runner.json(["collection", "tag", "rename", "history::ww2", "history::wwii"])
         assert data["notes_modified"] == 2
         assert "history::wwii" in self._tags(runner, id1)
         assert "history::wwii" in self._tags(runner, id2)
 
     def test_rename_scoped_is_exact(self, runner):
         note_id = self._make(runner, "jp,jp-verbs")
-        data = runner.json(["tag", "rename", "jp", "japanese", "--note", note_id])
+        data = runner.json(["collection", "tag", "rename", "jp", "japanese", "--note", note_id])
         assert data["notes_modified"] == 1
         assert self._tags(runner, note_id) == ["japanese", "jp-verbs"]
 
@@ -562,7 +562,7 @@ class TestDeckGroup:
     """Deck lifecycle via CLI."""
 
     def _deck_names(self, runner):
-        return {d["name"] for d in runner.json(["info", "--decks"])["decks"]}
+        return {d["name"] for d in runner.json(["collection", "info", "--decks"])["decks"]}
 
     def test_create(self, runner):
         data = runner.json(["deck", "create", "CLIDeck::Sub"])
@@ -608,7 +608,11 @@ class TestDeckGroup:
 
     def _deck_id(self, runner, name):
         return str(
-            next(d["id"] for d in runner.json(["info", "--decks"])["decks"] if d["name"] == name)
+            next(
+                d["id"]
+                for d in runner.json(["collection", "info", "--decks"])["decks"]
+                if d["name"] == name
+            )
         )
 
     def test_rename_and_delete_by_id(self, runner):
@@ -719,7 +723,7 @@ class TestNoteDelete:
 
 
 class TestNoteSearch:
-    """`note search` on a server with no embeddings: exact substring still works."""
+    """`shrike search` on a server with no embeddings: exact substring still works."""
 
     def _make(self, runner, front: str) -> None:
         runner.json(
@@ -730,7 +734,7 @@ class TestNoteSearch:
     def test_substring_finds_note_json(self, runner):
         self._make(runner, "mitochondria powerhouse")
         self._make(runner, "ribosome protein")
-        data = runner.json(["note", "search", "mitochondria"])
+        data = runner.json(["search", "mitochondria"])
         matches = data["results"][0]["matches"]
         assert len(matches) == 1
         # CLI --json drops null fields, so an exact-only hit has no `score` key.
@@ -739,7 +743,7 @@ class TestNoteSearch:
 
     def test_substring_pretty_shows_snippet(self, runner):
         self._make(runner, "electron transport chain")
-        result = runner.invoke(["note", "search", "transport"])
+        result = runner.invoke(["search", "transport"])
         assert result.exit_code == 0
         assert "transport" in result.output
         # semantic ranking is unavailable on this server; that's surfaced (the
@@ -747,7 +751,7 @@ class TestNoteSearch:
         assert "unavailable" in result.output.lower()
 
     def test_requires_an_argument(self, runner):
-        result = runner.invoke(["note", "search"])
+        result = runner.invoke(["search"])
         assert result.exit_code != 0
 
 
@@ -804,7 +808,7 @@ class TestCollectionPrune:
         assert preview["dry_run"] is True
         assert "cporphan" in preview["unused_tags"]["tags"]
         # Still in the registry — preview mutated nothing.
-        assert "cporphan" in runner.json(["info", "--tags"])["tags"]
+        assert "cporphan" in runner.json(["collection", "info", "--tags"])["tags"]
 
     def test_pretty_preview_says_preview_only(self, runner):
         # Seed an orphan tag so there's something to preview (the per-test reset
@@ -830,7 +834,7 @@ class TestCollectionPrune:
 
         applied = runner.json(["collection", "prune", "--unused-tags", "--apply"])
         assert applied["dry_run"] is False
-        assert "cpapply" not in runner.json(["info", "--tags"])["tags"]
+        assert "cpapply" not in runner.json(["collection", "info", "--tags"])["tags"]
 
 
 class TestCollectionReload:
@@ -843,7 +847,7 @@ class TestCollectionReload:
         # No embedder in the non-embedding lane, so nothing to rebuild.
         assert result["rebuilding"] is False
         # Collection is still usable through the re-opened handle.
-        summary = runner.json(["info"])["summary"]
+        summary = runner.json(["collection", "info"])["summary"]
         assert "notes" in summary
 
     def test_reload_then_write(self, runner):
@@ -894,7 +898,7 @@ class TestMigrateType:
 
 
 class TestCollectionQuery:
-    """`shrike collection query` via CLI. Each test seeds its own note (xdist)."""
+    """`shrike search query` via CLI. Each test seeds its own note (xdist)."""
 
     def _make(self, runner, deck, front, tag):
         runner.json(
@@ -904,31 +908,31 @@ class TestCollectionQuery:
 
     def test_query_json(self, runner):
         self._make(runner, "CQ", "cq-card", "cqtag")
-        result = runner.json(["collection", "query", "tag:cqtag"])
+        result = runner.json(["search", "query", "tag:cqtag"])
         assert result["total"] == 1
         assert result["notes"][0]["content"]["Front"] == "cq-card"
 
     def test_query_brief_pretty(self, runner):
         self._make(runner, "CQB", "cqb-card", "cqbrief")
-        result = runner.invoke(["collection", "query", "tag:cqbrief", "--brief"])
+        result = runner.invoke(["search", "query", "tag:cqbrief", "--brief"])
         assert result.exit_code == 0
         assert "cqbrief" in result.output  # header echoes the expression
 
     def test_malformed_query_errors(self, runner):
-        result = runner.invoke(["collection", "query", "(unbalanced"])
+        result = runner.invoke(["search", "query", "(unbalanced"])
         assert result.exit_code != 0
 
 
 class TestIndexSave:
-    """`shrike index save` against a server with no embedding/index configured."""
+    """`shrike server index save` against a server with no embedding/index configured."""
 
     def test_save_empty_json(self, runner):
-        data = runner.json(["index", "save"])
+        data = runner.json(["server", "index", "save"])
         # No embedding service → no index has been built, nothing to persist.
         assert data["status"] == "empty"
 
     def test_save_empty_pretty(self, runner):
-        result = runner.invoke(["index", "save"])
+        result = runner.invoke(["server", "index", "save"])
         assert result.exit_code == 0
         assert "no index" in result.output.lower()
 
@@ -1232,17 +1236,17 @@ class TestOutputModes:
     """Test --json, --pretty, --no-pretty across commands."""
 
     def test_json_flag(self, runner):
-        result = runner.invoke(["--json", "info"])
+        result = runner.invoke(["--json", "collection", "info"])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert "summary" in data
 
     def test_no_pretty(self, runner):
-        result = runner.invoke(["--no-pretty", "info"])
+        result = runner.invoke(["--no-pretty", "collection", "info"])
         assert result.exit_code == 0
 
     def test_json_pretty_conflict(self, runner):
-        result = runner.invoke(["info", "--json", "--pretty"])
+        result = runner.invoke(["collection", "info", "--json", "--pretty"])
         assert result.exit_code != 0
 
 

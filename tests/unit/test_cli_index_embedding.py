@@ -1,4 +1,4 @@
-"""Unit coverage for the `shrike index` and `shrike embedding` CLI commands.
+"""Unit coverage for the `shrike server index` and `shrike server embedding` CLI commands.
 
 These commands are thin clients: they call `ShrikeClient` methods and render the
 typed responses. In CI they're otherwise only reached by the embedding-gated
@@ -78,7 +78,7 @@ class TestIndexStatus:
         fake.index_status.return_value = IndexReady(
             state="ready", available=True, size=42, ndim=384, col_mod=99, path="/i.usearch"
         )
-        result = run("index", "status")
+        result = run("server", "index", "status")
         assert result.exit_code == 0
         assert "ready" in result.output
         assert "42" in result.output
@@ -87,81 +87,81 @@ class TestIndexStatus:
 
     def test_ready_unknown_dims(self, run, fake):
         fake.index_status.return_value = IndexReady(state="ready", size=0)
-        result = run("index", "status")
+        result = run("server", "index", "status")
         assert "?" in result.output
 
     def test_building(self, run, fake):
         fake.index_status.return_value = IndexBuilding(
             state="building", progress=IndexProgress(indexed=3, total=10)
         )
-        result = run("index", "status")
+        result = run("server", "index", "status")
         assert "building" in result.output
         assert "3 / 10" in result.output
 
     def test_error(self, run, fake):
         fake.index_status.return_value = IndexErrored(state="error", error="kaboom")
-        result = run("index", "status")
+        result = run("server", "index", "status")
         assert "error" in result.output
         assert "kaboom" in result.output
 
     def test_unavailable(self, run, fake):
         fake.index_status.return_value = IndexUnavailable()
-        result = run("index", "status")
+        result = run("server", "index", "status")
         assert "unavailable" in result.output
 
     def test_json(self, run, fake):
         fake.index_status.return_value = IndexReady(state="ready", size=5, ndim=7)
-        result = run("--json", "index", "status")
+        result = run("--json", "server", "index", "status")
         assert json.loads(result.output)["state"] == "ready"
 
 
 class TestIndexSave:
     def test_saved_with_vectors(self, run, fake):
         fake.index_save.return_value = IndexSaved(status="saved", size=10, pending=3)
-        result = run("index", "save")
+        result = run("server", "index", "save")
         assert "10" in result.output
         assert "3 pending" in result.output
 
     def test_saved_empty(self, run, fake):
         fake.index_save.return_value = IndexSaved(status="saved", size=0, pending=0)
-        result = run("index", "save")
+        result = run("server", "index", "save")
         assert "empty" in result.output.lower()
 
     def test_empty(self, run, fake):
         fake.index_save.return_value = IndexSaveEmpty(status="empty")
-        result = run("index", "save")
+        result = run("server", "index", "save")
         assert "none has been built" in result.output
 
     def test_building(self, run, fake):
         fake.index_save.return_value = IndexSaveBuilding(
             status="building", progress=IndexProgress(indexed=1, total=4)
         )
-        result = run("index", "save")
+        result = run("server", "index", "save")
         assert "building" in result.output
         assert "1 / 4" in result.output
 
     def test_json(self, run, fake):
         fake.index_save.return_value = IndexSaved(status="saved", size=2, pending=0)
-        result = run("--json", "index", "save")
+        result = run("--json", "server", "index", "save")
         assert json.loads(result.output)["status"] == "saved"
 
 
 class TestIndexRebuild:
     def test_complete_empty_collection(self, run, fake):
         fake.index_rebuild.return_value = IndexRebuildComplete(status="complete", size=0)
-        result = run("index", "rebuild")
+        result = run("server", "index", "rebuild")
         assert "nothing to index" in result.output.lower()
 
     def test_started_background(self, run, fake):
         fake.index_rebuild.return_value = IndexRebuildStarted(status="started", total=7)
-        result = run("index", "rebuild", "--background")
+        result = run("server", "index", "rebuild", "--background")
         assert "7 notes" in result.output
 
     def test_already_building_background(self, run, fake):
         fake.index_rebuild.return_value = IndexRebuildAlreadyBuilding(
             status="already_building", progress=IndexProgress(indexed=2, total=9)
         )
-        result = run("index", "rebuild", "--background")
+        result = run("server", "index", "rebuild", "--background")
         assert "already in progress" in result.output
 
     def test_started_foreground_polls_to_ready(self, run, fake):
@@ -169,18 +169,18 @@ class TestIndexRebuild:
         # _poll_progress reads server_status(); return ready immediately so it
         # exits the loop without sleeping.
         fake.server_status.return_value = _server(IndexReady(state="ready", size=3, ndim=8))
-        result = run("index", "rebuild")
+        result = run("server", "index", "rebuild")
         assert result.exit_code == 0
         assert "Index ready" in result.output
 
     def test_json_started_background(self, run, fake):
         fake.index_rebuild.return_value = IndexRebuildStarted(status="started", total=4)
-        result = run("--json", "index", "rebuild", "--background")
+        result = run("--json", "server", "index", "rebuild", "--background")
         assert json.loads(result.output)["status"] == "started"
 
     def test_complete_json(self, run, fake):
         fake.index_rebuild.return_value = IndexRebuildComplete(status="complete", size=0)
-        result = run("--json", "index", "rebuild")
+        result = run("--json", "server", "index", "rebuild")
         assert json.loads(result.output)["status"] == "complete"
 
 
@@ -195,7 +195,7 @@ class TestPollProgress:
             _server(IndexReady(state="ready", size=3, ndim=8)),  # final read for the summary
         ]
         with patch("shrike.cli.index_cmd.time.sleep"):
-            result = run("index", "rebuild")
+            result = run("server", "index", "rebuild")
         assert result.exit_code == 0
         assert "Index ready" in result.output
 
@@ -203,7 +203,7 @@ class TestPollProgress:
         fake.index_rebuild.return_value = IndexRebuildStarted(status="started", total=3)
         fake.server_status.return_value = _server(IndexErrored(state="error", error="boom"))
         with patch("shrike.cli.index_cmd.time.sleep"):
-            result = run("index", "rebuild")
+            result = run("server", "index", "rebuild")
         assert result.exit_code != 0
         assert "boom" in result.output
 
@@ -216,21 +216,21 @@ class TestPollProgress:
             _server(IndexReady(state="ready", size=1, ndim=4)),
         ]
         with patch("shrike.cli.index_cmd.time.sleep"):
-            result = run("index", "rebuild")
+            result = run("server", "index", "rebuild")
         assert result.exit_code == 0
 
     def test_json_poll_complete(self, run, fake):
         fake.index_rebuild.return_value = IndexRebuildStarted(status="started", total=1)
         fake.server_status.return_value = _server(IndexReady(state="ready", size=1, ndim=4))
         with patch("shrike.cli.index_cmd.time.sleep"):
-            result = run("--json", "index", "rebuild")
+            result = run("--json", "server", "index", "rebuild")
         assert json.loads(result.output)["status"] == "complete"
 
     def test_json_poll_error(self, run, fake):
         fake.index_rebuild.return_value = IndexRebuildStarted(status="started", total=1)
         fake.server_status.return_value = _server(IndexErrored(state="error", error="boom"))
         with patch("shrike.cli.index_cmd.time.sleep"):
-            result = run("--json", "index", "rebuild")
+            result = run("--json", "server", "index", "rebuild")
         assert result.exit_code == 1
         assert json.loads(result.output)["status"] == "error"
 
@@ -240,7 +240,7 @@ class TestEmbeddingStatus:
         fake.embedding_status.return_value = EmbeddingRunning(
             available=True, pid=123, url="http://127.0.0.1:8373", model="/m.gguf"
         )
-        result = run("embedding", "status")
+        result = run("server", "embedding", "status")
         assert "available" in result.output
         assert "123" in result.output
         assert "/m.gguf" in result.output
@@ -251,12 +251,12 @@ class TestEmbeddingStatus:
     )
     def test_down_states(self, run, fake, state, needle):
         fake.embedding_status.return_value = EmbeddingDown(state=state)
-        result = run("embedding", "status")
+        result = run("server", "embedding", "status")
         assert needle in result.output
 
     def test_json(self, run, fake):
         fake.embedding_status.return_value = EmbeddingRunning(available=True, pid=1)
-        result = run("--json", "embedding", "status")
+        result = run("--json", "server", "embedding", "status")
         assert json.loads(result.output)["state"] == "running"
 
 
@@ -265,7 +265,7 @@ class TestEmbeddingStart:
         fake.embedding_start.return_value = EmbeddingAlreadyRunning(
             status="already_running", embedding=EmbeddingRunning(available=True)
         )
-        result = run("embedding", "start")
+        result = run("server", "embedding", "start")
         assert "already running" in result.output.lower()
 
     def test_started_not_building(self, run, fake):
@@ -274,7 +274,7 @@ class TestEmbeddingStart:
             embedding=EmbeddingRunning(available=True, model="/m.gguf"),
             index=IndexUnavailable(),
         )
-        result = run("embedding", "start")
+        result = run("server", "embedding", "start")
         assert "started" in result.output.lower()
         assert "/m.gguf" in result.output
 
@@ -284,7 +284,7 @@ class TestEmbeddingStart:
             embedding=EmbeddingRunning(available=True),
             index=IndexBuilding(state="building", progress=IndexProgress(indexed=0, total=5)),
         )
-        result = run("embedding", "start", "--background")
+        result = run("server", "embedding", "start", "--background")
         assert "rebuild started in the background" in result.output.lower()
 
     def test_started_building_polls(self, run, fake):
@@ -295,7 +295,7 @@ class TestEmbeddingStart:
         )
         fake.server_status.return_value = _server(IndexReady(state="ready", size=2, ndim=8))
         fake.embedding_status.return_value = EmbeddingRunning(available=True, model="/m.gguf")
-        result = run("embedding", "start")
+        result = run("server", "embedding", "start")
         assert result.exit_code == 0
         assert "Index ready" in result.output
 
@@ -303,7 +303,7 @@ class TestEmbeddingStart:
         fake.embedding_start.return_value = EmbeddingAlreadyRunning(
             status="already_running", embedding=EmbeddingRunning(available=True)
         )
-        result = run("--json", "embedding", "start")
+        result = run("--json", "server", "embedding", "start")
         assert json.loads(result.output)["status"] == "already_running"
 
 
@@ -312,17 +312,17 @@ class TestEmbeddingStop:
         fake.embedding_stop.return_value = EmbeddingStopped(
             status="stopped", index=IndexUnavailable()
         )
-        result = run("embedding", "stop")
+        result = run("server", "embedding", "stop")
         assert "stopped" in result.output.lower()
 
     def test_not_running(self, run, fake):
         fake.embedding_stop.return_value = EmbeddingNotRunning(status="not_running")
-        result = run("embedding", "stop")
+        result = run("server", "embedding", "stop")
         assert "not running" in result.output.lower()
 
     def test_json(self, run, fake):
         fake.embedding_stop.return_value = EmbeddingStopped(
             status="stopped", index=IndexUnavailable()
         )
-        result = run("--json", "embedding", "stop")
+        result = run("--json", "server", "embedding", "stop")
         assert json.loads(result.output)["status"] == "stopped"

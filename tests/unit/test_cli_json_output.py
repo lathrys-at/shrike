@@ -76,7 +76,7 @@ class TestJsonNullStripping:
         # and must not appear as explicit nulls in --json output.
         fake.collection_info.return_value = CollectionInfo(summary=_summary())
 
-        result = run("--json", "info")
+        result = run("--json", "collection", "info")
 
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)

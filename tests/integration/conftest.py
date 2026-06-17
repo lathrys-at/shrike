@@ -207,7 +207,11 @@ _MCP_READ_TOOLS = frozenset(
         "collection_check",
     }
 )
-_CLI_READ_VERBS = frozenset({"list", "show", "search", "status", "logs", "fetch", "check"})
+_CLI_READ_VERBS = frozenset({"list", "show", "status", "logs", "fetch", "check", "info"})
+# Whole groups that are read-only end to end (#683 rehome): `search` (semantic +
+# substring search, raw query, coverage) never mutates the collection, and its
+# default-command form `search <query>` has the query — not a verb — as args[1].
+_CLI_READ_GROUPS = frozenset({"search"})
 
 
 def _cli_noun_verb(args: list[str]) -> tuple[str | None, str | None]:
@@ -216,6 +220,30 @@ def _cli_noun_verb(args: list[str]) -> tuple[str | None, str | None]:
     while a and a[0] in ("--json", "--no-pretty", "--pretty"):
         a.pop(0)
     return (a[0] if a else None, a[1] if len(a) > 1 else None)
+
+
+def _cli_is_read(args: list[str]) -> bool:
+    """Whether a CLI invocation is read-only (so the per-test reset can skip it).
+
+    Read-only when the top-level group is wholly read-only (`search`) or a token
+    on the command PATH is a known read verb (`info`/`status`/`list`/… — matches
+    the leaf verb of a rehomed path like `collection info` or `server index
+    status`). Only the leading path tokens are inspected, never option values, so
+    a tag literally named `list` can't masquerade as a read. Default-dirty is safe
+    — at worst the reset enumerates needlessly — so this need not be exhaustive.
+    """
+    a = list(args)
+    while a and a[0] in ("--json", "--no-pretty", "--pretty"):
+        a.pop(0)
+    if a and a[0] in _CLI_READ_GROUPS:
+        return True
+    # The command path is the leading tokens before the first option/value.
+    path: list[str] = []
+    for tok in a:
+        if tok.startswith("-"):
+            break
+        path.append(tok)
+    return any(tok in _CLI_READ_VERBS for tok in path)
 
 
 class _ResetTracker:
@@ -376,10 +404,9 @@ class CLIRunner:
         self._config = config_path
 
     def invoke(self, args: list[str], **kwargs: Any) -> Any:
-        noun, verb = _cli_noun_verb(args)
         # Anything that isn't a known read command is treated as a mutation
         # (default-dirty is safe — at worst the reset enumerates needlessly).
-        if not (noun == "info" or verb in _CLI_READ_VERBS):
+        if not _cli_is_read(args):
             _reset_tracker.dirty = True
         return self._runner.invoke(
             cli,

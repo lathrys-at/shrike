@@ -229,26 +229,26 @@ class TestMediaCLI:
         src = tmp_path / "pic.png"
         src.write_bytes(b"\x89PNG\r\n\x1a\nhello-cli")
 
-        store = media_runner.invoke(["media", "store", str(src)])
+        store = media_runner.invoke(["collection", "media", "store", str(src)])
         assert store.exit_code == 0, store.output
         assert "Stored" in store.output and "pic.png" in store.output
 
-        listing = media_runner.json(["media", "list"])
+        listing = media_runner.json(["collection", "media", "list"])
         assert "pic.png" in [f["filename"] for f in listing["files"]]
 
         dest = tmp_path / "out.png"
-        fetch = media_runner.invoke(["media", "fetch", "pic.png", "-o", str(dest)])
+        fetch = media_runner.invoke(["collection", "media", "fetch", "pic.png", "-o", str(dest)])
         assert fetch.exit_code == 0, fetch.output
         assert dest.read_bytes() == b"\x89PNG\r\n\x1a\nhello-cli"
 
-        delete = media_runner.invoke(["media", "delete", "pic.png", "--yes"])
+        delete = media_runner.invoke(["collection", "media", "delete", "pic.png", "--yes"])
         assert delete.exit_code == 0, delete.output
-        assert media_runner.json(["media", "list", "pic.png"])["count"] == 0
+        assert media_runner.json(["collection", "media", "list", "pic.png"])["count"] == 0
 
     def test_collection_check_reports_unused(self, media_runner, tmp_path):
         src = tmp_path / "orphan.png"
         src.write_bytes(b"\x89PNG\r\n\x1a\norphan")
-        media_runner.invoke(["media", "store", str(src)])
+        media_runner.invoke(["collection", "media", "store", str(src)])
 
         data = media_runner.json(["collection", "check"])
         assert "orphan.png" in data["unused"]
@@ -259,7 +259,7 @@ class TestMediaCLI:
         # plumbing + the default-off behavior end-to-end.
         src = tmp_path / "on-server.png"
         src.write_bytes(b"\x89PNG\r\n\x1a\nserver-side")
-        result = media_runner.invoke(["media", "store", "--server-path", str(src)])
+        result = media_runner.invoke(["collection", "media", "store", "--server-path", str(src)])
         assert result.exit_code == 1
         assert "not enabled" in result.output
 

@@ -1,4 +1,4 @@
-"""CLI behavior for `shrike import` (#72 S3), with the client stubbed."""
+"""CLI behavior for `shrike collection import` (#72 S3; rehomed in #683), client stubbed."""
 
 from __future__ import annotations
 
@@ -19,7 +19,9 @@ def _run(tmp_path, args, **kwargs):
         new=3, updated=1, found_notes=4, reindexed=True
     )
     with patch("shrike.client.ShrikeClient", return_value=fake):
-        result = CliRunner().invoke(cli, ["--config", str(cfg), "import", *args], **kwargs)
+        result = CliRunner().invoke(
+            cli, ["--config", str(cfg), "collection", "import", *args], **kwargs
+        )
     return result, fake
 
 
