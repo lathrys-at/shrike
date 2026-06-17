@@ -289,7 +289,7 @@ Stop the running daemon.
 
 ### `shrike server status`
 
-Show whether the server is running, and if so, its URL, PID, collection path, and uptime. In cooperative-locking mode it also shows whether the collection is currently held or released (idle).
+Show whether the server is running, and if so, its URL, PID, collection path, and uptime. Below that it reports the index, derived-text store, recognition, and embedding blocks (in that order), each with its status on its own line. The index block breaks down per modality sub-index; the embedding block lists one entry per configured space, keyed by its modalities. In cooperative-locking mode it also shows whether the collection is currently held or released (idle).
 
 ### `shrike server logs`
 
@@ -324,7 +324,7 @@ Save the index, then stop the embedding service and mark the index `unavailable`
 
 #### `shrike server embedding status`
 
-Show whether the embedding service is running, its URL, PID, and model.
+Show each configured embedding space, one entry per space keyed by its modalities (`Embedding [text]`, `Embedding [text, image]`), with that space's status, URL, PID, model, provider, and batching. A multi-space profile reports every space, not just the primary.
 
 ### `shrike server index`
 
@@ -340,7 +340,7 @@ Force an immediate flush of the in-memory index to disk (off the event loop). No
 
 #### `shrike server index status`
 
-Show index state (`ready` / `building` / `unavailable` / `error`), vector count, dimensions, and on-disk path.
+Show index state (`ready` / `building` / `unavailable` / `error`) and on-disk path, with a per-modality breakdown of each sub-index's vector count and dimensions (a text+image collection reports its `text` and `image` sub-indexes separately, since they differ in dimensionality).
 
 ---
 
