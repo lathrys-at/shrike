@@ -1,4 +1,4 @@
-//! `shrike-net` — the one home for Shrike's SSRF safety primitives (#592).
+//! `shrike-network` — the one home for Shrike's SSRF safety primitives (#592).
 //!
 //! **Trust-boundary code**: changes here go through the security-review gate.
 //!

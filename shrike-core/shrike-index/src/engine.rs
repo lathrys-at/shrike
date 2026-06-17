@@ -30,9 +30,9 @@ use crate::new_index;
 /// Mirrors `shrike.index_engine.SEARCH_OVERFETCH`.
 const SEARCH_OVERFETCH: usize = 4;
 
-// Canonical docs live in shrike-store-api (#389); re-exported here so the
+// Canonical docs live in shrike-store (#389); re-exported here so the
 // pre-trait import paths keep working.
-pub use shrike_store_api::{ActivationStats, ModalityRanking};
+pub use shrike_store::{ActivationStats, ModalityRanking};
 
 struct Sub {
     /// `Arc` so [`MultiModalIndex::save`] can clone a cheap handle under the
@@ -676,7 +676,7 @@ impl MultiModalIndex {
 /// The store contract (#389): every method forwards to the inherent impl, so
 /// the concrete engine keeps its full API while the kernel consumes
 /// `Arc<dyn VectorIndex>`.
-impl shrike_store_api::VectorIndex for MultiModalIndex {
+impl shrike_store::VectorIndex for MultiModalIndex {
     fn size(&self) -> usize {
         Self::size(self)
     }

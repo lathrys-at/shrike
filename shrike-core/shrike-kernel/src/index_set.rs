@@ -43,7 +43,7 @@ use std::sync::{Arc, RwLock};
 use blake2::digest::consts::U16;
 use blake2::{Blake2b, Digest};
 use shrike_error::NativeResult;
-use shrike_store_api::VectorIndex;
+use shrike_store::VectorIndex;
 
 use crate::index_orchestrator::{DebouncedSaver, IndexOrchestrator};
 

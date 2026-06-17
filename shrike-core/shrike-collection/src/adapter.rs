@@ -139,12 +139,12 @@ impl FieldsState {
 
 /// Build the import summary (#72) from anki's `ImportResponse.Log` — the
 /// counts the `ImportSummary` carries. Kept here (adjacent to the RPC) since it
-/// reads the anki proto; the type itself lives in shrike-store-api (the trait
-/// contract).
+/// reads the anki proto; the type itself lives in `crate::contract` (the
+/// collection contract, rehomed here in #706).
 fn import_summary_from_log(
     log: anki_proto::import_export::import_response::Log,
-) -> shrike_store_api::ImportSummary {
-    shrike_store_api::ImportSummary {
+) -> crate::contract::ImportSummary {
+    crate::contract::ImportSummary {
         new: log.new.len(),
         updated: log.updated.len(),
         duplicate: log.duplicate.len(),
@@ -157,7 +157,7 @@ fn import_summary_from_log(
     }
 }
 
-pub use shrike_store_api::ServiceNote;
+pub use crate::contract::ServiceNote;
 
 fn proto_to_note(n: anki_proto::notes::Note) -> ServiceNote {
     ServiceNote {
@@ -625,8 +625,8 @@ impl ServiceAdapter {
     pub fn import_anki_package(
         &self,
         package_path: &str,
-        options: shrike_store_api::ImportOptions,
-    ) -> NativeResult<shrike_store_api::ImportSummary> {
+        options: crate::contract::ImportOptions,
+    ) -> NativeResult<crate::contract::ImportSummary> {
         let req = anki_proto::import_export::ImportAnkiPackageRequest {
             package_path: package_path.to_string(),
             options: Some(anki_proto::import_export::ImportAnkiPackageOptions {

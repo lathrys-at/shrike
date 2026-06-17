@@ -25,8 +25,8 @@ shrike-error = { workspace = true }
 # and the IP-pinned agent builder — one home, shared with the remote engine
 # crates. A LOW utility crate (no engine dep, no kernel dep), so this edge keeps
 # the kernel pure.
-shrike-net = { workspace = true }
-shrike-store-api = { workspace = true }
+shrike-network = { workspace = true }
+shrike-store = { path = "../shrike-store" }
 # media URL fetch (#278 step 5b, kernel-owned since #389 B2): ureq is a
 # SYNCHRONOUS client — no tokio coupling; the prepare rides the blocking pool.
 ureq = "2"
@@ -55,6 +55,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "rt", "sync", "time"] }
 # wire types.
 [dev-dependencies]
 futures = { version = "0.3", features = ["executor"] }
+shrike-collection = { path = "../shrike-collection" }
 shrike-error = { workspace = true }
 shrike-schemas = { path = "../shrike-schemas" }
-shrike-store-api = { workspace = true }

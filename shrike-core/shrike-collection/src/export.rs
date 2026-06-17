@@ -13,10 +13,10 @@
 //! exactly like a write — export is exclusive by nature).
 //!
 //! The request/scope/format/outcome types are the store contract's
-//! (`shrike_store_api`), shared with the kernel and any other store impl.
+//! (`crate::contract`), shared with the kernel and any other store impl.
 
 use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
-use shrike_store_api::{ExportOutcome, ExportRequest, ExportScope, PackageFormat};
+use crate::contract::{ExportOutcome, ExportRequest, ExportScope, PackageFormat};
 
 use crate::CollectionCore;
 

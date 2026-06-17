@@ -102,16 +102,16 @@ pub fn path_within_any_root(path: &str, roots: &[String]) -> bool {
 /// server-local `path` inside an operator-configured root is deliberately
 /// uncapped.
 fn check_media_size(len: usize) -> NativeResult<()> {
-    if len > shrike_store_api::MEDIA_MAX_BYTES {
+    if len > shrike_store::MEDIA_MAX_BYTES {
         return Err(shrike_error::NativeError::invalid_input(format!(
             "file exceeds the {}-byte limit",
-            shrike_store_api::MEDIA_MAX_BYTES
+            shrike_store::MEDIA_MAX_BYTES
         )));
     }
     Ok(())
 }
 
-pub use shrike_store_api::{PreparedMedia, PreparedMediaSource};
+pub use crate::contract::{PreparedMedia, PreparedMediaSource};
 
 impl CollectionCore {
     /// The shared write tail of every store path — the full `_write_one_media`

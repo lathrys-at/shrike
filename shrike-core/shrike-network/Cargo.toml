@@ -7,13 +7,13 @@
 # and NOT on shrike-kernel (it sits BELOW both), so the //shrike-core:layering_check
 # kernel-purity and engine-purity rules both stay satisfied.
 [package]
-name = "shrike-net"
+name = "shrike-network"
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [lib]
-name = "shrike_net"
+name = "shrike_network"
 
 [dependencies]
 shrike-error = { workspace = true }

@@ -64,7 +64,7 @@ fn upsert_wire_returns_ok_results_even_when_the_embed_tail_fails() {
         ]"#;
         let notes: Vec<shrike_schemas::NoteInput> = serde_json::from_str(notes_json).unwrap();
         let result = kernel
-            .upsert_notes_wire(notes, shrike_store_api::DuplicatePolicy::Error, false)
+            .upsert_notes_wire(notes, shrike_collection::DuplicatePolicy::Error, false)
             .await;
 
         // FIXED (#590): the tail is best-effort — the committed write returns
@@ -82,7 +82,7 @@ fn upsert_wire_returns_ok_results_even_when_the_embed_tail_fails() {
         // rule), which can only happen if the first call persisted the note.
         let again: Vec<shrike_schemas::NoteInput> = serde_json::from_str(notes_json).unwrap();
         let second = kernel
-            .upsert_notes_wire(again, shrike_store_api::DuplicatePolicy::Error, true)
+            .upsert_notes_wire(again, shrike_collection::DuplicatePolicy::Error, true)
             .await;
         let results = second.expect("dry-run validation should not error");
         let dup = results.iter().any(|r| {

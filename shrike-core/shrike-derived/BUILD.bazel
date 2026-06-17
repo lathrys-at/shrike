@@ -18,7 +18,7 @@ rust_library(
     crate_features = ["bundled"],
     deps = [
         "//shrike-core/shrike-error:shrike_error",
-        "//shrike-core/shrike-store-api:shrike_store_api",
+        "//shrike-core/shrike-store:shrike_store",
         "@crates//:rusqlite",
         "@crates//:tracing",
     ],

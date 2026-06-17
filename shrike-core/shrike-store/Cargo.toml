@@ -1,0 +1,15 @@
+# The store contract crate (#389; slimmed in #706): the two store traits the
+# kernel consumes and that have TWO impl crates each over disjoint backends —
+# the vector index (shrike-index) and the derived text store (shrike-derived) —
+# so they cannot live in either impl crate (the dependency points the other
+# way). The Collection trait moved to shrike-collection in #706 (its sole
+# implementer); what remains is a tiny LEAF — only shrike-error, no schemas, no
+# serde, no kernel dep, no pyo3, no runtime.
+[package]
+name = "shrike-store"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+shrike-error = { workspace = true }

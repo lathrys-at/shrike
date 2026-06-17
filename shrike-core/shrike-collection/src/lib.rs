@@ -18,6 +18,7 @@
 //! Pin policy: the anki git tag equals the pip wheel version; bumped together.
 
 mod adapter;
+pub mod contract;
 pub mod embed_text;
 mod export;
 mod media;
@@ -29,9 +30,9 @@ pub use adapter::{FieldsState, ServiceAdapter};
 pub use embed_text::{extract_image_refs, extract_sound_refs, EMBED_TEXT_VERSION};
 use shrike_error::{NativeError, NativeResult};
 
-// Canonical homes moved to the store contract (#389); re-exported so the
-// pre-trait import paths keep working.
-pub use shrike_store_api::{
+// The collection contract — the `Collection` trait + its vocabulary — lives in
+// this crate (#706, rehomed from the store-contract crate beside its sole impl).
+pub use contract::{
     Collection, CreateOutcome, DuplicatePolicy, ExportOutcome, ExportRequest, ExportScope,
     ImportOptions, ImportSummary, ImportUpdateCondition, OwnedFieldRow, PackageFormat,
     PreparedMedia, PreparedMediaSource, ServiceNote,
@@ -256,12 +257,15 @@ impl CollectionCore {
     }
 }
 
-/// The store contract (#389): every method forwards to the inherent impl,
+/// The store contract impl (#389): every method forwards to the inherent impl,
 /// so the concrete core keeps its full API while the kernel and the host
-/// bindings consume `dyn Collection`.
+/// bindings consume `dyn Collection`. (The trait itself lives in
+/// [`crate::contract`]; this is the impl-only module — named distinctly so the
+/// two don't collide, #706.)
 #[allow(clippy::use_self)]
-mod contract {
+mod contract_impl {
     use super::{CollectionCore, CreateOutcome, DuplicatePolicy, NativeResult};
+    use crate::contract::Collection;
     use crate::{ExportOutcome, ExportRequest, OwnedFieldRow, PreparedMedia, ServiceNote};
     use serde_json::Value;
     use shrike_schemas::{
@@ -275,7 +279,7 @@ mod contract {
     };
     use std::collections::BTreeMap;
 
-    impl shrike_store_api::Collection for CollectionCore {
+    impl Collection for CollectionCore {
         fn close(&self) -> NativeResult<()> {
             Self::close(self)
         }
@@ -417,8 +421,8 @@ mod contract {
         fn import_package(
             &self,
             package_path: &str,
-            options: shrike_store_api::ImportOptions,
-        ) -> NativeResult<shrike_store_api::ImportSummary> {
+            options: crate::contract::ImportOptions,
+        ) -> NativeResult<crate::contract::ImportSummary> {
             Self::import_package(self, package_path, options)
         }
         fn find_replace_notes(
@@ -1409,7 +1413,7 @@ mod tests {
         assert_eq!(deleted.not_found, vec!["nope.png"]);
 
         // The byte-source size cap (the path source is deliberately uncapped).
-        let oversize = vec![0u8; shrike_store_api::MEDIA_MAX_BYTES + 1];
+        let oversize = vec![0u8; shrike_store::MEDIA_MAX_BYTES + 1];
         assert!(core
             .store_media_bytes(Some("big.bin"), &oversize, None)
             .is_err());
@@ -1984,7 +1988,7 @@ mod tests {
         // apkg export above left it open; the colpkg below consumes it last).
         let _ = core.import_package(
             "/nonexistent-shrike-import-tripwire.apkg",
-            shrike_store_api::ImportOptions::default(),
+            crate::contract::ImportOptions::default(),
         );
         core.export_package(&ExportRequest {
             out_path: dir.join("drive.colpkg").to_str().unwrap().to_string(),

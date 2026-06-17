@@ -83,7 +83,7 @@ pub struct RemoteEmbedderConfig {
 /// and **pinned to `base_url`'s resolved IP** (closing the DNS-rebinding
 /// TOCTOU), and a redirect is followed only when it stays on the SAME host (an
 /// embeddings endpoint that 30x-es you to a different host is the SSRF vector —
-/// `shrike_net::same_host_redirect` refuses it). NOTE: the IP is pinned once at
+/// `shrike_network::same_host_redirect` refuses it). NOTE: the IP is pinned once at
 /// construction; an endpoint whose address rotates mid-life (a cloud LB
 /// draining a node) would surface as a transient failure → the bounded retry,
 /// not silently wrong — reconstruct the engine to re-pin.
@@ -147,7 +147,7 @@ impl RemoteEmbedder {
         // SSRF posture (#592): pin the connection to base_url's resolved IP with
         // auto-redirects OFF. The agent-level timeout is a backstop; each request
         // sets its own via `.timeout()`.
-        let (agent, base) = shrike_net::pinned_endpoint_agent(&base_url, EMBED_TIMEOUT)?;
+        let (agent, base) = shrike_network::pinned_endpoint_agent(&base_url, EMBED_TIMEOUT)?;
         Ok(Self {
             base_url,
             base,
@@ -246,16 +246,16 @@ impl RemoteEmbedder {
         // The redirect loop (SSRF #592): auto-redirects are OFF, so a 3xx
         // surfaces as Ok(resp). Follow it only if it stays on the SAME host
         // (the pinned base host); a cross-host redirect is refused. Capped at
-        // shrike_net::MAX_REDIRECTS. Each URL gets its own transient-retry.
+        // shrike_network::MAX_REDIRECTS. Each URL gets its own transient-retry.
         let mut current = format!("{}{}", self.base_url, path);
         let mut from = self.base.clone();
-        for _hop in 0..=shrike_net::MAX_REDIRECTS {
+        for _hop in 0..=shrike_network::MAX_REDIRECTS {
             let resp = self.post_one_url_with_retry(&current, payload)?;
             if (300..400).contains(&resp.status()) {
                 let location = resp.header("location").ok_or_else(|| {
                     NativeError::unavailable("redirect response without a Location header")
                 })?;
-                let target = shrike_net::same_host_redirect(&from, location)?;
+                let target = shrike_network::same_host_redirect(&from, location)?;
                 current = target.to_string();
                 from = target;
                 continue;
@@ -264,7 +264,7 @@ impl RemoteEmbedder {
         }
         Err(NativeError::unavailable(format!(
             "too many redirects (>{})",
-            shrike_net::MAX_REDIRECTS
+            shrike_network::MAX_REDIRECTS
         )))
     }
 

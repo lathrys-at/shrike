@@ -1,8 +1,13 @@
-//! The collection contract (#389 PR B): the typed surface the kernel and the
-//! host bindings drive — anki never leaks through it (the canonical impl,
-//! `shrike-collection`'s `CollectionCore`, keeps its protobuf adapter
-//! private). Sequenced after #391 so every method speaks shrike-schemas
+//! The collection contract (#389 PR B; rehomed here in #706): the typed
+//! surface the kernel and the host bindings drive — anki never leaks through
+//! it (the canonical impl, this crate's `CollectionCore`, keeps its protobuf
+//! adapter private). Sequenced after #391 so every method speaks shrike-schemas
 //! types, not JSON strings.
+//!
+//! Lives in `shrike-collection` (not the store-contract crate) because this
+//! crate is the SOLE implementer and every consumer (kernel/pyo3/cabi) already
+//! depends on it — homing the trait beside its only impl removes the edge a
+//! separate contract crate would have forced (#706).
 
 use std::collections::BTreeMap;
 

@@ -9,7 +9,7 @@ exports_files(["Cargo.toml"])
 # BOTH shrike-kernel (media_fetch) and the remote engine crates — kernel-unaware
 # and engine-unaware, so it sits below both (//shrike-core:layering_check stays green).
 rust_library(
-    name = "shrike_net",
+    name = "shrike_network",
     srcs = ["src/lib.rs"],
     edition = "2021",
     deps = [
@@ -21,7 +21,7 @@ rust_library(
 )
 
 rust_test(
-    name = "shrike_net_test",
+    name = "shrike_network_test",
     size = "small",
-    crate = ":shrike_net",
+    crate = ":shrike_network",
 )

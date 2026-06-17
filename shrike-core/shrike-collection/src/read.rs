@@ -55,7 +55,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// read at 100k notes.
 type NoteFieldRow = (i64, std::sync::Arc<Vec<String>>, Vec<String>);
 
-pub use shrike_store_api::OwnedFieldRow;
+pub use crate::contract::OwnedFieldRow;
 
 pub(crate) fn ids_sql_list(ids: &[i64]) -> String {
     ids.iter()

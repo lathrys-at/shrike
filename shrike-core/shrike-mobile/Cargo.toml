@@ -40,7 +40,7 @@ bundled-sqlite = ["shrike-derived/bundled"]
 # The anki collection core + kernel binding. Always on for any usable mobile
 # build (the app owns a sandboxed collection); still a named feature so a
 # compute-only shape stays expressible, exactly like the server build.
-anki-core = ["dep:shrike-collection", "dep:shrike-kernel", "dep:shrike-store-api"]
+anki-core = ["dep:shrike-collection", "dep:shrike-kernel"]
 # Embeddings over any OpenAI-compatible endpoint — the relay-offload path
 # (the mobile app subordinates to a desktop/DIY kernel over the relay) and
 # any cloud endpoint with an api_key. This is the ONLY embedding runtime in
@@ -61,7 +61,6 @@ engine-android = []
 # excludes this crate from PYO3_ALLOWED — that exclusion is the boundary).
 shrike-kernel = { path = "../shrike-kernel", optional = true }
 shrike-collection = { path = "../shrike-collection", optional = true }
-shrike-store-api = { workspace = true, optional = true }
 shrike-derived = { path = "../shrike-derived", default-features = false }
 shrike-engine-api = { path = "../shrike-engine-api" }
 shrike-embed-remote = { path = "../shrike-embed-remote", optional = true }

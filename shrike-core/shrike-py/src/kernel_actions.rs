@@ -128,10 +128,10 @@ pub(crate) fn action_search_notes(
     let inner = core.core_ref();
     let index = index_engine
         .as_ref()
-        .map(|e| &*e.inner as &dyn shrike_store_api::VectorIndex);
+        .map(|e| &*e.inner as &dyn shrike_store::VectorIndex);
     let derived = derived_engine
         .as_ref()
-        .map(|e| &e.inner as &dyn shrike_store_api::DerivedStore);
+        .map(|e| &e.inner as &dyn shrike_store::DerivedStore);
     let sources: Vec<shrike_kernel::actions::SearchSource> = sources
         .into_iter()
         .map(

@@ -23,7 +23,7 @@ use blake2::{Blake2b, Digest};
 use serde::{Deserialize, Serialize};
 
 use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
-use shrike_store_api::VectorIndex;
+use shrike_store::VectorIndex;
 
 /// The on-disk schema version of a freshly built index (mirrors
 /// `index.INDEX_SCHEMA_VERSION`: v2 = per-modality sub-indexes, #201a).

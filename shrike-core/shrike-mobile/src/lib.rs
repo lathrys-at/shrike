@@ -680,7 +680,7 @@ async fn dispatch(kernel: Arc<Kernel>, action: String, params: String) -> Native
                 dry_run: bool,
             }
             let args: Args = parse(&params)?;
-            let policy = shrike_store_api::DuplicatePolicy::parse(&args.on_duplicate)?;
+            let policy = shrike_collection::DuplicatePolicy::parse(&args.on_duplicate)?;
             let results = kernel
                 .upsert_notes_wire(args.notes, policy, args.dry_run)
                 .await?;

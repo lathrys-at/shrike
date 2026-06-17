@@ -26,7 +26,7 @@ use blake2::digest::consts::U8;
 use blake2::{Blake2b, Digest};
 
 use shrike_error::{ErrorKind, NativeResult, ResultExt};
-use shrike_store_api::VectorIndex;
+use shrike_store::VectorIndex;
 
 use crate::TAG_TEXT_SPACE;
 

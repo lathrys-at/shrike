@@ -39,8 +39,8 @@ PYO3_ALLOWED = {"shrike-py"}
 
 # Engine crates the kernel must NEVER name (#342). Grown as engine crates are
 # added; the kernel's only engine-shaped dep is shrike-engine-api (the traits).
-# (The shared LOW utility crates — shrike-net today, renaming to shrike-network
-# in #706, plus the coming shrike-process — are intentionally NOT here: they
+# (The shared LOW utility crates — shrike-network (the SSRF primitives), plus
+# the coming shrike-process — are intentionally NOT here: they
 # sit BELOW both the kernel and the engine crates, so BOTH may depend on them
 # without inverting the layer graph. They live in LAYER_FLOOR instead.)
 ENGINE_CRATES = {
@@ -56,18 +56,18 @@ ENGINE_CRATES = {
 # kernel NOR any engine — depending UP into those layers inverts the graph.
 # The assertion is on each floor crate's OUTGOING edges, so the legitimate
 # downward edges INTO these crates (kernel -> shrike-engine-api, kernel ->
-# shrike-net, an engine -> shrike-net, …) are fine — only edges OUT of a floor
-# crate are constrained.
+# shrike-network, an engine -> shrike-network, …) are fine — only edges OUT of a
+# floor crate are constrained.
 #
-# As the #703 reorg renames/adds low-utility crates (shrike-net -> shrike-network;
-# the new shrike-process / shrike-media / shrike-cache / shrike-store), extend
-# this set — one line per crate.
+# As the #703 reorg adds further low-utility crates (the coming
+# shrike-process / shrike-media / shrike-cache), extend this set — one line per
+# crate.
 LAYER_FLOOR = {
     "shrike-error",
-    "shrike-net",  # -> shrike-network (#706)
+    "shrike-network",
     "shrike-schemas",
     "shrike-engine-api",  # the kernel<->ort firewall — a thin contract, stays floor
-    "shrike-store-api",  # -> shrike-store (#706)
+    "shrike-store",
 }
 
 # The set a floor crate's closure must avoid: the kernel and everything at or

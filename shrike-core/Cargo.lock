@@ -5014,7 +5014,7 @@ dependencies = [
  "serde_json",
  "shrike-error",
  "shrike-schemas",
- "shrike-store-api",
+ "shrike-store",
  "tempfile",
  "tokio",
 ]
@@ -5025,7 +5025,7 @@ version = "0.0.0"
 dependencies = [
  "rusqlite",
  "shrike-error",
- "shrike-store-api",
+ "shrike-store",
  "tracing",
 ]
 
@@ -5038,7 +5038,7 @@ dependencies = [
  "serde_json",
  "shrike-engine-api",
  "shrike-error",
- "shrike-net",
+ "shrike-network",
  "tracing",
  "ureq",
  "url",
@@ -5066,7 +5066,7 @@ dependencies = [
  "serde_json",
  "shrike-engine-api",
  "shrike-error",
- "shrike-net",
+ "shrike-network",
  "tracing",
  "ureq",
  "url",
@@ -5099,7 +5099,7 @@ name = "shrike-index"
 version = "0.0.0"
 dependencies = [
  "shrike-error",
- "shrike-store-api",
+ "shrike-store",
  "tracing",
  "usearch",
 ]
@@ -5118,9 +5118,9 @@ dependencies = [
  "shrike-engine-api",
  "shrike-error",
  "shrike-index",
- "shrike-net",
+ "shrike-network",
  "shrike-schemas",
- "shrike-store-api",
+ "shrike-store",
  "tokio",
  "tracing",
  "ureq",
@@ -5153,13 +5153,12 @@ dependencies = [
  "shrike-kernel",
  "shrike-recognize-apple",
  "shrike-schemas",
- "shrike-store-api",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "shrike-net"
+name = "shrike-network"
 version = "0.1.0"
 dependencies = [
  "shrike-error",
@@ -5190,7 +5189,7 @@ dependencies = [
  "shrike-llama-server",
  "shrike-recognize-apple",
  "shrike-schemas",
- "shrike-store-api",
+ "shrike-store",
  "tokio",
  "tracing",
  "tracing-error",
@@ -5218,12 +5217,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "shrike-store-api"
+name = "shrike-store"
 version = "0.1.0"
 dependencies = [
- "serde_json",
  "shrike-error",
- "shrike-schemas",
 ]
 
 [[package]]

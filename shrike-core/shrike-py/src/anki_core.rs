@@ -14,7 +14,7 @@
 
 use pyo3::prelude::*;
 use shrike_collection::CollectionCore as ConcreteCore;
-use shrike_store_api::{Collection, CreateOutcome, DuplicatePolicy};
+use shrike_collection::{Collection, CreateOutcome, DuplicatePolicy};
 
 use crate::to_py_err;
 

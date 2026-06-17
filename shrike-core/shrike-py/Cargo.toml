@@ -74,7 +74,7 @@ shrike-llama-server = { path = "../shrike-llama-server", optional = true }
 # OnExecutor over the asyncio lane) into the kernel's Arc<dyn Embedder> slot.
 shrike-engine-api = { path = "../shrike-engine-api" }
 shrike-error = { workspace = true }
-shrike-store-api = { workspace = true }
+shrike-store = { path = "../shrike-store" }
 # The Apple Vision OCR engine (#342 P3) — attached native, like the embedders.
 shrike-recognize-apple = { path = "../shrike-recognize-apple", optional = true }
 shrike-index = { path = "../shrike-index" }

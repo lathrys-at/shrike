@@ -142,7 +142,7 @@ impl Default for RemoteDescriberConfig {
 /// operator-configured and trusted, so it is NOT `is_global`-gated — but the
 /// agent has auto-redirects OFF and is **pinned to `base_url`'s resolved IP**
 /// (closing the DNS-rebinding TOCTOU), and a redirect is followed only when it
-/// stays on the SAME host (`shrike_net::same_host_redirect` refuses a
+/// stays on the SAME host (`shrike_network::same_host_redirect` refuses a
 /// cross-host 30x — the SSRF vector). The IP is pinned once at construction;
 /// reconstruct to re-pin if the endpoint's address rotates.
 pub struct RemoteDescriber {
@@ -237,7 +237,7 @@ impl RemoteDescriber {
         // SSRF posture (#592): pin the connection to base_url's resolved IP with
         // auto-redirects OFF. The agent-level timeout is a backstop; each request
         // sets its own via `.timeout()`.
-        let (agent, base) = shrike_net::pinned_endpoint_agent(&base_url, timeout)?;
+        let (agent, base) = shrike_network::pinned_endpoint_agent(&base_url, timeout)?;
         Ok(Self {
             base_url,
             base,
@@ -271,11 +271,11 @@ impl RemoteDescriber {
     /// is an item-level rejection (a 4xx the image caused — the caller degrades
     /// to the empty recognition); `Err` is an endpoint-level failure. A
     /// cross-host redirect is refused (the SSRF vector), capped at
-    /// `shrike_net::MAX_REDIRECTS`.
+    /// `shrike_network::MAX_REDIRECTS`.
     fn post_chat(&self, payload: &serde_json::Value) -> NativeResult<Option<ureq::Response>> {
         let mut current = format!("{}/v1/chat/completions", self.base_url);
         let mut from = self.base.clone();
-        for _hop in 0..=shrike_net::MAX_REDIRECTS {
+        for _hop in 0..=shrike_network::MAX_REDIRECTS {
             let Some(resp) = self.post_chat_one_url(&current, payload)? else {
                 return Ok(None); // item-level reject
             };
@@ -283,7 +283,7 @@ impl RemoteDescriber {
                 let location = resp.header("location").ok_or_else(|| {
                     NativeError::unavailable("redirect response without a Location header")
                 })?;
-                let target = shrike_net::same_host_redirect(&from, location)?;
+                let target = shrike_network::same_host_redirect(&from, location)?;
                 current = target.to_string();
                 from = target;
                 continue;
@@ -292,7 +292,7 @@ impl RemoteDescriber {
         }
         Err(NativeError::unavailable(format!(
             "too many redirects (>{})",
-            shrike_net::MAX_REDIRECTS
+            shrike_network::MAX_REDIRECTS
         )))
     }
 

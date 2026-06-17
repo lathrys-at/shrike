@@ -29,7 +29,6 @@ MOBILE_DEPS = [
     "//shrike-core/shrike-index:shrike_index",
     "//shrike-core/shrike-kernel:shrike_kernel",
     "//shrike-core/shrike-schemas:shrike_schemas",
-    "//shrike-core/shrike-store-api:shrike_store_api",
     # A hand-written rust target does NOT inherit cargo's deps, so each
     # third-party crate is named explicitly (the lockfile-owner hazard).
     "@crates//:serde",

@@ -28,22 +28,22 @@ use std::io::Read;
 use base64::Engine;
 use shrike_error::{NativeError, NativeResult};
 use shrike_schemas::StoreMediaItem;
-use shrike_store_api::{PreparedMedia, PreparedMediaSource};
+use shrike_collection::{PreparedMedia, PreparedMediaSource};
 use url::Url;
 
 // The SSRF classifier + the resolve-and-vet helper now live in the shared
-// `shrike-net` crate (#592) so the remote engine crates use the SAME control.
+// `shrike-network` crate (#592) so the remote engine crates use the SAME control.
 // Re-exported here so the kernel's Python-facing binding
 // (anki_core::media_ip_allowed) and any in-tree caller keep importing them from
 // `media_fetch` unchanged — a pure move, store_media SSRF behavior + the parity
 // corpus are byte-identical.
-pub use shrike_net::{ip_is_allowed, resolve_public_ip};
+pub use shrike_network::{ip_is_allowed, resolve_public_ip};
 
-pub use shrike_store_api::MEDIA_MAX_BYTES;
+pub use shrike_store::MEDIA_MAX_BYTES;
 pub const URL_FETCH_TIMEOUT_SECS: u64 = 30;
-/// The redirect hop cap (= `shrike_net::MAX_REDIRECTS`, kept as a named alias so
+/// The redirect hop cap (= `shrike_network::MAX_REDIRECTS`, kept as a named alias so
 /// existing call sites and the error message that quotes it are unchanged).
-pub const MAX_MEDIA_REDIRECTS: usize = shrike_net::MAX_REDIRECTS;
+pub const MAX_MEDIA_REDIRECTS: usize = shrike_network::MAX_REDIRECTS;
 
 fn invalid(msg: impl Into<String>) -> NativeError {
     NativeError::invalid_input(msg)
@@ -94,7 +94,7 @@ pub fn fetch_media_url(url: &str, allow_private: bool) -> NativeResult<(Vec<u8>,
             // string ureq hands the resolver doesn't split cleanly for
             // bracketed IPv6 literals (#382).
             let port = parsed.port_or_known_default().unwrap_or(0);
-            shrike_net::pinned_agent(pinned, port, timeout)
+            shrike_network::pinned_agent(pinned, port, timeout)
         };
 
         // ureq surfaces 3xx either as Ok (redirects disabled) or Error::Status

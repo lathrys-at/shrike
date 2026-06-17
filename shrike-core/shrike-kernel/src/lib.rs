@@ -48,7 +48,8 @@ use shrike_collection::CollectionCore;
 use shrike_derived::DerivedEngine;
 use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 use shrike_index::MultiModalIndex;
-use shrike_store_api::{Collection, CreateOutcome, DerivedStore, DuplicatePolicy, VectorIndex};
+use shrike_collection::{Collection, CreateOutcome, DuplicatePolicy};
+use shrike_store::{DerivedStore, VectorIndex};
 
 pub mod runtime;
 pub use runtime::{block_on, init_runtime, spawn_op};
@@ -69,10 +70,10 @@ pub use shrike_engine_api::{
     Embedder, ImageEmbedder, ImageResolver, Locator, MediaItem, Recognition, Recognizer, Segment,
 };
 
-// The export request/scope/format types (#71): the store contract's, re-exported
-// so the pyo3 binding constructs them as `shrike_kernel::*` without reaching
-// past the kernel into the store-api crate.
-pub use shrike_store_api::{ExportOutcome, ExportRequest, ExportScope, PackageFormat};
+// The export request/scope/format types (#71): the collection contract's,
+// re-exported so the pyo3 binding constructs them as `shrike_kernel::*`
+// without reaching past the kernel into the collection crate.
+pub use shrike_collection::{ExportOutcome, ExportRequest, ExportScope, PackageFormat};
 
 /// The collection as a task-actor (#374): every access is one job sent to a
 /// single spawned task that runs them **inline, sequentially** — FIFO
@@ -3711,7 +3712,7 @@ mod no_cpython_smoke {
         crate::runtime::block_on(async {
             let dir = temp_dir();
             std::fs::create_dir_all(dir.join("cache")).unwrap();
-            let collection: Arc<dyn shrike_store_api::Collection> =
+            let collection: Arc<dyn shrike_collection::Collection> =
                 Arc::new(CollectionCore::open(dir.join("c.anki2").to_str().unwrap()).unwrap());
             let index: Arc<dyn VectorIndex> =
                 Arc::new(MultiModalIndex::new(vec!["text".to_owned()]).unwrap());

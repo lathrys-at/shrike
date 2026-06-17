@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 
 use shrike_error::{NativeError, NativeResult};
 use shrike_schemas::{CollectionInfo, ListNotesResponse};
-use shrike_store_api::Collection;
+use shrike_collection::Collection;
 
 /// The actions this module has re-homed (the registry seam: the Python
 /// binding asserts its forwarding list against this, so the two sides can't
@@ -234,7 +234,7 @@ use shrike_derived::MIN_TRIGRAM;
 use shrike_schemas::{
     FuzzyMatch, Note, SearchMatch, SearchResultGroup, SignalContribution, SubstringInfo,
 };
-use shrike_store_api::{DerivedStore, VectorIndex};
+use shrike_store::{DerivedStore, VectorIndex};
 
 /// A note's field map (`Note.content`): the "full" projection's fields, absent
 /// in "meta" mode. The literal-substring authority reads it.
@@ -1629,7 +1629,7 @@ mod search_tests {
         inner: DerivedEngine,
         fail_lexical: bool,
     }
-    impl shrike_store_api::DerivedStore for FlakyDerived {
+    impl shrike_store::DerivedStore for FlakyDerived {
         fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()> {
             self.inner.build(rows, col_mod)
         }
@@ -1696,7 +1696,7 @@ mod search_tests {
             with_text: bool,
             scope: Option<&[i64]>,
             exclude: &[&str],
-        ) -> NativeResult<Vec<shrike_store_api::MatchRow>> {
+        ) -> NativeResult<Vec<shrike_store::MatchRow>> {
             self.inner
                 .match_rows(expr, limit, with_text, scope, exclude)
         }
@@ -1706,7 +1706,7 @@ mod search_tests {
             limit: i64,
             scope: Option<&[i64]>,
             exclude: &[&str],
-        ) -> NativeResult<Option<Vec<shrike_store_api::LexicalRow>>> {
+        ) -> NativeResult<Option<Vec<shrike_store::LexicalRow>>> {
             if self.fail_lexical {
                 return Err(NativeError::unavailable("derived busy (simulated)"));
             }
@@ -1718,7 +1718,7 @@ mod search_tests {
             top_k: i64,
             scope: Option<&[i64]>,
             exclude: &[&str],
-        ) -> NativeResult<Vec<shrike_store_api::LexicalRow>> {
+        ) -> NativeResult<Vec<shrike_store::LexicalRow>> {
             if self.fail_lexical {
                 return Err(NativeError::unavailable("derived busy (simulated)"));
             }

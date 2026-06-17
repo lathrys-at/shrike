@@ -1,31 +1,28 @@
 //! The store contract (#389) — the missing half of #342's plugin
 //! architecture. Engines (embed/recognize) became pluggable there; the
-//! kernel's three STORES stayed concrete. These traits make the deployment
-//! ladder composition: a beefy server runs all-local impls, mobile (#226)
-//! runs local stores + platform engines, a wasm thin client substitutes
-//! remote impls for stores it can't host.
+//! kernel's STORES stayed concrete. These traits make the deployment ladder
+//! composition: a beefy server runs all-local impls, mobile (#226) runs local
+//! stores + platform engines, a wasm thin client substitutes remote impls for
+//! stores it can't host.
+//!
+//! Slimmed in #706: the `Collection` trait + its vocabulary moved into
+//! `shrike-collection` (its sole implementer — homing the trait beside its only
+//! impl removes the edge a separate contract crate forced). What stays here are
+//! the two traits with *two* impl crates each over disjoint backends —
+//! [`VectorIndex`] (`shrike-index`) and [`DerivedStore`] (`shrike-derived`) —
+//! which therefore CANNOT live in either impl crate (the dependency points the
+//! other way) plus [`MEDIA_MAX_BYTES`], the one policy value both the
+//! collection write tail and the kernel fetch/decode caps must agree on.
 //!
 //! Shape rules (the engine contract's, restated for stores):
-//! - **Sync traits.** Scheduling is the KERNEL's concern — collection ops
-//!   serialize through its task-actor, index/derived calls ride the op
-//!   bodies or the blocking pool. An impl that talks to a network does its
-//!   blocking I/O inside the method (the actor/pool absorbs it), exactly
+//! - **Sync traits.** Scheduling is the KERNEL's concern — index/derived calls
+//!   ride the op bodies or the blocking pool. An impl that talks to a network
+//!   does its blocking I/O inside the method (the pool absorbs it), exactly
 //!   like sync compute engines behind `Blocking<E>`.
 //! - **`Send + Sync`, object-safe.** The kernel holds `Arc<dyn …>`.
 //! - **Typed vocabulary lives here.** A trait method's types cannot live in
 //!   an impl crate (the dependency points the other way), so the row/stat
 //!   aliases are canonical here and re-exported by the impls.
-//!
-//! [`VectorIndex`] and [`DerivedStore`] landed first (PR A); [`Collection`]
-//! followed once its surface was typed (#391).
-
-mod collection;
-
-pub use collection::{
-    Collection, CreateOutcome, DuplicatePolicy, ExportOutcome, ExportRequest, ExportScope,
-    ImportOptions, ImportSummary, ImportUpdateCondition, OwnedFieldRow, PackageFormat,
-    PreparedMedia, PreparedMediaSource, ServiceNote,
-};
 
 use shrike_error::NativeResult;
 use std::collections::BTreeMap;

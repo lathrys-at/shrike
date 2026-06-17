@@ -15,7 +15,7 @@ use shrike_schemas::{
     UpsertNoteResult,
 };
 
-use shrike_store_api::{ImportOptions, ImportSummary};
+use crate::contract::{ImportOptions, ImportSummary};
 
 use crate::adapter::FieldsState;
 use crate::{CollectionCore, DuplicatePolicy};

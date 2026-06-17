@@ -30,7 +30,7 @@ use shrike_error::{ErrorKind, NativeError, NativeResult};
 /// part of the pinned engine behaviour).
 const SNIPPET_TOKENS: i64 = 12;
 
-pub use shrike_store_api::MatchRow;
+pub use shrike_store::MatchRow;
 
 /// Whether this build statically links rusqlite's bundled SQLite (#300).
 /// Bundled guarantees FTS5 + trigram; a platform-linked build must rely on
@@ -871,7 +871,7 @@ impl DerivedEngine {
 /// The store contract (#389): every method forwards to the inherent impl, so
 /// the concrete engine keeps its full API while the kernel consumes
 /// `Arc<dyn DerivedStore>`.
-impl shrike_store_api::DerivedStore for DerivedEngine {
+impl shrike_store::DerivedStore for DerivedEngine {
     fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()> {
         Self::build(self, rows, col_mod)
     }
@@ -1472,7 +1472,7 @@ pub const MIN_TRIGRAM: usize = 3;
 /// A fuzzy candidate must share at least this many query trigrams (noise floor).
 pub const FUZZY_MIN_SHARED: usize = 2;
 
-pub use shrike_store_api::LexicalRow;
+pub use shrike_store::LexicalRow;
 
 /// Lowercased char-level trigrams (mirrors the Python `_trigrams`: code-point
 /// windows over `text.lower()`).

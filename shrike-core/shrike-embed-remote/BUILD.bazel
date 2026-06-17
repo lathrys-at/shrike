@@ -14,7 +14,7 @@ rust_library(
     deps = [
         "//shrike-core/shrike-engine-api:shrike_engine_api",
         "//shrike-core/shrike-error:shrike_error",
-        "//shrike-core/shrike-net:shrike_net",
+        "//shrike-core/shrike-network:shrike_network",
         "@crates//:base64",
         "@crates//:serde",
         "@crates//:serde_json",

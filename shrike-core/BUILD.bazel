@@ -29,10 +29,10 @@ py_test(
         "//shrike-core/shrike-kernel:Cargo.toml",
         "//shrike-core/shrike-llama-server:Cargo.toml",
         "//shrike-core/shrike-mobile:Cargo.toml",
-        "//shrike-core/shrike-net:Cargo.toml",
+        "//shrike-core/shrike-network:Cargo.toml",
         "//shrike-core/shrike-py:Cargo.toml",
         "//shrike-core/shrike-recognize-apple:Cargo.toml",
         "//shrike-core/shrike-schemas:Cargo.toml",
-        "//shrike-core/shrike-store-api:Cargo.toml",
+        "//shrike-core/shrike-store:Cargo.toml",
     ],
 )
