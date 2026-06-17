@@ -44,8 +44,8 @@ Several advisories can fire at once, spawning several copies of you in parallel.
 The **tracking issue is the claim** — use it as a lock so two agents never
 perform the same bump. The claim key for an advisory is the pair **(advisory id,
 manifest/lockfile path)**: the *same* package vulnerable in two *different*
-lockfiles (e.g. `native/Cargo.lock` vs `eval/spa-spike/Cargo.lock`) is two
-separate jobs; the same advisory in the same manifest is one job.
+lockfiles (e.g. `native/Cargo.lock` vs a standalone `eval/<name>/Cargo.lock`) is
+two separate jobs; the same advisory in the same manifest is one job.
 
 1. **Check for an existing claim** before you create anything. List open
    `deps`-labelled issues and open PRs/branches, and look for one already
@@ -105,12 +105,12 @@ is regenerated and committed**. The surfaces:
 | **Rust kernel workspace** | `native/Cargo.toml` + each `native/<crate>/Cargo.toml` | `native/Cargo.lock` **and** the Bazel mirror `MODULE.bazel.lock` (+ `MODULE.bazel` if a `[patch]`/source line changes) |
 | **Python** | `pyproject.toml` (`[project].dependencies` / `[project.optional-dependencies]`) | `requirements_lock.txt` |
 | **GitHub Actions** | `.github/workflows/*.yml` (pinned action majors/SHAs) | none |
-| **Standalone eval spikes** | e.g. `eval/spa-spike/Cargo.toml` | that spike's **own** `Cargo.lock` only — these carry their own `[workspace]`, are deliberately **outside** the kernel resolution and the Bazel build, so they need **no** `MODULE.bazel.lock` repin |
+| **Standalone eval spikes** | a self-contained spike under `eval/<name>/Cargo.toml` (none in-tree today) | that spike's **own** `Cargo.lock` only — such spikes carry their own `[workspace]`, are deliberately **outside** the kernel resolution and the Bazel build, so they need **no** `MODULE.bazel.lock` repin |
 | **Managed binaries / models** | `scripts/llama-server.lock`, `EMBEDDING_MODEL_*` in `tests/integration/model_cache.py` | manual, bumped rarely — almost never a security bump |
 
 Identify which surface the advisory's manifest path points at *before* you touch
-anything. (A Dependabot alert names the manifest, e.g. `eval/spa-spike/Cargo.lock`
-vs `native/Cargo.lock`.)
+anything. (A Dependabot alert names the manifest, e.g. a standalone
+`eval/<name>/Cargo.lock` vs the kernel's `native/Cargo.lock`.)
 
 ## How to perform the bump, by surface
 
@@ -128,13 +128,14 @@ running with `CARGO_BAZEL_ISOLATED=0` against a warm `~/.cargo` is the
 workaround; do a warming `cargo fetch`/`cargo build` in `native/` first if you
 hit it.
 
-**Rust — a standalone spike (e.g. `eval/spa-spike/`):**
+**Rust — a standalone spike (a self-contained `eval/<name>/` project, should one exist):**
 ```bash
-(cd eval/spa-spike && cargo update -p <crate> --precise <version>)
+(cd eval/<name> && cargo update -p <crate> --precise <version>)
 ```
-Only that spike's `Cargo.lock` changes. It is **not** in Bazel or in CI — do not
-repin `MODULE.bazel.lock`, and verify it with a plain `cargo build`/`cargo test`
-*inside that directory* (the repo gate below does not cover spikes).
+Only that spike's `Cargo.lock` changes. Such a spike is **not** in Bazel or in
+CI — do not repin `MODULE.bazel.lock`, and verify it with a plain `cargo
+build`/`cargo test` *inside that directory* (the repo gate below does not cover
+spikes).
 
 **Python:** bump the version constraint in `pyproject.toml`, then regenerate
 `requirements_lock.txt` (the project pins transitively — match the existing

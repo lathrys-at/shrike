@@ -14,8 +14,7 @@ the data that drives `tests/integration/test_search_quality.py` (run only with
 - **`resolved_urls.json`** — the **committed** pin: `handle` → Wikimedia Commons
   URL. Makes a replay reproducible without re-resolving.
 - **`ASSETS.md`** — per-image attribution (Commons page / license / author),
-  generated from the live API. Also backfills attribution for the reused
-  `eval/multimodal/` images.
+  generated from the live API.
 - **`cache/`** — **gitignored**: the downloaded image bytes. Never committed.
 
 ## Asset licensing
@@ -33,10 +32,10 @@ and authorship live.
 ## Regenerating
 
 ```bash
-# resolve any new images, re-pin, regenerate ASSETS.md (incl. the multimodal backfill)
-python scripts/eval_search_quality_corpus.py --backfill-multimodal
+# resolve any new images, re-pin, regenerate ASSETS.md
+python scripts/eval_search_quality_corpus.py
 # re-resolve every term from scratch (a Commons file can be renamed/deleted)
-python scripts/eval_search_quality_corpus.py --refresh --backfill-multimodal
+python scripts/eval_search_quality_corpus.py --refresh
 ```
 
 ## Running the suite

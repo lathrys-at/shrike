@@ -8,6 +8,50 @@ isn't reconstructable from the code.
 
 ## Semantic search & the vector index
 
+### MobileCLIP2 ONNX loads through `ClipBackend` unchanged (#568)
+
+Spike #568 verified that a real MobileCLIP2 ONNX export
+(`plhery/mobileclip2-onnx`, rev `ba95759a`, sizes S0/S2) satisfies
+`ClipBackend._resolve_files` with no rename or re-export: the engine discovers
+the text inputs by name, takes the vision input positionally, reads outputs
+positionally, L2-normalizes itself (the export ships unnormalized), and honors
+the export's own `preprocessor_config.json` (256px, `image_mean=(0,0,0)` /
+`image_std=(1,1,1)` — a no-op normalize, unlike OpenAI-CLIP's mean/std).
+Cross-modal cosine was correct — matching text↔image ~0.25–0.29 vs mismatched
+~0.07–0.12, the textbook modality gap the per-modality RRF + activation gate
+already handles — and the fp32 export cleared the batch-safety probe for batched
+embedding. Caveat for a checked-in profile: the text tower is 254 MB (the
+"mobile-fit" framing is the 45–143 MB *vision* tower), and the base license is
+`apple-amlr` (model bytes are fetched at runtime, never committed). The
+capability shipped in the `onnx-multispace` / `jina-text-clip` profiles; the
+verify harness (`eval/mobileclip/`) was removed once it shipped and survives in
+git history.
+
+### CLIP gives image-by-text retrieval in one shared space; multi-vector + per-modality RRF follow from the modality gap (#162)
+
+The Phase-3a spike that gated the CLIP build (jina-clip-v2) settled three things,
+all now shipped:
+
+- **Image-by-text works.** An index holding *only* image vectors retrieved the
+  right image from a text query at R@1=1.00, against a blind-text floor of ~0.06
+  (answer-independent filler ≈ chance, ~1/16) — so the signal is the image
+  *content*, not leaked labels. Text-by-text did not regress versus the MiniLM
+  baseline (both saturate the small set).
+- **The embedding unit is a note's text vector + one vector per image, all under
+  the `note_id` key** (USearch `multi=True`), not a single fused vector:
+  `remove(note_id)` drops all of a note's vectors, search returns `note_id`, and
+  results dedup to the best vector per note.
+- **The modality gap is the design driver.** In one cosine index a text query
+  sits closer to text vectors than image vectors, so image hits are *additive*
+  (they catch what text misses; R@5 stayed 1.00) rather than rank-dominant. That
+  is why the shipped design ranks each modality as its **own RRF signal** behind
+  an activation gate (the #201b entry below) instead of one deduped cosine
+  ranking — a rank combiner is blind to the gap's constant offset.
+
+The spike's eval skeleton (`eval/multimodal/`, `scripts/eval_multimodal.py`) was
+removed once `ClipBackend` + the per-modality index shipped; it survives in git
+history.
+
 ### The activation gate floors a modality by its own typical match, calibrated offline (#201b)
 
 #201a made `image` a separate RRF signal but fed it **unfloored**: RRF fuses rank positions, so it
@@ -1182,8 +1226,9 @@ two evaluation screens — a collection browser (list/search over the actions
 edge, card HTML in a sandboxed frame) and the server status pane (live
 `/status` + the per-space coverage matrix) — and judged the finalists on
 shared-schema ergonomics, iteration DX, bundle size, sandboxed-frame
-integration, Tauri integration, and ecosystem gaps. The skeleton lives in
-`eval/spa-spike/`.
+integration, Tauri integration, and ecosystem gaps. The two-screen eval
+skeleton is preserved on the archived `spike/506-spa-stack-eval` branch (it was
+removed from the tree once the verdict landed; the real client is #505/#506).
 
 **The decisive factor is the shared schema. The client imports
 `shrike-schemas` as a Rust dependency — zero codegen, zero drift — against a

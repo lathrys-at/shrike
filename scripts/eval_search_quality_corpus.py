@@ -8,15 +8,14 @@ the URL** in ``eval/search_quality/resolved_urls.json`` (committed), and writes
 page / license / author) the AGPL repo needs since it redistributes no bytes.
 
 Image **bytes are never committed**: the manual suite downloads them on demand
-into the gitignored ``eval/search_quality/cache/`` at run time, exactly the
-``eval/multimodal/`` pattern. PD / PD-art / CC0 are preferred at corpus design
-time; CC-BY-SA is allowed but is attributed here.
+into the gitignored ``eval/search_quality/cache/`` at run time. PD / PD-art /
+CC0 are preferred at corpus design time; CC-BY-SA is allowed but is attributed
+here.
 
 Run::
 
     python scripts/eval_search_quality_corpus.py            # resolve missing, write ASSETS.md
     python scripts/eval_search_quality_corpus.py --refresh  # re-resolve every term
-    python scripts/eval_search_quality_corpus.py --backfill-multimodal  # + eval/multimodal pins
 
 The pinned URLs make a replay reproducible; ``--refresh`` re-resolves (a Commons
 file can be deleted/renamed). The licensing block ALWAYS re-reads metadata so
@@ -37,7 +36,6 @@ EVAL_DIR = ROOT / "eval" / "search_quality"
 MANIFEST = EVAL_DIR / "manifest.json"
 RESOLVED = EVAL_DIR / "resolved_urls.json"  # committed: pins image selection
 ASSETS = EVAL_DIR / "ASSETS.md"
-MULTIMODAL_RESOLVED = ROOT / "eval" / "multimodal" / "resolved_urls.json"
 
 # Canonical pins for handles where a fuzzy Commons search picks the wrong file
 # (a desmosome instead of the cell, a rock formation instead of a violin). These
@@ -109,34 +107,7 @@ def resolve_corpus(refresh: bool) -> dict[str, dict]:
     return out
 
 
-def _multimodal_backfill() -> list[dict]:
-    """Re-read attribution for the reused eval/multimodal images (closes the
-    pre-existing attribution gap — they were pinned with no license record)."""
-    from tests.search_quality.commons import resolve_asset
-
-    if not MULTIMODAL_RESOLVED.exists():
-        return []
-    pins: dict[str, str] = json.loads(MULTIMODAL_RESOLVED.read_text())
-    rows = []
-    for term, url in sorted(pins.items()):
-        try:
-            asset = resolve_asset(url, is_url=True)
-            rows.append(
-                {
-                    "handle": term,
-                    "url": url,
-                    "commons_page": asset.commons_page,
-                    "license": asset.license,
-                    "author": asset.author,
-                }
-            )
-            print(f"  [MM ] {term[:28]:28} {asset.license}")
-        except Exception as e:  # noqa: BLE001
-            print(f"  [ERR] {term}: {e}")
-    return rows
-
-
-def write_assets(resolved: dict[str, dict], multimodal: list[dict]) -> None:
+def write_assets(resolved: dict[str, dict]) -> None:
     lines = [
         "# Search-quality corpus image assets (#559)",
         "",
@@ -162,24 +133,6 @@ def write_assets(resolved: dict[str, dict], multimodal: list[dict]) -> None:
         page_md = f"[{page.rsplit('/', 1)[-1][:48]}]({page})" if page.startswith("http") else page
         lines.append(f"| `{handle}` | {a['license']} | {a['author']} | {page_md} |")
 
-    if multimodal:
-        lines += [
-            "",
-            "## Reused multimodal-eval images (`eval/multimodal/`)",
-            "",
-            "Attribution for the images the multimodal eval (#162) pinned without a",
-            "license record — backfilled here (the suites share these Commons files).",
-            "",
-            "| Search term | License | Author | Commons page |",
-            "| --- | --- | --- | --- |",
-        ]
-        for a in multimodal:
-            page = a["commons_page"]
-            page_md = (
-                f"[{page.rsplit('/', 1)[-1][:48]}]({page})" if page.startswith("http") else page
-            )
-            lines.append(f"| {a['handle']} | {a['license']} | {a['author']} | {page_md} |")
-
     lines.append("")
     ASSETS.write_text("\n".join(lines))
     print(f"\nwrote {ASSETS.relative_to(ROOT)} ({len(resolved)} corpus images)")
@@ -188,17 +141,11 @@ def write_assets(resolved: dict[str, dict], multimodal: list[dict]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--refresh", action="store_true", help="re-resolve every term (re-pin URLs)")
-    ap.add_argument(
-        "--backfill-multimodal",
-        action="store_true",
-        help="also attribute the reused eval/multimodal images in ASSETS.md",
-    )
     args = ap.parse_args()
 
     print(f"Resolving corpus images from {MANIFEST.relative_to(ROOT)} ...")
     resolved = resolve_corpus(args.refresh)
-    multimodal = _multimodal_backfill() if args.backfill_multimodal else []
-    write_assets(resolved, multimodal)
+    write_assets(resolved)
 
 
 if __name__ == "__main__":
