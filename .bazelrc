@@ -8,10 +8,6 @@
 
 # Readable, non-truncated test failures.
 test --test_output=errors
-# TEMP(#687 debug): un-truncate the integration suite's failed-test output (its
-# stdout exceeds the 1 MB default cap, hiding the failing assertion on linux CI).
-# Revert before merge.
-test --experimental_ui_max_stdouterr_bytes=20971520
 
 # Stamp the build with the tag-derived version (STABLE_VERSION) so py_wheel (#245)
 # can embed it. Cheap (a `git describe`); only stamped outputs (the wheel) rebuild
