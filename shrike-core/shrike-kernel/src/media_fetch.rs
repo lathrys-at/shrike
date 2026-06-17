@@ -26,9 +26,9 @@
 use std::io::Read;
 
 use base64::Engine;
+use shrike_collection::{PreparedMedia, PreparedMediaSource};
 use shrike_error::{NativeError, NativeResult};
 use shrike_schemas::StoreMediaItem;
-use shrike_collection::{PreparedMedia, PreparedMediaSource};
 use url::Url;
 
 // The SSRF classifier + the resolve-and-vet helper now live in the shared

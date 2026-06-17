@@ -45,10 +45,10 @@ use futures::future::BoxFuture;
 use tracing::Instrument;
 
 use shrike_collection::CollectionCore;
+use shrike_collection::{Collection, CreateOutcome, DuplicatePolicy};
 use shrike_derived::DerivedEngine;
 use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 use shrike_index::MultiModalIndex;
-use shrike_collection::{Collection, CreateOutcome, DuplicatePolicy};
 use shrike_store::{DerivedStore, VectorIndex};
 
 pub mod runtime;

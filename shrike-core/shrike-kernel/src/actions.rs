@@ -17,9 +17,9 @@
 
 use serde::de::DeserializeOwned;
 
+use shrike_collection::Collection;
 use shrike_error::{NativeError, NativeResult};
 use shrike_schemas::{CollectionInfo, ListNotesResponse};
-use shrike_collection::Collection;
 
 /// The actions this module has re-homed (the registry seam: the Python
 /// binding asserts its forwarding list against this, so the two sides can't

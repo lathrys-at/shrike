@@ -15,8 +15,8 @@
 //! The request/scope/format/outcome types are the store contract's
 //! (`crate::contract`), shared with the kernel and any other store impl.
 
-use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 use crate::contract::{ExportOutcome, ExportRequest, ExportScope, PackageFormat};
+use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 
 use crate::CollectionCore;
 
