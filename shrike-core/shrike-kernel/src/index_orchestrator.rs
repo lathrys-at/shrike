@@ -144,7 +144,34 @@ pub struct IndexMeta {
     pub collection: Option<String>,
     /// Presence (even empty) records that calibration ran (one-shot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activation: Option<BTreeMap<String, BTreeMap<String, f64>>>,
+    pub activation: Option<ActivationStats>,
+}
+
+/// The #201b calibration stats, keyed by modality (`image`). Replaces the old
+/// `BTreeMap<String, f64>` value with magic `"n"/"mean"/"std"` keys — a typo'd
+/// key no longer compiles, and the per-modality stat is a named struct rather
+/// than three string lookups.
+///
+/// On-disk/wire format is UNCHANGED: the outer key→value map stays a
+/// `BTreeMap` (sorted-key JSON object), and [`ActivationStat`] serializes its
+/// three fields in `mean, n, std` order — byte-for-byte the sorted order the
+/// old `BTreeMap<String, f64>` emitted. `n` stays `f64` so it round-trips the
+/// Python shape (`{"n": 40.0, ...}`, not `40`).
+pub type ActivationStats = BTreeMap<String, ActivationStat>;
+
+/// One modality's calibrated best-match distribution (#201b): the sample count
+/// and the `(mean, std)` the host-side activation floor reads as
+/// `mean + margin·std`. All three are `f64` — `n` included — to round-trip the
+/// Python on-disk shape byte-for-byte (it wrote `n` as a float).
+///
+/// Field order is deliberate (`mean, n, std`): serde serializes struct fields
+/// in declaration order, and these match the alphabetical key order the prior
+/// `BTreeMap<String, f64>` produced, so the serialized bytes are identical.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct ActivationStat {
+    pub mean: f64,
+    pub n: f64,
+    pub std: f64,
 }
 
 fn default_schema_v1() -> i64 {
@@ -190,7 +217,7 @@ pub struct OrchestratorStatus {
     pub model_id: Option<String>,
     pub progress: BuildProgress,
     pub error: Option<String>,
-    pub activation: Option<BTreeMap<String, BTreeMap<String, f64>>>,
+    pub activation: Option<ActivationStats>,
     /// Per-modality sub-index breakdown (#684): the text and image sub-indexes
     /// report their OWN size/ndim, which the aggregate `size`/`ndim` above
     /// (sum / text-modality width) can't express. Ordered text-first.
@@ -223,7 +250,7 @@ struct Shared {
     /// (a `compose`d kernel has no collection path) — then nothing is stamped
     /// and ownership is unenforced, exactly as before #67.
     owner: Option<String>,
-    activation: Option<BTreeMap<String, BTreeMap<String, f64>>>,
+    activation: Option<ActivationStats>,
     /// note_id → embedding-text fingerprint; `None` = no per-note state (an
     /// old or never-built index) → the next reconcile full-rebuilds.
     note_hashes: Option<BTreeMap<i64, String>>,
@@ -715,7 +742,15 @@ mod tests {
         let meta: IndexMeta = serde_json::from_str(python_meta).unwrap();
         assert_eq!(meta.ndim, 384);
         assert_eq!(meta.schema, 2);
-        assert!(meta.activation.is_some());
+        let stat = meta.activation.as_ref().unwrap().get("image").unwrap();
+        assert_eq!(*stat, ActivationStat { mean: 0.2, n: 40.0, std: 0.05 });
+        // The typed stat re-serializes byte-for-byte as the prior
+        // BTreeMap<String, f64> did: keys in sorted order (mean, n, std) and
+        // `n` as a float, so the on-disk activation block is unchanged.
+        assert_eq!(
+            serde_json::to_string(meta.activation.as_ref().unwrap()).unwrap(),
+            r#"{"image":{"mean":0.2,"n":40.0,"std":0.05}}"#,
+        );
         // A v1 meta (no schema marker) defaults to 1, like the Python load.
         let v1: IndexMeta = serde_json::from_str(r#"{"ndim": 8}"#).unwrap();
         assert_eq!(v1.schema, 1);
@@ -1274,16 +1309,7 @@ impl IndexOrchestrator {
         shared.activation = Some(
             stats
                 .into_iter()
-                .map(|(modality, n, mean, std)| {
-                    (
-                        modality,
-                        BTreeMap::from([
-                            ("n".to_owned(), n),
-                            ("mean".to_owned(), mean),
-                            ("std".to_owned(), std),
-                        ]),
-                    )
-                })
+                .map(|(modality, n, mean, std)| (modality, ActivationStat { mean, n, std }))
                 .collect(),
         );
         Ok(())
