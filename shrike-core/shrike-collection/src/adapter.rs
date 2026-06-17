@@ -15,7 +15,7 @@
 
 use anki::backend::{init_backend, Backend};
 use prost::Message;
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 // In test builds every dispatch is recorded, so the method-constant
 // coverage tripwire (#394) can assert each declared index is genuinely
@@ -301,7 +301,7 @@ impl ServiceAdapter {
         match self.call::<_, anki_proto::decks::DeckId>(SVC_DECKS, DECKS_GET_DECK_ID_BY_NAME, &req)
         {
             Ok(resp) => Ok(Some(resp.did)),
-            Err(e) if e.kind == shrike_ffi::ErrorKind::InvalidInput => Ok(None),
+            Err(e) if e.kind == shrike_error::ErrorKind::InvalidInput => Ok(None),
             Err(e) => Err(e),
         }
     }

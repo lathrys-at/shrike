@@ -9,7 +9,7 @@
 //! both this binding and the pip `anki` package; cross-core parity cases run
 //! the pip side in a subprocess on a *separate* collection file.
 //!
-//! Marshaling follows the shrike-ffi conventions: strings, i64 keys, small
+//! Marshaling follows the shrike-error conventions: strings, i64 keys, small
 //! tuples; every collection op runs under `py.detach` (GIL released).
 
 use pyo3::prelude::*;
@@ -190,17 +190,17 @@ impl CollectionCore {
         on_duplicate: &str,
         dry_run: bool,
     ) -> PyResult<String> {
-        py.detach(|| -> shrike_ffi::NativeResult<String> {
+        py.detach(|| -> shrike_error::NativeResult<String> {
             let notes: Vec<shrike_schemas::NoteInput> =
                 serde_json::from_str(&notes_json).map_err(|e| {
-                    shrike_ffi::NativeError::invalid_input(format!(
+                    shrike_error::NativeError::invalid_input(format!(
                         "notes must be a JSON list: {e}"
                     ))
                 })?;
             let policy = shrike_collection::DuplicatePolicy::parse(on_duplicate)?;
             let results = self.inner.upsert_notes(&notes, policy, dry_run)?;
             serde_json::to_string(&results)
-                .map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
+                .map_err(|e| shrike_error::NativeError::internal(e.to_string()))
         })
         .map_err(to_py_err)
     }
@@ -250,7 +250,7 @@ impl CollectionCore {
         py.detach(|| {
             let decks: Vec<shrike_schemas::DeckInput> =
                 serde_json::from_str(&decks_json).map_err(|e| {
-                    shrike_ffi::NativeError::invalid_input(format!(
+                    shrike_error::NativeError::invalid_input(format!(
                         "decks must be a JSON list: {e}"
                     ))
                 })?;
@@ -413,7 +413,7 @@ impl CollectionCore {
         py.detach(|| {
             let items: Vec<shrike_schemas::StoreMediaItem> = serde_json::from_str(&items_json)
                 .map_err(|e| {
-                    shrike_ffi::NativeError::invalid_input(format!(
+                    shrike_error::NativeError::invalid_input(format!(
                         "items must be a JSON list: {e}"
                     ))
                 })?;
@@ -453,10 +453,10 @@ impl CollectionCore {
     /// replace with the #76 unsound-move rejection). JSON at this edge only:
     /// typed inputs in, typed per-item results serialized once on the way out.
     fn upsert_note_types(&self, py: Python<'_>, note_types_json: String) -> PyResult<String> {
-        py.detach(|| -> shrike_ffi::NativeResult<String> {
+        py.detach(|| -> shrike_error::NativeResult<String> {
             let inputs: Vec<shrike_schemas::NoteTypeInput> = serde_json::from_str(&note_types_json)
                 .map_err(|e| {
-                    shrike_ffi::NativeError::invalid_input(format!(
+                    shrike_error::NativeError::invalid_input(format!(
                         "note_types must be a JSON list: {e}"
                     ))
                 })?;
@@ -473,10 +473,10 @@ impl CollectionCore {
         note_type_name: String,
         operations_json: String,
     ) -> PyResult<String> {
-        py.detach(|| -> shrike_ffi::NativeResult<String> {
+        py.detach(|| -> shrike_error::NativeResult<String> {
             let operations: Vec<shrike_schemas::FieldOp> = serde_json::from_str(&operations_json)
                 .map_err(|e| {
-                shrike_ffi::NativeError::invalid_input(format!(
+                shrike_error::NativeError::invalid_input(format!(
                     "operations must be a JSON list: {e}"
                 ))
             })?;
@@ -495,10 +495,10 @@ impl CollectionCore {
         note_type_name: String,
         operations_json: String,
     ) -> PyResult<String> {
-        py.detach(|| -> shrike_ffi::NativeResult<String> {
+        py.detach(|| -> shrike_error::NativeResult<String> {
             let operations: Vec<shrike_schemas::TemplateOp> =
                 serde_json::from_str(&operations_json).map_err(|e| {
-                    shrike_ffi::NativeError::invalid_input(format!(
+                    shrike_error::NativeError::invalid_input(format!(
                         "operations must be a JSON list: {e}"
                     ))
                 })?;
@@ -548,10 +548,10 @@ impl CollectionCore {
         note_type_name: String,
         updates_json: String,
     ) -> PyResult<String> {
-        py.detach(|| -> shrike_ffi::NativeResult<String> {
+        py.detach(|| -> shrike_error::NativeResult<String> {
             let updates: Vec<shrike_schemas::FieldMetadataInput> =
                 serde_json::from_str(&updates_json).map_err(|e| {
-                    shrike_ffi::NativeError::invalid_input(format!(
+                    shrike_error::NativeError::invalid_input(format!(
                         "updates must be a JSON list: {e}"
                     ))
                 })?;
@@ -575,10 +575,10 @@ impl CollectionCore {
         template_map_json: &str,
         dry_run: bool,
     ) -> PyResult<String> {
-        py.detach(|| -> shrike_ffi::NativeResult<String> {
+        py.detach(|| -> shrike_error::NativeResult<String> {
             let field_map: std::collections::BTreeMap<String, String> =
                 serde_json::from_str(&field_map_json).map_err(|e| {
-                    shrike_ffi::NativeError::invalid_input(format!(
+                    shrike_error::NativeError::invalid_input(format!(
                         "field_map must be a JSON object: {e}"
                     ))
                 })?;
@@ -587,7 +587,7 @@ impl CollectionCore {
                     Default::default()
                 } else {
                     serde_json::from_str(template_map_json).map_err(|e| {
-                        shrike_ffi::NativeError::invalid_input(format!(
+                        shrike_error::NativeError::invalid_input(format!(
                             "template_map must be a JSON object: {e}"
                         ))
                     })?

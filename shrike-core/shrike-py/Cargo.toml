@@ -73,7 +73,7 @@ shrike-llama-server = { path = "../shrike-llama-server", optional = true }
 # The engine contract (#342): the binding composes engines (WithPolicy +
 # OnExecutor over the asyncio lane) into the kernel's Arc<dyn Embedder> slot.
 shrike-engine-api = { path = "../shrike-engine-api" }
-shrike-ffi = { workspace = true }
+shrike-error = { workspace = true }
 shrike-store-api = { workspace = true }
 # The Apple Vision OCR engine (#342 P3) — attached native, like the embedders.
 shrike-recognize-apple = { path = "../shrike-recognize-apple", optional = true }

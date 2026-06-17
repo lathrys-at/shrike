@@ -8,7 +8,7 @@
 use std::ffi::c_char;
 
 use shrike_engine_api::Recognition;
-use shrike_ffi::NativeResult;
+use shrike_error::NativeResult;
 
 use crate::empty_recognition;
 use crate::glue::{parse_wire, SwiftString};

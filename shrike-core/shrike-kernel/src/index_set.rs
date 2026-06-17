@@ -42,7 +42,7 @@ use std::sync::{Arc, RwLock};
 
 use blake2::digest::consts::U16;
 use blake2::{Blake2b, Digest};
-use shrike_ffi::NativeResult;
+use shrike_error::NativeResult;
 use shrike_store_api::VectorIndex;
 
 use crate::index_orchestrator::{DebouncedSaver, IndexOrchestrator};
@@ -192,7 +192,7 @@ impl IndexSet {
         // this release → materializes fresh, no migration).
         let subdir = self.config.base_dir.join(space_subdir(key));
         std::fs::create_dir_all(&subdir)
-            .map_err(|e| shrike_ffi::NativeError::internal(format!("index space dir: {e}")))?;
+            .map_err(|e| shrike_error::NativeError::internal(format!("index space dir: {e}")))?;
         let engine = (self.config.engine_factory)(modalities)?;
         let orchestrator = Arc::new(IndexOrchestrator::open_owned(
             subdir,

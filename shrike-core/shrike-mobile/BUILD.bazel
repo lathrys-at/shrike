@@ -25,7 +25,7 @@ MOBILE_DEPS = [
     "//shrike-core/shrike-derived:shrike_derived",
     "//shrike-core/shrike-embed-remote:shrike_embed_remote",
     "//shrike-core/shrike-engine-api:shrike_engine_api",
-    "//shrike-core/shrike-ffi:shrike_ffi",
+    "//shrike-core/shrike-error:shrike_error",
     "//shrike-core/shrike-index:shrike_index",
     "//shrike-core/shrike-kernel:shrike_kernel",
     "//shrike-core/shrike-schemas:shrike_schemas",

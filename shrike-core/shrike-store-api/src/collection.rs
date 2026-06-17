@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
-use shrike_ffi::NativeResult;
+use shrike_error::NativeResult;
 use shrike_schemas::{
     CollectionCheckResponse, CollectionInfo, CollectionPruneResponse, DeckInput,
     DeleteDecksResponse, DeleteMediaResponse, DeleteNoteTypeResult, FieldMetadataInput, FieldOp,
@@ -32,7 +32,7 @@ impl DuplicatePolicy {
             "error" => Ok(Self::Error),
             "skip" => Ok(Self::Skip),
             "allow" => Ok(Self::Allow),
-            other => Err(shrike_ffi::NativeError::invalid_input(format!(
+            other => Err(shrike_error::NativeError::invalid_input(format!(
                 "on_duplicate must be error/skip/allow (got {other:?})"
             ))),
         }
@@ -65,7 +65,7 @@ impl ImportUpdateCondition {
             "if_newer" => Ok(Self::IfNewer),
             "always" => Ok(Self::Always),
             "never" => Ok(Self::Never),
-            other => Err(shrike_ffi::NativeError::invalid_input(format!(
+            other => Err(shrike_error::NativeError::invalid_input(format!(
                 "update condition must be if_newer/always/never (got {other:?})"
             ))),
         }

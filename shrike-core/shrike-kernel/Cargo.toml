@@ -20,7 +20,7 @@ name = "shrike_kernel"
 shrike-collection = { path = "../shrike-collection" }
 shrike-derived = { path = "../shrike-derived" }
 shrike-engine-api = { path = "../shrike-engine-api" }
-shrike-ffi = { workspace = true }
+shrike-error = { workspace = true }
 # Shared SSRF-safety primitives (#592): the is_global classifier, resolve-and-vet,
 # and the IP-pinned agent builder — one home, shared with the remote engine
 # crates. A LOW utility crate (no engine dep, no kernel dep), so this edge keeps
@@ -51,10 +51,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "rt", "sync", "time"] }
 # Integration tests (tests/*.rs) link the library crate, so they need the
 # crate's own deps re-declared as dev-deps to `use` them directly: the #590
 # committed-but-errored repro (tests/s6_repro.rs) builds a FailingEmbedder
-# (futures::BoxFuture + shrike_ffi error types) and asserts on the schema/store
+# (futures::BoxFuture + shrike_error error types) and asserts on the schema/store
 # wire types.
 [dev-dependencies]
 futures = { version = "0.3", features = ["executor"] }
-shrike-ffi = { workspace = true }
+shrike-error = { workspace = true }
 shrike-schemas = { path = "../shrike-schemas" }
 shrike-store-api = { workspace = true }

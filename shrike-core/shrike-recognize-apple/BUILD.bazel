@@ -75,7 +75,7 @@ rust_library(
     edition = "2021",
     deps = [
         "//shrike-core/shrike-engine-api:shrike_engine_api",
-        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-error:shrike_error",
         "@crates//:tracing",
     ] + select({
         "@platforms//os:macos": [

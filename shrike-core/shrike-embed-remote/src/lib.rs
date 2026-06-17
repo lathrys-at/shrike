@@ -27,7 +27,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde::Deserialize;
 use shrike_engine_api::{EmbedImages, EmbedText, MediaItem};
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 /// Per-request ceiling, matching the Python backend's httpx timeout.
 const EMBED_TIMEOUT: Duration = Duration::from_secs(60);

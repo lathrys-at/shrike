@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 use shrike_kernel::{block_on, Embedder, Kernel};
 
 /// An embedder whose every embed fails — stands in for a transient backend

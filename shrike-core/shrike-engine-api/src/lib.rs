@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 // ── media items ──────────────────────────────────────────────────────────────
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 
 use shrike_collection::{CreateOutcome, DuplicatePolicy, ImportOptions, ImportUpdateCondition};
-use shrike_ffi::NativeResult;
+use shrike_error::NativeResult;
 use shrike_kernel::{Embedder, Kernel, NoteSpec, SerializedCollection};
 
 use crate::asyncio_bridge::future_into_py;
@@ -82,7 +82,7 @@ impl AsyncCollection {
 /// `(status, id, error)` so Python pattern-matches without a union type.
 type UpsertWireResult = (String, Option<i64>, Option<String>);
 
-fn outcome_to_wire(outcome: shrike_ffi::NativeResult<CreateOutcome>) -> UpsertWireResult {
+fn outcome_to_wire(outcome: shrike_error::NativeResult<CreateOutcome>) -> UpsertWireResult {
     match outcome {
         Ok(CreateOutcome::Created(id)) => ("created".to_string(), Some(id), None),
         Ok(CreateOutcome::SkippedDuplicate) => ("skipped".to_string(), None, None),
@@ -389,7 +389,7 @@ impl AsyncKernel {
         // here into the typed seam (#391) and serialized once on the way out.
         let notes: Vec<shrike_schemas::NoteInput> =
             serde_json::from_str(&notes_json).map_err(|e| {
-                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                crate::to_py_err(shrike_error::NativeError::invalid_input(format!(
                     "notes must be a JSON list: {e}"
                 )))
             })?;
@@ -398,7 +398,7 @@ impl AsyncKernel {
         kernel_op(py, async move {
             let results = kernel.upsert_notes_wire(notes, policy, dry_run).await?;
             serde_json::to_string(&results)
-                .map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
+                .map_err(|e| shrike_error::NativeError::internal(e.to_string()))
         })
     }
 
@@ -475,7 +475,7 @@ impl AsyncKernel {
         kernel_op(py, async move {
             let response = kernel.delete_notes(note_ids).await?;
             serde_json::to_string(&response).map_err(|e| {
-                shrike_ffi::NativeError::internal(format!("serializing delete response: {e}"))
+                shrike_error::NativeError::internal(format!("serializing delete response: {e}"))
             })
         })
     }
@@ -495,7 +495,7 @@ impl AsyncKernel {
     ) -> PyResult<Bound<'py, PyAny>> {
         let items: Vec<shrike_schemas::StoreMediaItem> = serde_json::from_str(&items_json)
             .map_err(|e| {
-                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                crate::to_py_err(shrike_error::NativeError::invalid_input(format!(
                     "items must be a JSON list: {e}"
                 )))
             })?;
@@ -604,7 +604,7 @@ impl AsyncKernel {
             "apkg" => PackageFormat::Apkg,
             "colpkg" => PackageFormat::Colpkg,
             other => {
-                return Err(crate::to_py_err(shrike_ffi::NativeError::invalid_input(
+                return Err(crate::to_py_err(shrike_error::NativeError::invalid_input(
                     format!("format must be apkg/colpkg (got {other:?})"),
                 )))
             }
@@ -612,13 +612,13 @@ impl AsyncKernel {
         let scope = match scope_kind.as_str() {
             "whole" => ExportScope::Whole,
             "deck" => ExportScope::Deck(deck.ok_or_else(|| {
-                crate::to_py_err(shrike_ffi::NativeError::invalid_input(
+                crate::to_py_err(shrike_error::NativeError::invalid_input(
                     "deck scope needs a deck reference",
                 ))
             })?),
             "notes" => ExportScope::Notes(note_ids.unwrap_or_default()),
             other => {
-                return Err(crate::to_py_err(shrike_ffi::NativeError::invalid_input(
+                return Err(crate::to_py_err(shrike_error::NativeError::invalid_input(
                     format!("scope_kind must be whole/deck/notes (got {other:?})"),
                 )))
             }
@@ -683,7 +683,7 @@ impl AsyncKernel {
     ) -> PyResult<Bound<'py, PyAny>> {
         let decks: Vec<shrike_schemas::DeckInput> =
             serde_json::from_str(&decks_json).map_err(|e| {
-                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                crate::to_py_err(shrike_error::NativeError::invalid_input(format!(
                     "decks must be a JSON list: {e}"
                 )))
             })?;
@@ -714,7 +714,7 @@ impl AsyncKernel {
     ) -> PyResult<Bound<'py, PyAny>> {
         let note_types: Vec<shrike_schemas::NoteTypeInput> = serde_json::from_str(&note_types_json)
             .map_err(|e| {
-                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                crate::to_py_err(shrike_error::NativeError::invalid_input(format!(
                     "note_types must be a JSON list: {e}"
                 )))
             })?;
@@ -734,7 +734,7 @@ impl AsyncKernel {
     ) -> PyResult<Bound<'py, PyAny>> {
         let operations: Vec<shrike_schemas::FieldOp> = serde_json::from_str(&operations_json)
             .map_err(|e| {
-                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                crate::to_py_err(shrike_error::NativeError::invalid_input(format!(
                     "operations must be a JSON list: {e}"
                 )))
             })?;
@@ -756,7 +756,7 @@ impl AsyncKernel {
     ) -> PyResult<Bound<'py, PyAny>> {
         let operations: Vec<shrike_schemas::TemplateOp> = serde_json::from_str(&operations_json)
             .map_err(|e| {
-                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                crate::to_py_err(shrike_error::NativeError::invalid_input(format!(
                     "operations must be a JSON list: {e}"
                 )))
             })?;
@@ -813,7 +813,7 @@ impl AsyncKernel {
     ) -> PyResult<Bound<'py, PyAny>> {
         let updates: Vec<shrike_schemas::FieldMetadataInput> = serde_json::from_str(&updates_json)
             .map_err(|e| {
-                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                crate::to_py_err(shrike_error::NativeError::invalid_input(format!(
                     "updates must be a JSON list: {e}"
                 )))
             })?;
@@ -840,7 +840,7 @@ impl AsyncKernel {
     ) -> PyResult<Bound<'py, PyAny>> {
         let field_map: std::collections::BTreeMap<String, String> =
             serde_json::from_str(&field_map_json).map_err(|e| {
-                crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                crate::to_py_err(shrike_error::NativeError::invalid_input(format!(
                     "field_map must be a JSON object: {e}"
                 )))
             })?;
@@ -849,7 +849,7 @@ impl AsyncKernel {
                 Default::default()
             } else {
                 serde_json::from_str(&template_map_json).map_err(|e| {
-                    crate::to_py_err(shrike_ffi::NativeError::invalid_input(format!(
+                    crate::to_py_err(shrike_error::NativeError::invalid_input(format!(
                         "template_map must be a JSON object: {e}"
                     )))
                 })?
@@ -942,7 +942,7 @@ impl AsyncKernel {
         kernel_op(py, async move {
             let spaces = kernel.build_cross_space(&source_texts, fetch_k).await?;
             serde_json::to_string(&spaces)
-                .map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
+                .map_err(|e| shrike_error::NativeError::internal(e.to_string()))
         })
     }
 

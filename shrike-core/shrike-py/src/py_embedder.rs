@@ -17,7 +17,7 @@ use futures::future::BoxFuture;
 use pyo3::prelude::*;
 
 use shrike_engine_api::{Embedder, ImageEmbedder, ImageResolver, MediaItem};
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 type VecResult = NativeResult<Vec<Vec<f32>>>;
 

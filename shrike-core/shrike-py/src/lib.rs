@@ -2,12 +2,12 @@
 //!
 //! The ONE crate that depends on `pyo3` (epic #265 convention 5, enforced by
 //! `//shrike-core:layering_check`). Every native compute crate (pure Rust) is bound
-//! to Python here, following the `shrike-ffi` conventions:
+//! to Python here, following the `shrike-error` conventions:
 //!
 //! - coarse, batched calls; only strings, bytes, f32 vectors, i64 key arrays,
 //!   and small JSON-able dicts cross the boundary
 //! - all compute under `py.detach` (GIL released; pyo3 ≥0.26 name for allow_threads)
-//! - `shrike_ffi::NativeError` kinds map to the exception classes below, which
+//! - `shrike_error::NativeError` kinds map to the exception classes below, which
 //!   the Python facades translate into Shrike's existing error surface
 //!
 //! The module is internal: production code reaches it only through the
@@ -25,7 +25,7 @@ use pyo3::prelude::*;
 // native multimodal image path).
 #[cfg(feature = "engine-remote")]
 use shrike_engine_api::{EmbedImages as _, EmbedText as _};
-use shrike_ffi::{ErrorKind, NativeError};
+use shrike_error::{ErrorKind, NativeError};
 
 #[cfg(feature = "anki-core")]
 mod anki_core;
@@ -50,7 +50,7 @@ pyo3::create_exception!(
     _native,
     NativeInputError,
     pyo3::exceptions::PyValueError,
-    "Expected bad input crossed the FFI (shrike_ffi ErrorKind::InvalidInput). \
+    "Expected bad input crossed the FFI (shrike_error ErrorKind::InvalidInput). \
      Facades translate this into the Python-side input-error surface; logged \
      without a traceback."
 );

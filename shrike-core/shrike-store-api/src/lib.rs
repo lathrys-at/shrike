@@ -27,7 +27,7 @@ pub use collection::{
     PreparedMedia, PreparedMediaSource, ServiceNote,
 };
 
-use shrike_ffi::NativeResult;
+use shrike_error::NativeResult;
 use std::collections::BTreeMap;
 
 /// The byte-source media size cap — ONE policy value: the collection's write

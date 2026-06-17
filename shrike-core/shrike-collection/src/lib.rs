@@ -27,7 +27,7 @@ mod write;
 
 pub use adapter::{FieldsState, ServiceAdapter};
 pub use embed_text::{extract_image_refs, extract_sound_refs, EMBED_TEXT_VERSION};
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 // Canonical homes moved to the store contract (#389); re-exported so the
 // pre-trait import paths keep working.
@@ -631,7 +631,7 @@ mod tests {
         core: &CollectionCore,
         name: &str,
         ops_json: &str,
-    ) -> shrike_ffi::NativeResult<serde_json::Value> {
+    ) -> shrike_error::NativeResult<serde_json::Value> {
         let ops: Vec<shrike_schemas::FieldOp> = serde_json::from_str(ops_json).unwrap();
         Ok(serde_json::to_value(core.update_note_type_fields(name, &ops)?).unwrap())
     }
@@ -640,7 +640,7 @@ mod tests {
         core: &CollectionCore,
         name: &str,
         ops_json: &str,
-    ) -> shrike_ffi::NativeResult<serde_json::Value> {
+    ) -> shrike_error::NativeResult<serde_json::Value> {
         let ops: Vec<shrike_schemas::TemplateOp> = serde_json::from_str(ops_json).unwrap();
         Ok(serde_json::to_value(core.update_note_type_templates(name, &ops)?).unwrap())
     }
@@ -742,7 +742,7 @@ mod tests {
         let err = core
             .create_note(basic, DEFAULT_DECK, &fields, &[], DuplicatePolicy::Error)
             .unwrap_err();
-        assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
+        assert_eq!(err.kind, shrike_error::ErrorKind::InvalidInput);
         // skip: not written, reported as skipped
         let skipped = core
             .create_note(basic, DEFAULT_DECK, &fields, &[], DuplicatePolicy::Skip)
@@ -771,7 +771,7 @@ mod tests {
                 DuplicatePolicy::Allow, // policy never overrides structural errors
             )
             .unwrap_err();
-        assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
+        assert_eq!(err.kind, shrike_error::ErrorKind::InvalidInput);
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
@@ -929,7 +929,7 @@ mod tests {
         let err = core
             .list_notes(None, None, None, None, None, false, 50)
             .unwrap_err();
-        assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
+        assert_eq!(err.kind, shrike_error::ErrorKind::InvalidInput);
 
         // collection_info: all sections, summary/stats/decks coherent.
         let info = serde_json::to_value(
@@ -1096,7 +1096,7 @@ mod tests {
             {"op": "remove", "name": "Ghost"},
         ]);
         let err = field_ops_json(&core, "Custom", &bad_ops.to_string()).unwrap_err();
-        assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
+        assert_eq!(err.kind, shrike_error::ErrorKind::InvalidInput);
         assert_eq!(
             core.notetype_field_names(custom_id).unwrap(),
             vec!["C", "A2", "D"]
@@ -1599,7 +1599,7 @@ mod tests {
 
         // reopen while held → the BUSY tier, message intact.
         let err = core.reopen().unwrap_err();
-        assert_eq!(err.kind, shrike_ffi::ErrorKind::Busy);
+        assert_eq!(err.kind, shrike_error::ErrorKind::Busy);
         assert!(err.message.contains("in use by another process"));
 
         // holder leaves → reopen succeeds and ops work again.
@@ -1778,7 +1778,7 @@ mod tests {
         assert_eq!(core.find_notes("alpha").unwrap().len(), 1);
         // A malformed expression is the expected-input error tier.
         let err = core.find_notes("added:notanumber").unwrap_err();
-        assert_eq!(err.kind, shrike_ffi::ErrorKind::InvalidInput);
+        assert_eq!(err.kind, shrike_error::ErrorKind::InvalidInput);
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
     }

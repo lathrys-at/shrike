@@ -39,7 +39,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde::Deserialize;
 use shrike_engine_api::{MediaItem, Recognition, RecognizeMedia};
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 /// Bump whenever [`DESCRIBE_PROMPT_V1`] (or whichever template ships)
 /// changes: the prompt is part of the output space, so a change must

@@ -16,7 +16,7 @@ build = "build.rs"
 
 [dependencies]
 shrike-engine-api = { path = "../shrike-engine-api" }
-shrike-ffi = { workspace = true }
+shrike-error = { workspace = true }
 tracing = "0.1"
 
 # The Swift wire: JSON across the C boundary, parsed straight into the

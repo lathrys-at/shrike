@@ -5012,7 +5012,7 @@ dependencies = [
  "prost",
  "regex",
  "serde_json",
- "shrike-ffi",
+ "shrike-error",
  "shrike-schemas",
  "shrike-store-api",
  "tempfile",
@@ -5024,7 +5024,7 @@ name = "shrike-derived"
 version = "0.0.0"
 dependencies = [
  "rusqlite",
- "shrike-ffi",
+ "shrike-error",
  "shrike-store-api",
  "tracing",
 ]
@@ -5037,7 +5037,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shrike-engine-api",
- "shrike-ffi",
+ "shrike-error",
  "shrike-net",
  "tracing",
  "ureq",
@@ -5052,7 +5052,7 @@ dependencies = [
  "ndarray 0.17.2",
  "ort",
  "shrike-engine-api",
- "shrike-ffi",
+ "shrike-error",
  "tokenizers",
  "tracing",
 ]
@@ -5065,7 +5065,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shrike-engine-api",
- "shrike-ffi",
+ "shrike-error",
  "shrike-net",
  "tracing",
  "ureq",
@@ -5080,12 +5080,12 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
- "shrike-ffi",
+ "shrike-error",
  "tokio",
 ]
 
 [[package]]
-name = "shrike-ffi"
+name = "shrike-error"
 version = "0.0.0"
 dependencies = [
  "tracing",
@@ -5096,7 +5096,7 @@ dependencies = [
 name = "shrike-index"
 version = "0.0.0"
 dependencies = [
- "shrike-ffi",
+ "shrike-error",
  "shrike-store-api",
  "tracing",
  "usearch",
@@ -5114,7 +5114,7 @@ dependencies = [
  "shrike-collection",
  "shrike-derived",
  "shrike-engine-api",
- "shrike-ffi",
+ "shrike-error",
  "shrike-index",
  "shrike-net",
  "shrike-schemas",
@@ -5131,7 +5131,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "shlex 1.3.0",
- "shrike-ffi",
+ "shrike-error",
  "tracing",
  "ureq",
 ]
@@ -5147,7 +5147,7 @@ dependencies = [
  "shrike-derived",
  "shrike-embed-remote",
  "shrike-engine-api",
- "shrike-ffi",
+ "shrike-error",
  "shrike-kernel",
  "shrike-recognize-apple",
  "shrike-schemas",
@@ -5160,7 +5160,7 @@ dependencies = [
 name = "shrike-net"
 version = "0.1.0"
 dependencies = [
- "shrike-ffi",
+ "shrike-error",
  "tracing",
  "ureq",
  "url",
@@ -5182,7 +5182,7 @@ dependencies = [
  "shrike-embed",
  "shrike-embed-remote",
  "shrike-engine-api",
- "shrike-ffi",
+ "shrike-error",
  "shrike-index",
  "shrike-kernel",
  "shrike-llama-server",
@@ -5202,7 +5202,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shrike-engine-api",
- "shrike-ffi",
+ "shrike-error",
  "tracing",
 ]
 
@@ -5220,7 +5220,7 @@ name = "shrike-store-api"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "shrike-ffi",
+ "shrike-error",
  "shrike-schemas",
 ]
 

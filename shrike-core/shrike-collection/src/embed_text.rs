@@ -22,7 +22,7 @@ use std::sync::LazyLock;
 
 use fancy_regex::Regex as FancyRegex;
 use regex::Regex;
-use shrike_ffi::NativeResult;
+use shrike_error::NativeResult;
 
 /// Mirrors `shrike.embed_text.EMBED_TEXT_VERSION` — the parity test asserts
 /// the two constants agree.

@@ -25,7 +25,7 @@ use std::sync::{Arc, RwLock};
 use blake2::digest::consts::U8;
 use blake2::{Blake2b, Digest};
 
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 use shrike_store_api::VectorIndex;
 
 use crate::TAG_TEXT_SPACE;

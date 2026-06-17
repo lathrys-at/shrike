@@ -26,7 +26,7 @@
 use std::io::Read;
 
 use base64::Engine;
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 use shrike_schemas::StoreMediaItem;
 use shrike_store_api::{PreparedMedia, PreparedMediaSource};
 use url::Url;

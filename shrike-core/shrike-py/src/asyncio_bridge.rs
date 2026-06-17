@@ -28,7 +28,7 @@ use pyo3::pyclass::{PyTraverseError, PyVisit};
 use pyo3::types::{PyWeakrefMethods, PyWeakrefReference};
 use pyo3::BoundObject;
 
-use shrike_ffi::NativeResult;
+use shrike_error::NativeResult;
 
 use crate::to_py_err;
 

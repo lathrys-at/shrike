@@ -12,7 +12,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     deps = [
-        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-error:shrike_error",
         "//shrike-core/shrike-store-api:shrike_store_api",
         "@crates//:usearch",
         "@crates//:tracing",

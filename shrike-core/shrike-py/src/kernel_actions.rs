@@ -20,9 +20,9 @@ use crate::to_py_err;
 
 /// Serialize a typed response onto the host wire; a failure is a native bug.
 /// Shared with the direct `CollectionCore` read bindings in `anki_core`.
-pub(crate) fn wire<T: serde::Serialize>(value: &T) -> Result<String, shrike_ffi::NativeError> {
+pub(crate) fn wire<T: serde::Serialize>(value: &T) -> Result<String, shrike_error::NativeError> {
     serde_json::to_string(value)
-        .map_err(|e| shrike_ffi::NativeError::internal(format!("response wire shape: {e}")))
+        .map_err(|e| shrike_error::NativeError::internal(format!("response wire shape: {e}")))
 }
 
 /// The kernel-side registry — the Python binding asserts its forwarding list
@@ -148,7 +148,7 @@ pub(crate) fn action_search_notes(
     // args are byte-identical to today.
     let cross_space: Vec<shrike_kernel::actions::SpaceSemantic> = match cross_space {
         Some(s) if !s.is_empty() => serde_json::from_str(&s)
-            .map_err(|e| shrike_ffi::NativeError::invalid_input(format!("cross_space: {e}")))
+            .map_err(|e| shrike_error::NativeError::invalid_input(format!("cross_space: {e}")))
             .map_err(to_py_err)?,
         _ => Vec::new(),
     };
@@ -184,7 +184,7 @@ pub(crate) fn action_search_notes(
         let groups = shrike_kernel::actions::search_notes(
             inner, index, derived, tag_keys, &sources, &vectors, &args,
         )?;
-        serde_json::to_string(&groups).map_err(|e| shrike_ffi::NativeError::internal(e.to_string()))
+        serde_json::to_string(&groups).map_err(|e| shrike_error::NativeError::internal(e.to_string()))
     })
     .map_err(to_py_err)
 }

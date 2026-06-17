@@ -51,7 +51,7 @@
 use std::future::Future;
 use std::sync::OnceLock;
 
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 

@@ -19,7 +19,7 @@ rust_library(
         "//shrike-core/shrike-collection:shrike_collection",
         "//shrike-core/shrike-derived:shrike_derived",
         "//shrike-core/shrike-engine-api:shrike_engine_api",
-        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-error:shrike_error",
         "//shrike-core/shrike-net:shrike_net",
         "//shrike-core/shrike-store-api:shrike_store_api",
         "@crates//:base64",
@@ -70,7 +70,7 @@ rust_test(
     edition = "2021",
     deps = [
         ":shrike_kernel",
-        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-error:shrike_error",
         "//shrike-core/shrike-schemas:shrike_schemas",
         "//shrike-core/shrike-store-api:shrike_store_api",
         "@crates//:futures",

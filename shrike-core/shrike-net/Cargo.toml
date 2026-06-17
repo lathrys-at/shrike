@@ -16,7 +16,7 @@ license = "AGPL-3.0-or-later"
 name = "shrike_net"
 
 [dependencies]
-shrike-ffi = { workspace = true }
+shrike-error = { workspace = true }
 # SYNCHRONOUS client — no tokio, no runtime (the workspace's runtime-less HTTP
 # precedent, same as the kernel's media fetch and the remote engines).
 ureq = "2"

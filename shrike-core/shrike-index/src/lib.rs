@@ -8,7 +8,7 @@
 
 mod engine;
 
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 pub use engine::{ActivationStats, ModalityRanking, MultiModalIndex};

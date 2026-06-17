@@ -22,14 +22,14 @@
 //! test` stays fast and download-free.
 
 use shrike_engine_api::{MediaItem, Recognition, RecognizeMedia};
-use shrike_ffi::NativeResult;
+use shrike_error::NativeResult;
 
 #[cfg(target_os = "macos")]
 mod imp {
     use std::ffi::{c_char, CString};
 
     use shrike_engine_api::Recognition;
-    use shrike_ffi::NativeResult;
+    use shrike_error::NativeResult;
 
     use crate::glue::{parse_wire, SwiftString};
 
@@ -92,10 +92,10 @@ mod imp {
             error: Option<String>,
         }
         let parsed: Status = serde_json::from_str(json.as_str()).map_err(|e| {
-            shrike_ffi::NativeError::internal(format!("asset status unparseable: {e}"))
+            shrike_error::NativeError::internal(format!("asset status unparseable: {e}"))
         })?;
         if let Some(error) = parsed.error {
-            return Err(shrike_ffi::NativeError::unavailable(format!(
+            return Err(shrike_error::NativeError::unavailable(format!(
                 "speech asset install failed: {error}"
             )));
         }
@@ -106,7 +106,7 @@ mod imp {
 #[cfg(not(target_os = "macos"))]
 mod imp {
     use shrike_engine_api::Recognition;
-    use shrike_ffi::NativeResult;
+    use shrike_error::NativeResult;
 
     pub(super) fn fingerprint(_locale: &str) -> NativeResult<String> {
         Err(crate::speech_unavailable())

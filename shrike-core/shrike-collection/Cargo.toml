@@ -17,7 +17,7 @@ name = "shrike_collection"
 # the exact surface pylib's rsbridge binds — never the bare crate API. Pin policy:
 # tag == the pip wheel version, bumped together.
 [dependencies]
-shrike-ffi = { workspace = true }
+shrike-error = { workspace = true }
 shrike-store-api = { workspace = true }
 # The typed read seam (#391 phase 2): the read surface returns the canonical
 # wire types directly. schemas is a leaf (pure serde, no pyo3) — no cycle.

@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 use shrike_schemas::{
     CollectionInfo, DeckInfo, DeckStat, FieldDetail, ListNotesResponse, Note, NoteTypeDetail,
     NoteTypeInfo, Stats, Summary, TemplateInfo,

@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 use shrike_schemas::{
     DeckInput, DeleteDecksResponse, DeleteNoteTypeResult, NoteInput, NoteValidationReason,

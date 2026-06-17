@@ -26,7 +26,7 @@
 //! needed).
 
 use shrike_engine_api::{MediaItem, Recognition, RecognizeMedia};
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 #[cfg(target_os = "macos")]
 mod glue;

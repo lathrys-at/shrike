@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 /// 50ms, not 250 (#426): a localhost health GET costs ~1ms, and every service

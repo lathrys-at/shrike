@@ -59,11 +59,11 @@ ENGINE_CRATES = {
 # shrike-net, an engine -> shrike-net, …) are fine — only edges OUT of a floor
 # crate are constrained.
 #
-# As the #703 reorg renames/adds low-utility crates (shrike-ffi -> shrike-error;
-# shrike-net -> shrike-network; the new shrike-process / shrike-media /
-# shrike-cache / shrike-store), extend this set — one line per crate.
+# As the #703 reorg renames/adds low-utility crates (shrike-net -> shrike-network;
+# the new shrike-process / shrike-media / shrike-cache / shrike-store), extend
+# this set — one line per crate.
 LAYER_FLOOR = {
-    "shrike-ffi",  # -> shrike-error (#705)
+    "shrike-error",
     "shrike-net",  # -> shrike-network (#706)
     "shrike-schemas",
     "shrike-engine-api",  # the kernel<->ort firewall — a thin contract, stays floor

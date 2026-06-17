@@ -17,7 +17,7 @@
 
 use serde::de::DeserializeOwned;
 
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 use shrike_schemas::{CollectionInfo, ListNotesResponse};
 use shrike_store_api::Collection;
 

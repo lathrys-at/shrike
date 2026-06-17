@@ -11,7 +11,7 @@ license = "AGPL-3.0-or-later"
 
 [dependencies]
 shrike-engine-api = { path = "../shrike-engine-api" }
-shrike-ffi = { workspace = true }
+shrike-error = { workspace = true }
 # Shared SSRF-safety primitives (#592): pin the configured endpoint's IP and
 # refuse cross-host redirects, the SAME control as the kernel's media fetch.
 shrike-net = { workspace = true }

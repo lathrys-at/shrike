@@ -33,7 +33,7 @@
 //!   batch" are the same size.
 
 use crate::{EmbedImages, EmbedText, MediaItem};
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 /// Tolerance for "batched == serial". Sits well above float-reduction noise
 /// (llama-server ~4e-5, fp32 ONNX exactly 0) and far below dynamic-int8
@@ -482,7 +482,7 @@ fn drift(reference: &[Vec<f32>], batched: &[Vec<f32>]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shrike_ffi::NativeResult;
+    use shrike_error::NativeResult;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Hash-deterministic per-text vectors, optionally batch-variant.

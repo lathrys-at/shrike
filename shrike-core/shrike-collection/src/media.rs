@@ -5,7 +5,7 @@
 //! code and lands as its own step (5b) under the security-review gate.
 
 use serde_json::Value;
-use shrike_ffi::NativeResult;
+use shrike_error::NativeResult;
 use shrike_schemas::{
     CollectionCheckResponse, CollectionPruneResponse, DeleteMediaResponse, ListMediaResponse,
     MediaFetchResult, MediaFileInfo, PruneEmptyCards, PruneEmptyNotes, PruneUnusedMedia,
@@ -103,7 +103,7 @@ pub fn path_within_any_root(path: &str, roots: &[String]) -> bool {
 /// uncapped.
 fn check_media_size(len: usize) -> NativeResult<()> {
     if len > shrike_store_api::MEDIA_MAX_BYTES {
-        return Err(shrike_ffi::NativeError::invalid_input(format!(
+        return Err(shrike_error::NativeError::invalid_input(format!(
             "file exceeds the {}-byte limit",
             shrike_store_api::MEDIA_MAX_BYTES
         )));
@@ -142,7 +142,7 @@ impl CollectionCore {
         }
         let safe = safe_media_name(&name);
         if safe.is_empty() {
-            return Err(shrike_ffi::NativeError::invalid_input(
+            return Err(shrike_error::NativeError::invalid_input(
                 "could not determine a filename",
             ));
         }
@@ -184,7 +184,7 @@ impl CollectionCore {
         index: i64,
         path_roots: &[String],
     ) -> NativeResult<StoreMediaResult> {
-        use shrike_ffi::NativeError;
+        use shrike_error::NativeError;
         if path_roots.is_empty() {
             return Err(NativeError::invalid_input(
                 "server-local paths are not enabled (set --media-path-root on a \
@@ -233,7 +233,7 @@ impl CollectionCore {
                     self.store_path_item(path, p.index, path_roots)
                 }
                 PreparedMediaSource::Failed { error } => {
-                    Err(shrike_ffi::NativeError::invalid_input(error.clone()))
+                    Err(shrike_error::NativeError::invalid_input(error.clone()))
                 }
             };
             results.push(result.unwrap_or_else(|e| StoreMediaResult::Error {

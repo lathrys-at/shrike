@@ -17,7 +17,7 @@ rust_library(
     # linkage under Bazel while actually linking bundled.
     crate_features = ["bundled"],
     deps = [
-        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-error:shrike_error",
         "//shrike-core/shrike-store-api:shrike_store_api",
         "@crates//:rusqlite",
         "@crates//:tracing",

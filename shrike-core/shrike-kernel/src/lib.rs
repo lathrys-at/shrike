@@ -46,7 +46,7 @@ use tracing::Instrument;
 
 use shrike_collection::CollectionCore;
 use shrike_derived::DerivedEngine;
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 use shrike_index::MultiModalIndex;
 use shrike_store_api::{Collection, CreateOutcome, DerivedStore, DuplicatePolicy, VectorIndex};
 
@@ -5836,7 +5836,7 @@ mod no_cpython_smoke {
             // Snapshot rows NOW (note A only), then land note B…
             let stale = kernel
                 .collection
-                .run(|core| -> shrike_ffi::NativeResult<_> {
+                .run(|core| -> shrike_error::NativeResult<_> {
                     let ids = core.find_notes("")?;
                     let rows = core.derived_field_rows(&ids)?;
                     let dmod = core.col_mod()?;

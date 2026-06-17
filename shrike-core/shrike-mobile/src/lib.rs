@@ -41,7 +41,7 @@
 //!
 //! Every result the callback receives is a JSON object: `{"ok": <value>}` on
 //! success, or `{"error": {"kind": "...", "message": "..."}}` on failure,
-//! where `kind` is the [`shrike_ffi::ErrorKind`] discriminant string. A
+//! where `kind` is the [`shrike_error::ErrorKind`] discriminant string. A
 //! synchronous misuse (a null handle, a non-UTF-8 C string) is reported the
 //! same way through the callback, never a panic across the FFI boundary.
 
@@ -54,7 +54,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 #[cfg(feature = "anki-core")]
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 #[cfg(feature = "anki-core")]
 use shrike_kernel::Kernel;
 

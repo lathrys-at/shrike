@@ -33,7 +33,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 /// The hop cap shared by every manual redirect-following loop in the tree (the
 /// kernel media fetch and the remote engines), so "how many redirects" is one

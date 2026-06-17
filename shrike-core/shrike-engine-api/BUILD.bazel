@@ -11,7 +11,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     deps = [
-        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-error:shrike_error",
         "@crates//:futures",
         "@crates//:serde",
         "@crates//:tokio",

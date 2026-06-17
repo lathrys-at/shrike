@@ -195,7 +195,7 @@ mod tests {
     use super::*;
     use crate::{Embedder, ImageEmbedder};
     use futures::future::BoxFuture;
-    use shrike_ffi::NativeResult;
+    use shrike_error::NativeResult;
 
     /// A do-nothing embedder — the carrier tests only exercise set bookkeeping,
     /// never an embed call.

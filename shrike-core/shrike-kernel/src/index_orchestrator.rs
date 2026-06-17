@@ -22,7 +22,7 @@ use blake2::digest::consts::U8;
 use blake2::{Blake2b, Digest};
 use serde::{Deserialize, Serialize};
 
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 use shrike_store_api::VectorIndex;
 
 /// The on-disk schema version of a freshly built index (mirrors

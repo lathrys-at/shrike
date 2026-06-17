@@ -2,7 +2,7 @@
 //! the same degrade-don't-crash a missing pyobjc gave the Python backend.
 
 use shrike_engine_api::Recognition;
-use shrike_ffi::NativeResult;
+use shrike_error::NativeResult;
 
 pub(crate) fn fingerprint() -> NativeResult<String> {
     Err(crate::unavailable())

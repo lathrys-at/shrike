@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{json, Value};
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 use shrike_schemas::{
     FieldMetadataInput, FieldOp, FindReplaceNoteTypesResponse, MigrateNoteTypeResponse,
     NoteTypeInput, NoteTypeResult, TemplateInput, TemplateOp, UpdateNoteTypeFieldMetadataResponse,

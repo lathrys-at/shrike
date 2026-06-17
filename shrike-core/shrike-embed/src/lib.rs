@@ -18,7 +18,7 @@ use std::sync::Mutex;
 pub use clip::{ClipEmbedder, ClipEmbedderConfig, IMAGE_PREP_VERSION_RS};
 
 use ndarray::{s, Array1, Array2, ArrayD, Axis, Ix3};
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 use tokenizers::Tokenizer;
 
 /// Pooling strategies (mirrors `_POOLINGS` in embedding_onnx.py; "none" is

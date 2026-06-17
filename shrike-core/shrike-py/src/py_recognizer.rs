@@ -18,7 +18,7 @@ use futures::future::BoxFuture;
 use pyo3::prelude::*;
 
 use shrike_engine_api::{MediaItem, Recognition, Recognizer, Segment};
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 
 type RecResult = NativeResult<Vec<Recognition>>;
 

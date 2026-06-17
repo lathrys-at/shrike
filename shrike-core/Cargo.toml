@@ -16,7 +16,7 @@ members = [
     "shrike-embed-remote",
     "shrike-describe-remote",
     "shrike-engine-api",
-    "shrike-ffi",
+    "shrike-error",
     "shrike-index",
     "shrike-kernel",
     "shrike-llama-server",
@@ -49,6 +49,6 @@ license = "AGPL-3.0-or-later"
 # interpreter — the key property for a hermetic Bazel build (and one wheel works
 # across 3.12+). Matches the hermetic toolchain's minor.
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
-shrike-ffi = { path = "shrike-ffi" }
+shrike-error = { path = "shrike-error" }
 shrike-net = { path = "shrike-net" }
 shrike-store-api = { path = "shrike-store-api" }

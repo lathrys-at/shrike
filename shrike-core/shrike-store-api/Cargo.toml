@@ -3,7 +3,7 @@
 # crate implements — the scale-down seam (engines are swappable compute;
 # stores are the kernel's owned state, composed at assembly). A LEAF — no
 # store deps, no kernel dep, no pyo3, no runtime. If a change here needs
-# more than shrike-ffi + shrike-schemas (the wire types the Collection
+# more than shrike-error + shrike-schemas (the wire types the Collection
 # contract speaks) + serde_json, it belongs somewhere else.
 [package]
 name = "shrike-store-api"
@@ -13,5 +13,5 @@ license = "AGPL-3.0-or-later"
 
 [dependencies]
 serde_json = "1"
-shrike-ffi = { workspace = true }
+shrike-error = { workspace = true }
 shrike-schemas = { path = "../shrike-schemas" }

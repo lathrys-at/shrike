@@ -12,7 +12,7 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-shrike-ffi = { workspace = true }
+shrike-error = { workspace = true }
 shlex = "1"
 tracing = "0.1"
 # SYNCHRONOUS — no runtime; the host runs lifecycle off its loop.

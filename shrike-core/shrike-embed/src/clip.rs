@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use image::imageops::FilterType;
 use shrike_engine_api::MediaItem;
-use shrike_ffi::{NativeError, NativeResult};
+use shrike_error::{NativeError, NativeResult};
 use tokenizers::Tokenizer;
 
 use crate::{l2_normalize_rows, GraphInput};

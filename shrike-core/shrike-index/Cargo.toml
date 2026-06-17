@@ -11,7 +11,7 @@ name = "shrike_index"
 
 # Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py.
 [dependencies]
-shrike-ffi = { workspace = true }
+shrike-error = { workspace = true }
 shrike-store-api = { workspace = true }
 # The official Rust binding over the same native C++ core as usearch-python.
 # Pinned to the same core version as the Python binding (2.25.3) — the #272
