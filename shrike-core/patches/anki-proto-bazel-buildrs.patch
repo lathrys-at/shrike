@@ -9,7 +9,7 @@ Three sandbox realities:
 * The source repo's proto/ tree and protoc itself are not available in the
   build-script sandbox (crate_universe materializes only the crate package).
   With DESCRIPTORS_BIN set (the annotation points it at the checked-in pinned
-  descriptor set, //native/third_party/anki), codegen runs via prost's
+  descriptor set, //shrike-core/third_party/anki), codegen runs via prost's
   compile_fds — generate-from-descriptors, no protoc, no proto files.
 * descriptors_path() defaults to `OUT_DIR/../../anki_descriptors.bin`,
   cargo's shared target layout, which doesn't exist across Bazel sandboxes —

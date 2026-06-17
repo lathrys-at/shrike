@@ -4,7 +4,7 @@
 //! native module shares: the error taxonomy and (in documentation) the
 //! marshaling rules. The Python-facing half of these conventions (exception
 //! classes, `allow_threads` wrapping) lives in `shrike-py`, the one crate
-//! allowed to depend on `pyo3` (enforced by `//native:layering_check`).
+//! allowed to depend on `pyo3` (enforced by `//shrike-core:layering_check`).
 //!
 //! # Marshaling rules (epic #265 convention 6)
 //!

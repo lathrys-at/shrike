@@ -1,23 +1,23 @@
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
-package(default_visibility = ["//native:__subpackages__"])
+package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
 # Rust collection core over anki's protobuf service layer (#278, slice 1).
-# Pure Rust — NO pyo3 (enforced by //native:layering_check).
+# Pure Rust — NO pyo3 (enforced by //shrike-core:layering_check).
 #
 # Builds the whole anki dependency tree; its protobuf codegen runs the
-# hermetic protoc external (//native/third_party/protoc) via the crate
+# hermetic protoc external (//shrike-core/third_party/protoc) via the crate
 # annotations in MODULE.bazel — on the regular build graph since the cutover.
 rust_library(
     name = "shrike_collection",
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     deps = [
-        "//native/shrike-ffi:shrike_ffi",
-        "//native/shrike-store-api:shrike_store_api",
-        "//native/shrike-schemas:shrike_schemas",
+        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-store-api:shrike_store_api",
+        "//shrike-core/shrike-schemas:shrike_schemas",
         "@crates//:anki",
         "@crates//:anki_proto",
         "@crates//:fancy-regex",

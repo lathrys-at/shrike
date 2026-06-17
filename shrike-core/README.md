@@ -26,7 +26,7 @@ and `rules_rust` builds everything against the hermetic CPython toolchain.
 
 **Layering rule:** `pyo3` may appear only in `shrike-py`. Every other crate
 stays pure Rust, which is what makes the kernel deployable in non-Python hosts.
-Enforced by `//native:layering_check`.
+Enforced by `//shrike-core:layering_check`.
 
 ## Conventions every native module follows
 
@@ -48,14 +48,14 @@ Enforced by `//native:layering_check`.
   `NativeInternalError` (RuntimeError). `parallel_sum`/`checked_div` in
   `shrike-py` are the permanent executable exemplar.
 - **Typing:** the `shrike_native` package ships `.pyi` stubs + `py.typed`;
-  `//native/shrike-py:stubtest` (mypy.stubtest) fails when a Rust signature
+  `//shrike-core/shrike-py:stubtest` (mypy.stubtest) fails when a Rust signature
   drifts from its stub.
 
 ## Building and testing
 
 ```bash
 # Bazel (CI runs one `./bazel test //...` over the whole graph; this is its native slice):
-./bazel test //native/...                  # crates, layering check, smoke, stubtest
+./bazel test //shrike-core/...                  # crates, layering check, smoke, stubtest
 ./bazel build //:wheel --stamp             # the platform-tagged shrike-mcp wheel (manual tag)
 
 # Plain cargo (fast inner loop; .cargo/config.toml carries the macOS link flags):
@@ -73,9 +73,9 @@ shrike-describe-remote joins at #485), `engine-apple` (Vision OCR — MOBILE
 builds only, never the server set, on any OS; binding coverage is #514),
 `manage-llama` (llama-server lifecycle). The cargo default is the SERVER
 set, pinned verbatim on
-`//native/shrike-py:shrike_py_native`; the MOBILE set (anki-core +
+`//shrike-core/shrike-py:shrike_py_native`; the MOBILE set (anki-core +
 engine-remote + engine-apple — no ort, no managers) is proven by
-`//native/shrike-py:mobile_skeleton`, which the per-PR `//...` lane builds so
+`//shrike-core/shrike-py:mobile_skeleton`, which the per-PR `//...` lane builds so
 an ungated engine reference fails CI (the Bazel target is the authoritative
 proof — it really links; the cargo line below is the convenience check):
 

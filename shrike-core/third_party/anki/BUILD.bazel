@@ -6,7 +6,7 @@
 # env override, so under Bazel it reads THIS checked-in copy (injected by the
 # crate annotation in MODULE.bazel) while the anki_proto build script writes
 # its own into its private OUT_DIR (see
-# //native/patches:anki-proto-bazel-sandbox.patch).
+# //shrike-core/patches:anki-proto-bazel-sandbox.patch).
 #
 # Pin policy: regenerate on every anki tag bump (scripts/update-anki-descriptors.sh
 # copies it out of a cargo build); the shrike-collection tripwire tests run

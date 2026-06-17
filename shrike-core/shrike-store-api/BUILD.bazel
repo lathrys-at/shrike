@@ -1,6 +1,6 @@
 load("@rules_rust//rust:defs.bzl", "rust_library")
 
-package(default_visibility = ["//native:__subpackages__"])
+package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
@@ -12,8 +12,8 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     deps = [
-        "//native/shrike-ffi:shrike_ffi",
-        "//native/shrike-schemas:shrike_schemas",
+        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-schemas:shrike_schemas",
         "@crates//:serde_json",
     ],
 )

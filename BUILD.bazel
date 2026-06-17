@@ -25,10 +25,10 @@ py_wheel(
     python_tag = "cp312",
     abi = "abi3",
     platform = select({
-        "//native/shrike-py:macos_arm64": "macosx_11_0_arm64",
-        "//native/shrike-py:macos_x86_64": "macosx_11_0_x86_64",
-        "//native/shrike-py:linux_x86_64": "linux_x86_64",
-        "//native/shrike-py:linux_arm64": "linux_aarch64",
+        "//shrike-core/shrike-py:macos_arm64": "macosx_11_0_arm64",
+        "//shrike-core/shrike-py:macos_x86_64": "macosx_11_0_x86_64",
+        "//shrike-core/shrike-py:linux_x86_64": "linux_x86_64",
+        "//shrike-core/shrike-py:linux_arm64": "linux_aarch64",
     }),
     summary = "MCP server for Anki collection management",
     description_file = "README.md",
@@ -88,7 +88,7 @@ py_wheel(
     tags = ["manual"],
     strip_path_prefixes = [
         "src",
-        "native/shrike-py/python",
+        "shrike-core/shrike-py/python",
     ],
     deps = [
         # The package tree as a filegroup — py_wheel packages direct files only, so
@@ -97,7 +97,7 @@ py_wheel(
         "//src/shrike:py_typed",
         # The shrike_native package payload: __init__.py + .pyi stubs + py.typed +
         # the compiled _native.so (py_wheel packages a filegroup's files directly).
-        "//native/shrike-py:wheel_files",
+        "//shrike-core/shrike-py:wheel_files",
     ],
 )
 

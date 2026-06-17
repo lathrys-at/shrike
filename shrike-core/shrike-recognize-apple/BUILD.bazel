@@ -3,7 +3,7 @@ load("@rules_cc//cc:cc_import.bzl", "cc_import")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
-package(default_visibility = ["//native:__subpackages__"])
+package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
@@ -74,8 +74,8 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     deps = [
-        "//native/shrike-engine-api:shrike_engine_api",
-        "//native/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-engine-api:shrike_engine_api",
+        "//shrike-core/shrike-ffi:shrike_ffi",
         "@crates//:tracing",
     ] + select({
         "@platforms//os:macos": [

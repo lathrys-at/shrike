@@ -1,11 +1,11 @@
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
-package(default_visibility = ["//native:__subpackages__"])
+package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
 # Native derived-text engine (#281): rusqlite + bundled SQLite (FTS5 + trigram
-# always compiled in). Pure Rust — NO pyo3 (enforced by //native:layering_check).
+# always compiled in). Pure Rust — NO pyo3 (enforced by //shrike-core:layering_check).
 rust_library(
     name = "shrike_derived",
     srcs = glob(["src/**/*.rs"]),
@@ -17,8 +17,8 @@ rust_library(
     # linkage under Bazel while actually linking bundled.
     crate_features = ["bundled"],
     deps = [
-        "//native/shrike-ffi:shrike_ffi",
-        "//native/shrike-store-api:shrike_store_api",
+        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-store-api:shrike_store_api",
         "@crates//:rusqlite",
         "@crates//:tracing",
     ],

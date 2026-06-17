@@ -18,7 +18,7 @@ crate-type = ["cdylib"]
 # everything the daemon profile compiles. Platform engines (engine-apple) are
 # NOT in it, on any OS — the matrix's hard boundary, enforced 2026-06-12. The
 # matrix's lean (mobile) set is anki-core + engine-remote + engine-apple,
-# proven by //native/shrike-py:mobile_skeleton.
+# proven by //shrike-core/shrike-py:mobile_skeleton.
 default = [
     "bundled-sqlite",
     "anki-core",

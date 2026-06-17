@@ -15,7 +15,7 @@
 //! gate.)
 //!
 //! There is **no pyo3 anywhere in this dependency tree** (epic #265 convention
-//! 5, enforced by `//native:layering_check`); the no-CPython smoke test in
+//! 5, enforced by `//shrike-core:layering_check`); the no-CPython smoke test in
 //! this crate links the kernel without Python and runs open → upsert → search
 //! (a semantic and a lexical signal both contributing) → close — the #279
 //! acceptance's executable form.

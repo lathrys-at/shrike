@@ -1,6 +1,6 @@
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
-package(default_visibility = ["//native:__subpackages__"])
+package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 

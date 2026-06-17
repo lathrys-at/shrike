@@ -47,15 +47,15 @@ def manifest_paths() -> list[Path]:
     so a new crate whose manifest wasn't added to this test's `data` would
     silently escape a glob — here it fails the run instead.
     """
-    root = Path("native/Cargo.toml")
+    root = Path("shrike-core/Cargo.toml")
     workspace = tomllib.loads(root.read_text())
     members = workspace.get("workspace", {}).get("members", [])
     if not members:
-        raise SystemExit("layering_check: no workspace members in native/Cargo.toml")
+        raise SystemExit("layering_check: no workspace members in shrike-core/Cargo.toml")
     paths: list[Path] = []
     missing: list[str] = []
     for member in members:
-        manifest = Path("native") / member / "Cargo.toml"
+        manifest = Path("shrike-core") / member / "Cargo.toml"
         if manifest.is_file():
             paths.append(manifest)
         else:
@@ -63,7 +63,7 @@ def manifest_paths() -> list[Path]:
     if missing:
         raise SystemExit(
             "layering_check: member manifest(s) not in runfiles — add them to the "
-            f"test's data in native/BUILD.bazel: {missing}"
+            f"test's data in shrike-core/BUILD.bazel: {missing}"
         )
     return paths
 

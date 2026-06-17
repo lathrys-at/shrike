@@ -1,6 +1,6 @@
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
-package(default_visibility = ["//native:__subpackages__"])
+package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
@@ -16,17 +16,17 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     deps = [
-        "//native/shrike-collection:shrike_collection",
-        "//native/shrike-derived:shrike_derived",
-        "//native/shrike-engine-api:shrike_engine_api",
-        "//native/shrike-ffi:shrike_ffi",
-        "//native/shrike-net:shrike_net",
-        "//native/shrike-store-api:shrike_store_api",
+        "//shrike-core/shrike-collection:shrike_collection",
+        "//shrike-core/shrike-derived:shrike_derived",
+        "//shrike-core/shrike-engine-api:shrike_engine_api",
+        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-net:shrike_net",
+        "//shrike-core/shrike-store-api:shrike_store_api",
         "@crates//:base64",
         "@crates//:ureq",
         "@crates//:url",
-        "//native/shrike-index:shrike_index",
-        "//native/shrike-schemas:shrike_schemas",
+        "//shrike-core/shrike-index:shrike_index",
+        "//shrike-core/shrike-schemas:shrike_schemas",
         "@crates//:blake2",
         "@crates//:futures",
         "@crates//:serde",
@@ -54,7 +54,7 @@ rust_test(
     edition = "2021",
     deps = [
         ":shrike_kernel",
-        "//native/shrike-collection:shrike_collection",
+        "//shrike-core/shrike-collection:shrike_collection",
         "@crates//:tokio",
     ],
 )
@@ -70,9 +70,9 @@ rust_test(
     edition = "2021",
     deps = [
         ":shrike_kernel",
-        "//native/shrike-ffi:shrike_ffi",
-        "//native/shrike-schemas:shrike_schemas",
-        "//native/shrike-store-api:shrike_store_api",
+        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-schemas:shrike_schemas",
+        "//shrike-core/shrike-store-api:shrike_store_api",
         "@crates//:futures",
         "@crates//:serde_json",
     ],

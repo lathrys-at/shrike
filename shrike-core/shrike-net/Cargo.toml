@@ -4,7 +4,7 @@
 # (shrike-kernel's media_fetch) AND the remote engine crates
 # (shrike-embed-remote, shrike-describe-remote) — so the one SSRF control lives
 # in one place, not copied per consumer. Pure Rust, depends on NO engine crate
-# and NOT on shrike-kernel (it sits BELOW both), so the //native:layering_check
+# and NOT on shrike-kernel (it sits BELOW both), so the //shrike-core:layering_check
 # kernel-purity and engine-purity rules both stay satisfied.
 [package]
 name = "shrike-net"

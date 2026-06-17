@@ -53,18 +53,18 @@ rust_shared_library(
         "manage-llama",
     ],
     deps = [
-        "//native/shrike-collection:shrike_collection",
-        "//native/shrike-derived:shrike_derived",
-        "//native/shrike-describe-remote:shrike_describe_remote",
-        "//native/shrike-embed:shrike_embed",
-        "//native/shrike-embed-remote:shrike_embed_remote",
-        "//native/shrike-engine-api:shrike_engine_api",
-        "//native/shrike-ffi:shrike_ffi",
-        "//native/shrike-store-api:shrike_store_api",
-        "//native/shrike-index:shrike_index",
-        "//native/shrike-kernel:shrike_kernel",
-        "//native/shrike-llama-server:shrike_llama_server",
-        "//native/shrike-schemas:shrike_schemas",
+        "//shrike-core/shrike-collection:shrike_collection",
+        "//shrike-core/shrike-derived:shrike_derived",
+        "//shrike-core/shrike-describe-remote:shrike_describe_remote",
+        "//shrike-core/shrike-embed:shrike_embed",
+        "//shrike-core/shrike-embed-remote:shrike_embed_remote",
+        "//shrike-core/shrike-engine-api:shrike_engine_api",
+        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-store-api:shrike_store_api",
+        "//shrike-core/shrike-index:shrike_index",
+        "//shrike-core/shrike-kernel:shrike_kernel",
+        "//shrike-core/shrike-llama-server:shrike_llama_server",
+        "//shrike-core/shrike-schemas:shrike_schemas",
         "@crates//:futures",
         "@crates//:tokio",
         "@crates//:pyo3",
@@ -79,7 +79,7 @@ rust_shared_library(
 )
 
 # The lean (mobile) build's CI proof now lives on its OWN crate (#504):
-# //native/shrike-mobile is the real mobile binding (the C-ABI cdylib, zero
+# //shrike-core/shrike-mobile is the real mobile binding (the C-ABI cdylib, zero
 # pyo3), and its `rust_shared_library` + `rust_test` exercise the mobile
 # feature set (anki-core + engine-remote, no ort, no managers) on the per-PR
 # `//...` lane — the `mobile_skeleton` reuse-of-shrike-py-sources proof it

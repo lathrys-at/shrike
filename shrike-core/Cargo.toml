@@ -5,7 +5,7 @@
 # Crate layering (epic convention 5): `pyo3` may appear ONLY in the binding
 # crate `shrike-py` — kernel/compute crates stay pure Rust so the stretch
 # end-state (zero necessary CPython) is structural. Enforced by
-# //native:layering_check.
+# //shrike-core:layering_check.
 
 [workspace]
 resolver = "2"

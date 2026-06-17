@@ -1,7 +1,7 @@
 //! `shrike_native._native` — the Shrike PyO3 binding module (#269).
 //!
 //! The ONE crate that depends on `pyo3` (epic #265 convention 5, enforced by
-//! `//native:layering_check`). Every native compute crate (pure Rust) is bound
+//! `//shrike-core:layering_check`). Every native compute crate (pure Rust) is bound
 //! to Python here, following the `shrike-ffi` conventions:
 //!
 //! - coarse, batched calls; only strings, bytes, f32 vectors, i64 key arrays,
