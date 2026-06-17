@@ -49,16 +49,16 @@ pip.parse(
 use_repo(pip, "shrike_sdist_pip")
 
 # ── Rust toolchain + crates: the native compute workspace (#247 → #269) ─────
-# rules_rust builds the Shrike native crates (native/Cargo.toml workspace)
+# rules_rust builds the Shrike native crates (shrike-core/Cargo.toml workspace)
 # against the hermetic CPython. The PyO3 binding crate (shrike-py) and the
-# polyglot-proof demo are the only crates that see pyo3 (//native:layering_check
+# polyglot-proof demo are the only crates that see pyo3 (//shrike-core:layering_check
 # enforces it); compute crates stay pure Rust. crate deps resolve from the
 # workspace's single Cargo.lock via the rust toolchain's own cargo — no system
 # Rust required.
 bazel_dep(name = "rules_rust", version = "0.70.0")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "bazel_skylib", version = "1.8.2")  # copy_file (the .so rename)
-bazel_dep(name = "rules_pkg", version = "1.0.1")  # the anki-cards.skill bundle (#245)
+bazel_dep(name = "rules_pkg", version = "1.0.1")  # the create-cards.skill bundle (#245)
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(edition = "2021")
@@ -69,26 +69,26 @@ register_toolchains("@rust_toolchains//:all")
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
     name = "crates",
-    cargo_lockfile = "//native:Cargo.lock",
+    cargo_lockfile = "//shrike-core:Cargo.lock",
     manifests = [
-        "//native:Cargo.toml",
-        "//native/shrike-collection:Cargo.toml",
-        "//native/shrike-derived:Cargo.toml",
-        "//native/shrike-embed:Cargo.toml",
-        "//native/shrike-embed-remote:Cargo.toml",
-        "//native/shrike-describe-remote:Cargo.toml",
-        "//native/shrike-engine-api:Cargo.toml",
-        "//native/shrike-ffi:Cargo.toml",
-        "//native/shrike-index:Cargo.toml",
-        "//native/shrike-kernel:Cargo.toml",
-        "//native/shrike-llama-server:Cargo.toml",
-        "//native/shrike-py:Cargo.toml",
-        "//native/shrike-recognize-apple:Cargo.toml",
-        "//native/shrike-schemas:Cargo.toml",
+        "//shrike-core:Cargo.toml",
+        "//shrike-core/shrike-collection:Cargo.toml",
+        "//shrike-core/shrike-derived:Cargo.toml",
+        "//shrike-core/shrike-embed:Cargo.toml",
+        "//shrike-core/shrike-embed-remote:Cargo.toml",
+        "//shrike-core/shrike-describe-remote:Cargo.toml",
+        "//shrike-core/shrike-engine-api:Cargo.toml",
+        "//shrike-core/shrike-ffi:Cargo.toml",
+        "//shrike-core/shrike-index:Cargo.toml",
+        "//shrike-core/shrike-kernel:Cargo.toml",
+        "//shrike-core/shrike-llama-server:Cargo.toml",
+        "//shrike-core/shrike-py:Cargo.toml",
+        "//shrike-core/shrike-recognize-apple:Cargo.toml",
+        "//shrike-core/shrike-schemas:Cargo.toml",
     ],
 )
 # Temporary: `@crates//:pyo3-log` resolves to the fork pinned by the
-# `[patch.crates-io]` in //native:Cargo.toml (lathrys-at/pyo3-log = v0.13.3 with
+# `[patch.crates-io]` in //shrike-core:Cargo.toml (lathrys-at/pyo3-log = v0.13.3 with
 # a widened pyo3 bound) — the crates.io release caps pyo3 at `<0.29`, blocking
 # the RUSTSEC-2026-0176/-0177 bump. crate_universe vendors the git rev, pinned
 # by its immutable commit SHA in MODULE.bazel.lock. Drop the patch once upstream
@@ -99,7 +99,7 @@ crate.from_cargo(
 crate.annotation(
     crate = "usearch",
     patch_args = ["-p1"],
-    patches = ["//native/patches:usearch-bazel-cxxbridge-symlink.patch"],
+    patches = ["//shrike-core/patches:usearch-bazel-cxxbridge-symlink.patch"],
 )
 # cxx's C++ object (cxx_cc) needs GCC's STATIC libgcc.a on aarch64-linux (the
 # outline-atomics helpers, #417); the shim dep appends a linux-only -lgcc to
@@ -112,11 +112,11 @@ crate.annotation(
     # restated alongside the shim.
     deps = [
         ":cxx_cc",
-        "@@//native/patches:libgcc_shim",
+        "@@//shrike-core/patches:libgcc_shim",
     ],
 )
 # The anki tree under Bazel (#278 cutover): both anki build scripts run off
-# the CHECKED-IN pinned protobuf descriptor set (//native/third_party/anki,
+# the CHECKED-IN pinned protobuf descriptor set (//shrike-core/third_party/anki,
 # refreshed by scripts/update-anki-descriptors.sh on tag bumps, tripwire-tested
 # under Bazel) instead of cargo's shared-target-dir handoff, which doesn't
 # exist across Bazel sandboxes. anki_proto is additionally patched (Bazel-only;
@@ -126,14 +126,14 @@ crate.annotation(
 # source repo.
 crate.annotation(
     crate = "anki_proto",
-    build_script_data = ["@@//native/third_party/anki:anki_descriptors.bin"],
+    build_script_data = ["@@//shrike-core/third_party/anki:anki_descriptors.bin"],
     build_script_env = {
-        "DESCRIPTORS_BIN": "$(execpath @@//native/third_party/anki:anki_descriptors.bin)",
+        "DESCRIPTORS_BIN": "$(execpath @@//shrike-core/third_party/anki:anki_descriptors.bin)",
     },
     patch_args = ["-p1"],
     patches = [
-        "//native/patches:anki-proto-bazel-buildrs.patch",
-        "//native/patches:anki-proto-bazel-rustrs.patch",
+        "//shrike-core/patches:anki-proto-bazel-buildrs.patch",
+        "//shrike-core/patches:anki-proto-bazel-rustrs.patch",
     ],
 )
 crate.annotation(
@@ -148,17 +148,17 @@ crate.annotation(
     },
     patch_args = ["-p1"],
     patches = [
-        "//native/patches:anki-i18n-bazel-build.patch",
-        "//native/patches:anki-i18n-bazel-gather.patch",
+        "//shrike-core/patches:anki-i18n-bazel-build.patch",
+        "//shrike-core/patches:anki-i18n-bazel-gather.patch",
     ],
 )
 crate.annotation(
     crate = "anki",
-    build_script_data = ["@@//native/third_party/anki:anki_descriptors.bin"],
+    build_script_data = ["@@//shrike-core/third_party/anki:anki_descriptors.bin"],
     patch_args = ["-p1"],
-    patches = ["//native/patches:anki-version-bazel.patch"],
+    patches = ["//shrike-core/patches:anki-version-bazel.patch"],
     build_script_env = {
-        "DESCRIPTORS_BIN": "$(execpath @@//native/third_party/anki:anki_descriptors.bin)",
+        "DESCRIPTORS_BIN": "$(execpath @@//shrike-core/third_party/anki:anki_descriptors.bin)",
     },
 )
 use_repo(crate, "crates")

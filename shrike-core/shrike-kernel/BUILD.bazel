@@ -1,0 +1,89 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//shrike-core:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# The pure-Rust kernel (#279): collection (via anki's protobuf services) +
+# index + derived store + fusion. Natively async, owns no threads, assumes
+# no runtime (#308/#310) — serialization and execution are injected. Since
+# #342 the kernel has NO features and names NO engine: it consumes the
+# shrike-engine-api traits and composes whatever engines the host attaches.
+# NO pyo3 in this dep tree (the layering check + the no-CPython smoke prove
+# both rules).
+rust_library(
+    name = "shrike_kernel",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        "//shrike-core/shrike-collection:shrike_collection",
+        "//shrike-core/shrike-derived:shrike_derived",
+        "//shrike-core/shrike-engine-api:shrike_engine_api",
+        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-net:shrike_net",
+        "//shrike-core/shrike-store-api:shrike_store_api",
+        "@crates//:base64",
+        "@crates//:ureq",
+        "@crates//:url",
+        "//shrike-core/shrike-index:shrike_index",
+        "//shrike-core/shrike-schemas:shrike_schemas",
+        "@crates//:blake2",
+        "@crates//:futures",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:tokio",
+        "@crates//:tracing",
+    ],
+)
+
+# The #279 no-CPython acceptance smoke: links the kernel without Python and
+# runs open → upsert → fused search (semantic + lexical) → delete → close.
+rust_test(
+    name = "shrike_kernel_test",
+    size = "medium",
+    crate = ":shrike_kernel",
+)
+
+# The degenerate single-thread proof (#374 design 3): its own test binary —
+# the runtime seam is process-global, so this must not share a process with
+# the multi-thread suite.
+rust_test(
+    name = "current_thread_test",
+    size = "medium",
+    srcs = ["tests/current_thread.rs"],
+    edition = "2021",
+    deps = [
+        ":shrike_kernel",
+        "//shrike-core/shrike-collection:shrike_collection",
+        "@crates//:tokio",
+    ],
+)
+
+# The #590 committed-but-errored regression (= S6-1): the maintained write tail
+# is best-effort — a committed note's call returns Ok despite a failed embed
+# tail. Its own test binary (an integration test linking the public crate API +
+# the schema/store wire types + a FailingEmbedder).
+rust_test(
+    name = "s6_repro_test",
+    size = "small",
+    srcs = ["tests/s6_repro.rs"],
+    edition = "2021",
+    deps = [
+        ":shrike_kernel",
+        "//shrike-core/shrike-ffi:shrike_ffi",
+        "//shrike-core/shrike-schemas:shrike_schemas",
+        "//shrike-core/shrike-store-api:shrike_store_api",
+        "@crates//:futures",
+        "@crates//:serde_json",
+    ],
+)
+
+# SSRF classifier parity regression (#591): the allowlist must refuse 6to4
+# (2002::/16) and 3fff::/20 like Python's `ipaddress.is_global`.
+rust_test(
+    name = "s2_ssrf_6to4_probe_test",
+    size = "small",
+    srcs = ["tests/s2_ssrf_6to4_probe.rs"],
+    edition = "2021",
+    deps = [":shrike_kernel"],
+)

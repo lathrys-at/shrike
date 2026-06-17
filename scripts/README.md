@@ -20,7 +20,13 @@ consumes the lock.
 - `dev-setup.sh` — the one-step, idempotent dev environment (venv, editable install, native build).
 - `build-native.sh` — rebuilds the `shrike_native` extension into the venv (the pip-lane inner loop).
 - `native-stale.sh` / `native-stamp.sh` — the staleness check + per-venv stamp that drive the auto-rebuild and the pytest backstop.
-- `update-anki-descriptors.sh` — refreshes the checked-in anki protobuf descriptor set after an anki tag bump (writes into `native/`).
+- `update-anki-descriptors.sh` — refreshes the checked-in anki protobuf descriptor set after an anki tag bump (writes into `shrike-core/`).
+
+> The native-build trio (`build-native.sh`, `native-stale.sh`, `native-stamp.sh`)
+> physically lives in `shrike-core/scripts/` — with the workspace it serves, so
+> `shrike-core/` is a self-contained, subtree-extractable unit (#696). The entries
+> here are relative symlinks back into `scripts/` so the familiar
+> `scripts/build-native.sh` invocation still resolves.
 
 ### Coverage
 - `coverage.sh` — the full local coverage run; enforces `fail_under`.
@@ -31,7 +37,7 @@ consumes the lock.
 - `profiles/` — the checked-in, path-free capability profiles `serve` reads.
 
 ### Packaging
-- `package-skill.py` — bundles the `anki-cards` skill into a `.skill` package.
+- `package-skill.py` — bundles the `create-cards` skill into a `.skill` package (a symlink into the `shrike-skills/` unit, where the real file lives).
 
 > Several of these are being reshaped by the layout epic (#694): `serve`
 > becomes canonically Bazel (#699), the dev/maintenance shell scripts grow

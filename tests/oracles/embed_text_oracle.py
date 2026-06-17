@@ -77,7 +77,7 @@ _BLOCK_TAG_RE = re.compile(r"(?i)<\s*/?\s*(?:br|div|p|li|ul|ol|tr|td|h[1-6]|bloc
 # side keeps `\s+` (not the C0-extended class) deliberately — matching Python
 # literally would change the output for an unreachable input and force an
 # EMBED_TEXT_VERSION bump + index rebuild for no behavioral gain. See the
-# matching note in native/shrike-collection/src/embed_text.rs.
+# matching note in shrike-core/shrike-collection/src/embed_text.rs.
 _WS_RE = re.compile(r"\s+")
 
 

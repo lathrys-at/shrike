@@ -66,7 +66,7 @@ backward compatibility; don't rush it.
 
 The tag *is* the version (hatch-vcs, #42) — there's no constant to bump. The
 tag-triggered workflow (`.github/workflows/release.yml`) runs the full
-cross-platform suite, builds the **sdist + wheel**, the **`anki-cards.skill`**
+cross-platform suite, builds the **sdist + wheel**, the **`create-cards.skill`**
 bundle (`scripts/package-skill.py`), and a **`SHA256SUMS`**, and attaches them to a
 GitHub Release. Final-release notes come from the matching `## [X.Y.Z]` section of
 `CHANGELOG.md`; an rc tag uses auto-generated commit notes instead. A final release
@@ -168,8 +168,8 @@ build (e.g. `build-native.sh`).
 ## Local checks before a PR
 
 ```bash
-ruff check src/shrike/ tests/ native/shrike-py/python/
-ruff format --check src/shrike/ tests/ native/shrike-py/python/
+ruff check src/shrike/ tests/ shrike-core/shrike-py/python/
+ruff format --check src/shrike/ tests/ shrike-core/shrike-py/python/
 mypy src/shrike/
 pytest tests/unit -q
 pytest tests/integration -q -m "integration and not embedding"
@@ -178,15 +178,15 @@ pytest tests/integration -q -m "integration and not embedding"
 For a change touching the Rust workspace, also run the native gate:
 
 ```bash
-(cd native && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings)
-(cd native && cargo test --workspace)
+(cd shrike-core && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings)
+(cd shrike-core && cargo test --workspace)
 scripts/build-native.sh && pytest tests/unit tests/native -q
 ./bazel test //...     # the authoritative CI lane
 ```
 
 `pip install` doesn't build the `shrike_native` extension (a separate cargo step
 in `scripts/build-native.sh`), so a stale `.so` used to slip into a pytest run
-silently after a `native/` change. That's structurally closed now (#573): run
+silently after a `shrike-core/` change. That's structurally closed now (#573): run
 `scripts/dev-setup.sh` once for the whole setup, then rebuilds are automatic with
 direnv (`.envrc` rebuilds a stale extension on `cd`) and `pytest` fails loud
 (before importing the extension) if you skip the rebuild without direnv. The
@@ -224,7 +224,7 @@ in-process tracking can't see. So always do a full `pytest` run before you push.
 
 ## Skill changes (QA eval)
 
-The `anki-cards` skill (`skills/anki-cards/**`) is **not covered by `pytest`/CI** —
+The `create-cards` skill (`shrike-skills/create-cards/**`) is **not covered by `pytest`/CI** —
 only the pure grader (`tests/manual/skill_quality/test_grade.py`) runs there. A change to the
 skill's guidance or references can pass every CI check while silently regressing
 card quality, so the regression guard is the manual eval harness, not the test

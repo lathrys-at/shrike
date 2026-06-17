@@ -1076,7 +1076,7 @@ discipline below.
 
 1. **The anki-patch mechanism is Bazel-only, so a runtime-injection patch
    would fork behaviour across build lanes.** anki source patches ride
-   `MODULE.bazel` `crate.annotation` (e.g. `native/patches/anki-version-bazel.patch`
+   `MODULE.bazel` `crate.annotation` (e.g. `shrike-core/patches/anki-version-bazel.patch`
    patching anki's `src/version.rs`), which applies **only** on the Bazel
    lane. The cargo inner loop — `scripts/build-native.sh` → `cargo build -p
    shrike-py`, and `cargo test` — builds the *unpatched* anki checkout. A
@@ -1088,7 +1088,7 @@ discipline below.
    upstream.
 
 2. **The panic hazard is kernel-side and runtime-agnostic.**
-   [`SerializedCollection`](../native/shrike-kernel/src/lib.rs) runs every
+   [`SerializedCollection`](../shrike-core/shrike-kernel/src/lib.rs) runs every
    collection job inline as a sync closure on whichever runtime worker polls
    the actor. anki's sync paths call `block_on`, and
    `tokio::runtime::Handle::block_on` panics whenever it is invoked from inside

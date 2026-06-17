@@ -1,7 +1,7 @@
 name: Set up Rust cache + protoc
 description: >
   The shared preamble of every cargo-based lane (#422): Swatinem/rust-cache over
-  the native workspace (keyed per-lane via shared-key — clippy's check artifacts
+  the shrike-core workspace (keyed per-lane via shared-key — clippy's check artifacts
   and a cargo build are different caches, and a lane restoring the other's entry
   would just miss) and protoc (the anki tree's protobuf codegen needs it on the
   runner). Each lane's cargo step still sets DESCRIPTORS_BIN itself: rust-cache
@@ -22,7 +22,7 @@ runs:
     - name: Cache Rust dependencies
       uses: Swatinem/rust-cache@v2
       with:
-        workspaces: native
+        workspaces: shrike-core
         shared-key: ${{ inputs.shared-key }}
         cache-on-failure: true
     - name: Install protoc

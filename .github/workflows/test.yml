@@ -70,7 +70,7 @@ jobs:
               # job needs no such gate since Bazel resolves the Rust cone
               # itself. MODULE.bazel(.lock) carry the Rust toolchain + crate
               # pins; the workflow + composite define the steps.
-              - 'native/**'
+              - 'shrike-core/**'
               - 'MODULE.bazel'
               - 'MODULE.bazel.lock'
               - '.bazelversion'
@@ -108,14 +108,14 @@ jobs:
           cache-dependency-glob: pyproject.toml
       - name: Install dependencies
         run: uv pip install --system -e ".[dev]"
-      # native/shrike-py/python is the extension's Python shim package (#437):
+      # shrike-core/shrike-py/python is the extension's Python shim package (#437):
       # outside src/, so it was in no ruff scope anywhere and lint debt
       # accumulated invisibly. (Its .pyi stubs are additionally
       # stubtest-validated under Bazel in the tests lane.)
       - name: Ruff check
-        run: ruff check src/shrike/ tests/ native/shrike-py/python/
+        run: ruff check src/shrike/ tests/ shrike-core/shrike-py/python/
       - name: Ruff format check
-        run: ruff format --check src/shrike/ tests/ native/shrike-py/python/
+        run: ruff format --check src/shrike/ tests/ shrike-core/shrike-py/python/
       - name: Mypy
         run: mypy src/shrike/
       # Rust lint (#304): the idiomatic gates for the native workspace —
@@ -135,7 +135,7 @@ jobs:
           shared-key: rust-lint
       - name: Rust format check
         if: needs.changes.outputs.native == 'true' || contains(github.event.pull_request.labels.*.name, 'rc')
-        run: cd native && cargo fmt --check
+        run: cd shrike-core && cargo fmt --check
       # Since the cutover the collection core + kernel are on the default
       # build, so clippy covers the whole workspace.
       - name: Rust clippy
@@ -147,9 +147,9 @@ jobs:
         # anki_proto's write_file_if_changed re-verifies it (a content drift
         # would show as a dirty file — a tag-bump tripwire, not a hazard).
         env:
-          DESCRIPTORS_BIN: ${{ github.workspace }}/native/third_party/anki/anki_descriptors.bin
+          DESCRIPTORS_BIN: ${{ github.workspace }}/shrike-core/third_party/anki/anki_descriptors.bin
         run: |
-          cd native
+          cd shrike-core
           cargo clippy --workspace --all-targets -- -D warnings
 
   # The authoritative test lane (#422): ONE `bazel test` invocation over the
@@ -164,7 +164,7 @@ jobs:
   # No sub-lanes and no path gating: `needs: changes` carries the ci-label
   # gate (a skipped `changes` cascades), and a docs-only labeled PR costs one
   # mostly-cache-hit invocation — the price of having no hand-rolled filter to
-  # get wrong (#418's tests/** gap, the embedding filter missing native/**).
+  # get wrong (#418's tests/** gap, the embedding filter missing shrike-core/**).
   # The embedding halves are named explicitly only because they're `manual` —
   # which they are to keep the local `bazel test //...` dev loop from fetching
   # models / booting llama-server, not as a CI distinction. The committed

@@ -1,6 +1,6 @@
 # QA eval harness
 
-Quantitative, repeatable evaluation of the **anki-cards** skill: feed each
+Quantitative, repeatable evaluation of the **create-cards** skill: feed each
 scenario prompt to a cold weak agent (Haiku 4.5), with the skill and without it,
 and grade what actually lands in the collection. Reusable as the skill evolves.
 

@@ -1,6 +1,6 @@
 # QA scenarios
 
-Hand-run test scenarios for the **anki-cards** skill. Each one is a realistic
+Hand-run test scenarios for the **create-cards** skill. Each one is a realistic
 user prompt plus the behaviour to look for — they exercise the skill's judgment
 (card-type choice, dedup, deck/tag restraint), which is qualitative and not a
 fit for the automated suites.
@@ -15,7 +15,7 @@ These are **manual**. Nothing here runs in `pytest` or CI.
    ```
    (Or, for a GGUF model, drive the eval harness `../run.py`, which sets up
    the fixture + server with `SHRIKE_EMBEDDING_MODEL`. See `../README.md`.)
-2. In a session that has the **anki-cards** skill loaded and can reach the QA
+2. In a session that has the **create-cards** skill loaded and can reach the QA
    server (the `shrike` CLI, or the MCP tools via `mcp-remote`), paste the
    scenario's **Prompt**.
 3. Check the result against **Expected outcome**. Useful inspection:

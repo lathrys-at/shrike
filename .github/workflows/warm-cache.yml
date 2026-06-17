@@ -20,7 +20,7 @@ name: Warm CI caches
 # incremental linux build), on demand via workflow_dispatch, AND on a merge to
 # main that
 # changes the DEPENDENCY CONE (#319): the lock/pin files only, deliberately not
-# `native/**`. Every cache here is keyed on the locks, so a source-only merge
+# `shrike-core/**`. Every cache here is keyed on the locks, so a source-only merge
 # (the common single-commit PR) invalidates nothing — the next PR still restores
 # the same warmed dependency entries and only rebuilds the workspace crates
 # themselves, which is the normal cheap incremental cost. Only a lock change
@@ -34,7 +34,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "native/Cargo.lock"
+      - "shrike-core/Cargo.lock"
       - "MODULE.bazel"
       - "MODULE.bazel.lock"
       - "requirements_lock.txt"
@@ -92,7 +92,7 @@ jobs:
   # SAME clippy command as test.yml's lint job, run on main so the saved entry
   # lands in the default branch's scope — the only scope every PR can restore
   # from. rust-cache saves ~/.cargo (registry + git, i.e. the crate downloads)
-  # and a dependency-pruned native/target keyed on Cargo.lock + toolchain, so a
+  # and a dependency-pruned shrike-core/target keyed on Cargo.lock + toolchain, so a
   # PR's clippy step restores the compiled dependency cone and only builds the
   # workspace crates themselves.
   warm-rust-lint:
@@ -105,8 +105,8 @@ jobs:
           shared-key: rust-lint
       - name: Clippy (warms the dependency build)
         env:
-          DESCRIPTORS_BIN: ${{ github.workspace }}/native/third_party/anki/anki_descriptors.bin
-        run: cd native && cargo clippy --workspace --all-targets -- -D warnings
+          DESCRIPTORS_BIN: ${{ github.workspace }}/shrike-core/third_party/anki/anki_descriptors.bin
+        run: cd shrike-core && cargo clippy --workspace --all-targets -- -D warnings
 
   # The coverage lane's Rust cache (#422): coverage.yml builds the native
   # extension with a debug `cargo build -p shrike-py` under the `rust-coverage`
@@ -125,8 +125,8 @@ jobs:
           shared-key: rust-coverage
       - name: Build shrike-py (warms the dependency build)
         env:
-          DESCRIPTORS_BIN: ${{ github.workspace }}/native/third_party/anki/anki_descriptors.bin
-        run: cd native && cargo build -p shrike-py
+          DESCRIPTORS_BIN: ${{ github.workspace }}/shrike-core/third_party/anki/anki_descriptors.bin
+        run: cd shrike-core && cargo build -p shrike-py
 
   # Prune superseded bazel-disk-* entries (#645). The disk cache is keyed on the
   # run id (a fresh ~0.5 GB superset every run, by design — it must accumulate

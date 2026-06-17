@@ -1,0 +1,26 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//shrike-core:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# Rust-canonical wire contracts (#330): serde types + schemars JSON Schema for
+# every tool request/response and status shape; schemas.py is the Python
+# binding, kept honest by tests/unit/test_schema_contract.py. Pure Rust — NO
+# pyo3.
+rust_library(
+    name = "shrike_schemas",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        "@crates//:schemars",
+        "@crates//:serde",
+        "@crates//:serde_json",
+    ],
+)
+
+rust_test(
+    name = "shrike_schemas_test",
+    size = "small",
+    crate = ":shrike_schemas",
+)
