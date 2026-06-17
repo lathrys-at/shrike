@@ -8,7 +8,7 @@ exports_files([
 ])
 
 # Crate-layering gate (epic #265 convention 5): `pyo3` may appear only in the
-# binding crate shrike-py. A compute/kernel crate growing a pyo3 dependency is
+# binding crate shrike-pyo3. A compute/kernel crate growing a pyo3 dependency is
 # exactly the structural drift that would make the stretch end-state (zero
 # necessary CPython) aspirational — fail fast.
 py_test(
@@ -31,7 +31,7 @@ py_test(
         "//shrike-core/shrike-llama-server:Cargo.toml",
         "//shrike-core/shrike-mobile:Cargo.toml",
         "//shrike-core/shrike-network:Cargo.toml",
-        "//shrike-core/shrike-py:Cargo.toml",
+        "//shrike-core/shrike-pyo3:Cargo.toml",
         "//shrike-core/shrike-recognize-apple:Cargo.toml",
         "//shrike-core/shrike-schemas:Cargo.toml",
         "//shrike-core/shrike-store:Cargo.toml",

@@ -5178,7 +5178,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "shrike-py"
+name = "shrike-pyo3"
 version = "0.0.0"
 dependencies = [
  "futures",

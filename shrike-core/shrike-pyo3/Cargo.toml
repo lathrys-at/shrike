@@ -1,5 +1,5 @@
 [package]
-name = "shrike-py"
+name = "shrike-pyo3"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -10,7 +10,7 @@ description = "The Shrike PyO3 binding crate — the ONLY crate that sees pyo3 (
 # A Python extension module is a cdylib. Imported as `shrike_native._native`
 # (the .so is renamed by the BUILD rule / build script), so the lib name here is
 # free — kept descriptive.
-name = "shrike_py"
+name = "shrike_pyo3"
 crate-type = ["cdylib"]
 
 [features]
@@ -18,7 +18,7 @@ crate-type = ["cdylib"]
 # everything the daemon profile compiles. Platform engines (engine-apple) are
 # NOT in it, on any OS — the matrix's hard boundary, enforced 2026-06-12. The
 # matrix's lean (mobile) set is anki-core + engine-remote + engine-apple,
-# proven by //shrike-core/shrike-py:mobile_skeleton.
+# proven by //shrike-core/shrike-pyo3:mobile_skeleton.
 default = [
     "bundled-sqlite",
     "anki-core",

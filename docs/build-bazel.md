@@ -99,9 +99,9 @@ clean release version. The pip lane reads the same tag through hatch-vcs.
   `crate.annotation` patches (usearch's cxxbridge symlinks; anki's
   proto-descriptor and FTL build scripts, fed from the checked-in
   descriptors and the `@anki_src` archive).
-- **The PyO3 extension** (`//shrike-core/shrike-py:shrike_py_native`) builds as
+- **The PyO3 extension** (`//shrike-core/shrike-pyo3:shrike_pyo3_native`) builds as
   an abi3-py312 cdylib — no libpython at build time — and is wrapped into
-  the importable `//shrike-core/shrike-py:shrike_native` py_library that
+  the importable `//shrike-core/shrike-pyo3:shrike_native` py_library that
   `//src/shrike` depends on. `:mobile_skeleton` is a build-only proof that
   the mobile feature set keeps compiling; `:stubtest` pins the `.pyi` stubs
   against the real module; `//shrike-core:layering_check` enforces the crate

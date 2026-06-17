@@ -1079,7 +1079,7 @@ discipline below.
    `MODULE.bazel` `crate.annotation` (e.g. `shrike-core/patches/anki-version-bazel.patch`
    patching anki's `src/version.rs`), which applies **only** on the Bazel
    lane. The cargo inner loop — `scripts/build-native.sh` → `cargo build -p
-   shrike-py`, and `cargo test` — builds the *unpatched* anki checkout. A
+   shrike-pyo3`, and `cargo test` — builds the *unpatched* anki checkout. A
    patch that changed anki's runtime accessor to prefer an injected
    `Handle` would therefore make `cargo test`/`pytest` and Bazel disagree on a
    **correctness** invariant (which runtime runs sync). Closing that gap would

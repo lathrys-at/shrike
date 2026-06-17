@@ -22,9 +22,9 @@ and `rules_rust` builds everything against the hermetic CPython toolchain.
 | `shrike-recognize-apple` | Apple Vision OCR engine (Swift glue behind Rust, macOS 15+; stub elsewhere) | no |
 | `shrike-schemas` | serde+schemars wire types — canonical; `shrike/schemas.py` binds them | no |
 | `shrike-ffi` | FFI conventions: error taxonomy (`NativeError`: `invalid_input` / `unavailable` / `internal`) + the marshaling rules (crate docs) | no |
-| `shrike-py` | The one PyO3 binding crate — builds the `shrike_native._native` extension module | **yes** |
+| `shrike-pyo3` | The one PyO3 binding crate — builds the `shrike_native._native` extension module | **yes** |
 
-**Layering rule:** `pyo3` may appear only in `shrike-py`. Every other crate
+**Layering rule:** `pyo3` may appear only in `shrike-pyo3`. Every other crate
 stays pure Rust, which is what makes the kernel deployable in non-Python hosts.
 Enforced by `//shrike-core:layering_check`.
 
@@ -42,13 +42,13 @@ Enforced by `//shrike-core:layering_check`.
   threads.
 - **GIL:** all compute under `py.detach(..)` (pyo3 ≥ 0.26's name for
   `allow_threads`).
-- **Errors:** native code returns `shrike_ffi::NativeError`; `shrike-py` maps
+- **Errors:** native code returns `shrike_ffi::NativeError`; `shrike-pyo3` maps
   the kinds to `NativeInputError` (ValueError — the expected-bad-input tier,
   logged without traceback by the facades), `NativeUnavailableError`, and
   `NativeInternalError` (RuntimeError). `parallel_sum`/`checked_div` in
-  `shrike-py` are the permanent executable exemplar.
+  `shrike-pyo3` are the permanent executable exemplar.
 - **Typing:** the `shrike_native` package ships `.pyi` stubs + `py.typed`;
-  `//shrike-core/shrike-py:stubtest` (mypy.stubtest) fails when a Rust signature
+  `//shrike-core/shrike-pyo3:stubtest` (mypy.stubtest) fails when a Rust signature
   drifts from its stub.
 
 ## Building and testing
@@ -73,20 +73,20 @@ shrike-describe-remote joins at #485), `engine-apple` (Vision OCR — MOBILE
 builds only, never the server set, on any OS; binding coverage is #514),
 `manage-llama` (llama-server lifecycle). The cargo default is the SERVER
 set, pinned verbatim on
-`//shrike-core/shrike-py:shrike_py_native`; the MOBILE set (anki-core +
+`//shrike-core/shrike-pyo3:shrike_pyo3_native`; the MOBILE set (anki-core +
 engine-remote + engine-apple — no ort, no managers) is proven by
-`//shrike-core/shrike-py:mobile_skeleton`, which the per-PR `//...` lane builds so
+`//shrike-core/shrike-pyo3:mobile_skeleton`, which the per-PR `//...` lane builds so
 an ungated engine reference fails CI (the Bazel target is the authoritative
 proof — it really links; the cargo line below is the convenience check):
 
 ```bash
-cd native && cargo check -p shrike-py --no-default-features \
+cd native && cargo check -p shrike-pyo3 --no-default-features \
   --features bundled-sqlite,anki-core,engine-remote,engine-apple
 ```
 
 **SQLite linkage (#300):** `shrike-derived` bundles its own SQLite by default
 (FTS5 + trigram guaranteed — the #281 property; release wheels keep this).
-`scripts/build-native.sh --system-sqlite` (or `cargo build -p shrike-py
+`scripts/build-native.sh --system-sqlite` (or `cargo build -p shrike-pyo3
 --no-default-features --features <the server set minus bundled-sqlite>`)
 links the platform libsqlite3 instead — any sqlite3-ABI-compatible library works via the standard
 libsqlite3-sys overrides (pkg-config / `SQLITE3_LIB_DIR`), including libsql

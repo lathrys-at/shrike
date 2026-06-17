@@ -2,7 +2,7 @@
 
 Structural rules over every workspace manifest:
 
-1. `pyo3` is allowed ONLY in the Python binding crate `shrike-py` (the real
+1. `pyo3` is allowed ONLY in the Python binding crate `shrike-pyo3` (the real
    binding module). Kernel/compute crates must stay pure Rust — that's what
    makes the no-CPython kernel structural rather than aspirational.
 2. `shrike-kernel` names NO engine crate (#342): it consumes the
@@ -35,7 +35,7 @@ import tomllib
 from pathlib import Path
 
 # Crates allowed to depend on pyo3 (by Cargo package name).
-PYO3_ALLOWED = {"shrike-py"}
+PYO3_ALLOWED = {"shrike-pyo3"}
 
 # Engine crates the kernel must NEVER name (#342). Grown as engine crates are
 # added; the kernel's only engine-shaped dep is shrike-engine-api (the traits).

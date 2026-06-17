@@ -51,7 +51,7 @@ CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP, server.py = the
                                       │
                                       └──▶ Harness (harness.py: assembly + operational verbs)
                                               │
-                                              └──▶ AsyncKernel (Rust shrike-kernel via shrike-py)
+                                              └──▶ AsyncKernel (Rust shrike-kernel via shrike-pyo3)
                                                       ├──▶ collection.anki2 (anki protobuf services)
                                                       ├──▶ IndexOrchestrator (per-modality USearch HNSW)
                                                       │       └──▶ index.usearch (+ index.image.usearch) + index.meta.json
@@ -125,7 +125,7 @@ shrike-core/                      # the Rust workspace (the compute core)
 ├── shrike-recognize-apple/       # Apple Vision OCR engine (Swift glue behind Rust; off-macOS stub; needs Xcode)
 ├── shrike-schemas/               # serde+schemars wire types (CANONICAL; schemas.py binds)
 ├── shrike-ffi/                   # the shared error taxonomy
-└── shrike-py/                    # the pyo3 binding (the ONLY pyo3 crate) + shrike_native package
+└── shrike-pyo3/                  # the pyo3 binding (the ONLY pyo3 crate) + shrike_native package
 docs/
 └── mcp-tools.md                  # Tool documentation (human-readable; machine schema served live by the server)
 ```
@@ -270,12 +270,12 @@ Embedding tests use their own `collection_server` and are untouched by the reset
 ### Linting
 
 ```bash
-ruff check src/shrike/ tests/ shrike-core/shrike-py/python/           # Lint
-ruff format --check src/shrike/ tests/ shrike-core/shrike-py/python/  # Format check
-mypy src/shrike/                                                      # Type check
+ruff check src/shrike/ tests/ shrike-core/shrike-pyo3/python/           # Lint
+ruff format --check src/shrike/ tests/ shrike-core/shrike-pyo3/python/  # Format check
+mypy src/shrike/                                                        # Type check
 ```
 
-(`shrike-core/shrike-py/python/` is the extension's Python shim — outside `src/`, so
+(`shrike-core/shrike-pyo3/python/` is the extension's Python shim — outside `src/`, so
 it must be named explicitly or it sits in no lint scope at all, #437.)
 
 All three must pass cleanly. CI (`.github/workflows/test.yml`) **always runs on every PR** — there is no `ci`-label gate (retired in #678). On every push (Linux x64): a `lint` job and a `tests` job — ONE `bazel test` invocation over the full graph plus the `manual` embedding halves; Bazel's dependency analysis + the disk cache decide what re-executes (an unchanged target replays as "(cached) PASSED"). The `ci-ok` job emits the single required status check (`CI passed`); it always runs and is success iff every lane passed or legitimately skipped (it must stay a real *declared* job — a ruleset check pinned to the GitHub Actions integration is **not** satisfied by an API-posted check run, #664). Because CI actually runs, a PR is pending/blocked until it goes green — combined with **drafts-by-default** (see the PR loop below) nothing is mergeable before CI has run. The expensive **cross-platform ARM legs** stay opt-in by label: `rc` selects **all legs** (apply before tagging a release — it subsumes the per-leg labels), **`macos`** selects **only the macos-latest leg** (Apple-Silicon/ARM macOS — Swift/Vision glue, the PyO3 link path), and **`linux-arm`** selects **only the ubuntu-24.04-arm leg**. None of the ARM legs run on a plain PR or on merge to `main`.

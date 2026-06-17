@@ -50,7 +50,7 @@ use_repo(pip, "shrike_sdist_pip")
 
 # ── Rust toolchain + crates: the native compute workspace (#247 → #269) ─────
 # rules_rust builds the Shrike native crates (shrike-core/Cargo.toml workspace)
-# against the hermetic CPython. The PyO3 binding crate (shrike-py) and the
+# against the hermetic CPython. The PyO3 binding crate (shrike-pyo3) and the
 # polyglot-proof demo are the only crates that see pyo3 (//shrike-core:layering_check
 # enforces it); compute crates stay pure Rust. crate deps resolve from the
 # workspace's single Cargo.lock via the rust toolchain's own cargo — no system
@@ -82,7 +82,7 @@ crate.from_cargo(
         "//shrike-core/shrike-index:Cargo.toml",
         "//shrike-core/shrike-kernel:Cargo.toml",
         "//shrike-core/shrike-llama-server:Cargo.toml",
-        "//shrike-core/shrike-py:Cargo.toml",
+        "//shrike-core/shrike-pyo3:Cargo.toml",
         "//shrike-core/shrike-recognize-apple:Cargo.toml",
         "//shrike-core/shrike-schemas:Cargo.toml",
     ],

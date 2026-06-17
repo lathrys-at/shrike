@@ -37,7 +37,7 @@ Every decision lives in exactly one of two layers:
 
 ### The build matrix
 
-| feature | server binding (`shrike-py`, PyO3 → daemon) | mobile binding (C ABI → xcframework/AAR, #504) |
+| feature | server binding (`shrike-pyo3`, PyO3 → daemon) | mobile binding (C ABI → xcframework/AAR, #504) |
 |---|---|---|
 | `anki-core` (incl. client sync) | ✅ | ✅ |
 | `engine-ort` (text-ONNX + CLIP) | ✅ | ❌ |

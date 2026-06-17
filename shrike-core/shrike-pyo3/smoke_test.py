@@ -2,7 +2,7 @@
 
 Pins the FFI conventions' executable exemplars: marshaling (a Vec<f64> batch
 in, an f64 out), the GIL-released compute path, and the error-taxonomy →
-exception-class mapping. Runs under Bazel (//shrike-core/shrike-py:smoke_test) and
+exception-class mapping. Runs under Bazel (//shrike-core/shrike-pyo3:smoke_test) and
 plain pytest alike.
 """
 
@@ -13,7 +13,7 @@ import shrike_native
 
 def test_version_and_build_info() -> None:
     assert shrike_native.version()
-    assert "shrike-py" in shrike_native.build_info()
+    assert "shrike-pyo3" in shrike_native.build_info()
 
 
 def test_parallel_sum_marshals_f64_batch() -> None:

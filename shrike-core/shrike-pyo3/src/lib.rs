@@ -226,7 +226,7 @@ fn version() -> String {
 #[pyfunction]
 fn build_info() -> String {
     format!(
-        "shrike-py (pyo3 abi3) on {}-{}",
+        "shrike-pyo3 (pyo3 abi3) on {}-{}",
         std::env::consts::ARCH,
         std::env::consts::OS,
     )

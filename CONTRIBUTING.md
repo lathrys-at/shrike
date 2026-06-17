@@ -168,8 +168,8 @@ build (e.g. `build-native.sh`).
 ## Local checks before a PR
 
 ```bash
-ruff check src/shrike/ tests/ shrike-core/shrike-py/python/
-ruff format --check src/shrike/ tests/ shrike-core/shrike-py/python/
+ruff check src/shrike/ tests/ shrike-core/shrike-pyo3/python/
+ruff format --check src/shrike/ tests/ shrike-core/shrike-pyo3/python/
 mypy src/shrike/
 pytest tests/unit -q
 pytest tests/integration -q -m "integration and not embedding"

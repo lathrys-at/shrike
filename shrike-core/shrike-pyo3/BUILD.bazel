@@ -7,7 +7,7 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["Cargo.toml"])
 
-SHRIKE_PY_SRCS = [
+SHRIKE_PYO3_SRCS = [
     "src/anki_core.rs",
     "src/async_kernel.rs",
     "src/asyncio_bridge.rs",
@@ -22,7 +22,7 @@ SHRIKE_PY_SRCS = [
 
 # On macOS the Python symbols stay undefined at link time (resolved by the
 # host interpreter at import).
-SHRIKE_PY_LINK_FLAGS = select({
+SHRIKE_PYO3_LINK_FLAGS = select({
     "@platforms//os:macos": [
         "-Clink-arg=-undefined",
         "-Clink-arg=dynamic_lookup",
@@ -36,10 +36,10 @@ SHRIKE_PY_LINK_FLAGS = select({
 # manager set, matching the crate's cargo default features exactly — Bazel
 # crate_features don't inherit cargo defaults, so they're pinned here.
 rust_shared_library(
-    name = "shrike_py_native",
-    srcs = SHRIKE_PY_SRCS,
+    name = "shrike_pyo3_native",
+    srcs = SHRIKE_PYO3_SRCS,
     edition = "2021",
-    rustc_flags = SHRIKE_PY_LINK_FLAGS,
+    rustc_flags = SHRIKE_PYO3_LINK_FLAGS,
     crate_features = [
         "anki-core",
         # Inert for this crate under Bazel (the cargo feature only forwards to
@@ -83,7 +83,7 @@ rust_shared_library(
 # //shrike-core/shrike-mobile is the real mobile binding (the C-ABI cdylib, zero
 # pyo3), and its `rust_shared_library` + `rust_test` exercise the mobile
 # feature set (anki-core + engine-remote, no ort, no managers) on the per-PR
-# `//...` lane — the `mobile_skeleton` reuse-of-shrike-py-sources proof it
+# `//...` lane — the `mobile_skeleton` reuse-of-shrike-pyo3-sources proof it
 # replaced was a placeholder until this crate existed.
 
 # Python imports `shrike_native._native` from a file literally named
@@ -91,7 +91,7 @@ rust_shared_library(
 # name inside the package dir (runfiles merge it with the source __init__.py).
 copy_file(
     name = "native_so",
-    src = ":shrike_py_native",
+    src = ":shrike_pyo3_native",
     out = "python/shrike_native/_native.so",
     allow_symlink = False,
 )

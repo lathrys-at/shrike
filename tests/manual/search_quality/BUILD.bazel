@@ -48,7 +48,7 @@ py_library(
     visibility = ["//tests:__subpackages__"],
     deps = [
         ":search_quality",
-        "//shrike-core/shrike-py:shrike_native",
+        "//shrike-core/shrike-pyo3:shrike_native",
         "//src/shrike:derived",
         "//src/shrike:embedding",
         "//src/shrike:harness",
