@@ -60,7 +60,7 @@ and are ignored by the generator.
   `--embedding-pooling last` to `shrike server start` / `shrike embedding
   start`). Note that some of these architectures (e.g. EuroBERT, which
   jina-v5-nano is built on) may need a newer `llama-server` than the pinned
-  build — see `scripts/llama-server.lock`.
+  build — see `tools/llama-server.lock`.
 
 ## Usage
 
