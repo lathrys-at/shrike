@@ -10,7 +10,7 @@ from click.core import ParameterSource
 from shrike.cli import output
 from shrike.cli.config import resolve_collection
 from shrike.cli.groups import OrderedGroup
-from shrike.cli.output import NOTE_ID, output_options
+from shrike.cli.output import NOTE_ID, output_options, parse_comma_separated
 
 
 def _parse_field(value: str) -> tuple[str, str]:
@@ -21,18 +21,6 @@ def _parse_field(value: str) -> tuple[str, str]:
         )
     key, _, val = value.partition("=")
     return key.strip(), val.strip()
-
-
-def _parse_comma_separated(
-    ctx: click.Context,
-    param: click.Parameter,
-    value: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Split comma-separated values so --tags a,b and --tags a --tags b both work."""
-    result: list[str] = []
-    for v in value:
-        result.extend(part.strip() for part in v.split(",") if part.strip())
-    return tuple(result)
 
 
 @click.group("note", cls=OrderedGroup, short_help="Manage notes")
@@ -49,7 +37,7 @@ def note() -> None:
 @click.option(
     "--tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Filter by tag (repeatable, comma-separated, ANDed).",
 )
@@ -182,7 +170,7 @@ def note_show(ctx: click.Context, note_id: int) -> None:
 @click.option(
     "--tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Tags for the note (repeatable, comma-separated).",
 )
@@ -262,7 +250,7 @@ def note_create(
 @click.option(
     "--tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Replace all tags (repeatable, comma-separated).",
 )
@@ -316,7 +304,7 @@ def note_update(
     "--set",
     "set_tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Replace all tags with this set (repeatable, comma-separated). "
     'Pass --set "" to clear all tags. Mutually exclusive with --add/--remove.',
@@ -325,7 +313,7 @@ def note_update(
     "--add",
     "add_tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Add these tags, leaving other tags intact (repeatable, comma-separated).",
 )
@@ -333,7 +321,7 @@ def note_update(
     "--remove",
     "remove_tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Remove these tags, leaving other tags intact (repeatable, comma-separated).",
 )
@@ -399,7 +387,7 @@ def note_tag(
 @click.option(
     "--tags",
     multiple=True,
-    callback=_parse_comma_separated,
+    callback=parse_comma_separated,
     expose_value=True,
     help="Scope to notes with these tags (repeatable, comma-separated).",
 )

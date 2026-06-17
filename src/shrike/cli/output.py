@@ -53,6 +53,19 @@ class NoteIDType(click.ParamType):
 NOTE_ID = NoteIDType()
 
 
+def parse_comma_separated(
+    ctx: click.Context,
+    param: click.Parameter,
+    value: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Click callback: split comma-separated values so ``--tags a,b`` and
+    ``--tags a --tags b`` both work. Shared by every repeatable ``--tags`` option."""
+    result: list[str] = []
+    for v in value:
+        result.extend(part.strip() for part in v.split(",") if part.strip())
+    return tuple(result)
+
+
 def _append_template_field(lines: list[str], label: str, value: str) -> None:
     """Append a template field — inline if single-line, indented block if multiline.
 

@@ -15,7 +15,7 @@ import click
 from shrike.cli import output
 from shrike.cli.config import resolve_collection
 from shrike.cli.groups import SearchGroup
-from shrike.cli.output import NOTE_ID, output_options
+from shrike.cli.output import NOTE_ID, output_options, parse_comma_separated
 from shrike.schemas import CoverageCell, CoverageMatrix, CoverageRow, SearchMatch
 
 # The cross-modal coverage cells, styled for the matrix (#235): native is the
@@ -81,10 +81,8 @@ def _search_match_badges(m: SearchMatch) -> str:
 @click.option(
     "--tags",
     multiple=True,
+    callback=parse_comma_separated,
     help="Restrict search to notes with these tags (repeatable, comma-separated).",
-    callback=lambda ctx, param, value: tuple(  # split a,b and -t a -t b alike
-        part.strip() for v in value for part in v.split(",") if part.strip()
-    ),
 )
 @click.option("--brief", is_flag=True, help="Show only IDs and scores, not full note content.")
 @click.pass_context
