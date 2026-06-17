@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from shrike.paths import config_file
-from shrike.paths import log_dir as _default_log_dir
+from shrike.platform.paths import config_file
+from shrike.platform.paths import log_dir as _default_log_dir
 
 if TYPE_CHECKING:
     from shrike.client import ServerSpec
@@ -174,7 +174,7 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
     # the registry model so the on-disk shape stays the single round-trip
     # contract (ordered entries + the active-default name; optional per-profile
     # fields emitted only when set).
-    from shrike.registry import Registry
+    from shrike.harness.registry import Registry
 
     profiles_out = Registry.from_config(config).to_config_section()
     if profiles_out:
@@ -335,7 +335,7 @@ def resolve_cross_space_margin(config: dict[str, Any]) -> float:
     v2 capability section), so it keeps the env→config→default cascade past
     #523, like the cache dir / index-flush tuning. An unparseable value falls
     back to the default rather than failing boot."""
-    from shrike.actions import ACTIVATION_MARGIN
+    from shrike.harness.index import ACTIVATION_MARGIN
 
     env = os.environ.get("SHRIKE_CROSS_SPACE_FLOOR_MARGIN")
     if env:
@@ -548,7 +548,7 @@ def resolve_embedding_profile(
     (``build_server_spec``), so only the explicit ``server start`` /
     ``embedding start`` paths warn, and exactly once.
     """
-    from shrike.profiles import (
+    from shrike.harness.profiles import (
         ProfileError,
         parse_capabilities,
         plan_to_runtime_params,

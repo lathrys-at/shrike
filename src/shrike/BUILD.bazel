@@ -11,6 +11,14 @@ package(default_visibility = ["//visibility:public"])
 # bottom aggregates everything for consumers that want the whole package
 # (//bin, the wheel, the integration/native suites).
 #
+# Module layout (#730): the package is grouped into layered subpackages —
+# platform/ (paths, log, daemon, pathsafety), the top-level contract (schemas,
+# errors) + standalone client, harness/ (assembly + engines/), api/ (the verb
+# surface), server/ (the host), cli/. Per the reorg's "flat labels" decision the
+# targets here stay flat (//src/shrike:collection, not //src/shrike/harness:…) —
+# only the srcs point at the new subpaths — so the #259 per-module test-cache
+# granularity and the test///bin dep labels are preserved.
+#
 # Ground rules:
 #  - src-layout: every target sets imports=[".."] so src/ is on sys.path and
 #    the package imports as `shrike` (not `src.shrike`).
@@ -26,11 +34,21 @@ package(default_visibility = ["//visibility:public"])
 
 # --- leaf tier (no intra-package deps) -------------------------------------
 
-# The package marker. Every other target depends on it: importing any
-# shrike.* module executes shrike/__init__.py (the lazy _version shim).
+# The package markers. Every other target depends on :pkg: importing any
+# shrike.* module executes shrike/__init__.py (the lazy _version shim), and each
+# subpackage __init__.py must be present for `shrike.platform.*` etc. to import.
+# The two __init__.py files that carry real code (server/, recognition/) live in
+# their own targets with the right deps; everything else is a plain marker.
 py_library(
     name = "pkg",
-    srcs = ["__init__.py"],
+    srcs = [
+        "__init__.py",
+        "api/__init__.py",
+        "harness/__init__.py",
+        "harness/engines/__init__.py",
+        "harness/engines/embedding/__init__.py",
+        "platform/__init__.py",
+    ],
     imports = [".."],
 )
 
@@ -43,7 +61,7 @@ py_library(
 
 py_library(
     name = "paths",
-    srcs = ["paths.py"],
+    srcs = ["platform/paths.py"],
     imports = [".."],
     deps = [
         ":pkg",
@@ -63,17 +81,18 @@ py_library(
 
 py_library(
     name = "index",
-    srcs = ["index.py"],
+    srcs = ["harness/index.py"],
     imports = [".."],
     deps = [":pkg"],
 )
 
 # Shared server-local path-safety mechanism (#71): the capability-agnostic
 # helpers store_media (#164/#170), export (#71), and import (#72) all gate
-# through. Leaf — stdlib only.
+# through. Leaf — stdlib only. Lives in platform/ (#730): shared by api/actions
+# (the export gate) and server, so placing it in server/ would invert api→server.
 py_library(
     name = "pathsafety",
-    srcs = ["pathsafety.py"],
+    srcs = ["platform/pathsafety.py"],
     imports = [".."],
     deps = [":pkg"],
 )
@@ -82,14 +101,14 @@ py_library(
 # download tokens, reaped on download/TTL/shutdown. Leaf — stdlib only.
 py_library(
     name = "export_store",
-    srcs = ["export_store.py"],
+    srcs = ["server/export_store.py"],
     imports = [".."],
     deps = [":pkg"],
 )
 
 py_library(
     name = "cache_layout",
-    srcs = ["cache_layout.py"],
+    srcs = ["harness/cache_layout.py"],
     imports = [".."],
     deps = [
         ":pkg",
@@ -99,7 +118,7 @@ py_library(
 
 py_library(
     name = "profiles",
-    srcs = ["profiles.py"],
+    srcs = ["harness/profiles.py"],
     imports = [".."],
     deps = [":pkg"],
 )
@@ -109,28 +128,28 @@ py_library(
 # capability/build profiles); they share the word, nothing else.
 py_library(
     name = "registry",
-    srcs = ["registry.py"],
+    srcs = ["harness/registry.py"],
     imports = [".."],
     deps = [":pkg"],
 )
 
 py_library(
     name = "embed_text",
-    srcs = ["embed_text.py"],
+    srcs = ["harness/engines/embedding/text.py"],
     imports = [".."],
     deps = [":pkg"],
 )
 
 py_library(
     name = "embedding_base",
-    srcs = ["embedding_base.py"],
+    srcs = ["harness/engines/embedding/base.py"],
     imports = [".."],
     deps = [":pkg"],
 )
 
 py_library(
     name = "search_fusion",
-    srcs = ["search_fusion.py"],
+    srcs = ["harness/search_fusion.py"],
     imports = [".."],
     deps = [
         ":pkg",
@@ -138,9 +157,15 @@ py_library(
     ],
 )
 
+# Recognition engines (#730): a package (engines/recognition/) whose __init__.py
+# re-exports the OCR facade, so callers import shrike.harness.engines.recognition.
+# Room for ASR/describe facades as siblings.
 py_library(
     name = "recognition",
-    srcs = ["recognition.py"],
+    srcs = [
+        "harness/engines/recognition/__init__.py",
+        "harness/engines/recognition/recognition.py",
+    ],
     imports = [".."],
     deps = [
         ":pkg",
@@ -152,7 +177,7 @@ py_library(
 
 py_library(
     name = "log",
-    srcs = ["log.py"],
+    srcs = ["platform/log.py"],
     imports = [".."],
     deps = [
         ":paths",
@@ -163,7 +188,7 @@ py_library(
 
 py_library(
     name = "daemon",
-    srcs = ["daemon.py"],
+    srcs = ["platform/daemon.py"],
     imports = [".."],
     deps = [
         ":paths",
@@ -189,7 +214,7 @@ py_library(
 
 py_library(
     name = "embed_batching",
-    srcs = ["embed_batching.py"],
+    srcs = ["harness/engines/embedding/batching.py"],
     imports = [".."],
     deps = [
         ":pkg",
@@ -200,7 +225,7 @@ py_library(
 
 py_library(
     name = "collection",
-    srcs = ["collection.py"],
+    srcs = ["harness/collection.py"],
     imports = [".."],
     deps = [
         ":embedding_base",
@@ -212,7 +237,7 @@ py_library(
 
 py_library(
     name = "derived",
-    srcs = ["derived.py"],
+    srcs = ["harness/derived.py"],
     imports = [".."],
     deps = [
         ":index",
@@ -222,15 +247,15 @@ py_library(
 )
 
 # The embedding runtime + the in-process backends (onnx/clip) as one cluster:
-# embedding.py constructs the backends lazily, and they share the probe/text
+# runtime.py constructs the backends lazily, and they share the probe/text
 # helpers, so they version together. onnxruntime stays out (lazy heavy import).
 py_library(
     name = "embedding",
     srcs = [
-        "embedding.py",
-        "embedding_clip.py",
-        "embedding_onnx.py",
-        "embedding_onnx_common.py",
+        "harness/engines/embedding/clip.py",
+        "harness/engines/embedding/onnx.py",
+        "harness/engines/embedding/onnx_common.py",
+        "harness/engines/embedding/runtime.py",
     ],
     imports = [".."],
     deps = [
@@ -246,17 +271,17 @@ py_library(
 
 py_library(
     name = "harness",
-    srcs = ["harness.py"],
+    srcs = ["harness/harness.py"],
     imports = [".."],
     deps = [
-        ":actions",  # #580: ACTIVATION_MARGIN (the cross-space floor margin default)
+        ":actions",  # #68 routing: CollectionBundle (lazy, in resolve_bundle)
         ":cache_layout",  # #68 routing: per-collection index/derived paths
         ":cli_core",  # #68 routing: re-reads the registry via cli.config.load_config (lazy)
         ":collection",
         ":derived",
         ":embedding",
         ":embedding_base",
-        ":index",
+        ":index",  # #580/#730: ACTIVATION_MARGIN (the cross-space floor margin default)
         ":pkg",
         ":profiles",
         ":recognition",
@@ -267,7 +292,7 @@ py_library(
 
 py_library(
     name = "actions",
-    srcs = ["actions.py"],
+    srcs = ["api/actions.py"],
     imports = [".."],
     deps = [
         ":collection",
@@ -284,8 +309,8 @@ py_library(
 py_library(
     name = "tools",
     srcs = [
-        "mcp_adapter.py",
-        "tools.py",
+        "api/mcp_adapter.py",
+        "api/tools.py",
     ],
     imports = [".."],
     deps = [
@@ -314,6 +339,7 @@ py_library(
     deps = [
         ":client",
         ":errors",
+        ":index",  # cli/config resolves the cross-space margin from ACTIVATION_MARGIN (lazy)
         ":paths",
         ":pkg",
         ":profiles",
@@ -330,8 +356,10 @@ py_library(
 py_library(
     name = "server",
     srcs = [
-        "_mcp_perf.py",
-        "server.py",
+        "server/__init__.py",
+        "server/__main__.py",
+        "server/_mcp_perf.py",
+        "server/server.py",
     ],
     imports = [".."],
     deps = [

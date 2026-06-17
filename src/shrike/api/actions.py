@@ -32,12 +32,12 @@ from typing import Annotated, Any, Literal
 import shrike_native
 from pydantic import Field, TypeAdapter
 
-from shrike.collection import (
+from shrike.harness.collection import (
     CollectionWrapper,
 )
-from shrike.derived import DerivedTextStore
-from shrike.index import IndexState, activation_floor
-from shrike.pathsafety import output_path_within_any_root, path_within_any_root
+from shrike.harness.derived import DerivedTextStore
+from shrike.harness.index import ACTIVATION_MARGIN, IndexState, activation_floor
+from shrike.platform.pathsafety import output_path_within_any_root, path_within_any_root
 from shrike.schemas import (
     CollectionCheckResponse,
     CollectionInfo,
@@ -122,14 +122,6 @@ _UNBOUNDED_LIMIT = 1_000_000_000
 # `_attach_neighbors` (a neighbor must be semantic- or exact-backed), not a
 # magic threshold number.
 SEARCH_SEMANTIC_THRESHOLD = 0.5
-
-# Intra-modal activation gate (#201b). A non-text modality's ranking is fed to the fusion only when
-# its best match for the query exceeds `mean + ACTIVATION_MARGIN·std` of that modality's calibrated
-# typical best match (index.activation_stats) — otherwise the modality "had no good match" and its
-# top-k would just inject noise. Higher margin = stricter (fewer image cards surface). Like RRF_K, a
-# module constant today; becomes a `--search-*` knob under the tuning harness. Uncalibrated stats
-# (a text-only or pre-#201b index) yield no floor, so the gate is simply off.
-ACTIVATION_MARGIN = 1.0
 
 # The per-call collection selector (#68 routing). Every routable tool carries
 # this optional param; it names a registered profile to operate on, defaulting

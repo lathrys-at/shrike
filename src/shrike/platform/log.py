@@ -18,7 +18,7 @@ import logging.handlers
 from pathlib import Path
 from typing import Any
 
-from shrike.paths import log_dir as _platform_log_dir
+from shrike.platform.paths import log_dir as _platform_log_dir
 
 DEFAULT_LOG_DIR = _platform_log_dir()
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB

@@ -18,15 +18,15 @@ from mcp.server.fastmcp.tools.base import Tool
 # Re-exports: these lived here pre-split and are part of the module's surface
 # (ACTIVATION_MARGIN is imported by tests; ToolInputError is the error
 # contract's home name).
-from shrike.actions import (
+from shrike.api.actions import (
     ACTIVATION_MARGIN,
     ActionContext,
     ToolInputError,
     build_actions,
 )
-from shrike.collection import CollectionWrapper
-from shrike.derived import DerivedTextStore
-from shrike.mcp_adapter import _safe_tool, build_action_tools, register_actions
+from shrike.harness.collection import CollectionWrapper
+from shrike.harness.derived import DerivedTextStore
+from shrike.api.mcp_adapter import _safe_tool, build_action_tools, register_actions
 
 __all__ = [
     "ACTIVATION_MARGIN",

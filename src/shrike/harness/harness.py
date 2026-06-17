@@ -25,14 +25,14 @@ from typing import Any
 
 import shrike_native
 
-from shrike import cache_layout
-from shrike.actions import ACTIVATION_MARGIN
-from shrike.collection import CollectionWrapper
-from shrike.derived import DerivedTextStore, NativeDerivedEngine
-from shrike.embedding import EmbeddingRuntime
-from shrike.embedding_base import EmbedderBackend
-from shrike.profiles import MODALITIES
-from shrike.registry import Registry
+from shrike.harness import cache_layout
+from shrike.harness.collection import CollectionWrapper
+from shrike.harness.derived import DerivedTextStore, NativeDerivedEngine
+from shrike.harness.engines.embedding.base import EmbedderBackend
+from shrike.harness.engines.embedding.runtime import EmbeddingRuntime
+from shrike.harness.index import ACTIVATION_MARGIN  # #580/#730: the cross-space floor margin default
+from shrike.harness.profiles import MODALITIES
+from shrike.harness.registry import Registry
 
 logger = logging.getLogger("shrike.kernel")
 
@@ -203,7 +203,7 @@ class KernelIndexView:
     @property
     def state(self) -> Any:
         """The facade's ``IndexState`` enum, for the search action's gating."""
-        from shrike.index import IndexState
+        from shrike.harness.index import IndexState
 
         name = self.state_name
         if self._runtime.backend is None and name == "ready":
@@ -864,7 +864,7 @@ class Harness:
         dependency (the engine isn't compiled in) or an unknown kind — never
         kills boot. Byte-identical OCR path to before #485 (the OCR purpose,
         the legacy ``--ocr-backend`` flow)."""
-        from shrike.recognition import make_recognizer
+        from shrike.harness.engines.recognition import make_recognizer
 
         try:
             backend = make_recognizer(kind)
@@ -902,7 +902,7 @@ class Harness:
         as 'error' rather than 'ready' so a degraded engine is visible (#485) —
         rows minted under the degenerate fingerprint re-derive once on the next
         restart, when model_info resolves and the fingerprint sharpens."""
-        from shrike.recognition import make_describe_recognizer
+        from shrike.harness.engines.recognition import make_describe_recognizer
 
         try:
             backend, fingerprint, reachable = make_describe_recognizer(
@@ -1126,7 +1126,7 @@ class CollectionManager:
     (contract #2 — re-read on demand so a ``profile create`` in one session routes
     in the same session), defaulting to the registry's active profile; no
     server-side mutable "current collection". The registry's stored path is
-    routed THROUGH :mod:`shrike.cache_layout` (contract #1) so canonicalization
+    routed THROUGH :mod:`shrike.harness.cache_layout` (contract #1) so canonicalization
     is the equalizer — never a raw-abspath-derived index path.
 
     The **default collection** (the one the daemon booted with, ``--collection``)
@@ -1298,7 +1298,7 @@ class CollectionManager:
         dedup recorder) — exactly the handles an action operates on. A
         :class:`RoutingError` (unknown selector) propagates to the action
         layer, which maps it to a clean ``ToolInputError``."""
-        from shrike.actions import CollectionBundle
+        from shrike.api.actions import CollectionBundle
 
         harness = await self.harness_for(selector)
         return CollectionBundle(

@@ -19,7 +19,7 @@ from shrike.cli import output
 from shrike.cli.config import save_config
 from shrike.cli.groups import OrderedGroup
 from shrike.cli.output import output_options
-from shrike.registry import Registry, RegistryError
+from shrike.harness.registry import Registry, RegistryError
 
 
 def _save(ctx: click.Context, registry: Registry) -> None:
@@ -237,7 +237,7 @@ def _list_discovered(ctx: click.Context, registry: Registry) -> None:
     """Render Anki-base-dir discovery (`profile list --discover`)."""
     import os
 
-    from shrike.paths import anki_base_dir, discover_anki_profiles
+    from shrike.platform.paths import anki_base_dir, discover_anki_profiles
 
     base = anki_base_dir()
     discovered = discover_anki_profiles(base)

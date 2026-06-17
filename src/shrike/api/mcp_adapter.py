@@ -1,6 +1,6 @@
 """The MCP binding for the action registry (#276, implements #225).
 
-Iterates :func:`shrike.actions.build_actions`'s registry and generates the
+Iterates :func:`shrike.api.actions.build_actions`'s registry and generates the
 FastMCP ``@mcp.tool`` bindings, applying the ``_safe_tool`` policy — docstring
 ``inspect.cleandoc`` (so advertised descriptions carry no source indentation)
 and the error→``isError`` mapping (``ToolInputError``/``CollectionBusyError``
@@ -24,8 +24,8 @@ import shrike_native
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.tools.base import Tool
 
-from shrike.actions import ActionDef, ToolInputError, _call_outcome
-from shrike.collection import CollectionBusyError
+from shrike.api.actions import ActionDef, ToolInputError, _call_outcome
+from shrike.harness.collection import CollectionBusyError
 
 logger = logging.getLogger("shrike.tools")
 

@@ -8,7 +8,7 @@ from shrike.cli.groups import OrderedGroup
 from shrike.cli.index_cmd import _poll_progress
 from shrike.cli.output import output_options
 from shrike.client import ShrikeClient
-from shrike.embedding import BACKEND_ALIASES, SUPPORTED_BACKENDS
+from shrike.harness.engines.embedding.runtime import BACKEND_ALIASES, SUPPORTED_BACKENDS
 from shrike.schemas import EmbeddingStatus
 
 
@@ -146,7 +146,7 @@ def embedding_start(
     # v2-first like `server start` (#498): a config declaring embedders:/managed:
     # is the only home for these settings — the legacy flags/env are rejected/
     # ignored under it; a legacy config runs the old cascade unchanged.
-    from shrike.profiles import ProfileError
+    from shrike.harness.profiles import ProfileError
 
     try:
         resolved = resolve_embedding_profile(
@@ -171,7 +171,7 @@ def embedding_start(
     # Under a v2 config send NO overrides: the daemon booted with --config and
     # owns the resolution — "start what the config says". (The bridged params
     # include keys like endpoint that the legacy override body doesn't carry.)
-    from shrike.profiles import parse_capabilities
+    from shrike.harness.profiles import parse_capabilities
 
     if not parse_capabilities(config).legacy:
         resolved = {}

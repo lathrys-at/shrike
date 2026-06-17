@@ -32,7 +32,7 @@ from typing import Any
 
 from filelock import FileLock, Timeout
 
-from shrike.paths import state_dir
+from shrike.platform.paths import state_dir
 
 logger = logging.getLogger("shrike.daemon")
 

@@ -27,10 +27,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from shrike.embed_batching import probe_image_max_safe_batch, probe_max_safe_batch
-from shrike.embed_text import EMBED_TEXT_VERSION
-from shrike.embedding_base import IMAGE, TEXT
-from shrike.embedding_onnx_common import resolve_execution_providers
+from shrike.harness.engines.embedding.batching import probe_image_max_safe_batch, probe_max_safe_batch
+from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
+from shrike.harness.engines.embedding.base import IMAGE, TEXT
+from shrike.harness.engines.embedding.onnx_common import resolve_execution_providers
 
 logger = logging.getLogger("shrike.embedding")
 
@@ -169,7 +169,7 @@ class ClipBackend:
 
         import shrike_native
 
-        from shrike.embedding_onnx import locate_ort_dylib
+        from shrike.harness.engines.embedding.onnx import locate_ort_dylib
 
         shrike_native.init_onnx_runtime(str(locate_ort_dylib()))
         self._native_engine = shrike_native.ClipEmbedder(

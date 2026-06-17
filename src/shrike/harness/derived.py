@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from shrike.index import IndexState
+from shrike.harness.index import IndexState
 
 logger = logging.getLogger("shrike.derived")
 

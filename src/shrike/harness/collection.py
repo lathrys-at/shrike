@@ -34,7 +34,7 @@ from typing import Any, Literal, TypeVar
 import shrike_native
 from shrike_native import CollectionCore
 
-from shrike.embedding_base import NoteEmbedInput
+from shrike.harness.engines.embedding.base import NoteEmbedInput
 from shrike.schemas import COLLECTION_BUSY_CODE
 
 logger = logging.getLogger("shrike.collection")

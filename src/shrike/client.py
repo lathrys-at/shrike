@@ -32,7 +32,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import TypeAdapter
 
-from shrike import daemon
+from shrike.platform import daemon
 from shrike.errors import (
     CollectionBusyError,
     ServerError,

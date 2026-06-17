@@ -143,7 +143,7 @@ def cli(
     # auto-start with a warning rather than breaking every command — commands
     # against an already-running or remote server still work; `shrike server
     # start` surfaces the same error loudly.
-    from shrike.profiles import ProfileError
+    from shrike.harness.profiles import ProfileError
 
     try:
         spec = build_server_spec(config, config_path=config_path)

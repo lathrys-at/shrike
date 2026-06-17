@@ -24,29 +24,29 @@ from mcp.server.transport_security import (
 )
 from pydantic import ValidationError
 
-from shrike._mcp_perf import install_validator_cache
-from shrike.collection import DEFAULT_LOCK_HOLD
-from shrike.daemon import AlreadyRunningError, ServerLock
-from shrike.embedding import (
+from shrike.server._mcp_perf import install_validator_cache
+from shrike.harness.collection import DEFAULT_LOCK_HOLD
+from shrike.platform.daemon import AlreadyRunningError, ServerLock
+from shrike.harness.engines.embedding.runtime import (
     BACKEND_ALIASES,
     DEFAULT_BACKEND,
     SUPPORTED_BACKENDS,
     EmbeddingRuntime,
 )
-from shrike.harness import CollectionManager, Harness, HarnessParams, KernelConfigError
+from shrike.harness.harness import CollectionManager, Harness, HarnessParams, KernelConfigError
 
 # The transport-free core (#275). The collectors and _maybe_rebuild moved there
 # with it; re-exported here so existing import sites (tests included) are
 # unchanged.
-from shrike.log import configure_logging
-from shrike.paths import cache_dir, state_dir
-from shrike.pathsafety import (
+from shrike.platform.log import configure_logging
+from shrike.platform.paths import cache_dir, state_dir
+from shrike.platform.pathsafety import (
     is_loopback,
     server_is_purely_local,
     validate_path_root,
 )
 from shrike.schemas import WIRE_PROTOCOL_VERSION, ActionError, ActionErrorCode
-from shrike.tools import ToolInputError, register_tools
+from shrike.api.tools import ToolInputError, register_tools
 
 # The kernel saver's built-in flush tuning (#355): the --index-save-* help
 # names the defaults the flags would override. Sourced from the kernel, not
@@ -75,7 +75,7 @@ def _make_image_resolver(
     is a cheap stat (no byte read) the index folds into the per-note hash, so an image stored after
     its note re-embeds on reconcile instead of being skipped.
     """
-    from shrike.collection import _safe_media_name
+    from shrike.harness.collection import _safe_media_name
 
     def _path(name: str) -> str | None:
         safe = _safe_media_name(name)
@@ -284,7 +284,7 @@ def _register_custom_routes(
     from starlette.requests import Request
     from starlette.responses import FileResponse, JSONResponse, Response
 
-    from shrike.collection import CollectionBusyError, _safe_media_name
+    from shrike.harness.collection import CollectionBusyError, _safe_media_name
 
     security_mw = TransportSecurityMiddleware(security)
 
@@ -617,7 +617,13 @@ def _register_custom_routes(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Shrike MCP server for Anki")
+    # prog is pinned so the help/usage text reads `shrike.server` regardless of
+    # entry point (python -m shrike.server via __main__, the //bin launcher, or
+    # the foreground CLI) — the module became a package in #730, which would
+    # otherwise surface argv[0] as `__main__.py`.
+    parser = argparse.ArgumentParser(
+        prog="shrike.server", description="Shrike MCP server for Anki"
+    )
     parser.add_argument(
         "--collection",
         required=True,
@@ -1009,7 +1015,7 @@ def main() -> None:
                 "the config file is the only home for these (docs/distribution.md)"
             )
         from shrike.cli.config import load_config, resolve_embedding
-        from shrike.profiles import (
+        from shrike.harness.profiles import (
             ProfileError,
             parse_capabilities,
             plan_to_runtime_params,
@@ -1301,7 +1307,7 @@ def main() -> None:
     # registry is host-side config; the server operates on --collection today,
     # and routing by selector is the capstone (#68).
     from shrike.cli.config import DEFAULT_CONFIG_PATH, load_config
-    from shrike.registry import Registry
+    from shrike.harness.registry import Registry
 
     profile_registry: Registry | None = None
     try:
@@ -1314,7 +1320,7 @@ def main() -> None:
     # cache dir + their one-shot download tokens, reaped on download / TTL /
     # shutdown. Backs the default export delivery (the GET /export/{token}
     # route below); the server-local output_path mode bypasses it.
-    from shrike.export_store import ExportStore
+    from shrike.server.export_store import ExportStore
 
     export_store = ExportStore(str(cache_base))
 

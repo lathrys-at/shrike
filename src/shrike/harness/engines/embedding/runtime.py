@@ -34,9 +34,9 @@ from typing import Any
 
 import shrike_native
 
-from shrike.embed_batching import probe_max_safe_batch
-from shrike.embed_text import EMBED_TEXT_VERSION
-from shrike.embedding_base import IMAGE, TEXT, EmbedderBackend
+from shrike.harness.engines.embedding.batching import probe_max_safe_batch
+from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
+from shrike.harness.engines.embedding.base import IMAGE, TEXT, EmbedderBackend
 
 # Embedding backend kinds the runtime can construct (see EmbeddingRuntime).
 # The onnx/clip backends run the native (Rust) engines, unconditional since the
@@ -873,7 +873,7 @@ class EmbeddingRuntime:
             )
         assert self._model is not None  # callers check before constructing
         if self._backend_kind == "onnx":
-            from shrike.embedding_onnx import OnnxBackend
+            from shrike.harness.engines.embedding.onnx import OnnxBackend
 
             return OnnxBackend(
                 model=self._model,
@@ -887,7 +887,7 @@ class EmbeddingRuntime:
                 log_dir=self._log_dir,
             )
         if self._backend_kind == "clip":
-            from shrike.embedding_clip import ClipBackend
+            from shrike.harness.engines.embedding.clip import ClipBackend
 
             return ClipBackend(
                 model=self._model,

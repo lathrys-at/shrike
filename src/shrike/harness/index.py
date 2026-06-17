@@ -24,12 +24,22 @@ from __future__ import annotations
 
 import enum
 
-__all__ = ["CALIB_MIN", "IndexState", "activation_floor"]
+__all__ = ["ACTIVATION_MARGIN", "CALIB_MIN", "IndexState", "activation_floor"]
 
 # Minimum non-self best-matches a modality needs for activation stats — the
 # host-side mirror of the kernel's CALIB_MIN (kept in sync by hand; it only
 # feeds test assertions, never the gate itself, which runs on kernel stats).
 CALIB_MIN = 30
+
+
+# Intra-modal activation gate (#201b). A non-text modality's ranking is fed to the fusion only when
+# its best match for the query exceeds `mean + ACTIVATION_MARGIN·std` of that modality's calibrated
+# typical best match (index.activation_stats) — otherwise the modality "had no good match" and its
+# top-k would just inject noise. Higher margin = stricter (fewer image cards surface). Like RRF_K, a
+# module constant today; becomes a `--search-*` knob under the tuning harness. Uncalibrated stats
+# (a text-only or pre-#201b index) yield no floor, so the gate is simply off. Lives here beside
+# `activation_floor` (its sole consumer's math) rather than in the action layer (#730).
+ACTIVATION_MARGIN = 1.0
 
 
 class IndexState(enum.Enum):

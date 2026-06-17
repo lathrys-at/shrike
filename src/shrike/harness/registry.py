@@ -22,7 +22,7 @@ through config but are **not resolved here** — applying a per-profile embeddin
 config is routing (#68) and resolving a per-profile cache dir is namespacing
 (#67). They are modeled and stored, and that is all.
 
-This is distinct from the capability/build :mod:`shrike.profiles` module (which
+This is distinct from the capability/build :mod:`shrike.harness.profiles` module (which
 resolves ``embedders:``/``recognizers:`` against the compiled build). They
 share the word "profile" but nothing else — collection profiles are *where the
 notes live*, capability profiles are *how vectors are produced*.
