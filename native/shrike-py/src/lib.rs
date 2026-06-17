@@ -802,6 +802,10 @@ impl NativeIndexEngine {
         self.inner.modality_sizes()
     }
 
+    fn modality_stats(&self) -> Vec<(String, usize, Option<usize>)> {
+        self.inner.modality_stats()
+    }
+
     fn modality_names(&self) -> Vec<String> {
         self.inner.modality_names()
     }

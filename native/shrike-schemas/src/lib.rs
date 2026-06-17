@@ -869,6 +869,17 @@ pub struct IndexProgress {
     pub total: i64,
 }
 
+/// One per-modality sub-index's size/ndim (#684). Mirror of Pydantic's
+/// `IndexModalityStat`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct IndexModalityStat {
+    pub modality: String,
+    #[serde(default)]
+    pub size: i64,
+    #[serde(default)]
+    pub ndim: Option<i64>,
+}
+
 /// On-disk index contents shared across build states (Pydantic's `_IndexBase`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct IndexBase {
@@ -886,6 +897,9 @@ pub struct IndexBase {
     pub model_id: Option<String>,
     #[serde(default)]
     pub activation: Option<BTreeMap<String, BTreeMap<String, f64>>>,
+    /// Per-modality sub-index breakdown (#684): each sub-index's own size/ndim.
+    #[serde(default)]
+    pub modalities: Vec<IndexModalityStat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1058,6 +1072,11 @@ pub struct ServerStatus {
     #[serde(default)]
     pub log: Option<String>,
     pub embedding: EmbeddingStatus,
+    /// Per-space embedding health (#681): one entry per configured embedder (the
+    /// primary plus every secondary space). `embedding` above stays the primary
+    /// for back-compat; this is the full list. Empty on older payloads.
+    #[serde(default)]
+    pub embedding_spaces: Vec<EmbeddingStatus>,
     pub index: IndexStatus,
     #[serde(default)]
     pub derived: DerivedStatus,
@@ -1383,6 +1402,7 @@ catalog![
     ("ImportPackageResponse", ImportPackageResponse),
     ("EmbeddingStatus", EmbeddingStatus),
     ("IndexProgress", IndexProgress),
+    ("IndexModalityStat", IndexModalityStat),
     ("IndexStatus", IndexStatus),
     ("DedupStats", DedupStats),
     ("RecognitionEngineStatus", RecognitionEngineStatus),

@@ -59,6 +59,12 @@ pub trait VectorIndex: Send + Sync {
     fn size(&self) -> usize;
     fn ndim(&self) -> Option<usize>;
     fn modality_sizes(&self) -> Vec<(String, usize)>;
+    /// Per-modality `(name, size, ndim)` — the status breakdown (#684). Unlike
+    /// [`modality_sizes`](Self::modality_sizes) it carries each sub-index's own
+    /// dimensionality (text 768-dim, image 512-dim under CLIP), which the single
+    /// top-level [`ndim`](Self::ndim) (the text modality's) can't express.
+    /// `ndim` is `None` for a modality whose sub-index has no vectors yet.
+    fn modality_stats(&self) -> Vec<(String, usize, Option<usize>)>;
     fn modality_names(&self) -> Vec<String>;
     /// Create/verify a modality's sub-index at `ndim` (idempotent; a
     /// dimension mismatch is an error).

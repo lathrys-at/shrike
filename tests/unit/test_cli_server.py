@@ -24,6 +24,7 @@ from shrike.schemas import (
     EmbeddingRunning,
     IndexBuilding,
     IndexErrored,
+    IndexModalityStat,
     IndexProgress,
     IndexReady,
     ServerStatus,
@@ -44,7 +45,7 @@ def run(tmp_path):
     return _run
 
 
-def _server(index=None, embedding=None, *, log_dir="/logs", coverage=None):
+def _server(index=None, embedding=None, *, log_dir="/logs", coverage=None, embedding_spaces=None):
     return ServerStatus(
         wire_protocol_version=1,
         pid=4242,
@@ -54,6 +55,7 @@ def _server(index=None, embedding=None, *, log_dir="/logs", coverage=None):
         log_dir=log_dir,
         uptime="0:01:00",
         embedding=embedding or EmbeddingRunning(available=True, url="http://e", pid=99, model="/m"),
+        embedding_spaces=embedding_spaces or [],
         index=index or IndexReady(state="ready", size=5, ndim=384, col_mod=7, path="/i"),
         coverage=coverage,
     )
@@ -117,6 +119,66 @@ class TestServerStatus:
         assert result.exit_code == 0
         assert "Coverage" not in result.output
         assert "via text" not in result.output
+
+    def test_status_on_own_line_and_section_order(self, run):
+        # §B reshape (#684): the section header is the identity (`Index`,
+        # `Embedding`), `Status:` moves onto its own line, and the order is
+        # Index → Derived text → Recognition → Embedding.
+        fake = MagicMock()
+        fake.server_status.return_value = _server()
+        with patch(f"{SC}.ShrikeClient", return_value=fake):
+            result = run("server", "status")
+        out = result.output
+        # Status moved to its own line (header carries no inline status now).
+        assert "Status:" in out
+        assert "Index:" not in out
+        assert "Embedding:" not in out
+        # Section order: Index before Derived text before Recognition before Embedding.
+        i_index = out.index("Index")
+        i_derived = out.index("Derived text")
+        i_recog = out.index("Recognition")
+        i_embed = out.index("Embedding")
+        assert i_index < i_derived < i_recog < i_embed
+
+    def test_index_per_modality_breakdown(self, run):
+        # §C index (#684): each sub-index reports its own size/ndim.
+        fake = MagicMock()
+        fake.server_status.return_value = _server(
+            index=IndexReady(
+                state="ready",
+                size=87,
+                ndim=768,
+                modalities=[
+                    IndexModalityStat(modality="text", size=50, ndim=768),
+                    IndexModalityStat(modality="image", size=37, ndim=512),
+                ],
+            )
+        )
+        with patch(f"{SC}.ShrikeClient", return_value=fake):
+            result = run("server", "status")
+        out = result.output
+        assert "Vectors (text)" in out
+        assert "Vectors (image)" in out
+        assert "768 dims" in out
+        assert "512 dims" in out
+
+    def test_embedding_per_space(self, run):
+        # §C embedding (#681): one `Embedding [<modalities>]` block per space.
+        fake = MagicMock()
+        fake.server_status.return_value = _server(
+            embedding=EmbeddingRunning(available=True, model="gemma", modalities=["text"]),
+            embedding_spaces=[
+                EmbeddingRunning(available=True, model="gemma", modalities=["text"]),
+                EmbeddingRunning(available=True, model="clip", modalities=["text", "image"]),
+            ],
+        )
+        with patch(f"{SC}.ShrikeClient", return_value=fake):
+            result = run("server", "status")
+        out = result.output
+        assert "Embedding [text]" in out
+        assert "Embedding [text, image]" in out
+        assert "gemma" in out
+        assert "clip" in out
 
     def test_running_but_unresponsive(self, run):
         fake = MagicMock()

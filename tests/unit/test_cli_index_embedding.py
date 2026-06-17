@@ -60,7 +60,7 @@ def run(tmp_path, fake):
     return _run
 
 
-def _server(index, embedding=None):
+def _server(index, embedding=None, embedding_spaces=None):
     return ServerStatus(
         wire_protocol_version=1,
         pid=1,
@@ -69,6 +69,7 @@ def _server(index, embedding=None):
         log_level="info",
         log_dir="/logs",
         embedding=embedding or EmbeddingRunning(available=True),
+        embedding_spaces=embedding_spaces or [],
         index=index,
     )
 
@@ -236,28 +237,58 @@ class TestPollProgress:
 
 
 class TestEmbeddingStatus:
+    # `embedding status` reads the full /status now (#681 per-space), so it
+    # mocks `server_status` and the embedding shows up under `embedding_spaces`.
     def test_available(self, run, fake):
-        fake.embedding_status.return_value = EmbeddingRunning(
-            available=True, pid=123, url="http://127.0.0.1:8373", model="/m.gguf"
+        fake.server_status.return_value = _server(
+            IndexReady(state="ready", size=5, ndim=384),
+            embedding=EmbeddingRunning(
+                available=True, pid=123, url="http://127.0.0.1:8373", model="/m.gguf"
+            ),
         )
         result = run("server", "embedding", "status")
         assert "available" in result.output
         assert "123" in result.output
         assert "/m.gguf" in result.output
 
+    def test_per_space(self, run, fake):
+        # A two-space profile (#681): each space is its own `Embedding […]`
+        # block keyed by modalities — both must appear.
+        fake.server_status.return_value = _server(
+            IndexReady(state="ready", size=87, ndim=768),
+            embedding=EmbeddingRunning(available=True, model="gemma", modalities=["text"]),
+            embedding_spaces=[
+                EmbeddingRunning(available=True, model="gemma", modalities=["text"]),
+                EmbeddingRunning(available=True, model="clip", modalities=["text", "image"]),
+            ],
+        )
+        result = run("server", "embedding", "status")
+        assert "gemma" in result.output
+        assert "clip" in result.output
+        assert "[text]" in result.output
+        assert "[text, image]" in result.output
+
     @pytest.mark.parametrize(
         "state,needle",
         [("failed", "failed"), ("stopped", "stopped"), ("not_configured", "not configured")],
     )
     def test_down_states(self, run, fake, state, needle):
-        fake.embedding_status.return_value = EmbeddingDown(state=state)
+        fake.server_status.return_value = _server(
+            IndexUnavailable(), embedding=EmbeddingDown(state=state)
+        )
         result = run("server", "embedding", "status")
         assert needle in result.output
 
     def test_json(self, run, fake):
-        fake.embedding_status.return_value = EmbeddingRunning(available=True, pid=1)
+        fake.server_status.return_value = _server(
+            IndexReady(state="ready", size=1, ndim=8),
+            embedding=EmbeddingRunning(available=True, pid=1),
+        )
         result = run("--json", "server", "embedding", "status")
-        assert json.loads(result.output)["state"] == "running"
+        # The full per-space list; a single-space server emits a one-element list.
+        data = json.loads(result.output)
+        assert isinstance(data, list)
+        assert data[0]["state"] == "running"
 
 
 class TestEmbeddingStart:

@@ -158,6 +158,22 @@ impl MultiModalIndex {
             .collect()
     }
 
+    /// Per-modality `(name, size, ndim)` (#684): each sub-index reports its OWN
+    /// dimensionality (the text and image sub-indexes differ under CLIP). `ndim`
+    /// is `None` for an empty sub-index (usearch reports 0 dimensions before the
+    /// first vector sets the width; surface that as "unknown", not 0).
+    pub fn modality_stats(&self) -> Vec<(String, usize, Option<usize>)> {
+        self.lock()
+            .indexes
+            .iter()
+            .map(|(m, s)| {
+                let size = s.index.size();
+                let dim = s.index.dimensions();
+                (m.clone(), size, (dim > 0).then_some(dim))
+            })
+            .collect()
+    }
+
     pub fn modality_names(&self) -> Vec<String> {
         self.lock().indexes.keys().cloned().collect()
     }
@@ -660,6 +676,9 @@ impl shrike_store_api::VectorIndex for MultiModalIndex {
     }
     fn modality_sizes(&self) -> Vec<(String, usize)> {
         Self::modality_sizes(self)
+    }
+    fn modality_stats(&self) -> Vec<(String, usize, Option<usize>)> {
+        Self::modality_stats(self)
     }
     fn modality_names(&self) -> Vec<String> {
         Self::modality_names(self)

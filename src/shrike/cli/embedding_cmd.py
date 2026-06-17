@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import click
 
-from shrike.cli import output
+from shrike.cli import output, status_render
 from shrike.cli.config import resolve_embedding_profile
 from shrike.cli.groups import OrderedGroup
 from shrike.cli.index_cmd import _poll_progress
@@ -23,6 +23,9 @@ def embedding() -> None:
 def embedding_status(ctx: click.Context) -> None:
     """Show the current state of the embedding service.
 
+    Reports one entry per configured embedding space (#681): a multi-space
+    profile shows each space keyed by its modalities.
+
     \b
     Examples:
       shrike server embedding status
@@ -31,14 +34,23 @@ def embedding_status(ctx: click.Context) -> None:
     client: ShrikeClient = ctx.obj["client"]
     json_out: bool = ctx.obj["json"]
 
+    # Per-space (#681): pull the full status so every space is reported, not just
+    # the primary. The shared renderer keeps this identical to the `server
+    # status` Embedding block.
     with output.spinner("Checking embedding service…"):
-        emb_status = client.embedding_status()
+        full = client.server_status()
+
+    if full is None:
+        raise click.ClickException("Server is not responding.")
+
+    spaces = full.embedding_spaces or [full.embedding]
 
     if json_out:
-        output.emit_json(emb_status)
+        # The full per-space list; a single-space server emits a one-element list.
+        output.emit_json([s.model_dump(exclude_none=True) for s in spaces])
         return
 
-    _render_embedding(emb_status)
+    status_render.render_embedding_spaces(spaces)
 
 
 @embedding.command("start", short_help="Start the embedding service")
@@ -223,23 +235,9 @@ def embedding_stop(ctx: click.Context) -> None:
 
 
 def _render_embedding(emb: EmbeddingStatus) -> None:
-    """Render the embedding status block (shared by status and start)."""
-    if emb.available:
-        output.kv("Embedding", "[green]available[/green]")
-        if emb.url:
-            output.kv("URL", f"[cyan]{emb.url}[/cyan]", indent=2)
-        if emb.pid:
-            output.kv("PID", f"[cyan]{emb.pid}[/cyan]", indent=2)
-        if emb.model:
-            output.kv("Model", f"[cyan]{emb.model}[/cyan]", indent=2)
-        if emb.provider:
-            output.kv("Provider", emb.provider.replace("ExecutionProvider", ""), indent=2)
-        if emb.batch:
-            output.kv("Batching", emb.batch, indent=2)
-    else:
-        labels = {
-            "failed": "[red]failed to start[/red]",
-            "stopped": "[dim]stopped[/dim]",
-            "not_configured": "[dim]not configured[/dim]",
-        }
-        output.kv("Embedding", labels.get(emb.state or "", "[dim]unavailable[/dim]"))
+    """Render ONE embedding space's block (the `embedding start` confirmation).
+
+    Delegates to the shared per-space renderer so the start-confirmation block
+    matches the `server status` / `server embedding status` Embedding blocks
+    (#684 §B). `start` only knows the space it just started, so it renders one."""
+    status_render.render_embedding_spaces([emb])

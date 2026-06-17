@@ -474,9 +474,19 @@ class TestIndexCLI:
         assert data["state"] == "ready"
         assert data["size"] >= 50
         assert data["ndim"] is not None
+        # Per-modality breakdown (#684): a text-only index reports a single
+        # `text` sub-index whose size/ndim mirror the aggregate.
+        mods = {m["modality"]: m for m in data["modalities"]}
+        assert "text" in mods
+        assert mods["text"]["size"] == data["size"]
+        assert mods["text"]["ndim"] == data["ndim"]
         result = semantic_runner.invoke(["server", "index", "status"])
         assert result.exit_code == 0
-        assert "Index:" in result.output
+        # §B reshape (#684): the header is the section identity, `Status:` is its
+        # own line, and the per-modality breakdown reads `Vectors (text)`.
+        assert "Index" in result.output
+        assert "Status:" in result.output
+        assert "Vectors (text)" in result.output
         assert "ready" in result.output.lower()
 
     def test_index_rebuild_background(self, semantic_runner, collection_server):
@@ -501,12 +511,17 @@ class TestEmbeddingCLI:
     """Test shrike server embedding status via CLI."""
 
     def test_embedding_status_json_and_pretty(self, semantic_runner):
+        # Per-space (#681): JSON is now the per-space LIST (a one-element list on
+        # a single-space server), each entry the same EmbeddingStatus shape.
         data = semantic_runner.json(["server", "embedding", "status"])
-        assert data["available"] is True
-        assert "url" in data
+        assert isinstance(data, list)
+        assert data[0]["available"] is True
+        assert "url" in data[0]
         result = semantic_runner.invoke(["server", "embedding", "status"])
         assert result.exit_code == 0
-        assert "Embedding:" in result.output
+        # §B reshape (#684): `Embedding [text]` header, `Status:` on its own line.
+        assert "Embedding [text]" in result.output
+        assert "Status:" in result.output
         assert "available" in result.output.lower()
 
 
@@ -560,9 +575,12 @@ class TestServerStatusWithIndex:
         _wait_for_index_ready(collection_server)
         result = semantic_runner.invoke(["server", "status"])
         assert result.exit_code == 0
-        assert "Index:" in result.output
+        # §B reshape (#684): section headers are identities; `Status:` is its own
+        # line; the Embedding header carries the modalities (`Embedding [text]`).
+        assert "Index" in result.output
+        assert "Embedding [text]" in result.output
+        assert "Status:" in result.output
         assert "ready" in result.output.lower()
-        assert "Embedding:" in result.output
         assert "available" in result.output.lower()
 
     def test_server_status_json_includes_index_and_embedding(
