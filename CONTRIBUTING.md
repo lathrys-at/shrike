@@ -142,6 +142,29 @@ Branch protection on `main` (required status checks, no direct pushes, squash-on
 merges) is configured in the GitHub repo settings, not in this repo's files. Set
 it once when the project goes public; it can also be scripted later via `gh api`.
 
+## Repository layout: `scripts/` vs `tools/` vs `bin/`
+
+Three top-level directories hold non-package code. The line between them is **who
+invokes it** — each carries a `README.md` with its full inventory:
+
+- **`bin/`** — shipped/runnable product entry points: the Bazel `py_binary`
+  launchers over `//src/shrike:shrike` (`//bin:shrike`, `//bin:server`,
+  `//bin:server_embedding`). Load-bearing, kept outside the `shrike` package so a
+  binary's output path never collides with a package subdir. Not cruft.
+- **`tools/`** — invoked by the build: Bazel macros (`//tools/bazel`), the
+  version-pin locks + their writers/checkers, the sdist/wheel/requirements
+  builders, `workspace_status.sh`, the hermetic-toolchain CI smoke tests.
+- **`scripts/`** — human-facing dev/maintenance entry points: `dev-setup.sh`, the
+  native build, the coverage runners, the `//scripts:serve` launcher.
+
+A file follows its strongest coupling. A *version-pin lock* is consumed by the
+build (Bazel reads it, CI cache keys hash it, a `py_test` validates it), so the
+lock, its regenerator, and its tripwire all live in `tools/` — e.g. the llama-lock
+trio `tools/llama-server.lock` + `tools/update-llama-lock.sh` +
+`tools/check_llama_lock.py`, beside the sibling `tools/bazel.lock` build-pin. A
+script a developer runs by hand stays in `scripts/` even when its output feeds a
+build (e.g. `build-native.sh`).
+
 ## Local checks before a PR
 
 ```bash

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Tripwire: scripts/llama-server.lock and MODULE.bazel must agree (#566).
+"""Tripwire: tools/llama-server.lock and MODULE.bazel must agree (#566).
 
 The pinned llama.cpp tag + the four per-platform SHA256s live in
-``scripts/llama-server.lock`` (shell-sourceable, consumed by the CI model-cache
+``tools/llama-server.lock`` (shell-sourceable, consumed by the CI model-cache
 key) AND, duplicated, in MODULE.bazel's four ``llama_server_*`` http_archives
 (Bazel can't read the lock at module-resolution time). They can silently drift
 — a bump applied to one but not the other ships a tag/sha mismatch.
@@ -44,12 +44,12 @@ def _repo_root() -> Path:
     """
     here = Path(__file__).resolve()
     for parent in [here.parent, *here.parents]:
-        if (parent / "scripts" / "llama-server.lock").is_file() and (
+        if (parent / "tools" / "llama-server.lock").is_file() and (
             parent / "MODULE.bazel"
         ).is_file():
             return parent
     raise FileNotFoundError(
-        f"could not locate scripts/llama-server.lock + MODULE.bazel from {here}"
+        f"could not locate tools/llama-server.lock + MODULE.bazel from {here}"
     )
 
 
@@ -95,7 +95,7 @@ def check(lock_text: str, module_text: str) -> list[str]:
 
     tag = lock.get("LLAMA_TAG")
     if not tag:
-        return ["scripts/llama-server.lock has no LLAMA_TAG"]
+        return ["tools/llama-server.lock has no LLAMA_TAG"]
 
     expected_names = {name for name, _ in _PLATFORMS.values()}
     missing = expected_names - set(archives)
@@ -106,7 +106,7 @@ def check(lock_text: str, module_text: str) -> list[str]:
         sha_key = f"SHA256_{lock_key}"
         lock_sha = lock.get(sha_key)
         if not lock_sha:
-            problems.append(f"scripts/llama-server.lock has no {sha_key}")
+            problems.append(f"tools/llama-server.lock has no {sha_key}")
             continue
         arch = archives.get(archive_name)
         if arch is None:
@@ -134,7 +134,7 @@ def check(lock_text: str, module_text: str) -> list[str]:
 
 def _load() -> list[str]:
     root = _repo_root()
-    lock_text = (root / "scripts" / "llama-server.lock").read_text()
+    lock_text = (root / "tools" / "llama-server.lock").read_text()
     module_text = (root / "MODULE.bazel").read_text()
     return check(lock_text, module_text)
 
@@ -142,7 +142,7 @@ def _load() -> list[str]:
 def test_llama_lock_matches_module_bazel() -> None:
     """pytest entry: the lock and MODULE.bazel pin the same tag + shas."""
     problems = _load()
-    assert not problems, "scripts/llama-server.lock and MODULE.bazel drifted:\n" + "\n".join(
+    assert not problems, "tools/llama-server.lock and MODULE.bazel drifted:\n" + "\n".join(
         f"  - {p}" for p in problems
     )
 
@@ -150,13 +150,13 @@ def test_llama_lock_matches_module_bazel() -> None:
 if __name__ == "__main__":
     issues = _load()
     if issues:
-        print("scripts/llama-server.lock and MODULE.bazel drifted:", file=sys.stderr)
+        print("tools/llama-server.lock and MODULE.bazel drifted:", file=sys.stderr)
         for issue in issues:
             print(f"  - {issue}", file=sys.stderr)
         print(
-            "\nBump both via scripts/update-llama-lock.sh <TAG>, then mirror the "
+            "\nBump both via tools/update-llama-lock.sh <TAG>, then mirror the "
             "values into MODULE.bazel's llama_server_* http_archives.",
             file=sys.stderr,
         )
         sys.exit(1)
-    print("OK: scripts/llama-server.lock and MODULE.bazel are in sync.")
+    print("OK: tools/llama-server.lock and MODULE.bazel are in sync.")

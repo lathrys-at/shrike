@@ -5,7 +5,7 @@ description: >
 
     1. bazel-models  — the heavy embedding externals (the GGUF/ONNX/CLIP model
        files + the pinned llama-server binaries). ~hundreds of MB, and they
-       change only when their VERSION PINS change (scripts/llama-server.lock +
+       change only when their VERSION PINS change (tools/llama-server.lock +
        the EMBEDDING_MODEL_*/ONNX_*/CLIP_* names in
        tests/integration/model_cache.py) — NOT on a Cargo.lock/MODULE.bazel.lock
        bump. Keyed on those pins so a crate churn never re-downloads them, and
@@ -54,7 +54,7 @@ runs:
       uses: actions/cache/restore@v5
       with:
         path: ~/.cache/shrike/bazel-repo
-        key: bazel-models-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/llama-server.lock', 'tests/integration/model_cache.py') }}
+        key: bazel-models-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/llama-server.lock', 'tests/integration/model_cache.py') }}
         restore-keys: bazel-models-${{ runner.os }}-${{ runner.arch }}-
     # ~/.cache/llama.cpp is llama-server's model-preset cache (#441): built
     # once per model file (~6s), then every later llama boot is ~0.1s — the

@@ -359,13 +359,13 @@ http_file(
 
 
 # The pinned llama-server binary (+ its shared libs, flat beside it) as a per-platform
-# http_archive — tag + shas from scripts/llama-server.lock. The conftest puts the
+# http_archive — tag + shas from tools/llama-server.lock. The conftest puts the
 # host one on PATH + the lib path for the embedding_server fixture. Lazily fetched.
 #
-# The tag + 4 shas are DUPLICATED here from scripts/llama-server.lock (Bazel can't
+# The tag + 4 shas are DUPLICATED here from tools/llama-server.lock (Bazel can't
 # read the lock at module-resolution time). //:llama_lock_in_sync_test is the
 # tripwire: it parses the lock and asserts every value below matches, failing CI on
-# drift. To bump: `scripts/update-llama-lock.sh <TAG>` then mirror the values here
+# drift. To bump: `tools/update-llama-lock.sh <TAG>` then mirror the values here
 # (the test names the exact mismatch).
 _LLAMA_FILES = 'filegroup(name = "files", srcs = glob(["**"]), visibility = ["//visibility:public"])'
 

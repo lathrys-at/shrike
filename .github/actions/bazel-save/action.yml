@@ -38,7 +38,7 @@ runs:
       uses: actions/cache/save@v5
       with:
         path: ~/.cache/shrike/bazel-repo
-        key: bazel-models-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/llama-server.lock', 'tests/integration/model_cache.py') }}
+        key: bazel-models-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/llama-server.lock', 'tests/integration/model_cache.py') }}
     - name: Save Bazel toolchains + repo
       if: ${{ inputs.save == 'all' }}
       uses: actions/cache/save@v5

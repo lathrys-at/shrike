@@ -1,0 +1,11 @@
+# Build-invoked tooling (#695). This package is the home for things the *build*
+# runs — version-pin locks and their tripwires, sdist/wheel builders, the
+# workspace-status stamp. See README.md for the scripts/ vs tools/ vs bin/
+# boundary.
+
+# The pinned llama.cpp lock, consumed as `data` by //:llama_lock_in_sync_test —
+# the de-dup tripwire (tools/check_llama_lock.py) that asserts it matches
+# MODULE.bazel's llama_server_* http_archives (#566). The lock lives here, beside
+# its checker and writer (tools/update-llama-lock.sh), mirroring the sibling
+# tools/bazel.lock build-pin (#695 reunited the split llama-lock concern).
+exports_files(["llama-server.lock"])

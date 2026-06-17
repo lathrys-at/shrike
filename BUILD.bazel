@@ -30,7 +30,7 @@ py_test(
     deps = ["//src/shrike:shrike"],
 )
 
-# De-dup tripwire (#566): scripts/llama-server.lock and MODULE.bazel duplicate the
+# De-dup tripwire (#566): tools/llama-server.lock and MODULE.bazel duplicate the
 # pinned llama.cpp tag + the four per-platform SHA256s (Bazel can't read the lock at
 # module-resolution time). This fails CI the moment they drift — a bump applied to
 # one but not the other. Pure stdlib, so it's also a plain pytest unit (pip lane).
@@ -41,7 +41,7 @@ py_test(
     main = "tools/check_llama_lock.py",
     data = [
         "MODULE.bazel",
-        "//scripts:llama-server.lock",
+        "//tools:llama-server.lock",
     ],
 )
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Refresh the pinned build-system bootstrap: tools/bazel.lock + .bazelversion.
 # Run after bumping bazelisk or Bazel, then commit both files. Mirrors
-# scripts/update-llama-lock.sh.
+# tools/update-llama-lock.sh.
 #
 # Usage:
 #   tools/update-bazel-lock.sh                                 # keep versions, refresh shas
@@ -48,7 +48,7 @@ cat > "$repo_root/tools/bazel.lock" <<LOCK
 # then bazelisk fetches Bazel (BAZEL_VERSION, mirrored in .bazelversion) and the
 # wrapper hands it the matching BAZEL_SHA256 via BAZELISK_VERIFY_SHA256 — so the
 # whole chain (launcher -> bazelisk -> Bazel) is hash-pinned end to end. Mirrors
-# scripts/llama-server.lock.
+# tools/llama-server.lock.
 #
 # Bump with tools/update-bazel-lock.sh (refreshes .bazelversion + every sha here).
 BAZELISK_VERSION=${bazelisk_ver}
