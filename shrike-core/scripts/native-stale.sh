@@ -7,7 +7,9 @@
 # Fast (git plumbing only, no compile — well under 100ms in the fresh case), so
 # it's cheap enough to run on every shell cd (.envrc) and every pytest session
 # (the tests/conftest.py backstop). Run it from anywhere — the repo root is
-# resolved from the script's own location.
+# resolved via git, and the sibling native-stamp.sh is found relative to this
+# script (so it works whether invoked directly in shrike-core/scripts/ or via
+# the top-level scripts/ symlink).
 #
 # Two conditions must BOTH hold for "fresh":
 #   - the recorded stamp ($venv/.shrike-native-stamp) equals the current stamp
@@ -22,8 +24,7 @@
 # bare CLI run with no venv at all — fair to reject.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
-cd "$ROOT"
+cd "$(git rev-parse --show-toplevel)"
 
 venv="${VIRTUAL_ENV:-${SHRIKE_NATIVE_VENV:-}}"
 if [[ -z "$venv" ]]; then

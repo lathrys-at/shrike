@@ -14,8 +14,12 @@
 #
 # Since the cutover the anki collection core is a DEFAULT cargo feature —
 # every build pulls the anki tree and needs protoc on PATH (brew/apt).
+#
+# Lives in shrike-core/scripts/ (with the workspace it builds) and is symlinked
+# back into top-level scripts/; resolve the repo root via git so it works from
+# either invocation path.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(git rev-parse --show-toplevel)"
 
 PROFILE="debug"
 CARGO_FLAGS=()
@@ -30,19 +34,19 @@ for arg in "$@"; do
   esac
 done
 
-(cd native && cargo build -p shrike-py ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"})
+(cd shrike-core && cargo build -p shrike-py ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"})
 
 case "$(uname -s)" in
-  Darwin) LIB="native/target/${PROFILE}/libshrike_py.dylib" ;;
-  *)      LIB="native/target/${PROFILE}/libshrike_py.so" ;;
+  Darwin) LIB="shrike-core/target/${PROFILE}/libshrike_py.dylib" ;;
+  *)      LIB="shrike-core/target/${PROFILE}/libshrike_py.so" ;;
 esac
-DEST="native/shrike-py/python/shrike_native/_native.so"
+DEST="shrike-core/shrike-py/python/shrike_native/_native.so"
 cp "$LIB" "$DEST"
 echo "built $DEST (${PROFILE})"
 
 # Plain (non-editable) install: hatchling editables use an import hook that
 # mypy/stubtest cannot resolve, and the .so changes each rebuild anyway.
-python -m pip install -q --force-reinstall native/shrike-py/python
+python -m pip install -q --force-reinstall shrike-core/shrike-py/python
 python - <<'PY'
 import shrike_native
 print(f"shrike_native {shrike_native.version()} — {shrike_native.build_info()}")
