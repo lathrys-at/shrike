@@ -14,6 +14,11 @@
 # plus the native extension — see the guard below).
 set -euo pipefail
 
+# Repo root from the script's own location, so the committed coverage hook
+# (tools/coverage_subprocess.pth) is found regardless of cwd. The rest of the
+# script still expects to run from the repo root (it uses $PWD/pyproject.toml).
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 # Since the native cutover the suite imports shrike_native, which pip alone
 # doesn't build — fail early with the fix instead of an ImportError wall (#400).
 if ! python -c 'import shrike_native' 2>/dev/null; then
@@ -34,11 +39,13 @@ done
 # The integration suite drives a `python -m shrike.server` subprocess; without this
 # the server's lines read as uncovered. The .pth only imports coverage when
 # COVERAGE_PROCESS_START is set, so it costs nothing on other interpreter starts —
-# the same guard coverage's own auto-.pth uses. Idempotent.
+# the same guard coverage's own auto-.pth uses. Copy the single committed hook
+# (tools/coverage_subprocess.pth — one source of truth, shared with CLAUDE.md's
+# by-hand recipe) into site-packages. Idempotent.
 SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
 HOOK="$SITE/coverage_subprocess.pth"
 if [ ! -f "$HOOK" ]; then
-  echo 'import os; os.getenv("COVERAGE_PROCESS_START") and __import__("coverage").process_startup()' >"$HOOK"
+  cp "$ROOT/tools/coverage_subprocess.pth" "$HOOK"
 fi
 
 export COVERAGE_PROCESS_START="$PWD/pyproject.toml"

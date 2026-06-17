@@ -1,0 +1,1 @@
+import os; os.getenv("COVERAGE_PROCESS_START") and __import__("coverage").process_startup()
