@@ -38,7 +38,7 @@ shrike server start --collection ~/path/to/collection.anki2
 That starts a background daemon with your collection open. The other `shrike` commands talk to it, so they don't repeat `--collection`:
 
 ```bash
-shrike info
+shrike collection info
 shrike note list --deck Default
 ```
 
@@ -50,7 +50,7 @@ shrike server stop
 
 ## Semantic search
 
-`shrike note search` finds notes by meaning instead of keywords. To turn it on, declare an embedder in your config file (see [Configuration](#configuration) for where the file lives), then start the server as usual. The entry says what kinds of content you want searchable and where the model runs.
+`shrike search` finds notes by meaning instead of keywords. To turn it on, declare an embedder in your config file (see [Configuration](#configuration) for where the file lives), then start the server as usual. The entry says what kinds of content you want searchable and where the model runs.
 
 ### Text search with a local model
 
@@ -144,19 +144,19 @@ OCR support is being reworked. The server no longer bundles Apple's Vision OCR (
 Shrike builds an index of your notes in the background. A large collection takes a little while the first time; search will tell you if it's still indexing. Once it's ready:
 
 ```bash
-shrike note search "electron transport chain"
-shrike note search --similar-to 1700000000123
+shrike search "electron transport chain"
+shrike search --similar-to 1700000000123
 ```
 
-`shrike note search` also matches your query as exact text and as a near-miss (so `protien` still finds protein cards); each result shows you which applied. These text matches work even without the embedding service running.
+`shrike search` also matches your query as exact text and as a near-miss (so `protien` still finds protein cards); each result shows you which applied. These text matches work even without the embedding service running.
 
 ## CLI
 
-`shrike info` summarizes the collection: note types, decks, tags, and scheduling stats.
+`shrike collection info` summarizes the collection: note types, decks, tags, and scheduling stats.
 
 ```bash
-shrike info
-shrike info --types --decks --stats
+shrike collection info
+shrike collection info --types --decks --stats
 ```
 
 List and read notes:
@@ -215,11 +215,11 @@ shrike note replace "teh" "the" --deck "Biology"          # preview, confirm, ap
 shrike note replace "colou?r" "color" --regex --tags spelling --dry-run
 ```
 
-For tags across the whole collection, `shrike tag` renames:
+For tags across the whole collection, `shrike collection tag` renames:
 
 ```bash
-shrike tag rename history::ww2 history::wwii   # rename everywhere it appears
-shrike tag rename jp japanese --note 1779749914797   # only on these notes
+shrike collection tag rename history::ww2 history::wwii   # rename everywhere it appears
+shrike collection tag rename jp japanese --note 1779749914797   # only on these notes
 ```
 
 Manage decks with `shrike deck`:
@@ -241,13 +241,13 @@ shrike type create --name Vocab --field Word --field Meaning \
   --template 'Card 1:{{Word}}:{{FrontSide}}<hr>{{Meaning}}'
 ```
 
-`shrike media` gets images and audio into the collection (reference the stored name from a note field with `<img src="...">` or `[sound:...]`):
+`shrike collection media` gets images and audio into the collection (reference the stored name from a note field with `<img src="...">` or `[sound:...]`):
 
 ```bash
-shrike media store diagram.png                  # upload a local file
-shrike media store --url https://example.com/cell.png
-shrike media list '*.png'
-shrike media fetch diagram.png -o /tmp/out.png  # download it back
+shrike collection media store diagram.png                  # upload a local file
+shrike collection media store --url https://example.com/cell.png
+shrike collection media list '*.png'
+shrike collection media fetch diagram.png -o /tmp/out.png  # download it back
 ```
 
 Every command takes `--json` for scriptable output. See [the CLI reference](docs/cli-reference.md) for the full list of commands and flags.

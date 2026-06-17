@@ -2,7 +2,9 @@
 
 The Shrike CLI manages your Anki collection through the MCP server. If the server isn't running when you run a command, the CLI starts the daemon automatically, as long as a collection is configured (in the config file or `SHRIKE_COLLECTION`). On a fresh setup, start it yourself first with `shrike server start --collection`.
 
-All commands accept `--json` for machine-readable output and `--pretty/--no-pretty` for controlling Rich formatting. These flags work on both the root command and any subcommand (`shrike --json info` and `shrike info --json` are equivalent).
+All commands accept `--json` for machine-readable output and `--pretty/--no-pretty` for controlling Rich formatting. These flags work on both the root command and any subcommand (`shrike --json collection info` and `shrike collection info --json` are equivalent).
+
+The top-level groups are `collection`, `search`, `server`, `note`, `deck`, `type`, `profile`, and `completion`. Collection-scoped commands (info, import/export, media, tags, maintenance) live under `collection`; retrieval (semantic/substring search, raw queries, coverage) under `search`; daemon control (the embedding service and vector index) under `server`.
 
 Note IDs accept an optional `#` prefix, so `shrike note show #1779749914797` and `shrike note show 1779749914797` are the same. Type commands accept either a name or numeric ID wherever an identifier is expected. **Decks** are likewise referenceable by name, numeric ID, or `#id` anywhere a deck is taken (`--deck`, `deck rename`, `deck delete`): `#id` is always an ID, a bare number is tried as an ID then falls back to a name.
 
@@ -22,9 +24,236 @@ shrike [OPTIONS] COMMAND [ARGS]...
 
 ---
 
+## `shrike collection`
+
+Collection-wide operations: summary info, integrity checks, maintenance, import/export, tags, and media.
+
+### `shrike collection info`
+
+Show collection information. Without flags, prints a compact summary (note count, deck count, note type count). Use flags to include additional detail.
+
+| Option | Description |
+|---|---|
+| `--types` | List note types with their fields. |
+| `--decks` | List decks with note counts. |
+| `--tags` | List all tags. |
+| `--stats` | Show scheduling statistics (due cards, new cards, per-deck breakdown). |
+| `--type-details NAME` | Show full templates and CSS for a specific note type. |
+
+```bash
+shrike collection info                         # compact summary
+shrike collection info --types --decks --stats # everything
+shrike collection info --type-details Basic    # full definition for Basic
+```
+
+### `shrike collection check`
+
+Report media-integrity issues without changing anything: files on disk no note references (prune candidates), references to files that are missing, the notes holding those broken references, and whether Anki's media trash holds anything.
+
+```bash
+shrike collection check
+```
+
+### `shrike collection export [DEST]`
+
+Export the collection (or a deck/selection) to an Anki package: a `.apkg` (shareable, scopable) or `.colpkg` (whole-collection backup). By default the server writes a temporary package and the CLI downloads it to `DEST`. With `--server-path` the server writes directly to a path on its own disk (no download), for a co-located operator.
+
+| Option | Description |
+|---|---|
+| `--deck TEXT` | Export only this deck (name, id, or `#id`). Mutually exclusive with `--note-id`. |
+| `--note-id INTEGER` | Export only these notes. Repeatable. Mutually exclusive with `--deck`. |
+| `--format` | Package format (`apkg`/`colpkg`). Default inferred from `DEST`'s extension, else `apkg`. A `.colpkg` is a whole-collection backup (no `--deck`/`--note-id`). |
+| `--scheduling/--no-scheduling` | Include review/scheduling data and deck options (default: off). |
+| `--media/--no-media` | Bundle referenced media into the package (default: on). |
+| `--server-path PATH` | Write the package to this path on the **server's** disk (zero-copy; requires a purely-local daemon with a matching `--export-path-root`). |
+
+```bash
+shrike collection export backup.colpkg
+shrike collection export spanish.apkg --deck Spanish
+shrike collection export deck.apkg --deck Spanish --scheduling
+shrike collection export --server-path /srv/exports/backup.colpkg
+```
+
+### `shrike collection import <PATH>`
+
+Import an Anki package (`.apkg`/`.colpkg`) into the collection. This **merges** the package's notes into your collection (added or updated) — it is not a destructive restore, and your collection is never replaced, even for a `.colpkg`. `PATH` is read by the **server** from its own filesystem (the operator must have enabled it with `--import-path-root` on a purely-local daemon); a relative `PATH` is absolutized against your current directory first.
+
+| Option | Description |
+|---|---|
+| `--update-notes` | How to handle an imported note whose GUID matches an existing one: `if_newer` (default), `always`, or `never`. New notes always add. |
+| `--update-notetypes` | The same condition, applied to note types. |
+| `--with-scheduling` | Import the package's review scheduling (due dates, intervals). Off by default. |
+| `--merge-notetypes` | Merge imported note types into existing ones by name rather than adding new ones. |
+
+```bash
+shrike collection import ~/Downloads/shared-deck.apkg
+shrike collection import /srv/anki/backup.colpkg --with-scheduling
+shrike collection import deck.apkg --update-notes always
+```
+
+### `shrike collection prune`
+
+Tidy up the collection: remove unused tags, empty notes, empty cards, and unused media. Select cleanups with the flags below; **with none selected, all four run.** By default this only **previews** what would be removed — pass `--apply` to actually remove (it previews, asks for confirmation, then applies). An empty note has every field blank, where a field is blank only if it has no text **and** no media, so an image- or audio-only note is kept.
+
+| Option | Description |
+|---|---|
+| `--unused-tags` | Remove tag-registry names no note uses. |
+| `--empty-notes` | Delete notes whose every field is blank (text- and media-free). |
+| `--empty-cards` | Remove cards that render empty; a note that loses its last card is deleted. |
+| `--unused-media` | Move media files no note references to Anki's recoverable trash. |
+| `--apply` | Apply the changes. Without it, the command only previews. |
+| `-y, --yes` | Skip the confirmation prompt (with `--apply`). |
+
+```bash
+shrike collection prune                          # preview every cleanup
+shrike collection prune --unused-tags            # preview just unused tags
+shrike collection prune --apply                  # preview, confirm, then prune all
+shrike collection prune --empty-notes --apply -y # remove empty notes, no prompt
+```
+
+`--apply` is destructive (deleted notes and cards cannot be recovered; trashed media can, from Anki's media trash); preview first.
+
+### `shrike collection reload`
+
+Close and re-open the collection without restarting the daemon. Picks up changes made to the collection file on disk underneath a running daemon (a restored backup, a file-level sync or swap) and re-checks the search index for drift, rebuilding it in the background if the collection changed. Reports the new `col_mod` and whether a rebuild was triggered.
+
+```bash
+shrike collection reload
+```
+
+Note: in the default locking mode the daemon holds the collection's lock for its whole life, so external tools (Anki desktop, sync) generally cannot edit the collection underneath you — reload is mainly for file-level replacement. With `--cooperative-lock`, the daemon already re-checks for external edits each time it re-acquires the collection, so a manual reload is rarely needed.
+
+### `shrike collection tag`
+
+Collection-level tag operations. Per-note tag editing (set/add/remove on specific notes) lives under `shrike note tag`; this acts on the collection's tag taxonomy.
+
+#### `shrike collection tag rename <OLD> <NEW>`
+
+Rename a tag. With no `--note`, the tag is renamed everywhere it appears, children included (renaming `history` also moves `history::ww2`). With `--note`, only those notes are affected and the tag is matched exactly, so renaming `jp` never touches `jp-verbs`.
+
+| Option | Description |
+|---|---|
+| `--note NOTE_ID` | Restrict the rename to this note ID. Repeatable. Omit to rename across the whole collection. |
+
+```bash
+shrike collection tag rename history::ww2 history::wwii
+shrike collection tag rename jp japanese --note 1779749914797 --note 1779749914798
+```
+
+### `shrike collection media`
+
+Manage the collection's media folder — the images and audio that note fields reference with `<img src="...">` and `[sound:...]`. Anki resolves name collisions (identical content keeps the name; different content under the same name gets a hashed suffix), so always reference the filename the store command *returns*.
+
+#### `shrike collection media store [PATHS]...`
+
+Store local files and/or URLs into the media folder. Local paths are read here and uploaded as bytes, so they work against a remote daemon. URLs are fetched by the server by default (http/https only; private and internal addresses are refused unless the server runs with `--allow-private-media-fetch`).
+
+| Option | Description |
+|---|---|
+| `--name TEXT` | Override the stored filename (single item only). |
+| `--url URL` | URL to fetch and store. Repeatable. |
+| `--client-fetch` | Download `--url` files locally and upload the bytes — for when this machine has the network path or proxy, not the server. |
+| `--server-path PATH` | Store a file already on the *server's* disk without sending bytes (repeatable). Off by default: the server must be started with one or more `--media-path-root DIR` (config `server.media_path_roots`, env `SHRIKE_MEDIA_PATH_ROOTS`) on a purely-local configuration, and the file must be under one of those roots. |
+
+```bash
+shrike collection media store diagram.png
+shrike collection media store a.png b.jpg c.ogg
+shrike collection media store --url https://example.com/cell.png
+shrike collection media store --server-path /data/big-lecture.mp4
+```
+
+#### `shrike collection media fetch <NAMES>...`
+
+Write media files out to local disk.
+
+| Option | Description |
+|---|---|
+| `-o, --output PATH` | Write a single file to this path. |
+| `--out-dir PATH` | Directory to write files into (default: current directory). |
+
+```bash
+shrike collection media fetch diagram.png -o /tmp/out.png
+shrike collection media fetch a.png b.jpg --out-dir ./assets
+```
+
+#### `shrike collection media list [PATTERN]`
+
+List media filenames, with size and type, optionally filtered by a glob pattern.
+
+| Option | Description |
+|---|---|
+| `--limit INTEGER` | Maximum files to show. |
+
+```bash
+shrike collection media list
+shrike collection media list '*.png' --limit 20
+```
+
+#### `shrike collection media delete <NAMES>...`
+
+Move media files to Anki's recoverable trash. This does **not** check whether a note still references the file — run `shrike collection check` first to find unused media.
+
+| Option | Description |
+|---|---|
+| `-y, --yes` | Skip confirmation. |
+
+```bash
+shrike collection media delete orphan.png --yes
+```
+
+---
+
+## `shrike search`
+
+Search the collection and inspect retrieval. `shrike search <query>` runs the default search (semantic + exact-substring); `shrike search query` is the raw-Anki-expression escape hatch; `shrike search coverage` shows the cross-modal coverage matrix.
+
+### `shrike search [QUERIES]...`
+
+Search the collection by meaning **and** by text. Each query is matched by semantic similarity (needs the embedding service and a built index), as an exact, case-insensitive substring of note fields, and fuzzily (trigram matching, so a typo like `protien` still finds protein cards). Results are folded together: each shows a similarity score when ranked and the matched field + a snippet when the text matched. Text matches work even with no embedding service (you'll see a note that semantic ranking was skipped). Accepts query strings, note IDs to find similar notes, or both.
+
+| Option | Description |
+|---|---|
+| `--similar-to ID` | Find notes similar to this note ID (semantic only). Repeatable. |
+| `--top-k INTEGER` | Results per mechanism per query (default: 10). |
+| `--threshold FLOAT` | Minimum *semantic* similarity, 0–1 (default: 0.5). Exact matches ignore it. |
+| `--deck TEXT` | Restrict search to this deck (name, numeric ID, or `#id`). |
+| `--tags TEXT` | Restrict search to notes with these tags. Repeatable and comma-separated. |
+| `--brief` | Show only IDs, badges, and snippet, not full note content. |
+
+```bash
+shrike search "electron transport chain"   # semantic + exact
+shrike search --similar-to 1779749914797
+shrike search "mitochondria" --deck Biochemistry
+```
+
+### `shrike search query <EXPRESSION>`
+
+Find notes with a raw [Anki search expression](https://docs.ankiweb.net/searching.html) — the power-user escape hatch. EXPRESSION is passed straight to Anki's search engine, so the full language works (`is:due`, `prop:ivl>=30`, `added:`, `rated:`, `flag:`, `OR`, `-`, parentheses). For meaning/text search use `shrike search`; for plain deck/tag/type filters use `shrike note list`.
+
+| Option | Description |
+|---|---|
+| `--brief` | Show only IDs and metadata, not field content. |
+| `--limit INTEGER` | Max notes to return (default 50, max 200). |
+
+```bash
+shrike search query "is:due prop:ivl>=30"
+shrike search query "added:7 -tag:done" --brief
+shrike search query "deck:Japanese (tag:verb OR tag:adj)" --limit 100
+```
+
+### `shrike search coverage`
+
+Show the cross-modal coverage matrix: for each (query → target) modality pair, how the target is reachable — **native** (one embedding space covers both modalities), **via text** (a recognizer derives text from the target into the text space), or **unavailable**. Reflects the server's configured embedders and recognizers, so e.g. `text → audio` reads "via text" only when ASR reaches it.
+
+```bash
+shrike search coverage
+```
+
+---
+
 ## `shrike server`
 
-Manage the Shrike MCP server daemon.
+Manage the Shrike MCP server daemon. The embedding service and the vector index are controlled under this group too (`shrike server embedding …`, `shrike server index …`).
 
 ### `shrike server start`
 
@@ -50,7 +279,7 @@ Start the server as a background daemon. The collection path can come from `--co
 | `--no-embedding` | Start without the embedding service even if one is configured. |
 | `--save-config` | Persist the resolved operational flags to the config file. Without this, `server start` never writes config; it stays under your control and start always reflects the flags you pass. |
 
-Embedding models, recognition, and managed processes are declared in the config file, not on the command line: an `embedders:` entry plus, where it applies, a `managed:` section. The [README's semantic search section](../README.md#semantic-search) walks through each shape. The older embedding flags (`--embedding-*`, `--llama-server`, `--ocr-backend`) still exist on `server start` and `embedding start` for one more release, and a legacy `embedding:` config section still works and prints a pointer to the new shape; both are rejected when the config file declares the new sections, and both are removed in [#523](https://github.com/lathrys-at/shrike/issues/523).
+Embedding models, recognition, and managed processes are declared in the config file, not on the command line: an `embedders:` entry plus, where it applies, a `managed:` section. The [README's semantic search section](../README.md#semantic-search) walks through each shape. The older embedding flags (`--embedding-*`, `--llama-server`, `--ocr-backend`) still exist on `server start` and `server embedding start` for one more release, and a legacy `embedding:` config section still works and prints a pointer to the new shape; both are rejected when the config file declares the new sections, and both are removed in [#523](https://github.com/lathrys-at/shrike/issues/523).
 
 `server start` never edits your config file on its own. Pass `--save-config` once to write the operational flags you started with (collection, ports, cache and index tuning) so you can drop them from later commands; without it, the file is yours alone to edit.
 
@@ -81,63 +310,43 @@ shrike --json server logs       # raw JSON log entries
 cat shrike.log | shrike server logs --stdin
 ```
 
----
+### `shrike server embedding`
 
-## `shrike info`
+Manage the embedding service that powers semantic search, whichever backend it runs on. It can be cycled independently of the Shrike server (model swaps, freeing GPU/RAM).
 
-Show collection information. Without flags, prints a compact summary (note count, deck count, note type count). Use flags to include additional detail.
+#### `shrike server embedding start`
 
-| Option | Description |
-|---|---|
-| `--types` | List note types with their fields. |
-| `--decks` | List decks with note counts. |
-| `--tags` | List all tags. |
-| `--stats` | Show scheduling statistics (due cards, new cards, per-deck breakdown). |
-| `--type-details NAME` | Show full templates and CSS for a specific note type. |
+Start the embedding service on a running server, using whatever the config file declares (the daemon resolves its `embedders:`/`managed:` sections). With a legacy flag-driven setup it accepts the same deprecated embedding options as `shrike server start`, and unspecified ones fall back to what the server booted with. Re-attaches the index and rebuilds it if the model changed or the index drifted.
 
-```bash
-shrike info                         # compact summary
-shrike info --types --decks --stats # everything
-shrike info --type-details Basic    # full definition for Basic
-```
+#### `shrike server embedding stop`
+
+Save the index, then stop the embedding service and mark the index `unavailable`. The server and collection stay up.
+
+#### `shrike server embedding status`
+
+Show whether the embedding service is running, its URL, PID, and model.
+
+### `shrike server index`
+
+Build and inspect the semantic-search vector index. The index is a derived cache over note content; it can lag the collection and is rebuilt from it.
+
+#### `shrike server index rebuild`
+
+Drop the existing index and re-embed every note from scratch. Runs in the background on the server; requires the embedding service to be running. Use after the embedding model changes or if the index is suspected stale.
+
+#### `shrike server index save`
+
+Force an immediate flush of the in-memory index to disk (off the event loop). Normally the index auto-saves via a debounced flush, so this is rarely needed.
+
+#### `shrike server index status`
+
+Show index state (`ready` / `building` / `unavailable` / `error`), vector count, dimensions, and on-disk path.
 
 ---
 
 ## `shrike note`
 
-Create, list, update, search, and delete notes.
-
-### `shrike note list`
-
-List notes matching structured filters. At least one filter is required.
-
-| Option | Description |
-|---|---|
-| `--deck TEXT` | Filter by deck name (includes child decks). |
-| `--tags TEXT` | Filter by tag. Repeatable and comma-separated, ANDed together. |
-| `--type TEXT` | Filter by note type. |
-| `--ids ID` | Fetch specific note IDs. Repeatable. |
-| `--since TEXT` | Notes modified after this date (ISO 8601). |
-| `--brief` | Show only IDs and metadata (type, deck, tags, modified), not field content. |
-| `--limit INTEGER` | Max notes to return (default: 50). |
-
-For text or semantic search, use `shrike note search`.
-
-```bash
-shrike note list --deck "Japanese::Vocabulary"
-shrike note list --tags verb,chapter-3
-shrike note list --type Cloze --brief --limit 20
-shrike note list --since 2026-05-01
-```
-
-### `shrike note show <NOTE_ID>`
-
-Show a single note by ID. Shorthand for `note list --ids <ID>` with an error if the note doesn't exist.
-
-```bash
-shrike note show 1779749914797
-shrike note show '#1779749914797'
-```
+Create, list, update, and delete notes. For text or semantic search, use `shrike search`.
 
 ### `shrike note create`
 
@@ -192,6 +401,51 @@ shrike note update 1779749914797 --tags newtag,kept-tag
 shrike note update 1779749914797 --deck "Other::Deck"
 ```
 
+### `shrike note delete <NOTE_IDS>...`
+
+Permanently delete notes and their cards. Prompts for confirmation unless `--yes` is passed.
+
+| Option | Description |
+|---|---|
+| `-y, --yes` | Skip confirmation. |
+
+```bash
+shrike note delete 1779749914797
+shrike note delete 1779749914797 1779749914798 --yes
+```
+
+### `shrike note list`
+
+List notes matching structured filters. At least one filter is required.
+
+| Option | Description |
+|---|---|
+| `--deck TEXT` | Filter by deck name (includes child decks). |
+| `--tags TEXT` | Filter by tag. Repeatable and comma-separated, ANDed together. |
+| `--type TEXT` | Filter by note type. |
+| `--ids ID` | Fetch specific note IDs. Repeatable. |
+| `--since TEXT` | Notes modified after this date (ISO 8601). |
+| `--brief` | Show only IDs and metadata (type, deck, tags, modified), not field content. |
+| `--limit INTEGER` | Max notes to return (default: 50). |
+
+For text or semantic search, use `shrike search`.
+
+```bash
+shrike note list --deck "Japanese::Vocabulary"
+shrike note list --tags verb,chapter-3
+shrike note list --type Cloze --brief --limit 20
+shrike note list --since 2026-05-01
+```
+
+### `shrike note show <NOTE_ID>`
+
+Show a single note by ID. Shorthand for `note list --ids <ID>` with an error if the note doesn't exist.
+
+```bash
+shrike note show 1779749914797
+shrike note show '#1779749914797'
+```
+
 ### `shrike note tag <NOTE_IDS>...`
 
 Edit the tags on one or more notes. Pick exactly one mode — there is no default. `--set` replaces wholesale; `--add`/`--remove` edit additively and combine in a single call. `--set` cannot be combined with `--add`/`--remove`. Fields and decks are untouched.
@@ -207,38 +461,6 @@ shrike note tag 1779749914797 --set world-war-2,history
 shrike note tag 1779749914797 1779749914798 --add needs-review
 shrike note tag 1779749914797 --add jp --add verbs --remove jp-verbs
 shrike note tag 1779749914797 --set ""        # clear all tags
-```
-
-### `shrike note delete <NOTE_IDS>...`
-
-Permanently delete notes and their cards. Prompts for confirmation unless `--yes` is passed.
-
-| Option | Description |
-|---|---|
-| `-y, --yes` | Skip confirmation. |
-
-```bash
-shrike note delete 1779749914797
-shrike note delete 1779749914797 1779749914798 --yes
-```
-
-### `shrike note search [QUERIES]...`
-
-Search the collection by meaning **and** by text. Each query is matched by semantic similarity (needs the embedding service and a built index), as an exact, case-insensitive substring of note fields, and fuzzily (trigram matching, so a typo like `protien` still finds protein cards). Results are folded together: each shows a similarity score when ranked and the matched field + a snippet when the text matched. Text matches work even with no embedding service (you'll see a note that semantic ranking was skipped). Accepts query strings, note IDs to find similar notes, or both.
-
-| Option | Description |
-|---|---|
-| `--similar-to ID` | Find notes similar to this note ID (semantic only). Repeatable. |
-| `--top-k INTEGER` | Results per mechanism per query (default: 10). |
-| `--threshold FLOAT` | Minimum *semantic* similarity, 0–1 (default: 0.5). Exact matches ignore it. |
-| `--deck TEXT` | Restrict search to this deck (name, numeric ID, or `#id`). |
-| `--tags TEXT` | Restrict search to notes with these tags. Repeatable and comma-separated. |
-| `--brief` | Show only IDs, badges, and snippet, not full note content. |
-
-```bash
-shrike note search "electron transport chain"   # semantic + exact
-shrike note search --similar-to 1779749914797
-shrike note search "mitochondria" --deck Biochemistry
 ```
 
 ### `shrike note replace <SEARCH> <REPLACE>`
@@ -317,166 +539,9 @@ shrike deck delete "A" "B" --yes
 
 ---
 
-## `shrike tag`
-
-Collection-level tag operations. Per-note tag editing (set/add/remove on specific notes) lives under `shrike note tag`; this acts on the collection's tag taxonomy.
-
-### `shrike tag rename <OLD> <NEW>`
-
-Rename a tag. With no `--note`, the tag is renamed everywhere it appears, children included (renaming `history` also moves `history::ww2`). With `--note`, only those notes are affected and the tag is matched exactly, so renaming `jp` never touches `jp-verbs`.
-
-| Option | Description |
-|---|---|
-| `--note NOTE_ID` | Restrict the rename to this note ID. Repeatable. Omit to rename across the whole collection. |
-
-```bash
-shrike tag rename history::ww2 history::wwii
-shrike tag rename jp japanese --note 1779749914797 --note 1779749914798
-```
-
----
-
-## `shrike media`
-
-Manage the collection's media folder — the images and audio that note fields reference with `<img src="...">` and `[sound:...]`. Anki resolves name collisions (identical content keeps the name; different content under the same name gets a hashed suffix), so always reference the filename the store command *returns*.
-
-### `shrike media store [PATHS]...`
-
-Store local files and/or URLs into the media folder. Local paths are read here and uploaded as bytes, so they work against a remote daemon. URLs are fetched by the server by default (http/https only; private and internal addresses are refused unless the server runs with `--allow-private-media-fetch`).
-
-| Option | Description |
-|---|---|
-| `--name TEXT` | Override the stored filename (single item only). |
-| `--url URL` | URL to fetch and store. Repeatable. |
-| `--client-fetch` | Download `--url` files locally and upload the bytes — for when this machine has the network path or proxy, not the server. |
-| `--server-path PATH` | Store a file already on the *server's* disk without sending bytes (repeatable). Off by default: the server must be started with one or more `--media-path-root DIR` (config `server.media_path_roots`, env `SHRIKE_MEDIA_PATH_ROOTS`) on a purely-local configuration, and the file must be under one of those roots. |
-
-```bash
-shrike media store diagram.png
-shrike media store a.png b.jpg c.ogg
-shrike media store --url https://example.com/cell.png
-shrike media store --server-path /data/big-lecture.mp4
-```
-
-### `shrike media fetch <NAMES>...`
-
-Write media files out to local disk.
-
-| Option | Description |
-|---|---|
-| `-o, --output PATH` | Write a single file to this path. |
-| `--out-dir PATH` | Directory to write files into (default: current directory). |
-
-```bash
-shrike media fetch diagram.png -o /tmp/out.png
-shrike media fetch a.png b.jpg --out-dir ./assets
-```
-
-### `shrike media list [PATTERN]`
-
-List media filenames, with size and type, optionally filtered by a glob pattern.
-
-| Option | Description |
-|---|---|
-| `--limit INTEGER` | Maximum files to show. |
-
-```bash
-shrike media list
-shrike media list '*.png' --limit 20
-```
-
-### `shrike media delete <NAMES>...`
-
-Move media files to Anki's recoverable trash. This does **not** check whether a note still references the file — run `shrike collection check` first to find unused media.
-
-| Option | Description |
-|---|---|
-| `-y, --yes` | Skip confirmation. |
-
-```bash
-shrike media delete orphan.png --yes
-```
-
----
-
-## `shrike collection`
-
-Collection-wide query and maintenance.
-
-### `shrike collection query <EXPRESSION>`
-
-Find notes with a raw [Anki search expression](https://docs.ankiweb.net/searching.html) — the power-user escape hatch. EXPRESSION is passed straight to Anki's search engine, so the full language works (`is:due`, `prop:ivl>=30`, `added:`, `rated:`, `flag:`, `OR`, `-`, parentheses). For meaning/text search use `shrike note search`; for plain deck/tag/type filters use `shrike note list`.
-
-| Option | Description |
-|---|---|
-| `--brief` | Show only IDs and metadata, not field content. |
-| `--limit INTEGER` | Max notes to return (default 50, max 200). |
-
-```bash
-shrike collection query "is:due prop:ivl>=30"
-shrike collection query "added:7 -tag:done" --brief
-shrike collection query "deck:Japanese (tag:verb OR tag:adj)" --limit 100
-```
-
-### `shrike collection prune`
-
-Tidy up the collection: remove unused tags, empty notes, empty cards, and unused media. Select cleanups with the flags below; **with none selected, all four run.** By default this only **previews** what would be removed — pass `--apply` to actually remove (it previews, asks for confirmation, then applies). An empty note has every field blank, where a field is blank only if it has no text **and** no media, so an image- or audio-only note is kept.
-
-| Option | Description |
-|---|---|
-| `--unused-tags` | Remove tag-registry names no note uses. |
-| `--empty-notes` | Delete notes whose every field is blank (text- and media-free). |
-| `--empty-cards` | Remove cards that render empty; a note that loses its last card is deleted. |
-| `--unused-media` | Move media files no note references to Anki's recoverable trash. |
-| `--apply` | Apply the changes. Without it, the command only previews. |
-| `-y, --yes` | Skip the confirmation prompt (with `--apply`). |
-
-```bash
-shrike collection prune                          # preview every cleanup
-shrike collection prune --unused-tags            # preview just unused tags
-shrike collection prune --apply                  # preview, confirm, then prune all
-shrike collection prune --empty-notes --apply -y # remove empty notes, no prompt
-```
-
-`--apply` is destructive (deleted notes and cards cannot be recovered; trashed media can, from Anki's media trash); preview first.
-
-### `shrike collection check`
-
-Report media-integrity issues without changing anything: files on disk no note references (prune candidates), references to files that are missing, the notes holding those broken references, and whether Anki's media trash holds anything.
-
-```bash
-shrike collection check
-```
-
-### `shrike collection reload`
-
-Close and re-open the collection without restarting the daemon. Picks up changes made to the collection file on disk underneath a running daemon (a restored backup, a file-level sync or swap) and re-checks the search index for drift, rebuilding it in the background if the collection changed. Reports the new `col_mod` and whether a rebuild was triggered.
-
-```bash
-shrike collection reload
-```
-
-Note: in the default locking mode the daemon holds the collection's lock for its whole life, so external tools (Anki desktop, sync) generally cannot edit the collection underneath you — reload is mainly for file-level replacement. With `--cooperative-lock`, the daemon already re-checks for external edits each time it re-acquires the collection, so a manual reload is rarely needed.
-
----
-
 ## `shrike type`
 
 Create, list, show, update, and delete note type definitions. All subcommands accept either a note type name or numeric ID as the identifier.
-
-### `shrike type list [IDENTIFIER]`
-
-Without an identifier, lists all note types in a table (ID, name, kind, fields). With an identifier, shows the full definition including templates and CSS.
-
-```bash
-shrike type list                 # table of all note types
-shrike type list Basic           # full detail for Basic
-shrike type list 1779649378945   # full detail by ID
-```
-
-### `shrike type show <IDENTIFIER>`
-
-Shorthand for `type list <IDENTIFIER>`.
 
 ### `shrike type create`
 
@@ -561,54 +626,32 @@ shrike type delete "Old Type"
 shrike type delete 1779649378945 1779649378946 --yes
 ```
 
----
+### `shrike type list [IDENTIFIER]`
 
-## `shrike index`
+Without an identifier, lists all note types in a table (ID, name, kind, fields). With an identifier, shows the full definition including templates and CSS.
 
-Build and inspect the semantic-search vector index. The index is a derived cache
-over note content; it can lag the collection and is rebuilt from it.
+```bash
+shrike type list                 # table of all note types
+shrike type list Basic           # full detail for Basic
+shrike type list 1779649378945   # full detail by ID
+```
 
-### `shrike index status`
+### `shrike type show <IDENTIFIER>`
 
-Show index state (`ready` / `building` / `unavailable` / `error`), vector count,
-dimensions, and on-disk path.
-
-### `shrike index rebuild`
-
-Drop the existing index and re-embed every note from scratch. Runs in the
-background on the server; requires the embedding service to be running. Use after
-the embedding model changes or if the index is suspected stale.
-
-### `shrike index save`
-
-Force an immediate flush of the in-memory index to disk (off the event loop).
-Normally the index auto-saves via a debounced flush, so this is rarely needed.
+Shorthand for `type list <IDENTIFIER>`.
 
 ---
 
-## `shrike embedding`
+## `shrike profile`
 
-Manage the embedding service that powers semantic search, whichever backend it
-runs on. It can be cycled independently of the Shrike server (model swaps,
-freeing GPU/RAM).
+Register collections by a friendly name, set an active default, and list them. The registry lives in the config file and is managed entirely client-side — these commands never talk to the server. (Verb names are unchanged in this release.)
 
-### `shrike embedding status`
-
-Show whether the embedding service is running, its URL, PID, and model.
-
-### `shrike embedding start`
-
-Start the embedding service on a running server, using whatever the config
-file declares (the daemon resolves its `embedders:`/`managed:` sections). With
-a legacy flag-driven setup it accepts the same deprecated embedding options as
-`shrike server start`, and unspecified ones fall back to what the server
-booted with. Re-attaches the index and rebuilds it if the model changed or the
-index drifted.
-
-### `shrike embedding stop`
-
-Save the index, then stop the embedding service and mark the index
-`unavailable`. The server and collection stay up.
+```bash
+shrike profile add work ~/Anki2/Work/collection.anki2 --default
+shrike profile list
+shrike profile default personal
+shrike profile remove old
+```
 
 ---
 

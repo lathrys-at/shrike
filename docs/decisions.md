@@ -427,7 +427,8 @@ removed in #86: text search lives in `search_notes`, deck/tag/type are structure
 `list_notes` filters, and the raw param was a leaky mode bolted onto a structured
 tool. The remaining raw-Anki power (`is:due`, `prop:ivl>=30`, `added:`, `flag:`,
 `OR`/`-`/brackets, …) returned in #97 as an explicit tool — `collection_query` /
-`shrike collection query` — rather than that param.
+`shrike search query` (the CLI command rehomed from `collection query` in #683) —
+rather than that param.
 
 Two scope decisions when building it:
 
@@ -494,7 +495,7 @@ a single overloaded field.
 Earlier this was deliberately unbuilt "until a concrete need appears" — #73 was
 that need. Bulk add/remove over existing notes (`update_note_tags`, backed by
 Anki's `bulk_add`/`bulk_remove`) and collection-wide and note-scoped tag rename
-(`rename_tag` / `shrike tag rename`) are available. Note-scoped rename matches the
+(`rename_tag` / `shrike collection tag rename`) are available. Note-scoped rename matches the
 tag *exactly* (find notes carrying it, then swap) rather than a substring
 find/replace, so renaming `jp` never touches `jp-verbs`. Unused-tag cleanup
 shipped briefly here too, but was pulled back out: it belongs with other
