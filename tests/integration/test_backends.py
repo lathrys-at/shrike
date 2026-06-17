@@ -167,7 +167,7 @@ class TestBackendParity:
         # ranking check, not an absolute-score check.
         result = mcp(
             "search_notes",
-            {"queries": ["derivative calculus rate of change"], "top_k": 5, "threshold": 0.0},
+            {"queries": ["derivative calculus rate of change"], "limit": 5, "threshold": 0.0},
         )
         matches = result["results"][0]["matches"]
         assert matches

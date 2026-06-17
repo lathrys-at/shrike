@@ -1,7 +1,6 @@
 """The search-quality manifest loader (#559).
 
-Parses the reconciled manifest schema (an evolution of
-``eval/multimodal/manifest.json``) into typed objects the harness builds a
+Parses the reconciled manifest schema into typed objects the harness builds a
 collection from and the metric engine grades against. The schema::
 
     { "closed_world": true,              // ungraded-returned ⇒ grade-0

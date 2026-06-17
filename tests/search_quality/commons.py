@@ -1,8 +1,7 @@
 """Wikimedia Commons image resolution for the manual search-quality corpus (#559).
 
-Reuses the proven ``scripts/eval_multimodal.py`` resolve→pin→cache mechanism,
-generalized so a corpus entry can be pinned by its **committed URL** OR
-resolved fresh from a ``search_term``, and so the per-image **licensing
+A resolve→pin→cache mechanism: a corpus entry can be pinned by its **committed
+URL** OR resolved fresh from a ``search_term``, and the per-image **licensing
 metadata** (Commons page / license / author) is captured for ``ASSETS.md``.
 
 The contract that keeps the AGPL repo clean of redistributed assets:
@@ -10,9 +9,9 @@ The contract that keeps the AGPL repo clean of redistributed assets:
   - **URLs are committed** (``eval/search_quality/resolved_urls.json``) — the
     pinned selection, so a replay is reproducible.
   - **Bytes are NEVER committed** — downloaded on demand into a *gitignored*
-    cache (``eval/search_quality/cache/``), exactly the ``eval/multimodal/``
-    pattern. The suite is env-gated and manual, so the bytes only ever exist on
-    a developer's machine that opted in with ``SHRIKE_SEARCH_QUALITY=1``.
+    cache (``eval/search_quality/cache/``). The suite is env-gated and manual,
+    so the bytes only ever exist on a developer's machine that opted in with
+    ``SHRIKE_SEARCH_QUALITY=1``.
 
 A corpus entry's ``media[].spec`` carries either a ``url`` (already pinned) or a
 ``search_term`` (resolve on first sight, then pin), plus the licensing fields

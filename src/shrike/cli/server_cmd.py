@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from shrike.cli import output
+from shrike.cli import output, status_render
 from shrike.cli.config import (
     DEFAULT_CONFIG_PATH,
     embedding_args,
@@ -57,86 +57,15 @@ def _render_status(status: ServerStatus) -> None:
         held = "[green]held[/green]" if status.collection_held else "[dim]released (idle)[/dim]"
         output.kv("Locking", f"cooperative · collection {held}")
 
-    emb = status.embedding
-    if emb.state == "running" and emb.available:
-        output.kv("Embedding", "[green]available[/green]")
-        if emb.url:
-            output.kv("URL", f"[cyan]{emb.url}[/cyan]", indent=2)
-        if emb.pid:
-            output.kv("PID", f"[cyan]{emb.pid}[/cyan]", indent=2)
-        if emb.model:
-            output.kv("Model", f"[cyan]{emb.model}[/cyan]", indent=2)
-        if emb.provider:
-            output.kv("Provider", emb.provider.replace("ExecutionProvider", ""), indent=2)
-        if emb.batch:
-            output.kv("Batching", emb.batch, indent=2)
-        if emb.modalities:
-            output.kv("Modalities", ", ".join(emb.modalities), indent=2)
-    else:
-        labels = {
-            "running": "[dim]unavailable[/dim]",
-            "failed": "[red]failed to start[/red]",
-            "stopped": "[dim]stopped[/dim]",
-        }
-        output.kv("Embedding", labels.get(emb.state, "[dim]not configured[/dim]"))
-
-    idx = status.index
-    if idx.state == "ready":
-        output.kv("Index", "[green]ready[/green]")
-        output.kv("Vectors", f"[green]{idx.size}[/green]", indent=2)
-        output.kv("Dimensions", str(idx.ndim if idx.ndim is not None else "?"), indent=2)
-    elif idx.state == "building":
-        output.kv("Index", "[yellow]building[/yellow]")
-        output.kv("Progress", f"{idx.progress.indexed} / {idx.progress.total} notes", indent=2)
-    elif idx.state == "error":
-        output.kv("Index", "[red]error[/red]")
-        output.kv("Error", idx.error, indent=2)
-    else:
-        output.kv("Index", "[dim]unavailable[/dim]")
-    if idx.col_mod is not None:
-        output.kv("Collection mod", str(idx.col_mod), indent=2)
-    if idx.activation:
-        # Per-modality activation-gate calibration (#201b): the typical best-match a query beats.
-        for modality, s in idx.activation.items():
-            output.kv(
-                f"Activation ({modality})",
-                f"μ={s['mean']:.3f} σ={s['std']:.3f} (n={int(s['n'])})",
-                indent=2,
-            )
-    if idx.path:
-        output.kv("Path", f"[cyan]{idx.path}[/cyan]", indent=2)
-
-    # Derived-text store (#98): the FTS5 trigram sidecar behind substring/fuzzy lexical search.
-    der = status.derived
-    if not der.fts5:
-        output.kv("Derived text", "[dim]unavailable (no SQLite FTS5)[/dim]")
-    elif der.state == "ready":
-        output.kv("Derived text", "[green]ready[/green]")
-        output.kv("Rows", f"[green]{der.size}[/green]", indent=2)
-    elif der.state == "building":
-        output.kv("Derived text", "[yellow]building[/yellow]")
-    elif der.state == "error":
-        output.kv("Derived text", "[red]error[/red]")
-    else:
-        output.kv("Derived text", "[dim]unavailable[/dim]")
-    if der.fts5 and der.col_mod is not None:
-        output.kv("Collection mod", str(der.col_mod), indent=2)
-
-    # Recognition (#228/#485): one row per attached engine, keyed by source
-    # (ocr/vlm). An empty map = nothing attached (shown as a clean "none");
-    # each engine renders its own state + backend.
-    if status.recognition:
-        for source in sorted(status.recognition):
-            eng = status.recognition[source]
-            label = f"Recognition ({source})"
-            if eng.state == "ready":
-                output.kv(label, f"[green]ready[/green] ([cyan]{eng.backend}[/cyan])")
-            elif eng.state == "error":
-                output.kv(label, f"[red]error[/red] ([cyan]{eng.backend}[/cyan])")
-            else:
-                output.kv(label, f"[dim]{eng.state}[/dim]")
-    else:
-        output.kv("Recognition", "[dim]none (no recognizer attached)[/dim]")
+    # §B section order (#684): Index → Derived text → Recognition → Embedding,
+    # rendered via the SHARED block renderers so the standalone `server embedding
+    # status` / `server index status` commands can't drift from these blocks.
+    status_render.render_index(status.index)
+    status_render.render_derived(status.derived)
+    status_render.render_recognition(status.recognition)
+    # Per-space embedding (#681): the full list when the server reports it, else
+    # the single primary `embedding` (older payloads).
+    status_render.render_embedding_spaces(status.embedding_spaces or [status.embedding])
 
     # The cross-modal coverage matrix moved to `shrike search coverage` (#683):
     # it's a retrieval concern, not a daemon-status one. `/status` still carries

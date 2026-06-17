@@ -65,27 +65,3 @@ lexical signal and only CLIP can judge the image.
 | `crane_machine` | CC BY-SA 4.0 | Rodhullandemu | [File:Crane_on_Leeds_Street,_Liverpool.jpg](https://commons.wikimedia.org/wiki/File:Crane_on_Leeds_Street,_Liverpool.jpg) |
 | `jaguar_animal` | CC BY-SA 3.0 | Bjørn Christian Tørrissen | [File:Junior-Jaguar-Belize-Zoo.jpg](https://commons.wikimedia.org/wiki/File:Junior-Jaguar-Belize-Zoo.jpg) |
 | `jaguar_car` | CC BY-SA 4.0 | DeFacto | [File:Jaguar_E-Type_series_2_coupé_1968.jpg](https://commons.wikimedia.org/wiki/File:Jaguar_E-Type_series_2_coupé_1968.jpg) |
-
-## Reused multimodal-eval images (`eval/multimodal/`)
-
-Attribution for the images the multimodal eval (#162) pinned without a
-license record — backfilled here (the suites share these Commons files).
-
-| Search term | License | Author | Commons page |
-| --- | --- | --- | --- |
-| DNA double helix structure | Public domain | Jerome Walker | [File:DNA_double_helix_horizontal.png](https://commons.wikimedia.org/wiki/File:DNA_double_helix_horizontal.png) |
-| Eiffel Tower Paris | Public domain | Benh LIEU SONG | [File:Tour_Eiffel_Wikimedia_Commons.jpg](https://commons.wikimedia.org/wiki/File:Tour_Eiffel_Wikimedia_Commons.jpg) |
-| acoustic guitar | CC0 | Wilfredor | [File:Man_playing_an_acoustic_brazilian_guitar_(V](https://commons.wikimedia.org/wiki/File:Man_playing_an_acoustic_brazilian_guitar_(Viol%C3%A3o)_on_Marco_Zero_Square,_Refice,_Pernambuco,_Brazil.jpg) |
-| citric acid cycle diagram | CC BY-SA 3.0 | Narayanese, WikiUserPedia, YassineMrabet, TotoBaggins | [File:Citric_acid_cycle_with_aconitate_2.svg](https://commons.wikimedia.org/wiki/File:Citric_acid_cycle_with_aconitate_2.svg) |
-| domestic cat photograph | CC BY-SA 3.0 | Von.grzanka | [File:Felis_catus-cat_on_snow.jpg](https://commons.wikimedia.org/wiki/File:Felis_catus-cat_on_snow.jpg) |
-| human eye cross section diagram | CC BY-SA 3.0 | Jmarchn | [File:Diagram_of_human_eye_without_labels.svg](https://commons.wikimedia.org/wiki/File:Diagram_of_human_eye_without_labels.svg) |
-| human heart anatomy diagram | CC BY-SA 3.0 | Wapcaplet. | [File:Heart_numlabels.svg](https://commons.wikimedia.org/wiki/File:Heart_numlabels.svg) |
-| human skeleton anterior | Public domain | LadyofHats Mariana Ruiz Villarreal | [File:Human_skeleton_front_en.svg](https://commons.wikimedia.org/wiki/File:Human_skeleton_front_en.svg) |
-| monarch butterfly | GFDL 1.2 | Photo (c)2007 Derek Ramsey (Ram-Man) | [File:Monarch_Butterfly_Danaus_plexippus_Vertical](https://commons.wikimedia.org/wiki/File:Monarch_Butterfly_Danaus_plexippus_Vertical_Caterpillar_2000px.jpg) |
-| neuron diagram axon dendrite | CC BY-SA 4.0 | Dominique222 | [File:Neuron_figure_fr.png](https://commons.wikimedia.org/wiki/File:Neuron_figure_fr.png) |
-| periodic table of elements | CC BY 3.0 | 2012rc | [File:Periodic_table_large.svg](https://commons.wikimedia.org/wiki/File:Periodic_table_large.svg) |
-| plant cell diagram labelled | Public domain | LadyofHats | [File:Plant_cell_structure-en.svg](https://commons.wikimedia.org/wiki/File:Plant_cell_structure-en.svg) |
-| resistor capacitor circuit schematic | CC BY-SA 4.0 | NoAppliedVoltage | [File:Charge_on_Photosensitive_Capacitor.png](https://commons.wikimedia.org/wiki/File:Charge_on_Photosensitive_Capacitor.png) |
-| stratovolcano cross section diagram | CC BY-SA 3.0 | Woudloper | [File:Stratovolcano_cross-section.svg](https://commons.wikimedia.org/wiki/File:Stratovolcano_cross-section.svg) |
-| water cycle diagram | CC BY-SA 4.0 | Tttrung | [File:Water_cycle_diagram-vi.svg](https://commons.wikimedia.org/wiki/File:Water_cycle_diagram-vi.svg) |
-| world map continents | Public domain | Thomas Kitchin | [File:1794_Samuel_Dunn_Wall_Map_of_the_World_in_H](https://commons.wikimedia.org/wiki/File:1794_Samuel_Dunn_Wall_Map_of_the_World_in_Hemispheres_-_Geographicus_-_World2-dunn-1794.jpg) |

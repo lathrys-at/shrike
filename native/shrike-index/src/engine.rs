@@ -158,6 +158,22 @@ impl MultiModalIndex {
             .collect()
     }
 
+    /// Per-modality `(name, size, ndim)` (#684): each sub-index reports its OWN
+    /// dimensionality (the text and image sub-indexes differ under CLIP). `ndim`
+    /// is `None` for an empty sub-index (usearch reports 0 dimensions before the
+    /// first vector sets the width; surface that as "unknown", not 0).
+    pub fn modality_stats(&self) -> Vec<(String, usize, Option<usize>)> {
+        self.lock()
+            .indexes
+            .iter()
+            .map(|(m, s)| {
+                let size = s.index.size();
+                let dim = s.index.dimensions();
+                (m.clone(), size, (dim > 0).then_some(dim))
+            })
+            .collect()
+    }
+
     pub fn modality_names(&self) -> Vec<String> {
         self.lock().indexes.keys().cloned().collect()
     }
@@ -405,6 +421,16 @@ impl MultiModalIndex {
             if sub.index.size() == 0 {
                 continue;
             }
+            // Clamp the over-fetch to what THIS sub-index can actually return
+            // (#684/#685): usearch's `search(query, count)` reserves AND
+            // zero-fills `count` result slots up front (lib.cpp search_) before
+            // the graph walk, so an unclamped `fetch` allocates work proportional
+            // to `count`, not to the hits. With `limit=0` the caller sets
+            // `k = index.size`, so `fetch = SEARCH_OVERFETCH * index.size` — at
+            // 100k notes that is a ~400k-slot zero-fill per query per modality
+            // for a sub-index that holds at most `size` vectors. A sub-index can
+            // never yield more than `size()` hits, so the clamp is lossless.
+            let fetch = fetch.min(sub.index.size());
             for (qi, query) in queries.iter().enumerate() {
                 let hits = sub
                     .index
@@ -661,6 +687,9 @@ impl shrike_store_api::VectorIndex for MultiModalIndex {
     fn modality_sizes(&self) -> Vec<(String, usize)> {
         Self::modality_sizes(self)
     }
+    fn modality_stats(&self) -> Vec<(String, usize, Option<usize>)> {
+        Self::modality_stats(self)
+    }
     fn modality_names(&self) -> Vec<String> {
         Self::modality_names(self)
     }
@@ -772,6 +801,25 @@ mod tests {
         let (keys, dists) = &out[0]["image"];
         assert_eq!(keys, &vec![1]);
         assert!(dists[0].abs() < 1e-5);
+    }
+
+    #[test]
+    fn search_k_far_exceeding_size_is_lossless_and_bounded() {
+        // The `limit=0` over-fetch path (#684/#685): the caller passes
+        // `k = index.size`, the engine over-fetches `SEARCH_OVERFETCH * k`, and
+        // the per-sub-index clamp keeps usearch's `search(query, count)` from
+        // reserving+zero-filling a buffer far larger than the sub-index. A `k`
+        // (and thus `fetch`) orders of magnitude past the 3 stored text vectors
+        // must still return exactly those 3, best-first, without error or hang.
+        let e = engine();
+        e.add("text", &[1, 2, 3], &[unit(1, 8), unit(2, 8), unit(3, 8)])
+            .unwrap();
+        let out = e
+            .search_by_modality(&[unit(1, 8)], 1_000_000, Some(&["text".to_string()]))
+            .unwrap();
+        let (keys, _dists) = &out[0]["text"];
+        assert_eq!(keys.len(), 3, "all stored vectors returned, never more");
+        assert_eq!(keys[0], 1, "the self-hit ranks first");
     }
 
     #[test]

@@ -23,11 +23,10 @@ and `rules_rust` builds everything against the hermetic CPython toolchain.
 | `shrike-schemas` | serde+schemars wire types — canonical; `shrike/schemas.py` binds them | no |
 | `shrike-ffi` | FFI conventions: error taxonomy (`NativeError`: `invalid_input` / `unavailable` / `internal`) + the marshaling rules (crate docs) | no |
 | `shrike-py` | The one PyO3 binding crate — builds the `shrike_native._native` extension module | **yes** |
-| `_demo` | The #247 polyglot proof (kept as the smoke target) | yes |
 
-**Layering rule:** `pyo3` may appear only in `shrike-py` and `_demo`. Every
-other crate stays pure Rust, which is what makes the kernel deployable in
-non-Python hosts. Enforced by `//native:layering_check`.
+**Layering rule:** `pyo3` may appear only in `shrike-py`. Every other crate
+stays pure Rust, which is what makes the kernel deployable in non-Python hosts.
+Enforced by `//native:layering_check`.
 
 ## Conventions every native module follows
 

@@ -182,7 +182,7 @@ async def run_search_quality(
 
         for q in manifest.queries:
             thr = q.threshold if q.threshold is not None else 0.5
-            matches = await ip.matches(q.q, top_k=q.top_k, threshold=thr)
+            matches = await ip.matches(q.q, limit=q.top_k, threshold=thr)
             # Remap live anki ids back to manifest ids (gold is manifest-keyed).
             for m in matches:
                 m["id"] = inv.get(m["id"], m["id"])

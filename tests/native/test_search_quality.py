@@ -88,7 +88,7 @@ class TestSignalDisagreement:
 
                 # threshold 0.0: all three cards participate in the text signal at
                 # their cosine rank; a3 also picks up the fuzzy signal.
-                matches = await ip.matches(query, top_k=10, threshold=0.0)
+                matches = await ip.matches(query, limit=10, threshold=0.0)
                 got = _ids(matches)
 
                 a3_match = next((m for m in matches if m["id"] == a3), None)
@@ -167,7 +167,7 @@ class TestExactOverride:
                 b1, b2, b3 = (n["id"] for n in notes)
                 await ip.finalize()
 
-                matches = await ip.matches(query, top_k=10, threshold=0.0)
+                matches = await ip.matches(query, limit=10, threshold=0.0)
                 got = _ids(matches)
 
                 # b3 is the literal hit (semantically the WORST of the three) and
@@ -209,7 +209,7 @@ class TestExactOverride:
                 answer, trap = (n["id"] for n in notes)
                 await ip.finalize()
 
-                matches = await ip.matches(query, top_k=10, threshold=0.0)
+                matches = await ip.matches(query, limit=10, threshold=0.0)
                 got = _ids(matches)
 
                 # CHARACTERIZATION (#559 design-tension finding): the grade-0
@@ -312,7 +312,7 @@ class TestActivationGate:
                     "the image modality calibrated (>= 30 images)"
                 )
 
-                matches = await ip.matches("the target subject diagram", top_k=10, threshold=0.5)
+                matches = await ip.matches("the target subject diagram", limit=10, threshold=0.5)
                 target = next((m for m in matches if m["id"] == target_id), None)
                 assert target is not None, "the target card is retrieved by its image"
                 # The gate FIRED: the target surfaces via the IMAGE signal — a
@@ -329,7 +329,7 @@ class TestActivationGate:
         async def flow() -> None:
             ip, _ = await TestActivationGate._build(tmp_path)
             try:
-                matches = await ip.matches("an unrelated subject entirely", top_k=10, threshold=0.5)
+                matches = await ip.matches("an unrelated subject entirely", limit=10, threshold=0.5)
                 # The gate HELD: no result may carry image provenance — an
                 # off-topic query injects no weak image card (no pollution).
                 polluted = [m["id"] for m in matches if "image" in _signals(m)]
@@ -382,7 +382,7 @@ class TestGracefulDegradation:
                 )
                 await ip.finalize()
 
-                live = await ip.search("photosynthesis", top_k=10, threshold=0.0, tier="live")
+                live = await ip.search("photosynthesis", limit=10, threshold=0.0, tier="live")
                 # The live tier ANNOUNCES partial completeness and runs only the
                 # no-embedding signals — its hits carry no semantic `score`.
                 assert live.get("completeness") == "partial", "live tier announces partial"
@@ -392,7 +392,7 @@ class TestGracefulDegradation:
                     assert m.get("score") is None, "no semantic score on the live tier"
                     assert "text" not in _signals(m), "the semantic signal is skipped"
 
-                full = await ip.search("photosynthesis", top_k=10, threshold=0.0, tier="full")
+                full = await ip.search("photosynthesis", limit=10, threshold=0.0, tier="full")
                 assert full.get("completeness") == "full", "the full tier is complete"
             finally:
                 await ip.harness.close()
@@ -410,7 +410,7 @@ class TestGracefulDegradation:
 
                 # A < 3-char query can't form a trigram → semantic skipped, and
                 # the response says so (the announcement is the contract).
-                resp = await ip.search("ph", top_k=10, threshold=0.0)
+                resp = await ip.search("ph", limit=10, threshold=0.0)
                 assert resp.get("message"), "a sub-trigram query announces the skip"
                 assert "shorter than 3" in resp["message"], resp["message"]
             finally:
@@ -436,7 +436,7 @@ class TestGracefulDegradation:
                 )
                 await ip.finalize()
 
-                resp = await ip.search("photosynthesis", top_k=10, threshold=0.0)
+                resp = await ip.search("photosynthesis", limit=10, threshold=0.0)
                 assert resp.get("message"), "embedding-down announces via message"
                 assert "unavailable" in resp["message"].lower(), resp["message"]
                 matches = resp["results"][0]["matches"] if resp["results"] else []

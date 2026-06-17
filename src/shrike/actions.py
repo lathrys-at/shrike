@@ -103,6 +103,15 @@ def note_outcome(message: str) -> None:
 # gated (no typing-fragment problem).
 MIN_SEMANTIC_QUERY_CHARS = 3
 
+# `limit` == 0 means "return all" (#685): no upper cap. Used only on the paths
+# whose native cap is a plain `.take()`/`.truncate()`/SQLite `LIMIT` — list_notes,
+# collection_query, list_media (None there) — where a large sentinel just reads as
+# "all" for any real collection. The SEMANTIC search path does NOT use this: it
+# over-fetches `k * SEARCH_OVERFETCH` into USearch's `search(k)`, which *allocates*
+# a buffer of that size, so search_notes bounds `limit==0` to `index.size` instead
+# (the true result ceiling). 1e9 is orders of magnitude past any Anki collection.
+_UNBOUNDED_LIMIT = 1_000_000_000
+
 # The semantic floor for neighbor search (#531) — the search pipeline's own
 # default (0.5). Upsert neighbors ARE search results: a draft's neighbors are a
 # `search_notes` of the draft's content (see `_attach_neighbors`), so they use
@@ -609,8 +618,13 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             ),
         ] = None,
         limit: Annotated[
-            int, Field(ge=1, le=200, description="Maximum notes to return. Default 50.")
-        ] = 50,
+            int,
+            Field(
+                ge=0,
+                le=200,
+                description="Maximum notes to return. Default 20. 0 returns all.",
+            ),
+        ] = 20,
         collection: Annotated[
             str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
         ] = None,
@@ -662,6 +676,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=UTC)
             cutoff = int(dt.timestamp())
+        # limit==0 means "return all" (#685): the native cap is `.truncate()`, so
+        # a large sentinel reads as "all".
+        effective_limit = limit if limit > 0 else _UNBOUNDED_LIMIT
         # Re-homed (#331): the whole body runs in shrike_kernel::actions.
         raw = await wrapper.run(
             lambda c: shrike_native.action_list_notes(
@@ -672,7 +689,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 note_type=note_type,
                 modified_since_epoch=cutoff,
                 with_fields=(fields or "full") == "full",
-                limit=limit,
+                limit=effective_limit,
             )
         )
         result = ListNotesResponse.model_validate_json(raw)
@@ -702,8 +719,13 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             ),
         ] = "full",
         limit: Annotated[
-            int, Field(ge=1, le=200, description="Maximum notes to return. Default 50.")
-        ] = 50,
+            int,
+            Field(
+                ge=0,
+                le=200,
+                description="Maximum notes to return. Default 20. 0 returns all.",
+            ),
+        ] = 20,
         collection: Annotated[
             str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
         ] = None,
@@ -723,10 +745,12 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("collection_query %r fields=%s limit=%d", query, fields, limit)
         try:
+            # limit==0 means "return all" (#685): a large sentinel reads as "all".
+            effective_limit = limit if limit > 0 else _UNBOUNDED_LIMIT
             # Re-homed (#331): the whole body runs in shrike_kernel::actions.
             raw = await wrapper.run(
                 lambda c: shrike_native.action_collection_query(
-                    c, query, with_fields=fields == "full", limit=limit
+                    c, query, with_fields=fields == "full", limit=effective_limit
                 )
             )
         except NoteTypeOpError as e:
@@ -762,10 +786,14 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 ),
             ),
         ],
-        top_k: Annotated[
+        limit: Annotated[
             int,
-            Field(ge=1, le=50, description="Maximum results per query or source ID. Default 10."),
-        ] = 10,
+            Field(
+                ge=0,
+                le=50,
+                description="Maximum results per query or source ID. Default 20. 0 returns all.",
+            ),
+        ] = 20,
         threshold: Annotated[
             float,
             Field(
@@ -843,10 +871,10 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             raise ToolInputError("At least one of queries or ids must be provided.")
 
         logger.debug(
-            "search_notes queries=%d ids=%d top_k=%d threshold=%.2f",
+            "search_notes queries=%d ids=%d limit=%d threshold=%.2f",
             len(queries or []),
             len(ids or []),
-            top_k,
+            limit,
             threshold,
         )
         if queries:
@@ -955,10 +983,26 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         # actor thread and can't await embed, #503), returning the per-space
         # SpaceSemantic rows the kernel fuses with the gate. EMPTY ("[]") when
         # there are no secondary spaces — the N=1 case stays byte-identical.
+        # limit==0 means "return all" (#685). The native search applies the cap
+        # lazily (`.take()`), so a large sentinel reads as "all" for the lexical
+        # signals. The semantic path is the exception: the per-modality engine
+        # over-fetches `k * SEARCH_OVERFETCH` and hands that to USearch's
+        # `search(k)`, which *allocates* a result buffer of that size — a raw
+        # `_UNBOUNDED_LIMIT` would ask USearch for billions of slots and hang. An
+        # index holds at most `index.size` vectors, so that is the true "all"
+        # bound for the semantic over-fetch; the lexical-only path (no usable
+        # index) keeps the cheap FTS5 `LIMIT` sentinel.
+        if limit > 0:
+            fetch_k = limit
+        elif semantic_ok and index is not None:
+            fetch_k = max(index.size, 1)
+        else:
+            fetch_k = _UNBOUNDED_LIMIT
+
         cross_space_json: str | None = None
         if semantic_ok and kernel is not None:
             source_texts = [t for (_, t, _) in sources]
-            cross_space_json = await kernel.build_cross_space_json(source_texts, top_k)
+            cross_space_json = await kernel.build_cross_space_json(source_texts, fetch_k)
 
         # Orchestrator state the kernel will own after S3 (#332): the #201b
         # image activation floor and the index size for the over-fetch clamp.
@@ -982,7 +1026,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 derived_handle,
                 sources,
                 vectors,
-                top_k,
+                fetch_k,
                 threshold,
                 deck=deck,
                 tags=tags or None,
@@ -2142,9 +2186,14 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         limit: Annotated[
             int,
             Field(
-                ge=1, le=1000, description="Maximum filenames to return (the total still counts)."
+                ge=0,
+                le=1000,
+                description=(
+                    "Maximum filenames to return (the total still counts). "
+                    "Default 20. 0 returns all."
+                ),
             ),
-        ] = 100,
+        ] = 20,
         collection: Annotated[
             str | None, Field(default=None, description=COLLECTION_SELECTOR_DESCRIPTION)
         ] = None,
@@ -2157,7 +2206,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         file's bytes by GETting its `url` (the server's `GET /media/<name>`)."""
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("list_media pattern=%s limit=%d", pattern, limit)
-        result = json.loads(await kernel.list_media(pattern, limit))
+        # limit==0 means "return all" (#685): the native list_media treats a None
+        # limit as unbounded.
+        result = json.loads(await kernel.list_media(pattern, limit if limit > 0 else None))
         for f in result["files"]:
             f["url"] = _media_url(f["filename"])
         note_outcome(f"{len(result['files'])}/{result['count']} file(s)")

@@ -189,7 +189,7 @@ class TestRealTwoSpaceSmoke:
             # the CLIP space — the modality-gap payoff. The signal carries the
             # CLIP space key (#234: `image#<space>`), proving it came from the
             # secondary space's cross-space contribution, not the text space.
-            matches = await ip.matches("a photograph of a cat", top_k=5, threshold=0.2)
+            matches = await ip.matches("a photograph of a cat", limit=5, threshold=0.2)
             cat = next((m for m in matches if m["id"] == id_by_handle["cat"]), None)
             assert cat is not None, "the cat image card was retrieved by a text query"
             signals = {p["signal"] for p in cat["provenance"]}

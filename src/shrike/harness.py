@@ -538,10 +538,18 @@ class Harness:
 
     async def status(self) -> dict[str, Any]:
         """The core status block — everything in ``/status`` minus host concerns."""
-        # health() may probe llama-server over HTTP — off the loop.
-        embedding = await asyncio.to_thread(self.runtime.health)
+        # Per-space embedding health (#681): the primary runtime PLUS every
+        # secondary space (#233), not just the primary — a multi-space profile
+        # has more than one embedder, each its own /status entry. health() may
+        # probe llama-server over HTTP, so every space's probe rides to_thread.
+        runtimes = [self.runtime, *self.secondary_runtimes]
+        embedding_spaces = [await asyncio.to_thread(rt.health) for rt in runtimes]
+        # ``embedding`` stays the PRIMARY space's health for back-compat (every
+        # existing consumer reads it); ``embedding_spaces`` is the full list.
+        embedding = embedding_spaces[0]
         status: dict[str, Any] = {
             "embedding": embedding,
+            "embedding_spaces": embedding_spaces,
             "index": self._index_status(),
             "derived": self.derived.status(),
             "locking": "cooperative" if self.wrapper.cooperative else "permanent",
@@ -597,6 +605,18 @@ class Harness:
             "size": int(raw.get("size", 0)),
             "ndim": raw.get("ndim"),
         }
+        # Per-modality sub-index breakdown (#684): the kernel reports each
+        # sub-index's own size/ndim (the aggregate above collapses them). Pass it
+        # straight through to IndexModalityStat (text-first, kernel-ordered).
+        if raw.get("modalities"):
+            status["modalities"] = [
+                {
+                    "modality": m["modality"],
+                    "size": int(m.get("size", 0)),
+                    "ndim": m.get("ndim"),
+                }
+                for m in raw["modalities"]
+            ]
         if raw.get("col_mod") is not None:
             status["col_mod"] = raw["col_mod"]
         if raw.get("model_id") is not None:

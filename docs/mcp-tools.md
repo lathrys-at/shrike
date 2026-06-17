@@ -140,7 +140,7 @@ Results are capped by `limit`. The response includes `total` (the full count of 
 | `note_type` | `string` | no | Filter to notes using this note type (e.g., `"Basic"`, `"Cloze"`). |
 | `modified_since` | `string` | no | ISO 8601 date or datetime. Only notes modified after this time. |
 | `fields` | `string` | no | `"full"` (default) returns all field content. `"meta"` returns only note ID, note type, deck, tags, and modification time. |
-| `limit` | `integer` | no | Maximum notes to return. Default `50`, max `200`. |
+| `limit` | `integer` | no | Maximum notes to return. Default `20`, max `200`. Set to `0` to return all. |
 
 At least one filter (`ids`, `deck`, `tags`, `note_type`, or `modified_since`) must be provided. For text search, use `search_notes`.
 
@@ -183,7 +183,7 @@ Reach for this when you need predicates the structured tools don't expose. For c
 |---|---|---|---|
 | `query` | `string` | **yes** | A raw Anki search expression (e.g. `"deck:Japanese (tag:verb OR tag:adj) -is:suspended"`). |
 | `fields` | `string` | no | `"full"` (default) returns all field content; `"meta"` returns only metadata. |
-| `limit` | `integer` | no | Maximum notes to return. Default `50`, max `200`. |
+| `limit` | `integer` | no | Maximum notes to return. Default `20`, max `200`. Set to `0` to return all. |
 
 ### Response
 
@@ -221,7 +221,7 @@ Exact matches are returned even when the embedding index is unavailable — the 
 |---|---|---|---|
 | `queries` | `string[]` | no | Search strings. Each is matched independently by semantic similarity **and** as an exact substring of note fields. Max 50 per call. |
 | `ids` | `integer[]` | no | Note IDs to use as semantic anchors, finding notes similar to these. Source notes are excluded from results. Max 50 per call. |
-| `top_k` | `integer` | no | Maximum results per query/anchor (the fused result is capped to this). Default `10`, max `50`. |
+| `limit` | `integer` | no | Maximum results per query/anchor (the fused result is capped to this). Default `20`, max `50`. Set to `0` to return all. |
 | `threshold` | `number` | no | Minimum cosine similarity (0–1) for a *semantic* match. Default `0.5`. Does not apply to exact substring matches. |
 | `deck` | `string` | no | Restrict to notes in this deck (includes child decks). Accepts a deck name, numeric ID, or `#id`. |
 | `tags` | `string[]` | no | Restrict to notes matching all of these tags. |
@@ -233,7 +233,7 @@ At least one of `queries` or `ids` must be provided.
 
 The response carries `completeness`: `"partial"` means the embedding-bearing signals were skipped because the caller asked for the live tier — re-request with `tier: "full"` to upgrade; `"full"` is the final answer for that query and server state. Query strings shorter than 3 characters skip semantic ranking even on the full tier (typing fragments never burn an embedding call; the response stays `"full"` with an advisory `message` — id anchors are never gated). Query embeddings are cached server-side (LRU, keyed per backend), so an Enter-after-pause re-request of the same string is free.
 
-`deck`/`tags` are applied after the vector search over a widened candidate window; if in-scope notes rank very deep a filtered semantic search may still return fewer than `top_k` (exact matches are filtered precisely). 
+`deck`/`tags` are applied after the vector search over a widened candidate window; if in-scope notes rank very deep a filtered semantic search may still return fewer than `limit` (exact matches are filtered precisely). 
 
 ### Response
 
@@ -804,7 +804,7 @@ List filenames in the collection's media folder (with the folder path), optional
 | Name | Type | Required | Description |
 |---|---|---|---|
 | `pattern` | `string` | no | Glob to filter filenames (e.g. `"*.png"`, `"cell-*"`). |
-| `limit` | `integer` | no | Maximum filenames to return (`count` still reflects the full total). Default `100`. |
+| `limit` | `integer` | no | Maximum filenames to return (`count` still reflects the full total). Default `20`. Set to `0` to return all. |
 
 ### Response
 

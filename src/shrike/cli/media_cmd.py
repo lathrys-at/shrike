@@ -234,9 +234,9 @@ def media_fetch(
 @media.command("list", short_help="List media files in the collection")
 @output_options
 @click.argument("pattern", required=False)
-@click.option("--limit", type=int, default=None, help="Maximum files to show.")
+@click.option("--limit", type=int, default=20, help="Maximum files to show (default: 20; 0 = all).")
 @click.pass_context
-def media_list(ctx: click.Context, pattern: str | None, limit: int | None) -> None:
+def media_list(ctx: click.Context, pattern: str | None, limit: int) -> None:
     """List media filenames, optionally filtered by a glob PATTERN.
 
     \b

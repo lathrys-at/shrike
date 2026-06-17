@@ -140,7 +140,7 @@ def _nearest_existing_score(note_id: int, sibling_ids: set[int]) -> float | None
     """Top cosine of a created note against PRE-EXISTING notes (siblings excluded).
     None if the index/embeddings aren't available."""
     try:
-        resp = _shrike_json("search", "--similar-to", str(note_id), "--top-k", "10")
+        resp = _shrike_json("search", "--similar-to", str(note_id), "--limit", "10")
     except subprocess.CalledProcessError:
         return None
     best: float | None = None

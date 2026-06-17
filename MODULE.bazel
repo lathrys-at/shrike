@@ -72,7 +72,6 @@ crate.from_cargo(
     cargo_lockfile = "//native:Cargo.lock",
     manifests = [
         "//native:Cargo.toml",
-        "//native/_demo:Cargo.toml",
         "//native/shrike-collection:Cargo.toml",
         "//native/shrike-derived:Cargo.toml",
         "//native/shrike-embed:Cargo.toml",

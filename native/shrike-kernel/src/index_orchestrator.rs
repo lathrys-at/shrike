@@ -191,6 +191,19 @@ pub struct OrchestratorStatus {
     pub progress: BuildProgress,
     pub error: Option<String>,
     pub activation: Option<BTreeMap<String, BTreeMap<String, f64>>>,
+    /// Per-modality sub-index breakdown (#684): the text and image sub-indexes
+    /// report their OWN size/ndim, which the aggregate `size`/`ndim` above
+    /// (sum / text-modality width) can't express. Ordered text-first.
+    pub modalities: Vec<ModalityStat>,
+}
+
+/// One sub-index's `(name, size, ndim)` for the status breakdown (#684).
+/// `ndim` is `None` for an empty sub-index (width not yet set).
+#[derive(Debug, Clone, Serialize)]
+pub struct ModalityStat {
+    pub modality: String,
+    pub size: usize,
+    pub ndim: Option<usize>,
 }
 
 /// `status()`'s build progress pair (indexed so far / total planned).
@@ -1278,6 +1291,19 @@ impl IndexOrchestrator {
 
     /// The status block (state, size, progress, stamps) for the harness.
     pub fn status(&self) -> OrchestratorStatus {
+        // Per-modality breakdown (#684), text-first so it renders as the lead
+        // sub-index (the engine maps modalities in a BTreeMap → name order).
+        let mut modalities: Vec<ModalityStat> = self
+            .engine
+            .modality_stats()
+            .into_iter()
+            .map(|(modality, size, ndim)| ModalityStat {
+                modality,
+                size,
+                ndim,
+            })
+            .collect();
+        modalities.sort_by_key(|m| (m.modality != TEXT, m.modality.clone()));
         let shared = self.shared.lock().expect("orchestrator poisoned");
         OrchestratorStatus {
             state: shared.state,
@@ -1291,6 +1317,7 @@ impl IndexOrchestrator {
             },
             error: shared.error.clone(),
             activation: shared.activation.clone(),
+            modalities,
         }
     }
 }
@@ -1319,10 +1346,22 @@ mod op_tests {
             },
             error: None,
             activation: None,
+            modalities: vec![
+                ModalityStat {
+                    modality: "text".to_owned(),
+                    size: 4,
+                    ndim: Some(768),
+                },
+                ModalityStat {
+                    modality: "image".to_owned(),
+                    size: 0,
+                    ndim: None,
+                },
+            ],
         };
         assert_eq!(
             serde_json::to_string(&status).unwrap(),
-            r#"{"state":"building","size":4,"ndim":null,"col_mod":7,"model_id":null,"progress":{"indexed":1,"total":9},"error":null,"activation":null}"#
+            r#"{"state":"building","size":4,"ndim":null,"col_mod":7,"model_id":null,"progress":{"indexed":1,"total":9},"error":null,"activation":null,"modalities":[{"modality":"text","size":4,"ndim":768},{"modality":"image","size":0,"ndim":null}]}"#
         );
     }
 

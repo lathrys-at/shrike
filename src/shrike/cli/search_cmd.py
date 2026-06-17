@@ -73,7 +73,7 @@ def _search_match_badges(m: SearchMatch) -> str:
     metavar="ID",
     help="Find notes similar to this note ID.",
 )
-@click.option("--top-k", type=int, default=10, help="Results per query (default: 10).")
+@click.option("--limit", type=int, default=20, help="Results per query (default: 20; 0 = all).")
 @click.option(
     "--threshold", type=float, default=0.5, help="Minimum similarity score (default: 0.5)."
 )
@@ -90,7 +90,7 @@ def search_run(
     ctx: click.Context,
     queries: tuple[str, ...],
     similar_to: tuple[int, ...],
-    top_k: int,
+    limit: int,
     threshold: float,
     deck: str | None,
     tags: tuple[str, ...],
@@ -109,7 +109,7 @@ def search_run(
 
     client = ctx.obj["client"]
 
-    kwargs: dict[str, Any] = {"top_k": top_k, "threshold": threshold}
+    kwargs: dict[str, Any] = {"limit": limit, "threshold": threshold}
     if queries:
         kwargs["queries"] = list(queries)
     if similar_to:
@@ -162,7 +162,7 @@ def search_run(
 @output_options
 @click.argument("expression")
 @click.option("--brief", is_flag=True, help="Show only IDs and metadata, not field content.")
-@click.option("--limit", type=int, default=50, help="Max notes to return (default 50).")
+@click.option("--limit", type=int, default=20, help="Max notes to return (default 20; 0 = all).")
 @click.pass_context
 def query(ctx: click.Context, expression: str, brief: bool, limit: int) -> None:
     """Find notes matching a raw Anki search EXPRESSION.

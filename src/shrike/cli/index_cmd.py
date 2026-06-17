@@ -4,7 +4,7 @@ import time
 
 import click
 
-from shrike.cli import output
+from shrike.cli import output, status_render
 from shrike.cli.output import output_options
 from shrike.client import ShrikeClient
 
@@ -125,25 +125,9 @@ def index_status(ctx: click.Context) -> None:
         output.emit_json(idx_status)
         return
 
-    if idx_status.state == "ready":
-        ndim = idx_status.ndim if idx_status.ndim is not None else "?"
-        output.kv("Index", "[green]ready[/green]")
-        output.kv("Vectors", f"[green]{idx_status.size}[/green]", indent=2)
-        output.kv("Dimensions", str(ndim), indent=2)
-    elif idx_status.state == "building":
-        p = idx_status.progress
-        output.kv("Index", "[yellow]building[/yellow]")
-        output.kv("Progress", f"{p.indexed} / {p.total} notes", indent=2)
-    elif idx_status.state == "error":
-        output.kv("Index", "[red]error[/red]")
-        output.kv("Error", idx_status.error, indent=2)
-    else:
-        output.kv("Index", "[dim]unavailable (no embedding service configured)[/dim]")
-
-    if idx_status.col_mod is not None:
-        output.kv("Collection mod", str(idx_status.col_mod), indent=2)
-    if idx_status.path:
-        output.kv("Path", f"[cyan]{idx_status.path}[/cyan]", indent=2)
+    # Shared renderer (#684): identical to the `server status` Index block,
+    # including the per-modality sub-index breakdown.
+    status_render.render_index(idx_status)
 
 
 def _poll_progress(client: ShrikeClient, total: int, *, json_out: bool) -> None:

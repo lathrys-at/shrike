@@ -60,9 +60,9 @@ Export the collection (or a deck/selection) to an Anki package: a `.apkg` (share
 
 | Option | Description |
 |---|---|
-| `--deck TEXT` | Export only this deck (name, id, or `#id`). Mutually exclusive with `--note-id`. |
-| `--note-id INTEGER` | Export only these notes. Repeatable. Mutually exclusive with `--deck`. |
-| `--format` | Package format (`apkg`/`colpkg`). Default inferred from `DEST`'s extension, else `apkg`. A `.colpkg` is a whole-collection backup (no `--deck`/`--note-id`). |
+| `--deck TEXT` | Export only this deck (name, id, or `#id`). Mutually exclusive with `--ids`. |
+| `--ids INTEGER` | Export only these notes. Repeatable. Mutually exclusive with `--deck`. |
+| `--format` | Package format (`apkg`/`colpkg`). Default inferred from `DEST`'s extension, else `apkg`. A `.colpkg` is a whole-collection backup (no `--deck`/`--ids`). |
 | `--scheduling/--no-scheduling` | Include review/scheduling data and deck options (default: off). |
 | `--media/--no-media` | Bundle referenced media into the package (default: on). |
 | `--server-path PATH` | Write the package to this path on the **server's** disk (zero-copy; requires a purely-local daemon with a matching `--export-path-root`). |
@@ -182,7 +182,7 @@ List media filenames, with size and type, optionally filtered by a glob pattern.
 
 | Option | Description |
 |---|---|
-| `--limit INTEGER` | Maximum files to show. |
+| `--limit INTEGER` | Maximum files to show (default: 20; `0` = all). |
 
 ```bash
 shrike collection media list
@@ -214,7 +214,7 @@ Search the collection by meaning **and** by text. Each query is matched by seman
 | Option | Description |
 |---|---|
 | `--similar-to ID` | Find notes similar to this note ID (semantic only). Repeatable. |
-| `--top-k INTEGER` | Results per mechanism per query (default: 10). |
+| `--limit INTEGER` | Results per query (default: 20; `0` = all). |
 | `--threshold FLOAT` | Minimum *semantic* similarity, 0–1 (default: 0.5). Exact matches ignore it. |
 | `--deck TEXT` | Restrict search to this deck (name, numeric ID, or `#id`). |
 | `--tags TEXT` | Restrict search to notes with these tags. Repeatable and comma-separated. |
@@ -233,7 +233,7 @@ Find notes with a raw [Anki search expression](https://docs.ankiweb.net/searchin
 | Option | Description |
 |---|---|
 | `--brief` | Show only IDs and metadata, not field content. |
-| `--limit INTEGER` | Max notes to return (default 50, max 200). |
+| `--limit INTEGER` | Max notes to return (default 20, max 200; `0` = all). |
 
 ```bash
 shrike search query "is:due prop:ivl>=30"
@@ -289,7 +289,7 @@ Stop the running daemon.
 
 ### `shrike server status`
 
-Show whether the server is running, and if so, its URL, PID, collection path, and uptime. In cooperative-locking mode it also shows whether the collection is currently held or released (idle).
+Show whether the server is running, and if so, its URL, PID, collection path, and uptime. Below that it reports the index, derived-text store, recognition, and embedding blocks (in that order), each with its status on its own line. The index block breaks down per modality sub-index; the embedding block lists one entry per configured space, keyed by its modalities. In cooperative-locking mode it also shows whether the collection is currently held or released (idle).
 
 ### `shrike server logs`
 
@@ -324,7 +324,7 @@ Save the index, then stop the embedding service and mark the index `unavailable`
 
 #### `shrike server embedding status`
 
-Show whether the embedding service is running, its URL, PID, and model.
+Show each configured embedding space, one entry per space keyed by its modalities (`Embedding [text]`, `Embedding [text, image]`), with that space's status, URL, PID, model, provider, and batching. A multi-space profile reports every space, not just the primary.
 
 ### `shrike server index`
 
@@ -340,7 +340,7 @@ Force an immediate flush of the in-memory index to disk (off the event loop). No
 
 #### `shrike server index status`
 
-Show index state (`ready` / `building` / `unavailable` / `error`), vector count, dimensions, and on-disk path.
+Show index state (`ready` / `building` / `unavailable` / `error`) and on-disk path, with a per-modality breakdown of each sub-index's vector count and dimensions (a text+image collection reports its `text` and `image` sub-indexes separately, since they differ in dimensionality).
 
 ---
 
@@ -426,7 +426,7 @@ List notes matching structured filters. At least one filter is required.
 | `--ids ID` | Fetch specific note IDs. Repeatable. |
 | `--since TEXT` | Notes modified after this date (ISO 8601). |
 | `--brief` | Show only IDs and metadata (type, deck, tags, modified), not field content. |
-| `--limit INTEGER` | Max notes to return (default: 50). |
+| `--limit INTEGER` | Max notes to return (default: 20; `0` = all). |
 
 For text or semantic search, use `shrike search`.
 

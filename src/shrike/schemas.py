@@ -940,6 +940,20 @@ class IndexProgress(BaseModel):
     total: int = 0
 
 
+class IndexModalityStat(BaseModel):
+    """One per-modality sub-index's size/ndim (#684).
+
+    The aggregate ``size``/``ndim`` on the index collapse the per-modality
+    sub-indexes (sum / the text modality's width), so a two-space (text+image)
+    collection can't surface that its image sub-index is 512-dim while text is
+    768-dim. This row carries each sub-index's own figures. ``ndim`` is ``None``
+    for a sub-index with no vectors yet (width not set)."""
+
+    modality: str
+    size: int = 0
+    ndim: int | None = None
+
+
 class _IndexBase(BaseModel):
     """On-disk index contents, shared across build states.
 
@@ -956,6 +970,11 @@ class _IndexBase(BaseModel):
     # Per-(non-text-)modality activation-gate calibration {modality: {n, mean, std}} (#201b); absent
     # until a multimodal index is calibrated (text-only / uncalibrated indexes have none).
     activation: dict[str, dict[str, float]] | None = None
+    # Per-modality sub-index breakdown (#684): each sub-index's own size/ndim,
+    # which the aggregate size/ndim above can't express (text 768-dim, image
+    # 512-dim under CLIP). Text-first. Empty list on older payloads / a server
+    # that doesn't report it.
+    modalities: list[IndexModalityStat] = []
 
 
 class IndexUnavailable(_IndexBase):
@@ -1129,7 +1148,17 @@ class ServerStatus(BaseModel):
     log_dir: str
     uptime: str | None = None
     log: str | None = None
+    # The PRIMARY embedding space's health — kept for back-compat (every
+    # existing consumer reads ``embedding``). ``embedding_spaces`` below is the
+    # full per-space list (#681); this is ``embedding_spaces[0]`` when any space
+    # is live.
     embedding: EmbeddingStatus
+    # Per-space embedding health (#681): one entry per configured embedder — the
+    # primary runtime plus every secondary space (#233). A multi-space profile
+    # (e.g. a text space + a text+image CLIP space) reports each here, keyed in
+    # the CLI by its modalities. Single-space servers report a one-element list;
+    # empty on older payloads (read ``embedding`` then).
+    embedding_spaces: list[EmbeddingStatus] = []
     index: IndexStatus
     # Derived-text store (#98): the FTS5 trigram sidecar backing substring/fuzzy lexical search.
     # Defaulted so older payloads (and a build without FTS5 support) validate.
