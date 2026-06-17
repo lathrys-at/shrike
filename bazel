@@ -70,7 +70,7 @@ if [ ! -x "$bin" ] || ! verify "$bin" "$expected"; then
 fi
 
 # Pin the final hop too: hand bazelisk the expected Bazel-binary sha so its
-# download is hash-verified, not just HTTPS (mirrors scripts/llama-server.lock).
+# download is hash-verified, not just HTTPS (mirrors tools/llama-server.lock).
 # Only when the lock's BAZEL_VERSION matches .bazelversion — otherwise a version
 # bump that hasn't refreshed the lock would falsely fail, so warn and fall back
 # to HTTPS-only instead of hard-breaking.

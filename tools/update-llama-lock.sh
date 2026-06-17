@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Regenerate scripts/llama-server.lock: pin a llama.cpp release tag and record
+# Regenerate tools/llama-server.lock: pin a llama.cpp release tag and record
 # the SHA256 of each platform tarball we download.
 #
 # Usage:
-#   ./scripts/update-llama-lock.sh          # pin the latest release
-#   ./scripts/update-llama-lock.sh b9415    # pin a specific tag
+#   ./tools/update-llama-lock.sh          # pin the latest release
+#   ./tools/update-llama-lock.sh b9415    # pin a specific tag
 #
 # Downloads the four platform tarballs to a temp dir to hash them, then writes
 # the lock. Commit the result.
@@ -46,7 +46,7 @@ trap 'rm -rf "$TMP"' EXIT
     echo "#"
     echo "# We pin a known tag and verify a per-platform SHA256 instead of pulling"
     echo "# \`releases/latest\` unverified — a release could be re-tagged or a mirror"
-    echo "# tampered with. To bump: run \`scripts/update-llama-lock.sh [TAG]\` (defaults to"
+    echo "# tampered with. To bump: run \`tools/update-llama-lock.sh [TAG]\` (defaults to"
     echo "# the latest release) and commit the result."
     echo "#"
     echo "# Shell-sourceable: KEY=VALUE, no spaces. Platform keys use underscores because"

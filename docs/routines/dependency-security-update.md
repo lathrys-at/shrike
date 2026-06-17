@@ -106,7 +106,7 @@ is regenerated and committed**. The surfaces:
 | **Python** | `pyproject.toml` (`[project].dependencies` / `[project.optional-dependencies]`) | `requirements_lock.txt` |
 | **GitHub Actions** | `.github/workflows/*.yml` (pinned action majors/SHAs) | none |
 | **Standalone eval spikes** | a self-contained spike under `eval/<name>/Cargo.toml` (none in-tree today) | that spike's **own** `Cargo.lock` only — such spikes carry their own `[workspace]`, are deliberately **outside** the kernel resolution and the Bazel build, so they need **no** `MODULE.bazel.lock` repin |
-| **Managed binaries / models** | `scripts/llama-server.lock`, `EMBEDDING_MODEL_*` in `tests/integration/model_cache.py` | manual, bumped rarely — almost never a security bump |
+| **Managed binaries / models** | `tools/llama-server.lock`, `EMBEDDING_MODEL_*` in `tests/integration/model_cache.py` | manual, bumped rarely — almost never a security bump |
 
 Identify which surface the advisory's manifest path points at *before* you touch
 anything. (A Dependabot alert names the manifest, e.g. a standalone
