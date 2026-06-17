@@ -47,6 +47,7 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
   could not start the server.
 
 ### Changed
+- The skill-quality eval harness moved from `tests/qa/` to `tests/manual/skill_quality/`, flattening the redundant nested `eval/` into the unit root (#698). Internal dev/test tooling only; nothing user-facing changes.
 - The CLI command tree is reorganized so each command sits under its natural
   parent (#683). **Breaking:** several top-level commands moved and the old
   spellings are gone (they now error).

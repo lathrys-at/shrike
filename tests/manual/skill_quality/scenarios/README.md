@@ -13,7 +13,7 @@ These are **manual**. Nothing here runs in `pytest` or CI.
    ```bash
    ./bazel run //scripts:serve -- --profile text-onnx --seed qa --daemon
    ```
-   (Or, for a GGUF model, drive the eval harness `eval/run.py`, which sets up
+   (Or, for a GGUF model, drive the eval harness `../run.py`, which sets up
    the fixture + server with `SHRIKE_EMBEDDING_MODEL`. See `../README.md`.)
 2. In a session that has the **anki-cards** skill loaded and can reach the QA
    server (the `shrike` CLI, or the MCP tools via `mcp-remote`), paste the

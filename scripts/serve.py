@@ -433,9 +433,9 @@ def seed_qa_collection(collection_path: Path) -> None:
     """
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
-    from tests.qa.build_collection import build
+    from tests.manual.skill_quality.build_collection import build
 
-    spec = _REPO_ROOT / "tests" / "qa" / "collection.json"
+    spec = _REPO_ROOT / "tests" / "manual" / "skill_quality" / "collection.json"
     logger.info("seeding qa fixture from %s → %s", spec, collection_path)
     rc = build(spec, collection_path)
     if rc != 0:

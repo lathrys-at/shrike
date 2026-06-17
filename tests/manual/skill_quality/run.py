@@ -11,19 +11,19 @@ This is the automated counterpart to driving ``harness.py`` by hand. The author
 runs with ``--dangerously-skip-permissions`` because the QA collection is a
 disposable fixture rebuilt every cell — fine here, never point it at a real one.
 
-Prerequisites (same as the manual harness — see ../README.md):
+Prerequisites (same as the manual harness — see README.md):
     export LLAMA_SERVER_PATH=/path/to/llama-server
     export SHRIKE_EMBEDDING_MODEL=/path/to/embedding-model.gguf
 
 Examples:
     # 1x sweep, with_skill only, Sonnet judge (the default):
-    tests/qa/eval/run.py --repeats 1 --configs with_skill
+    tests/manual/skill_quality/run.py --repeats 1 --configs with_skill
 
     # 3x depth across two scenarios, no judge (mechanical only, fast):
-    tests/qa/eval/run.py --scenarios 01,03 --repeats 3 --no-judge
+    tests/manual/skill_quality/run.py --scenarios 01,03 --repeats 3 --no-judge
 
     # full matrix with a different judge model:
-    tests/qa/eval/run.py --configs with_skill,baseline --judge-model opus
+    tests/manual/skill_quality/run.py --configs with_skill,baseline --judge-model opus
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from judge import DEFAULT_JUDGE_MODEL, DEFAULT_JUDGE_THINKING
 from prompts import SHRIKE_BIN, baseline_prompt, with_skill_prompt
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[2]  # tests/qa/eval -> repo root
+ROOT = HERE.parents[2]  # tests/manual/skill_quality -> repo root
 HARNESS = HERE / "harness.py"
 PY = sys.executable
 
@@ -88,13 +88,13 @@ def _preflight() -> None:
         raise SystemExit(
             "preflight failed:\n"
             + "\n".join(f"  - {p}" for p in problems)
-            + "\n\nSee tests/qa/README.md for the env setup."
+            + "\n\nSee tests/manual/skill_quality/README.md for the env setup."
         )
 
 
 def _read_prompt_md(sid: str) -> str:
     # Same single-source read as harness.py, duplicated to keep run.py standalone.
-    matches = sorted((HERE.parent / "scenarios").glob(f"{sid}-*.md"))
+    matches = sorted((HERE / "scenarios").glob(f"{sid}-*.md"))
     if not matches:
         raise SystemExit(f"no scenario markdown for id {sid}")
     fence = matches[0].read_text().split("## Prompt", 1)[1].split("```")

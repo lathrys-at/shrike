@@ -26,17 +26,17 @@ src/shrike/_version.py
 target/
 
 # QA harness working dir — regenerated each launch (eval/run.py)
-tests/qa/run/
+tests/manual/skill_quality/run/
 
 # //scripts:serve launcher per-run output (script-fallback lane; #656)
 scripts/.run/
 
 # Packaged skills (scripts/package-skill.py)
 dist/
-tests/qa/eval/runs/
+tests/manual/skill_quality/runs/
 
 # QA skill-variant A/B copies — throwaway; the swap script (use-variant.sh) is tracked
-tests/qa/eval/variants/*/
+tests/manual/skill_quality/variants/*/
 
 # Multimodal eval image-bytes cache (URLs are pinned in resolved_urls.json)
 eval/multimodal/cache/

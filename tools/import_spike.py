@@ -8,7 +8,7 @@ want to find out here, cheaply, before building any of the real graph.
 
 Each check does a little real work, not just `import`, so the native libraries
 are actually dlopen'd and exercised. Run as a `py_test` (`./bazel test
-//:import_spike`); a non-zero exit fails the test.
+//tools:import_spike`); a non-zero exit fails the test.
 """
 
 from __future__ import annotations

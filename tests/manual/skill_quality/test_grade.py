@@ -1,4 +1,4 @@
-"""Unit tests for the pure eval grader. Run with: pytest tests/qa/eval/test_grade.py
+"""Unit tests for the pure eval grader. Run with: pytest tests/manual/skill_quality/test_grade.py
 (not part of the CI gate — QA tooling)."""
 
 from __future__ import annotations

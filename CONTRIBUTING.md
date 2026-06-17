@@ -142,6 +142,29 @@ Branch protection on `main` (required status checks, no direct pushes, squash-on
 merges) is configured in the GitHub repo settings, not in this repo's files. Set
 it once when the project goes public; it can also be scripted later via `gh api`.
 
+## Repository layout: `scripts/` vs `tools/` vs `bin/`
+
+Three top-level directories hold non-package code. The line between them is **who
+invokes it** — each carries a `README.md` with its full inventory:
+
+- **`bin/`** — shipped/runnable product entry points: the Bazel `py_binary`
+  launchers over `//src/shrike:shrike` (`//bin:shrike`, `//bin:server`,
+  `//bin:server_embedding`). Load-bearing, kept outside the `shrike` package so a
+  binary's output path never collides with a package subdir. Not cruft.
+- **`tools/`** — invoked by the build: Bazel macros (`//tools/bazel`), the
+  version-pin locks + their writers/checkers, the sdist/wheel/requirements
+  builders, `workspace_status.sh`, the hermetic-toolchain CI smoke tests.
+- **`scripts/`** — human-facing dev/maintenance entry points: `dev-setup.sh`, the
+  native build, the coverage runners, the `//scripts:serve` launcher.
+
+A file follows its strongest coupling. A *version-pin lock* is consumed by the
+build (Bazel reads it, CI cache keys hash it, a `py_test` validates it), so the
+lock, its regenerator, and its tripwire all live in `tools/` — e.g. the llama-lock
+trio `tools/llama-server.lock` + `tools/update-llama-lock.sh` +
+`tools/check_llama_lock.py`, beside the sibling `tools/bazel.lock` build-pin. A
+script a developer runs by hand stays in `scripts/` even when its output feeds a
+build (e.g. `build-native.sh`).
+
 ## Local checks before a PR
 
 ```bash
@@ -202,7 +225,7 @@ in-process tracking can't see. So always do a full `pytest` run before you push.
 ## Skill changes (QA eval)
 
 The `anki-cards` skill (`skills/anki-cards/**`) is **not covered by `pytest`/CI** —
-only the pure grader (`tests/qa/eval/test_grade.py`) runs there. A change to the
+only the pure grader (`tests/manual/skill_quality/test_grade.py`) runs there. A change to the
 skill's guidance or references can pass every CI check while silently regressing
 card quality, so the regression guard is the manual eval harness, not the test
 suite. (For scale: rewording one rule from an abstraction into a surface check
@@ -214,10 +237,10 @@ and costs real tokens, so it can't be a CI gate — it's expected practice, not 
 hard merge blocker.
 
 ```bash
-tests/qa/eval/run.py        # see tests/qa/eval/README.md for flags
+tests/manual/skill_quality/run.py   # see tests/manual/skill_quality/EVAL.md for flags
 ```
 
 Scope is your judgment: run the scenarios the change plausibly affects (a targeted
 `--scenarios …` sweep is fine for a narrow edit; a fuller matrix before a release).
 The harness, scenarios, and grading are documented in
-[`tests/qa/eval/README.md`](tests/qa/eval/README.md).
+[`tests/manual/skill_quality/EVAL.md`](tests/manual/skill_quality/EVAL.md).

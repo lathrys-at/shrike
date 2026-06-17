@@ -10,9 +10,10 @@ The corpus is the checked-in source of truth; the built collection is a
 disposable, gitignored artifact regenerated on every QA launch. There is no
 binary fixture in git.
 
-Usage:
-    python tests/qa/build_collection.py --out tests/qa/run/working.anki2
-    python tests/qa/build_collection.py --out /tmp/c.anki2 --spec other.json
+Usage (run from the repo root):
+    python tests/manual/skill_quality/build_collection.py \
+        --out tests/manual/skill_quality/run/working.anki2
+    python tests/manual/skill_quality/build_collection.py --out /tmp/c.anki2 --spec other.json
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import sys
 from pathlib import Path
 
 # Allow running without an editable install (e.g. a bare checkout).
-_ROOT = Path(__file__).resolve().parents[2]
+_ROOT = Path(__file__).resolve().parents[3]
 _SRC = _ROOT / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -75,7 +76,7 @@ def main() -> int:
         "--spec",
         type=Path,
         default=here / "collection.json",
-        help="Path to the JSON corpus (default: tests/qa/collection.json).",
+        help="Path to the JSON corpus (default: tests/manual/skill_quality/collection.json).",
     )
     parser.add_argument(
         "--out",
