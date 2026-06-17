@@ -7,8 +7,8 @@ Desktop / claude.ai expect when you upload a skill. This mirrors the layout the
 skill-creator uses, so the output installs the same way.
 
 Usage:
-    scripts/package-skill.py                                # packages shrike-skills/create-cards → dist/
-    scripts/package-skill.py shrike-skills/create-cards     # explicit folder
+    scripts/package-skill.py                            # shrike-skills/create-cards → dist/
+    scripts/package-skill.py shrike-skills/create-cards       # explicit folder
     scripts/package-skill.py shrike-skills/create-cards -o /tmp   # custom output dir
     scripts/package-skill.py shrike-skills/create-cards --zip     # name it .zip instead
 
