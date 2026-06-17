@@ -323,7 +323,7 @@ class ShrikeClient:
         note_type: str | None = None,
         modified_since: str | None = None,
         fields: str | None = None,
-        limit: int = 50,
+        limit: int = 20,
     ) -> ListNotesResponse:
         args: dict[str, Any] = {"limit": limit}
         for key, value in (
@@ -338,7 +338,7 @@ class ShrikeClient:
                 args[key] = value
         return ListNotesResponse.model_validate(self._call("list_notes", args))
 
-    def query(self, query: str, *, fields: str = "full", limit: int = 50) -> ListNotesResponse:
+    def query(self, query: str, *, fields: str = "full", limit: int = 20) -> ListNotesResponse:
         return ListNotesResponse.model_validate(
             self._call("collection_query", {"query": query, "fields": fields, "limit": limit})
         )
@@ -367,13 +367,13 @@ class ShrikeClient:
         *,
         queries: list[str] | None = None,
         ids: list[int] | None = None,
-        top_k: int = 10,
+        limit: int = 20,
         threshold: float = 0.5,
         deck: str | None = None,
         tags: list[str] | None = None,
         exclude_ids: list[int] | None = None,
     ) -> SearchResponse:
-        args: dict[str, Any] = {"top_k": top_k, "threshold": threshold}
+        args: dict[str, Any] = {"limit": limit, "threshold": threshold}
         for key, value in (
             ("queries", queries),
             ("ids", ids),

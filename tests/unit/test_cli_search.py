@@ -97,9 +97,9 @@ class TestDefaultSearchCommand:
     def test_top_k_and_threshold_forwarded(self, run):
         fake = MagicMock()
         fake.search_notes.return_value = SearchResponse(results=[])
-        res, _ = run("--json", "search", "x", "--top-k", "5", "--threshold", "0.7", client=fake)
+        res, _ = run("--json", "search", "x", "--limit", "5", "--threshold", "0.7", client=fake)
         assert res.exit_code == 0, res.output
-        assert fake.search_notes.call_args.kwargs["top_k"] == 5
+        assert fake.search_notes.call_args.kwargs["limit"] == 5
         assert fake.search_notes.call_args.kwargs["threshold"] == 0.7
 
 

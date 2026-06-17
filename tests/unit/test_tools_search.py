@@ -295,12 +295,19 @@ class TestUnifiedSearch:
         assert "content" in match
         assert match["content"]["Front"] == "What is 2+2?"
 
-    def test_top_k_out_of_range_rejected(self, kharness, mcp_no_index):
-        """top_k is schema-constrained (ge=1, le=50); out-of-range is rejected."""
+    def test_limit_out_of_range_rejected(self, kharness, mcp_no_index):
+        """limit is schema-constrained (ge=0, le=50); above-max is rejected."""
         from mcp.server.fastmcp.exceptions import ToolError
 
         with pytest.raises(ToolError):
-            kharness.call_tool(mcp_no_index, "search_notes", {"queries": ["test"], "top_k": 0})
+            kharness.call_tool(mcp_no_index, "search_notes", {"queries": ["test"], "limit": 51})
+
+    def test_limit_zero_accepted(self, kharness, mcp_no_index):
+        """limit=0 means "return all" (#685) — it is a valid value, not rejected."""
+        # No index attached, so this returns no semantic results but must not raise
+        # on the bound (it would have under the old ge=1).
+        res = kharness.call_tool(mcp_no_index, "search_notes", {"queries": ["test"], "limit": 0})
+        assert "results" in res or res.get("message")
 
     def test_too_many_queries_rejected(self, kharness, mcp_no_index):
         """queries is capped at 50 (schema max_length) to bound embedding load."""
@@ -576,16 +583,27 @@ class TestDerivedSearch:
         assert "fuzzy" not in [p["signal"] for p in hit["provenance"]]
         assert hit.get("fuzzy") is None
 
-    def test_result_capped_at_top_k(self, kharness, mcp_derived, derived):
-        # Review F5: the fused union (text/image/exact/fuzzy, each up to top_k) is capped to top_k,
+    def test_result_capped_at_limit(self, kharness, mcp_derived, derived):
+        # Review F5: the fused union (text/image/exact/fuzzy, each up to limit) is capped to limit,
         # so a broad fuzzy signal can't inflate a query's result count past the documented cap.
         for i in range(8):
             kharness.seed_note(f"mitochondrion variant {i}")  # all fuzzy-match the typo
         _build_derived(kharness, derived)
         res = kharness.call_tool(
-            mcp_derived, "search_notes", {"queries": ["mitochndrion"], "top_k": 3}
+            mcp_derived, "search_notes", {"queries": ["mitochndrion"], "limit": 3}
         )
         assert len(res["results"][0]["matches"]) == 3
+
+    def test_limit_zero_returns_all(self, kharness, mcp_derived, derived):
+        # limit=0 means "return all" (#685): the same broad fuzzy match that the
+        # cap-to-3 test truncates must come back in full when the cap is lifted.
+        for i in range(8):
+            kharness.seed_note(f"mitochondrion variant {i}")
+        _build_derived(kharness, derived)
+        res = kharness.call_tool(
+            mcp_derived, "search_notes", {"queries": ["mitochndrion"], "limit": 0}
+        )
+        assert len(res["results"][0]["matches"]) == 8
 
 
 class TestUpsertNeighbors:

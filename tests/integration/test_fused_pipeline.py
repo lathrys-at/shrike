@@ -97,7 +97,7 @@ class TestFullyNativeServer:
 
         res = mcp(
             "search_notes",
-            {"queries": ["calculus accumulation"], "top_k": 3, "threshold": 0.0},
+            {"queries": ["calculus accumulation"], "limit": 3, "threshold": 0.0},
         )
         matches = res["results"][0]["matches"]
         assert matches
@@ -109,7 +109,7 @@ class TestFullyNativeServer:
         mcp = MCPClient(srv.url)
         res = mcp(
             "search_notes",
-            {"queries": ["ATP synthase"], "top_k": 3, "threshold": 0.0},
+            {"queries": ["ATP synthase"], "limit": 3, "threshold": 0.0},
         )
         matches = res["results"][0]["matches"]
         assert matches

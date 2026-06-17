@@ -2,7 +2,7 @@
 
 The CLI talks to a mocked client; the export action + route are covered in
 test_tools_export.py / test_export.py (integration). These pin the CLI's own
-logic: format inference, the deck/note-id and colpkg-scope guards, downloading
+logic: format inference, the deck/ids and colpkg-scope guards, downloading
 to DEST vs --server-path, and the JSON output shape.
 """
 
@@ -98,12 +98,10 @@ class TestServerPathDelivery:
 
 
 class TestValidation:
-    def test_deck_and_note_id_mutually_exclusive(self, tmp_path):
-        result, _ = _run(
-            tmp_path, ["collection", "export", "x.apkg", "--deck", "A", "--note-id", "1"]
-        )
+    def test_deck_and_ids_mutually_exclusive(self, tmp_path):
+        result, _ = _run(tmp_path, ["collection", "export", "x.apkg", "--deck", "A", "--ids", "1"])
         assert result.exit_code != 0
-        assert "at most one of --deck or --note-id" in result.output
+        assert "at most one of --deck or --ids" in result.output
 
     def test_colpkg_with_deck_rejected(self, tmp_path):
         result, _ = _run(tmp_path, ["collection", "export", "x.colpkg", "--deck", "A"])

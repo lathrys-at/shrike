@@ -13,7 +13,7 @@ from shrike.cli.output import output_options
 @click.argument("dest", type=click.Path(dir_okay=False), required=False)
 @click.option("--deck", default=None, help="Export only this deck (name, id, or #id).")
 @click.option(
-    "--note-id",
+    "--ids",
     "note_ids",
     multiple=True,
     type=int,
@@ -25,7 +25,7 @@ from shrike.cli.output import output_options
     type=click.Choice(["apkg", "colpkg"]),
     default=None,
     help="Package format. Default inferred from DEST's extension, else 'apkg'. "
-    "A .colpkg is a whole-collection backup (no --deck/--note-id).",
+    "A .colpkg is a whole-collection backup (no --deck/--ids).",
 )
 @click.option(
     "--scheduling/--no-scheduling",
@@ -74,7 +74,7 @@ def export(
     import os
 
     if deck and note_ids:
-        raise click.UsageError("Use at most one of --deck or --note-id, not both.")
+        raise click.UsageError("Use at most one of --deck or --ids, not both.")
     if not dest and not server_path:
         raise click.UsageError("Provide a DEST to download to, or --server-path.")
 
@@ -84,7 +84,7 @@ def export(
     resolved_fmt = fmt or ("colpkg" if ref_path.endswith(".colpkg") else "apkg")
     if resolved_fmt == "colpkg" and (deck or note_ids):
         raise click.UsageError(
-            "A .colpkg is a whole-collection backup — drop --deck/--note-id, or use --format apkg."
+            "A .colpkg is a whole-collection backup — drop --deck/--ids, or use --format apkg."
         )
 
     client = ctx.obj["client"]

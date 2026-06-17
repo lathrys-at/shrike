@@ -45,7 +45,7 @@ def note() -> None:
 @click.option("--ids", multiple=True, type=NOTE_ID, help="Fetch specific note IDs.")
 @click.option("--since", "modified_since", help="Notes modified after this date (ISO 8601).")
 @click.option("--brief", is_flag=True, help="Show only IDs and metadata, not field content.")
-@click.option("--limit", type=int, default=50, help="Max notes to return (default: 50).")
+@click.option("--limit", type=int, default=20, help="Max notes to return (default: 20; 0 = all).")
 @click.pass_context
 def note_list(
     ctx: click.Context,

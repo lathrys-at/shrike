@@ -144,7 +144,7 @@ class TestSearchNotes:
         # that perturbation while still failing if the ranking is actually broken.
         result = semantic_mcp(
             "search_notes",
-            {"queries": ["derivative calculus rate of change"], "top_k": 5, "threshold": 0.0},
+            {"queries": ["derivative calculus rate of change"], "limit": 5, "threshold": 0.0},
         )
         matches = result["results"][0]["matches"]
         assert len(matches) > 0
@@ -156,7 +156,7 @@ class TestSearchNotes:
         listed = semantic_mcp("list_notes", {"tags": ["cell-biology"], "limit": 1})
         note_id = listed["notes"][0]["id"]
 
-        result = semantic_mcp("search_notes", {"ids": [note_id], "top_k": 5})
+        result = semantic_mcp("search_notes", {"ids": [note_id], "limit": 5})
         assert len(result["results"]) == 1
         matches = result["results"][0]["matches"]
         assert all(m["id"] != note_id for m in matches)
@@ -165,7 +165,7 @@ class TestSearchNotes:
         _wait_for_index_ready(collection_server)
         result = semantic_mcp(
             "search_notes",
-            {"queries": ["energy force motion"], "deck": "Physics", "top_k": 10},
+            {"queries": ["energy force motion"], "deck": "Physics", "limit": 10},
         )
         matches = result["results"][0]["matches"]
         assert all(m["deck"] == "Physics" for m in matches)
@@ -174,19 +174,19 @@ class TestSearchNotes:
         _wait_for_index_ready(collection_server)
         result = semantic_mcp(
             "search_notes",
-            {"queries": ["chemical bonds"], "tags": ["organic"], "top_k": 5},
+            {"queries": ["chemical bonds"], "tags": ["organic"], "limit": 5},
         )
         matches = result["results"][0]["matches"]
         assert all("organic" in m["tags"] for m in matches)
 
     def test_exclude_ids(self, semantic_mcp, collection_server):
         _wait_for_index_ready(collection_server)
-        first = semantic_mcp("search_notes", {"queries": ["DNA genetics"], "top_k": 3})
+        first = semantic_mcp("search_notes", {"queries": ["DNA genetics"], "limit": 3})
         first_ids = [m["id"] for m in first["results"][0]["matches"]]
 
         second = semantic_mcp(
             "search_notes",
-            {"queries": ["DNA genetics"], "top_k": 3, "exclude_ids": first_ids},
+            {"queries": ["DNA genetics"], "limit": 3, "exclude_ids": first_ids},
         )
         second_ids = [m["id"] for m in second["results"][0]["matches"]]
         assert not set(first_ids) & set(second_ids)
@@ -195,7 +195,7 @@ class TestSearchNotes:
         _wait_for_index_ready(collection_server)
         result = semantic_mcp(
             "search_notes",
-            {"queries": ["Newton's laws", "eigenvalue matrix"], "top_k": 3},
+            {"queries": ["Newton's laws", "eigenvalue matrix"], "limit": 3},
         )
         assert len(result["results"]) == 2
         assert result["results"][0]["source"] == "Newton's laws"
@@ -207,7 +207,7 @@ class TestSearchNotes:
         # "algorithm" embeds too thinly to clear the default 0.5 threshold
         # against this collection, leaving no matches to inspect.
         result = semantic_mcp(
-            "search_notes", {"queries": ["Big-O notation algorithm complexity"], "top_k": 3}
+            "search_notes", {"queries": ["Big-O notation algorithm complexity"], "limit": 3}
         )
         # Each query is matched semantically and by exact substring; inspect a
         # semantically-ranked hit (exact-only hits carry no score).
@@ -400,7 +400,7 @@ class TestUpsertNeighbors:
         # Property 2: neighbors ⊆ a generous self-search of the same content.
         search = semantic_mcp(
             "search_notes",
-            {"queries": [content], "top_k": k * 4, "exclude_ids": [note_id]},
+            {"queries": [content], "limit": k * 4, "exclude_ids": [note_id]},
         )
         groups = search["results"]
         search_ids = {m["id"] for m in groups[0]["matches"]} if groups else set()
@@ -440,12 +440,12 @@ class TestDeleteIndexUpdate:
         )
         note_id = created["results"][0]["id"]
 
-        before = semantic_mcp("search_notes", {"queries": ["unique xyzzy placeholder"], "top_k": 5})
+        before = semantic_mcp("search_notes", {"queries": ["unique xyzzy placeholder"], "limit": 5})
         assert note_id in [m["id"] for m in before["results"][0]["matches"]]
 
         semantic_mcp("delete_notes", {"ids": [note_id]})
 
-        after = semantic_mcp("search_notes", {"queries": ["unique xyzzy placeholder"], "top_k": 5})
+        after = semantic_mcp("search_notes", {"queries": ["unique xyzzy placeholder"], "limit": 5})
         after_ids = [m["id"] for m in after["results"][0]["matches"]]
         assert note_id not in after_ids
 
@@ -649,7 +649,7 @@ class TestEmbeddingLifecycle:
             },
         )
         _wait_for_index_ready(lifecycle_server)
-        before = mcp("search_notes", {"queries": ["mitochondria ATP energy"], "top_k": 5})
+        before = mcp("search_notes", {"queries": ["mitochondria ATP energy"], "limit": 5})
         assert before["results"][0]["matches"]
 
         # (d) Stop: embedding unavailable, index unavailable, search degrades to
@@ -659,7 +659,7 @@ class TestEmbeddingLifecycle:
         status = httpx.get(f"{base}/status", timeout=5.0).json()
         assert status["embedding"]["available"] is False
         assert status["index"]["state"] == "unavailable"
-        degraded = mcp("search_notes", {"queries": ["ATP"], "top_k": 5})
+        degraded = mcp("search_notes", {"queries": ["ATP"], "limit": 5})
         matches = degraded["results"][0]["matches"]
         assert matches
         assert all(m["score"] is None for m in matches)
@@ -692,7 +692,7 @@ class TestEmbeddingLifecycle:
         )
         assert started.exit_code == 0, started.output
         _wait_for_index_ready(lifecycle_server)
-        after = mcp("search_notes", {"queries": ["mitochondria ATP energy"], "top_k": 5})
+        after = mcp("search_notes", {"queries": ["mitochondria ATP energy"], "limit": 5})
         assert after["results"][0]["matches"]
 
         # (f) Idempotent start while running.
@@ -747,7 +747,7 @@ class TestSearchQuality:
             while True:
                 result = semantic_mcp(
                     "search_notes",
-                    {"queries": ["mitochondria ATP production"], "top_k": 10},
+                    {"queries": ["mitochondria ATP production"], "limit": 10},
                 )
                 matches = result["results"][0]["matches"]
                 ids = [m["id"] for m in matches]
@@ -769,7 +769,7 @@ class TestSearchQuality:
         # activation floor must hold — no result may carry tag provenance.
         result = semantic_mcp(
             "search_notes",
-            {"queries": ["purple elephant umbrella dancing"], "top_k": 10},
+            {"queries": ["purple elephant umbrella dancing"], "limit": 10},
         )
         for group in result["results"]:
             for m in group["matches"]:
@@ -783,7 +783,7 @@ class TestSearchQuality:
         # "citric acid cycle" is literal text of exactly one card; the
         # cell-biology tag plausibly activates and boosts its siblings — the
         # literal hit must still take rank 1 (the exact-match override).
-        result = semantic_mcp("search_notes", {"queries": ["citric acid cycle"], "top_k": 5})
+        result = semantic_mcp("search_notes", {"queries": ["citric acid cycle"], "limit": 5})
         matches = result["results"][0]["matches"]
         assert matches, "the literal hit must be found"
         assert matches[0].get("substring"), "rank 1 is the literal hit"
@@ -794,7 +794,7 @@ class TestSearchQuality:
         # cards, not members of OTHER activated tags riding the fusion.
         result = semantic_mcp(
             "search_notes",
-            {"queries": ["enzyme that transcribes DNA into RNA"], "top_k": 3},
+            {"queries": ["enzyme that transcribes DNA into RNA"], "limit": 3},
         )
         matches = result["results"][0]["matches"]
         assert matches
@@ -824,7 +824,7 @@ class TestSearchQuality:
         ids = [item["id"] for item in r["results"]]
         try:
             result = semantic_mcp(
-                "search_notes", {"queries": ["volcanic eruption geology"], "top_k": 10}
+                "search_notes", {"queries": ["volcanic eruption geology"], "limit": 10}
             )
             for group in result["results"]:
                 for m in group["matches"]:

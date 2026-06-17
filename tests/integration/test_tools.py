@@ -427,13 +427,19 @@ class TestListNotesAdvanced:
         assert "exact text matches" in (result.get("message") or "")
 
     def test_limit_over_max_rejected(self, mcp):
-        # limit is schema-constrained (1-200); out-of-range is rejected.
+        # limit is schema-constrained (0-200); above-max is rejected.
         with pytest.raises(RuntimeError, match="less than or equal to 200"):
             mcp("list_notes", {"deck": "Clamp", "limit": 999})
 
     def test_limit_below_min_rejected(self, mcp):
-        with pytest.raises(RuntimeError, match="greater than or equal to 1"):
+        # The floor is 0 now (#685: 0 means "return all"); a negative is rejected.
+        with pytest.raises(RuntimeError, match="greater than or equal to 0"):
             mcp("list_notes", {"deck": "ClampMin", "limit": -5})
+
+    def test_limit_zero_accepted(self, mcp):
+        # limit=0 means "return all" (#685) — a valid value, not a bound violation.
+        result = mcp("list_notes", {"deck": "ClampZero", "limit": 0})
+        assert "notes" in result
 
 
 class TestDerivedLexicalSearch:
