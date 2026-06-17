@@ -24,7 +24,7 @@ class TestUpsertNotesBatching:
             "results": [{"status": "created", "id": i, "name": f"T{i}"} for i in range(5)]
         }
 
-        with patch.object(client, "_call", return_value=mock_response) as mock_call:
+        with patch.object(client, "_action", return_value=mock_response) as mock_call:
             result = client.upsert_notes(notes)
 
         mock_call.assert_called_once_with(
@@ -56,7 +56,7 @@ class TestUpsertNotesBatching:
                 "results": [{"status": "created", "id": i, "name": "T"} for i in range(len(chunk))]
             }
 
-        with patch.object(client, "_call", side_effect=fake_call):
+        with patch.object(client, "_action", side_effect=fake_call):
             result = client.upsert_notes(notes)
 
         assert call_count == 3
@@ -78,7 +78,7 @@ class TestUpsertNotesBatching:
                 "dry_run": args["dry_run"],
             }
 
-        with patch.object(client, "_call", side_effect=fake_call) as mock_call:
+        with patch.object(client, "_action", side_effect=fake_call) as mock_call:
             result = client.upsert_notes(notes, on_duplicate="skip", dry_run=True)
 
         # Policy flags reach every batch.
@@ -97,7 +97,7 @@ class TestUpsertNoteTypesBatching:
             "results": [{"status": "created", "id": i, "name": f"T{i}"} for i in range(5)]
         }
 
-        with patch.object(client, "_call", return_value=mock_response) as mock_call:
+        with patch.object(client, "_action", return_value=mock_response) as mock_call:
             result = client.upsert_note_types(types)
 
         mock_call.assert_called_once_with("upsert_note_types", {"note_types": types})
@@ -118,7 +118,7 @@ class TestUpsertNoteTypesBatching:
                 "results": [{"status": "created", "id": i, "name": "T"} for i in range(len(chunk))]
             }
 
-        with patch.object(client, "_call", side_effect=fake_call):
+        with patch.object(client, "_action", side_effect=fake_call):
             result = client.upsert_note_types(types)
 
         assert call_count == 3
@@ -131,7 +131,7 @@ class TestDeleteNotesBatching:
         ids = list(range(50))
         mock_response = {"deleted": ids, "not_found": []}
 
-        with patch.object(client, "_call", return_value=mock_response) as mock_call:
+        with patch.object(client, "_action", return_value=mock_response) as mock_call:
             result = client.delete_notes(ids)
 
         mock_call.assert_called_once_with("delete_notes", {"ids": ids})
@@ -148,7 +148,7 @@ class TestDeleteNotesBatching:
             chunk_ids = args["ids"]
             return {"deleted": chunk_ids, "not_found": []}
 
-        with patch.object(client, "_call", side_effect=fake_call):
+        with patch.object(client, "_action", side_effect=fake_call):
             result = client.delete_notes(ids)
 
         assert call_count == 3
@@ -162,7 +162,7 @@ class TestDeleteNotesBatching:
             chunk_ids = args["ids"]
             return {"deleted": chunk_ids[:-1], "not_found": [chunk_ids[-1]]}
 
-        with patch.object(client, "_call", side_effect=fake_call):
+        with patch.object(client, "_action", side_effect=fake_call):
             result = client.delete_notes(ids)
 
         assert len(result.deleted) == 148
@@ -190,7 +190,7 @@ class TestStoreMediaBatching:
                 ]
             }
 
-        with patch.object(client, "_call", side_effect=fake_call):
+        with patch.object(client, "_action", side_effect=fake_call):
             result = client.store_media(items)
 
         assert [r.index for r in result.results] == list(range(15))

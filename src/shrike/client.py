@@ -1,8 +1,9 @@
 """Standalone Shrike client.
 
-A reusable, dependency-light client for a Shrike server: MCP tool calls over
-JSON-RPC, the custom HTTP endpoints (`/status`, `/index/rebuild`,
-`/embedding/*`, `/shutdown`), and daemon lifecycle (start/stop/liveness).
+A reusable, dependency-light client for a Shrike server: action calls over the
+schema-first `POST /actions/{name}` edge (#505/#687), the custom HTTP endpoints
+(`/status`, `/index/rebuild`, `/embedding/*`, `/shutdown`), and daemon lifecycle
+(start/stop/liveness).
 
 This module is deliberately **free of `click`** and of CLI config parsing so it
 can be used as a library outside the CLI. Callers that want to auto-start a
@@ -11,7 +12,7 @@ that spec from config/env/flags is the caller's concern (the CLI does it).
 
 Tool and status methods return the Pydantic models from :mod:`shrike.schemas`
 (the wire contract's single source of truth). The untyped escape hatch is
-:meth:`ShrikeClient._call`, for tools not yet wrapped in a typed method.
+:meth:`ShrikeClient._action`, for actions not yet wrapped in a typed method.
 
 Errors are raised as typed exceptions (:class:`ShrikeError` subclasses); the CLI
 translates them into user-facing messages.
@@ -41,7 +42,9 @@ from shrike.errors import (
     ShrikeError,
 )
 from shrike.schemas import (
-    COLLECTION_BUSY_CODE,
+    WIRE_PROTOCOL_VERSION,
+    ActionError,
+    ActionErrorCode,
     CollectionCheckResponse,
     CollectionInfo,
     CollectionPruneResponse,
@@ -154,13 +157,14 @@ class ServerSpec:
         return f"http://{self.host}:{self.port}/mcp"
 
 
-def _error_text(content: Any) -> str | None:
-    """Extract the first text payload from an MCP content list, if any."""
-    if isinstance(content, list):
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
-                return str(item["text"])
-    return None
+# The #392 wire-version handshake header. The server (server.py) echoes its
+# WIRE_PROTOCOL_VERSION here on every /actions/* response and refuses a request
+# whose header doesn't match. The client sends it so a future skew between a
+# separately-shipped client and daemon fails fast instead of mis-decoding. The
+# header NAME is a wire string, duplicated rather than imported because client.py
+# is dependency-light and must not pull in server.py (its heavy import graph) —
+# the same duplication the integration suite makes.
+WIRE_VERSION_HEADER = "X-Shrike-Wire-Version"
 
 
 # -- Client ------------------------------------------------------------------
@@ -184,7 +188,6 @@ class ShrikeClient:
         self.url = url
         self.spec = spec
         self.autostart = autostart and spec is not None
-        self._request_id = 0
         self._autostarted = False
         self._http = httpx.Client()
         # The per-call collection selector (#68): injected into every tool
@@ -220,87 +223,98 @@ class ShrikeClient:
         with contextlib.suppress(Exception):
             self.close()
 
-    # -- MCP tool calls ------------------------------------------------------
+    # -- Action calls --------------------------------------------------------
 
-    def _call(self, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Invoke an MCP tool and return its raw structured result.
+    def _action(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Invoke an action via ``POST /actions/{name}`` and return its body.
 
-        This is the untyped escape hatch — the typed convenience methods
-        (``list_notes``, ``search_notes``, …) wrap it and validate the result
-        into a response model. Reach for ``_call`` directly only when a tool has
-        no typed wrapper.
+        The schema-first edge (#505/#687): the args are the JSON request body,
+        the response is the action's response-model JSON dict directly (no MCP
+        JSON-RPC / ``isError`` / ``structuredContent`` envelope). This is the
+        untyped escape hatch — the typed convenience methods (``list_notes``,
+        ``search_notes``, …) wrap it and validate the result into a response
+        model. Reach for ``_action`` directly only when an action has no typed
+        wrapper.
 
         Raises:
-            ServerError: the tool failed — an MCP ``isError`` result (bad input
-                or an unhandled exception) or a JSON-RPC error.
-            ServerHTTPError: the server returned a non-2xx status.
+            CollectionBusyError: the collection couldn't be acquired (another
+                process holds it under cooperative locking — #65) — the op never
+                ran, so the caller may retry.
+            ServerError: the action failed — a bad input (``input_error``), an
+                unknown action (``unknown_action``), an internal server error,
+                or a wire-version mismatch (#392).
+            ServerHTTPError: the server returned a non-2xx status with no
+                recognizable ``ActionError`` envelope.
             ServerUnreachableError: the server could not be reached.
         """
-        self._request_id += 1
         args = dict(arguments or {})
         # Inject the client-wide collection selector (#68) unless the call
         # already specified one. `list_profiles` is registry-level (no routing)
         # so it takes no selector — skip it.
-        if self.collection is not None and tool_name != "list_profiles":
+        if self.collection is not None and name != "list_profiles":
             args.setdefault("collection", self.collection)
-        payload = {
-            "jsonrpc": "2.0",
-            "id": self._request_id,
-            "method": "tools/call",
-            "params": {"name": tool_name, "arguments": args},
+        resp = self._post_action(name, args)
+
+        if resp.status_code >= 400:
+            self._raise_action_error(resp)
+
+        body: Any = resp.json()
+        # Every action returns its response-model JSON object directly (the
+        # structuredContent shape, minus the MCP JSON-RPC envelope). A
+        # union-rooted response (export_package) is wrapped under a `result` key
+        # by the serializer, exactly as MCP does — the typed wrapper unwraps it.
+        return body if isinstance(body, dict) else {}
+
+    def _post_action(self, name: str, arguments: dict[str, Any]) -> httpx.Response:
+        """POST to ``/actions/{name}``, auto-starting the daemon on first failure."""
+        url = f"{self._base_url}/actions/{name}"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            # #392: assert the wire version so a client/daemon skew fails fast.
+            WIRE_VERSION_HEADER: str(WIRE_PROTOCOL_VERSION),
         }
-        resp = self._post_mcp(payload)
-        self._raise_for_status(resp)
-        body = resp.json()
-
-        if "error" in body:
-            raise ServerError(f"Server error: {body['error']}")
-
-        result = body.get("result", {})
-        if result.get("isError"):
-            # Tool failure: the message lives in the text content. Tools no
-            # longer embed an error field in structuredContent — failures are
-            # MCP isError results.
-            text = _error_text(result.get("content"))
-            if text:
-                # Detect the busy sentinel by POSITION, not prefix: FastMCP's
-                # Tool.run wraps a raised exception as
-                # "Error executing tool <name>: collection_busy: <message>", so
-                # the sentinel is mid-string, not at index 0 (#598). A bare
-                # `startswith` missed the wrapped form and mis-raised ServerError,
-                # silently defeating every `except CollectionBusyError: retry`.
-                sentinel = f"{COLLECTION_BUSY_CODE}:"
-                pos = text.find(sentinel)
-                if pos != -1:
-                    # Slice the human message from *after* the sentinel — a plain
-                    # split(":", 1) would keep the wrapper's "Error executing
-                    # tool …" half. The collection couldn't be acquired (another
-                    # process holds it); raise a distinct, catchable error.
-                    message = text[pos + len(sentinel) :].strip()
-                    raise CollectionBusyError(message)
-            raise ServerError(text or "Tool returned an error")
-
-        content = result.get("structuredContent", {})
-        return content if isinstance(content, dict) else {}
-
-    def _post_mcp(self, payload: dict[str, Any], *, timeout: float = 30.0) -> httpx.Response:
-        """POST to the MCP endpoint, auto-starting the daemon on first failure."""
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
         try:
-            return self._http.post(self.url, json=payload, headers=headers, timeout=timeout)
+            return self._http.post(url, json=arguments, headers=headers, timeout=30.0)
         except httpx.ConnectError as err:
             if self.autostart and not self._autostarted:
                 assert self.spec is not None
                 self.ensure_running(self.spec)
+                # ensure_running may have learned a different URL from the
+                # daemon's meta; rebuild the action URL from the (updated) base.
+                url = f"{self._base_url}/actions/{name}"
                 try:
-                    return self._http.post(self.url, json=payload, headers=headers, timeout=timeout)
+                    return self._http.post(url, json=arguments, headers=headers, timeout=30.0)
                 except (httpx.ConnectError, httpx.TimeoutException) as err2:
                     raise ServerUnreachableError(self._unreachable_msg()) from err2
             raise ServerUnreachableError(self._unreachable_msg()) from err
         except httpx.TimeoutException as err:
-            raise ServerUnreachableError(f"Request to {self.url} timed out") from err
+            raise ServerUnreachableError(f"Request to {url} timed out") from err
 
-    # -- Typed tool wrappers -------------------------------------------------
+    def _raise_action_error(self, resp: httpx.Response) -> None:
+        """Map a non-2xx ``ActionError`` envelope to the client error taxonomy.
+
+        The actions edge returns a typed ``{code, message}`` body with an HTTP
+        status. The ``code`` is the authority (it replaces the old fragile
+        mid-string ``collection_busy:`` text-sentinel parsing, #598). A response
+        without a decodable envelope falls back to a plain ``ServerHTTPError``.
+        """
+        try:
+            err = ActionError.model_validate(resp.json())
+        except Exception:
+            # No recognizable envelope (e.g. a proxy 502, the guard's 421): use
+            # the generic HTTP-status error, preferring a server-provided message.
+            self._raise_for_status(resp)
+            return  # _raise_for_status always raises on >= 400; satisfies mypy
+        if err.code == ActionErrorCode.COLLECTION_BUSY:
+            # The op never ran (contention); raise a distinct, catchable error.
+            raise CollectionBusyError(err.message)
+        # input_error / unknown_action / internal_error / wire-version mismatch:
+        # all are a ServerError the CLI renders as a clean message. (A wire
+        # mismatch arrives as input_error with a "wire protocol version" message.)
+        raise ServerError(err.message)
+
+    # -- Typed action wrappers ----------------------------------------------
 
     def collection_info(
         self,
@@ -312,7 +326,7 @@ class ShrikeClient:
             args["include"] = include
         if note_type_details:
             args["note_type_details"] = note_type_details
-        return CollectionInfo.model_validate(self._call("collection_info", args))
+        return CollectionInfo.model_validate(self._action("collection_info", args))
 
     def list_notes(
         self,
@@ -336,11 +350,11 @@ class ShrikeClient:
         ):
             if value is not None:
                 args[key] = value
-        return ListNotesResponse.model_validate(self._call("list_notes", args))
+        return ListNotesResponse.model_validate(self._action("list_notes", args))
 
     def query(self, query: str, *, fields: str = "full", limit: int = 20) -> ListNotesResponse:
         return ListNotesResponse.model_validate(
-            self._call("collection_query", {"query": query, "fields": fields, "limit": limit})
+            self._action("collection_query", {"query": query, "fields": fields, "limit": limit})
         )
 
     def migrate_note_type(
@@ -360,7 +374,7 @@ class ShrikeClient:
         }
         if template_map:
             args["template_map"] = template_map
-        return MigrateNoteTypeResponse.model_validate(self._call("migrate_note_type", args))
+        return MigrateNoteTypeResponse.model_validate(self._action("migrate_note_type", args))
 
     def search_notes(
         self,
@@ -383,7 +397,7 @@ class ShrikeClient:
         ):
             if value is not None:
                 args[key] = value
-        return SearchResponse.model_validate(self._call("search_notes", args))
+        return SearchResponse.model_validate(self._action("search_notes", args))
 
     def upsert_notes(
         self,
@@ -432,7 +446,7 @@ class ShrikeClient:
             op if isinstance(op, dict) else op.model_dump(exclude_none=True) for op in operations
         ]
         return UpdateNoteTypeFieldsResponse.model_validate(
-            self._call("update_note_type_fields", {"note_type": note_type, "operations": ops})
+            self._action("update_note_type_fields", {"note_type": note_type, "operations": ops})
         )
 
     def update_note_type_templates(
@@ -442,7 +456,7 @@ class ShrikeClient:
             op if isinstance(op, dict) else op.model_dump(exclude_none=True) for op in operations
         ]
         return UpdateNoteTypeTemplatesResponse.model_validate(
-            self._call("update_note_type_templates", {"note_type": note_type, "operations": ops})
+            self._action("update_note_type_templates", {"note_type": note_type, "operations": ops})
         )
 
     def find_replace_note_types(
@@ -458,7 +472,7 @@ class ShrikeClient:
         match_case: bool = True,
     ) -> FindReplaceNoteTypesResponse:
         return FindReplaceNoteTypesResponse.model_validate(
-            self._call(
+            self._action(
                 "find_replace_note_types",
                 {
                     "note_type": note_type,
@@ -478,25 +492,27 @@ class ShrikeClient:
     ) -> UpdateNoteTypeFieldMetadataResponse:
         payload = [f if isinstance(f, dict) else f.model_dump(exclude_none=True) for f in fields]
         return UpdateNoteTypeFieldMetadataResponse.model_validate(
-            self._call(
+            self._action(
                 "update_note_type_field_metadata",
                 {"note_type": note_type, "fields": payload},
             )
         )
 
     def delete_note_types(self, ids: list[int]) -> DeleteNoteTypesResponse:
-        return DeleteNoteTypesResponse.model_validate(self._call("delete_note_types", {"ids": ids}))
+        return DeleteNoteTypesResponse.model_validate(
+            self._action("delete_note_types", {"ids": ids})
+        )
 
     def delete_notes(self, ids: list[int]) -> DeleteNotesResponse:
         """Delete notes, transparently batching if over the server limit."""
         if len(ids) <= 100:
-            return DeleteNotesResponse.model_validate(self._call("delete_notes", {"ids": ids}))
+            return DeleteNotesResponse.model_validate(self._action("delete_notes", {"ids": ids}))
 
         all_deleted: list[int] = []
         all_not_found: list[int] = []
         for i in range(0, len(ids), 100):
             chunk = ids[i : i + 100]
-            result = self._call("delete_notes", {"ids": chunk})
+            result = self._action("delete_notes", {"ids": chunk})
             all_deleted.extend(result.get("deleted", []))
             all_not_found.extend(result.get("not_found", []))
         return DeleteNotesResponse(deleted=all_deleted, not_found=all_not_found)
@@ -524,7 +540,7 @@ class ShrikeClient:
 
         if len(note_ids) <= 1000:
             return UpdateNoteTagsResponse.model_validate(
-                self._call("update_note_tags", {"note_ids": note_ids, **args})
+                self._action("update_note_tags", {"note_ids": note_ids, **args})
             )
 
         modified = 0
@@ -532,7 +548,7 @@ class ShrikeClient:
         message: str | None = None
         for i in range(0, len(note_ids), 1000):
             chunk = note_ids[i : i + 1000]
-            result = self._call("update_note_tags", {"note_ids": chunk, **args})
+            result = self._action("update_note_tags", {"note_ids": chunk, **args})
             modified += result.get("notes_modified", 0)
             not_found.extend(result.get("not_found", []))
             message = result.get("message") or message
@@ -544,7 +560,7 @@ class ShrikeClient:
         args: dict[str, Any] = {"old": old, "new": new}
         if note_ids:
             args["note_ids"] = note_ids
-        return RenameTagResponse.model_validate(self._call("rename_tag", args))
+        return RenameTagResponse.model_validate(self._action("rename_tag", args))
 
     def prune(
         self,
@@ -556,7 +572,7 @@ class ShrikeClient:
         dry_run: bool = False,
     ) -> CollectionPruneResponse:
         return CollectionPruneResponse.model_validate(
-            self._call(
+            self._action(
                 "collection_prune",
                 {
                     "unused_tags": unused_tags,
@@ -644,9 +660,10 @@ class ShrikeClient:
             args["note_ids"] = list(note_ids)
         if output_path is not None:
             args["output_path"] = output_path
-        raw = self._call("export_package", args)
-        # A union (non-object-root) return is wrapped by FastMCP under a
-        # `result` key in structuredContent; the flat-model tools aren't.
+        raw = self._action("export_package", args)
+        # A union (non-object-root) response is wrapped under a `result` key by
+        # the actions serializer (mirroring MCP's structuredContent); the
+        # flat-model actions aren't.
         payload = raw["result"] if isinstance(raw.get("result"), dict) else raw
         return _EXPORT_ADAPTER.validate_python(payload)
 
@@ -669,15 +686,15 @@ class ShrikeClient:
             args["pattern"] = pattern
         if limit is not None:
             args["limit"] = limit
-        return ListMediaResponse.model_validate(self._call("list_media", args))
+        return ListMediaResponse.model_validate(self._action("list_media", args))
 
     def delete_media(self, filenames: Sequence[str]) -> DeleteMediaResponse:
         return DeleteMediaResponse.model_validate(
-            self._call("delete_media", {"filenames": list(filenames)})
+            self._action("delete_media", {"filenames": list(filenames)})
         )
 
     def collection_check(self) -> CollectionCheckResponse:
-        return CollectionCheckResponse.model_validate(self._call("collection_check", {}))
+        return CollectionCheckResponse.model_validate(self._action("collection_check", {}))
 
     def import_package(
         self,
@@ -690,7 +707,7 @@ class ShrikeClient:
     ) -> ImportPackageResponse:
         """Import an .apkg/.colpkg from a server-local path (#72)."""
         return ImportPackageResponse.model_validate(
-            self._call(
+            self._action(
                 "import_package",
                 {
                     "path": path,
@@ -715,7 +732,7 @@ class ShrikeClient:
         return UpsertDecksResponse.model_validate(merged)
 
     def delete_decks(self, names: list[str]) -> DeleteDecksResponse:
-        return DeleteDecksResponse.model_validate(self._call("delete_decks", {"decks": names}))
+        return DeleteDecksResponse.model_validate(self._action("delete_decks", {"decks": names}))
 
     def find_replace_notes(
         self,
@@ -747,7 +764,7 @@ class ShrikeClient:
         ):
             if value is not None:
                 args[key] = value
-        return FindReplaceResponse.model_validate(self._call("find_replace_notes", args))
+        return FindReplaceResponse.model_validate(self._action("find_replace_notes", args))
 
     def _batched_call(
         self,
@@ -762,13 +779,13 @@ class ShrikeClient:
         """Split a list of items into batches and merge the results."""
         extra = extra or {}
         if len(items) <= batch_size:
-            return self._call(tool_name, {param_key: items, **extra})
+            return self._action(tool_name, {param_key: items, **extra})
 
         all_results: list[Any] = []
         message: str | None = None
         for i in range(0, len(items), batch_size):
             chunk = items[i : i + batch_size]
-            result = self._call(tool_name, {param_key: chunk, **extra})
+            result = self._action(tool_name, {param_key: chunk, **extra})
             all_results.extend(result.get(result_key, []))
             message = result.get("message") or message
         merged: dict[str, Any] = {result_key: all_results}

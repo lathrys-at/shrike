@@ -25,11 +25,17 @@ def _resp(status: int = 200, json_body: dict | None = None) -> MagicMock:
 
 
 def _capture_post(body: dict):
-    """A patched httpx.Client.post that records the JSON payload it was sent."""
+    """A patched httpx.Client.post that records the URL + JSON body it was sent.
+
+    The actions edge (#687) POSTs the action's arguments as the JSON body to
+    ``/actions/{name}`` and gets the response-model dict back directly.
+    """
     captured: dict = {}
 
     def _post(self, url, *, json, **kwargs):  # noqa: ANN001, A002
-        captured.update(json)
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = kwargs.get("headers")
         return _resp(200, body)
 
     return _post, captured
@@ -37,74 +43,93 @@ def _capture_post(body: dict):
 
 class TestSelectorInjection:
     """#68: the client injects its --profile/--collection selector into every
-    routed tool call's arguments; list_profiles (registry-level) is exempt."""
+    routed action's arguments; list_profiles (registry-level) is exempt."""
 
     def test_selector_injected_into_arguments(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False, collection="work")
-        body = {"result": {"structuredContent": {}}}
-        post, captured = _capture_post(body)
+        post, captured = _capture_post({})
         with patch("httpx.Client.post", post):
-            c._call("collection_info", {"include": ["summary"]})
-        assert captured["params"]["arguments"]["collection"] == "work"
-        assert captured["params"]["arguments"]["include"] == ["summary"]
+            c._action("collection_info", {"include": ["summary"]})
+        assert captured["url"].endswith("/actions/collection_info")
+        assert captured["json"]["collection"] == "work"
+        assert captured["json"]["include"] == ["summary"]
 
     def test_no_selector_leaves_arguments_untouched(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)  # collection=None
-        body = {"result": {"structuredContent": {}}}
-        post, captured = _capture_post(body)
+        post, captured = _capture_post({})
         with patch("httpx.Client.post", post):
-            c._call("collection_info", {})
-        assert "collection" not in captured["params"]["arguments"]
+            c._action("collection_info", {})
+        assert "collection" not in captured["json"]
 
     def test_explicit_call_collection_wins(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False, collection="work")
-        body = {"result": {"structuredContent": {}}}
-        post, captured = _capture_post(body)
+        post, captured = _capture_post({})
         with patch("httpx.Client.post", post):
-            c._call("collection_info", {"collection": "override"})
-        assert captured["params"]["arguments"]["collection"] == "override"
+            c._action("collection_info", {"collection": "override"})
+        assert captured["json"]["collection"] == "override"
 
     def test_list_profiles_is_exempt(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False, collection="work")
-        body = {"result": {"structuredContent": {}}}
-        post, captured = _capture_post(body)
+        post, captured = _capture_post({})
         with patch("httpx.Client.post", post):
-            c._call("list_profiles", {})
-        assert "collection" not in captured["params"]["arguments"]
+            c._action("list_profiles", {})
+        assert "collection" not in captured["json"]
 
 
-class TestCall:
-    def test_success_returns_content(self) -> None:
+class TestAction:
+    def test_success_returns_body(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
-        body = {"result": {"structuredContent": {"ok": 1}}}
-        with patch("httpx.Client.post", return_value=_resp(200, body)):
-            assert c._call("t") == {"ok": 1}
+        with patch("httpx.Client.post", return_value=_resp(200, {"ok": 1})):
+            assert c._action("t") == {"ok": 1}
 
-    def test_is_error_result_raises(self) -> None:
+    def test_posts_to_actions_route_with_wire_header(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
-        body = {"result": {"isError": True, "content": [{"type": "text", "text": "bad note"}]}}
+        from shrike.client import WIRE_VERSION_HEADER
+        from shrike.schemas import WIRE_PROTOCOL_VERSION
+
+        post, captured = _capture_post({"ok": 1})
+        with patch("httpx.Client.post", post):
+            c._action("collection_info", {})
+        assert captured["url"] == "http://x:1/actions/collection_info"
+        assert captured["headers"][WIRE_VERSION_HEADER] == str(WIRE_PROTOCOL_VERSION)
+
+    def test_input_error_raises_server_error(self) -> None:
+        c = ShrikeClient("http://x:1/mcp", autostart=False)
+        body = {"code": "input_error", "message": "bad note"}
         with (
-            patch("httpx.Client.post", return_value=_resp(200, body)),
+            patch("httpx.Client.post", return_value=_resp(400, body)),
             pytest.raises(ServerError, match="bad note"),
         ):
-            c._call("t")
+            c._action("t")
 
-    def test_jsonrpc_error(self) -> None:
+    def test_unknown_action_raises_server_error(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
+        body = {"code": "unknown_action", "message": "No action named 'nope'."}
         with (
-            patch("httpx.Client.post", return_value=_resp(200, {"error": {"code": -1}})),
-            pytest.raises(ServerError),
+            patch("httpx.Client.post", return_value=_resp(404, body)),
+            pytest.raises(ServerError, match="No action named"),
         ):
-            c._call("t")
+            c._action("nope")
 
-    def test_http_error_raises_typed(self) -> None:
+    def test_internal_error_raises_server_error(self) -> None:
+        c = ShrikeClient("http://x:1/mcp", autostart=False)
+        body = {"code": "internal_error", "message": "The server failed to process this action."}
+        with (
+            patch("httpx.Client.post", return_value=_resp(500, body)),
+            pytest.raises(ServerError, match="failed to process"),
+        ):
+            c._action("t")
+
+    def test_undecodable_error_falls_back_to_http_error(self) -> None:
+        # A non-2xx without a recognizable ActionError envelope (e.g. a proxy
+        # 502 / the guard's 421) maps to the generic typed HTTP error.
         c = ShrikeClient("http://x:1/mcp", autostart=False)
         with (
-            patch("httpx.Client.post", return_value=_resp(500, {})),
+            patch("httpx.Client.post", return_value=_resp(502, {"oops": True})),
             pytest.raises(ServerHTTPError) as ei,
         ):
-            c._call("t")
-        assert ei.value.status_code == 500
+            c._action("t")
+        assert ei.value.status_code == 502
 
     def test_unreachable(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
@@ -112,7 +137,7 @@ class TestCall:
             patch("httpx.Client.post", side_effect=httpx.ConnectError("down")),
             pytest.raises(ServerUnreachableError),
         ):
-            c._call("t")
+            c._action("t")
 
 
 class TestCustomEndpoints:
@@ -261,19 +286,18 @@ class TestLifecycle:
     def test_call_autostarts_then_retries(self, tmp_path) -> None:
         spec = ServerSpec(collection="/c.anki2", port=9004, log_dir=str(tmp_path))
         c = ShrikeClient(spec.url, spec=spec, autostart=True)
-        body = {"result": {"structuredContent": {"ok": 1}}}
         calls = {"n": 0}
 
         def post(url, json=None, headers=None, timeout=None):  # type: ignore[no-untyped-def]
             calls["n"] += 1
             if calls["n"] == 1:
                 raise httpx.ConnectError("down")
-            return _resp(200, body)
+            return _resp(200, {"ok": 1})
 
         with (
             patch("httpx.Client.post", side_effect=post),
             patch.object(ShrikeClient, "ensure_running", return_value=spec.url) as er,
         ):
-            assert c._call("t") == {"ok": 1}
+            assert c._action("t") == {"ok": 1}
         er.assert_called_once()
         assert calls["n"] == 2
