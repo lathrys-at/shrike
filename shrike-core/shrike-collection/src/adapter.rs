@@ -727,23 +727,28 @@ impl ServiceAdapter {
     /// `db_rows` surface `col_mod`/the prune reads use), so the whole read is
     /// one `SELECT … WHERE id IN (…)` round trip.
     ///
-    /// `UpdateNotes` re-loads each note from storage by id and diffs (anki's
-    /// `update_note_inner`), re-stamping `mtime`/`usn` itself and rejecting a
-    /// changed `guid`/`notetype_id`/`fields` — so the row we send must carry
-    /// each note's *current* guid/notetype_id/fields verbatim (only `tags` is
-    /// overwritten), exactly as the prior `GetNote` fetch did. `flds` is anki's
-    /// 0x1f-separated field blob (mirrors `proto_to_note`'s split).
+    /// `UpdateNotes` re-loads each note from storage by id (anki's
+    /// `update_note_inner`); `note_differs_from_db` is only a skip-if-identical
+    /// short-circuit, NOT a guard — a row whose `guid`/`notetype_id`/`fields`
+    /// differ from storage is APPLIED/written through (a changed notetype even
+    /// regenerates cards), and anki re-stamps `mtime`/`usn` itself. So a wrong
+    /// value here would silently CORRUPT the note (it does not error) —
+    /// therefore the row we send MUST carry each note's *current*
+    /// guid/notetype_id/fields verbatim (only `tags` is overwritten), exactly
+    /// as the prior `GetNote` fetch did. `flds` is anki's 0x1f-separated field
+    /// blob, split the same way anki's `split_fields` (and our `typed_notes`)
+    /// does.
+    ///
+    /// Contract: callers must pre-filter to existing ids — an absent id is
+    /// silently skipped here (the `IN (…)` read just omits it; no per-note
+    /// `GetNote`-style not-found error), mirroring the old per-note skip.
     pub fn set_note_tags_bulk(&self, note_ids: &[i64], tags: &[String]) -> NativeResult<usize> {
         if note_ids.is_empty() {
             return Ok(0);
         }
         // Integer ids (never user strings) → safe to inline, like the other
         // db_rows reads in this crate; no proxy parameterization needed.
-        let id_list = note_ids
-            .iter()
-            .map(i64::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
+        let id_list = crate::read::ids_sql_list(note_ids);
         let rows = self.db_rows(&format!(
             "select id, guid, mid, mod, usn, flds from notes where id in ({id_list})"
         ))?;
