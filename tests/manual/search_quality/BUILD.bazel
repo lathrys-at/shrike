@@ -19,8 +19,15 @@ py_library(
         "manifest.py",
         "metrics.py",
     ],
-    data = glob(["fixtures/**"]),
-    imports = ["../.."],  # repo root on sys.path so `tests.search_quality.*` resolves
+    data = glob([
+        "fixtures/**",
+        # the committed corpus data (read at runtime by the manual suite);
+        # the gitignored cache/ + RESULTS.md are never present at build time.
+        "manifest.json",
+        "resolved_urls.json",
+        "ASSETS.md",
+    ]),
+    imports = ["../../.."],  # repo root on sys.path so `tests.manual.search_quality.*` resolves
     visibility = ["//tests:__subpackages__"],
     deps = [requirement("httpx")],
 )
@@ -37,7 +44,7 @@ py_library(
         "inprocess.py",
         "runner.py",
     ],
-    imports = ["../.."],
+    imports = ["../../.."],
     visibility = ["//tests:__subpackages__"],
     deps = [
         ":search_quality",

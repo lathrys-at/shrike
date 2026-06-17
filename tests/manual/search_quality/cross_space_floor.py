@@ -15,7 +15,7 @@ This is the reproducible #576 decision artifact — the integration suite's
 permanent guard; this script regenerates the before/after table on demand.
 
 Run (needs the real models + the Commons corpus, like the manual suite):
-    SHRIKE_SEARCH_QUALITY=1 .venv/bin/python scripts/eval_cross_space_floor.py
+    SHRIKE_SEARCH_QUALITY=1 .venv/bin/python tests/manual/search_quality/cross_space_floor.py
 """
 
 from __future__ import annotations
@@ -25,13 +25,13 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]  # repo root (for `import tests.*`)
 sys.path.insert(0, str(ROOT))
 
-from tests.search_quality.inprocess import to_returned_cards  # noqa: E402
-from tests.search_quality.manifest import load_manifest  # noqa: E402
-from tests.search_quality.metrics import SuiteReport, evaluate_query  # noqa: E402
-from tests.search_quality.runner import (  # noqa: E402
+from tests.manual.search_quality.inprocess import to_returned_cards  # noqa: E402
+from tests.manual.search_quality.manifest import load_manifest  # noqa: E402
+from tests.manual.search_quality.metrics import SuiteReport, evaluate_query  # noqa: E402
+from tests.manual.search_quality.runner import (  # noqa: E402
     MANIFEST,
     build_real_collection,
     clip_fired,
@@ -89,7 +89,9 @@ async def main() -> None:
 
     rows = []
     try:
-        derived = await ip.harness.kernel.calibrate_secondary_floors(ip.harness.cross_space_floor_margin)
+        derived = await ip.harness.kernel.calibrate_secondary_floors(
+            ip.harness.cross_space_floor_margin
+        )
         print(f"\nDERIVED secondary image floor(s): {derived}", flush=True)
 
         for label, mode in [

@@ -6,10 +6,10 @@ metadata** (Commons page / license / author) is captured for ``ASSETS.md``.
 
 The contract that keeps the AGPL repo clean of redistributed assets:
 
-  - **URLs are committed** (``eval/search_quality/resolved_urls.json``) — the
+  - **URLs are committed** (``tests/manual/search_quality/resolved_urls.json``) — the
     pinned selection, so a replay is reproducible.
   - **Bytes are NEVER committed** — downloaded on demand into a *gitignored*
-    cache (``eval/search_quality/cache/``). The suite is env-gated and manual,
+    cache (``tests/manual/search_quality/cache/``). The suite is env-gated and manual,
     so the bytes only ever exist on a developer's machine that opted in with
     ``SHRIKE_SEARCH_QUALITY=1``.
 

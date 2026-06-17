@@ -28,8 +28,8 @@ pytest_test(
         ":conftest",
         # test_search_quality.py drives the REAL search_notes action in-process
         # via the StubEmbedder + the shared metric engine (#559).
-        "//tests/search_quality",
-        "//tests/search_quality:inprocess",
+        "//tests/manual/search_quality",
+        "//tests/manual/search_quality:inprocess",
     ],
     size = "medium",
 )

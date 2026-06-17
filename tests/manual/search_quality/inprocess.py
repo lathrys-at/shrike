@@ -194,7 +194,7 @@ class InProcessSearch:
 
 def to_returned_cards(matches: Sequence[Mapping[str, Any]]) -> list[Any]:
     """Adapt search_notes match dicts into the metric engine's ``ReturnedCard``s."""
-    from tests.search_quality.metrics import ReturnedCard
+    from tests.manual.search_quality.metrics import ReturnedCard
 
     cards = []
     for rank, m in enumerate(matches, start=1):
@@ -215,7 +215,7 @@ def to_returned_cards(matches: Sequence[Mapping[str, Any]]) -> list[Any]:
 def to_ranked_cards(matches: Sequence[Mapping[str, Any]]) -> list[Any]:
     """Adapt match dicts into ``RankedCard``s (per-signal ranks from provenance)
     for the pure RRF golden-order recompute."""
-    from tests.search_quality.metrics import RankedCard
+    from tests.manual.search_quality.metrics import RankedCard
 
     out = []
     for m in matches:

@@ -177,8 +177,8 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//tests/search_quality",
-        "//tests/search_quality:inprocess",
+        "//tests/manual/search_quality",
+        "//tests/manual/search_quality:inprocess",
         requirement("onnxruntime"),
         requirement("pillow"),
         requirement("tokenizers"),

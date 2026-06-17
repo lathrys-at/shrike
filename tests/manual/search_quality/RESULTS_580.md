@@ -1,7 +1,7 @@
 # #580 cross-space floor-admission (+ #582 per-note floor) — measured results
 
 Real MiniLM (text) + CLIP (image) 2-space corpus (`SHRIKE_SEARCH_QUALITY=1`,
-`scripts/eval_cross_space_floor_admit.py`). Derived secondary image floor =
+`tests/manual/search_quality/cross_space_floor_admit.py`). Derived secondary image floor =
 **0.246** (the `clip` space's calibrated `mean + margin·std`, margin 1.0). Single
 image space throughout (the production-valid config; >1 image space is a
 `ProfileError`). `FloorAdmit` is the SHIPPED production default since #580; the

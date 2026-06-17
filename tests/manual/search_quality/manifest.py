@@ -32,7 +32,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tests.search_quality.metrics import GradedGold
+from tests.manual.search_quality.metrics import GradedGold
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,7 @@
 These images are **not redistributed** in this repository. The manual
 search-quality suite (`SHRIKE_SEARCH_QUALITY=1`) resolves each via the
 Wikimedia Commons API and downloads the bytes on demand into the
-gitignored `eval/search_quality/cache/` — only the pinned URLs
+gitignored `tests/manual/search_quality/cache/` — only the pinned URLs
 (`resolved_urls.json`) and this attribution table are committed.
 
 Licensing preference is **public domain / PD-art / CC0**; a few
@@ -11,7 +11,7 @@ CC-BY-SA images are used where no public-domain file fits the corpus
 need, and are attributed below. Each row links its Wikimedia Commons
 page, where the full license terms and authorship live.
 
-## Corpus images (`eval/search_quality/`)
+## Corpus images (`tests/manual/search_quality/`)
 
 | Handle | License | Author | Commons page |
 | --- | --- | --- | --- |

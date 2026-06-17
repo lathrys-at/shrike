@@ -22,14 +22,14 @@ import pytest
 
 shrike_native = pytest.importorskip("shrike_native")
 
-from tests.search_quality.inprocess import (  # noqa: E402
+from tests.manual.search_quality.inprocess import (  # noqa: E402
     StubEmbedder,
     build_harness,
     onehot,
     to_ranked_cards,
     to_returned_cards,
 )
-from tests.search_quality.metrics import (  # noqa: E402
+from tests.manual.search_quality.metrics import (  # noqa: E402
     GradedGold,
     evaluate_query,
     rrf_order_from_ranks,
@@ -118,7 +118,7 @@ class TestSignalDisagreement:
         # the rest (0.5 vs 1.0) — a near-miss is weaker evidence than a literal
         # or semantic hit. Two pure-arithmetic facts over the canonical
         # constants, no server:
-        from tests.search_quality.metrics import RRF_WEIGHTS, RankedCard
+        from tests.manual.search_quality.metrics import RRF_WEIGHTS, RankedCard
 
         # (1) The weight is genuinely lower than every other signal's.
         others = {s: w for s, w in RRF_WEIGHTS.items() if s != "fuzzy"}

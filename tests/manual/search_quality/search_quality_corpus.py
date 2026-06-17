@@ -2,20 +2,22 @@
 """Resolve + pin the search-quality corpus's Wikimedia Commons images (#559 PR2).
 
 Corpus tooling (NOT a test): for every ``source: commons`` image in
-``eval/search_quality/manifest.json`` it resolves a real Commons file, **pins
-the URL** in ``eval/search_quality/resolved_urls.json`` (committed), and writes
-``eval/search_quality/ASSETS.md`` — the per-image attribution table (Commons
+``tests/manual/search_quality/manifest.json`` it resolves a real Commons file, **pins
+the URL** in ``tests/manual/search_quality/resolved_urls.json`` (committed), and writes
+``tests/manual/search_quality/ASSETS.md`` — the per-image attribution table (Commons
 page / license / author) the AGPL repo needs since it redistributes no bytes.
 
 Image **bytes are never committed**: the manual suite downloads them on demand
-into the gitignored ``eval/search_quality/cache/`` at run time. PD / PD-art /
+into the gitignored ``tests/manual/search_quality/cache/`` at run time. PD / PD-art /
 CC0 are preferred at corpus design time; CC-BY-SA is allowed but is attributed
 here.
 
 Run::
 
-    python scripts/eval_search_quality_corpus.py            # resolve missing, write ASSETS.md
-    python scripts/eval_search_quality_corpus.py --refresh  # re-resolve every term
+    # resolve missing, write ASSETS.md:
+    python tests/manual/search_quality/search_quality_corpus.py
+    # re-resolve every term:
+    python tests/manual/search_quality/search_quality_corpus.py --refresh
 
 The pinned URLs make a replay reproducible; ``--refresh`` re-resolves (a Commons
 file can be deleted/renamed). The licensing block ALWAYS re-reads metadata so
@@ -29,13 +31,13 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[3]  # repo root (for `import tests.*`)
 sys.path.insert(0, str(ROOT))
 
-EVAL_DIR = ROOT / "eval" / "search_quality"
-MANIFEST = EVAL_DIR / "manifest.json"
-RESOLVED = EVAL_DIR / "resolved_urls.json"  # committed: pins image selection
-ASSETS = EVAL_DIR / "ASSETS.md"
+DATA_DIR = Path(__file__).resolve().parent  # the unit holds its own corpus data
+MANIFEST = DATA_DIR / "manifest.json"
+RESOLVED = DATA_DIR / "resolved_urls.json"  # committed: pins image selection
+ASSETS = DATA_DIR / "ASSETS.md"
 
 # Canonical pins for handles where a fuzzy Commons search picks the wrong file
 # (a desmosome instead of the cell, a rock formation instead of a violin). These
@@ -71,7 +73,7 @@ def resolve_corpus(refresh: bool) -> dict[str, dict]:
 
     A handle already pinned in resolved_urls.json keeps its URL (unless
     --refresh), but its metadata is always re-read so ASSETS.md is current."""
-    from tests.search_quality.commons import resolve_asset
+    from tests.manual.search_quality.commons import resolve_asset
 
     manifest = json.loads(MANIFEST.read_text())
     pins: dict[str, str] = json.loads(RESOLVED.read_text()) if RESOLVED.exists() else {}
@@ -114,7 +116,7 @@ def write_assets(resolved: dict[str, dict]) -> None:
         "These images are **not redistributed** in this repository. The manual",
         "search-quality suite (`SHRIKE_SEARCH_QUALITY=1`) resolves each via the",
         "Wikimedia Commons API and downloads the bytes on demand into the",
-        "gitignored `eval/search_quality/cache/` — only the pinned URLs",
+        "gitignored `tests/manual/search_quality/cache/` — only the pinned URLs",
         "(`resolved_urls.json`) and this attribution table are committed.",
         "",
         "Licensing preference is **public domain / PD-art / CC0**; a few",
@@ -122,7 +124,7 @@ def write_assets(resolved: dict[str, dict]) -> None:
         "need, and are attributed below. Each row links its Wikimedia Commons",
         "page, where the full license terms and authorship live.",
         "",
-        "## Corpus images (`eval/search_quality/`)",
+        "## Corpus images (`tests/manual/search_quality/`)",
         "",
         "| Handle | License | Author | Commons page |",
         "| --- | --- | --- | --- |",

@@ -115,7 +115,7 @@ _EMBED_HELPERS = [
 ]
 
 # The search-quality metric engine + manifest loader (#559): pure, native-free
-# tests over the shared //tests/search_quality support (not a //src/shrike lib).
+# tests over the shared //tests/manual/search_quality support (not a //src/shrike lib).
 _SEARCH_QUALITY = ["test_search_quality_metrics.py"]
 
 _EMBEDDING = [
@@ -307,7 +307,7 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//tests/search_quality",
+        "//tests/manual/search_quality",
     ],
 )
 

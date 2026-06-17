@@ -17,8 +17,8 @@ Run it explicitly::
     SHRIKE_SEARCH_QUALITY=1 pytest tests/integration/test_search_quality.py -m search_quality
 
 It downloads a ~30-image Wikimedia Commons corpus (pinned URLs in
-``eval/search_quality/resolved_urls.json``; bytes cached in the gitignored
-``eval/search_quality/cache/``; attribution in ``ASSETS.md``) and runs real
+``tests/manual/search_quality/resolved_urls.json``; bytes cached in the gitignored
+``tests/manual/search_quality/cache/``; attribution in ``ASSETS.md``) and runs real
 CLIP + MiniLM. The recall/precision/cross-lingual/calibrated-gate *classes* land
 in PR2b; PR2a proves the corpus loads, the Commons resolve→cache works, and the
 real 2-space loop (a dedicated text space + a separate CLIP space, #229)
@@ -37,10 +37,10 @@ from tests.integration.conftest import requires_clip, requires_search_quality
 pytestmark = [pytest.mark.integration, pytest.mark.search_quality, requires_search_quality]
 
 ROOT = Path(__file__).resolve().parents[2]
-EVAL_DIR = ROOT / "eval" / "search_quality"
-MANIFEST = EVAL_DIR / "manifest.json"
-RESOLVED = EVAL_DIR / "resolved_urls.json"
-CACHE = EVAL_DIR / "cache"
+DATA_DIR = ROOT / "tests" / "manual" / "search_quality"
+MANIFEST = DATA_DIR / "manifest.json"
+RESOLVED = DATA_DIR / "resolved_urls.json"
+CACHE = DATA_DIR / "cache"
 
 # At least this many image-bearing notes so the activation gate calibrates on
 # real CLIP (the kernel's CALIB_MIN). The corpus is sized to clear it.
@@ -57,7 +57,7 @@ class TestCorpusManifest:
     gate — no models or network needed (pure manifest checks)."""
 
     def test_manifest_loads_and_is_graded(self) -> None:
-        from tests.search_quality.manifest import load_manifest
+        from tests.manual.search_quality.manifest import load_manifest
 
         manifest = load_manifest(MANIFEST)
         # Open-world: per-query sparse gold (1 answer + a few hard-negatives among
@@ -72,7 +72,7 @@ class TestCorpusManifest:
                 assert nid in ids, f"query {q.q!r} grades a non-existent card {nid}"
 
     def test_at_least_thirty_image_bearing_notes(self) -> None:
-        from tests.search_quality.manifest import load_manifest
+        from tests.manual.search_quality.manifest import load_manifest
 
         manifest = load_manifest(MANIFEST)
         image_cards = [c for c in manifest.cards if c.media]
@@ -85,7 +85,7 @@ class TestCorpusManifest:
         # The committed pins make a replay reproducible without re-resolving.
         import json
 
-        from tests.search_quality.manifest import load_manifest
+        from tests.manual.search_quality.manifest import load_manifest
 
         manifest = load_manifest(MANIFEST)
         pins = json.loads(RESOLVED.read_text())
@@ -94,13 +94,13 @@ class TestCorpusManifest:
                 if media.source == "commons":
                     assert media.handle in pins, (
                         f"image handle {media.handle!r} is not pinned in resolved_urls.json "
-                        "(run scripts/eval_search_quality_corpus.py)"
+                        "(run tests/manual/search_quality/search_quality_corpus.py)"
                     )
                     assert pins[media.handle].startswith("http"), pins[media.handle]
 
     def test_adversarial_classes_are_present(self) -> None:
         # The corpus exercises the killer constructions, not just plain recall.
-        from tests.search_quality.manifest import load_manifest
+        from tests.manual.search_quality.manifest import load_manifest
 
         manifest = load_manifest(MANIFEST)
         classes = {q.adversarial_class for q in manifest.queries}
@@ -125,7 +125,7 @@ class TestCommonsResolution:
 
         from PIL import Image
 
-        from tests.search_quality.commons import CommonsCache
+        from tests.manual.search_quality.commons import CommonsCache
 
         cache = CommonsCache(RESOLVED, CACHE)
         pins = cache.load_pins()
@@ -153,8 +153,8 @@ class TestRealTwoSpaceSmoke:
             cached_clip_model_dir,
             cached_onnx_model_dir,
         )
-        from tests.search_quality.commons import CommonsCache
-        from tests.search_quality.inprocess import build_harness_real
+        from tests.manual.search_quality.commons import CommonsCache
+        from tests.manual.search_quality.inprocess import build_harness_real
 
         base = _model_cache_base()
         text = OnnxBackend(model=str(cached_onnx_model_dir(base)))
@@ -208,7 +208,7 @@ class TestRealTwoSpaceSmoke:
 # build + every query is one ~15-30s run on real CLIP + MiniLM) and assert the
 # per-class thresholds. Thresholds are MEMBERSHIP/floor-based, never exact-slot,
 # so they survive the int8 cosine wobble (#559 methodology). The numbers behind
-# them are reproduced by `scripts/eval_search_quality.py` into RESULTS.md.
+# them are reproduced by `tests/manual/search_quality/search_quality.py` into RESULTS.md.
 
 
 @pytest.fixture(scope="module")
@@ -219,7 +219,7 @@ def real_run(tmp_path_factory):
     threshold/characterization test reads the shared :class:`RunResult`."""
     import asyncio
 
-    from tests.search_quality.runner import run_search_quality
+    from tests.manual.search_quality.runner import run_search_quality
 
     tmp = tmp_path_factory.mktemp("real_run")
     return asyncio.run(run_search_quality(tmp))
@@ -288,7 +288,7 @@ class TestRealPrecision:
         # now drops every one of them: the weak image best clears no floor. So the
         # ∅-gold query surfaces NO `image#clip` card at all. (Was a
         # characterization of the documented leak; #576 closed it.)
-        from tests.search_quality.runner import clip_fired
+        from tests.manual.search_quality.runner import clip_fired
 
         q = next(qq for qq in real_run.manifest.queries if qq.adversarial_class == "over_return")
         returned = real_run.returns.get(q.q, [])
@@ -353,7 +353,7 @@ class TestRealActivationGate:
     ]
 
     def test_clip_fires_for_strongly_cross_modal_queries(self, real_run) -> None:
-        from tests.search_quality.runner import clip_fired
+        from tests.manual.search_quality.runner import clip_fired
 
         # A MEMBERSHIP floor, not an all-or-nothing conjunction (matching the
         # suite's threshold philosophy): the image signal must contribute for the
@@ -421,7 +421,7 @@ class TestSpuriousFilenameFloorAdmit:
     CLIP encoder ranks the correct visual sense first."""
 
     def test_on_topic_sense_wins_rank_one_and_corroborates(self, real_run) -> None:
-        from tests.search_quality.runner import clip_fired
+        from tests.manual.search_quality.runner import clip_fired
 
         for q in real_run.manifest.queries:
             if q.adversarial_class != "spurious_filename":

@@ -33,9 +33,9 @@ and authorship live.
 
 ```bash
 # resolve any new images, re-pin, regenerate ASSETS.md
-python scripts/eval_search_quality_corpus.py
+python tests/manual/search_quality/search_quality_corpus.py
 # re-resolve every term from scratch (a Commons file can be renamed/deleted)
-python scripts/eval_search_quality_corpus.py --refresh
+python tests/manual/search_quality/search_quality_corpus.py --refresh
 ```
 
 ## Running the suite

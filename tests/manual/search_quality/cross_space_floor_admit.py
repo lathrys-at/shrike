@@ -23,7 +23,7 @@ axis):
       query.
 
 Run (needs the real models + the Commons corpus, like the manual suite):
-    SHRIKE_SEARCH_QUALITY=1 .venv/bin/python scripts/eval_cross_space_floor_admit.py
+    SHRIKE_SEARCH_QUALITY=1 .venv/bin/python tests/manual/search_quality/cross_space_floor_admit.py
 """
 
 from __future__ import annotations
@@ -34,13 +34,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]  # repo root (for `import tests.*`)
 sys.path.insert(0, str(ROOT))
 
-from tests.search_quality.inprocess import to_returned_cards  # noqa: E402
-from tests.search_quality.manifest import load_manifest  # noqa: E402
-from tests.search_quality.metrics import SuiteReport, evaluate_query  # noqa: E402
-from tests.search_quality.runner import (  # noqa: E402
+from tests.manual.search_quality.inprocess import to_returned_cards  # noqa: E402
+from tests.manual.search_quality.manifest import load_manifest  # noqa: E402
+from tests.manual.search_quality.metrics import SuiteReport, evaluate_query  # noqa: E402
+from tests.manual.search_quality.runner import (  # noqa: E402
     MANIFEST,
     build_real_collection,
     clip_fired,
@@ -52,8 +52,15 @@ SPURIOUS = "spurious_filename"
 
 # The 7 filename-collision cards (manifest ids) — their <img src> filename word
 # is in the query, so the relative gate stays shut on the pre-#580 baseline.
-COLLISION_IDS = {1: "heart", 2: "skeleton", 6: "plant_cell", 7: "animal_cell",
-                 8: "citric_acid", 10: "periodic_table", 15: "great_wall"}
+COLLISION_IDS = {
+    1: "heart",
+    2: "skeleton",
+    6: "plant_cell",
+    7: "animal_cell",
+    8: "citric_acid",
+    10: "periodic_table",
+    15: "great_wall",
+}
 
 # The modes to sweep: the pre-#580 production gate (now eval-only) vs the #580
 # floor-admission family. `FloorAdmit` is the PRODUCTION default since #580.
@@ -198,7 +205,9 @@ async def main() -> None:
 
     rows = []
     try:
-        derived = await ip.harness.kernel.calibrate_secondary_floors(ip.harness.cross_space_floor_margin)
+        derived = await ip.harness.kernel.calibrate_secondary_floors(
+            ip.harness.cross_space_floor_margin
+        )
         print(f"\nDERIVED secondary image floor(s): {derived}\n", flush=True)
         for idx, (label, mode) in enumerate(MODES):
             _set_mode(mode, TAU_OVERRIDE.get(idx))
@@ -213,13 +222,17 @@ async def main() -> None:
     print("=" * 100)
     print("#580 FLOOR-ADMISSION — modality_gap recall (axis 2) + over-return leak (axis 3)")
     print("=" * 100)
-    hdr = (f"{'mode':<32}| {'mg_R1':>6}{'mg_R5':>6}{'mg_Rk':>6}{'mg_MRR':>7}{'mg_nDCG':>8} | "
-           f"{'OR_n':>5}{'OR_clip':>8}")
+    hdr = (
+        f"{'mode':<32}| {'mg_R1':>6}{'mg_R5':>6}{'mg_Rk':>6}{'mg_MRR':>7}{'mg_nDCG':>8} | "
+        f"{'OR_n':>5}{'OR_clip':>8}"
+    )
     print(hdr)
     print("-" * len(hdr))
     for label, a in rows:
-        print(f"{label:<32}| {_fmt(a['mg_r1'])}{_fmt(a['mg_r5'])}{_fmt(a['mg_rk'])}"
-              f"{_fmt(a['mg_mrr'])}{_fmt(a['mg_ndcg'])} | {a['or_count']:>5}{a['or_clip']:>8}")
+        print(
+            f"{label:<32}| {_fmt(a['mg_r1'])}{_fmt(a['mg_r5'])}{_fmt(a['mg_rk'])}"
+            f"{_fmt(a['mg_mrr'])}{_fmt(a['mg_ndcg'])} | {a['or_count']:>5}{a['or_clip']:>8}"
+        )
 
     # ── Axis 1a: collision corroboration (clip present + rank) ─────────────
     print("\n" + "=" * 100)
@@ -239,9 +252,13 @@ async def main() -> None:
     # ── Axis 1b: spurious-filename precision (ORDERING, not provenance) ─────
     print("\n" + "=" * 100)
     print("AXIS 1b — spurious-filename PRECISION (homonym pairs). With the #582 per-NOTE floor, a")
-    print("card carries image#clip only when its OWN image clears the floor — but BOTH homonym senses")
+    print(
+        "card carries image#clip only when its OWN image clears the floor — but BOTH homonym senses"
+    )
     print("are above the floor (CLIP genuinely matched them), so both are KEPT and that's correct.")
-    print("The precision that matters is ORDERING: on-topic must rank ABOVE off-topic (cosine sep).")
+    print(
+        "The precision that matters is ORDERING: on-topic must rank ABOVE off-topic (cosine sep)."
+    )
     print("=" * 100)
     for label, a in rows:
         print(f"\n  {label}")
@@ -251,14 +268,21 @@ async def main() -> None:
             on = f"on(id{row.get('on_id')}) r={row.get('on_rank')} cos={_fmt(os_)}"
             off = f"off(id{row.get('off_id')}) r={row.get('off_rank')} cos={_fmt(ofs)}"
             # The discrimination: on-topic ranks above off-topic AND wins rank-1.
-            ordered = (row.get("on_rank") is not None and row.get("off_rank") is not None
-                       and row["on_rank"] < row["off_rank"])
+            ordered = (
+                row.get("on_rank") is not None
+                and row.get("off_rank") is not None
+                and row["on_rank"] < row["off_rank"]
+            )
             ok = "PASS" if (ordered and row.get("on_rank") == 1) else "FAIL"
             print(f"    [{ok}] {row['q']:<32} {on:<28} {off:<28} sep={_fmt(sep)}")
     print("\n" + "=" * 100)
     print("DECISION RULE: a floor-admission mode is GO iff — axis1a: image#clip reaches the")
-    print("collision cards (≥ baseline) and ranks hold/improve; axis1b: on-topic outranks off-topic")
-    print("and wins rank-1 on every pair (no precision regression vs baseline); axis2: mg recall does")
+    print(
+        "collision cards (≥ baseline) and ranks hold/improve; axis1b: on-topic outranks off-topic"
+    )
+    print(
+        "and wins rank-1 on every pair (no precision regression vs baseline); axis2: mg recall does"
+    )
     print("not regress vs RelativeFloor; axis3: OR_clip stays 0.")
 
 

@@ -3,10 +3,10 @@
 ONE engine, two consumers (the plan's "single source of truth"):
 
   - ``tests/integration/test_search_quality.py`` asserts the resulting
-    :class:`~tests.search_quality.metrics.SuiteReport` against per-class
+    :class:`~tests.manual.search_quality.metrics.SuiteReport` against per-class
     thresholds (the machine pass/fail);
-  - ``scripts/eval_search_quality.py`` renders the same report to
-    ``eval/search_quality/RESULTS.md`` (the dogfooding artifact).
+  - ``tests/manual/search_quality/search_quality.py`` renders the same report to
+    ``tests/manual/search_quality/RESULTS.md`` (the dogfooding artifact).
 
 It builds a **real** 2-space collection (a dedicated text space + a separate
 CLIP image space, #229/#232/#234) from the manifest — downloading the pinned
@@ -16,7 +16,7 @@ returned-with-provenance + the graded gold to the pure metric engine. No planted
 vectors: real embeddings, real RRF fusion, the real relative cross-space gate.
 
 The engine is offline after a first run: the images cache in the gitignored
-``eval/search_quality/cache/`` and the models in the shared test-model cache.
+``tests/manual/search_quality/cache/`` and the models in the shared test-model cache.
 """
 
 from __future__ import annotations
@@ -27,16 +27,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tests.search_quality.commons import CommonsCache
-from tests.search_quality.inprocess import InProcessSearch, build_harness_real, to_returned_cards
-from tests.search_quality.manifest import Manifest, load_manifest
-from tests.search_quality.metrics import QueryReport, SuiteReport, evaluate_query
+from tests.manual.search_quality.commons import CommonsCache
+from tests.manual.search_quality.inprocess import (
+    InProcessSearch,
+    build_harness_real,
+    to_returned_cards,
+)
+from tests.manual.search_quality.manifest import Manifest, load_manifest
+from tests.manual.search_quality.metrics import QueryReport, SuiteReport, evaluate_query
 
-ROOT = Path(__file__).resolve().parents[2]
-EVAL_DIR = ROOT / "eval" / "search_quality"
-MANIFEST = EVAL_DIR / "manifest.json"
-RESOLVED = EVAL_DIR / "resolved_urls.json"
-CACHE = EVAL_DIR / "cache"
+DATA_DIR = Path(__file__).resolve().parent  # the unit holds its own corpus data
+MANIFEST = DATA_DIR / "manifest.json"
+RESOLVED = DATA_DIR / "resolved_urls.json"
+CACHE = DATA_DIR / "cache"
 
 # The cross-space CLIP signal name the kernel emits (#234: image#<space-key>).
 CLIP_SIGNAL_PREFIX = "image#"

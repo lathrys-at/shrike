@@ -44,9 +44,9 @@ eval/multimodal/cache/
 # Search-quality eval image-bytes cache (#559): URLs pinned in resolved_urls.json,
 # attribution in ASSETS.md — the Commons bytes are NEVER committed (downloaded
 # on demand by the manual suite).
-eval/search_quality/cache/
+tests/manual/search_quality/cache/
 # The PR2b runner's generated report (a local artifact, not committed).
-eval/search_quality/RESULTS.md
+tests/manual/search_quality/RESULTS.md
 
 # MobileCLIP2 spike (#568): model bytes are NEVER committed — fetched on demand
 # into this gitignored scratch cache. Only the verify script + RESULTS.md +
