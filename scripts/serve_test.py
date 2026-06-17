@@ -1,4 +1,4 @@
-"""Unit tests for the //scripts:serve launcher's pure logic (#565/#656).
+"""Unit tests for the //scripts:serve_<profile> launcher's pure logic (#565/#656/#699).
 
 Covers profile resolution, the path-free invariant, arg parsing, the
 effective-config composition (dir-name → absolute path rewrite), the run-server
@@ -137,7 +137,7 @@ def test_jina_text_clip_onnx_leg_is_not_a_registered_dir_name() -> None:
     names = serve._model_names_in_profile(profile)
     assert names == ["${SHRIKE_JINA_TEXT_CLIP_MOBILECLIP2}"]
     # It is NOT a known materializable dir-name, so a stray `serve --profile`
-    # would fail loud at materialize_model rather than silently fetch — the
+    # would fail loud at resolve_model_dir rather than silently fetch — the
     # placeholder can't collide with a registered model.
     assert "mobileclip2-s2-onnx" not in names
 
@@ -263,9 +263,9 @@ def test_model_names_empty_profile() -> None:
     assert serve._model_names_in_profile({"embedders": []}) == []
 
 
-# -- model materialization (the adversarial-case regression guards) ------------
+# -- model resolution (the adversarial-case regression guards) -----------------
 #
-# Download-free: monkeypatch serve._runfiles / serve._model_sources so no model
+# Download-free: monkeypatch serve._runfiles / serve._fetchers so no model
 # externals or HuggingFace fetch is touched.
 
 
@@ -281,156 +281,100 @@ class _FakeRunfiles:
         return self._present.get(key)
 
 
-def test_materialize_unknown_model_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # An unknown dir-name must fail loud, naming the model + the model-source table.
-    monkeypatch.setattr(
-        serve, "_model_sources", lambda: {"known-model": {"bazel": {}, "fetch": None}}
-    )
+def test_resolve_absolute_model_name_points_at_path_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An absolute model: name violates the path-free rule — fail with a pointed
+    # message, not the misleading "don't know how to resolve".
+    monkeypatch.setattr(serve, "_runfiles", lambda: None)
+    monkeypatch.setattr(serve, "_fetchers", lambda: {})
+    with pytest.raises(SystemExit, match="path-free"):
+        serve.resolve_model_dir("/abs/models/minilm", tmp_path)
+
+
+def test_resolve_under_bazel_returns_runfiles_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Under Bazel the per-model dir is already assembled in the runfiles by
+    # serve.bzl; resolve_model_dir resolves the dir's SENTINEL file and returns its
+    # parent IN PLACE (no copy, no fetch — a bare dir has no reliable Rlocation).
+    model_dir = tmp_path / "rf" / "all-MiniLM-L6-v2-onnx-int8"
+    model_dir.mkdir(parents=True)
+    sentinel = model_dir / serve._SENTINEL_NAME
+    sentinel.write_text("# marker")
+    key = f"{serve._MODEL_RUNFILES_ROOT}/all-MiniLM-L6-v2-onnx-int8/{serve._SENTINEL_NAME}"
+    monkeypatch.setattr(serve, "_runfiles", lambda: _FakeRunfiles({key: str(sentinel)}))
+    out = serve.resolve_model_dir("all-MiniLM-L6-v2-onnx-int8", tmp_path / "unused")
+    assert out == model_dir
+
+
+def test_resolve_under_bazel_missing_dir_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Under Bazel but the dir isn't in THIS target's runfiles — a forgotten `data`
+    # dep / a missing _MODEL_FILES row. Fail loud HERE (naming serve.bzl + the
+    # BUILD `models` list), not late + cryptically at the backend's _resolve_files.
+    monkeypatch.setattr(serve, "_runfiles", lambda: _FakeRunfiles({}))
     with pytest.raises(SystemExit) as exc:
-        serve.materialize_model("unknown-xyz", tmp_path)
+        serve.resolve_model_dir("mobileclip2-s2-onnx", tmp_path)
+    msg = str(exc.value)
+    assert "mobileclip2-s2-onnx" in msg
+    assert "_MODEL_FILES" in msg
+    assert "scripts/BUILD.bazel" in msg
+
+
+def test_resolve_off_bazel_unknown_model_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Off Bazel, an unknown dir-name must fail loud, naming the model + the fetcher map.
+    monkeypatch.setattr(serve, "_runfiles", lambda: None)
+    monkeypatch.setattr(serve, "_fetchers", lambda: {"known-model": lambda root: root})
+    with pytest.raises(SystemExit) as exc:
+        serve.resolve_model_dir("unknown-xyz", tmp_path)
     msg = str(exc.value)
     assert "unknown-xyz" in msg
-    assert "model-source table" in msg
+    assert "fetcher map" in msg
 
 
-def test_materialize_partial_runfiles_errors(
+def test_resolve_off_bazel_calls_the_fetcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # F1 repro: a model declares two files, but only ONE Rlocation resolves.
-    # materialize_model must raise (NOT return a one-file dir) — the partial dir
-    # would only blow up late + cryptically at the backend's _resolve_files.
-    real = tmp_path / "runfiles_text_model.onnx"
-    real.write_bytes(b"x")
-    monkeypatch.setattr(
-        serve,
-        "_model_sources",
-        lambda: {
-            "two-file-model": {
-                "bazel": {
-                    "model_x_text/file/text_model.onnx": "text_model.onnx",
-                    "model_x_tok/file/tokenizer.json": "tokenizer.json",  # NOT in runfiles
-                },
-                "fetch": None,
-            }
-        },
-    )
-    # Only the text graph resolves; the tokenizer is a forgotten data dep.
-    monkeypatch.setattr(
-        serve, "_runfiles", lambda: _FakeRunfiles({"model_x_text/file/text_model.onnx": str(real)})
-    )
-    models_root = tmp_path / "models"
-    with pytest.raises(SystemExit) as exc:
-        serve.materialize_model("two-file-model", models_root)
-    msg = str(exc.value)
-    # Names the missing file + the data-dep remedy; does not silently return.
-    assert "model_x_tok/file/tokenizer.json" in msg
-    assert "data` deps" in msg
-    # And it did NOT leave a usable-looking one-file dir behind as a return value:
-    # the function raised before returning, so no caller ever sees a partial dir.
+    # Off Bazel, a known dir-name delegates to its model_cache fetcher (the single
+    # download source) and returns that dir. The fetcher is stubbed — no download.
+    fetched = tmp_path / "fetched" / "minilm"
+    fetched.mkdir(parents=True)
+    monkeypatch.setattr(serve, "_runfiles", lambda: None)
+    monkeypatch.setattr(serve, "_fetchers", lambda: {"minilm": lambda root: fetched})
+    out = serve.resolve_model_dir("minilm", tmp_path / "models")
+    assert out == fetched
 
 
-def test_materialize_all_present_returns_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The happy path: every declared file resolves → the populated dir is returned
-    # (proves the F1 fix doesn't over-reject when the deps ARE complete).
-    text = tmp_path / "rf_text.onnx"
-    tok = tmp_path / "rf_tok.json"
-    text.write_bytes(b"t")
-    tok.write_bytes(b"k")
-    monkeypatch.setattr(
-        serve,
-        "_model_sources",
-        lambda: {
-            "complete-model": {
-                "bazel": {
-                    "model_x_text/file/text_model.onnx": "text_model.onnx",
-                    "model_x_tok/file/tokenizer.json": "tokenizer.json",
-                },
-                "fetch": None,
-            }
-        },
-    )
-    monkeypatch.setattr(
-        serve,
-        "_runfiles",
-        lambda: _FakeRunfiles(
-            {
-                "model_x_text/file/text_model.onnx": str(text),
-                "model_x_tok/file/tokenizer.json": str(tok),
-            }
-        ),
-    )
-    models_root = tmp_path / "models"
-    out = serve.materialize_model("complete-model", models_root)
-    assert out == models_root / "complete-model"
-    assert (out / "text_model.onnx").read_bytes() == b"t"
-    assert (out / "tokenizer.json").read_bytes() == b"k"
-
-
-def test_materialize_absolute_model_name_points_at_path_free(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # F2: an absolute model: name violates the path-free rule — fail with a pointed
-    # message, not the misleading "don't know how to materialize".
-    monkeypatch.setattr(serve, "_model_sources", lambda: {})
-    with pytest.raises(SystemExit, match="path-free"):
-        serve.materialize_model("/abs/models/minilm", tmp_path)
-
-
-# -- the Wave-2 model-source registrations (#667) ------------------------------
+# -- the off-Bazel fetcher map (#667/#699) -------------------------------------
 #
-# These exercise the real _model_sources() table (imports model_cache) — a
-# registration regression guard: every profile model dir-name must resolve, name a
-# matching @model_* runfiles set, and carry a fetch fn. No download (the fetch fns
-# are referenced, never called).
+# Exercises the real _fetchers() map (imports model_cache) — a registration
+# regression guard: every CI/dogfooding profile model dir-name must resolve to a
+# callable model_cache fetcher. No download (the fetchers are referenced, never
+# called). The bazel runfiles file-map lives in serve.bzl now (one source of
+# truth); this map is only the off-Bazel download source serve.py still owns.
 
 
-def test_model_sources_covers_onnx_multispace_models() -> None:
-    sources = serve._model_sources()
-    for name in ("embeddinggemma-300m-onnx-int8", "mobileclip2-s2-onnx"):
-        assert name in sources, f"{name} missing from _model_sources()"
-        spec = sources[name]
-        assert spec["bazel"], f"{name} has no bazel runfiles map"
-        assert callable(spec["fetch"]), f"{name} has no fetch fn"
+def test_fetchers_cover_the_profile_models() -> None:
+    fetchers = serve._fetchers()
+    for name in (
+        "all-MiniLM-L6-v2-onnx-int8",
+        "embeddinggemma-300m-onnx-int8",
+        "mobileclip2-s2-onnx",
+    ):
+        assert name in fetchers, f"{name} missing from _fetchers()"
+        assert callable(fetchers[name]), f"{name} has no fetch fn"
 
 
-def test_model_sources_registers_jina_clip_v2_for_673() -> None:
-    # jina-clip-v2 is pre-staged for #673 (native fused-graph ClipBackend support),
-    # which will consume exactly this fused export. It is NOT consumed by any current
-    # profile — jina-text-clip uses MobileCLIP2 — but is registered here (this stream
-    # owns the registration surface) so the #673 follow-up doesn't touch these files.
-    sources = serve._model_sources()
-    assert "jina-clip-v2-onnx-int8" in sources
-    assert callable(sources["jina-clip-v2-onnx-int8"]["fetch"])
-
-
-def test_embeddinggemma_external_data_is_registered() -> None:
-    # The external-data landmine: the graph stub AND its .onnx_data companion must
-    # both be in the runfiles map (or the graph won't load). Both materialize into
-    # the SAME dir under their exact names (onnxruntime resolves .onnx_data by name
-    # relative to the graph dir).
-    spec = serve._model_sources()["embeddinggemma-300m-onnx-int8"]
-    dest_names = set(spec["bazel"].values())
-    assert "model_quantized.onnx" in dest_names
-    assert "model_quantized.onnx_data" in dest_names
-    assert "tokenizer.json" in dest_names
-    # The .onnx_data dest name is exact (the graph references it by that name).
-    data_srcs = [s for s, d in spec["bazel"].items() if d == "model_quantized.onnx_data"]
-    assert data_srcs and data_srcs[0].endswith("/model_quantized.onnx_data")
-
-
-def test_mobileclip2_clip_layout_is_registered() -> None:
-    # ClipBackend needs text + vision graphs + tokenizer + preprocessor flat in one
-    # dir (spike #568's verified layout).
-    spec = serve._model_sources()["mobileclip2-s2-onnx"]
-    dest_names = set(spec["bazel"].values())
-    assert {
-        "text_model.onnx",
-        "vision_model.onnx",
-        "preprocessor_config.json",
-        "tokenizer.json",
-    } <= dest_names
+def test_fetchers_registers_jina_clip_v2_for_673() -> None:
+    # jina-clip-v2 is pre-staged for #673 (native fused-graph ClipBackend support);
+    # not consumed by any current profile, but kept registered as a download source.
+    fetchers = serve._fetchers()
+    assert "jina-clip-v2-onnx-int8" in fetchers
+    assert callable(fetchers["jina-clip-v2-onnx-int8"])
 
 
 # -- effective-config composition ----------------------------------------------

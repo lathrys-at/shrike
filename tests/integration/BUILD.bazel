@@ -194,7 +194,7 @@ pytest_test(
 )
 
 # The pinned-model fetch util on its own, non-testonly (overriding the package
-# default) so non-test consumers can reuse it — the //scripts:serve launcher
+# default) so non-test consumers can reuse it — the //scripts:serve_<profile> launcher
 # imports its *_DIR_NAME constants + cached_*_model_dir fetchers as the single
 # Python download source for its script-fallback lane. imports=["../.."] so it
 # resolves as tests.integration.model_cache (matching the conftest's layout).

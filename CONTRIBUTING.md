@@ -155,7 +155,7 @@ invokes it** — each carries a `README.md` with its full inventory:
   version-pin locks + their writers/checkers, the sdist/wheel/requirements
   builders, `workspace_status.sh`, the hermetic-toolchain CI smoke tests.
 - **`scripts/`** — human-facing dev/maintenance entry points: `dev-setup.sh`, the
-  native build, the coverage runners, the `//scripts:serve` launcher.
+  native build, the coverage runners, the `//scripts:serve_<profile>` launcher.
 
 A file follows its strongest coupling. A *version-pin lock* is consumed by the
 build (Bazel reads it, CI cache keys hash it, a `py_test` validates it), so the

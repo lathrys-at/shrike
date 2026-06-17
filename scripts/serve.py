@@ -1,29 +1,29 @@
 #!/usr/bin/env python
-"""``//scripts:serve`` — the consolidated dogfooding launcher (#565/#656).
+"""The consolidated dogfooding launcher behind ``//scripts:serve_<profile>`` (#565/#656/#699).
 
 Boots a real Shrike server against a **fresh** collection using a checked-in,
-path-free capability *profile* (``scripts/profiles/<name>.yml``), with the
-profile's models materialized from Bazel externals — zero new download code, no
-URL re-spelling. It is the spine the offline-integration milestone layers on; it
-retires ``scripts/launch-qa-server.sh`` (whose job is now
-``serve --profile <name> --seed qa``).
+path-free capability *profile* (``scripts/profiles/<name>.yml``). Under Bazel each
+profile has its OWN launcher target (``//scripts:serve_text_onnx``,
+``//scripts:serve_onnx_multispace``) whose ``data`` carries just that profile's
+models, assembled from the pinned externals into per-model dirs AT BUILD TIME by
+``scripts/serve.bzl`` (zero new download code, no URL re-spelling). It is the spine
+the offline-integration milestone layers on; it retired
+``scripts/launch-qa-server.sh`` (whose job is now ``serve … --seed qa``).
 
-Usage (under Bazel — the model externals ride the binary's ``data`` deps):
+Usage (under Bazel — the per-profile target supplies ``--profile`` as a default arg):
 
-    ./bazel run //scripts:serve -- --profile text-onnx [--seed qa] [--foreground|--daemon]
+    ./bazel run //scripts:serve_text_onnx -- [--seed qa] [--foreground|--daemon]
 
 Profiles are **path-free** (the hard invariant): no ``collection:`` key, no
 machine-absolute paths. An onnx embedder's ``model:`` is a bare *dir-name* (e.g.
-``all-MiniLM-L6-v2-onnx-int8``); the launcher materializes that dir into the
-per-run model tree and rewrites the entry's ``model:`` to the absolute path
-before handing the effective config to the server. Run paths (collection, cache,
-logs) ride as flags, not config.
+``all-MiniLM-L6-v2-onnx-int8``); the launcher RESOLVES that dir to its absolute
+path and rewrites the entry's ``model:`` before handing the effective config to
+the server. Run paths (collection, cache, logs) ride as flags, not config.
 
-Model materialization mirrors ``tests/integration/conftest.py``'s
-``_populate_bazel_model_dir`` but for ``bazel run`` (there is no ``TEST_TMPDIR``):
-under Bazel each profile-named model is located in the runfiles and copied into
-``<run>/models/<dir-name>/...``; off Bazel (a plain checkout) the matching
-``model_cache.cached_*_model_dir`` fetches it (the single Python fetch source).
+Model resolution: under Bazel the per-model dir is assembled into the runfiles by
+``serve.bzl`` (``models/<dir-name>/``) and read IN PLACE — the launcher resolves it
+via the runfiles, no runtime copy. Off Bazel (a plain checkout) the matching
+``model_cache.cached_*_model_dir`` fetches it (the single Python download source).
 """
 
 from __future__ import annotations
@@ -54,87 +54,38 @@ _PROFILES_DIR = _REPO_ROOT / "scripts" / "profiles"
 _SCRIPT_RUN_ROOT = _REPO_ROOT / "scripts" / ".run"
 
 
-# -- Model materialization: profile dir-name → how to source it ----------------
+# -- Model resolution: profile dir-name → an on-disk model dir -----------------
 #
 # A profile names each onnx model by its model_cache *_DIR_NAME (the same layout
-# the integration conftest assembles into SHRIKE_TEST_MODEL_DIR). For each such
-# dir-name we record BOTH source paths so neither lane re-spells a URL:
-#   - bazel: the http_file external's runfiles paths → the dir/<file> layout
-#     (mirrors conftest's _BAZEL_MODELS, keyed the other way: dir-name → files).
-#   - script fallback: the model_cache.cached_*_model_dir function that fetches it.
-#
-# Add a row here (not a new download path) when a profile reuses another pinned
-# external. The keys are model_cache's *_DIR_NAME constants, imported so a rename
-# there can't silently drift this map.
+# the integration conftest assembles into SHRIKE_TEST_MODEL_DIR). Under Bazel,
+# serve.bzl has ALREADY assembled each profile model's scattered http_file
+# externals into a per-model dir in the runfiles (models/<dir-name>/), scoped to
+# the per-profile target's `data` — so resolution is a runfiles LOOKUP, not a copy.
+# Off Bazel (a plain checkout) the matching model_cache.cached_*_model_dir fetches
+# it (the single Python download source). The dir-name → fetch-fn map below is the
+# ONLY model table serve.py still owns; the bazel runfiles file-map moved to
+# serve.bzl's _MODEL_FILES (one source of truth — no hand-sync between the two).
 
 
-def _model_sources() -> dict[str, dict[str, Any]]:
-    """The dir-name → {bazel runfiles map, script fetch fn} table.
+def _fetchers() -> dict[str, Any]:
+    """The dir-name → off-Bazel fetch-fn map (the single Python download source).
 
-    Imported lazily so the pure-logic surface (arg parsing, profile load,
-    config composition) stays importable without ``tests`` on ``sys.path`` —
-    the Bazel unit test exercises that surface with this table stubbed.
+    Imported lazily so the pure-logic surface (arg parsing, profile load, config
+    composition) stays importable without ``tests`` on ``sys.path`` — the Bazel
+    unit test exercises that surface with this map stubbed.
     """
-    # tests.integration.model_cache is the single source of model dir-names +
-    # the script-fallback fetchers. imports=["../.."] in the test BUILD puts the
-    # repo root on sys.path under Bazel; the non-Bazel lane runs from a checkout.
+    # tests.integration.model_cache is the single source of model dir-names + the
+    # fetchers. imports=["../.."] in the test BUILD puts the repo root on sys.path
+    # under Bazel; the non-Bazel lane runs from a checkout.
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
     from tests.integration import model_cache as mc
 
     return {
-        mc.ONNX_MODEL_DIR_NAME: {
-            # runfiles path (MODULE.bazel http_file) → file name within the dir
-            "bazel": {
-                "model_minilm_int8_onnx/file/model.onnx": "model.onnx",
-                "model_minilm_tokenizer/file/tokenizer.json": "tokenizer.json",
-            },
-            "fetch": mc.cached_onnx_model_dir,
-        },
-        # Wave-2 profile models (#667). Each model's bazel map MUST name every file
-        # the backend's _resolve_files needs, and a matching @model_* data dep MUST
-        # be in //scripts:serve's `data` (else materialize_model fails loud).
-        # embeddinggemma text leg: graph stub + its EXTERNAL weight data + tokenizer.
-        # The .onnx_data MUST land beside the graph under its exact name — onnxruntime
-        # loads it relative to the graph file's dir (the external-data invariant).
-        mc.EMBEDDINGGEMMA_MODEL_DIR_NAME: {
-            "bazel": {
-                "model_embeddinggemma_int8_onnx/file/model_quantized.onnx": (
-                    "model_quantized.onnx"
-                ),
-                "model_embeddinggemma_int8_onnx_data/file/model_quantized.onnx_data": (
-                    "model_quantized.onnx_data"
-                ),
-                "model_embeddinggemma_tokenizer/file/tokenizer.json": "tokenizer.json",
-            },
-            "fetch": mc.cached_embeddinggemma_model_dir,
-        },
-        # MobileCLIP2-S2 image leg: text + vision graphs + preprocessor + tokenizer
-        # (the flat ClipBackend layout spike #568 verified loads as-is).
-        mc.MOBILECLIP2_MODEL_DIR_NAME: {
-            "bazel": {
-                "model_mobileclip2_text_onnx/file/text_model.onnx": "text_model.onnx",
-                "model_mobileclip2_vision_onnx/file/vision_model.onnx": "vision_model.onnx",
-                "model_mobileclip2_preprocessor/file/preprocessor_config.json": (
-                    "preprocessor_config.json"
-                ),
-                "model_mobileclip2_tokenizer/file/tokenizer.json": "tokenizer.json",
-            },
-            "fetch": mc.cached_mobileclip2_model_dir,
-        },
-        # jina-clip-v2 (combined graph) — pre-staged for #673 (native fused-graph
-        # ClipBackend support); not consumed by any current profile — jina-text-clip
-        # uses MobileCLIP2 (see model_cache.py caveat).
-        mc.JINA_CLIP_V2_MODEL_DIR_NAME: {
-            "bazel": {
-                "model_jina_clip_v2_int8_onnx/file/model_quantized.onnx": ("model_quantized.onnx"),
-                "model_jina_clip_v2_tokenizer/file/tokenizer.json": "tokenizer.json",
-                "model_jina_clip_v2_preprocessor/file/preprocessor_config.json": (
-                    "preprocessor_config.json"
-                ),
-            },
-            "fetch": mc.cached_jina_clip_v2_model_dir,
-        },
+        mc.ONNX_MODEL_DIR_NAME: mc.cached_onnx_model_dir,
+        mc.EMBEDDINGGEMMA_MODEL_DIR_NAME: mc.cached_embeddinggemma_model_dir,
+        mc.MOBILECLIP2_MODEL_DIR_NAME: mc.cached_mobileclip2_model_dir,
+        mc.JINA_CLIP_V2_MODEL_DIR_NAME: mc.cached_jina_clip_v2_model_dir,
     }
 
 
@@ -149,65 +100,64 @@ def _runfiles() -> Any | None:
     return runfiles.Create()
 
 
-def materialize_model(dir_name: str, models_root: Path) -> Path:
-    """Materialize the model named *dir_name* into ``<models_root>/<dir_name>/``.
+#: The runfiles location (relative to the canonical ``_main`` repo) of the per-model
+#: dirs serve.bzl assembles. ``models/<dir-name>`` is package-relative to ``//scripts``.
+_MODEL_RUNFILES_ROOT = "_main/scripts/models"
 
-    Under Bazel, copy each of the model's files out of the runfiles into the run
-    tree (so the server reads a stable on-disk dir, not a sandbox path that may
-    vanish). Off Bazel, delegate to the matching ``model_cache`` fetcher (the
-    single Python download source). Returns the materialized model dir.
+#: The per-model-dir sentinel file serve.bzl drops into each assembled dir. A bare
+#: directory has no reliable runfiles ``Rlocation`` entry (manifest-based runfiles
+#: map FILES only), so the launcher resolves this FILE and takes its parent. Kept
+#: in sync with serve.bzl's ``_SENTINEL_NAME``.
+_SENTINEL_NAME = ".shrike_model_dir"
+
+
+def resolve_model_dir(dir_name: str, models_root: Path) -> Path:
+    """Resolve the model named *dir_name* to an on-disk model dir.
+
+    Under Bazel the per-model dir is already assembled in the runfiles by serve.bzl;
+    return its absolute path (read in place — no copy). Off Bazel, delegate to the
+    matching ``model_cache`` fetcher (the single Python download source), fetching
+    into *models_root*. Returns the model dir (an absolute path the effective config
+    can name).
     """
     if Path(dir_name).is_absolute():
         # A profile must name a model by bare dir-name, not a machine path — the
         # path-free invariant the launcher exists to enforce. Catch it here with a
-        # pointed message rather than the misleading "don't know how to materialize".
+        # pointed message rather than the misleading "don't know how to resolve".
         raise SystemExit(
             f"profile names model {dir_name!r} as an absolute path — profiles are path-free; "
-            f"name the model by its bare dir-name (the launcher materializes it and rewrites "
+            f"name the model by its bare dir-name (the launcher resolves it and rewrites "
             f"the path)"
         )
-    sources = _model_sources()
-    if dir_name not in sources:
-        raise SystemExit(
-            f"profile names model {dir_name!r} which the launcher doesn't know how to "
-            f"materialize — add it to scripts/serve.py's model-source table "
-            f"(known: {', '.join(sorted(sources)) or 'none'})"
-        )
-    spec = sources[dir_name]
-    model_dir = models_root / dir_name
 
     r = _runfiles()
     if r is not None:
-        model_dir.mkdir(parents=True, exist_ok=True)
-        missing: list[str] = []
-        for src, file_name in spec["bazel"].items():
-            loc = r.Rlocation(src)
-            if not loc or not os.path.exists(loc):
-                missing.append(src)
-                continue
-            dest = model_dir / file_name
-            if not (dest.exists() and dest.stat().st_size > 0):
-                tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
-                shutil.copy(loc, tmp)
-                os.replace(tmp, dest)
-        # EVERY declared file must be present, or the materialized dir is partial
-        # and the failure would surface late + cryptically at the backend's
-        # _resolve_files ("no tokenizer.json" / "no text+vision pair"). Fail loud
-        # HERE — a missing file means a forgotten @model_* data dep (bites the
-        # 4-file CLIP dir of the profile-(c) wave; harmless silent for 2-file MVP).
-        if missing:
-            raise SystemExit(
-                f"model {dir_name!r}: {len(missing)}/{len(spec['bazel'])} file(s) not found in "
-                f"Bazel runfiles ({', '.join(missing)}) — add the corresponding @model_* "
-                f"external(s) to //scripts:serve's `data` deps (and confirm scripts/serve.py's "
-                f"model-source table names them)"
-            )
-        logger.info("materialized model %s from Bazel runfiles → %s", dir_name, model_dir)
-        return model_dir
+        # Resolve the dir's SENTINEL file (a directory has no reliable Rlocation
+        # entry), then take its parent — robust across runfiles implementations.
+        sentinel = r.Rlocation(f"{_MODEL_RUNFILES_ROOT}/{dir_name}/{_SENTINEL_NAME}")
+        if sentinel and os.path.isfile(sentinel):
+            model_dir = Path(sentinel).parent
+            logger.info("resolved model %s from Bazel runfiles → %s", dir_name, model_dir)
+            return model_dir
+        # Under Bazel but the dir isn't in THIS target's runfiles — the per-profile
+        # launcher target is missing this model's `data` dep (or serve.bzl has no
+        # _MODEL_FILES row for it). Fail loud here, not late at the backend.
+        raise SystemExit(
+            f"model {dir_name!r} is not in this launcher's Bazel runfiles "
+            f"({_MODEL_RUNFILES_ROOT}/{dir_name}) — add it to serve.bzl's _MODEL_FILES "
+            f"table and to this profile's `models` list in scripts/BUILD.bazel"
+        )
 
     # Non-Bazel: fetch via model_cache (the single download source).
-    logger.info("materializing model %s via model_cache fetch → %s", dir_name, model_dir)
-    fetched = spec["fetch"](models_root)
+    fetchers = _fetchers()
+    if dir_name not in fetchers:
+        raise SystemExit(
+            f"profile names model {dir_name!r} which the launcher can't fetch off Bazel — "
+            f"add it to scripts/serve.py's fetcher map "
+            f"(known: {', '.join(sorted(fetchers)) or 'none'})"
+        )
+    logger.info("fetching model %s via model_cache → %s", dir_name, models_root)
+    fetched = fetchers[dir_name](models_root)
     return Path(fetched)
 
 
@@ -369,9 +319,9 @@ def compose_effective_config(
     """Rewrite a path-free profile into a server-ready effective config.
 
     Each onnx embedder's ``model:`` (a bare dir-name) is replaced with the
-    absolute materialized path from *resolved_models*. Everything else passes
-    through unchanged. A model with no resolved path is a programming error
-    (the caller materializes every name from :func:`_model_names_in_profile`).
+    absolute resolved path from *resolved_models*. Everything else passes through
+    unchanged. A model with no resolved path is a programming error (the caller
+    resolves every name from :func:`_model_names_in_profile`).
 
     *providers* (when not ``None``) is the launcher-resolved ONNX execution
     provider list (#569), overlaid onto every **onnx** entry that does not
@@ -388,7 +338,7 @@ def compose_effective_config(
                 model = new_entry.get("model")
                 if isinstance(model, str) and model:
                     if model not in resolved_models:
-                        raise KeyError(f"no materialized path for model {model!r}")
+                        raise KeyError(f"no resolved path for model {model!r}")
                     new_entry["model"] = resolved_models[model]
                 # Overlay detected providers ONLY when the profile didn't set its
                 # own (a checked-in profile carries none; an explicit one wins).
@@ -426,10 +376,10 @@ def run_root() -> Path:
 
 
 def seed_qa_collection(collection_path: Path) -> None:
-    """Generate the ``tests/qa`` synthetic fixture into *collection_path*.
+    """Generate the ``tests/manual/skill_quality`` synthetic fixture into *collection_path*.
 
-    Reuses ``tests/qa/build_collection.py``'s ``build`` — the same write path
-    ``launch-qa-server.sh`` drove, now a launcher seed.
+    Reuses ``tests/manual/skill_quality/build_collection.py``'s ``build`` — the same
+    write path ``launch-qa-server.sh`` drove, now a launcher seed.
     """
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
@@ -622,7 +572,7 @@ def main(argv: list[str] | None = None) -> int:
     resolved_models: dict[str, str] = {}
     for name in _model_names_in_profile(profile):
         if name not in resolved_models:
-            resolved_models[name] = str(materialize_model(name, models_root))
+            resolved_models[name] = str(resolve_model_dir(name, models_root))
 
     # Resolve ONNX execution providers for this host (auto-detect, or the
     # --providers/--cpu override) and overlay them onto onnx entries (#569). The

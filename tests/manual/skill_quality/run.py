@@ -108,7 +108,7 @@ def _reset_fixture() -> None:
     stop any running server, wipe the run dir, rebuild the synthetic fixture
     from the corpus, and start the server against run-local paths. The eval is a
     pip-lane manual harness with its own GGUF model (SHRIKE_EMBEDDING_MODEL +
-    LLAMA_SERVER_PATH, asserted in _preflight); the //scripts:serve launcher with
+    LLAMA_SERVER_PATH, asserted in _preflight); the //scripts:serve_<profile> launcher with
     a llama profile supersedes this in a later wave of the offline-integration
     epic (#565)."""
     _log("reset: rebuilding fixture + launching clean QA server…")

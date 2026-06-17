@@ -65,16 +65,16 @@ and are ignored by the generator.
 ## Usage
 
 The QA fixture is now a seed of the consolidated dogfooding launcher
-(`//scripts:serve`, #565/#656) — `serve --seed qa` rebuilds the synthetic
+(the `//scripts:serve_<profile>` targets, #565/#656) — `serve … --seed qa` rebuilds the synthetic
 collection into a fresh per-run dir and boots a server against it with the
 profile's real embedder:
 
 ```bash
 # Clean rebuild + serve with the text-only ONNX profile (foreground by default):
-./bazel run //scripts:serve -- --profile text-onnx --seed qa
+./bazel run //scripts:serve_text_onnx -- --seed qa
 
 # Background daemon instead of foreground:
-./bazel run //scripts:serve -- --profile text-onnx --seed qa --daemon
+./bazel run //scripts:serve_text_onnx -- --seed qa --daemon
 ```
 
 A llama-server / GGUF profile (the embedding model this README discusses) is a

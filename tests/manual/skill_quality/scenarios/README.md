@@ -11,7 +11,7 @@ These are **manual**. Nothing here runs in `pytest` or CI.
 
 1. Start a **fresh** QA server so the fixture is in a known state:
    ```bash
-   ./bazel run //scripts:serve -- --profile text-onnx --seed qa --daemon
+   ./bazel run //scripts:serve_text_onnx -- --seed qa --daemon
    ```
    (Or, for a GGUF model, drive the eval harness `../run.py`, which sets up
    the fixture + server with `SHRIKE_EMBEDDING_MODEL`. See `../README.md`.)
