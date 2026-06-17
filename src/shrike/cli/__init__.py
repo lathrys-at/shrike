@@ -8,46 +8,51 @@ import click
 
 from shrike import __version__
 from shrike.cli.config import DEFAULT_CONFIG_PATH, build_server_spec, load_config, resolve_url
+from shrike.cli.groups import OrderedGroup
 from shrike.errors import ShrikeError
 
-# Subcommand name -> "module:attribute", imported only when the command is
-# actually invoked. Loading every command module up front pulled in httpx +
+# Top-level subcommand name -> "module:attribute", imported only when the command
+# is actually invoked. Loading every command module up front pulled in httpx +
 # Pydantic on every `shrike` call (tab-completion, --help, --version included);
-# this defers each module's import to the one command that needs it. Each group
-# (note, server, type, …) lives in a single module, so lazy-loading at this top
-# level already defers a whole group's subcommands — there's nothing finer to
-# split below it.
+# this defers each module's import to the one command that needs it. Each top-
+# level group (collection, search, server, note, …) lives in a single module and
+# attaches its own subgroups (e.g. `collection` pulls in info/export/media), so
+# lazy-loading at this level already defers a whole branch — there's nothing
+# finer to split below it. Per the #683 rehome, only the eight top-level groups
+# appear here; the rehomed leaves (info, export, media, index, embedding, …) are
+# reached through their parent group.
 _LAZY_COMMANDS: dict[str, str] = {
     "collection": "shrike.cli.collection_cmd:collection",
-    "completion": "shrike.cli.completion_cmd:completion",
-    "deck": "shrike.cli.deck_cmd:deck",
-    "embedding": "shrike.cli.embedding_cmd:embedding",
-    "export": "shrike.cli.export_cmd:export",
-    "import": "shrike.cli.import_cmd:import_cmd",
-    "index": "shrike.cli.index_cmd:index",
-    "info": "shrike.cli.info_cmd:info",
-    "media": "shrike.cli.media_cmd:media",
-    "note": "shrike.cli.note_cmd:note",
-    "profile": "shrike.cli.profile_cmd:profile",
+    "search": "shrike.cli.search_cmd:search",
     "server": "shrike.cli.server_cmd:server",
-    "tag": "shrike.cli.tag_cmd:tag",
+    "note": "shrike.cli.note_cmd:note",
+    "deck": "shrike.cli.deck_cmd:deck",
     "type": "shrike.cli.type_cmd:type_group",
+    "profile": "shrike.cli.profile_cmd:profile",
+    "completion": "shrike.cli.completion_cmd:completion",
 }
 
 
-class ShrikeGroup(click.Group):
+class ShrikeGroup(OrderedGroup):
     """Root group: lazy-loads subcommands and turns library ``ShrikeError``s into
     clean CLI errors.
 
     Subcommand modules are imported on demand (see ``_LAZY_COMMANDS``) so a bare
-    `shrike` invocation stays cheap. ``ShrikeError`` is caught here — from the
-    dependency-light ``shrike.errors`` — to render server/connection failures as
-    clean messages instead of tracebacks, without the standalone client needing
-    ``click``.
+    `shrike` invocation stays cheap. ``OrderedGroup`` gives the canonical
+    subcommand order (#682 §G; the root group's name is ``shrike``).
+    ``ShrikeError`` is caught here — from the dependency-light ``shrike.errors`` —
+    to render server/connection failures as clean messages instead of tracebacks,
+    without the standalone client needing ``click``.
     """
 
     def list_commands(self, ctx: click.Context) -> list[str]:
-        return sorted(_LAZY_COMMANDS)
+        # The lazy table is the command set; order it canonically (#683/#682 §G)
+        # without forcing each module to import — OrderedGroup keys on group name.
+        from shrike.cli.groups import CANONICAL_ORDER, _ordered
+
+        order = CANONICAL_ORDER.get(self.name or "")
+        names = list(_LAZY_COMMANDS)
+        return _ordered(names, order) if order else sorted(names)
 
     def get_command(self, ctx: click.Context, name: str) -> click.Command | None:
         target = _LAZY_COMMANDS.get(name)
@@ -64,7 +69,7 @@ class ShrikeGroup(click.Group):
             raise click.ClickException(str(err)) from err
 
 
-@click.group(cls=ShrikeGroup)
+@click.group("shrike", cls=ShrikeGroup)
 @click.option(
     "-c",
     "--config",
@@ -119,7 +124,7 @@ def cli(
     \b
     Quick start:
       shrike server start --collection ~/path/to/collection.anki2
-      shrike info
+      shrike collection info
       shrike note list --deck Default
       shrike server stop
 

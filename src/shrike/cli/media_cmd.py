@@ -9,10 +9,11 @@ from urllib.parse import urlparse
 import click
 
 from shrike.cli import output
+from shrike.cli.groups import OrderedGroup
 from shrike.cli.output import output_options
 
 
-@click.group("media", short_help="Manage media files")
+@click.group("media", cls=OrderedGroup, short_help="Manage media files")
 def media() -> None:
     """Store, fetch, list, and delete files in the collection's media folder.
 
@@ -97,11 +98,11 @@ def media_store(
 
     \b
     Examples:
-      shrike media store diagram.png
-      shrike media store a.png b.jpg c.ogg
-      shrike media store --url https://example.com/cell.png
-      shrike media store --url https://intranet/x.png --client-fetch
-      shrike media store --server-path /data/big-lecture.mp4
+      shrike collection media store diagram.png
+      shrike collection media store a.png b.jpg c.ogg
+      shrike collection media store --url https://example.com/cell.png
+      shrike collection media store --url https://intranet/x.png --client-fetch
+      shrike collection media store --server-path /data/big-lecture.mp4
     """
     total = len(paths) + len(urls) + len(server_paths)
     if name and total != 1:
@@ -180,8 +181,8 @@ def media_fetch(
 
     \b
     Examples:
-      shrike media fetch cell.png -o /tmp/cell.png
-      shrike media fetch a.png b.png --out-dir ./exported
+      shrike collection media fetch cell.png -o /tmp/cell.png
+      shrike collection media fetch a.png b.png --out-dir ./exported
     """
     if out and len(names) > 1:
         raise click.UsageError("-o/--output works with a single NAME; use --out-dir for several.")
@@ -240,9 +241,9 @@ def media_list(ctx: click.Context, pattern: str | None, limit: int | None) -> No
 
     \b
     Examples:
-      shrike media list
-      shrike media list "*.png"
-      shrike media list "cell-*" --limit 20
+      shrike collection media list
+      shrike collection media list "*.png"
+      shrike collection media list "cell-*" --limit 20
     """
     client = ctx.obj["client"]
     with output.spinner("Listing…"):
@@ -286,8 +287,8 @@ def media_delete(ctx: click.Context, names: tuple[str, ...], yes: bool) -> None:
 
     \b
     Examples:
-      shrike media delete old.png
-      shrike media delete a.png b.png --yes
+      shrike collection media delete old.png
+      shrike collection media delete a.png b.png --yes
     """
     if not yes and not click.confirm(f"Delete {len(names)} media file(s)?"):
         output.console.print("Cancelled.")

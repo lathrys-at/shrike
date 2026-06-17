@@ -65,9 +65,9 @@ def import_cmd(
 
     \b
     Examples:
-      shrike import ~/Downloads/shared-deck.apkg
-      shrike import /srv/anki/backup.colpkg --with-scheduling
-      shrike import deck.apkg --update-notes always
+      shrike collection import ~/Downloads/shared-deck.apkg
+      shrike collection import /srv/anki/backup.colpkg --with-scheduling
+      shrike collection import deck.apkg --update-notes always
     """
     # Absolutize so a relative path isn't resolved against the (possibly
     # different) server cwd — the server still gates it against --import-path-root.

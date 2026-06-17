@@ -3,10 +3,11 @@ from __future__ import annotations
 import click
 
 from shrike.cli import output
+from shrike.cli.groups import OrderedGroup
 from shrike.cli.output import NOTE_ID, output_options
 
 
-@click.group("tag", short_help="Manage tags across the collection")
+@click.group("tag", cls=OrderedGroup, short_help="Manage tags across the collection")
 def tag() -> None:
     """Rename tags across the collection.
 
@@ -38,8 +39,8 @@ def tag_rename(ctx: click.Context, old: str, new: str, note_ids: tuple[int, ...]
 
     \b
     Examples:
-      shrike tag rename history::ww2 history::wwii
-      shrike tag rename ww2 wwii --note 170000123 --note 170000456
+      shrike collection tag rename history::ww2 history::wwii
+      shrike collection tag rename ww2 wwii --note 170000123 --note 170000456
     """
     client = ctx.obj["client"]
     with output.spinner("Renaming tag…"):

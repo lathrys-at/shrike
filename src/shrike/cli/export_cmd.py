@@ -66,10 +66,10 @@ def export(
 
     \b
     Examples:
-      shrike export backup.colpkg
-      shrike export spanish.apkg --deck Spanish
-      shrike export deck.apkg --deck Spanish --scheduling
-      shrike export --server-path /srv/exports/backup.colpkg
+      shrike collection export backup.colpkg
+      shrike collection export spanish.apkg --deck Spanish
+      shrike collection export deck.apkg --deck Spanish --scheduling
+      shrike collection export --server-path /srv/exports/backup.colpkg
     """
     import os
 

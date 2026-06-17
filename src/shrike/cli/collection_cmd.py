@@ -3,14 +3,28 @@ from __future__ import annotations
 import click
 
 from shrike.cli import output
-from shrike.cli.config import resolve_collection
+from shrike.cli.export_cmd import export
+from shrike.cli.groups import OrderedGroup
+from shrike.cli.import_cmd import import_cmd
+from shrike.cli.info_cmd import info
+from shrike.cli.media_cmd import media
 from shrike.cli.output import output_options
+from shrike.cli.tag_cmd import tag
 from shrike.schemas import CollectionCheckResponse, CollectionPruneResponse
 
 
-@click.group("collection", short_help="Collection-wide query and maintenance")
+@click.group("collection", cls=OrderedGroup, short_help="Collection-wide operations")
 def collection() -> None:
-    """Collection-wide operations: raw query and maintenance."""
+    """Collection-wide operations: info, import/export, maintenance, tags, media."""
+
+
+# Rehomed under `collection` (#683): info/export/import/tag/media are collection-
+# scoped, so they live beneath the collection group rather than at the top level.
+collection.add_command(info)
+collection.add_command(export)
+collection.add_command(import_cmd)
+collection.add_command(tag)
+collection.add_command(media)
 
 
 def _render_preview(r: CollectionPruneResponse) -> int:
@@ -163,59 +177,6 @@ def check(ctx: click.Context) -> None:
     _render_check(result)
     if result.missing:
         ctx.exit(1)
-
-
-@collection.command("query", short_help="Find notes with a raw Anki search expression")
-@output_options
-@click.argument("expression")
-@click.option("--brief", is_flag=True, help="Show only IDs and metadata, not field content.")
-@click.option("--limit", type=int, default=50, help="Max notes to return (default 50).")
-@click.pass_context
-def query(ctx: click.Context, expression: str, brief: bool, limit: int) -> None:
-    """Find notes matching a raw Anki search EXPRESSION.
-
-    The power-user escape hatch: EXPRESSION is passed straight to Anki's search
-    engine, so the full language works (is:due, prop:ivl>=30, added:, rated:,
-    flag:, OR, -, parentheses). For meaning/text search use 'note search'; for
-    plain deck/tag/type filters use 'note list'.
-
-    \b
-    Examples:
-      shrike collection query "is:due prop:ivl>=30"
-      shrike collection query "added:7 -tag:done" --brief
-      shrike collection query "deck:Japanese (tag:verb OR tag:adj)" --limit 100
-    """
-    client = ctx.obj["client"]
-
-    with output.spinner("Searching…"):
-        result = client.query(expression, fields="meta" if brief else "full", limit=limit)
-
-    if ctx.obj["json"]:
-        output.emit_json(result)
-        return
-
-    notes = result.notes
-    if not notes:
-        output.console.print("[dim]No notes found.[/dim]")
-        return
-
-    col_path = resolve_collection(ctx.obj["config"]) or "collection"
-    count = f"{len(notes)} of {result.total}" if result.total > len(notes) else str(result.total)
-    # The query expression + collection path can contain brackets → escaped.
-    output.console.print(
-        f"[dim]Showing {count} note(s) matching [cyan]{output.esc(expression)}[/cyan] "
-        f"from [cyan]{output.esc(col_path)}[/cyan][/dim]"
-    )
-    output.console.print()
-
-    if brief or not any(n.content for n in notes):
-        rows = [output.note_summary_row(n) for n in notes]
-        output.table(["ID", "Type", "Deck", "Tags", "Modified"], rows)
-    else:
-        for n in notes:
-            output.note_detail(n)
-
-    output.console.print()
 
 
 @collection.command("reload", short_help="Re-open the collection from disk")

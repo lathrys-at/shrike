@@ -30,9 +30,9 @@ def index_rebuild(ctx: click.Context, background: bool) -> None:
 
     \b
     Examples:
-      shrike index rebuild
-      shrike index rebuild --background
-      shrike --json index rebuild
+      shrike server index rebuild
+      shrike server index rebuild --background
+      shrike --json server index rebuild
     """
     client: ShrikeClient = ctx.obj["client"]
     json_out: bool = ctx.obj["json"]
@@ -76,8 +76,8 @@ def index_save(ctx: click.Context) -> None:
 
     \b
     Examples:
-      shrike index save
-      shrike --json index save
+      shrike server index save
+      shrike --json server index save
     """
     client: ShrikeClient = ctx.obj["client"]
     json_out: bool = ctx.obj["json"]
@@ -112,8 +112,8 @@ def index_status(ctx: click.Context) -> None:
 
     \b
     Examples:
-      shrike index status
-      shrike --json index status
+      shrike server index status
+      shrike --json server index status
     """
     client: ShrikeClient = ctx.obj["client"]
     json_out: bool = ctx.obj["json"]
