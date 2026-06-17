@@ -3,7 +3,7 @@
 #
 # We pin a known tag and verify a per-platform SHA256 instead of pulling
 # `releases/latest` unverified — a release could be re-tagged or a mirror
-# tampered with. To bump: run `scripts/update-llama-lock.sh [TAG]` (defaults to
+# tampered with. To bump: run `tools/update-llama-lock.sh [TAG]` (defaults to
 # the latest release) and commit the result.
 #
 # Shell-sourceable: KEY=VALUE, no spaces. Platform keys use underscores because
