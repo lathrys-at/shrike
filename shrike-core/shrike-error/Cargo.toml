@@ -10,7 +10,7 @@ description = "The shared error taxonomy every Shrike native crate returns acros
 name = "shrike_error"
 
 # Pure Rust by design — NO pyo3 here (epic #265 convention 5). The Python
-# exception mapping for this crate's error taxonomy lives in shrike-py, the one
+# exception mapping for this crate's error taxonomy lives in shrike-pyo3, the one
 # crate allowed to see pyo3.
 #
 # tracing (#308): native code emits spans/events with NO subscriber installed —

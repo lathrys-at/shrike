@@ -9,7 +9,7 @@ description = "Rust collection core over anki's protobuf service layer (#278, sl
 [lib]
 name = "shrike_collection"
 
-# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py
+# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-pyo3
 # behind its (default-off) `anki-core` feature.
 #
 # Consumption rule (#277 verdict review, binding): anki is consumed ONLY through

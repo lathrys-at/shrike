@@ -10,7 +10,7 @@ description = "Native embedding backends: ort + tokenizers + pooling (#270)."
 name = "shrike_embed"
 
 # The GPU execution providers are additive features (#384). The default keeps
-# the full set — the server profile (what shrike-py builds) is unchanged; the
+# the full set — the server profile (what shrike-pyo3 builds) is unchanged; the
 # features exist so slim builds (mobile/embedded minimal-core, #338) can drop
 # the GPU EP glue they can never use via `default-features = false`. CoreML
 # stays in the base: it's the macOS path, wanted on exactly the slim targets.
@@ -20,7 +20,7 @@ cuda = ["ort/cuda"]
 tensorrt = ["ort/tensorrt"]
 directml = ["ort/directml"]
 
-# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py.
+# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-pyo3.
 [dependencies]
 shrike-error = { workspace = true }
 # The engine contract (#342): this crate implements the sync compute traits

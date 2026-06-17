@@ -1,7 +1,7 @@
 # The Shrike MOBILE binding crate (#504): the action exchange over a C ABI —
 # the principled successor to the deleted shrike-cabi, and the second of the
 # two kernel builds (docs/distribution.md's build matrix). Sibling of
-# shrike-py, but it sees ZERO pyo3: a native Swift/Kotlin app embeds the
+# shrike-pyo3, but it sees ZERO pyo3: a native Swift/Kotlin app embeds the
 # kernel in-process and drives the action exchange with C completion
 # callbacks, so no CPython links into the artifact (pinned by the
 # `no_libpython` link-property test, mirroring the kernel's no_cpython_smoke).

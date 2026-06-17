@@ -9,7 +9,7 @@
 //! completion-log fragment.
 //!
 //! Actions are synchronous over `&dyn Collection` (#389): the transitional harness
-//! invokes them on its collection worker thread through the shrike-py
+//! invokes them on its collection worker thread through the shrike-pyo3
 //! per-action bindings (the same serialization every collection op rides);
 //! the kernel's async layer (S3, #332) will drive the same bodies through
 //! [`crate::SerializedCollection`]. No threading, no runtime assumption here

@@ -8,7 +8,7 @@
 //! `no_libpython` link-property test), so the no-Python-on-mobile property
 //! is structural, not aspirational.
 //!
-//! ## Shape (mirrors `shrike-py`'s `async_kernel.rs`, minus Python)
+//! ## Shape (mirrors `shrike-pyo3`'s `async_kernel.rs`, minus Python)
 //!
 //! - [`shrike_runtime_init`] installs a `current_thread` tokio runtime via
 //!   [`shrike_kernel::init_runtime`] AND starts a dedicated driver thread

@@ -4,9 +4,9 @@
 //! This crate is **pure Rust** — no `pyo3`. It defines one thing: [`NativeError`],
 //! the error every native compute crate returns, and its [`ErrorKind`] projection.
 //! The Python-facing half (exception classes, the `kind` → exception mapping) lives
-//! in `shrike-py`, the one crate allowed to depend on `pyo3` (enforced by
+//! in `shrike-pyo3`, the one crate allowed to depend on `pyo3` (enforced by
 //! `//shrike-core:layering_check`); the marshaling/threading conventions are
-//! documented on the binding crates that enforce them (`shrike-py`,
+//! documented on the binding crates that enforce them (`shrike-pyo3`,
 //! `shrike-mobile`), not here.
 //!
 //! # Error taxonomy
@@ -16,7 +16,7 @@
 //! Python without traceback noise), [`ErrorKind::Unavailable`] is a runtime
 //! resource that isn't up (model not loaded, file missing), [`ErrorKind::Busy`]
 //! is collection-lock contention (retryable), and [`ErrorKind::Internal`] is a
-//! bug. `shrike-py` maps each kind to a distinct Python exception class, and the
+//! bug. `shrike-pyo3` maps each kind to a distinct Python exception class, and the
 //! Python facades translate those into the existing error surface.
 //!
 //! # Source chain
@@ -55,7 +55,7 @@ pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
 ///
 /// Deliberately a CLOSED set (not `#[non_exhaustive]`): the four kinds are an
 /// INTERNAL taxonomy consumed only by in-workspace code, and they map 1:1 onto
-/// the four Python exception classes in `shrike-py`. The exhaustive match in
+/// the four Python exception classes in `shrike-pyo3`. The exhaustive match in
 /// `to_py_err` is the gate — adding a kind here is a deliberate COMPILE ERROR
 /// there, forcing a new exception mapping rather than letting a wildcard
 /// fail-soft mis-map it. (`#[non_exhaustive]` is for a published crate's public
@@ -81,7 +81,7 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
-    /// The stable wire string for this kind (matched in `shrike-py`'s mapping).
+    /// The stable wire string for this kind (matched in `shrike-pyo3`'s mapping).
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorKind::InvalidInput => "invalid_input",

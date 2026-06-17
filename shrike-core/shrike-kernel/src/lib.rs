@@ -22,7 +22,7 @@
 //!
 //! Slice-2 series (recorded on #279): this keystone first; then the kernel's
 //! action core + Rust-canonical schemas with the Pydantic contract test; then
-//! the Python harness rebased onto `shrike-py` kernel bindings, retiring the
+//! the Python harness rebased onto `shrike-pyo3` kernel bindings, retiring the
 //! transitional Python schedulers from #275.
 
 pub mod actions;

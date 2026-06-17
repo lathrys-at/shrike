@@ -8,7 +8,7 @@
 //! kind; provider resolution policy (intersect-with-available + warnings) stays
 //! Python-side, and this crate receives the already-resolved provider list.
 //!
-//! Pure Rust: no pyo3 (epic #265 convention 5) — bound to Python in `shrike-py`.
+//! Pure Rust: no pyo3 (epic #265 convention 5) — bound to Python in `shrike-pyo3`.
 
 mod clip;
 

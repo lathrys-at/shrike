@@ -19,7 +19,7 @@ name = "shrike_derived"
 default = ["bundled"]
 bundled = ["rusqlite/bundled"]
 
-# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py.
+# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-pyo3.
 [dependencies]
 shrike-error = { workspace = true }
 shrike-store = { path = "../shrike-store" }

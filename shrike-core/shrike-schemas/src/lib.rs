@@ -14,7 +14,7 @@
 //! - `Literal[True]`-style fields that are *not* a union's tag use the
 //!   [`literals`] types (const-valued, schema `const`).
 //! - Unknown keys are ignored (Pydantic's `extra="ignore"`; serde's default).
-//! - Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-py.
+//! - Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-pyo3.
 
 pub mod literals;
 
