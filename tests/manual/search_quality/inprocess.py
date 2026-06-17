@@ -41,8 +41,8 @@ from typing import Any
 import shrike_native
 
 from shrike.harness.derived import DerivedTextStore, NativeDerivedEngine
-from shrike.harness.engines.embedding.runtime import EmbeddingRuntime
 from shrike.harness.engines.embedding.base import IMAGE, TEXT
+from shrike.harness.engines.embedding.runtime import EmbeddingRuntime
 from shrike.harness.harness import Harness, KernelIndexView
 
 _MARKER_RE = re.compile(r"@@P:([A-Za-z0-9_-]+)@@")

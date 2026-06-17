@@ -24,9 +24,9 @@ from unittest.mock import MagicMock
 import pytest
 from mcp.server.fastmcp import FastMCP
 
+from shrike.api.tools import register_tools
 from shrike.harness.harness import KernelIndexView
 from shrike.harness.index import IndexState
-from shrike.api.tools import register_tools
 from tests.unit.conftest import KernelHarness
 
 BASIC_NOTE = {

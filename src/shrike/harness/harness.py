@@ -30,7 +30,9 @@ from shrike.harness.collection import CollectionWrapper
 from shrike.harness.derived import DerivedTextStore, NativeDerivedEngine
 from shrike.harness.engines.embedding.base import EmbedderBackend
 from shrike.harness.engines.embedding.runtime import EmbeddingRuntime
-from shrike.harness.index import ACTIVATION_MARGIN  # #580/#730: the cross-space floor margin default
+from shrike.harness.index import (
+    ACTIVATION_MARGIN,  # #580/#730: the cross-space floor margin default
+)
 from shrike.harness.profiles import MODALITIES
 from shrike.harness.registry import Registry
 

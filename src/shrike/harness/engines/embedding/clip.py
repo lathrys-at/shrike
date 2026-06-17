@@ -27,10 +27,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from shrike.harness.engines.embedding.batching import probe_image_max_safe_batch, probe_max_safe_batch
-from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
 from shrike.harness.engines.embedding.base import IMAGE, TEXT
+from shrike.harness.engines.embedding.batching import (
+    probe_image_max_safe_batch,
+    probe_max_safe_batch,
+)
 from shrike.harness.engines.embedding.onnx_common import resolve_execution_providers
+from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
 
 logger = logging.getLogger("shrike.embedding")
 

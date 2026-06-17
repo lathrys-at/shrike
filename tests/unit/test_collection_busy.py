@@ -92,8 +92,8 @@ class TestKernelBusyNormalization:
         import pytest
         import shrike_native
 
-        from shrike.harness.collection import CollectionBusyError
         from shrike.api.mcp_adapter import _safe_tool
+        from shrike.harness.collection import CollectionBusyError
         from shrike.schemas import COLLECTION_BUSY_CODE
 
         @_safe_tool

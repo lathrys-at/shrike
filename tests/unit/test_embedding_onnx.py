@@ -19,10 +19,10 @@ from unittest.mock import patch
 
 import pytest
 
-from shrike.harness.engines.embedding.batching import BATCH_PROBE_TEXTS
-from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
 from shrike.harness.engines.embedding.base import TEXT
+from shrike.harness.engines.embedding.batching import BATCH_PROBE_TEXTS
 from shrike.harness.engines.embedding.onnx import OnnxBackend
+from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
 
 # -- Fakes for onnxruntime (the carrier wheel) / shrike_native (the engine) ----
 
@@ -267,7 +267,10 @@ class TestLifecycleAndEmbed:
         fake_native.OnnxTextEmbedder = engine_cls  # type: ignore[attr-defined]
         with (
             patch.dict(sys.modules, {"onnxruntime": fake_ort, "shrike_native": fake_native}),
-            patch("shrike.harness.engines.embedding.onnx.locate_ort_dylib", lambda: Path("/fake/libort.so")),
+            patch(
+                "shrike.harness.engines.embedding.onnx.locate_ort_dylib",
+                lambda: Path("/fake/libort.so"),
+            ),
         ):
             be.start()
 

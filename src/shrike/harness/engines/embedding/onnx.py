@@ -41,10 +41,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from shrike.harness.engines.embedding.batching import ProbeError, probe_max_safe_batch
-from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
 from shrike.harness.engines.embedding.base import TEXT
+from shrike.harness.engines.embedding.batching import ProbeError, probe_max_safe_batch
 from shrike.harness.engines.embedding.onnx_common import resolve_execution_providers
+from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
 
 logger = logging.getLogger("shrike.embedding")
 

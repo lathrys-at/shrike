@@ -24,9 +24,8 @@ from mcp.server.transport_security import (
 )
 from pydantic import ValidationError
 
-from shrike.server._mcp_perf import install_validator_cache
+from shrike.api.tools import ToolInputError, register_tools
 from shrike.harness.collection import DEFAULT_LOCK_HOLD
-from shrike.platform.daemon import AlreadyRunningError, ServerLock
 from shrike.harness.engines.embedding.runtime import (
     BACKEND_ALIASES,
     DEFAULT_BACKEND,
@@ -34,6 +33,7 @@ from shrike.harness.engines.embedding.runtime import (
     EmbeddingRuntime,
 )
 from shrike.harness.harness import CollectionManager, Harness, HarnessParams, KernelConfigError
+from shrike.platform.daemon import AlreadyRunningError, ServerLock
 
 # The transport-free core (#275). The collectors and _maybe_rebuild moved there
 # with it; re-exported here so existing import sites (tests included) are
@@ -46,7 +46,7 @@ from shrike.platform.pathsafety import (
     validate_path_root,
 )
 from shrike.schemas import WIRE_PROTOCOL_VERSION, ActionError, ActionErrorCode
-from shrike.api.tools import ToolInputError, register_tools
+from shrike.server._mcp_perf import install_validator_cache
 
 # The kernel saver's built-in flush tuning (#355): the --index-save-* help
 # names the defaults the flags would override. Sourced from the kernel, not
@@ -621,9 +621,7 @@ def main() -> None:
     # entry point (python -m shrike.server via __main__, the //bin launcher, or
     # the foreground CLI) — the module became a package in #730, which would
     # otherwise surface argv[0] as `__main__.py`.
-    parser = argparse.ArgumentParser(
-        prog="shrike.server", description="Shrike MCP server for Anki"
-    )
+    parser = argparse.ArgumentParser(prog="shrike.server", description="Shrike MCP server for Anki")
     parser.add_argument(
         "--collection",
         required=True,

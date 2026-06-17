@@ -34,9 +34,9 @@ from typing import Any
 
 import shrike_native
 
+from shrike.harness.engines.embedding.base import IMAGE, TEXT, EmbedderBackend
 from shrike.harness.engines.embedding.batching import probe_max_safe_batch
 from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
-from shrike.harness.engines.embedding.base import IMAGE, TEXT, EmbedderBackend
 
 # Embedding backend kinds the runtime can construct (see EmbeddingRuntime).
 # The onnx/clip backends run the native (Rust) engines, unconditional since the

@@ -14,8 +14,8 @@ import pytest
 
 shrike_native = pytest.importorskip("shrike_native")
 
-from shrike.harness import cache_layout  # noqa: E402
 from shrike.cli.config import load_config, save_config  # noqa: E402
+from shrike.harness import cache_layout  # noqa: E402
 from shrike.harness.derived import DerivedTextStore, NativeDerivedEngine  # noqa: E402
 from shrike.harness.engines.embedding.runtime import EmbeddingRuntime  # noqa: E402
 from shrike.harness.harness import (  # noqa: E402

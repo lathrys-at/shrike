@@ -29,6 +29,7 @@ from shrike.cli.groups import OrderedGroup
 from shrike.cli.index_cmd import index
 from shrike.cli.output import output_options
 from shrike.client import ShrikeClient
+from shrike.harness.engines.embedding.runtime import BACKEND_ALIASES, SUPPORTED_BACKENDS
 from shrike.platform.daemon import (
     META_FILE,
     STATE_DIR,
@@ -37,7 +38,6 @@ from shrike.platform.daemon import (
     read_server_meta,
     stop_server,
 )
-from shrike.harness.engines.embedding.runtime import BACKEND_ALIASES, SUPPORTED_BACKENDS
 from shrike.platform.log import DEFAULT_LOG_DIR, get_log_file, parse_log_line, style_log_line
 from shrike.schemas import ServerStatus
 

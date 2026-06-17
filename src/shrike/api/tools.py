@@ -24,9 +24,9 @@ from shrike.api.actions import (
     ToolInputError,
     build_actions,
 )
+from shrike.api.mcp_adapter import _safe_tool, build_action_tools, register_actions
 from shrike.harness.collection import CollectionWrapper
 from shrike.harness.derived import DerivedTextStore
-from shrike.api.mcp_adapter import _safe_tool, build_action_tools, register_actions
 
 __all__ = [
     "ACTIVATION_MARGIN",

@@ -1019,8 +1019,8 @@ class TestDescribeAttach:
 
         from mcp.server.fastmcp import FastMCP
 
-        from shrike.harness.harness import KernelIndexView
         from shrike.api.tools import register_tools
+        from shrike.harness.harness import KernelIndexView
 
         class _TokenHash:
             def embed_texts(self, texts: list[str]) -> list[list[float]]:
