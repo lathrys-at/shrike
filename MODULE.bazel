@@ -58,7 +58,7 @@ use_repo(pip, "shrike_sdist_pip")
 bazel_dep(name = "rules_rust", version = "0.70.0")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "bazel_skylib", version = "1.8.2")  # copy_file (the .so rename)
-bazel_dep(name = "rules_pkg", version = "1.0.1")  # the anki-cards.skill bundle (#245)
+bazel_dep(name = "rules_pkg", version = "1.0.1")  # the create-cards.skill bundle (#245)
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(edition = "2021")

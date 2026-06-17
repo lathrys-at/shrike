@@ -2,15 +2,15 @@
 """Package a Shrike skill folder into a distributable ``.skill`` (or ``.zip``).
 
 A ``.skill`` file is just a zip whose root contains the skill folder
-(``anki-cards/SKILL.md``, ``anki-cards/references/…``), which is what Claude
+(``create-cards/SKILL.md``, ``create-cards/references/…``), which is what Claude
 Desktop / claude.ai expect when you upload a skill. This mirrors the layout the
 skill-creator uses, so the output installs the same way.
 
 Usage:
-    scripts/package-skill.py                       # packages skills/anki-cards → dist/
-    scripts/package-skill.py skills/anki-cards      # explicit folder
-    scripts/package-skill.py skills/anki-cards -o /tmp   # custom output dir
-    scripts/package-skill.py skills/anki-cards --zip     # name it .zip instead
+    scripts/package-skill.py                                # packages shrike-skills/create-cards → dist/
+    scripts/package-skill.py shrike-skills/create-cards     # explicit folder
+    scripts/package-skill.py shrike-skills/create-cards -o /tmp   # custom output dir
+    scripts/package-skill.py shrike-skills/create-cards --zip     # name it .zip instead
 
 Build artifacts (__pycache__, *.pyc, .DS_Store, node_modules) and a top-level
 ``evals/`` directory are excluded.
@@ -25,7 +25,7 @@ import zipfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SKILL = REPO_ROOT / "skills" / "anki-cards"
+DEFAULT_SKILL = REPO_ROOT / "shrike-skills" / "create-cards"
 
 EXCLUDE_DIRS = {"__pycache__", "node_modules", ".git"}
 EXCLUDE_GLOBS = {"*.pyc", "*.pyo"}
@@ -104,7 +104,7 @@ def main() -> int:
         nargs="?",
         type=Path,
         default=DEFAULT_SKILL,
-        help="Path to the skill folder (default: skills/anki-cards).",
+        help="Path to the skill folder (default: shrike-skills/create-cards).",
     )
     parser.add_argument(
         "-o",

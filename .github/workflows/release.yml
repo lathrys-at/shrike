@@ -4,7 +4,7 @@ name: Release
 # (they only run on `rc`-labelled PRs — see test.yml) run here unconditionally:
 # tagging a release is exactly the moment to pay for full coverage. On a `v*` tag
 # push we run the full integration suite on every platform, build the artifacts
-# with Bazel (the platform-tagged Python wheels + sdist, the anki-cards.skill
+# with Bazel (the platform-tagged Python wheels + sdist, the create-cards.skill
 # bundle, and SHA256SUMS), and cut a GitHub Release with them attached.
 #
 # Pre-release tags (`vX.Y.Z-rc.N`, `-alpha`, …) are marked as GitHub pre-releases.
@@ -118,7 +118,7 @@ jobs:
           name: dist-wheel-${{ matrix.os }}
           path: dist/*.whl
 
-  # The sdist + the anki-cards.skill bundle, all via Bazel (#245). Each is
+  # The sdist + the create-cards.skill bundle, all via Bazel (#245). Each is
   # stamped from the tag (STABLE_VERSION via tools/workspace_status.sh, hence
   # fetch-depth: 0). They go into a dist-* artifact for the release job to
   # attach + checksum alongside the wheels.
@@ -153,10 +153,10 @@ jobs:
             fi
           fi
       # Built after `twine check` so the check only ever saw the Python dists.
-      - name: Package the anki-cards skill bundle with Bazel
+      - name: Package the create-cards skill bundle with Bazel
         run: |
-          ./bazel build //skills:skill --stamp
-          cp -f "$(./bazel cquery --output=files //skills:skill)" dist/anki-cards.skill
+          ./bazel build //shrike-skills:skill --stamp
+          cp -f "$(./bazel cquery --output=files //shrike-skills:skill)" dist/create-cards.skill
       - uses: ./.github/actions/bazel-save
         if: always()
       - uses: actions/upload-artifact@v7
@@ -233,7 +233,7 @@ jobs:
           merge-multiple: true
           path: dist
       - name: Keep only the Python distributions
-        # The dist artifacts also carry anki-cards.skill; PyPI must receive only
+        # The dist artifacts also carry create-cards.skill; PyPI must receive only
         # the sdist + the platform wheels.
         run: find dist -maxdepth 1 -type f ! -name '*.whl' ! -name '*.tar.gz' -delete
       - uses: pypa/gh-action-pypi-publish@release/v1

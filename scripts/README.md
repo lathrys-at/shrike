@@ -31,7 +31,7 @@ consumes the lock.
 - `profiles/` — the checked-in, path-free capability profiles `serve` reads.
 
 ### Packaging
-- `package-skill.py` — bundles the `anki-cards` skill into a `.skill` package.
+- `package-skill.py` — bundles the `create-cards` skill into a `.skill` package (a symlink into the `shrike-skills/` unit, where the real file lives).
 
 > Several of these are being reshaped by the layout epic (#694): `serve`
 > becomes canonically Bazel (#699), the dev/maintenance shell scripts grow

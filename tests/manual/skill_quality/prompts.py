@@ -19,7 +19,7 @@ from pathlib import Path
 # prefix is just where this clone happens to live.
 _ROOT = Path(__file__).resolve().parents[3]  # tests/manual/skill_quality -> repo root
 
-SKILL_PATH = str(_ROOT / "skills" / "anki-cards" / "SKILL.md")
+SKILL_PATH = str(_ROOT / "shrike-skills" / "create-cards" / "SKILL.md")
 SHRIKE_BIN = str(_ROOT / ".venv" / "bin" / "shrike")
 
 CLI_REFERENCE = str(_ROOT / "docs" / "cli-reference.md")
@@ -37,7 +37,7 @@ Do NOT start or stop the server."""
 
 def with_skill_prompt(user_request: str) -> str:
     return f"""\
-You are an assistant that has the "anki-cards" skill available. Before doing
+You are an assistant that has the "create-cards" skill available. Before doing
 anything else, read the skill instructions at {SKILL_PATH} and the reference
 files it points to (references/examples.md and references/shrike-cli.md), and
 follow them carefully for the task below.

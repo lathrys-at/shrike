@@ -1,5 +1,5 @@
 ---
-name: anki-cards
+name: create-cards
 description: >-
   Author durable, well-formed Anki flashcards in an existing collection through
   Shrike — using its MCP tools when connected, or the `shrike` CLI otherwise —

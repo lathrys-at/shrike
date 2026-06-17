@@ -55,7 +55,7 @@ extension).
   //tests/integration:embedding_backends # what CI runs (adds the manual halves)
 ./bazel build //:wheel --stamp           # the platform wheel (or tools/build-wheel.sh)
 ./bazel build //:sdist --stamp           # the sdist (or tools/build-sdist.sh)
-./bazel build //skills:skill             # the anki-cards.skill bundle (unversioned)
+./bazel build //shrike-skills:skill      # the create-cards.skill bundle (unversioned)
 ```
 
 **Manual targets.** The embedding test halves, the llama-server alias, and

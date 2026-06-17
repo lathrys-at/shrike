@@ -66,7 +66,7 @@ backward compatibility; don't rush it.
 
 The tag *is* the version (hatch-vcs, #42) — there's no constant to bump. The
 tag-triggered workflow (`.github/workflows/release.yml`) runs the full
-cross-platform suite, builds the **sdist + wheel**, the **`anki-cards.skill`**
+cross-platform suite, builds the **sdist + wheel**, the **`create-cards.skill`**
 bundle (`scripts/package-skill.py`), and a **`SHA256SUMS`**, and attaches them to a
 GitHub Release. Final-release notes come from the matching `## [X.Y.Z]` section of
 `CHANGELOG.md`; an rc tag uses auto-generated commit notes instead. A final release
@@ -224,7 +224,7 @@ in-process tracking can't see. So always do a full `pytest` run before you push.
 
 ## Skill changes (QA eval)
 
-The `anki-cards` skill (`skills/anki-cards/**`) is **not covered by `pytest`/CI** —
+The `create-cards` skill (`shrike-skills/create-cards/**`) is **not covered by `pytest`/CI** —
 only the pure grader (`tests/manual/skill_quality/test_grade.py`) runs there. A change to the
 skill's guidance or references can pass every CI check while silently regressing
 card quality, so the regression guard is the manual eval harness, not the test
