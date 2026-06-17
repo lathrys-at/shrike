@@ -225,9 +225,16 @@ class TestClipImageIndex:
             await kernel.rebuild_index()  # full rebuild calibrates the gate (#201b)
 
             # Offline calibration (#201b) ran on the real model and produced image stats.
-            stats = json.loads(kernel.index_status_json())["activation"]
+            raw = json.loads(kernel.index_status_json())
+            stats = raw["activation"]
             assert stats["image"]["n"] >= CALIB_MIN
             assert stats["image"]["std"] > 0.0
+            # Per-modality breakdown (#684): the two-space CLIP index reports a
+            # text AND an image sub-index, each with its own size/ndim.
+            mods = {m["modality"]: m for m in raw["modalities"]}
+            assert {"text", "image"} <= set(mods)
+            assert mods["text"]["size"] == n and mods["image"]["size"] == n
+            assert mods["text"]["ndim"] and mods["image"]["ndim"]
             floor = activation_floor(stats["image"], ACTIVATION_MARGIN)
             assert floor is not None
 
