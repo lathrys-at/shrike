@@ -104,6 +104,12 @@ def _runfiles() -> Any | None:
 #: dirs serve.bzl assembles. ``models/<dir-name>`` is package-relative to ``//scripts``.
 _MODEL_RUNFILES_ROOT = "_main/scripts/models"
 
+#: The per-model-dir sentinel file serve.bzl drops into each assembled dir. A bare
+#: directory has no reliable runfiles ``Rlocation`` entry (manifest-based runfiles
+#: map FILES only), so the launcher resolves this FILE and takes its parent. Kept
+#: in sync with serve.bzl's ``_SENTINEL_NAME``.
+_SENTINEL_NAME = ".shrike_model_dir"
+
 
 def resolve_model_dir(dir_name: str, models_root: Path) -> Path:
     """Resolve the model named *dir_name* to an on-disk model dir.
@@ -126,10 +132,13 @@ def resolve_model_dir(dir_name: str, models_root: Path) -> Path:
 
     r = _runfiles()
     if r is not None:
-        loc = r.Rlocation(f"{_MODEL_RUNFILES_ROOT}/{dir_name}")
-        if loc and os.path.isdir(loc):
-            logger.info("resolved model %s from Bazel runfiles → %s", dir_name, loc)
-            return Path(loc)
+        # Resolve the dir's SENTINEL file (a directory has no reliable Rlocation
+        # entry), then take its parent — robust across runfiles implementations.
+        sentinel = r.Rlocation(f"{_MODEL_RUNFILES_ROOT}/{dir_name}/{_SENTINEL_NAME}")
+        if sentinel and os.path.isfile(sentinel):
+            model_dir = Path(sentinel).parent
+            logger.info("resolved model %s from Bazel runfiles → %s", dir_name, model_dir)
+            return model_dir
         # Under Bazel but the dir isn't in THIS target's runfiles — the per-profile
         # launcher target is missing this model's `data` dep (or serve.bzl has no
         # _MODEL_FILES row for it). Fail loud here, not late at the backend.

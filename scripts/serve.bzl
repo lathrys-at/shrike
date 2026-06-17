@@ -26,6 +26,7 @@ consumed, never ``serve --profile``, so they get NO launcher target here.
 """
 
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_python//python:defs.bzl", "py_binary")
 
 # -- The model-assembly table: dir-name -> list of (external file target, canonical
@@ -33,6 +34,12 @@ load("@rules_python//python:defs.bzl", "py_binary")
 # MODULE.bazel) is the canonical name, so the copy is a pure relocation into the
 # per-model dir. This is the SINGLE source of truth the macro derives copy_file
 # rules AND per-profile `data` from (no serve.py-side mirror).
+# The per-model-dir sentinel file name. serve.py resolves this FILE's runfiles
+# path and takes its parent to get the model dir (a directory has no reliable
+# Rlocation entry in manifest-based runfiles). Kept in sync with serve.py's
+# _SENTINEL_NAME.
+_SENTINEL_NAME = ".shrike_model_dir"
+
 _MODEL_FILES = {
     # MiniLM int8 text (the text-onnx profile; the same model the integration suite uses).
     "all-MiniLM-L6-v2-onnx-int8": [
@@ -84,9 +91,19 @@ def assemble_model_dirs():
                 tags = ["manual"],
             )
             outs.append(out)
+        # A sentinel file inside the dir. The launcher can't Rlocation a bare
+        # directory (manifest-based runfiles map FILES only), so it resolves THIS
+        # file and takes its parent — robust across runfiles implementations.
+        sentinel = "models/{}/{}".format(dir_name, _SENTINEL_NAME)
+        write_file(
+            name = "sentinel_" + dir_name,
+            out = sentinel,
+            content = ["# serve.bzl per-model dir marker (#699); resolved by serve.py."],
+            tags = ["manual"],
+        )
         native.filegroup(
             name = "model_dir_" + dir_name,
-            srcs = outs,
+            srcs = outs + [sentinel],
             visibility = ["//visibility:private"],
             # manual: same reason as the copy rules — keep the big externals off
             # the default `//...` build expansion (the per-profile target pulls it).

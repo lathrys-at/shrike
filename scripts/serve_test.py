@@ -296,11 +296,14 @@ def test_resolve_under_bazel_returns_runfiles_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Under Bazel the per-model dir is already assembled in the runfiles by
-    # serve.bzl; resolve_model_dir returns it IN PLACE (no copy, no fetch).
+    # serve.bzl; resolve_model_dir resolves the dir's SENTINEL file and returns its
+    # parent IN PLACE (no copy, no fetch — a bare dir has no reliable Rlocation).
     model_dir = tmp_path / "rf" / "all-MiniLM-L6-v2-onnx-int8"
     model_dir.mkdir(parents=True)
-    key = f"{serve._MODEL_RUNFILES_ROOT}/all-MiniLM-L6-v2-onnx-int8"
-    monkeypatch.setattr(serve, "_runfiles", lambda: _FakeRunfiles({key: str(model_dir)}))
+    sentinel = model_dir / serve._SENTINEL_NAME
+    sentinel.write_text("# marker")
+    key = f"{serve._MODEL_RUNFILES_ROOT}/all-MiniLM-L6-v2-onnx-int8/{serve._SENTINEL_NAME}"
+    monkeypatch.setattr(serve, "_runfiles", lambda: _FakeRunfiles({key: str(sentinel)}))
     out = serve.resolve_model_dir("all-MiniLM-L6-v2-onnx-int8", tmp_path / "unused")
     assert out == model_dir
 
