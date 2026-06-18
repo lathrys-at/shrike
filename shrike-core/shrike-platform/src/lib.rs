@@ -13,6 +13,13 @@
 //! Xcode (the Swift-only Vision module isn't in the Command Line Tools SDK);
 //! running needs nothing extra.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 // The Swift C-ABI memory guard (the free fn) is macOS-only; off macOS the
 // vision/speech shims are pure-Rust `None` stubs that never reference it.
 #[cfg(target_os = "macos")]

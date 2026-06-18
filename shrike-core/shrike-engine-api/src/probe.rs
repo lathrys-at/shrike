@@ -369,7 +369,7 @@ pub fn max_probe_drift<E: EmbedText + ?Sized>(engine: &E) -> NativeResult<f64> {
 
 /// The image analogue of [`probe_max_safe_batch`]: the batch size proven safe
 /// for the *vision* path, or 1 (embed serially). Same tolerance discipline,
-/// same two-failure-modes split — over the synthetic [`owned_images`] set.
+/// same two-failure-modes split — over the synthetic `owned_images` set.
 ///
 /// `_resolve_files` only ever loads a matched-precision text+vision pair, so a
 /// uniform export's text probe already predicts the vision path. This guards
