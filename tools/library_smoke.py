@@ -10,21 +10,21 @@ from __future__ import annotations
 
 
 def main() -> int:
+    # Since the #278 cutover the normalization runs in the native core; the
+    # smoke proves the native module is importable and carries it.
+    import shrike_native
+
     import shrike
+    import shrike.api.tools  # noqa: F401
 
     # Import the breadth of the package so any missing requirement surfaces here.
     import shrike.cli  # noqa: F401
     import shrike.client  # noqa: F401
-    import shrike.collection  # noqa: F401
-    import shrike.index  # noqa: F401
+    import shrike.harness.collection  # noqa: F401
+    import shrike.harness.index  # noqa: F401
     import shrike.schemas  # noqa: F401
     import shrike.server  # noqa: F401
-    import shrike.tools  # noqa: F401
-    from shrike.embed_text import EMBED_TEXT_VERSION
-
-    # Since the #278 cutover the normalization runs in the native core; the
-    # smoke proves the native module is importable and carries it.
-    import shrike_native
+    from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
 
     assert hasattr(shrike_native, "CollectionCore")
     assert EMBED_TEXT_VERSION >= 1
