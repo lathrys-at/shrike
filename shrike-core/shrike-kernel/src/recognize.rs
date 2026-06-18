@@ -147,6 +147,9 @@ pub enum GateOutcome {
 }
 
 impl RecognitionGate {
+    /// Judge one recognition: below confidence or lexical substance is
+    /// [`GateOutcome::Drop`]; substantive-enough text earns a vector
+    /// ([`GateOutcome::LexicalAndVector`]) else lexical-only.
     pub fn judge(&self, recognition: &Recognition) -> GateOutcome {
         let chars = recognition.text.trim().chars().count();
         if recognition.confidence < self.min_confidence || chars < self.min_chars_lexical {
@@ -182,8 +185,11 @@ pub enum SweepReport {
     /// A batch was sent: `recognized` items reached the engine, `stored`
     /// cleared the gate, `remaining` are left beyond this window.
     Ran {
+        /// Items that reached the engine in this batch.
         recognized: usize,
+        /// Of those, how many cleared the gate and were stored.
         stored: usize,
+        /// Pending items left beyond this window.
         remaining: usize,
     },
 }

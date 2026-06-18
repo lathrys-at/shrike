@@ -33,8 +33,13 @@ use crate::TAG_TEXT_SPACE;
 /// Hygiene knobs (#179: "a curation surface — make them configurable"). The
 /// defaults live here; the harness threads overrides through
 /// [`TagCentroidConfig`].
+///
+/// Minimum members a tag needs before a centroid is built for it.
 pub const DEFAULT_MIN_MEMBERS: usize = 2;
+/// Maximum fraction of the collection a tag may cover before it is too broad
+/// to be an informative centroid.
 pub const DEFAULT_MAX_COVERAGE: f64 = 0.5;
+/// Tags never given a centroid (Anki's own bookkeeping tags).
 pub const DEFAULT_BLOCKLIST: &[&str] = &["leech", "marked"];
 
 /// Per-tag ceiling on members scored during query expansion (#445): a huge
@@ -133,6 +138,11 @@ struct TagState {
 }
 
 impl TagKeyMap {
+    /// The tag name behind a centroid key (`None` if unknown).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn lookup(&self, key: i64) -> Option<String> {
         self.inner
             .read()
@@ -143,6 +153,10 @@ impl TagKeyMap {
     }
 
     /// The member note ids behind a centroid key (empty if unknown).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn members(&self, key: i64) -> Vec<i64> {
         self.inner
             .read()
@@ -177,10 +191,21 @@ impl TagKeyMap {
         fresh.copied().step_by(n.div_ceil(ceiling)).collect()
     }
 
+    /// How many centroid keys are currently mapped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn len(&self) -> usize {
         self.inner.read().expect("tag keys poisoned").names.len()
     }
 
+    /// Whether no centroid keys are mapped (no recompute has run yet, or none
+    /// survived the hygiene filters).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -189,6 +214,10 @@ impl TagKeyMap {
     /// half of the op-tail relevance probe (#445): a delete (or an update
     /// that removed tags) changes membership only if the note was IN it.
     /// One pass over the member lists (~sub-ms even at 100k members).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn any_member_of(&self, ids: &[i64]) -> bool {
         if ids.is_empty() {
             return false;
@@ -241,6 +270,9 @@ struct RefreshState {
 pub const TAG_REFRESH_WINDOW: f64 = 2.0;
 
 impl TagRefresher {
+    /// Build a refresher over the collection actor, vector engine, key map,
+    /// hygiene config, debounced saver, and the embed-slot the recompute means
+    /// over. Wraps it in the `Arc` the spawned refresh tasks clone.
     pub fn new(
         collection: Arc<crate::SerializedCollection>,
         engine: Arc<dyn VectorIndex>,
@@ -264,6 +296,11 @@ impl TagRefresher {
     /// Note a membership-relevant change. Never blocks, never errors: the
     /// refresh is best-effort by contract (the tag layer is
     /// conditionally-present and must not fail the op it rides on).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal state mutex is poisoned (a prior holder
+    /// panicked).
     pub fn request(self: &Arc<Self>) {
         {
             let mut st = self.state.lock().expect("tag refresher poisoned");
@@ -297,6 +334,11 @@ impl TagRefresher {
 
     /// Abort any in-flight/scheduled refresh (kernel close): the collection
     /// actor is about to drain, and a late follow-up has nothing to read.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal state mutex is poisoned (a prior holder
+    /// panicked).
     pub fn shutdown(&self) {
         let mut st = self.state.lock().expect("tag refresher poisoned");
         st.dirty = false;
@@ -340,6 +382,11 @@ impl TagRefresher {
 /// Recompute every tag centroid from the engine's note TEXT vectors and
 /// replace the `tag.text` space wholesale. Returns the centroid count.
 /// Centroid = renormalized mean (the mean of unit vectors is not unit-norm).
+///
+/// # Errors
+///
+/// Returns an error if the engine rejects the wholesale `tag.text` rebuild
+/// (`ensure`/`add` of the new centroid set).
 pub fn recompute(
     engine: &dyn VectorIndex,
     rows: &[(i64, Vec<String>)],
@@ -421,7 +468,10 @@ pub fn recompute(
 
 /// Retrieval knobs (#179): how many top tags may activate per query, and the
 /// note-ranking cap so one giant tag can't flood the fusion.
+///
+/// Maximum tags that may activate for a single query.
 pub const TAG_TOP_TAGS: usize = 3;
+/// Maximum member notes the tag signal contributes to the fusion per query.
 pub const TAG_RANK_CAP: usize = 50;
 
 /// The tag activation floor — deliberately BELOW the semantic note threshold:

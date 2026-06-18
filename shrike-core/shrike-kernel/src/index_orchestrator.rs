@@ -30,7 +30,10 @@ use shrike_store::VectorIndex;
 pub const INDEX_SCHEMA_VERSION: i64 = 2;
 
 /// Saver defaults (mirrors `index.DEFAULT_SAVE_DELAY` / `_THRESHOLD`).
+///
+/// Idle-debounce window: flush this many seconds after the last change.
 pub const DEFAULT_SAVE_DELAY: f64 = 60.0;
+/// Burst cap: flush immediately once this many unsaved changes accumulate.
 pub const DEFAULT_SAVE_THRESHOLD: u64 = 100;
 
 /// Stable fingerprint of a note's embedding text — bit-identical to Python's
@@ -126,9 +129,12 @@ pub fn note_hash_images_only(
 /// owning-collection identity (#67).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexMeta {
+    /// The text-modality vector width (the index's primary dimension).
     pub ndim: i64,
+    /// The `col.mod` at last build (absent before the first build).
     #[serde(default)]
     pub col_mod: Option<i64>,
+    /// The embedding model fingerprint at last build (absent if unset).
     #[serde(default)]
     pub model_id: Option<String>,
     /// Marker absent → pre-#201a (v1) single-index layout.
@@ -169,8 +175,11 @@ pub type ActivationStats = BTreeMap<String, ActivationStat>;
 /// `BTreeMap<String, f64>` produced, so the serialized bytes are identical.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct ActivationStat {
+    /// Mean of the modality's typical best-match cosine.
     pub mean: f64,
+    /// The sample count (`f64` to round-trip the Python on-disk shape).
     pub n: f64,
+    /// Standard deviation of the best-match cosine.
     pub std: f64,
 }
 
@@ -200,9 +209,13 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OrchestratorState {
+    /// The index is built and serving search.
     Ready,
+    /// A rebuild/reconcile is in progress (see [`BuildProgress`]).
     Building,
+    /// No embedder attached — the index loads on-disk vectors but cannot grow.
     Unavailable,
+    /// A build failed (the error is carried in [`OrchestratorStatus`]).
     Error,
 }
 
@@ -210,13 +223,21 @@ pub enum OrchestratorState {
 /// typed since #391; the binding serializes once at the edge.
 #[derive(Debug, Clone, Serialize)]
 pub struct OrchestratorStatus {
+    /// The current build/availability state.
     pub state: OrchestratorState,
+    /// Total vectors across all sub-indexes (text-modality note count).
     pub size: usize,
+    /// The text-modality vector width (`None` before any width is set).
     pub ndim: Option<usize>,
+    /// The `col.mod` at last build.
     pub col_mod: Option<i64>,
+    /// The embedding model fingerprint at last build.
     pub model_id: Option<String>,
+    /// Build progress (indexed so far / total planned).
     pub progress: BuildProgress,
+    /// The build error message when `state` is [`OrchestratorState::Error`].
     pub error: Option<String>,
+    /// Per-modality calibration stats, once calibration has run.
     pub activation: Option<ActivationStats>,
     /// Per-modality sub-index breakdown (#684): the text and image sub-indexes
     /// report their OWN size/ndim, which the aggregate `size`/`ndim` above
@@ -228,15 +249,20 @@ pub struct OrchestratorStatus {
 /// `ndim` is `None` for an empty sub-index (width not yet set).
 #[derive(Debug, Clone, Serialize)]
 pub struct ModalityStat {
+    /// The sub-index name (e.g. `text`, `image`).
     pub modality: String,
+    /// Vectors in this sub-index.
     pub size: usize,
+    /// This sub-index's vector width (`None` until its width is set).
     pub ndim: Option<usize>,
 }
 
 /// `status()`'s build progress pair (indexed so far / total planned).
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct BuildProgress {
+    /// Notes embedded so far in the current build.
     pub indexed: u64,
+    /// Total notes planned for the current build.
     pub total: u64,
 }
 
@@ -377,6 +403,7 @@ impl IndexOrchestrator {
         }
     }
 
+    /// The backing vector engine (borrowed).
     pub fn engine(&self) -> &dyn VectorIndex {
         &*self.engine
     }
@@ -388,12 +415,20 @@ impl IndexOrchestrator {
 
     /// Embedder detached: searchable vectors remain on disk/memory but the
     /// semantic surface is down (mirrors the Python `set_backend(None)`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub fn mark_unavailable(&self) {
         self.shared.lock().expect("orchestrator poisoned").state = OrchestratorState::Unavailable;
     }
 
     /// Embedder (re)attached: flip back to ready ONLY from unavailable — a
     /// building or errored state is the (re)build path's to resolve.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub fn mark_ready_if_loaded(&self) {
         let mut shared = self.shared.lock().expect("orchestrator poisoned");
         if shared.state == OrchestratorState::Unavailable {
@@ -404,6 +439,10 @@ impl IndexOrchestrator {
     /// The drift policy (mirrors `VectorIndex.check_drift`): nothing loaded /
     /// no stamp / model change / a v1 layout under an image-capable backend →
     /// rebuild; a bare `col_mod` move → reconcile; otherwise current.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     #[must_use]
     pub fn check_drift(
         &self,
@@ -431,6 +470,10 @@ impl IndexOrchestrator {
 
     /// Which notes changed/added/vanished vs the per-note fingerprints — the
     /// reconcile diff. `None` = no prior state, do a full rebuild instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     #[allow(clippy::type_complexity)]
     #[must_use]
     pub fn reconcile_diff(
@@ -452,18 +495,38 @@ impl IndexOrchestrator {
         Some((to_embed, to_remove))
     }
 
+    /// The current build/availability state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub fn state(&self) -> OrchestratorState {
         self.shared.lock().expect("orchestrator poisoned").state
     }
 
+    /// The `col.mod` at last build (`None` before the first build).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub fn col_mod(&self) -> Option<i64> {
         self.shared.lock().expect("orchestrator poisoned").col_mod
     }
 
+    /// Advance the stored `col.mod` watermark (a maintained write's tail).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub fn set_col_mod(&self, value: i64) {
         self.shared.lock().expect("orchestrator poisoned").col_mod = Some(value);
     }
 
+    /// The embedding model fingerprint at last build (`None` if unset).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub fn model_id(&self) -> Option<String> {
         self.shared
             .lock()
@@ -472,6 +535,11 @@ impl IndexOrchestrator {
             .clone()
     }
 
+    /// Build progress as `(indexed, total)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub fn build_progress(&self) -> (u64, u64) {
         self.shared
             .lock()
@@ -481,6 +549,10 @@ impl IndexOrchestrator {
 
     /// True when per-note fingerprints exist (an incremental reconcile is
     /// possible; absent → the next drift handles via full rebuild).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub fn has_note_hashes(&self) -> bool {
         self.shared
             .lock()
@@ -496,6 +568,17 @@ impl IndexOrchestrator {
     /// Every artifact lands via tmp + rename, ordered engine → hashes → meta:
     /// meta is the commit point, so it must never describe vectors or hashes
     /// that aren't already durably on disk (#381).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cache dir is non-UTF-8 or cannot be created, the
+    /// engine save fails, a sidecar cannot be encoded, or an artifact write
+    /// fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the save guard or the shared-state mutex is poisoned (a prior
+    /// holder panicked).
     pub fn save(&self) -> NativeResult<()> {
         // Savers serialize against each other; everything else stays free.
         let _saving = self.save_guard.lock().expect("save guard poisoned");
@@ -562,6 +645,16 @@ impl IndexOrchestrator {
     /// reachable only after `open` loaded persisted hashes, which exist only
     /// if a prior full `save()` landed. A new caller on a path where `add`
     /// populated hashes without a persist would write a lying meta.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cache dir cannot be created or the meta cannot be
+    /// encoded/written.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the save guard or the shared-state mutex is poisoned (a prior
+    /// holder panicked).
     pub fn save_meta_only(&self) -> NativeResult<()> {
         let _saving = self.save_guard.lock().expect("save guard poisoned");
         let Some(ndim) = self.engine.ndim() else {
@@ -606,6 +699,8 @@ struct PendingState {
 }
 
 impl DebouncedSaver {
+    /// Build a saver over `orchestrator` with the idle-debounce `delay_secs`
+    /// (clamped non-negative) and the burst-cap `threshold`.
     pub fn new(orchestrator: Arc<IndexOrchestrator>, delay_secs: f64, threshold: u64) -> Arc<Self> {
         Arc::new(Self {
             orchestrator,
@@ -616,6 +711,10 @@ impl DebouncedSaver {
     }
 
     /// Record a change: re-arm the idle timer, or flush now at the burst cap.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending-state mutex is poisoned (a prior holder panicked).
     pub fn request_save(self: &Arc<Self>) {
         // abort-old + spawn + store happen under ONE lock scope: two
         // concurrent op tails re-arming must never each take a None and
@@ -645,6 +744,10 @@ impl DebouncedSaver {
     }
 
     /// Unsaved changes since the last flush.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending-state mutex is poisoned (a prior holder panicked).
     pub fn pending_changes(&self) -> u64 {
         self.pending.lock().expect("saver poisoned").changes
     }
@@ -662,6 +765,13 @@ impl DebouncedSaver {
         pending.changes = 0;
     }
 
+    /// Flush synchronously: disarm the timer, zero the counter, and persist
+    /// (a save failure is logged, not propagated — used at shutdown so close()
+    /// returns only after the write lands).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending-state mutex is poisoned (a prior holder panicked).
     pub fn flush(&self) {
         self.reset_pending();
         if let Err(e) = self.orchestrator.save() {
@@ -860,7 +970,11 @@ mod tests {
 use crate::{Embedder, ImageEmbedder, ImageResolver, MediaItem};
 
 /// Calibration parameters (mirror `index.CALIB_SAMPLE` / `CALIB_MIN`).
+///
+/// How many stored text vectors to sample as pseudo-queries when calibrating.
 pub const CALIB_SAMPLE: usize = 256;
+/// Minimum usable samples below which calibration is skipped (the gate stays
+/// disabled rather than calibrate off too few points).
 pub const CALIB_MIN: usize = 30;
 /// Per-sample search depth: must be ≥ 2 per the engine's contract — a
 /// pseudo-query whose own image is the nearest hit needs a non-self hit to
@@ -875,8 +989,11 @@ const TEXT: &str = "text";
 /// One note's embedding inputs (mirrors the Python `NoteEmbedInput`).
 #[derive(Debug, Clone)]
 pub struct EmbedInput {
+    /// The note this input embeds for (the index key).
     pub note_id: i64,
+    /// The note's normalized embedding text.
     pub text: String,
+    /// The note's referenced image filenames (resolved lazily at embed time).
     pub image_names: Vec<String>,
     /// Recognized, vector-worthy texts for this note (#199/#228): each mints
     /// its own TEXT-space vector under the note key (no modality gap — the
@@ -923,6 +1040,10 @@ impl IndexOrchestrator {
     /// mid-replace (or see its text vector before its image one). That is
     /// inside the index's contract: a lag-tolerant derived cache whose
     /// results may be stale, never wrong-note.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if embedding fails or the engine rejects the add.
     pub async fn add(
         &self,
         inputs: &[EmbedInput],
@@ -936,6 +1057,10 @@ impl IndexOrchestrator {
     /// [`Self::add`] with an explicit [`WriteMode`] (#232): the image-primary
     /// secondary space uses [`WriteMode::ImageOnly`] to store only image vectors
     /// + hash only image refs. `TextAndImage` is the byte-identical default.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if embedding fails or the engine rejects the add.
     pub async fn add_with_mode(
         &self,
         inputs: &[EmbedInput],
@@ -1082,6 +1207,14 @@ impl IndexOrchestrator {
 
     /// Remove every vector for the given notes (all modalities) and their
     /// hashes. Returns the count of notes actually present (text removals).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the engine rejects the removal.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub fn remove(&self, note_ids: &[i64]) -> NativeResult<usize> {
         if note_ids.is_empty() {
             return Ok(0);
@@ -1097,6 +1230,10 @@ impl IndexOrchestrator {
     }
 
     /// Create an empty, ready index for an empty collection (#148 semantics).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub fn materialize_empty(&self, ndim: usize, col_mod: i64, model_id: Option<&str>) {
         if self.engine.ndim().is_some() {
             return; // an index already exists — drift handling is reconcile's job
@@ -1117,6 +1254,11 @@ impl IndexOrchestrator {
 
     /// Full rebuild: clear, re-embed everything, recalibrate, persist.
     /// Mirrors `VectorIndex.rebuild` (progress lands in `build_progress`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if embedding or an engine write fails mid-rebuild (the
+    /// state flips to [`OrchestratorState::Error`]).
     pub async fn rebuild(
         &self,
         inputs: Vec<EmbedInput>,
@@ -1139,6 +1281,15 @@ impl IndexOrchestrator {
     /// [`Self::rebuild`] with an explicit [`WriteMode`] (#232): an image-primary
     /// secondary space rebuilds in `ImageOnly` mode (only image vectors land).
     /// `TextAndImage` is the byte-identical default.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if embedding or an engine write fails mid-rebuild (the
+    /// state flips to [`OrchestratorState::Error`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub async fn rebuild_with_mode(
         &self,
         inputs: Vec<EmbedInput>,
@@ -1199,6 +1350,11 @@ impl IndexOrchestrator {
     /// ones; end state identical to a full rebuild over the same inputs.
     /// Falls back to `rebuild` when there is no prior per-note state.
     /// Mirrors `VectorIndex.reconcile`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if embedding or an engine write fails (the state flips
+    /// to [`OrchestratorState::Error`]).
     pub async fn reconcile(
         &self,
         inputs: Vec<EmbedInput>,
@@ -1222,6 +1378,15 @@ impl IndexOrchestrator {
     /// image-primary secondary space reconciles in `ImageOnly` mode (its hash
     /// folds image refs only, so a text edit is a no-op for it). `TextAndImage`
     /// is the byte-identical default.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a fallback rebuild, embedding, or an engine write
+    /// fails (the state flips to [`OrchestratorState::Error`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub async fn reconcile_with_mode(
         &self,
         inputs: Vec<EmbedInput>,
@@ -1304,6 +1469,14 @@ impl IndexOrchestrator {
 
     /// Recompute the #201b activation stats from the engine's own sampling
     /// (text-only collections get none — the gate stays off).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the engine's sampling search fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub fn calibrate_activation(&self) -> NativeResult<()> {
         let stats = self
             .engine
@@ -1319,6 +1492,10 @@ impl IndexOrchestrator {
     }
 
     /// The status block (state, size, progress, stamps) for the harness.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
     pub fn status(&self) -> OrchestratorStatus {
         // Per-modality breakdown (#684), text-first so it renders as the lead
         // sub-index (the engine maps modalities in a BTreeMap → name order).

@@ -25,6 +25,13 @@
 //! the Python harness rebased onto `shrike-pyo3` kernel bindings, retiring the
 //! transitional Python schedulers from #275.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 pub mod actions;
 pub mod embed_set;
 pub mod fusion;
@@ -107,6 +114,13 @@ pub struct SerializedCollection {
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
 impl SerializedCollection {
+    /// Open a collection at `collection_path` inside the actor's first job, so
+    /// no collection access ever happens off the actor task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection cannot be opened (e.g. it is locked
+    /// by another process) or the actor drops the open job.
     pub async fn open(collection_path: String) -> NativeResult<Self> {
         // The open IS the actor's first job: the core is created inside the
         // task, so no collection access ever happens outside it.
@@ -167,6 +181,12 @@ impl SerializedCollection {
     /// idle-released (#64's open-on-demand, kernel-side — so a cooperative
     /// release between any two jobs self-heals; contention surfaces as the
     /// BUSY tier from `ensure_open`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the actor is gone (post-shutdown), the collection
+    /// cannot be (re)opened (the BUSY tier), or the job is dropped before it
+    /// returns.
     pub async fn run<T: Send + 'static>(
         &self,
         job: impl FnOnce(&dyn Collection) -> T + Send + 'static,
@@ -187,6 +207,12 @@ impl SerializedCollection {
     /// already-gone is the already-closed outcome, not an error — typed here
     /// rather than string-matched by the caller (#382). Mirrors `run` except
     /// for that one rule.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection cannot be (re)opened to close it, or
+    /// the close job is dropped before it returns; an already-drained actor is
+    /// the already-closed success, not an error.
     pub async fn close(&self) -> NativeResult<()> {
         let Ok(sender) = self.sender() else {
             return Ok(());
@@ -206,6 +232,11 @@ impl SerializedCollection {
     /// Drain the actor: take-and-drop the sender (the channel closes; the
     /// loop ends once queued jobs ran) and await the task — close returns
     /// with nothing in flight (the interpreter-teardown guard). Idempotent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the jobs or actor slot mutex is poisoned (a prior holder
+    /// panicked).
     pub async fn shutdown(&self) {
         drop(self.jobs.lock().expect("jobs slot poisoned").take());
         let handle = self.actor.lock().expect("actor slot poisoned").take();
@@ -224,8 +255,11 @@ impl SerializedCollection {
 /// One fused search hit: note id, fused score, per-signal 1-based ranks.
 #[derive(Debug, Clone)]
 pub struct KernelHit {
+    /// The matched note's id.
     pub note_id: i64,
+    /// The RRF-fused score.
     pub score: f64,
+    /// Per-signal `(name, 1-based rank)` provenance.
     pub signals: Vec<(String, i64)>,
 }
 
@@ -233,9 +267,13 @@ pub struct KernelHit {
 /// is batch-shaped; the single-note call is sugar over a batch of one).
 #[derive(Debug, Clone)]
 pub struct NoteSpec {
+    /// The note type to create the note under.
     pub notetype_id: i64,
+    /// The deck the note's cards land in.
     pub deck_id: i64,
+    /// The note's field values, in note-type field order.
     pub fields: Vec<String>,
+    /// The note's tags.
     pub tags: Vec<String>,
 }
 
@@ -322,7 +360,9 @@ pub struct Kernel {
 /// reads bytes through (independent of the embed slot — an OCR-only
 /// deployment has no image embedder).
 pub struct RecognizeService {
+    /// The recognition engine (OCR/ASR/describe).
     pub recognizer: Arc<dyn Recognizer>,
+    /// The media resolver the engine reads bytes through.
     pub resolver: Arc<dyn ImageResolver>,
 }
 
@@ -345,7 +385,10 @@ pub const RECOGNIZER_FINGERPRINT_KEY: &str = "recognizer_fingerprint";
 /// image half (present only for an image-advertising backend with a media
 /// resolver).
 pub struct EmbedService {
+    /// The text embedder.
     pub embedder: Arc<dyn Embedder>,
+    /// The image half (present only for an image-advertising backend with a
+    /// media resolver).
     pub images: Option<KernelImages>,
 }
 
@@ -407,6 +450,11 @@ impl Kernel {
     /// spawns the collection actor, and the debounced index flush rides
     /// tokio::time unconditionally. Saver defaults apply; a host with tuning
     /// flags uses [`Self::open_with`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cache dir cannot be created, the collection
+    /// cannot be opened, or a sidecar store fails to open.
     pub async fn open(collection_path: &str, cache_dir: &str) -> NativeResult<Self> {
         Self::open_with(collection_path, cache_dir, None, None).await
     }
@@ -415,6 +463,12 @@ impl Kernel {
     /// `--index-save-*` flags carry (#355 item 2): `save_delay` is the idle
     /// debounce in seconds, `save_threshold` the unsaved-change count that
     /// forces an immediate flush. `None` = the built-in default.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a cache/derived/index dir cannot be created, a path
+    /// is non-UTF-8, the collection cannot be opened, or a sidecar store fails
+    /// to open.
     pub async fn open_with(
         collection_path: &str,
         cache_dir: &str,
@@ -478,6 +532,11 @@ impl Kernel {
     /// here; [`Self::open`] is the all-local convenience over it). The
     /// collection arrives as the bare store; the kernel wraps it in its own
     /// task-actor (serialization is kernel policy, not the store's).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cache/index dir cannot be created during
+    /// assembly.
     pub fn compose(
         collection: Arc<dyn Collection>,
         index: Arc<dyn VectorIndex>,
@@ -581,6 +640,10 @@ impl Kernel {
     /// Attach (or swap) the recognition service for a specific purpose (#485)
     /// — OCR, ASR, or VLM describe, each routed to its own pending set /
     /// source / fingerprint / destination by the sweep.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the recognize-slot lock is poisoned (a prior holder panicked).
     pub fn attach_recognizer_with(
         &self,
         purpose: recognize::RecognitionPurpose,
@@ -607,6 +670,10 @@ impl Kernel {
     }
 
     /// Detach the recognition service for a specific purpose (#485).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the recognize-slot lock is poisoned (a prior holder panicked).
     pub fn detach_recognizer_for(&self, purpose: recognize::RecognitionPurpose) {
         self.recognize
             .write()
@@ -621,6 +688,10 @@ impl Kernel {
     }
 
     /// The recognition service for a specific purpose, if attached (#485).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the recognize-slot lock is poisoned (a prior holder panicked).
     pub fn recognize_service_for(
         &self,
         purpose: recognize::RecognitionPurpose,
@@ -635,6 +706,10 @@ impl Kernel {
     /// The purposes with a currently-attached recognizer (sorted) — the
     /// harness drives one sweep per attached purpose, and `/status` reports
     /// per-purpose state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the recognize-slot lock is poisoned (a prior holder panicked).
     pub fn attached_recognition_purposes(&self) -> Vec<recognize::RecognitionPurpose> {
         self.recognize
             .read()
@@ -683,6 +758,11 @@ impl Kernel {
     /// one membership pass (#179). Cheap (hundreds of tags, in-memory vector
     /// reads); runs at the tail of every index-changing op and is a no-op
     /// shortcut when no embedder is attached (no text vectors to mean).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection read fails or the engine rejects the
+    /// `tag.text` rebuild.
     pub async fn refresh_tag_centroids(&self) -> NativeResult<usize> {
         if self.embed_service().is_none() {
             return Ok(0);
@@ -736,6 +816,10 @@ impl Kernel {
     /// (a model swap that keeps the fingerprint, or a re-attach); a new key is
     /// appended in declaration order. `None` is a keyless backend (it never
     /// collides — each keyless attach is a fresh slot).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the embed-slot lock is poisoned (a prior holder panicked).
     pub fn attach_embedder_space(
         &self,
         key: Option<String>,
@@ -769,6 +853,10 @@ impl Kernel {
     /// Detach EVERY embedding space (embedding stop) — the N=1 convenience.
     /// Flush the index (the on-disk vectors are kept) and mark it unavailable.
     /// The collection and the lexical search surfaces stay fully live.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the embed-slot lock is poisoned (a prior holder panicked).
     pub fn detach_embedder(&self) {
         self.embed.write().expect("embed slot poisoned").clear();
         // Flush every space's index, then mark the primary (the served index)
@@ -783,6 +871,10 @@ impl Kernel {
     /// index unavailable only when the LAST space leaves (the index serves the
     /// primary space; while another space remains, it stays live). Returns
     /// whether a space was removed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the embed-slot lock is poisoned (a prior holder panicked).
     pub fn detach_embedder_space(&self, key: &str) -> bool {
         let (removed, now_empty) = {
             let mut spaces = self.embed.write().expect("embed slot poisoned");
@@ -801,12 +893,20 @@ impl Kernel {
     /// The PRIMARY text embedding space, if any — the one engine the
     /// index/search paths consume this PR. With one declared embedder it is
     /// the sole attached space (byte-identical to the pre-#233 single slot).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the embed-slot lock is poisoned (a prior holder panicked).
     pub fn embed_service(&self) -> Option<Arc<EmbedService>> {
         self.embed.read().expect("embed slot poisoned").primary()
     }
 
     /// The number of attached embedding spaces (#233) — status surface; the
     /// index path consumes only the primary this PR.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the embed-slot lock is poisoned (a prior holder panicked).
     pub fn embed_space_count(&self) -> usize {
         self.embed.read().expect("embed slot poisoned").len()
     }
@@ -814,6 +914,10 @@ impl Kernel {
     /// Every attached embedding space's service in declaration order (#233) —
     /// the carrier the query fan-out (PR-C) and status will read. The index
     /// path does NOT consume this set this PR (it stays on the primary).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the embed-slot lock is poisoned (a prior holder panicked).
     pub fn embed_spaces(&self) -> Vec<Arc<EmbedService>> {
         self.embed.read().expect("embed slot poisoned").services()
     }
@@ -821,6 +925,10 @@ impl Kernel {
     /// The SECONDARY text-capable embedding spaces as `(key, service)` pairs
     /// (#234) — the cross-space query fan-out embeds the query into each and
     /// searches its own index space. EMPTY in the N=1 / single-space case.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the embed-slot lock is poisoned (a prior holder panicked).
     pub fn secondary_embed_spaces(&self) -> Vec<(String, Arc<EmbedService>)> {
         self.embed
             .read()
@@ -869,6 +977,16 @@ impl Kernel {
     /// captured for the relative activation gate. EMPTY when there are no
     /// secondary spaces (the N=1 case) — the caller then runs exactly today's
     /// single-space path. `fetch_k` is the per-space rank cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if embedding the query into a secondary space fails or
+    /// its engine search fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `secondary_floors` lock is poisoned (a prior holder
+    /// panicked).
     pub async fn build_cross_space(
         &self,
         source_texts: &[String],
@@ -936,6 +1054,16 @@ impl Kernel {
     /// samples land. A space with too few image notes gets no floor (the gate
     /// then rides the relative comparison alone). Returns the per-space derived
     /// floor (`None` = uncalibrated) for the harness to log / surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a collection read, query embedding, or engine search
+    /// fails during calibration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `secondary_floors` lock is poisoned (a prior holder
+    /// panicked).
     pub async fn calibrate_secondary_floors(
         &self,
         margin: f64,
@@ -1079,6 +1207,11 @@ impl Kernel {
     /// collection materializes an empty-but-ready index. Returns whether any
     /// reindexing ran. The harness drives this as a background task — the
     /// kernel serves while it runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection read, embedding, or an index
+    /// reconcile/rebuild fails.
     #[must_use = "whether reindexing ran is the caller's signal to refresh status"]
     pub async fn reindex_if_needed(&self) -> NativeResult<bool> {
         let Some(svc) = self.embed_service() else {
@@ -1169,6 +1302,11 @@ impl Kernel {
     /// re-embed everything — never the incremental path (reconcile is only
     /// the automatic drift route). Returns the note count. Errors Unavailable
     /// with no embedder attached.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unavailable` when no embedder is attached, or an error if the
+    /// collection read, embedding, or the engine rebuild fails.
     pub async fn rebuild_index(&self) -> NativeResult<usize> {
         let Some(svc) = self.embed_service() else {
             return Err(NativeError::unavailable(
@@ -1226,6 +1364,11 @@ impl Kernel {
     /// watermark advance. The shared tail of every upsert shape — public as
     /// `reindex_notes` for harness ops that edit note text outside the
     /// upsert ops (find/replace, note-type migration).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection read, embedding, an index add, or the
+    /// derived ingest fails.
     pub async fn reindex_notes(&self, written: &[i64]) -> NativeResult<()> {
         self.index_written(written).await
     }
@@ -1293,6 +1436,10 @@ impl Kernel {
     /// `(row_count, col_mod)` — the col_mod is the BUILD's own snapshot (read
     /// in the same collection job as the rows), so the host's watermark can't
     /// mask a write that landed mid-build.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection read or the derived-store build fails.
     pub async fn rebuild_derived(&self) -> NativeResult<(usize, i64)> {
         // Commit-then-verify (#471): the collect runs in one actor job but
         // the build commits OFF the actor, so concurrent jobs (an upsert's
@@ -1362,6 +1509,12 @@ impl Kernel {
     /// touching OCR. Returns an AGGREGATED report (summed counts, max
     /// remaining) so the harness's existing `remaining > 0` driver loop is
     /// unchanged; `Unavailable` only when NO purpose is attached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a collection read, a recognizer call (e.g. a down
+    /// endpoint), or the post-recognition persist/re-embed fails for any
+    /// purpose — which aborts the call with that purpose's backlog intact.
     pub async fn recognize_pending(
         &self,
         max_items: usize,
@@ -1429,6 +1582,12 @@ impl Kernel {
     /// persisting anything or advancing this purpose's fingerprint meta —
     /// everything stays pending and the next sweep retries (the load-bearing
     /// describe-engine contract, preserved per purpose).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a collection read, the recognizer call, or the
+    /// post-recognition persist/re-embed fails — which aborts the sweep before
+    /// persisting, leaving the purpose's backlog pending.
     pub async fn recognize_pending_for(
         &self,
         purpose: recognize::RecognitionPurpose,
@@ -1926,6 +2085,12 @@ impl Kernel {
     /// `dry_run`, typed per-item results — run as ONE collection job, then
     /// the kernel-internal index/derived maintenance over everything written.
     /// This is the op the MCP `upsert_notes` action rides (S3d-2).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection write job fails; the index/derived
+    /// maintenance tail is best-effort (a failure there logs and still returns
+    /// the per-item results).
     pub async fn upsert_notes_wire(
         &self,
         notes: Vec<shrike_schemas::NoteInput>,
@@ -2010,10 +2175,21 @@ impl Kernel {
         }
     }
 
+    /// The collection's current `col.mod`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection read fails.
     pub async fn col_mod(&self) -> NativeResult<i64> {
         self.collection.run(|core| core.col_mod()).await?
     }
 
+    /// Resolve a note type's id by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no note type has that name or the collection read
+    /// fails.
     pub async fn notetype_id(&self, name: &str) -> NativeResult<i64> {
         let name = name.to_string();
         self.collection
@@ -2024,6 +2200,11 @@ impl Kernel {
     /// Create one note — sugar over [`upsert_notes`] with a batch of one (the
     /// batch op is the real implementation; per-item errors surface directly
     /// here since the batch is a single item).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the create is rejected (duplicate/validation per the
+    /// policy) or the collection write fails.
     pub async fn upsert_note(
         &self,
         notetype_id: i64,
@@ -2049,6 +2230,12 @@ impl Kernel {
     /// batched embed call produces all vectors, then one index add and a
     /// per-note derived ingest. Compute (embedding, index, derived) happens
     /// *off* the collection queue — it never routes back through it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection write job fails (the outer `Result`);
+    /// per-note rejections ride the inner per-item `Result`s. The
+    /// index/derived maintenance tail is best-effort.
     pub async fn upsert_notes(
         &self,
         notes: Vec<NoteSpec>,
@@ -2103,6 +2290,12 @@ impl Kernel {
     /// path: the collection op removed them internally; this is the sidecar
     /// half of `delete_notes`). No own collection write precedes it, so it
     /// reads `col.mod` + registers the watermark token in one actor job (#585).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading `col.mod` to register the watermark fails;
+    /// the sidecar removals are best-effort (a failure leaves the watermark
+    /// behind for the next drift to heal).
     pub async fn forget_notes(&self, note_ids: Vec<i64>) -> NativeResult<()> {
         let tokens = self.read_col_mod_and_register().await?;
         self.drop_note_sidecars(&note_ids, tokens).await
@@ -2162,6 +2355,10 @@ impl Kernel {
     /// there is pure O(collection) waste (`note_tag_rows` + `note_count` +
     /// a whole-collection recompute) behind no relevance signal (#445: per-op
     /// tails do no O(collection) work; the refresh runs only when relevant).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading `col.mod` to register the watermark fails.
     pub async fn metadata_changed(&self, membership_may_have_changed: bool) -> NativeResult<()> {
         // Read `col.mod` + register in one actor job (#585) — the metadata write
         // already committed in its own prior job, so FIFO orders this read after
@@ -2192,6 +2389,11 @@ impl Kernel {
     /// round trips) with one write job + the tail. Returns `{deleted,
     /// not_found}`: a requested id that no longer exists is `not_found`, never
     /// silently counted as deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection delete job fails; the sidecar tail is
+    /// best-effort.
     pub async fn delete_notes(
         &self,
         note_ids: Vec<i64>,
@@ -2256,6 +2458,11 @@ impl Kernel {
     /// the harness's job (it owns that store), mirroring `reload`. Returns
     /// `(summary, reindexed)` — the per-bucket counts and whether the index
     /// reconciled (false only when no embedder is attached).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the import RPC, the index reconcile, or the derived
+    /// rebuild fails.
     pub async fn import_package(
         &self,
         package_path: String,
@@ -2303,6 +2510,11 @@ impl Kernel {
     /// — the host facade's gather-over-to_thread, re-homed — then the batch
     /// writes as ONE collection job (`path` items run their containment
     /// gates under that job; they carry no prepare work).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a prepare task panics (a bug; expected source
+    /// failures are per-item `Failed`) or the collection write job fails.
     pub async fn store_media(
         &self,
         items: Vec<shrike_schemas::StoreMediaItem>,
@@ -2336,6 +2548,10 @@ impl Kernel {
 
     /// Resolve filenames to where their bytes live (never the bytes; the
     /// host fills the serving `url`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection read fails.
     pub async fn fetch_media(
         &self,
         filenames: Vec<String>,
@@ -2346,6 +2562,10 @@ impl Kernel {
     }
 
     /// List media files (sorted, optional glob + limit).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection read fails.
     pub async fn list_media(
         &self,
         pattern: Option<String>,
@@ -2357,6 +2577,10 @@ impl Kernel {
     }
 
     /// Move media files to Anki's recoverable trash.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection write fails.
     pub async fn delete_media(
         &self,
         filenames: Vec<String>,
@@ -2367,6 +2591,10 @@ impl Kernel {
     }
 
     /// Read-only media diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection media check fails.
     pub async fn media_check(&self) -> NativeResult<shrike_schemas::CollectionCheckResponse> {
         self.collection.run(move |core| core.media_check()).await?
     }
@@ -2380,6 +2608,11 @@ impl Kernel {
     /// path-safety check); the kernel trusts it and performs the anki export.
     /// `out_path` extension picks the format isn't done here — the host passes
     /// an explicit [`PackageFormat`] so the kernel never guesses.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the anki export fails (e.g. the scope is invalid or
+    /// the package cannot be written).
     pub async fn export_package(
         &self,
         out_path: String,
@@ -2412,6 +2645,11 @@ impl Kernel {
     /// a tags-only prune is a metadata-only watermark advance. The tail is
     /// best-effort — a failure logs and the response still returns (the next
     /// boot's drift check repairs).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the prune collection job fails; the maintenance tail
+    /// is best-effort.
     pub async fn collection_prune(
         &self,
         unused_tags: bool,
@@ -2469,6 +2707,11 @@ impl Kernel {
 
     /// Edit tags on a note set (`set` full-replace XOR add/remove — the
     /// exclusivity is the host's input validation).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection write fails; the metadata tail is
+    /// best-effort.
     pub async fn update_note_tags(
         &self,
         note_ids: Vec<i64>,
@@ -2486,6 +2729,11 @@ impl Kernel {
     }
 
     /// Rename a tag collection-wide (empty `note_ids`) or exactly on a set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection write fails; the metadata tail is
+    /// best-effort.
     pub async fn rename_tag(
         &self,
         old: String,
@@ -2502,6 +2750,11 @@ impl Kernel {
     }
 
     /// Create or rename decks in bulk (id present = rename; never merges).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection write fails; the metadata tail is
+    /// best-effort.
     pub async fn upsert_decks(
         &self,
         decks: Vec<shrike_schemas::DeckInput>,
@@ -2523,6 +2776,11 @@ impl Kernel {
     }
 
     /// Delete decks by reference — only if empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection write fails; the metadata tail is
+    /// best-effort.
     pub async fn delete_decks(
         &self,
         refs: Vec<String>,
@@ -2550,6 +2808,10 @@ impl Kernel {
 
     /// Create/update note-type definitions in bulk (the position-keyed
     /// replace with the #76 unsound-move rejection), per-item results.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection write job fails.
     pub async fn upsert_note_types(
         &self,
         note_types: Vec<shrike_schemas::NoteTypeInput>,
@@ -2560,6 +2822,11 @@ impl Kernel {
     }
 
     /// Identity-based field ops (add/remove/rename/reposition), atomic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an op is unsound (bad name/position) or the
+    /// collection write fails.
     pub async fn update_note_type_fields(
         &self,
         note_type_name: String,
@@ -2571,6 +2838,11 @@ impl Kernel {
     }
 
     /// Identity-based template ops (add/remove/rename/reposition), atomic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an op is unsound (bad name/position) or the
+    /// collection write fails.
     pub async fn update_note_type_templates(
         &self,
         note_type_name: String,
@@ -2586,6 +2858,11 @@ impl Kernel {
     /// replace advances the watermarks instead of reading as drift (a no-op
     /// replace saves nothing and bumps nothing). Best-effort — a tail
     /// failure logs and the response still returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the rewrite collection job fails (e.g. an invalid
+    /// regex); the watermark tail is best-effort.
     #[allow(clippy::too_many_arguments)]
     pub async fn find_replace_note_types(
         &self,
@@ -2626,6 +2903,11 @@ impl Kernel {
     /// unconditional watermark tail: editor cosmetics never touch embedding
     /// text, but the persist bumps col.mod. Best-effort, like the tag/deck
     /// metadata ops.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection write fails; the watermark tail is
+    /// best-effort.
     pub async fn update_note_type_field_metadata(
         &self,
         note_type_name: String,
@@ -2648,6 +2930,11 @@ impl Kernel {
     /// and re-ingests the changed notes (best-effort: the migration is
     /// committed either way; the next boot's drift check repairs). Dry-run
     /// touches nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the migration collection job fails (e.g. an unknown
+    /// name or an invalid field map); the re-embed tail is best-effort.
     pub async fn migrate_note_type(
         &self,
         note_ids: Vec<i64>,
@@ -2677,6 +2964,10 @@ impl Kernel {
     }
 
     /// Delete note types by id, only-if-unused, per-item results.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection write job fails.
     pub async fn delete_note_types(
         &self,
         ids: Vec<i64>,
@@ -2693,6 +2984,11 @@ impl Kernel {
     /// action degrades to the lexical signals. `score` carries the wire
     /// contract's semantic similarity when present (the raw RRF magnitude is
     /// deliberately not exposed, matching the host surface).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if query embedding (when an embedder is attached) or any
+    /// index/derived/collection read in the fusion fails.
     pub async fn search(&self, query: &str, top_k: usize) -> NativeResult<Vec<KernelHit>> {
         let span = tracing::debug_span!("kernel.search", top_k);
         async move {
@@ -2780,12 +3076,22 @@ impl Kernel {
     /// Cooperative idle-release (#64): close the collection, keeping the
     /// kernel reusable via [`reopen`]. WHEN to release is harness policy (an
     /// idle timer on its runtime); the kernel only provides the ops.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if releasing the collection fails (or the actor is
+    /// gone).
     pub async fn release(&self) -> NativeResult<()> {
         self.collection.run(|core| core.release()).await?
     }
 
     /// Re-acquire after a release; contention surfaces as the BUSY error
     /// tier (retryable — the caller decides, nothing waits).
+    ///
+    /// # Errors
+    ///
+    /// Returns the BUSY error tier if another process holds the collection, or
+    /// an error if the re-acquire otherwise fails.
     pub async fn reopen(&self) -> NativeResult<()> {
         self.collection.run(|core| core.reopen()).await?
     }
@@ -2795,6 +3101,11 @@ impl Kernel {
     /// through `&self` so shared handles (the binding's `Arc<Kernel>`) can
     /// close; idempotent (`SerializedCollection::close` treats a drained
     /// actor as already-closed, #382).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if closing the collection fails; a drained actor is the
+    /// already-closed success, not an error.
     pub async fn close(&self) -> NativeResult<()> {
         // A sleeping coalesced tag refresh has nothing to read once the
         // actor drains — abort it first (#445).
