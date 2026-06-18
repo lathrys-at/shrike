@@ -1,21 +1,19 @@
-//! The embed slot generalized from ONE service to an ordered SET of embedding
-//! spaces (the multi-space substrate's foundation).
+//! The embed slot as an ordered SET of embedding spaces.
 //!
-//! Each [`EmbedSpace`] wraps an [`EmbedService`](crate::EmbedService) (the
-//! existing text-embedder-plus-optional-image-half) with its **space key**
-//! (the backend's content fingerprint — keyed by CONTENT so reordering the
-//! config never re-keys or rebuilds, NOT a declaration index) and its
-//! **role**: which note modalities it is PRIMARY for, and whether it is
-//! text-capable for query routing.
+//! Each [`EmbedSpace`] wraps an [`EmbedService`](crate::EmbedService) (a
+//! text-embedder-plus-optional-image-half) with its **space key** (the
+//! backend's content fingerprint — keyed by CONTENT so reordering the config
+//! never re-keys or rebuilds, NOT a declaration index) and its **role**: which
+//! note modalities it is PRIMARY for, and whether it is text-capable for query
+//! routing.
 //!
-//! This carrier lands the **carrier + the routing metadata** only. The
-//! fan-out — index-narrow (note items → their per-modality primary space) and
-//! query-wide (a query → every text-capable space, RRF-fused) — is a later
-//! stage. The kernel's index/search paths still consume exactly ONE
-//! engine here ([`EmbedSpaces::primary`]), so with one declared embedder
-//! every on-disk artifact and fused ranking stays bit-identical to the
-//! single-slot era: single-space is the structurally-degenerate case of the
-//! general set, never a parallel branch.
+//! This carrier holds the carrier + routing metadata only; the fan-out —
+//! index-narrow (note items → their per-modality primary space) and query-wide
+//! (a query → every text-capable space, RRF-fused) — lives elsewhere. The
+//! kernel's index/search paths consume exactly ONE engine here
+//! ([`EmbedSpaces::primary`]), so with one declared embedder single-space is
+//! the structurally-degenerate case of the general set, never a parallel
+//! branch — every on-disk artifact and fused ranking is identical.
 
 use std::sync::Arc;
 
@@ -65,8 +63,7 @@ impl EmbedSpace {
 /// The **primary text space** is the first text-capable space in insertion
 /// order; the **primary image space** is the first image-capable one. With one
 /// declared embedder the sole space is primary for both modalities it serves,
-/// so [`primary`](Self::primary) returns it and the index/search paths are
-/// byte-identical to the single-slot era.
+/// so [`primary`](Self::primary) returns it.
 #[derive(Default)]
 pub struct EmbedSpaces {
     spaces: Vec<EmbedSpace>,
@@ -76,8 +73,8 @@ impl EmbedSpaces {
     /// Attach (or replace) a space. A space whose key matches an already-
     /// attached one REPLACES it in place (same position — a model swap that
     /// preserves the fingerprint, or a re-attach of the same space); a new key
-    /// (or a `None`/keyless backend) is appended. Returns nothing — the
-    /// orchestrator readiness flip stays the caller's (the kernel).
+    /// (or a `None`/keyless backend) is appended. The orchestrator readiness
+    /// flip is the caller's (the kernel).
     pub fn attach(&mut self, key: Option<String>, service: Arc<EmbedService>) {
         if let Some(k) = key.as_deref() {
             if let Some(slot) = self.spaces.iter_mut().find(|s| s.key.as_deref() == Some(k)) {
@@ -98,16 +95,14 @@ impl EmbedSpaces {
     }
 
     /// Detach EVERY space (embedding stop) — the N=1 wrapper's whole-clear,
-    /// preserving the single-slot era's `attach_embedder`-then-`detach`
-    /// semantics exactly.
+    /// the `attach_embedder`-then-`detach` semantics.
     pub fn clear(&mut self) {
         self.spaces.clear();
     }
 
     /// The PRIMARY text space — the first text-capable space in insertion
-    /// order. This is the one engine the index/search paths consume here;
-    /// with one declared embedder it is the sole space (byte-identical to the
-    /// single-slot `embed_service()`).
+    /// order. The one engine the index/search paths consume here; with one
+    /// declared embedder it is the sole space.
     pub fn primary(&self) -> Option<Arc<EmbedService>> {
         self.spaces
             .iter()
@@ -146,14 +141,13 @@ impl EmbedSpaces {
     }
 
     /// The ordered set (services), for the query fan-out / status surfaces
-    /// (unused by the index path here).
+    /// (the index path does not use it).
     pub fn services(&self) -> Vec<Arc<EmbedService>> {
         self.spaces.iter().map(|s| Arc::clone(&s.service)).collect()
     }
 
     /// Every text-capable space's service in insertion order — what the query
-    /// fan-out embeds the query into; the index path does not use it
-    /// here.
+    /// fan-out embeds the query into; the index path does not use it.
     pub fn text_capable_services(&self) -> Vec<Arc<EmbedService>> {
         self.spaces
             .iter()
@@ -183,8 +177,7 @@ impl EmbedSpaces {
         self.spaces.len()
     }
 
-    /// Whether any space is attached (the embedder gate — replaces the old
-    /// `Option::is_none()` check).
+    /// Whether any space is attached (the embedder gate).
     pub fn is_empty(&self) -> bool {
         self.spaces.is_empty()
     }

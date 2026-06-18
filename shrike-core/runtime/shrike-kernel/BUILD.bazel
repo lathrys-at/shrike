@@ -6,10 +6,10 @@ exports_files(["Cargo.toml"])
 
 # The pure-Rust kernel: collection (via anki's protobuf services) +
 # index + derived store + fusion. Natively async, owns no threads, assumes
-# no runtime — serialization and execution are injected. The kernel has NO
-# features and names NO engine: it consumes the shrike-engine-api traits and
-# composes whatever engines the host attaches. NO pyo3 in this dep tree (the
-# layering check + the no-CPython smoke prove both rules).
+# no runtime — serialization and execution are injected. No features, names
+# no engine: it consumes the shrike-engine-api traits and composes whatever
+# engines the host attaches. No pyo3 in this dep tree (the layering check +
+# the no-CPython smoke prove both rules).
 rust_library(
     name = "shrike_kernel",
     srcs = glob(["src/**/*.rs"]),
@@ -41,9 +41,9 @@ rust_test(
     crate = ":shrike_kernel",
 )
 
-# The degenerate single-thread proof: its own test binary —
-# the runtime seam is process-global, so this must not share a process with
-# the multi-thread suite.
+# The degenerate single-thread proof, in its own test binary: the runtime
+# seam is process-global, so it must not share a process with the
+# multi-thread suite.
 rust_test(
     name = "current_thread_test",
     size = "medium",
@@ -56,9 +56,9 @@ rust_test(
     ],
 )
 
-# The committed-but-errored regression: the maintained write tail
-# is best-effort — a committed note's call returns Ok despite a failed embed
-# tail. Its own test binary (an integration test linking the public crate API +
+# The committed-but-errored regression: the maintained write tail is
+# best-effort — a committed note's call returns Ok despite a failed embed
+# tail. Own test binary (an integration test linking the public crate API +
 # the schema/store wire types + a FailingEmbedder).
 rust_test(
     name = "s6_repro_test",

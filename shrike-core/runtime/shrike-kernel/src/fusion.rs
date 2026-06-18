@@ -1,6 +1,4 @@
-//! Reciprocal Rank Fusion — the kernel's fusion stage (moved here so the
-//! kernel stopped naming shrike-compute, whose other half dragged the whole
-//! ort engine stack into the link; the crate itself has since dissolved).
+//! Reciprocal Rank Fusion — the kernel's fusion stage.
 //!
 //! [`rrf_fuse`] is a byte-faithful port of `shrike/search_fusion.py` (the
 //! frozen reference spec): same canonical sorted-signal accumulation order
@@ -18,11 +16,10 @@ pub const RRF_K: i64 = 60;
 /// blindness to magnitude is wrong — see `search_fusion.py`).
 pub const PRIORITY_SIGNAL: &str = "exact";
 
-/// The CANONICAL per-signal RRF weights for fused search: `fuzzy`
-/// below the rest — a near-miss is weaker evidence than a literal or
-/// semantic hit. The single source of truth; the action defaults to these
-/// when the host passes none (the host parameter stays as an override
-/// seam for a future config knob).
+/// The CANONICAL per-signal RRF weights for fused search: `fuzzy` below the
+/// rest — a near-miss is weaker evidence than a literal or semantic hit. The
+/// single source of truth; the action defaults to these when the host passes
+/// none (the host parameter is an override seam for a future config knob).
 pub fn search_weights() -> BTreeMap<String, f64> {
     [
         ("text", 1.0),
@@ -58,13 +55,13 @@ pub fn rrf_fuse(
 
     for (signal, ids) in ordered {
         // Sanitize a non-finite weight to the default (1.0) BEFORE it reaches
-        // the score accumulation and the sort. A NaN weight poisons a
-        // note's score to NaN, and the two impls order NaN scores differently —
+        // the score accumulation and the sort. A NaN weight poisons a note's
+        // score to NaN, and the two impls order NaN scores differently —
         // Rust's `total_cmp` total-orders NaN, while the reference's Python sort
         // key (`-score`) leaves NaN comparisons false → input-order-dependent —
-        // so a NaN weight broke the frozen-reference parity contract. A
+        // so a NaN weight would break the frozen-reference parity contract. A
         // non-finite weight is meaningless as a scale, so both sides coerce it
-        // to 1.0; finite-weight RRF (incl. 0.0 and negatives) is unchanged.
+        // to 1.0; finite-weight RRF (incl. 0.0 and negatives) is untouched.
         // `search_fusion.py` applies the identical coercion.
         let w = weights.get(signal).copied().unwrap_or(1.0);
         let w = if w.is_finite() { w } else { 1.0 };

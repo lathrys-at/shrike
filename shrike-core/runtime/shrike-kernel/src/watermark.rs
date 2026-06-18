@@ -14,7 +14,7 @@
 //!    concurrent op B's write-job can interleave between op A's write-job and op
 //!    A's advance, so by the time op A advances, `live col.mod` already reflects
 //!    B's not-yet-indexed write. Reading the *live* `col.mod` at advance time
-//!    (the older bug) stamps B's write as certified.
+//!    would stamp B's write as certified.
 //! 2. **A tail can fail after the collection write committed** (embed backend
 //!    down, transient index/ingest error). The note is in the collection
 //!    but absent from the index/FTS5; the watermark must be left behind so boot
@@ -354,9 +354,8 @@ mod tests {
         );
     }
 
-    // ── Cross-review guards: seams that, if they regressed,
-    // would silently re-open the silent-loss bug. Pure tracker-level, like
-    // the rest of this module.
+    // ── Guards for seams that, if they regressed, would silently re-open the
+    // silent-loss bug. Pure tracker-level, like the rest of this module.
 
     /// (a') A later SUCCESS cannot jump a poison left by an EARLIER FAILURE. The
     /// failure here is the *earlier* write (200) and the success arrives *after*
