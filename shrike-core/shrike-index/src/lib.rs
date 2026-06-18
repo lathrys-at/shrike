@@ -6,6 +6,13 @@
 //! index contract, including on-disk compatibility with files written by the
 //! Python binding. The Phase-2b engine is built on the verdict.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 mod engine;
 
 use shrike_error::{ErrorKind, NativeResult, ResultExt};
@@ -15,6 +22,10 @@ pub use engine::{ActivationStats, ModalityRanking, MultiModalIndex};
 
 /// Build a usearch index matching `UsearchIndexEngine._ensure`'s configuration:
 /// cosine metric, f32 scalars, multi=true (several vectors per note_id key).
+///
+/// # Errors
+///
+/// Returns an error if usearch cannot create or reserve the index.
 pub fn new_index(ndim: usize) -> NativeResult<Index> {
     let options = IndexOptions {
         dimensions: ndim,

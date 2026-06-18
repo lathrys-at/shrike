@@ -67,6 +67,8 @@ struct State {
     ndim: Option<usize>,
 }
 
+/// The per-modality USearch vector store: a text sub-index plus one
+/// sub-index per non-text modality (the #201a layout), each ranked separately.
 pub struct MultiModalIndex {
     /// Known modalities in load order (TEXT first — it keeps the original
     /// index.usearch filename). Mirrors `_INDEX_MODALITIES`.
@@ -116,6 +118,10 @@ fn ensure_capacity(index: &Index, extra: usize) -> NativeResult<()> {
 
 impl MultiModalIndex {
     /// `modalities[0]` is the text modality (mandatory, owns index.usearch).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if `modalities` is empty.
     pub fn new(modalities: Vec<String>) -> NativeResult<Self> {
         let text = modalities
             .first()
@@ -142,14 +148,17 @@ impl MultiModalIndex {
             .expect("index save-mutation guard poisoned")
     }
 
+    /// Total vectors across all sub-indexes.
     pub fn size(&self) -> usize {
         self.lock().indexes.values().map(|s| s.index.size()).sum()
     }
 
+    /// The index dimensionality, or `None` before any vectors land.
     pub fn ndim(&self) -> Option<usize> {
         self.lock().ndim
     }
 
+    /// Per-modality `(name, vector count)`.
     pub fn modality_sizes(&self) -> Vec<(String, usize)> {
         self.lock()
             .indexes
@@ -174,10 +183,16 @@ impl MultiModalIndex {
             .collect()
     }
 
+    /// The names of the loaded modalities.
     pub fn modality_names(&self) -> Vec<String> {
         self.lock().indexes.keys().cloned().collect()
     }
 
+    /// Create `modality`'s sub-index at `ndim` if absent (idempotent).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sub-index cannot be created.
     pub fn ensure(&self, modality: &str, ndim: usize) -> NativeResult<()> {
         let mut state = self.lock();
         if !state.indexes.contains_key(modality) {
@@ -189,12 +204,14 @@ impl MultiModalIndex {
         Ok(())
     }
 
+    /// Drop every sub-index.
     pub fn clear(&self) {
         let mut state = self.lock();
         state.indexes.clear();
         state.ndim = None;
     }
 
+    /// Drop one modality's sub-index.
     pub fn drop_modality(&self, modality: &str) {
         self.lock().indexes.remove(modality);
     }
@@ -287,6 +304,10 @@ impl MultiModalIndex {
     /// the guard is the conservative, self-evidently-correct exclusion rather
     /// than a reliance on an undocumented upstream guarantee. Concurrent
     /// save+search is read+read on the shared `Index` and safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if creating `dir` or writing/renaming a sub-index file fails.
     pub fn save(&self, dir: &str) -> NativeResult<()> {
         // Exclude the in-place byte mutators for the whole serialize+write, but
         // not searches (which take only the `state` lock). Taken before the
@@ -333,6 +354,15 @@ impl MultiModalIndex {
 
     /// Pure add of vectors under i64 keys (replace semantics are the caller's,
     /// via `remove`). Keys may repeat (a note's several images).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if `keys`/`vectors` lengths disagree,
+    /// or an error if the backend rejects a vector (e.g. dimension mismatch).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal state mutex is poisoned (a prior holder panicked).
     pub fn add(&self, modality: &str, keys: &[i64], vectors: &[Vec<f32>]) -> NativeResult<()> {
         if keys.len() != vectors.len() {
             return Err(NativeError::invalid_input(format!(
@@ -367,6 +397,10 @@ impl MultiModalIndex {
 
     /// Remove the keys' vectors from every sub-index; returns the count removed
     /// from the *text* sub-index (one text vector per note — the note count).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend rejects a removal.
     pub fn remove(&self, keys: &[i64]) -> NativeResult<usize> {
         // Exclude a concurrent save's serialization read of this Index (#588).
         let _mutation = self.lock_save_mutation();
@@ -396,6 +430,10 @@ impl MultiModalIndex {
 
     /// Per-query, per-modality max-sim-per-note rankings (best-first, deduped,
     /// truncated to k). `modalities = None` searches every loaded sub-index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a backend search fails.
     pub fn search_by_modality(
         &self,
         queries: &[Vec<f32>],
@@ -458,6 +496,7 @@ impl MultiModalIndex {
         Ok(out)
     }
 
+    /// Whether the text sub-index holds a vector for `key`.
     pub fn contains(&self, key: i64) -> bool {
         self.modality_contains(&self.text, key)
     }
@@ -477,6 +516,7 @@ impl MultiModalIndex {
         self.modality_get(&self.text, key)
     }
 
+    /// Whether `modality`'s sub-index holds a vector for `key`.
     pub fn modality_contains(&self, modality: &str, key: i64) -> bool {
         let state = self.lock();
         state
@@ -535,6 +575,7 @@ impl MultiModalIndex {
             .collect()
     }
 
+    /// A key's vector(s) in `modality`, 2D row-major, or `None`.
     pub fn modality_get(&self, modality: &str, key: i64) -> Option<Vec<Vec<f32>>> {
         let state = self.lock();
         let sub = state.indexes.get(modality)?;
@@ -574,6 +615,10 @@ impl MultiModalIndex {
     /// and the engine's safety model trusts usearch's `Sync` only for
     /// read-vs-read — every usearch call stays under the mutex. The stats
     /// are statistical, so an interleaved write skewing one sample is fine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a sampling search fails.
     pub fn calibrate_activation(
         &self,
         sample_size: usize,

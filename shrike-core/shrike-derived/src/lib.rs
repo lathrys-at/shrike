@@ -21,6 +21,13 @@
 //! MATCH-expression building, trigram filtering, and the state machine stay
 //! facade-side; this crate is storage + queries only. Pure Rust — no pyo3.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 use std::sync::Mutex;
 
 use rusqlite::Connection;
@@ -52,6 +59,8 @@ pub fn fts5_trigram_available() -> bool {
         .is_ok()
 }
 
+/// The derived-text store (#98): the FTS5 trigram sidecar over note/recognized
+/// text, backing the lexical search signals plus the recognition bookkeeping.
 pub struct DerivedEngine {
     conn: Mutex<Connection>,
 }
@@ -115,6 +124,12 @@ impl DerivedEngine {
     /// drops everything — recognition rows re-derive via the pending sweep.
     pub const SCHEMA_VERSION: i64 = 2;
 
+    /// Open (or create) the sidecar database at `path`, migrating to
+    /// `schema_version`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be opened or its schema migrated.
     pub fn open(path: &str, schema_version: i64) -> NativeResult<Self> {
         let conn = Connection::open(path).map_err(db_err)?;
         // Plain rollback journaling + synchronous=NORMAL (#396). WAL was the
@@ -260,6 +275,7 @@ impl DerivedEngine {
         self.conn.lock().expect("derived conn lock poisoned")
     }
 
+    /// The stored drift watermark (`col.mod` at last reconcile), or `None`.
     pub fn get_col_mod(&self) -> Option<i64> {
         let conn = self.lock();
         conn.query_row("SELECT value FROM meta WHERE key='col_mod'", [], |r| {
@@ -279,6 +295,10 @@ impl DerivedEngine {
     /// this with its [`crate`]-external watermark tracker: a failed/partial
     /// ingest, or a value covering a concurrent in-flight write, leaves the
     /// watermark behind for the next drift to heal — never advances it here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn set_col_mod(&self, value: i64) -> NativeResult<()> {
         let conn = self.lock();
         conn.execute(
@@ -291,6 +311,10 @@ impl DerivedEngine {
 
     /// Indexed row count. Errors are surfaced (`unavailable`), never folded
     /// to 0 — a locked/corrupt store must not read as an empty one (#396).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn count(&self) -> NativeResult<i64> {
         let conn = self.lock();
         conn.query_row("SELECT count(*) FROM rowmap", [], |r| r.get(0))
@@ -414,6 +438,10 @@ impl DerivedEngine {
 
     /// Replace a note's text rows for one source (incremental upsert), in one
     /// transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn ingest(
         &self,
         note_id: i64,
@@ -432,6 +460,10 @@ impl DerivedEngine {
     /// under DELETE journaling is journal create+fsync+delete per note. The
     /// delete half batches across all ids; inserts pair idx↔rowmap per row
     /// exactly like `ingest`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn ingest_many(
         &self,
         notes: &[(i64, Vec<(String, String)>)],
@@ -492,6 +524,10 @@ impl DerivedEngine {
     /// Drop notes' rows (all sources, or just one), in one transaction.
     /// Note REMOVAL (deletion / invalidation) also drops the notes' below-gate
     /// markers — unlike `ingest`'s internal replace, which preserves them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn remove(&self, note_ids: &[i64], source: Option<&str>) -> NativeResult<()> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
@@ -509,6 +545,10 @@ impl DerivedEngine {
     /// their own fingerprint-keyed invalidation), so a boot-drift rebuild
     /// never forces re-recognition. Recognition rows whose note vanished
     /// from the new row set are pruned (the note was deleted).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
@@ -592,6 +632,10 @@ impl DerivedEngine {
     }
 
     /// A free-form meta value (e.g. the recognizer fingerprint, #228).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn meta_get(&self, key: &str) -> NativeResult<Option<String>> {
         let conn = self.lock();
         Ok(conn
@@ -601,6 +645,11 @@ impl DerivedEngine {
             .ok())
     }
 
+    /// Write a free-form meta key/value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn meta_set(&self, key: &str, value: &str) -> NativeResult<()> {
         let conn = self.lock();
         conn.execute(
@@ -614,6 +663,10 @@ impl DerivedEngine {
     /// Store one item's recognition structure (#228: segments JSON — boxes
     /// for OCR, time spans for ASR) alongside its text row, keyed like the
     /// row. One pass, many consumers: #230 (occlusion) reads these back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn put_segments(
         &self,
         note_id: i64,
@@ -630,6 +683,11 @@ impl DerivedEngine {
         Ok(())
     }
 
+    /// The stored per-segment JSON for one `(note, source, ref)`, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn get_segments(
         &self,
         note_id: i64,
@@ -650,6 +708,10 @@ impl DerivedEngine {
     /// has already been recognized" set (#228). Deliberately a full-set read:
     /// the sweep's pending diff needs the complete set, and the pairs are
     /// small. Bounding belongs to the sweep's batching, not this query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn refs_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String)>> {
         let conn = self.lock();
         let mut stmt = conn
@@ -666,6 +728,10 @@ impl DerivedEngine {
     /// Record below-gate outcomes (#416): each (note_id, ref) was recognized
     /// and the gate dropped it — no text row, but the pending sweep counts it
     /// done. One transaction per batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn mark_gated(&self, source: &str, pairs: &[(i64, String)]) -> NativeResult<()> {
         if pairs.is_empty() {
             return Ok(());
@@ -684,6 +750,10 @@ impl DerivedEngine {
 
     /// All below-gate (note_id, ref) markers for one source — unioned with
     /// [`Self::refs_for_source`] by the pending sweep's done-set diff (#416).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn gated_refs_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String)>> {
         let conn = self.lock();
         let mut stmt = conn
@@ -700,6 +770,10 @@ impl DerivedEngine {
     /// Drop ALL below-gate markers for one source — the recognizer-fingerprint
     /// invalidation path (#416): a new engine re-judges everything, gated
     /// items included, exactly like stored rows re-derive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn clear_gated(&self, source: &str) -> NativeResult<()> {
         let conn = self.lock();
         conn.execute("DELETE FROM gated WHERE source = ?1", [source])
@@ -711,6 +785,10 @@ impl DerivedEngine {
     /// composition reads recognized text back for vector minting (#199).
     /// Deliberately a full-set read (the composition consumes the whole set);
     /// volume is bounded by recognized-text size, not media size.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn texts_for_source(&self, source: &str) -> NativeResult<Vec<(i64, String, String)>> {
         let conn = self.lock();
         let mut stmt = conn
@@ -730,6 +808,10 @@ impl DerivedEngine {
     /// `texts_for_source` scoped to a note set (#445): the per-upsert embed
     /// composition needs only the WRITTEN notes' recognized texts — the
     /// full-set read belongs to rebuild/reconcile, not the op tail.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn texts_for_source_for_notes(
         &self,
         source: &str,
@@ -770,6 +852,10 @@ impl DerivedEngine {
     /// match to those note ids INSIDE the query (the #177 scoped-search path:
     /// the id set comes from anki's indexed deck:/tag: search, so scoped
     /// literal search needs no over-fetch and no post-hoc recall gamble).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn match_rows(
         &self,
         expr: &str,
@@ -1497,6 +1583,10 @@ impl DerivedEngine {
     /// with `(source, ref, snippet)` provenance. `None` tells the caller to use
     /// the `find_notes` fallback (query shorter than a trigram); a MATCH error
     /// is a real error (the caller decides whether to degrade).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn search_substring(
         &self,
         query: &str,
@@ -1521,6 +1611,10 @@ impl DerivedEngine {
     /// by FTS5 bm25, deduped to one (best) row per note, requiring at least
     /// [`FUZZY_MIN_SHARED`] shared trigrams (drops one-trigram noise). Empty
     /// when the query is too short to rank.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store rejects the operation.
     pub fn search_fuzzy(
         &self,
         query: &str,
