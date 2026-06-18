@@ -1,0 +1,33 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//shrike-core:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# Generic managed-subprocess lifecycle (#710): the `ManagedProcess` policy trait
+# + `Supervisor<P>` (spawn/health-wait/orphan-reap/stop) + the port-ownership
+# orphan reaper (#594/#654). A layer-FLOOR crate (enforced by
+# //shrike-core:layering_check) — shrike-error + std + libc + tracing only, NO
+# kernel or engine coupling, and deliberately NO HTTP dep (health rides the
+# policy's `health_check` hook).
+rust_library(
+    name = "shrike_process",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    deps = [
+        "//shrike-core/shrike-error:shrike_error",
+        "@crates//:tracing",
+    ] + select({
+        "@platforms//os:macos": ["@crates//:libc"],
+        "@platforms//os:linux": ["@crates//:libc"],
+        "//conditions:default": [],
+    }),
+)
+
+# medium: the SIGTERM-escalation test waits out the real 5s shutdown tier, and
+# the positive-reap test waits for a detached listener to bind.
+rust_test(
+    name = "shrike_process_test",
+    size = "medium",
+    crate = ":shrike_process",
+)

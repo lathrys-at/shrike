@@ -33,6 +33,7 @@ py_test(
         "//shrike-core/shrike-media:Cargo.toml",
         "//shrike-core/shrike-mobile:Cargo.toml",
         "//shrike-core/shrike-network:Cargo.toml",
+        "//shrike-core/shrike-process:Cargo.toml",
         "//shrike-core/shrike-pyo3:Cargo.toml",
         "//shrike-core/shrike-recognize-apple:Cargo.toml",
         "//shrike-core/shrike-schemas:Cargo.toml",

@@ -1,0 +1,29 @@
+# Generic managed-subprocess lifecycle (#710, epic #703): the `ManagedProcess`
+# policy trait + the `Supervisor<P>` engine (spawn → health-wait → reap → stop),
+# extracted from `shrike-llama-server`'s process half. The port-ownership orphan
+# reaper (#594/#654) lives here — the safety-critical core. Any subprocess-
+# managed runtime (the roadmap sync-server, a future local model server)
+# implements one small policy trait and inherits the whole lifecycle.
+[package]
+name = "shrike-process"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Generic managed-subprocess lifecycle: the ManagedProcess policy trait + Supervisor<P> (spawn/health-wait/orphan-reap/stop) + the port-ownership reaper (#594/#654, #710)."
+
+[lib]
+name = "shrike_process"
+
+# A layer-FLOOR crate (#704): subprocess machinery the managed-runtime crates
+# (shrike-llama-server, future sync-server) build on, naming NEITHER the kernel
+# NOR any engine — its closure is shrike-error + std + libc + tracing only.
+# Deliberately NO HTTP dependency: health-probing rides the `ManagedProcess`
+# `health_check` hook, so an HTTP-health policy brings its own client and this
+# crate stays minimal. Enforced by //shrike-core:layering_check.
+[dependencies]
+shrike-error = { workspace = true }
+tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
