@@ -62,11 +62,31 @@ def basic_note(wrapper):
 
 
 @pytest.fixture(scope="session")
-def kernel_loop():
+def _driven_runtime():
+    """Install + park the kernel's committed driver threads for the session.
+
+    The kernel runs a harness-driven ``current_thread`` runtime with no lazy
+    fallback, so the ``KernelHarness`` (a real ``AsyncKernel``) only makes
+    progress while a driver thread drives it. Install once (the seam is set-once
+    and the threads outlive any kernel, as in production) via the production
+    :class:`DrivenRuntime`, and tear down at session end."""
+    from shrike.platform.driven_runtime import DrivenRuntime
+
+    runtime = DrivenRuntime()
+    runtime.install()
+    runtime.start()
+    yield
+    runtime.shutdown()
+
+
+@pytest.fixture(scope="session")
+def kernel_loop(_driven_runtime):
     """One asyncio loop on a dedicated daemon thread for the whole session.
 
     Per-test kernels are cheap (tests/native opens one per test at ~ms cost);
-    the loop thread is the only shared piece, carrying no per-test state.
+    the loop thread is the only shared piece, carrying no per-test state. Depends
+    on ``_driven_runtime`` so the kernel runtime is installed + driven before any
+    harness opens a kernel on this loop.
     """
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, name="kernel-loop", daemon=True)
