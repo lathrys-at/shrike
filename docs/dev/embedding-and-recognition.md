@@ -47,7 +47,7 @@ GPU offload; the CLIP shape (a `[text, image]` ONNX entry) for the multimodal pa
 `modalities` is the graceful-degradation seam. Every backend advertises a
 `frozenset[str]` of what it can embed. **Text-only is a permanent, first-class
 capability** (the suites rely on small text-only models); a multimodal backend
-simply advertises more. Search over media-by-content lights up where vectors
+advertises more. Search over media-by-content lights up where vectors
 exist and quietly returns nothing where they don't — never an error.
 
 ### The CLIP backend
