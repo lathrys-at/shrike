@@ -63,8 +63,20 @@ CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP, server/ = the h
 
 ## Project layout
 
+The Python harness is a self-contained, subtree-extractable unit at `shrike-py/`
+(#731), mirroring `shrike-core/` (Rust). The pairing is `shrike-core/` ↔
+`shrike-py/`, bridged by the `shrike_native` extension. `shrike-py/` owns its
+build (`pyproject.toml`, `//shrike-py:wheel`/`:sdist`); `scripts/`, `tools/`,
+`MODULE.bazel`, and the requirements locks stay at the repo root (shared
+dev/build tooling + the single bzlmod hub).
+
 ```
-src/shrike/                       # Python package (src layout) — the harness half
+shrike-py/                        # the Python harness UNIT (subtree-extractable, #731)
+├── pyproject.toml                # the unit's build config (hatch-vcs root="..", readme="../README.md")
+├── BUILD.bazel                   # //shrike-py:wheel + :sdist (the unit owns its build)
+├── bin/                          # py_binary launchers over the package (//shrike-py/bin:{shrike,server,server_embedding})
+├── tests/                        # unit / native / integration / oracles / manual
+└── src/shrike/                   # Python package (src layout) — the harness half
 │                                 #   Layered subpackages (#730), each importing only from below:
 │                                 #   platform/ ← contract (schemas,errors)+client ← harness/ ← api/ ← server/ ← cli/
 ├── __init__.py                   # Re-exports __version__ from generated _version.py (hatch-vcs)
@@ -128,12 +140,12 @@ src/shrike/                       # Python package (src layout) — the harness 
     ├── media_cmd.py              # shrike collection media store/fetch/list/delete
     ├── type_cmd.py               # shrike type create/update/delete/list/show
     └── output.py                 # Rich formatting, output_options decorator
-tests/
+shrike-py/tests/                  # (the unit's test tree — under shrike-py/, #731)
 ├── unit/                         # direct calls, no server (conftest: wrapper fixture, temp collection)
 ├── native/                       # native extension + kernel bindings (asyncio bridge, AsyncKernel, Harness)
 └── integration/                  # real server subprocess + HTTP transport
                                   #   conftest: shared session server + per-test reset; mcp/runner; isolated_server
-shrike-core/                      # the Rust workspace (the compute core)
+shrike-core/                      # the Rust workspace (the compute core) — sibling unit to shrike-py/
 ├── shrike-kernel/                # THE kernel: collection + index orchestration + derived + fusion
 ├── shrike-collection/            # anki via its protobuf service layer (the ONLY anki coupling)
 ├── shrike-index/                 # per-modality USearch engine
@@ -155,11 +167,13 @@ docs/
 ```
 
 **`scripts/` vs `tools/` vs `bin/` — the boundary is *who invokes it*** (#695;
-each dir has a `README.md` with its inventory). `bin/` = **shipped/runnable
-product entry points** (the `py_binary` launchers over `//src/shrike:shrike` —
-`//bin:shrike`/`//bin:server`/`//bin:server_embedding`; load-bearing, kept out of
-the `shrike` package so a binary's output path never collides with a package
-subdir — *not* cruft). `tools/` = **invoked by the build** (Bazel macros under
+each dir has a `README.md` with its inventory). `bin/` (now `shrike-py/bin/`,
+inside the unit, #731) = **shipped/runnable product entry points** (the
+`py_binary` launchers over `//shrike-py/src/shrike:shrike` —
+`//shrike-py/bin:shrike`/`//shrike-py/bin:server`/`//shrike-py/bin:server_embedding`;
+load-bearing, kept out of the `shrike` package so a binary's output path never
+collides with a package subdir — *not* cruft). `tools/` (repo root) = **invoked
+by the build** (Bazel macros under
 `//tools/bazel`, the version-pin locks + their writers/checkers, the sdist/wheel/
 requirements builders, `workspace_status.sh`, the hermetic-toolchain CI smoke
 tests `//tools:import_spike`/`//tools:library_smoke`). `scripts/` = **human-facing
@@ -174,7 +188,7 @@ developer runs by hand stays in `scripts/` even when its output feeds a build.
 ## Development setup
 
 ```bash
-scripts/dev-setup.sh        # creates .venv, installs ".[dev]", builds the native extension
+scripts/dev-setup.sh        # creates .venv, installs "shrike-py/[dev]", builds the native extension
 source .venv/bin/activate
 ```
 
@@ -205,8 +219,8 @@ Platform directories below).
 ### Tests
 
 ```bash
-pytest tests/unit -v                           # Unit tests (fast, no server)
-pytest tests/integration -v -m integration     # Integration tests (starts a server)
+pytest shrike-py/tests/unit -v                       # Unit tests (fast, no server)
+pytest shrike-py/tests/integration -v -m integration # Integration tests (starts a server)
 ```
 
 #### Native (Rust) workspace
@@ -229,7 +243,7 @@ gate for a native change:
 ```bash
 (cd shrike-core && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings)
 (cd shrike-core && cargo test --workspace)
-scripts/build-native.sh && pytest tests/unit tests/native -q
+scripts/build-native.sh && pytest shrike-py/tests/unit shrike-py/tests/native -q
 ./bazel test //...      # the authoritative CI lane: all crate tests + layering check + py suites
                         # (CI also names the `manual` embedding halves — see test.yml)
 ```
@@ -252,7 +266,7 @@ scripts/coverage.sh            # full suite; prints report, exits non-zero below
 scripts/coverage.sh --html     # also writes htmlcov/index.html
 ```
 
-A plain `pytest tests/unit --cov=shrike` reads ~18 points lower because it can't see
+A plain `pytest shrike-py/tests/unit --cov=shrike` reads ~18 points lower because it can't see
 the spawned server subprocess. The script's hook (a `.pth` that imports coverage only
 when `COVERAGE_PROCESS_START` is set) is what captures it; `coverage.yml` and
 `scripts/coverage.sh` run this identical command, so the numbers are comparable. By
@@ -261,8 +275,8 @@ hand it's:
 ```bash
 SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
 cp tools/coverage_subprocess.pth "$SITE/coverage_subprocess.pth"   # the one committed hook (also used by scripts/coverage.sh)
-export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
-coverage run --parallel-mode -m pytest tests/unit tests/integration tests/native -q -m "not embedding" -n auto
+export COVERAGE_PROCESS_START="$PWD/shrike-py/pyproject.toml"   # [tool.coverage.*] lives in the unit (#731)
+coverage run --parallel-mode -m pytest shrike-py/tests/unit shrike-py/tests/integration shrike-py/tests/native -q -m "not embedding" -n auto
 coverage combine && coverage report      # exits non-zero below fail_under
 ```
 
@@ -294,9 +308,9 @@ Embedding tests use their own `collection_server` and are untouched by the reset
 ### Linting
 
 ```bash
-ruff check src/shrike/ tests/ shrike-core/shrike-pyo3/python/           # Lint
-ruff format --check src/shrike/ tests/ shrike-core/shrike-pyo3/python/  # Format check
-mypy src/shrike/                                                        # Type check
+ruff check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/   # Lint
+ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/  # Format check
+mypy --config-file shrike-py/pyproject.toml shrike-py/src/shrike/       # Type check
 ```
 
 (`shrike-core/shrike-pyo3/python/` is the extension's Python shim — outside `src/`, so
@@ -629,7 +643,7 @@ working summary.
 - **SemVer**, `vX.Y.Z` annotated tags. `0.x` may break the public surface (MCP
   schemas, CLI, config) between minor versions. The version is **derived from the
   git tag** by hatch-vcs (no `__version__` constant to bump): the build writes
-  `src/shrike/_version.py`, re-exported by `__init__.py`. Just tag to release.
+  `shrike-py/src/shrike/_version.py`, re-exported by `__init__.py`. Just tag to release.
 - **Roadmap and tracked work live in GitHub issues + milestones** (each milestone
   is a themed body of work — e.g. *Sync*, *Terminal UI (TUI)* — with an `epic`
   tracking issue; milestones are **not** tied to specific version numbers, since
