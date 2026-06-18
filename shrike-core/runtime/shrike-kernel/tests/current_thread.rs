@@ -1,10 +1,17 @@
-//! The degenerate single-thread proof: install a
-//! `current_thread` runtime through the init seam and run a full
-//! open → upsert → search → close flow — the entire kernel (ops, the
-//! collection actor, completions) on ONE thread driving its own asynchrony,
-//! zero extra threads. A separate integration binary on purpose: the runtime
-//! seam is process-global, so this proof must not share a process with the
-//! multi-thread suite.
+//! A `current_thread` runtime, end-to-end: install one through the default init
+//! seam and run a full open → upsert → search → close flow — the kernel's async
+//! side (ops, the collection actor's dispatch loop, completions) on one thread
+//! driving its own asynchrony. A separate integration binary on purpose: the
+//! runtime seam is process-global, so this proof must not share a process with
+//! the multi-thread suite.
+//!
+//! The collection actor routes every job through `dispatch_sync`, which in
+//! default mode is `spawn_blocking` — so a sync job runs on a blocking-pool
+//! thread, OFF the runtime worker, even when the runtime is `current_thread`.
+//! That is the sync-never-on-a-runtime-worker invariant made structural: a sync
+//! anki call (which `block_on`s) can never land on a runtime worker. So this
+//! test asserts the collection job ran on a DIFFERENT thread than the `block_on`
+//! driver. The full harness-driven model is proved by `driven_mode.rs`.
 
 use std::sync::Arc;
 
@@ -29,21 +36,23 @@ fn full_flow_on_a_current_thread_runtime() {
     shrike_kernel::block_on(async move {
         let kernel = Arc::new(Kernel::open(&collection, &cache).await.unwrap());
 
-        // The actor's jobs run on THIS thread (the one driving block_on).
+        // The actor's jobs run off the block_on driver thread: `dispatch_sync`
+        // is `spawn_blocking` in default mode, so a sync job rides the blocking
+        // pool, never the runtime worker.
         let kernel2 = Arc::clone(&kernel);
         let job_thread = kernel2
             .collection()
             .run(move |_core| std::thread::current().id())
             .await
             .unwrap();
-        assert_eq!(
+        assert_ne!(
             job_thread, main_thread,
-            "current_thread mode: the collection job ran on the driving thread"
+            "the collection job ran off the runtime driver thread (the sync \
+             offload, structural)"
         );
 
-        // A lexical end-to-end slice: upsert → search → close (no embedder —
-        // the degenerate kernel is lexical-only, exactly the no-extra-threads
-        // case the design preserves).
+        // A lexical end-to-end slice: upsert → search → close. No embedder, so
+        // search runs on the lexical signal alone.
         let basic = kernel
             .collection()
             .run(|core| core.notetype_id("Basic"))

@@ -786,10 +786,17 @@ impl DebouncedSaver {
     fn flush_background(self: &Arc<Self>) {
         self.reset_pending();
         let this = Arc::clone(self);
-        crate::runtime::handle().spawn_blocking(move || {
-            if let Err(e) = this.orchestrator.save() {
+        // The blocking file write rides the compute pool (`dispatch_compute`);
+        // fire-and-forget, so a detached runtime task (driven by `drive_io`)
+        // awaits the pool job's completion off the timer and op-tail paths.
+        let save = crate::runtime::dispatch_compute(move || {
+            this.orchestrator.save().map_err(|e| {
                 tracing::warn!(error = ?e, "debounced index save failed");
-            }
+                e
+            })
+        });
+        crate::runtime::handle().spawn(async move {
+            let _ = save.await;
         });
     }
 }

@@ -25,7 +25,7 @@ use std::sync::{Arc, RwLock};
 use blake2::digest::consts::U8;
 use blake2::{Blake2b, Digest};
 
-use shrike_error::{ErrorKind, NativeResult, ResultExt};
+use shrike_error::NativeResult;
 use shrike_store::VectorIndex;
 
 use crate::TAG_TEXT_SPACE;
@@ -366,9 +366,12 @@ impl TagRefresher {
             let engine = Arc::clone(&self.engine);
             let keys = Arc::clone(&self.keys);
             let config = self.config.clone();
-            tokio::task::spawn_blocking(move || recompute(&*engine, &rows, total, &config, &keys))
-                .await
-                .context(ErrorKind::Internal, "tag recompute task")??;
+            // O(collection) CPU + engine reads/writes → the compute pool
+            // (`dispatch_compute`), never a runtime worker.
+            crate::runtime::dispatch_compute(move || {
+                recompute(&*engine, &rows, total, &config, &keys)
+            })
+            .await?;
             Ok(())
         }
         .await;

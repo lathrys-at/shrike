@@ -52,7 +52,10 @@ use shrike_index::MultiModalIndex;
 use shrike_store::{DerivedStore, VectorIndex};
 
 pub mod runtime;
-pub use runtime::{block_on, init_runtime, spawn_op};
+pub use runtime::{
+    block_on, drive_compute, drive_io, drive_sync, init_driven_runtime, init_runtime, spawn_op,
+    submit_blocking,
+};
 
 // The multi-engine routing key: re-exported so the pyo3 binding maps
 // the harness's purpose string onto it as `shrike_kernel::RecognitionPurpose`
@@ -122,16 +125,30 @@ impl SerializedCollection {
         let (opened_tx, opened_rx) = oneshot::channel();
         let (jobs_tx, mut jobs_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
         let actor = runtime::handle().spawn(async move {
-            let core = match CollectionCore::open(&collection_path) {
-                Ok(core) => Arc::new(core),
+            // Open on the sync pool (driven) / blocking pool (default), never
+            // inline on the runtime task: the collection is a sync resource and
+            // anki's sync paths `block_on`, which a runtime worker forbids.
+            // `dispatch_sync` is the one routing seam.
+            let opened = runtime::dispatch_sync(move || {
+                CollectionCore::open(&collection_path).map(Arc::new)
+            })
+            .await;
+            let core = match opened {
+                Ok(core) => core,
                 Err(e) => {
                     let _ = opened_tx.send(Err(e));
                     return;
                 }
             };
             let _ = opened_tx.send(Ok(Arc::clone(&core)));
+            // Each job runs on the sync pool too, awaited here so serialization
+            // (one job at a time, FIFO) is preserved by construction.
             while let Some(job) = jobs_rx.recv().await {
-                job();
+                let _ = runtime::dispatch_sync(move || {
+                    job();
+                    Ok::<(), NativeError>(())
+                })
+                .await;
             }
         });
         let core = opened_rx
@@ -152,7 +169,12 @@ impl SerializedCollection {
         let (jobs_tx, mut jobs_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
         let actor = runtime::handle().spawn(async move {
             while let Some(job) = jobs_rx.recv().await {
-                job();
+                // Sync-pool routed, awaited to keep FIFO serialization.
+                let _ = runtime::dispatch_sync(move || {
+                    job();
+                    Ok::<(), NativeError>(())
+                })
+                .await;
             }
         });
         Self {
@@ -1484,9 +1506,8 @@ impl Kernel {
             .await??;
         let n = rows.len();
         let derived = Arc::clone(&self.derived);
-        tokio::task::spawn_blocking(move || derived.build(&rows, dmod))
-            .await
-            .context(ErrorKind::Internal, "derived build task")??;
+        // Blocking-fs leaf (the FTS5 rebuild) → the compute pool.
+        runtime::dispatch_compute(move || derived.build(&rows, dmod)).await?;
         let now = self.collection.run(|core| core.col_mod()).await??;
         Ok((n, dmod, now))
     }
