@@ -1,14 +1,12 @@
-//! The index orchestrator: the `VectorIndex` *policy* re-homed.
+//! The index orchestrator: the `VectorIndex` *policy*.
 //!
-//! The engine (`shrike-index`) owns storage; this module owns
-//! what the Python orchestrator owned — the meta/hashes sidecars, the drift
-//! rules, the per-note change fingerprints, the state machine, and the
-//! debounced saver (tokio::time). File formats are
+//! The engine (`shrike-index`) owns storage; this module owns the policy — the
+//! meta/hashes sidecars, the drift rules, the per-note change fingerprints, the
+//! state machine, and the debounced saver (tokio::time). File formats are
 //! byte-compatible with the Python orchestrator's (`index.meta.json`,
 //! `index.hashes.json`), and the note hash is bit-identical to Python's
-//! `hashlib.blake2b(digest_size=8)` — so an index built before the swap loads
-//! without a rebuild (the "text-only never rebuilds on upgrade" invariant,
-//! once more).
+//! `hashlib.blake2b(digest_size=8)` — so a Python-built index loads without a
+//! rebuild ("text-only never rebuilds on upgrade").
 //!
 //! The embed-free core is load/materialize/drift/hashes/save + the saver; the
 //! embed-coupled ops (add/reconcile/rebuild, calibration) live below.
@@ -57,7 +55,7 @@ pub fn note_hash(
 ) -> String {
     // Recognized texts fold in behind a distinct separator, so an
     // OCR change re-embeds exactly that note; with none, every branch below
-    // is byte-identical to the pre-OCR scheme (no upgrade rebuild).
+    // is byte-identical to the text-only scheme (no upgrade rebuild).
     let text_part: std::borrow::Cow<'_, str> = if ocr_texts.is_empty() {
         std::borrow::Cow::Borrowed(text)
     } else {
@@ -81,18 +79,16 @@ pub fn note_hash(
 }
 
 /// What a space embeds + hashes on the write path (the per-modality-primary
-/// routing). The existing `add`/`reconcile`/`rebuild` default to
-/// [`WriteMode::TextAndImage`] (text always, image
-/// when the space carries an image pair); a SECONDARY image-primary space uses
-/// [`WriteMode::ImageOnly`] so it stores only image vectors and hashes only its
-/// image refs — a pure-text edit then never re-embeds it, and the dedicated
-/// text space's stored vectors are the only text vectors (no waste, no
-/// double-index).
+/// routing). `add`/`reconcile`/`rebuild` default to
+/// [`WriteMode::TextAndImage`] (text always, image when the space carries an
+/// image pair); a SECONDARY image-primary space uses [`WriteMode::ImageOnly`]
+/// so it stores only image vectors and hashes only its image refs — a pure-text
+/// edit then never re-embeds it, and the dedicated text space's stored vectors
+/// are the only text vectors (no waste, no double-index).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {
     /// Embed text (+ image when an image pair is supplied) and fold both into
-    /// the per-note hash. The N=1 / omni-primary / dedicated-text-primary path
-    /// — byte-identical to the single-orchestrator era.
+    /// the per-note hash. The N=1 / omni-primary / dedicated-text-primary path.
     TextAndImage,
     /// Embed ONLY images, store ONLY image vectors, and hash ONLY the present
     /// image refs. The image-primary SECONDARY space's path: a pure-text
@@ -142,9 +138,9 @@ pub struct IndexMeta {
     /// The owning collection's path-derived identity: the canonicalized
     /// collection path. Recorded so a mismatched/moved cache (the index dir
     /// belongs to a different collection) is detected and rebuilt rather than
-    /// silently reused. Absent → an older index (loaded as-is; the next save
-    /// stamps the owner). Serialized last and skipped when absent so a text-
-    /// only index built before the owner stamp round-trips byte-identically.
+    /// silently reused. Absent → an ownerless index (loaded as-is; the next save
+    /// stamps the owner). Serialized last and skipped when absent so an
+    /// ownerless index round-trips byte-identically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection: Option<String>,
     /// Presence (even empty) records that calibration ran (one-shot).
@@ -152,16 +148,15 @@ pub struct IndexMeta {
     pub activation: Option<ActivationStats>,
 }
 
-/// The calibration stats, keyed by modality (`image`). Replaces the old
-/// `BTreeMap<String, f64>` value with magic `"n"/"mean"/"std"` keys — a typo'd
-/// key no longer compiles, and the per-modality stat is a named struct rather
-/// than three string lookups.
+/// The calibration stats, keyed by modality (`image`). A named struct per
+/// modality rather than a `BTreeMap<String, f64>` with magic `"n"/"mean"/"std"`
+/// keys, so a typo'd key no longer compiles.
 ///
-/// On-disk/wire format is UNCHANGED: the outer key→value map stays a
-/// `BTreeMap` (sorted-key JSON object), and [`ActivationStat`] serializes its
-/// three fields in `mean, n, std` order — byte-for-byte the sorted order the
-/// old `BTreeMap<String, f64>` emitted. `n` stays `f64` so it round-trips the
-/// Python shape (`{"n": 40.0, ...}`, not `40`).
+/// On-disk/wire format: the outer key→value map is a `BTreeMap` (sorted-key
+/// JSON object), and [`ActivationStat`] serializes its three fields in
+/// `mean, n, std` order — byte-for-byte the sorted order a
+/// `BTreeMap<String, f64>` emits. `n` is `f64` so it round-trips the Python
+/// shape (`{"n": 40.0, ...}`, not `40`).
 pub type ActivationStats = BTreeMap<String, ActivationStat>;
 
 /// One modality's calibrated best-match distribution: the sample count
@@ -170,8 +165,8 @@ pub type ActivationStats = BTreeMap<String, ActivationStat>;
 /// Python on-disk shape byte-for-byte (it wrote `n` as a float).
 ///
 /// Field order is deliberate (`mean, n, std`): serde serializes struct fields
-/// in declaration order, and these match the alphabetical key order the prior
-/// `BTreeMap<String, f64>` produced, so the serialized bytes are identical.
+/// in declaration order, and these match the alphabetical key order a
+/// `BTreeMap<String, f64>` produces, so the serialized bytes are identical.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct ActivationStat {
     /// Mean of the modality's typical best-match cosine.
@@ -584,14 +579,14 @@ impl IndexOrchestrator {
         let Some(ndim) = self.engine.ndim() else {
             return Ok(()); // nothing built — nothing to persist
         };
-        // SNAPSHOT under the shared lock, WRITE outside it: the old
-        // shape held `shared` across the multi-hundred-MB engine file write,
-        // so every op tail's watermark update and every /status blocked for
-        // the whole flush. The snapshot is cheap (clones of small fields +
-        // the hash map stringify); the writes below run lock-free. Ordering
-        // invariant holds: meta is the commit point and describes the
-        // snapshot, which is ≤ the engine state written after it — a
-        // too-old meta only costs an extra reconcile on load, never lies.
+        // SNAPSHOT under the shared lock, WRITE outside it: holding `shared`
+        // across the multi-hundred-MB engine file write would block every op
+        // tail's watermark update and every /status for the whole flush. The
+        // snapshot is cheap (clones of small fields + the hash map stringify);
+        // the writes below run lock-free. Ordering invariant holds: meta is the
+        // commit point and describes the snapshot, which is ≤ the engine state
+        // written after it — a too-old meta only costs an extra reconcile on
+        // load, never lies.
         let (hashes_json, meta) = {
             let shared = self.shared.lock().expect("orchestrator poisoned");
             let hashes_json = match &shared.note_hashes {
@@ -633,14 +628,14 @@ impl IndexOrchestrator {
         Ok(())
     }
 
-    /// Persist ONLY the meta sidecar: the watermark-only reconcile
-    /// path (a metadata-level col.mod bump — tags/decks/templates) changes no
-    /// vector and no hash, but previously rewrote the full engine files to
-    /// persist one i64. The vectors/hashes on disk are unchanged by
-    /// definition on this path, so meta stays truthful.
+    /// Persist ONLY the meta sidecar: the watermark-only reconcile path (a
+    /// metadata-level col.mod bump — tags/decks/templates) changes no vector and
+    /// no hash, so a full engine-file rewrite to persist one i64 is wasteful.
+    /// The vectors/hashes on disk are unchanged by definition on this path, so
+    /// meta stays truthful.
     ///
     /// Caller contract: only sound when the on-disk engine/hashes already
-    /// match memory — today's sole caller (reconcile's empty-diff branch) is
+    /// match memory — the sole caller (reconcile's empty-diff branch) is
     /// reachable only after `open` loaded persisted hashes, which exist only
     /// if a prior full `save()` landed. A new caller on a path where `add`
     /// populated hashes without a persist would write a lying meta.
@@ -726,8 +721,8 @@ impl DebouncedSaver {
         }
         if pending.changes >= self.threshold {
             drop(pending);
-            // Off the op tail: the 100th upsert's caller previously
-            // ate the entire multi-second file write inline.
+            // Off the op tail, so the burst-cap upsert's caller doesn't eat the
+            // multi-second file write inline.
             self.flush_background();
             return;
         }
@@ -892,7 +887,7 @@ mod tests {
         let orch = temp_orchestrator();
         // Nothing loaded → drift.
         assert!(orch.check_drift(1, Some("m"), false));
-        // Materialize state by hand (the embed-coupled ops land next slice).
+        // Materialize state by hand (no embed-coupled ops in this test).
         orch.engine().ensure("text", 4).unwrap();
         orch.set_col_mod(5);
         {
@@ -1005,7 +1000,7 @@ pub struct EmbedInput {
     /// its own TEXT-space vector under the note key (no modality gap — the
     /// text encoder reads them like any text), so a note ranks by
     /// max-over-items. Empty for notes without recognition — the hash stays
-    /// byte-identical to the pre-OCR scheme, so upgrades never rebuild.
+    /// byte-identical to the text-only scheme, so upgrades never rebuild.
     pub ocr_texts: Vec<String>,
 }
 
@@ -1024,8 +1019,7 @@ impl IndexOrchestrator {
             // Image-only: fold ONLY the present image refs — text edits
             // don't move it. (An ImageOnly space always carries an image pair.)
             WriteMode::ImageOnly => note_hash_images_only(&input.image_names, &exists),
-            // Text (+image when paired): the existing media-aware hash — at N=1
-            // this is byte-identical to the single-space path.
+            // Text (+image when paired): the media-aware hash.
             WriteMode::TextAndImage => note_hash(
                 &input.text,
                 &input.image_names,
@@ -1062,7 +1056,7 @@ impl IndexOrchestrator {
 
     /// [`Self::add`] with an explicit [`WriteMode`]: the image-primary
     /// secondary space uses [`WriteMode::ImageOnly`] to store only image vectors
-    /// + hash only image refs. `TextAndImage` is the byte-identical default.
+    /// + hash only image refs. `TextAndImage` is the default.
     ///
     /// # Errors
     ///
@@ -1122,7 +1116,7 @@ impl IndexOrchestrator {
             match mode {
                 // ── Image-only: embed + store ONLY image vectors. The
                 // text/OCR halves are skipped entirely — a secondary CLIP space
-                // never holds text vectors (PR-C reads only its image ranking).
+                // never holds text vectors (its index serves only image rankings).
                 WriteMode::ImageOnly => {
                     let image_vectors = image_fut.await?;
                     // Replace: drop the note's prior vectors (all modalities)
@@ -1143,8 +1137,7 @@ impl IndexOrchestrator {
                     // A note with no resolvable image adds nothing — but its
                     // hash still records (it's pending=current for reconcile).
                 }
-                // ── Text (+image when paired): the existing pipeline, verbatim
-                // for N=1 / the text-or-omni primary.
+                // ── Text (+image when paired): the N=1 / text-or-omni primary.
                 WriteMode::TextAndImage => {
                     let texts: Vec<String> = batch.iter().map(|i| i.text.clone()).collect();
                     // Recognized-text vectors: each vector-worthy
@@ -1286,7 +1279,7 @@ impl IndexOrchestrator {
 
     /// [`Self::rebuild`] with an explicit [`WriteMode`]: an image-primary
     /// secondary space rebuilds in `ImageOnly` mode (only image vectors land).
-    /// `TextAndImage` is the byte-identical default.
+    /// `TextAndImage` is the default.
     ///
     /// # Errors
     ///
@@ -1383,7 +1376,7 @@ impl IndexOrchestrator {
     /// [`Self::reconcile`] with an explicit [`WriteMode`]: an
     /// image-primary secondary space reconciles in `ImageOnly` mode (its hash
     /// folds image refs only, so a text edit is a no-op for it). `TextAndImage`
-    /// is the byte-identical default.
+    /// is the default.
     ///
     /// # Errors
     ///
@@ -1671,9 +1664,9 @@ mod op_tests {
 
     /// The pipeline-parallelism pin: `add` builds the batch's text
     /// and image engine futures BEFORE awaiting either, so two engines whose
-    /// compute runs off-thread overlap. The old text-then-image sequential
-    /// awaits would start the image engine only after the text engine
-    /// finished — the interleaving below would be impossible.
+    /// compute runs off-thread overlap. Sequential text-then-image awaits would
+    /// start the image engine only after the text engine finished — the
+    /// interleaving below would then be impossible.
     #[test]
     fn batch_engine_futures_overlap() {
         let events: Events = Arc::default();
@@ -1786,9 +1779,9 @@ mod op_tests {
 
     /// Pure swap (col_mod UNCHANGED): a new model arrives via /embedding/start
     /// with no note edit. A naive reconcile would let the empty diff leave
-    /// model_id + every vector stale forever (drift re-fires as a no-op).
-    /// Fixed: reconcile gates to a
-    /// full rebuild — every vector is the new model's and model_id is stamped.
+    /// model_id + every vector stale forever (drift re-fires as a no-op); the
+    /// model_id gate instead forces a full rebuild — every vector is the new
+    /// model's and model_id is stamped.
     #[test]
     fn reconcile_on_pure_model_swap_rebuilds_into_the_new_space() {
         let model_a = TaggedEmbedder { tag: 0.10 };
@@ -1850,7 +1843,7 @@ mod op_tests {
     /// Swap + 1 edit (col_mod BUMPS): the insidious variant. A naive reconcile's
     /// non-empty diff would stamp the new model_id while the 2/3 UNCHANGED notes
     /// kept OLD-model vectors → a silent MIXED-MODEL index that reports clean.
-    /// Fixed: the model_id gate forces a full rebuild regardless of the diff.
+    /// The model_id gate forces a full rebuild regardless of the diff.
     #[test]
     fn reconcile_on_model_swap_plus_edit_is_not_a_mixed_model_index() {
         let model_a = TaggedEmbedder { tag: 0.10 };
@@ -2485,11 +2478,10 @@ mod op_tests {
 
     #[test]
     fn pre_67_index_without_owner_loads_then_gets_stamped() {
-        // An older index records no owner; it must load as-is (the
-        // single-collection user's index survives the upgrade) and the next
-        // save stamps the owner in.
+        // An ownerless index must load as-is (the single-collection user's index
+        // survives the upgrade) and the next save stamps the owner in.
         let dir = temp_dir_unique();
-        // Build WITHOUT an owner (the older shape: meta has no `collection`).
+        // Build WITHOUT an owner (meta has no `collection`).
         let pre = IndexOrchestrator::open_owned(&dir, engine(), None);
         block_on(pre.rebuild(
             vec![input(1, "alpha")],

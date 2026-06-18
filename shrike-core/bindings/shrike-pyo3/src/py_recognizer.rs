@@ -257,12 +257,11 @@ impl RemoteDescriber {
     /// Direct describe in the RecognizerBackend wire shape
     /// (`(text, confidence, segments_json)`; describe locates nothing so the
     /// segments JSON is always `""`) — for tests and direct callers; the
-    /// kernel path never comes through here. The engine is async now; this
-    /// direct-call helper is off the runtime (under `py.detach`),
-    /// so it drives the future via `shrike_kernel::block_on` (a legal block_on
-    /// site — not a runtime worker). A chunk-level failure (a down endpoint)
-    /// raises; a per-item failure degrades to an empty recognition (the crate's
-    /// settled error split).
+    /// kernel path never comes through here. The async engine is driven off the
+    /// runtime (under `py.detach`) via `shrike_kernel::block_on` (a legal
+    /// block_on site — not a runtime worker). A chunk-level failure (a down
+    /// endpoint) raises; a per-item failure degrades to an empty recognition
+    /// (the crate's error split).
     fn recognize(
         &self,
         py: Python<'_>,

@@ -7,15 +7,15 @@
 //! binding, kept as part of the frozen contract), stale-file deletion on save,
 //! and the activation calibration — instance-per-space, no global state.
 //!
-//! One binding gap shapes this module: usearch's Rust crate (2.25.3) exposes
-//! no key-enumeration API (the Python binding's `Index.keys`), so the engine
+//! One binding gap shapes this module: usearch's Rust crate (2.25.3) exposes no
+//! key-enumeration API (the Python binding's `Index.keys`), so the engine
 //! tracks per-modality `{key: vector_count}` maps itself. On `restore` of a
-//! file written by the *Python* engine the map is reconstructed by probing
-//! `count(key)` for the caller-provided candidate keys (the orchestrator's
-//! `index.hashes.json` — every indexed note id). A multimodal index restored
-//! with no candidates fails the restore (one-time drift rebuild — convention
-//! 7's worst acceptable outcome); a text-only one loads with keys unknown,
-//! which only calibration would need (and text-only never calibrates).
+//! Python-written file the map is reconstructed by probing `count(key)` for the
+//! caller-provided candidate keys (the orchestrator's `index.hashes.json` —
+//! every indexed note id). A multimodal index restored with no candidates fails
+//! the restore (one-time drift rebuild — convention 7's worst acceptable
+//! outcome); a text-only one loads with keys unknown, which only calibration
+//! would need (and text-only never calibrates).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,19 +29,19 @@ use crate::new_index;
 /// Mirrors `shrike.index_engine.SEARCH_OVERFETCH`.
 const SEARCH_OVERFETCH: usize = 4;
 
-// Canonical docs live in shrike-store; re-exported here so the older
-// import paths keep working.
+// Canonical docs live in shrike-store; re-exported here so existing import
+// paths keep working.
 pub use shrike_store::{ActivationStats, ModalityRanking};
 
 struct Sub {
     /// `Arc` so [`MultiModalIndex::save`] can clone a cheap handle under the
-    /// state lock and serialize+write it *outside* the lock. usearch's
-    /// `Index` is `Send + Sync` with its own internal locking; the
-    /// `save_mutation` guard excludes the in-place mutators
+    /// state lock and serialize+write it *outside* the lock. usearch's `Index`
+    /// is `Send + Sync` with its own internal locking; the `save_mutation` guard
+    /// excludes the in-place mutators
     /// ([`add`](MultiModalIndex::add)/[`remove`](MultiModalIndex::remove)) for
     /// the duration of the serialize, while leaving searches concurrent — so a
     /// save and a concurrent search share the same `Index` without the state
-    /// mutex held across the file write. (Note `add`/`remove`/`reserve` are also
+    /// mutex held across the file write. (`add`/`remove`/`reserve` are also
     /// `&self` on usearch's `Index`, so `&self` alone does not imply read-only —
     /// the mutual exclusion comes from the guard, not the receiver.)
     index: Arc<Index>,
@@ -287,16 +287,15 @@ impl MultiModalIndex {
     ///
     /// **The state lock is NOT held across the file write (the
     /// "never hold a lock across file writes" rule one layer below
-    /// `IndexOrchestrator::save`).** Under the `state` lock we only snapshot a
-    /// cheap `Arc` handle to each sub-index (plus the loaded-modality set); the
-    /// `state` guard is dropped and every `index.save(tmp)`+rename runs while
+    /// `IndexOrchestrator::save`).** Under the `state` lock only a cheap `Arc`
+    /// handle to each sub-index (plus the loaded-modality set) is snapshotted;
+    /// the `state` guard is dropped and every `index.save(tmp)`+rename runs
     /// holding only the dedicated `save_mutation` guard, so a concurrent
     /// [`search_by_modality`](Self::search_by_modality) (which takes only the
     /// `state` lock) is never serialized behind the whole multi-file usearch
     /// write.
     ///
-    /// `add`/`remove` ARE excluded during the write: usearch's `Index` is
-    /// `Send + Sync` with internal locking, but `save` serializes the whole
+    /// `add`/`remove` ARE excluded during the write: `save` serializes the whole
     /// structure while those mutate it in place, so the `save_mutation` guard
     /// serializes save against them (it does NOT gate searches). usearch
     /// documents concurrent search+update but is silent on save-vs-mutate, so
@@ -540,13 +539,13 @@ impl MultiModalIndex {
     }
 
     /// Dot-score each key's FIRST stored vector against `query` in one lock
-    /// hold: the tag expansion otherwise pays a mutex acquire plus a
-    /// full per-vector heap clone per member via `modality_get`. Each key's
-    /// vectors are read into one reused buffer and only `(key, dot)` pairs
-    /// come back; missing keys are skipped, a query/ndim mismatch returns
-    /// empty. Callers bound `keys` (the expansion's member ceiling), so the
-    /// single hold stays in low-millisecond territory — unlike calibration,
-    /// which holds per-search because its total runs much longer.
+    /// hold: the tag expansion otherwise pays a mutex acquire plus a full
+    /// per-vector heap clone per member via `modality_get`. Each key's vectors
+    /// are read into one reused buffer and only `(key, dot)` pairs come back;
+    /// missing keys are skipped, a query/ndim mismatch returns empty. Callers
+    /// bound `keys` (the expansion's member ceiling), so the single hold stays
+    /// in low-millisecond territory — unlike calibration, which holds per-search
+    /// because its total runs much longer.
     pub fn dot_scores(&self, modality: &str, keys: &[i64], query: &[f32]) -> Vec<(i64, f32)> {
         let state = self.lock();
         let Some(sub) = state.indexes.get(modality) else {
@@ -606,14 +605,14 @@ impl MultiModalIndex {
     /// sample stored text vectors as pseudo-queries (deterministic),
     /// search each non-text modality, record the best non-self match.
     ///
-    /// Lock discipline: the sample keys and their query vectors are
-    /// snapshotted under ONE short hold, then each search takes its own brief
-    /// hold — so a calibration over hundreds of samples never stalls the
-    /// whole index behind a single multi-hundred-millisecond lock. Fully
-    /// lock-free searching is deliberately NOT used: writers may interleave,
-    /// and the engine's safety model trusts usearch's `Sync` only for
-    /// read-vs-read — every usearch call stays under the mutex. The stats
-    /// are statistical, so an interleaved write skewing one sample is fine.
+    /// Lock discipline: the sample keys and their query vectors are snapshotted
+    /// under ONE short hold, then each search takes its own brief hold — so a
+    /// calibration over hundreds of samples never stalls the whole index behind
+    /// a single multi-hundred-millisecond lock. Fully lock-free searching is
+    /// deliberately NOT used: writers may interleave, and the engine's safety
+    /// model trusts usearch's `Sync` only for read-vs-read — every usearch call
+    /// stays under the mutex. The stats are statistical, so an interleaved write
+    /// skewing one sample is fine.
     ///
     /// # Errors
     ///
@@ -644,11 +643,11 @@ impl MultiModalIndex {
                 return Ok(Vec::new());
             }
 
-            // Deterministic sample: a PARTIAL LCG Fisher-Yates over the
-            // sorted keys — only the first `sample_size` slots are drawn, so
-            // a large collection isn't fully shuffled to take 256.
-            // Stable across runs of this engine; deliberately NOT numpy's
-            // sampler — the stats are statistical, never byte-pinned.
+            // Deterministic sample: a PARTIAL LCG Fisher-Yates over the sorted
+            // keys — only the first `sample_size` slots are drawn, so a large
+            // collection isn't fully shuffled to take 256. Stable across runs of
+            // this engine; deliberately NOT numpy's sampler — the stats are
+            // statistical, never byte-pinned.
             let mut keys: Vec<i64> = text_sub.counts.keys().copied().collect();
             let n = keys.len();
             let take = sample_size.min(n);

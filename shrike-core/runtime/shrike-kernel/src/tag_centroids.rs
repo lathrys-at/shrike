@@ -236,15 +236,15 @@ impl TagKeyMap {
     }
 }
 
-/// Coalescing background refresher: write-op tails previously ran the
-/// full centroid recompute INLINE — O(tagged-notes) on every upsert/delete,
-/// serialized on the op. `request` returns immediately: the first request
-/// spawns a refresh right away (an isolated op's centroids land as fast as
-/// the inline call produced them, just off the tail), and requests arriving
-/// while one runs coalesce into ONE follow-up after `window` — so a burst of
-/// N ops costs a handful of recomputes, not N. A refresh is a pure function
-/// of current collection + engine state, so the coalesced run sees
-/// everything the skipped ones would have.
+/// Coalescing background refresher: a full centroid recompute is
+/// O(tagged-notes), so running it inline on every upsert/delete would
+/// serialize that cost on the op. `request` returns immediately: the first
+/// request spawns a refresh right away (an isolated op's centroids land just
+/// off the tail), and requests arriving while one runs coalesce into ONE
+/// follow-up after `window` — so a burst of N ops costs a handful of
+/// recomputes, not N. A refresh is a pure function of current collection +
+/// engine state, so the coalesced run sees everything the skipped ones would
+/// have.
 pub struct TagRefresher {
     collection: Arc<crate::SerializedCollection>,
     engine: Arc<dyn VectorIndex>,
@@ -398,9 +398,9 @@ pub fn recompute(
     keys: &TagKeyMap,
 ) -> NativeResult<usize> {
     let members_by_tag = membership(rows);
-    // Each distinct member's text vector is fetched ONCE: a note in N
-    // tags (and every `::` prefix) previously paid N engine lock + copy round
-    // trips — ~200k fetches per recompute at 100k notes with hierarchy.
+    // Each distinct member's text vector is fetched ONCE: a note in N tags (and
+    // every `::` prefix) would otherwise pay N engine lock + copy round trips —
+    // ~200k fetches per recompute at 100k notes with hierarchy.
     let mut vec_cache: std::collections::HashMap<i64, Option<Vec<f32>>> =
         std::collections::HashMap::new();
     let mut tag_keys: BTreeMap<i64, String> = BTreeMap::new();
@@ -480,9 +480,8 @@ pub const TAG_RANK_CAP: usize = 50;
 /// The tag activation floor — deliberately BELOW the semantic note threshold:
 /// a centroid is a MEAN over members, so dilution systematically lowers its
 /// attainable cosine against any single query (a perfectly on-topic tag with
-/// one off-topic member already sits well under the best member's score).
-/// Offline calibration against the tag space is the
-/// future refinement; this fixed floor is the v1 knob.
+/// one off-topic member already sits well under the best member's score). A
+/// fixed floor; offline calibration against the tag space could refine it.
 pub const TAG_ACTIVATION: f64 = 0.35;
 
 /// The tag retrieval signal: rank the `tag.text` space with the query
@@ -525,18 +524,18 @@ pub fn tag_ranking(
         if f64::from(1.0 - dist) < threshold {
             break;
         }
-        // Fresh-first: members an earlier (better) tag already ranked
-        // would only be skipped *after* scoring — filtering them up front
-        // means hierarchy overlap is never re-scored, and pushing the fresh
-        // subset in score order is exactly what the full sort + skip did.
+        // Fresh-first: members an earlier (better) tag already ranked would
+        // only be skipped *after* scoring — filtering them up front means
+        // hierarchy overlap is never re-scored, equivalent to scoring all then
+        // skipping seen.
         let fresh = keys.fresh_members(*key, &seen, MEMBER_SCORE_CEILING);
         if fresh.is_empty() {
             continue;
         }
         let mut scored = engine.dot_scores("text", &fresh, query);
         // Only the top `needed` ever leave this loop iteration — partition
-        // them out, then order just that slice (a huge tag previously
-        // paid a full O(m log m) sort to fill a 50-slot cap).
+        // them out, then order just that slice (a full O(m log m) sort over a
+        // huge tag to fill a 50-slot cap would be wasteful).
         let needed = cap - out.len();
         if scored.len() > needed {
             scored.select_nth_unstable_by(needed - 1, |a, b| b.1.total_cmp(&a.1));

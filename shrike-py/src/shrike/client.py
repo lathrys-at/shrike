@@ -295,9 +295,9 @@ class ShrikeClient:
         """Map a non-2xx ``ActionError`` envelope to the client error taxonomy.
 
         The actions edge returns a typed ``{code, message}`` body with an HTTP
-        status. The ``code`` is the authority (it replaces the old fragile
-        mid-string ``collection_busy:`` text-sentinel parsing). A response
-        without a decodable envelope falls back to a plain ``ServerHTTPError``.
+        status. The ``code`` is the authority for the mapping, not the message
+        text. A response without a decodable envelope falls back to a plain
+        ``ServerHTTPError``.
         """
         try:
             err = ActionError.model_validate(resp.json())

@@ -1,29 +1,28 @@
-//! The N-space index coordinator (the multi-space substrate's data
-//! layer). One [`IndexOrchestrator`] + [`DebouncedSaver`] per embedding
-//! space, keyed by the space's CONTENT fingerprint (the same key
-//! [`EmbedSpaces`](crate::EmbedSpaces) uses), so the index set stays in lockstep
-//! with the embed set.
+//! The N-space index coordinator. One [`IndexOrchestrator`] +
+//! [`DebouncedSaver`] per embedding space, keyed by the space's CONTENT
+//! fingerprint (the same key [`EmbedSpaces`](crate::EmbedSpaces) uses), so the
+//! index set stays in lockstep with the embed set.
 //!
 //! ## The N=1 migration rule (load-bearing)
 //!
-//! The PRIMARY text space keeps using `cache_dir`/the per-collection index dir
+//! The PRIMARY text space uses `cache_dir`/the per-collection index dir
 //! **DIRECTLY** (no subdir) — so an existing single-space user's on-disk index
 //! (`index.usearch` / `index.meta.json` / `index.hashes.json`) loads UNCHANGED,
 //! with **zero rebuild** ("text-only never rebuilds on upgrade"). Only the 2nd+
 //! spaces get a subdir (`<index_dir>/<space-key-hash>/`); a secondary space is
-//! always new on this release, so it materializes fresh — no migration. The
-//! asymmetry (the primary is special-cased to the base dir) is the price of
-//! zero-migration, and it is exactly what keeps N=1 byte-identical.
+//! always new, so it materializes fresh — no migration. The asymmetry (the
+//! primary special-cased to the base dir) is the price of zero-migration, and
+//! it is what keeps N=1 on the existing on-disk layout.
 //!
 //! ## Lockstep with the embed set
 //!
 //! The kernel opens with NO embedder, so the primary orchestrator is created
-//! eagerly at [`IndexSet::open`] over the base dir (byte-identical to the
-//! older single orchestrator) but **un-keyed**. The FIRST embedder attach
-//! ([`IndexSet::bind_space`]) claims the primary slot for that embedder's key;
-//! a SECOND distinct key creates a secondary orchestrator in a subdir. This
-//! keeps the embed-space → index-space mapping exact without the index path
-//! ever consuming more than the primary here (the fan-out is a later stage).
+//! eagerly at [`IndexSet::open`] over the base dir but **un-keyed**. The FIRST
+//! embedder attach ([`IndexSet::bind_space`]) claims the primary slot for that
+//! embedder's key; a SECOND distinct key creates a secondary orchestrator in a
+//! subdir. This keeps the embed-space → index-space mapping exact without the
+//! index path ever consuming more than the primary here (the fan-out lives
+//! elsewhere).
 //!
 //! ## What is fanned out here
 //!
@@ -34,8 +33,8 @@
 //! - **Reindex/rebuild** loop the spaces, each against its own embedder; a
 //!   model swap on one space drifts only that space (per-space `model_id`).
 //!
-//! The index/search path still reads [`IndexSet::primary`] — the one engine
-//! the orchestrator/search consume until cross-space fusion is wired.
+//! The index/search path reads [`IndexSet::primary`] — the one engine the
+//! orchestrator/search consume until cross-space fusion is wired.
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -90,12 +89,11 @@ pub struct IndexSet {
 }
 
 impl IndexSet {
-    /// Open the set with its PRIMARY space materialized eagerly at the base dir
-    /// (byte-identical to the older single orchestrator): the primary
-    /// orchestrator loads any existing on-disk index in place, un-keyed until an
-    /// embedder attaches. `primary_modalities` is what the primary engine spans
-    /// (the kernel passes the note modalities + the `tag.text` space, exactly as
-    /// the single-engine build did).
+    /// Open the set with its PRIMARY space materialized eagerly at the base dir:
+    /// the primary orchestrator loads any existing on-disk index in place,
+    /// un-keyed until an embedder attaches. `primary_modalities` is what the
+    /// primary engine spans (the kernel passes the note modalities + the
+    /// `tag.text` space).
     ///
     /// # Errors
     ///
@@ -136,8 +134,7 @@ impl IndexSet {
     }
 
     /// The PRIMARY orchestrator — the one engine the index/search paths consume
-    /// here. With one declared embedder it is the sole space at the base dir,
-    /// so every drift/reconcile/save/wire path is byte-identical to the older one.
+    /// here. With one declared embedder it is the sole space at the base dir.
     ///
     /// # Panics
     ///
@@ -228,8 +225,8 @@ impl IndexSet {
             return Ok(Arc::clone(&spaces[0].orchestrator));
         }
 
-        // A new secondary space → its own subdir + fresh engine (always new on
-        // this release → materializes fresh, no migration).
+        // A new secondary space → its own subdir + fresh engine (always new →
+        // materializes fresh, no migration).
         let subdir = self.config.base_dir.join(space_subdir(key));
         std::fs::create_dir_all(&subdir)
             .map_err(|e| shrike_error::NativeError::internal(format!("index space dir: {e}")))?;
@@ -300,8 +297,7 @@ impl IndexSet {
     }
 
     /// Remove a set of notes from EVERY space's index: a deleted note
-    /// leaves all indexes. Returns the primary's removal count (the one the
-    /// single-space path returned, byte-identical for N=1).
+    /// leaves all indexes. Returns the primary's removal count.
     ///
     /// # Errors
     ///
@@ -320,7 +316,7 @@ impl IndexSet {
 
     /// Advance every space's stored `col_mod` watermark — a maintained
     /// write touched all of them. With one space this is the single
-    /// `set_col_mod`, byte-identical.
+    /// `set_col_mod`.
     pub fn set_col_mod_all(&self, value: i64) {
         for orch in self.all_orchestrators() {
             orch.set_col_mod(value);

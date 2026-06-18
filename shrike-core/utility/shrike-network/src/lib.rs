@@ -2,8 +2,8 @@
 //!
 //! **Trust-boundary code**: changes here go through the security-review gate.
 //!
-//! This crate was extracted from the media URL fetch so the SSRF control is
-//! shared, not copied. Three consumers depend on it:
+//! The SSRF control lives here once, shared not copied. Three consumers
+//! depend on it:
 //!
 //! - `shrike-media` (the inbound-media crate): the attacker-supplied
 //!   `store_media` url path — resolves+vets EVERY hop's host against
@@ -257,9 +257,8 @@ pub fn same_host_redirect(from: &url::Url, location: &str) -> NativeResult<url::
 /// NOTE: a configured HTTP/SOCKS proxy short-circuits the DNS override —
 /// reqwest connects to the *proxy* and the proxy resolves the name, so the pin
 /// governs only the DIRECT-connection case (the SSRF surface). A configured
-/// proxy is an operator opt-in to route through it (the posture the prior sync
-/// agent carried, preserved). Proxy env (`HTTP_PROXY`/`ALL_PROXY`/…, SOCKS via
-/// the `socks` feature) is honored.
+/// proxy is an operator opt-in to route through it. Proxy env
+/// (`HTTP_PROXY`/`ALL_PROXY`/…, SOCKS via the `socks` feature) is honored.
 ///
 /// # Errors
 ///
@@ -317,10 +316,10 @@ pub fn pinned_endpoint_async_client(
 }
 
 // ── the centralized per-hop re-vet loops ───────────────────────────
-// ONE audited copy of the manual redirect-following + SSRF re-vet the two
-// consumers (the untrusted-media GET, the operator-endpoint POST) used to
-// hand-roll. The posture differs only in how each hop is re-vetted; engine
-// policy (retry/backoff/`Retry-After`/api-key/item-level status) stays with the
+// ONE audited copy of the manual redirect-following + SSRF re-vet for both
+// consumers (the untrusted-media GET, the operator-endpoint POST). The posture
+// differs only in how each hop is re-vetted; engine policy
+// (retry/backoff/`Retry-After`/api-key/item-level status) stays with the
 // consumer — these helpers own only the pinned-send + per-hop re-vet + cap.
 
 /// Download a URL with the untrusted-media SSRF posture (`store_media`'s url
@@ -529,11 +528,10 @@ mod tests {
         }
     }
 
-    /// The SSRF parity regression, moved with the classifier: the
-    /// allowlist must refuse 6to4 (2002::/16) and 3fff::/20 exactly like
-    /// Python's `ipaddress.is_global`. A 6to4 address embeds an IPv4 in bytes
-    /// 2..6, so `2002:7f00:0001::` is the 6to4 encoding of 127.0.0.1 —
-    /// fail-open to an internal IPv4 if permitted.
+    /// The SSRF parity regression: the allowlist must refuse 6to4 (2002::/16)
+    /// and 3fff::/20 exactly like Python's `ipaddress.is_global`. A 6to4
+    /// address embeds an IPv4 in bytes 2..6, so `2002:7f00:0001::` is the 6to4
+    /// encoding of 127.0.0.1 — fail-open to an internal IPv4 if permitted.
     #[test]
     fn ssrf_classifier_refuses_6to4_and_3fff_like_python() {
         let must_refuse = [

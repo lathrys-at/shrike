@@ -32,9 +32,9 @@ impl AppleVisionRecognizer {
 
     /// The platform identity: `apple-vision-swift:{revision}:macos{X.Y.Z}`
     /// — model revision + OS version (an OS upgrade re-derives, exactly
-    /// like a model change rebuilds vectors). A deliberate hard cut from
-    /// the objc2 engine's `apple-vision:rev{N}` lineage: the new
-    /// API rides a newer text model, so all OCR rows re-derive once.
+    /// like a model change rebuilds vectors). The `-swift` namespace and
+    /// `macos{X.Y.Z}` shape differ from the older `apple-vision:rev{N}`
+    /// scheme, so every OCR row re-derives once on the switch.
     pub fn fingerprint_str(&self) -> &str {
         &self.fingerprint
     }
@@ -89,8 +89,7 @@ mod tests {
         #[test]
         fn fingerprint_format() {
             let fp = engine().fingerprint_str().to_string();
-            // apple-vision-swift:{revision}:macos{X.Y.Z} — stable across
-            // calls; a hard cut from the objc2 lineage.
+            // apple-vision-swift:{revision}:macos{X.Y.Z} — stable across calls.
             assert!(fp.starts_with("apple-vision-swift:revision"), "{fp}");
             let macos = fp.split(":macos").nth(1).expect("macos segment");
             let parts: Vec<&str> = macos.split('.').collect();

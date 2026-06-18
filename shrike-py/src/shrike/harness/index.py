@@ -34,7 +34,7 @@ CALIB_MIN = 30
 # its best match for the query exceeds `mean + ACTIVATION_MARGIN·std` of that modality's calibrated
 # typical best match (index.activation_stats) — otherwise the modality "had no good match" and its
 # top-k would just inject noise. Higher margin = stricter (fewer image cards surface). Like RRF_K, a
-# module constant today; becomes a `--search-*` knob under the tuning harness. Uncalibrated stats
+# module constant; becomes a `--search-*` knob under the tuning harness. Uncalibrated stats
 # (a text-only index) yield no floor, so the gate is simply off. Lives here beside
 # `activation_floor` (its sole consumer's math) rather than in the action layer.
 ACTIVATION_MARGIN = 1.0

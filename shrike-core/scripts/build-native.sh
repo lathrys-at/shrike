@@ -11,7 +11,7 @@
 # `bazel cquery --output=files` locates the built .so (the house idiom from
 # tools/build-wheel.sh / tools/build-sdist.sh); we copy it into the source-tree
 # package dir and pip install that. Bazel builds anki + the engines hermetically,
-# so this lane needs no protoc on PATH (the old cargo lane did).
+# so this lane needs no protoc on PATH.
 #
 # Flags:
 #   --release   optimized build (bazel `-c opt`; default: fastbuild)

@@ -1,17 +1,17 @@
-//! Note-type operations — the port of
-//! `shrike/note_types.py` plus `_migrate_note_type` from `collection.py`.
+//! Note-type operations — the port of `shrike/note_types.py` plus
+//! `_migrate_note_type` from `collection.py`.
 //!
 //! Everything operates on the **schema11 JSON dicts** through the same legacy
 //! RPCs pylib's ModelManager uses (`update_dict` → `update_notetype_legacy`,
-//! `new_field`/`new_template` → stock-Basic clones), so the ord-based
-//! data/card migration semantics are identical by construction. The
-//! positional-vs-identity reconciliation, the simulate-then-apply
-//! atomicity, and the result shapes are ported verbatim (the tests/native
-//! parity harness compares result dicts against the Python implementation).
+//! `new_field`/`new_template` → stock-Basic clones), so the ord-based data/card
+//! migration semantics are identical by construction. The
+//! positional-vs-identity reconciliation, the simulate-then-apply atomicity, and
+//! the result shapes match the Python implementation (the tests/native parity
+//! harness compares result dicts against it).
 //!
-//! The public surface speaks shrike-schemas types both directions;
-//! only the anki legacy-notetype dicts stay `serde_json::Value` — that's
-//! anki's own schema, not our wire.
+//! The public surface speaks shrike-schemas types both directions; only the
+//! anki legacy-notetype dicts stay `serde_json::Value` — that's anki's own
+//! schema, not Shrike's wire.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -642,8 +642,8 @@ impl CollectionCore {
     ///
     /// # Panics
     ///
-    /// Does not panic in practice — the single `expect` reading the lone
-    /// source mid is reached only after the count is checked to be exactly one.
+    /// Does not panic in practice — the single `expect` reading the lone source
+    /// mid runs only after the count is checked to be exactly one.
     pub fn migrate_note_type(
         &self,
         note_ids: &[i64],
@@ -908,7 +908,8 @@ fn python_replacement_template(replacement: &str) -> String {
     out
 }
 
-/// `_reject_unsound_positional_replace` — wording kept verbatim.
+/// `_reject_unsound_positional_replace` — error wording matches the Python
+/// original (parity tests compare it verbatim).
 fn reject_unsound_positional_replace(
     old: &[String],
     new: &[String],

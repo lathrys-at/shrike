@@ -13,8 +13,8 @@ rust_library(
     # Pinned explicitly: the LINKAGE is bundled either way (crate-universe
     # resolves @crates//:rusqlite with the workspace-unified `bundled` feature),
     # but the crate's own `cfg!(feature = "bundled")` probe (`sqlite_bundled()`)
-    # reads Bazel's crate_features — without the pin it reported platform
-    # linkage under Bazel while actually linking bundled.
+    # reads Bazel's crate_features — without the pin it reports platform linkage
+    # under Bazel while actually linking bundled.
     crate_features = ["bundled"],
     deps = [
         "//shrike-core/contracts/shrike-error:shrike_error",

@@ -1,8 +1,7 @@
-//! The write surface: the named-fields upsert batch
-//! (create/update with the duplicate policy + dry_run), tags, decks,
-//! find_replace_notes, delete_note_types — ports of the CollectionWrapper
-//! methods of the same names, result-shape-identical JSON where the Python
-//! side returns dicts (the tests/native parity harness compares them).
+//! The write surface: the named-fields upsert batch (create/update with the
+//! duplicate policy + dry_run), tags, decks, find_replace_notes,
+//! delete_note_types. Result shapes are identical to the Python side where it
+//! returns dicts (the tests/native parity harness compares them).
 
 use std::collections::{HashMap, HashSet};
 
@@ -230,10 +229,9 @@ impl CollectionCore {
                 }
             },
             other => {
-                // The fallback (an unmapped FieldsState) carries reason: None
-                // — the typed wire has no "invalid" variant, and the message
-                // still says what happened. (The old raw "invalid" string
-                // would have failed response validation anyway.)
+                // The fallback (an unmapped FieldsState) carries reason: None —
+                // the typed wire has no "invalid" variant, and the message still
+                // says what happened.
                 let (reason, message) = match structural_problem(other) {
                     Some((reason, message)) => (Some(reason), message),
                     None => (None, "Note failed Anki's field validation."),
@@ -326,8 +324,7 @@ impl CollectionCore {
         // Resolve the deck reference BEFORE any write: a bad ref — a
         // numeric/#id that resolves to no deck — must fail the item WITHOUT
         // having mutated the note (resolving after the write would half-write
-        // the note and bump col.mod on a bad ref; create_note_named resolves
-        // before its write, and this mirrors that). `resolve_deck_ref` is
+        // the note and bump col.mod on a bad ref). `resolve_deck_ref` is
         // read-only — a not-yet-existing plain name passes through and is
         // auto-created on the write path below, so a dry run still creates
         // nothing.
@@ -575,11 +572,10 @@ impl CollectionCore {
     }
 
     /// Apply a find/replace over a note set's fields via Anki's own
-    /// find_and_replace, detecting the actually-changed notes by diffing the
-    /// raw `flds` column before/after (note.mod is second-resolution). The
-    /// dry-run *preview* (Python-side `apply_replacement` samples) stays in
-    /// the host; this is the apply path. Returns
-    /// `{"notes_changed": N, "changed_ids": [...]}` as JSON.
+    /// find_and_replace, detecting the actually-changed notes by diffing the raw
+    /// `flds` column before/after (note.mod is second-resolution). The dry-run
+    /// preview stays in the host; this is the apply path. Returns the
+    /// changed-note count and the changed-id list.
     ///
     /// # Errors
     ///

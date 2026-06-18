@@ -76,9 +76,8 @@ pub struct RemoteEmbedder {
     /// The endpoint's resolved multimodal capabilities, cached after the first
     /// successful `GET /props`: the marker + vision flag are per-process
     /// invariants of the endpoint, so the image path reads them ONCE rather than
-    /// re-probing per chunk (the documented per-chunk round-trip fix). Only a
-    /// SUCCESSFUL probe is cached — a text-only/absent `/props` falls through to
-    /// re-probe, preserving the original error behaviour exactly.
+    /// re-probing per chunk. Only a SUCCESSFUL probe is cached — a
+    /// text-only/absent `/props` falls through to re-probe.
     props: OnceLock<LlamaProps>,
 }
 
@@ -156,7 +155,7 @@ impl RemoteEmbedder {
     /// per-process invariants of the endpoint, so the image path probes the
     /// first time and reuses thereafter instead of paying a round-trip per
     /// chunk. Only a SUCCESSFUL probe is cached — `None` (no `/props`) falls
-    /// through to re-probe next chunk, identical to the original behaviour.
+    /// through to re-probe next chunk.
     async fn resolved_props(&self) -> Option<LlamaProps> {
         if let Some(cached) = self.props.get() {
             return Some(cached.clone());
@@ -269,9 +268,9 @@ impl ImageEmbedder for RemoteEmbedder {
                 if images.is_empty() {
                     return Ok(Vec::new());
                 }
-                // `/props` is read ONCE at the first image chunk and cached
-                // — the marker + capabilities are per-process invariants of the
-                // endpoint, so a full reindex no longer re-probes per chunk.
+                // `/props` is read ONCE at the first image chunk and cached —
+                // the marker + capabilities are per-process invariants of the
+                // endpoint, so a full reindex doesn't re-probe per chunk.
                 let props = self.resolved_props().await.ok_or_else(|| {
                     NativeError::unavailable(
                         "endpoint does not serve llama.cpp's /props — image embeddings need its \

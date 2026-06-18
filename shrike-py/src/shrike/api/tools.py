@@ -2,10 +2,9 @@
 
 The tool implementations live in ``actions.py`` as a transport-neutral
 registry; ``mcp_adapter.py`` binds them to FastMCP with the ``_safe_tool``
-policy. :func:`register_tools` keeps its signature as the composition of the
-two, so every existing caller — the server boot path and the tools-layer test
-files — is unchanged, and the wire surface (tools/list schemas, behaviour) is
-byte-identical.
+policy. :func:`register_tools` is the composition of the two; its signature is
+the one the server boot path and the tools-layer test files call, and the wire
+surface (tools/list schemas, behaviour) is byte-identical.
 """
 
 from __future__ import annotations

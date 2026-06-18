@@ -107,7 +107,7 @@ def rrf_fuse(
 class SearchPipeline(Protocol):
     """The fusion seam `search_notes` composes against.
 
-    Today's Python composition (`rrf_fuse` above) is the **reference
+    The Python composition (`rrf_fuse` above) is the **reference
     implementation** — the readable spec, what test doubles fake, and what the
     parity property suite compares the native implementation against. The
     native pipeline (`shrike_kernel::fusion`) is a second implementation of

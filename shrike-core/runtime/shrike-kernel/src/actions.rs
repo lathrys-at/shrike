@@ -1,18 +1,17 @@
-//! The action core — slice 1: the read surface.
+//! The action core: the read surface.
 //!
 //! Each action is the *whole* tool body: parameter normalization, the
 //! collection-core call, and the Rust-canonical response type — typed
-//! end-to-end (the read surface returns `shrike-schemas`
-//! types straight from the core; serialization happens once, at the host
-//! edge). Python's `actions.py` shrinks to a binding per re-homed action:
-//! typed signature (FastMCP's inputSchema source) + context assembly + the
-//! completion-log fragment.
+//! end-to-end (the read surface returns `shrike-schemas` types straight from
+//! the core; serialization happens once, at the host edge). Python's
+//! `actions.py` is a binding per action: typed signature (FastMCP's
+//! inputSchema source) + context assembly + the completion-log fragment.
 //!
-//! Actions are synchronous over `&dyn Collection`: the transitional harness
-//! invokes them on its collection worker thread through the shrike-pyo3
-//! per-action bindings (the same serialization every collection op rides);
-//! the kernel's async layer will drive the same bodies through
-//! [`crate::SerializedCollection`]. No threading, no runtime assumption here.
+//! Actions are synchronous over `&dyn Collection`: the harness invokes them on
+//! its collection worker thread through the shrike-pyo3 per-action bindings (the
+//! same serialization every collection op rides); the kernel's async layer
+//! drives the same bodies through [`crate::SerializedCollection`]. No
+//! threading, no runtime assumption here.
 
 use serde::de::DeserializeOwned;
 
@@ -20,7 +19,7 @@ use shrike_collection::Collection;
 use shrike_error::{NativeError, NativeResult};
 use shrike_schemas::{CollectionInfo, ListNotesResponse};
 
-/// The actions this module has re-homed (the registry seam: the Python
+/// The actions this module implements (the registry seam: the Python
 /// binding asserts its forwarding list against this, so the two sides can't
 /// drift silently).
 pub const REHOMED_ACTIONS: &[&str] = &[
@@ -35,9 +34,8 @@ pub const REHOMED_ACTIONS: &[&str] = &[
 /// A parse failure here is a *bug* (the core and the schema disagree), not
 /// caller input — surfaced as an internal error with the type named.
 ///
-/// The read surface no longer needs this (the core returns the
-/// typed values directly); it stays for the unconverted modules — the
-/// media/write/note-type re-homes still ride core-emitted JSON.
+/// The read surface returns typed values directly; this stays for the modules
+/// that still ride core-emitted JSON (media/write/note-type).
 #[allow(dead_code)]
 fn validate<T: DeserializeOwned>(name: &str, json: &str) -> NativeResult<T> {
     serde_json::from_str(json).map_err(|e| {
@@ -265,16 +263,15 @@ type NoteContent = BTreeMap<String, String>;
 type ModalityHits = std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>;
 
 /// One SECONDARY embedding space's already-embedded + already-searched semantic
-/// results, fed into cross-space fusion. The PRIMARY text space's hits
-/// ride the existing `vectors`/`index` path (unchanged, host-supplied); each
-/// secondary text-capable space embeds the query with ITS OWN model and
-/// searches ITS OWN engine at the kernel level, then hands the per-source rows
-/// here as data — so `search_notes` stays the pure fusion assembly and never
-/// holds N engines.
+/// results, fed into cross-space fusion. The PRIMARY text space's hits ride the
+/// host-supplied `vectors`/`index` path; each secondary text-capable space
+/// embeds the query with ITS OWN model and searches ITS OWN engine at the
+/// kernel level, then hands the per-source rows here as data — so `search_notes`
+/// stays the pure fusion assembly and never holds N engines.
 ///
 /// Empty `cross_space` (the N=1 / single-space case) → the rankings vector fed
-/// to `rrf_fuse` is EXACTLY the per-modality set today, so the fused output is
-/// byte-identical.
+/// to `rrf_fuse` is EXACTLY the per-modality set, so the fused output is
+/// unchanged from single-space search.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpaceSemantic {
     /// The space's CONTENT fingerprint — surfaced in per-space provenance
@@ -293,30 +290,30 @@ pub struct SpaceSemantic {
     pub image_floor: Option<f64>,
 }
 
-/// The cross-space fusion variant. `FloorAdmit` is the SHIPPED PRODUCTION
-/// default: the relative winner-take-all gate is RETIRED from
-/// the production path — a secondary image space is admitted on its OWN
-/// calibrated intra-modal floor (`image_best > z_floor`), independent of how the
-/// text space did, so a strong on-topic CLIP hit reaches RRF and corroborates a
-/// card even when the text space "won" on a spurious filename/lexical match (the
-/// corroboration win, measured on the real MiniLM+CLIP corpus:
-/// `eval/search_quality/RESULTS_580.md`). The floor margin is the precision/
-/// recall dial (`search.cross_space_fusion.margin`, threaded into calibration).
+/// The cross-space fusion variant. `FloorAdmit` is the PRODUCTION default: no
+/// relative winner-take-all gate — a secondary image space is admitted on its
+/// OWN calibrated intra-modal floor (`image_best > z_floor`), independent of how
+/// the text space did, so a strong on-topic CLIP hit reaches RRF and
+/// corroborates a card even when the text space "won" on a spurious
+/// filename/lexical match (the corroboration win, measured on the real
+/// MiniLM+CLIP corpus: `eval/search_quality/RESULTS_580.md`). The floor margin
+/// is the precision/recall dial (`search.cross_space_fusion.margin`, threaded
+/// into calibration).
 ///
-/// Retiring the relative gate is sound because >1 image-embedding space is a
-/// config error (`profiles.resolve_profile`): with at most ONE image space
-/// there is no multiplicity to guard, which was the relative gate's sole job
-/// (the N≥2 flood — `cross_space_ungated_regresses_text_negative_control` +
+/// No relative gate is sound because >1 image-embedding space is a config error
+/// (`profiles.resolve_profile`): with at most ONE image space there is no
+/// multiplicity to guard, which was the relative gate's sole job (the N≥2 flood
+/// — `cross_space_ungated_regresses_text_negative_control` +
 /// `floor_admit_alone_floods_n2_but_budget_holds_it` document the
 /// impossible-by-construction behaviour at the kernel level).
 ///
 /// The other modes are EVAL-ONLY (`SHRIKE_CROSS_SPACE_FUSION_MODE`), kept to
-/// reproduce the historical decision tables — they NEVER select in
-/// production: the relative family (`Relative`, `RelativeFloor`, `SoftRelative`,
-/// `SoftCalibrated`) reproduces the older gate; `SoftFloorAdmit*` reproduces
-/// the dominated soft variant (zero recall upside, re-opens the
-/// over-return leak with τ); the `*Budget` modes reproduce the N≥2 multiplicity
-/// measurement that justifies the single-image-space invariant.
+/// reproduce the decision tables — they NEVER select in production: the relative
+/// family (`Relative`, `RelativeFloor`, `SoftRelative`, `SoftCalibrated`) is the
+/// relative gate; `SoftFloorAdmit*` is the dominated soft variant (zero recall
+/// upside, re-opens the over-return leak with τ); the `*Budget` modes reproduce
+/// the N≥2 multiplicity measurement that justifies the single-image-space
+/// invariant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CrossSpaceFusionMode {
     /// PRODUCTION — FLOOR-ADMIT (binary): the relative gate is gone; admit
@@ -324,15 +321,15 @@ pub enum CrossSpaceFusionMode {
     /// calibrated floor (`image_best > z_floor`), at full weight 1.0. An
     /// uncalibrated space (no floor) is admitted (the floor is a no-op). The
     /// single-image-space invariant (a config error otherwise) means the N≥2
-    /// flood the relative gate used to guard cannot occur.
+    /// flood the relative gate guards against cannot occur.
     #[default]
     FloorAdmit,
-    /// V0+floor (eval) — the older production default: relative gate AND a
-    /// per-space calibrated intra-modal floor. Kept to reproduce the table.
+    /// V0+floor (eval) — relative gate AND a per-space calibrated intra-modal
+    /// floor. Kept to reproduce the table.
     RelativeFloor,
-    /// V0 (eval) — binary relative gate only (`clip_best >= text_best`). The
-    /// older behaviour; leaks weak image cards when the primary's best cosine
-    /// → 0. Kept to measure the leak the floor closes.
+    /// V0 (eval) — binary relative gate only (`clip_best >= text_best`); leaks
+    /// weak image cards when the primary's best cosine → 0. Kept to measure the
+    /// leak the floor closes.
     Relative,
     /// V1 (eval) — soft-relative: weight `w = σ((clip_best − text_best)/τ)`
     /// folded into the `image#<key>` RRF weight. Calibration-free CONTROL — it
@@ -393,8 +390,7 @@ fn escape_anki_text(text: &str) -> String {
 /// snippet slices the original by those indices).
 ///
 /// `None` content (a meta-mode note dict carries no fields) yields `None`, the
-/// "no literal match" answer — exactly the older `Value::Null` behaviour,
-/// now expressed in the type.
+/// "no literal match" answer.
 pub fn substring_info(content: Option<&NoteContent>, text: &str) -> Option<SubstringInfo> {
     let needle: Vec<char> = text.to_lowercase().chars().collect();
     let mut matched: Vec<String> = Vec::new();
@@ -431,8 +427,7 @@ pub fn substring_info(content: Option<&NoteContent>, text: &str) -> Option<Subst
             matched_fields: matched,
             snippet,
             // A field hit's source/ref are the schema defaults (`source:
-            // "field"`, `ref: None`), matching the older dict that carried
-            // neither key and so deserialized them from those serde defaults.
+            // "field"`, `ref: None`).
             source: crate::FIELD_SOURCE.to_owned(),
             r#ref: None,
         })
@@ -496,13 +491,13 @@ pub struct SearchArgs {
     /// Derived `source` strings hidden from the lexical (substring/fuzzy)
     /// surfaces: a VectorOnly recognition source (VLM describe) is
     /// stored for provenance + reconcile but never surfaced on a lexical
-    /// query. EMPTY (the default) = nothing hidden, the older behaviour.
+    /// query. EMPTY (the default) = nothing hidden.
     pub hidden_lexical_sources: Vec<String>,
     /// SECONDARY embedding spaces' semantic results for cross-space fusion,
     /// one per space, each already embedded + searched at the kernel
     /// level. EMPTY (the default) is the N=1 / single-space case — the rankings
-    /// fed to `rrf_fuse` are then EXACTLY today's per-modality set, so the fused
-    /// output is byte-identical. Non-empty appends each space's gated `image`
+    /// fed to `rrf_fuse` are then EXACTLY the per-modality set, so the fused
+    /// output is unchanged. Non-empty appends each space's gated `image`
     /// ranking (the relative activation gate, below).
     pub cross_space: Vec<SpaceSemantic>,
     /// Disable the cross-space relative activation gate — the NEGATIVE
@@ -511,10 +506,9 @@ pub struct SearchArgs {
     /// showed floods text queries and regresses text recall (the load-bearing
     /// 0.08-vs-1.00 separation a test pins). Never set in production.
     pub disable_cross_space_gate: bool,
-    /// The cross-space fusion variant. `Relative` (the default) is
-    /// today's binary relative gate — production behaviour is unchanged until
-    /// the experiment's data selects a winner. The floor/soft modes are
-    /// eval-selectable measurement variants.
+    /// The cross-space fusion variant. The floor/soft modes are eval-selectable
+    /// measurement variants; production uses the [`CrossSpaceFusionMode`]
+    /// default.
     pub cross_space_fusion_mode: CrossSpaceFusionMode,
     /// The temperature τ for the soft variants: smaller τ → a sharper
     /// taper (τ→0 is the binary floor limit). Ignored by the binary modes.
@@ -602,14 +596,13 @@ fn in_scope(note: &Note, deck: Option<&str>, tags: &[String]) -> bool {
     true
 }
 
-/// Batch-hydrate candidates: ONE `note_dicts` call per ranking replaces
-/// the old one-call-per-candidate shape (each singleton paid two DB-proxy
-/// queries plus a full `deck_names` RPC plus a full notetype proto — per
-/// candidate, hundreds of times per search). Each wire dict is parsed into the
-/// typed [`Note`] once here (it is exactly a serialized `Note`), so the ranking
-/// works a typed model rather than a stringly-indexed `Value`. Returns `nid ->
-/// Candidate` for ids not already hydrated; a missing/unreadable id is simply
-/// absent (the per-note skip the singleton path had).
+/// Batch-hydrate candidates: ONE `note_dicts` call per ranking, not one per
+/// candidate (a per-candidate call pays two DB-proxy queries plus a full
+/// `deck_names` RPC plus a full notetype proto — hundreds of times per search).
+/// Each wire dict is parsed into the typed [`Note`] once here (it is exactly a
+/// serialized `Note`), so the ranking works a typed model rather than a
+/// stringly-indexed `Value`. Returns `nid -> Candidate` for ids not already
+/// hydrated; a missing/unreadable id is simply absent (skipped per note).
 fn read_notes_batch(
     core: &dyn Collection,
     note_data: &NoteData,
@@ -648,8 +641,8 @@ fn read_notes_batch(
 /// `image#<space-key>`. Distinct per space so provenance identifies which
 /// vision space surfaced a note and each space fuses as its own RRF signal
 /// (the canonical `search_weights` has no entry → `rrf_fuse` defaults its weight
-/// to 1.0, the eval's equal weighting). Never collides with the primary's plain
-/// `image` signal, so N=1 (no secondary) emits exactly today's signal set.
+/// to 1.0, equal weighting). Never collides with the primary's plain `image`
+/// signal, so N=1 (no secondary) emits exactly the single-space signal set.
 pub fn cross_space_signal(space_key: &str) -> String {
     format!("image#{space_key}")
 }
@@ -694,16 +687,16 @@ fn sigmoid(x: f64) -> f64 {
 /// The PER-NOTE image activation floor: retain in `ranking` only the
 /// notes whose OWN image cosine (`score[id]`) clears `floor`, and prune the
 /// dropped notes from `score` so the displayed-`score` fold and the `image_best`
-/// read stay consistent. The older behaviour was a per-SPACE gate (admit the
-/// WHOLE ranking iff the rank-1 cosine cleared the floor); this is the correct
-/// per-note granularity — a below-floor tail card no longer rides in on a
-/// strong rank-1's coat-tails, so it carries no spurious image signal/provenance.
+/// read stay consistent. Per-note granularity (not a per-SPACE gate that admits
+/// the whole ranking on the rank-1 cosine): a below-floor tail card no longer
+/// rides in on a strong rank-1's coat-tails, so it carries no spurious image
+/// signal/provenance.
 ///
 /// `floor = None` (an uncalibrated space) is a no-op (the floor can't judge).
 /// It can only TIGHTEN: every kept note cleared the floor, and the rank-1 (if
 /// it cleared) is unchanged — so a genuine cross-modal find (above-floor by
 /// construction) is preserved, while an ∅-gold ranking whose best is sub-floor
-/// is emptied exactly as the per-space gate did.
+/// is emptied.
 fn apply_image_floor(ranking: &mut Vec<i64>, score: &mut HashMap<i64, f64>, floor: Option<f64>) {
     let Some(floor) = floor else {
         return;
@@ -714,9 +707,8 @@ fn apply_image_floor(ranking: &mut Vec<i64>, score: &mut HashMap<i64, f64>, floo
 
 /// The read-only context every ranking/collection helper threads identically:
 /// the collection handle, the exclusion set, and the per-call args. Grouping
-/// these retires the `too_many_arguments` suppressions the search helpers
-/// carried (they each took `core`, `exclude`, and `args` as three separate
-/// positional params).
+/// these into one struct keeps the helper signatures under the
+/// `too_many_arguments` clippy threshold.
 #[derive(Clone, Copy)]
 struct SearchCtx<'a> {
     core: &'a dyn Collection,
@@ -725,8 +717,7 @@ struct SearchCtx<'a> {
 }
 
 /// One modality's `search_by_modality` row as a borrowed pair (note keys +
-/// distance-ascending distances), the unit `rank_modality` ranks. A typed pair
-/// rather than two positional slices.
+/// distance-ascending distances), the unit `rank_modality` ranks.
 #[derive(Clone, Copy)]
 struct ModalitySlice<'a> {
     keys: &'a [i64],
@@ -765,7 +756,7 @@ fn rank_modality(
         args,
     } = ctx;
     // Prospective candidates (exclude/threshold pass) hydrate in ONE batch;
-    // the loop below then filters scope and ranks exactly as before.
+    // the loop below then filters scope and ranks.
     let prospective: Vec<i64> = slice
         .keys
         .iter()
@@ -819,12 +810,11 @@ fn collect_substring_candidates(
         exclude,
         args,
     } = ctx;
-    // The store serves scoped queries too (retirement of the wildcard
-    // scan): the scope id set — from anki's INDEXED deck:/tag: search — is
-    // pushed into the FTS5 query, so a scoped literal search reads no note
-    // text outside the store. The wildcard `*text*` fallback (a full field
-    // scan) survives only for the cases FTS5 can't serve: a sub-trigram
-    // query (<3 chars) or a missing/unbuilt store.
+    // The store serves scoped queries: the scope id set — from anki's INDEXED
+    // deck:/tag: search — is pushed into the FTS5 query, so a scoped literal
+    // search reads no note text outside the store. The wildcard `*text*`
+    // fallback (a full field scan) serves only the cases FTS5 can't: a
+    // sub-trigram query (<3 chars) or a missing/unbuilt store.
     let hidden: Vec<&str> = args
         .hidden_lexical_sources
         .iter()
@@ -1020,7 +1010,7 @@ struct CrossSpaceInput<'a> {
 /// rankings to append to `rankings`, and any non-default per-space RRF weights
 /// (the eval soft/budget modes) to fold into the weight map. Empty/empty for
 /// the N=1 production-common case (no secondary spaces), so the fused inputs
-/// are byte-identical to the no-cross-space path.
+/// match the no-cross-space path.
 struct CrossSpaceContribution {
     rankings: Vec<(String, Vec<i64>)>,
     weights: BTreeMap<String, f64>,
@@ -1039,18 +1029,18 @@ struct AdmittedSpace {
 /// cosines into `sem_score` (the displayed-score max-over-items) and hydrating
 /// its candidates into `note_data`. EMPTY `cross_space` (N=1 — the
 /// production-common case) returns an empty contribution, so the caller's
-/// rankings/weights are byte-identical to the no-cross-space path.
+/// rankings/weights match the no-cross-space path.
 ///
-/// PRODUCTION: FLOOR-ADMIT. The relative winner-take-all gate is RETIRED
-/// — a secondary image space is admitted on its OWN calibrated intra-modal
-/// floor (`image_best > z_floor`), independent of how the text space did, so a
+/// PRODUCTION: FLOOR-ADMIT. No relative winner-take-all gate — a secondary
+/// image space is admitted on its OWN calibrated intra-modal floor
+/// (`image_best > z_floor`), independent of how the text space did, so a
 /// strong on-topic CLIP hit corroborates the card even when text "won" on a
 /// spurious filename lexical match (the win). Sound because >1 image space
 /// is a config error (`profiles`): with at most one image space there is no
 /// multiplicity, which was the relative gate's only job.
 ///
 /// EVAL-ONLY (`SHRIKE_CROSS_SPACE_FUSION_MODE`): the relative family
-/// (`Relative*`/`*Floor` non-admit) reproduces the older gate; the
+/// (`Relative*`/`*Floor` non-admit) is the relative gate; the
 /// `Soft*`/`*Budget` modes reproduce the dominated soft variant + the N≥2
 /// multiplicity measurement. `uses_relative_gate` keeps the gate for the
 /// relative family ONLY; the floor-admit family skips it.
@@ -1128,9 +1118,8 @@ fn fuse_cross_spaces(
         // PRODUCTION FloorAdmit only: a PER-NOTE floor — keep only the
         // cards whose own image cosine clears this space's floor, so a
         // below-floor tail card carries no `image#clip`. The eval modes keep
-        // the historical per-SPACE rule below (on `image_best`) so they
-        // reproduce the decision tables unchanged. An uncalibrated space (no
-        // floor) is a no-op either way.
+        // the per-SPACE rule below (on `image_best`) to reproduce the decision
+        // tables. An uncalibrated space (no floor) is a no-op either way.
         if matches!(
             mode,
             CrossSpaceFusionMode::FloorAdmit | CrossSpaceFusionMode::FloorAdmitBudget
@@ -1145,7 +1134,7 @@ fn fuse_cross_spaces(
             }
         }
         // The best surviving image cosine — the value the eval modes' per-space
-        // floor judges (exactly the primary's old rank-1 rule).
+        // floor judges (the rank-1 rule).
         let image_best = ranking_space_image
             .first()
             .and_then(|nid| space_score.get(nid).copied());
@@ -1154,7 +1143,7 @@ fn fuse_cross_spaces(
         // space; `Some(w)` admits it at raw weight `w` (the budget pass may
         // scale it down for the `*Budget` modes).
         let weight = match mode {
-            // V0 — relative only (today): contribute at weight 1.0.
+            // V0 — relative only: contribute at weight 1.0.
             CrossSpaceFusionMode::Relative => Some(1.0),
             // V0+floor — relative AND z_s > z_floor (per-space). Drop the space
             // when its best surviving image cosine clears no floor; an
@@ -1175,9 +1164,9 @@ fn fuse_cross_spaces(
                 }
             }
             // V2 — soft-calibrated: w = σ((z_s − z0)/τ), composed with the
-            // relative gate (already applied above). The ren proposal — taper
-            // near the per-space floor instead of a hard drop. An uncalibrated
-            // space falls back to weight 1.0.
+            // relative gate (already applied above). Tapers near the per-space
+            // floor instead of a hard drop. An uncalibrated space falls back to
+            // weight 1.0.
             CrossSpaceFusionMode::SoftCalibrated => {
                 match (image_best, space.image_floor, args.cross_space_tau) {
                     (Some(b), Some(floor), tau) if tau > 0.0 => Some(sigmoid((b - floor) / tau)),
@@ -1216,8 +1205,8 @@ fn fuse_cross_spaces(
 
     // Pass 2: the vision-weight BUDGET. When N≥2 admitted spaces share a
     // bounded total weight `B`, no flood of always-confident off-topic spaces
-    // can out-fuse the text answer (the negative control the relative gate used
-    // to guard). N=1 keeps full weight (the production-common case is
+    // can out-fuse the text answer (the negative control the relative gate
+    // guards against). N=1 keeps full weight (the production-common case is
     // unpenalized). Two scalings:
     //   - binary budget (FloorAdmitBudget): every weight is 1.0, so each becomes
     //     B/N (the equal split).
@@ -1247,9 +1236,9 @@ fn fuse_cross_spaces(
         }
         // A DISTINCT signal name per space so provenance identifies which
         // vision space surfaced the note, and each space fuses as its own RRF
-        // signal (weight defaults to 1.0 — the eval's equal weighting; the
-        // soft/budget modes override it). `image#<key>` reads as "the image
-        // modality of space <key>".
+        // signal (weight defaults to 1.0 — equal weighting; the soft/budget
+        // modes override it). `image#<key>` reads as "the image modality of
+        // space <key>".
         if (a.weight - 1.0).abs() > f64::EPSILON {
             contribution.weights.insert(a.signal.clone(), a.weight);
         }
@@ -1368,11 +1357,10 @@ pub fn search_notes(
             &mut image_score,
             false,
         );
-        // Per-NOTE image floor — keep only the cards whose own image
-        // cosine clears the floor (was a per-space all-or-nothing gate on the
-        // rank-1). A below-floor tail card no longer rides in on the rank-1's
-        // coat-tails. When the rank-1 itself is sub-floor the whole ranking
-        // empties (the old behaviour falls out as the rank-1 case).
+        // Per-NOTE image floor — keep only the cards whose own image cosine
+        // clears the floor (not a per-space all-or-nothing gate on the rank-1).
+        // A below-floor tail card no longer rides in on the rank-1's coat-tails.
+        // When the rank-1 itself is sub-floor the whole ranking empties.
         apply_image_floor(&mut ranking_image, &mut image_score, args.image_floor);
         // Tag-centroid signal: conditionally present — activated tags
         // expand to member notes through the SAME scope/exclusion machinery
@@ -1459,7 +1447,7 @@ pub fn search_notes(
 
         // Cross-space fusion — each SECONDARY image space
         // contributes its own `image#<key>` ranking + (eval) weight; empty for
-        // the N=1 production-common case, so the inputs stay byte-identical.
+        // the N=1 production-common case, so the inputs are unchanged.
         let cross = fuse_cross_spaces(
             CrossSpaceInput {
                 ctx,
@@ -1569,10 +1557,10 @@ mod search_tests {
 
     #[test]
     fn scoped_lexical_search_serves_from_the_store() {
-        // Scan retirement: a deck-scoped literal/fuzzy search rides
-        // the FTS5 store with the scope id set pushed into the query — exact
-        // recall inside the scope, zero leakage outside it, and the wildcard
-        // `*text*` field scan is never consulted (the store served Some).
+        // A deck-scoped literal/fuzzy search rides the FTS5 store with the scope
+        // id set pushed into the query — exact recall inside the scope, zero
+        // leakage outside it, and the wildcard `*text*` field scan is never
+        // consulted (the store served Some).
         let (dir, core) = temp_collection();
         let scoped_notes: Vec<shrike_schemas::NoteInput> = serde_json::from_str(
             r#"[
@@ -1768,9 +1756,9 @@ mod search_tests {
 
     #[test]
     fn derived_read_error_surfaces_never_silently_field_falls_back() {
-        // The correctness fix: a REAL derived-read failure (a busy that
-        // outlived the retry) must SURFACE from search_notes, not silently fall
-        // back to the `find_notes("*text*")` field scan. The field scan can't
+        // A REAL derived-read failure (a busy that outlived the retry) must
+        // SURFACE from search_notes, not silently fall back to the
+        // `find_notes("*text*")` field scan. The field scan can't
         // serve OCR/ASR text (it lives only in the derived store, never in an
         // anki field), so a silent fallback would drop the OCR `exact`/`fuzzy`
         // signal with NO error — exactly the silent degradation in question.
@@ -2007,12 +1995,12 @@ mod search_tests {
 
     // ── Cross-space fusion + the relative activation gate ────────────────────
     //
-    // These productionize the eval's load-bearing findings against
-    // `search_notes` DIRECTLY (no host wiring needed): the gate PRESERVES
-    // text-target ranking, the negative control (gate OFF) REGRESSES it, and a
-    // gated vision space DELIVERS image recall. The two spaces are a primary
-    // text engine (planted vectors) + a secondary space's pre-searched
-    // `SpaceSemantic` rows — exactly the shape `build_cross_space` produces.
+    // These pin the eval's load-bearing findings against `search_notes`
+    // DIRECTLY (no host wiring needed): the gate PRESERVES text-target ranking,
+    // the negative control (gate OFF) REGRESSES it, and a gated vision space
+    // DELIVERS image recall. The two spaces are a primary text engine (planted
+    // vectors) + a secondary space's pre-searched `SpaceSemantic` rows — exactly
+    // the shape `build_cross_space` produces.
 
     /// One secondary space's `SpaceSemantic` carrying image-modality hits for a
     /// single source, with the best query cosine the relative gate reads. No
@@ -2066,13 +2054,12 @@ mod search_tests {
 
     #[test]
     fn cross_space_gated_preserves_text_target() {
-        // (a) Documents the now-EVAL-ONLY relative gate (retired from
-        // production): under `Relative`, an OFF-TOPIC vision space (its best image
-        // cosine BELOW the primary text space's best) does NOT fire — the
-        // text-target note stays rank-1. Kept as a kernel-level record of the
-        // gate's behaviour now that floor-admission is the default. (Under the
-        // production `FloorAdmit` the off-topic space here would be dropped by
-        // the floor instead; this test exercises the relative path explicitly.)
+        // (a) The EVAL-ONLY relative gate: under `Relative`, an OFF-TOPIC vision
+        // space (its best image cosine BELOW the primary text space's best) does
+        // NOT fire — the text-target note stays rank-1. A kernel-level record of
+        // the gate's behaviour; the production `FloorAdmit` would instead drop
+        // the off-topic space by the floor, but this test exercises the relative
+        // path explicitly.
         let (dir, core) = temp_collection();
         let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
         let image_note = add_note(&core, "unrelated filler card", "misc");
@@ -2129,15 +2116,15 @@ mod search_tests {
     #[test]
     fn cross_space_ungated_regresses_text_negative_control() {
         // (b) THE NEGATIVE CONTROL — the eval's load-bearing finding (text R@1
-        // collapse, the 0.08-vs-1.00 separation). It documents WHY the relative
-        // gate existed: N=2 off-topic vision spaces flood a text query. The gate
-        // was RETIRED because >1 image space is a config error
+        // collapse, the 0.08-vs-1.00 separation). Documents WHY the relative
+        // gate exists: N=2 off-topic vision spaces flood a text query. The gate
+        // is eval-only because >1 image space is a config error
         // (`profiles.resolve_profile`), so this N=2 shape is IMPOSSIBLE in
-        // production — this test is a kernel-level record of the now-eval-only
-        // relative gate (selected explicitly via `Relative`), not a production
-        // path. The query is ON-TOPIC for text; the off-topic image's vision
-        // cosine is BELOW the text-target's, so the relative gate keeps it OUT;
-        // ungated (or under floor-admit with no floor) it floods.
+        // production — a kernel-level record of the relative gate (selected
+        // explicitly via `Relative`), not a production path. The query is
+        // ON-TOPIC for text; the off-topic image's vision cosine is BELOW the
+        // text-target's, so the relative gate keeps it OUT; ungated (or under
+        // floor-admit with no floor) it floods.
         let (dir, core) = temp_collection();
         let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
         let off_topic_image = add_note(
@@ -2193,9 +2180,9 @@ mod search_tests {
 
         // THE SAME inputs WITH the relative gate ON (eval `Relative`): both
         // vision spaces close (vision 0.70 < text 0.80), the off-topic image
-        // note is excluded, and the text-target is restored to rank-1. This is
-        // the load-bearing contrast: the gate IS what prevented (b) — the reason
-        // it was safe to retire is that the N=2 input is now a config error.
+        // note is excluded, and the text-target is restored to rank-1. The
+        // load-bearing contrast: the gate IS what prevents (b) — and dropping it
+        // is safe only because the N=2 input is a config error.
         let mut gated_args = ungated_args.clone();
         gated_args.disable_cross_space_gate = false;
         gated_args.cross_space_fusion_mode = CrossSpaceFusionMode::Relative;
@@ -2323,10 +2310,10 @@ mod search_tests {
 
     #[test]
     fn over_return_v0_leaks_weak_image_on_empty_primary() {
-        // V0 (today): the primary's best cosine ≈ 0, so the relative gate
+        // V0: the primary's best cosine ≈ 0, so the relative gate
         // `v(0.2) >= p(0.0)` is trivially OPEN and the weak off-topic image
-        // leaks into the results. This is the leak the floor closes — pinned here so
-        // the floor variants below have a positive baseline to beat.
+        // leaks into the results. The leak the floor closes — pinned here so the
+        // floor variants below have a positive baseline to beat.
         let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
         let mut a = cross_args(10);
         // The space carries its own floor (0.5), but V0 never consults it.
@@ -2719,14 +2706,14 @@ mod search_tests {
     #[test]
     fn floor_admit_alone_floods_n2_but_budget_holds_it() {
         // THE MEASURED RATIONALE for the "no two image spaces" config
-        // assertion. The N=2 negative control's protection came ENTIRELY from the
-        // relative gate (see `floor_holds_the_negative_control_at_n2`): both
+        // assertion. The N=2 negative control's protection comes ENTIRELY from
+        // the relative gate (see `floor_holds_the_negative_control_at_n2`): both
         // off-topic spaces clear their floor, so dropping the relative gate lets
         // them flood. FloorAdmit (no budget) REGRESSES text R@1; FloorAdmitBudget
         // (B=1.0 split 0.5/0.5) restores it. In production this scenario is
         // IMPOSSIBLE (only one image space exists), so the budget is moot there —
-        // this test documents WHY the relative gate can be dropped: not because
-        // floor-admission handles N≥2, but because N≥2 image spaces never occur.
+        // WHY the relative gate can be dropped: not because floor-admission
+        // handles N≥2, but because N≥2 image spaces never occur.
         let (dir, core) = temp_collection();
         let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
         let off_topic_image = add_note(&core, "an off-topic but confident diagram", "img");
@@ -2735,7 +2722,7 @@ mod search_tests {
             .add("text", &[text_target], &[at_distance(0.2)])
             .unwrap(); // text cos 0.80
                        // Two intra-modally-confident but off-topic spaces (image best 0.70 >
-                       // floor 0.50) — exactly the shape the relative gate used to close.
+                       // floor 0.50) — exactly the shape the relative gate closes.
         let spaces = vec![
             vision_space_floored("clip-a", &[off_topic_image], &[0.30], Some(0.5)), // cos 0.70
             vision_space_floored("clip-b", &[off_topic_image], &[0.30], Some(0.5)),
@@ -2888,7 +2875,7 @@ mod search_tests {
         // and one BELOW it (cos 0.20, floor 0.50). Floor-admission's per-note
         // filter keeps the above-floor card's `image#clip` and DROPS the
         // below-floor one — the latter no longer rides in on the rank-1's
-        // coat-tails (the older per-space gate admitted the whole ranking).
+        // coat-tails (a per-space gate would admit the whole ranking).
         let (dir, core) = temp_collection();
         let weak_text = add_note(&core, "a loosely related text card", "text");
         let above = add_note(&core, "card whose image strongly matches", "img");
@@ -2939,8 +2926,8 @@ mod search_tests {
         // used by omni/single-space deployments). The primary image modality
         // returns two cards: one above the floor (cos 0.90) and one below (cos
         // 0.20, floor 0.50). The above-floor card surfaces via `image`; the
-        // below-floor one does NOT (was: the whole ranking admitted iff the
-        // rank-1 cleared the floor).
+        // below-floor one does NOT (a per-space gate would admit the whole
+        // ranking iff the rank-1 cleared the floor).
         let (dir, core) = temp_collection();
         let above = add_note(&core, "card whose image strongly matches", "imgA");
         let below = add_note(&core, "card whose image barely matches", "imgB");

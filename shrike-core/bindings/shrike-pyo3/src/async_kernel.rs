@@ -125,8 +125,7 @@ impl AsyncKernel {
 
 /// Either embedder shape at the attach seam: the native composition
 /// (engines direct to the kernel slot, no Python on the embed path) or the
-/// captured-Python-backend handle (llama until P4; the test seam + custom
-/// backends forever).
+/// captured-Python-backend handle (the test seam + custom backends).
 #[derive(FromPyObject)]
 enum AnyEmbedder<'py> {
     Native(PyRef<'py, NativeEmbedder>),

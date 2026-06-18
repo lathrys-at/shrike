@@ -106,8 +106,8 @@ fn decode_resize_crop(bytes: &[u8], cfg: &PreprocessConfig) -> NativeResult<imag
 }
 
 /// Catmull-Rom resize to `(nw, nh)` via `image`'s bicubic — the scalar
-/// resampler the golden tests pin (a SIMD backend that would change these
-/// pixels is deferred to a consumer-fingerprinted follow-up; see the crate docs).
+/// resampler the golden tests pin (a SIMD backend would change these pixels, so
+/// it stays behind a consumer-fingerprint mechanism; see the crate docs).
 fn resize_shortest_edge(img: &image::RgbImage, nw: u32, nh: u32) -> NativeResult<image::RgbImage> {
     Ok(image::imageops::resize(img, nw, nh, FilterType::CatmullRom))
 }

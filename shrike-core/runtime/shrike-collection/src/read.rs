@@ -1,13 +1,12 @@
-//! The read surface: collection_info, list_notes +
-//! note serialization, and the embedding-text readers — ports of the
-//! CollectionWrapper methods of the same names (the tests/native parity
-//! harness compares against the pip core).
+//! The read surface: collection_info, list_notes + note serialization, and the
+//! embedding-text readers (the tests/native parity harness compares against the
+//! pip core).
 //!
-//! The read ops return the canonical
-//! `shrike-schemas` types directly — no JSON-string assembly here.
-//! Serialization to the host wire happens exactly once, at the binding edge,
-//! with plain serde (an unset `Option` is an explicit `null` — the one wire
-//! convention, the Pydantic shape the schema contract test pins).
+//! The read ops return the canonical `shrike-schemas` types directly — no
+//! JSON-string assembly here. Serialization to the host wire happens exactly
+//! once, at the binding edge, with plain serde (an unset `Option` is an explicit
+//! `null` — the one wire convention, the Pydantic shape the schema contract test
+//! pins).
 
 use std::collections::{HashMap, HashSet};
 
@@ -49,10 +48,9 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// One note's `(note_id, field_names, field_values)`. Field names are
-/// shared per notetype: a per-note `Vec<String>` clone would copy
-/// every field name once per note — ~400k string allocations per rebuild
-/// read at 100k notes.
+/// One note's `(note_id, field_names, field_values)`. Field names are shared
+/// per notetype: a per-note `Vec<String>` clone would copy every field name
+/// once per note — ~400k string allocations per rebuild read at 100k notes.
 type NoteFieldRow = (i64, std::sync::Arc<Vec<String>>, Vec<String>);
 
 pub use crate::contract::OwnedFieldRow;
@@ -196,11 +194,10 @@ impl CollectionCore {
 
     /// `(note_id, image_names)` for every note whose raw fields reference an
     /// `<img` tag — the recognition sweep's pending-set source. One SQL pass
-    /// with an ASCII `lower()`
-    /// pre-filter — exactly the extractor's own ASCII-case-insensitive
-    /// probe, so the filter can never skip a note the extractor would
-    /// return names for — then the raw-field extractor (same per-field
-    /// extraction + in-order dedupe as `note_embed_inputs`).
+    /// with an ASCII `lower()` pre-filter (exactly the extractor's own
+    /// ASCII-case-insensitive probe, so the filter can never skip a note the
+    /// extractor would return names for), then the raw-field extractor (same
+    /// per-field extraction + in-order dedupe as `note_embed_inputs`).
     ///
     /// # Errors
     ///
@@ -210,11 +207,11 @@ impl CollectionCore {
     }
 
     /// `(note_id, sound_names)` for every note whose raw fields reference a
-    /// `[sound:…]` marker — the ASR sweep's pending-set source, the
-    /// audio twin of [`Self::note_image_refs`]. Same scoped-read discipline:
-    /// one SQL pass with an ASCII `lower()` pre-filter that exactly
-    /// matches the extractor's own ASCII byte probe (`[sound:`), then the
-    /// raw-field extractor with in-order dedupe.
+    /// `[sound:…]` marker — the ASR sweep's pending-set source, the audio twin
+    /// of [`Self::note_image_refs`]. Same scoped-read discipline: one SQL pass
+    /// with an ASCII `lower()` pre-filter that exactly matches the extractor's
+    /// own ASCII byte probe (`[sound:`), then the raw-field extractor with
+    /// in-order dedupe.
     ///
     /// # Errors
     ///
@@ -224,12 +221,12 @@ impl CollectionCore {
     }
 
     /// The shared scoped-read body behind [`Self::note_image_refs`] /
-    /// [`Self::note_sound_refs`]: `probe` is the ASCII-lowered marker
-    /// the SQL `instr` pre-filter looks for, `extract` the per-field ref
-    /// extractor (whose own byte probe matches `probe` exactly, so the filter
-    /// can never skip a note the extractor would return refs for). `probe` is
-    /// interpolated into the SQL text, so it MUST be a trusted compile-time
-    /// literal (both callers pass one) — never caller- or user-supplied input.
+    /// [`Self::note_sound_refs`]: `probe` is the ASCII-lowered marker the SQL
+    /// `instr` pre-filter looks for, `extract` the per-field ref extractor
+    /// (whose own byte probe matches `probe` exactly, so the filter can never
+    /// skip a note the extractor would return refs for). `probe` is interpolated
+    /// into the SQL text, so it MUST be a trusted compile-time literal (both
+    /// callers pass one) — never caller- or user-supplied input.
     fn note_media_refs_filtered(
         &self,
         probe: &str,
@@ -263,9 +260,9 @@ impl CollectionCore {
     }
 
     /// `(note_id, [leaf tags])` for every tagged note — the tag-centroid
-    /// layer's membership source: ONE pass over `notes.tags` (Anki
-    /// keeps it space-delimited), exact leaf strings; hierarchy roll-up is
-    /// the consumer's prefix aggregation.
+    /// layer's membership source: ONE pass over `notes.tags` (Anki keeps it
+    /// space-delimited), exact leaf strings; hierarchy roll-up is the consumer's
+    /// prefix aggregation.
     ///
     /// # Errors
     ///
@@ -411,12 +408,10 @@ impl CollectionCore {
         Ok(Some(reference.to_string()))
     }
 
-    /// Structured filters → notes, shape-identical to the wrapper's
-    /// `list_notes` (`{notes, total, limit}`). `modified_since` is an
-    /// epoch-seconds cutoff (the host parses ISO).
-    /// Divergence from the Python original: "no filter given" raises
-    /// invalid_input here instead of returning an `{"error": ...}` dict (the
-    /// facade owns that wire shape).
+    /// Structured filters → notes, shaped as `{notes, total, limit}`.
+    /// `modified_since` is an epoch-seconds cutoff (the host parses ISO). "No
+    /// filter given" raises invalid_input rather than returning an
+    /// `{"error": ...}` dict (the facade owns that wire shape).
     ///
     /// # Errors
     ///
@@ -515,10 +510,9 @@ impl CollectionCore {
 
     /// The typed notes as internal-wire `Value` dicts — the kernel's search
     /// assembly annotates candidates in place (`substring`/`score`/...), so it
-    /// wants mutable JSON objects. Plain serde: a
-    /// meta-mode note carries an explicit `"content": null`, never a dropped
-    /// key — every consumer reads via `.get(..)` + `as_*`, which treat `Null`
-    /// exactly like absent.
+    /// wants mutable JSON objects. Plain serde: a meta-mode note carries an
+    /// explicit `"content": null`, never a dropped key — every consumer reads
+    /// via `.get(..)` + `as_*`, which treat `Null` exactly like absent.
     ///
     /// # Errors
     ///
@@ -612,10 +606,9 @@ impl CollectionCore {
         Ok(out)
     }
 
-    /// `collection_info` — the wrapper's sectioned info, typed: a requested
-    /// section is `Some`, an unrequested one `None` (the wire helper omits
-    /// it, exactly like the hand-built dict it replaced).
-    /// `sections` mirrors `include` (`"all"` expands; empty = summary).
+    /// `collection_info` — sectioned info, typed: a requested section is
+    /// `Some`, an unrequested one `None` (the wire helper omits it). `sections`
+    /// mirrors `include` (`"all"` expands; empty = summary).
     ///
     /// # Errors
     ///
@@ -624,9 +617,9 @@ impl CollectionCore {
     ///
     /// # Panics
     ///
-    /// Panics only on an internal invariant violation — the deck tree / per-
-    /// deck counts are computed exactly when the section needing them is
-    /// requested, so the `expect`s reading them back never fire in practice.
+    /// Panics only on an internal invariant violation — the deck tree / per-deck
+    /// counts are computed exactly when the section needing them is requested,
+    /// so the `expect`s reading them back never fire in practice.
     pub fn collection_info(
         &self,
         sections: &[String],

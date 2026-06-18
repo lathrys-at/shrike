@@ -1,8 +1,7 @@
-//! Media + maintenance — the LOCAL halves of the
-//! media tools (store-from-bytes, fetch/list/delete, media check) and
-//! collection_prune, ported from CollectionWrapper. The URL-fetch path (the
-//! SSRF guard + IP pinning) is deliberately NOT here — it is trust-boundary
-//! code and lands as its own step under the security-review gate.
+//! Media + maintenance — the LOCAL halves of the media tools
+//! (store-from-bytes, fetch/list/delete, media check) and collection_prune. The
+//! URL-fetch path (the SSRF guard + IP pinning) is deliberately NOT here — it is
+//! trust-boundary code under the security-review gate.
 
 use serde_json::Value;
 use shrike_error::NativeResult;
@@ -15,9 +14,8 @@ use shrike_schemas::{
 use crate::{embed_text, CollectionCore};
 
 // The basename path-traversal guard + the extension<->MIME map live in the
-// inbound-media crate (`shrike-media`) — the one home both the store
-// write tail (here) and the kernel's fetch/decode path read. Imported, not
-// re-defined.
+// inbound-media crate (`shrike-media`) — the one home both the store write tail
+// (here) and the kernel's fetch/decode path read. Imported, not re-defined.
 use shrike_media::{guess_mime, mime_extension, safe_media_name};
 
 /// `_path_within_any_root`: containment on resolved real paths (canonicalize

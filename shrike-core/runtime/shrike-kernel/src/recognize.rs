@@ -1,8 +1,8 @@
-//! Recognition gating — the KERNEL's policy half of the
-//! recognition capability. The engine contract ([`Recognizer`],
-//! [`Recognition`], [`Segment`]) lives in `shrike-engine-api`; what
-//! stays here is what the kernel decides for itself: which recognitions are
-//! substantive enough to store, and which mint a vector.
+//! Recognition gating — the KERNEL's policy half of the recognition
+//! capability. The engine contract ([`Recognizer`], [`Recognition`],
+//! [`Segment`]) lives in `shrike-engine-api`; what stays here is what the
+//! kernel decides for itself: which recognitions are substantive enough to
+//! store, and which mint a vector.
 //!
 //! [`Recognizer`]: shrike_engine_api::Recognizer
 //! [`Recognition`]: shrike_engine_api::Recognition
@@ -44,20 +44,17 @@ pub enum Destination {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RecognitionPurpose {
     /// Image → searchable text (Apple Vision / remote VLM-OCR). Source
-    /// `"ocr"`, lexical + vector — behaviour bit-identical to the older
-    /// single-slot sweep.
+    /// `"ocr"`, lexical + vector.
     Ocr,
-    /// Image → descriptive prose for retrieval. Source `"vlm"`,
-    /// VECTOR-ONLY (the settled destination rule).
+    /// Image → descriptive prose for retrieval. Source `"vlm"`, VECTOR-ONLY.
     Describe,
-    /// Audio → transcript. Source `"asr"`, lexical + vector
-    /// (like OCR).
+    /// Audio → transcript. Source `"asr"`, lexical + vector (like OCR).
     Asr,
 }
 
 impl RecognitionPurpose {
-    /// The derived-store source recognized text lands under. The OCR key is
-    /// unchanged (`"ocr"`), so existing rows + the OCR sweep are untouched.
+    /// The derived-store source recognized text lands under. Source `"ocr"`
+    /// must stay stable: existing indexes' rows and the OCR sweep key on it.
     pub fn source(self) -> &'static str {
         match self {
             RecognitionPurpose::Ocr => "ocr",
@@ -67,8 +64,8 @@ impl RecognitionPurpose {
     }
 
     /// The derived-store meta key holding this purpose's recognizer
-    /// fingerprint. The OCR key is unchanged (`"recognizer_fingerprint"`), so
-    /// an existing index's stored fingerprint still matches on upgrade.
+    /// fingerprint. OCR's key `"recognizer_fingerprint"` must stay stable so an
+    /// existing index's stored fingerprint still matches on upgrade.
     pub fn fingerprint_key(self) -> &'static str {
         match self {
             RecognitionPurpose::Ocr => "recognizer_fingerprint",
@@ -99,8 +96,7 @@ impl RecognitionPurpose {
     /// These park a blocking-pool thread for the call's full duration while
     /// holding model residency, so the kernel bounds how many run concurrently
     /// ([`crate::SLOW_RECOGNITION_CONCURRENCY`]). OCR is fast and per-item
-    /// bounded (a page of glyphs), so it is never throttled — its behaviour
-    /// stays byte-identical.
+    /// bounded (a page of glyphs), so it is never throttled.
     pub fn is_long_running(self) -> bool {
         match self {
             RecognitionPurpose::Describe | RecognitionPurpose::Asr => true,
@@ -243,9 +239,8 @@ mod tests {
     #[test]
     fn purpose_routing_is_per_engine_and_ocr_keys_are_unchanged() {
         use RecognitionPurpose::*;
-        // OCR's source + fingerprint key are byte-identical to the older
-        // single-slot constants, so existing rows and stored meta still match
-        // (no spurious re-derive on upgrade).
+        // OCR's source + fingerprint key match the crate constants, so existing
+        // rows and stored meta still match (no spurious re-derive on upgrade).
         assert_eq!(Ocr.source(), super::super::OCR_SOURCE);
         assert_eq!(
             Ocr.fingerprint_key(),
@@ -271,7 +266,7 @@ mod tests {
             keys.iter().collect::<std::collections::HashSet<_>>().len(),
             3
         );
-        // Media kind + destination per the settled policy.
+        // Media kind + destination per the routing policy.
         assert_eq!(Ocr.media_kind(), MediaKind::Image);
         assert_eq!(Describe.media_kind(), MediaKind::Image);
         assert_eq!(Asr.media_kind(), MediaKind::Audio);
@@ -281,7 +276,7 @@ mod tests {
         assert_eq!(Describe.destination(), Destination::VectorOnly);
         // Concurrency classification: describe + ASR are long-running
         // (model-resident, slow per call) and bounded; OCR is fast and never
-        // throttled — its dispatch stays byte-identical.
+        // throttled.
         assert!(Describe.is_long_running());
         assert!(Asr.is_long_running());
         assert!(!Ocr.is_long_running());

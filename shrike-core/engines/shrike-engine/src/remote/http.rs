@@ -1,8 +1,7 @@
 //! The shared, SSRF-pinned HTTP client both remote engines (`embed`, `describe`)
-//! ride: ONE copy of the trust-boundary code the two engines used
-//! to carry verbatim — the API-key/header-injection validator, the IP-pin, the
-//! same-host redirect re-vet, and the bounded transient retry
-//! (backoff + `Retry-After`).
+//! ride: ONE home for the trust-boundary code — the API-key/header-injection
+//! validator, the IP-pin, the same-host redirect re-vet, and the bounded
+//! transient retry (backoff + `Retry-After`).
 //!
 //! **Async `reqwest`** (route 2): the engines implement engine-api's
 //! async traits directly and the kernel awaits them on its runtime, so the
@@ -407,11 +406,10 @@ async fn error_detail(resp: reqwest::Response, status: u16) -> String {
 /// response in sequence (each closes its connection, so a retry is a fresh
 /// accept): returns (base_url, a receiver yielding each raw request head+body).
 /// A `status_line` may carry extra header lines
-/// (`"HTTP/1.1 429 …\r\nRetry-After: 1"`). Shared by both engines' test
-/// modules — the SSRF/redirect/api-key/retry vectors run against ONE harness.
-/// A plain blocking std-thread server: the engines' async tests drive it from a
-/// tokio runtime, which is fine (the server thread blocks on `accept`, the test
-/// awaits the client request).
+/// (`"HTTP/1.1 429 …\r\nRetry-After: 1"`). Both engines' test modules share it,
+/// so the SSRF/redirect/api-key/retry vectors run against ONE harness. A plain
+/// blocking std-thread server driven from the async tests' tokio runtime (the
+/// server thread blocks on `accept`, the test awaits the client request).
 #[cfg(test)]
 pub(crate) mod test_server {
     use std::io::{BufRead, BufReader, Read, Write};

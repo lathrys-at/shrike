@@ -1,9 +1,8 @@
 //! `shrike-media` — the inbound/untrusted-media crate.
 //!
-//! The "acquire + validate untrusted bytes" half of media handling, cracked
-//! out of `shrike-kernel`'s `media_fetch`. The *store* half (store/fetch/list/
-//! delete/prune) stays in `shrike-collection` — it is inseparable from
-//! `col.media`. This crate owns:
+//! The "acquire + validate untrusted bytes" half of media handling. The *store*
+//! half (store/fetch/list/delete/prune) stays in `shrike-collection` — it is
+//! inseparable from `col.media`. This crate owns:
 //!
 //! - the SSRF-guarded media URL fetch ([`fetch_media_url`]) + base64 decode
 //!   ([`decode_media_b64`]) + the [`MEDIA_MAX_BYTES`] cap;
@@ -15,9 +14,9 @@
 //!   ([`guess_mime`]/[`mime_extension`]).
 //!
 //! **Trust-boundary code**: changes here go through the security-review gate.
-//! The SSRF model is preserved exactly — it delegates
-//! the primitives to `shrike-network` (the one home for the is_global
-//! classifier + the IP-pinned agent), so the control is shared, not copied:
+//! It delegates the SSRF primitives to `shrike-network` (the one home for the
+//! is_global classifier + the IP-pinned agent), so the control is shared, not
+//! copied:
 //!
 //! - http/https only; every hop's host is resolved and refused unless every
 //!   address is **globally routable** (`shrike_network::ip_is_allowed`, an
@@ -55,9 +54,9 @@ use shrike_schemas::StoreMediaItem;
 use url::Url;
 
 // The SSRF classifier + the resolve-and-vet helper live in the shared
-// `shrike-network` crate so the remote engine crates use the SAME
-// control. Re-exported here so the in-tree callers (the kernel's Python-facing
-// binding, any media caller) keep importing them from `shrike_media` unchanged.
+// `shrike-network` crate so the remote engine crates use the SAME control.
+// Re-exported here so the in-tree callers (the kernel's Python-facing binding,
+// any media caller) can import them from `shrike_media`.
 pub use shrike_network::{ip_is_allowed, resolve_public_ip};
 
 /// The byte-source size cap — caller-supplied/downloaded bytes only; a
@@ -68,8 +67,8 @@ pub const MEDIA_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Per-request timeout for an inbound media URL fetch.
 pub const URL_FETCH_TIMEOUT_SECS: u64 = 30;
-/// The redirect hop cap (= `shrike_network::MAX_REDIRECTS`, kept as a named alias so
-/// existing call sites and the error message that quotes it are unchanged).
+/// The redirect hop cap (= `shrike_network::MAX_REDIRECTS`, a named alias the
+/// call sites and the error message that quotes it use).
 pub const MAX_MEDIA_REDIRECTS: usize = shrike_network::MAX_REDIRECTS;
 
 /// One store_media item after the kernel's off-actor prepare: byte
@@ -262,7 +261,7 @@ pub fn media_name_from_url(url: &str) -> Option<String> {
 
 /// One store_media item's prepare — validate, then decode/fetch the byte
 /// source (path items pass through; their gates are collection policy and
-/// run under the write). The ONE prepare both drivers share, now **async**
+/// run under the write). The ONE prepare both drivers share, **async**
 /// (the url path awaits [`fetch_media_url`]): the kernel `tokio::spawn`s
 /// each item so they prepare concurrently on the runtime; the standalone binding
 /// drives it via `block_on`.
@@ -299,7 +298,7 @@ pub async fn prepare_media_item(
             Err(e) => PreparedMediaSource::Failed { error: e.message },
         }
     } else {
-        // validate() guarantees one source; backstop message kept.
+        // validate() guarantees one source; this is a backstop.
         PreparedMediaSource::Failed {
             error: "each item needs one of data, url, or path".to_string(),
         }

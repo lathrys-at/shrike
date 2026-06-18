@@ -1,9 +1,9 @@
 //! Native vector index engine over the usearch Rust crate.
 //!
-//! The `spike` test module below answers the biggest unknown — whether the
-//! official usearch Rust crate (same native C++ core as usearch-python, pinned
-//! to the same 2.25.3) satisfies Shrike's exact index contract, including
-//! on-disk compatibility with files written by the Python binding.
+//! The `spike` test module below pins that the official usearch Rust crate
+//! (same native C++ core as usearch-python, pinned to the same 2.25.3)
+//! satisfies Shrike's exact index contract, including on-disk compatibility
+//! with files written by the Python binding.
 
 #![deny(missing_docs)]
 #![deny(

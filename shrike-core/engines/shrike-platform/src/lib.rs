@@ -28,8 +28,7 @@ mod glue;
 pub mod speech;
 pub mod vision;
 
-/// Reserved for the future Android JNI/NDK glue (lands behind
-/// `engine-android` in a later slice) — the natural home for the Kotlin bridge,
-/// mirroring how `vision`/`speech` host the Apple one.
+/// Reserved for the Android JNI/NDK glue (behind `engine-android`) — the home
+/// for the Kotlin bridge, mirroring how `vision`/`speech` host the Apple one.
 #[cfg(feature = "engine-android")]
 pub mod android {}

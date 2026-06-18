@@ -12,8 +12,7 @@
 #   4. verify onnxruntime and shrike_native both import
 #
 # Python selection: pyenv if present (it honors .python-version), else the
-# matching python3.X off PATH. (Adopting `uv` for the whole venv is a separable
-# future option — not built here.)
+# matching python3.X off PATH.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -51,7 +50,7 @@ source .venv/bin/activate
 # --------------------------------------------------------------- 2. deps -------
 # pyproject.toml lives in the shrike-py/ unit; install editable from there.
 # The .venv stays at the repo root so native-stale.sh / .envrc / the pytest
-# backstop (all keyed off $VIRTUAL_ENV / sys.prefix) keep working unchanged.
+# backstop (all keyed off $VIRTUAL_ENV / sys.prefix) keep working.
 echo "==> installing the harness and dev tooling (pip install -e \"shrike-py/[dev]\")"
 pip install -q --upgrade pip
 pip install -q -e "shrike-py/[dev]"
