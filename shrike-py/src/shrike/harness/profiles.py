@@ -1,4 +1,4 @@
-"""Config model v2 (#498): capability declarations → a resolved profile plan.
+"""Config model v2: capability declarations → a resolved profile plan.
 
 The distribution-profiles design (docs/distribution.md, canonical) replaces
 the backend knob with *capability declarations*: an ``embedders:`` list of
@@ -11,15 +11,14 @@ and resolve the declared set against what the build actually compiled
 (``shrike_native.build_features()``, passed in — this module imports nothing
 native so it stays unit-testable everywhere).
 
-The two-layer rule it enforces (#498):
+The two-layer rule it enforces:
 
 - a ``runtime`` whose build feature is **not compiled in** is a
   :class:`ProfileError` naming the build profile — never a silent no-op
   (killing the silent-cross-talk era is the point);
 - a capability the build *can* express but Shrike hasn't implemented yet is a
-  :class:`ProfileError` naming the tracking issue (#229 multi-space, #485
-  asr/describe integration, #502 remote OCR, #36 sync server) — declared
-  config never silently does nothing.
+  :class:`ProfileError` naming the tracking issue — declared config never
+  silently does nothing.
 
 The N=1 serving shapes map onto the runtime via :func:`plan_to_runtime_params`:
 the ort backends keyed by modalities, the managed llama-server (``manage:
@@ -42,7 +41,7 @@ RECOGNIZER_SOURCES = ("ocr", "asr", "describe")
 RECOGNIZER_RUNTIMES = ("onnx", "remote", "platform")
 MANAGE_MODES = ("auto", "attach", "off")
 
-# runtime → the #499 build-matrix feature that provides it.
+# runtime → the build-matrix feature that provides it.
 _RUNTIME_FEATURE = {
     "onnx": "engine-ort",
     "remote": "engine-remote",
@@ -59,7 +58,7 @@ class ProfileError(ValueError):
 
 @dataclass(frozen=True)
 class EmbedderEntry:
-    """One vector space (#229/#235): what it embeds and where it runs."""
+    """One vector space: what it embeds and where it runs."""
 
     modalities: tuple[str, ...]
     runtime: str
@@ -73,7 +72,7 @@ class EmbedderEntry:
 
 @dataclass(frozen=True)
 class RecognizerEntry:
-    """One recognition source (#485's engine map row)."""
+    """One recognition source (an engine map row)."""
 
     source: str
     runtime: str
@@ -87,17 +86,16 @@ class RecognizerEntry:
 class ManagedLlama:
     """llama-server as a manage-class component — orthogonal to engines.
 
-    The model-loading shape is the typed single-vs-router split (#567),
-    mirroring the native ``ModelSpec`` enum: ``models_dir`` unset = a
-    SINGLE-model server (the entry's ``model`` is the GGUF path Shrike loads —
-    today's N=1 behavior, byte-for-byte); ``models_dir`` set = llama.cpp
-    **router** mode, ONE process serving that directory of GGUFs with the
-    request ``model`` field routing among them, so N remote/no-endpoint
-    embedder spaces share one spawn. In router mode each consuming entry's
-    ``model`` names a model WITHIN the directory (the routing key), not a path.
-    The two are mutually exclusive — a single ``model`` path and a router
-    ``models_dir`` can't both load — so the consumers' ``model`` semantics flip
-    with this one field, never overlapping.
+    The model-loading shape is the typed single-vs-router split, mirroring the
+    native ``ModelSpec`` enum: ``models_dir`` unset = a SINGLE-model server (the
+    entry's ``model`` is the GGUF path Shrike loads — the N=1 behavior);
+    ``models_dir`` set = llama.cpp **router** mode, ONE process serving that
+    directory of GGUFs with the request ``model`` field routing among them, so N
+    remote/no-endpoint embedder spaces share one spawn. In router mode each
+    consuming entry's ``model`` names a model WITHIN the directory (the routing
+    key), not a path. The two are mutually exclusive — a single ``model`` path
+    and a router ``models_dir`` can't both load — so the consumers' ``model``
+    semantics flip with this one field, never overlapping.
     """
 
     manage: str = "auto"  # auto = spawn/own a child; attach = existing; off = cloud
@@ -107,19 +105,19 @@ class ManagedLlama:
     context_size: int | None = None
     threads: int | None = None
     gpu_layers: int | None = None
-    # Per-modality multimodal projectors (#501) — loaded with the managed
-    # server so it can embed images/audio. Empty for a text-only server.
+    # Per-modality multimodal projectors — loaded with the managed server so it
+    # can embed images/audio. Empty for a text-only server.
     mmprojs: tuple[str, ...] = ()
-    # Router mode (#567): the directory of GGUFs llama.cpp serves under
-    # `--models-dir`, request-`model`-field routed. Unset = single-model mode
-    # (the entry's `model` is the GGUF path). Set = N consumers share ONE
-    # spawn, each pinning its own `model` (a name in this dir).
+    # Router mode: the directory of GGUFs llama.cpp serves under `--models-dir`,
+    # request-`model`-field routed. Unset = single-model mode (the entry's
+    # `model` is the GGUF path). Set = N consumers share ONE spawn, each pinning
+    # its own `model` (a name in this dir).
     models_dir: str | None = None
     # Router `--models-max`: the max models loaded simultaneously (LRU-evicts
     # beyond it); None = the server default. Router-only.
     models_max: int | None = None
-    # Router-wide `--pooling` (#567): a router applies ONE pooling type across
-    # every model it serves, so pooling is a router-scoped setting here, not a
+    # Router-wide `--pooling`: a router applies ONE pooling type across every
+    # model it serves, so pooling is a router-scoped setting here, not a
     # per-entry one (a single consumer's pooling is unexpressible per-model on a
     # router). Required when the router serves last-token models (Jina v5,
     # Qwen3-Embedding), whose pooling isn't in the GGUF metadata. Vector-
@@ -129,7 +127,7 @@ class ManagedLlama:
 
 @dataclass(frozen=True)
 class ManagedSync:
-    """anki's sync server as a child process (#36) — server profile only."""
+    """anki's sync server as a child process — server profile only."""
 
     manage: str = "off"
 
@@ -150,7 +148,7 @@ class Capabilities:
 
 @dataclass(frozen=True)
 class RecognizerPlan:
-    """One resolved recognition engine (#485): the harness-ready shape a
+    """One resolved recognition engine: the harness-ready shape a
     ``recognizers:`` entry maps onto. ``purpose`` is the kernel routing key /
     derived source (``ocr``/``describe``/``asr``); ``kind`` is the construction
     selector (``apple`` for the platform OCR engine, ``describe-remote`` for the
@@ -166,12 +164,10 @@ class RecognizerPlan:
 
 @dataclass(frozen=True)
 class ResolvedEmbedder:
-    """One resolved embedding space (#233): the declared entry plus its
-    routing **role** — the per-modality PRIMARY flags. A modality's primary is
-    the FIRST entry (declaration order) that declares it, which mirrors the
-    kernel's insertion-order primary (``EmbedSpaces::primary``). The role is
-    metadata this PR; the index-narrow / query-wide fan-out it feeds is PR-B/C
-    (#232/#234)."""
+    """One resolved embedding space: the declared entry plus its routing
+    **role** — the per-modality PRIMARY flags. A modality's primary is the
+    FIRST entry (declaration order) that declares it, which mirrors the kernel's
+    insertion-order primary (``EmbedSpaces::primary``)."""
 
     entry: EmbedderEntry
     #: The note modalities this space is PRIMARY for (it is the first declared
@@ -190,17 +186,17 @@ class ResolvedEmbedder:
     @property
     def text_capable(self) -> bool:
         """Whether this space embeds the TEXT modality — the query-routing
-        flag (a query fans out to every text-capable space in PR-C)."""
+        flag (a query fans out to every text-capable space)."""
         return "text" in self.entry.modalities
 
 
 @dataclass(frozen=True)
 class ResolvedProfile:
     """The declared set intersected with the build: what this process will
-    actually serve. ``embedders`` is the ordered set of resolved spaces (#233 —
-    the multi-space substrate; an empty tuple means no embedder, one entry is
-    the N=1 case); ``recognizers`` is the per-purpose recognition set (#485);
-    ``warnings`` aggregates migration + degradation messages."""
+    actually serve. ``embedders`` is the ordered set of resolved spaces (an
+    empty tuple means no embedder, one entry is the N=1 case);
+    ``recognizers`` is the per-purpose recognition set; ``warnings`` aggregates
+    migration + degradation messages."""
 
     embedders: tuple[ResolvedEmbedder, ...]
     managed_llama: ManagedLlama | None
@@ -210,8 +206,7 @@ class ResolvedProfile:
     @property
     def embedder(self) -> EmbedderEntry | None:
         """The PRIMARY (first) embedder entry, or ``None`` — the N=1
-        back-compat accessor. The index path consumes one engine until the
-        fan-out lands (PR-B/C), so the primary entry is the load-bearing one."""
+        back-compat accessor."""
         return self.embedders[0].entry if self.embedders else None
 
 
@@ -285,7 +280,7 @@ def _parse_embedder(raw: Any, index: int) -> EmbedderEntry:
     # {text}` — embedding_base.py). Text-only is the permanent first-class
     # capability; a multimodal entry advertises MORE (text + image). An
     # image-only entry would build a backend that violates the protocol with no
-    # downstream guard (#603), so reject it here at parse time, like the other
+    # downstream guard, so reject it here at parse time, like the other
     # modality validations.
     if "text" not in modalities:
         raise ProfileError(
@@ -311,7 +306,7 @@ def _parse_embedder(raw: Any, index: int) -> EmbedderEntry:
     )
 
     # Knobs are structurally scoped to their runtime — inapplicable knobs are
-    # errors, not silent cross-talk (the disease #498 cures).
+    # errors, not silent cross-talk.
     if entry.runtime != "remote":
         for key in ("endpoint", "api_key_env"):
             if getattr(entry, key) is not None:
@@ -426,7 +421,7 @@ def _parse_managed(raw: Any) -> tuple[ManagedLlama | None, ManagedSync | None]:
 
 def _migrate_legacy(config: Mapping[str, Any]) -> Capabilities:
     """Synthesize v2 capabilities from the legacy ``embedding:`` /
-    ``recognition:`` sections — the one-release warn-and-map (#498). Legacy
+    ``recognition:`` sections — the one-release warn-and-map. Legacy
     semantics are preserved (degrade, don't refuse): a legacy OCR selection
     the build can't serve becomes a warning + an absent capability, exactly
     the boot behavior the old flag had."""
@@ -492,8 +487,8 @@ def _migrate_legacy(config: Mapping[str, Any]) -> Capabilities:
 
     rec = config.get("recognition") or {}
     if rec.get("ocr"):
-        # Legacy degrade semantics: the platform OCR engine left the server
-        # build (#496 boundary) — warn and drop rather than refuse boot.
+        # Legacy degrade semantics: the platform OCR engine is not in the
+        # server build — warn and drop rather than refuse boot.
         warnings.append(
             "config: recognition.ocr is deprecated and the platform OCR engine is "
             "not in the server build — recognition stays off (the replacement is "
@@ -557,10 +552,10 @@ def _profile_name(build_features: set[str]) -> str:
 def _resolve_embedder_roles(
     embedders: tuple[EmbedderEntry, ...],
 ) -> tuple[ResolvedEmbedder, ...]:
-    """Assign each space its per-modality PRIMARY role (#233): a modality's
-    primary is the FIRST entry (declaration order) that declares it, mirroring
-    the kernel's insertion-order primary. So the first text space is primary
-    for text, the first image space primary for image — and a single entry is
+    """Assign each space its per-modality PRIMARY role: a modality's primary
+    is the FIRST entry (declaration order) that declares it, mirroring the
+    kernel's insertion-order primary. So the first text space is primary for
+    text, the first image space primary for image — and a single entry is
     primary for every modality it carries (the N=1 case)."""
     seen: set[str] = set()
     resolved: list[ResolvedEmbedder] = []
@@ -574,21 +569,21 @@ def _resolve_embedder_roles(
 def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> ResolvedProfile:
     """Intersect the declared capabilities with what the build compiled.
 
-    Implements the #498 rules: an uncompiled runtime is a ProfileError naming
-    the build profile; a declared capability this release hasn't wired yet is
-    a ProfileError naming the tracking issue. Legacy-synthesized sets keep
-    legacy degrade semantics (handled in :func:`_migrate_legacy`).
+    The two-layer rules: an uncompiled runtime is a ProfileError naming the
+    build profile; a declared capability this release hasn't wired yet is a
+    ProfileError naming the tracking issue. Legacy-synthesized sets keep legacy
+    degrade semantics (handled in :func:`_migrate_legacy`).
     """
     features = set(build_features)
     profile = _profile_name(features)
     warnings = list(caps.warnings)
 
-    # Multi-space is built since #233: each declared entry is its own vector
-    # space, validated independently against the build + this release. The
-    # per-modality PRIMARY is the FIRST entry carrying the modality (mirrors the
-    # kernel's insertion-order primary). The remote/managed-llama coupling is
-    # validated per entry below; the managed-llama-consumption check (further
-    # down) looks across ALL entries.
+    # Each declared entry is its own vector space, validated independently
+    # against the build + this release. The per-modality PRIMARY is the FIRST
+    # entry carrying the modality (mirrors the kernel's insertion-order
+    # primary). The remote/managed-llama coupling is validated per entry below;
+    # the managed-llama-consumption check (further down) looks across ALL
+    # entries.
     for index, embedder in enumerate(caps.embedders):
         feature = _RUNTIME_FEATURE[embedder.runtime]
         if feature not in features:
@@ -643,7 +638,7 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
     # ONE may bind it — two would both load on the one port, which is ambiguous.
     # In ROUTER mode (models_dir set) llama.cpp serves a directory of GGUFs and
     # routes by the request `model` field, so N consumers share ONE spawn, each
-    # pinning its own model (#567). The guard therefore depends on the shape.
+    # pinning its own model. The guard therefore depends on the shape.
     managed_consumers = [
         i for i, e in enumerate(caps.embedders) if e.runtime == "remote" and e.endpoint is None
     ]
@@ -678,13 +673,13 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
                 "model — the model field routes the request and identifies the vector space, so "
                 f"the router consumers must name distinct models (got {sorted(models)})"
             )
-        # Router mode does NOT support image embedding (#567). A multimodal
-        # projector is per-model (`--mmproj`), but a router serves MANY models, so
-        # no single projector applies — the native router deliberately suppresses
-        # mmprojs (#663). Accepting an image consumer (or a non-empty `mmprojs`)
-        # would spawn a projector-less server that then fails the image-embed
-        # start with a confusing "endpoint does not serve image embeddings". Make
-        # the illegal state unrepresentable: reject at resolve time. (This mirrors
+        # Router mode does NOT support image embedding. A multimodal projector
+        # is per-model (`--mmproj`), but a router serves MANY models, so no
+        # single projector applies — the native router deliberately suppresses
+        # mmprojs. Accepting an image consumer (or a non-empty `mmprojs`) would
+        # spawn a projector-less server that then fails the image-embed start
+        # with a confusing "endpoint does not serve image embeddings". Make the
+        # illegal state unrepresentable: reject at resolve time. (This mirrors
         # the native router's suppression; an image model belongs in single-
         # managed mode, where `mmprojs` loads onto its one server.)
         image_consumers = [i for i in managed_consumers if "image" in caps.embedders[i].modalities]
@@ -717,14 +712,12 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
             "the embedders: entry for a single-model managed server"
         )
 
-    # At most ONE IMAGE-embedding space (#580). Cross-space fusion admits a
-    # secondary image space on its own calibrated floor (floor-admission, the
-    # production mechanism since #580) — the relative winner-take-all gate that
-    # used to bound MULTIPLICITY is retired. With a single image space there is
-    # no multiplicity to bound, so retiring it is sound; declaring two image
-    # spaces would reintroduce the N≥2 flood the gate guarded against (the eval
-    # showed text recall collapses), with no mechanism left to stop it. So it is
-    # a config error, not a silent degrade.
+    # At most ONE IMAGE-embedding space. Cross-space fusion admits a secondary
+    # image space on its own calibrated floor (floor-admission, the production
+    # mechanism). With a single image space there is no multiplicity to bound;
+    # declaring two image spaces would flood the fusion (the eval showed text
+    # recall collapses), with no mechanism left to stop it. So it is a config
+    # error, not a silent degrade.
     image_entries = [i for i, e in enumerate(caps.embedders) if "image" in e.modalities]
     if len(image_entries) > 1:
         raise ProfileError(
@@ -742,10 +735,10 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
                 "landed yet (#485 PR2) — remove the entry for now"
             )
         if rec.source == "describe":
-            # describe is attachable now (#485 PR1) — VLM image→text into the
-            # embedding space (vector-only). The remote runtime (any
-            # OpenAI-compatible vision endpoint) is the wired shape; platform
-            # (engine-apple) and onnx describe engines don't exist yet.
+            # describe is attachable — VLM image→text into the embedding space
+            # (vector-only). The remote runtime (any OpenAI-compatible vision
+            # endpoint) is the wired shape; platform (engine-apple) and onnx
+            # describe engines don't exist yet.
             if rec.runtime != "remote":
                 raise ProfileError(
                     f"recognizers.describe.runtime: {rec.runtime} is not a describe engine — "
@@ -839,7 +832,7 @@ def resolve_profile(caps: Capabilities, build_features: Iterable[str]) -> Resolv
         # SEPARATE remote endpoint, loading the projectors onto a text-only
         # server that never embeds an image (a silent no-op + a needless TEXT
         # rebuild via the fingerprint fold). Bind the check to the actual
-        # consumer (#609).
+        # consumer.
         consumers = [e for e in caps.embedders if e.runtime == "remote" and e.endpoint is None]
         if not any("image" in e.modalities for e in consumers):
             raise ProfileError(
@@ -869,16 +862,15 @@ def _entry_to_runtime_params(
     """Map ONE resolved embedder entry onto the runtime-params dict
     ``EmbeddingRuntime`` consumes — the per-entry mapping shared by the N=1
     primary accessor (:func:`plan_to_runtime_params`) and the N-dict set
-    (:func:`plan_to_runtime_params_set`). Reused verbatim per #233's scope (the
-    multi-space change is fanning OUT this mapping, not altering it).
+    (:func:`plan_to_runtime_params_set`).
 
     The mapping: an onnx entry keys the ort backend by its modalities
     (text → ``onnx``, text+image → ``clip``); a remote entry WITH an
     endpoint — or under ``manage: attach`` — is the unmanaged ``remote``
     backend (Shrike never spawns/stops that server); a remote entry without
-    one is the managed llama-server (``manage: auto``, today's behavior).
+    one is the managed llama-server (``manage: auto``).
 
-    Router mode (#567 — ``managed.llama_server.models_dir`` set): every
+    Router mode (``managed.llama_server.models_dir`` set): every
     remote/no-endpoint consumer becomes a ``remote`` backend pointed at the
     shared router's loopback endpoint, each pinning its own ``model`` (the
     request-routing key). The dict carries a ``router`` sub-mapping with the
@@ -889,8 +881,8 @@ def _entry_to_runtime_params(
     fingerprint/dim derive from the pinned model, never the shared endpoint's
     ``/v1/models[0]`` (which lists many models — a vector-space collapse).
     """
-    # The space's modalities flow to the backend (#501): an image space
-    # composes the image half + reports image coverage.
+    # The space's modalities flow to the backend: an image space composes the
+    # image half + reports image coverage.
     modalities = frozenset(e.modalities)
     if e.runtime == "onnx":
         backend = "clip" if "image" in e.modalities else "onnx"
@@ -920,9 +912,9 @@ def _entry_to_runtime_params(
                 "api_key_env": None,
                 "batch_size": e.batch_size,
                 "modalities": modalities,
-                # The router-wide pooling (#567) is vector-affecting and shared
-                # across consumers; carried per-consumer so it folds into each
-                # space's fingerprint (a pooling change must rebuild every space).
+                # The router-wide pooling is vector-affecting and shared across
+                # consumers; carried per-consumer so it folds into each space's
+                # fingerprint (a pooling change must rebuild every space).
                 "pooling": llama.pooling,
                 "router": {
                     "models_dir": llama.models_dir,
@@ -965,9 +957,8 @@ def _entry_to_runtime_params(
 
 def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
     """The PRIMARY embedder's runtime-params dict (the N=1 accessor) — what
-    the index/search paths' single engine consume this release. With one
-    declared embedder it is the sole space, so the dict is byte-identical to
-    the single-space era; the multi-space fan-out reads
+    the index/search paths' single engine consume. With one declared embedder
+    it is the sole space; the multi-space fan-out reads
     :func:`plan_to_runtime_params_set`.
     """
     e = plan.embedder
@@ -977,12 +968,12 @@ def plan_to_runtime_params(plan: ResolvedProfile) -> dict[str, Any]:
 
 
 def plan_to_runtime_params_set(plan: ResolvedProfile) -> tuple[dict[str, Any], ...]:
-    """The runtime-params dict for EVERY resolved space, in declaration order
-    (#233): the harness/``EmbeddingRuntime`` fan-out attaches one backend per
-    dict, each to its own kernel embed space. An empty plan yields an empty
-    tuple. Each dict is the same per-entry mapping :func:`plan_to_runtime_params`
-    emits for the primary — N=1 yields a 1-tuple whose sole element equals the
-    primary dict, so the single-space runtime is unchanged."""
+    """The runtime-params dict for EVERY resolved space, in declaration order:
+    the harness/``EmbeddingRuntime`` fan-out attaches one backend per dict, each
+    to its own kernel embed space. An empty plan yields an empty tuple. Each
+    dict is the same per-entry mapping :func:`plan_to_runtime_params` emits for
+    the primary — N=1 yields a 1-tuple whose sole element equals the primary
+    dict, so the single-space runtime is unchanged."""
     return tuple(_entry_to_runtime_params(re.entry, plan.managed_llama) for re in plan.embedders)
 
 
@@ -995,7 +986,7 @@ _RECOGNIZER_KIND = {
 
 def recognizer_plans(plan: ResolvedProfile) -> tuple[RecognizerPlan, ...]:
     """Adapt the resolved recognizers onto the harness-ready
-    :class:`RecognizerPlan` shape (#485) — the recognizer analogue of
+    :class:`RecognizerPlan` shape — the recognizer analogue of
     :func:`plan_to_runtime_params`. ``resolve_profile`` has already validated
     each entry against the build and this release, so this is a pure mapping;
     an entry it doesn't know how to construct is a ProfileError (the

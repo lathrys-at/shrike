@@ -1,9 +1,9 @@
-"""``shrike profile`` — the collection/profile registry (#66).
+"""``shrike profile`` — the collection/profile registry.
 
 Register collections by a friendly name, set an active default, and list them.
 The registry lives in ``config.yml`` (a ``profiles:`` section) and is managed
 entirely client-side — these commands never talk to the server. A registered
-name is a handle for humans and the per-call routing selector (#68); the active
+name is a handle for humans and the per-call routing selector; the active
 default is the config-level fallback that selector resolves to when no selector
 is passed. Neither is a server runtime switch.
 

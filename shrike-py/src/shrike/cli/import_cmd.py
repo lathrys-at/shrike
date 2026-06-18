@@ -1,4 +1,4 @@
-"""``shrike import`` — import an Anki package (.apkg/.colpkg) into the collection (#72)."""
+"""``shrike import`` — import an Anki package (.apkg/.colpkg) into the collection."""
 
 from __future__ import annotations
 

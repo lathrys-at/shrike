@@ -3,19 +3,18 @@
 A CLIP export is a **dual encoder**: a text graph (``text_model.onnx``: ``input_ids`` →
 ``text_embeds``) and a vision graph (``vision_model.onnx``: ``pixel_values`` → ``image_embeds``),
 both projecting into the *same* space (cosine-comparable after L2 normalization). So a text query
-can retrieve a card by the content of its image — the capability the Phase-3a eval (#193) proved.
-This backend advertises ``modalities = {text, image}``; text-only collections keep using the
-small text backends (the ``modalities`` seam).
+can retrieve a card by the content of its image. This backend advertises
+``modalities = {text, image}``; text-only collections keep using the small text backends (the
+``modalities`` seam).
 
-The engine is the Rust ``shrike_native.ClipEmbedder`` (#271), native-only since the #278 cutover
-(the Python onnxruntime + PIL engine retired with it): both graphs, tokenization, and the image
-preprocessing pipeline (resize → center-crop → rescale → normalize, read from the model's
+The engine is the Rust ``shrike_native.ClipEmbedder``, native-only: both graphs, tokenization, and
+the image preprocessing pipeline (resize → center-crop → rescale → normalize, read from the model's
 ``preprocessor_config.json``) run crate-side, dlopening the onnxruntime shared library from the
 installed wheel — the same single-runtime linkage as the text backend. Unlike the text-only
 ``OnnxBackend`` there's no pooling: both graphs emit a pre-pooled, projected vector. Provider
-resolution and the batch-safety probe are shared with the text-backend work (#175/#176): the text
-and vision graphs share the model's quantization, so one probe on the text path governs both (an
-int8 CLIP is batch-variant → serial; an fp CLIP batches).
+resolution and the batch-safety probe are shared with the text backend: the text and vision graphs
+share the model's quantization, so one probe on the text path governs both (an int8 CLIP is
+batch-variant → serial; an fp CLIP batches).
 """
 
 from __future__ import annotations
@@ -43,7 +42,6 @@ CLIP_CONTEXT = 77
 # CLIP exports ship a graph at several precisions; auto-discovery prefers full precision (best
 # quality, and it batches) and falls back to a quantized one, picking the first precision for
 # which *both* graphs exist (so text and vision stay the same precision — no mixed-precision pair).
-# Explicit operator selection of a precision is tracked in #210.
 _VARIANT_SUFFIXES = ("", "_fp16", "_quantized", "_int8", "_uint8", "_q4", "_bnb4")
 
 # An image accepted by embed_images: a PIL image, a filesystem path, or raw bytes.
@@ -203,7 +201,7 @@ class ClipBackend:
         """The tail of start(): the batch-safety probe + logging."""
         # _resolve_files auto-discovers both graphs at the *same* precision, so a uniform
         # export's text probe already predicts the vision path. We still probe BOTH and take
-        # the min (#211) to harden against a hand-assembled mixed-precision pair (fp text +
+        # the min to harden against a hand-assembled mixed-precision pair (fp text +
         # int8 vision a user dropped on disk), where the vision graph batches
         # non-deterministically and the text probe alone would wrongly clear it — breaking the
         # reconcile==rebuild invariant for image vectors.
@@ -315,11 +313,11 @@ class ClipBackend:
         """Stable identity for the index ``model_id`` — both graphs + image-prep + text-prep.
 
         The ``clip-rs:`` namespace is the native engine's vector-space identity, kept
-        verbatim from the dual-engine bake (#271) so indexes built then load without a
-        rebuild; it never collides with a text-only ``onnx-rs:``/``meta:`` fingerprint
-        (or the retired Python engine's ``clip:``, whose PIL-bicubic image vectors were
-        pixel-different — epic #265 convention 7). A change to either graph (or the
-        crate-side preprocessing, via its version counter) forces a re-embed.
+        verbatim so indexes built under it load without a rebuild; it never collides
+        with a text-only ``onnx-rs:``/``meta:`` fingerprint (or the retired Python
+        engine's ``clip:``, whose PIL-bicubic image vectors were pixel-different).
+        A change to either graph (or the crate-side preprocessing, via its version
+        counter) forces a re-embed.
         """
 
         def _sz(p: Path | None) -> int:
@@ -337,11 +335,11 @@ class ClipBackend:
         return f"clip-rs:{tn}:{_sz(t)}:{vn}:{_sz(v)}:{prep}"
 
     def native_embedder(self) -> Any:
-        """The kernel-slot handle (#342 P2): the dual encoder composed behind
-        the engine contract — ONE adapted instance serving both the text and
-        image halves, so kernel embeds (text, OCR re-embeds, image vectors)
-        never re-enter this facade. Must be called from a coroutine context
-        (it captures the running loop).
+        """The kernel-slot handle: the dual encoder composed behind the engine
+        contract — ONE adapted instance serving both the text and image halves,
+        so kernel embeds (text, OCR re-embeds, image vectors) never re-enter
+        this facade. Must be called from a coroutine context (it captures the
+        running loop).
         """
         if not self.running:
             raise RuntimeError("CLIP embedding backend is not running")

@@ -2,8 +2,8 @@
 
 Its first artifact is an **FTS5 trigram** index over note text, backing fast substring and fuzzy
 (typo/partial) lexical search. The store is *source-seamed*: every indexed row is keyed
-``(note_id, source, ref)`` — ``source`` is where the text came from (``field`` now; ``ocr``/``asr``
-when #199 lands; never VLM image-describe, which stays embedding-only) and ``ref`` is the field name
+``(note_id, source, ref)`` — ``source`` is where the text came from (``field`` today; ``ocr``/``asr``
+later; never VLM image-describe, which stays embedding-only) and ``ref`` is the field name
 or media filename. So a match's provenance can say *where* it hit, and new derived sources slot in
 without reshaping the store.
 
@@ -15,13 +15,14 @@ in our cache dir, deliberately **not** as tables in Anki's ``collection.anki2``
 there is no debounced saver (unlike the vector index): writes are transactional
 and durable.
 
-Engine split (#281, mirroring the index's #267/#273): the SQL layer lives behind a small engine —
-the native ``shrike-derived`` crate (rusqlite), unconditional since the #278 cutover. The facade
-keeps the state machine, drift policy, MATCH-expression building, and result filtering. With the
-default *bundled*-SQLite build, FTS5+trigram is deterministically available, so the availability
-probe below is a formality; a platform-linked build (#300) probes the host library instead, and a
-host SQLite without FTS5/trigram makes the store report ``unavailable`` — every lookup then signals
-the caller to fall back to the linear ``find_notes`` scan, no feature regression.
+Engine split: the SQL layer lives behind a small engine — the native
+``shrike-derived`` crate (rusqlite). The facade keeps the state machine, drift
+policy, MATCH-expression building, and result filtering. With the default
+*bundled*-SQLite build, FTS5+trigram is deterministically available, so the
+availability probe below is a formality; a platform-linked build probes the host
+library instead, and a host SQLite without FTS5/trigram makes the store report
+``unavailable`` — every lookup then signals the caller to fall back to the linear
+``find_notes`` scan, no feature regression.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from shrike.harness.index import IndexState
 
 logger = logging.getLogger("shrike.derived")
 
-# v2 (#228): segments table + recognition meta. Must match DerivedEngine::SCHEMA_VERSION.
+# v2: segments table + recognition meta. Must match DerivedEngine::SCHEMA_VERSION.
 SCHEMA_VERSION = 2
 MIN_TRIGRAM = 3  # FTS5's trigram tokenizer can't match a term shorter than 3 chars
 FUZZY_MIN_SHARED = 2  # a fuzzy candidate must share at least this many query trigrams (noise floor)
@@ -77,11 +78,11 @@ def _fts_quote(term: str) -> str:
 
 
 class NativeDerivedEngine:
-    """The Rust engine (#281): the same surface over rusqlite's *bundled* SQLite.
+    """The Rust engine: the same surface over rusqlite's *bundled* SQLite.
 
     A thin marshaling adapter over ``shrike_native.DerivedTextEngine``. Under
     the default build the extension bundles its own SQLite, so FTS5 + trigram
-    are deterministically available; a platform-linked build (#300, a cargo-only
+    are deterministically available; a platform-linked build (a cargo-only
     ``--no-default-features`` build) relies on the host library, so :meth:`probe`
     genuinely probes either way (trivially true when bundled). Native errors
     are translated to ``sqlite3.Error`` so the facade's recovery/fallback logic
@@ -103,7 +104,7 @@ class NativeDerivedEngine:
 
     @staticmethod
     def probe() -> bool:
-        """FTS5+trigram availability in the *extension's* SQLite (#300).
+        """FTS5+trigram availability in the *extension's* SQLite.
 
         Trivially true under the bundled default; load-bearing when the
         extension was built against a platform SQLite.
@@ -175,9 +176,9 @@ class DerivedTextStore:
         engine_factory: Callable[[Path], NativeDerivedEngine] | None = None,
     ) -> None:
         self._path = Path(path)
-        # Injectable (the server harness passes it, #278 C5); defaults to the
-        # native engine. A *factory*, not an instance: corrupt-file recovery
-        # recreates the engine after discarding the file.
+        # Injectable (the server harness passes it); defaults to the native
+        # engine. A *factory*, not an instance: corrupt-file recovery recreates
+        # the engine after discarding the file.
         self._engine_factory = engine_factory if engine_factory is not None else NativeDerivedEngine
         # A short-lived lock for the BUILDING claim only — never held during SQLite I/O,
         # so a /reload on the event loop can claim/skip a build without waiting on an in-flight
@@ -200,8 +201,7 @@ class DerivedTextStore:
     # ── lifecycle ────────────────────────────────────────────────────────────────────────────────
 
     def _make_engine(self) -> NativeDerivedEngine:
-        """The FTS5 engine, from the injected factory (native by default —
-        unconditional since the #278 cutover)."""
+        """The FTS5 engine, from the injected factory (native by default)."""
         return self._engine_factory(self._path)
 
     def _open(self) -> None:
@@ -258,9 +258,8 @@ class DerivedTextStore:
         """Whether the selected engine's SQLite has FTS5 with the trigram tokenizer.
 
         The probe asks the extension's linked SQLite: under the bundled
-        default that's constant True — the #281 win (the probe stops being
-        load-bearing) — while a platform-linked build (#300) genuinely probes
-        the host library.
+        default that's constant True, while a platform-linked build genuinely
+        probes the host library.
         """
         return NativeDerivedEngine.probe()
 
@@ -280,7 +279,7 @@ class DerivedTextStore:
         """Whether a *read* (substring/fuzzy) may run against the engine right now.
 
         Looser than :attr:`available`: it also serves during the **external-build** BUILDING
-        window (#650). There the kernel rebuilds against its OWN connection while this facade's
+        window. There the kernel rebuilds against its OWN connection while this facade's
         ``_engine`` is idle and the relevant rows are already committed in ``shrike.db`` — so a
         host read is safe and consistent, and must NOT silently field-fall-back already-present
         recognition rows during the boot/reload rebuild. A *host-side* ``build()`` stays gated
@@ -327,7 +326,7 @@ class DerivedTextStore:
         try:
             return self._engine.count()
         except sqlite3.Error as e:
-            # A store that can't even count is broken, not empty (#396) —
+            # A store that can't even count is broken, not empty —
             # surface it as the error state instead of a silent ready/0.
             self._state = IndexState.ERROR
             logger.warning("Derived-text store count failed: %s", e)
@@ -339,7 +338,7 @@ class DerivedTextStore:
         """Replace a note's text rows for one ``source`` (incremental upsert).
 
         ``refs_text`` maps a ``ref`` (field name, or a media filename for a derived source) to its
-        text. #98 calls this with ``source="field"``; #199 will call it with ``"ocr"``/``"asr"``.
+        text. Called with ``source="field"`` today; ``"ocr"``/``"asr"`` later.
         """
         if not self._available or self._engine is None:
             return
@@ -373,7 +372,7 @@ class DerivedTextStore:
             raise
 
     def claim_external_build(self) -> bool:
-        """Claim BUILDING for a build that runs OUTSIDE this store (#445: the
+        """Claim BUILDING for a build that runs OUTSIDE this store (the
         kernel's `rebuild_derived` op builds against its own engine on the
         same shrike.db; the rows never enter Python). Same dedupe rule as
         `build_in_background`: a second drift trigger while one is in flight
@@ -385,7 +384,7 @@ class DerivedTextStore:
                 return False
             self._state = IndexState.BUILDING
             # The build runs on the kernel's own connection; this facade's engine stays idle and
-            # the rows are already committed, so reads may be served during this window (#650).
+            # the rows are already committed, so reads may be served during this window.
             self._external_build = True
         return True
 
@@ -458,8 +457,8 @@ class DerivedTextStore:
         if not self._can_serve_reads() or self._engine is None:
             return None
         try:
-            # The MATCH policy is the Rust engine's (single implementation,
-            # #331); None = sub-trigram query → find_notes fallback.
+            # The MATCH policy is the Rust engine's (single implementation);
+            # None = sub-trigram query → find_notes fallback.
             rows = self._engine.search_substring(query, limit)
         except sqlite3.Error:
             logger.debug("FTS5 substring query failed for %r; falling back", query, exc_info=True)
@@ -481,7 +480,7 @@ class DerivedTextStore:
             return []
         try:
             # The trigram/overlap policy is the Rust engine's (single
-            # implementation, #331), already deduped + floored.
+            # implementation), already deduped + floored.
             rows = self._engine.search_fuzzy(query, top_k)
         except sqlite3.Error:
             logger.debug("FTS5 fuzzy query failed for %r", query, exc_info=True)

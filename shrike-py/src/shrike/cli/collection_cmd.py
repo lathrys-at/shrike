@@ -18,8 +18,8 @@ def collection() -> None:
     """Collection-wide operations: info, import/export, maintenance, tags, media."""
 
 
-# Rehomed under `collection` (#683): info/export/import/tag/media are collection-
-# scoped, so they live beneath the collection group rather than at the top level.
+# info/export/import/tag/media are collection-scoped, so they live beneath the
+# collection group rather than at the top level.
 collection.add_command(info)
 collection.add_command(export)
 collection.add_command(import_cmd)

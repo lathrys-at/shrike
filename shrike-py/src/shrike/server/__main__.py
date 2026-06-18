@@ -1,7 +1,6 @@
 """``python -m shrike.server`` entry point.
 
-Preserves the documented foreground-run invocation now that ``server`` is a
-package rather than a single module.
+Preserves the documented foreground-run invocation for the ``server`` package.
 """
 
 from shrike.server.server import main

@@ -1,10 +1,10 @@
-"""Reciprocal Rank Fusion (RRF) — the signal-agnostic combiner behind multi-signal search (#180).
+"""Reciprocal Rank Fusion (RRF) — the signal-agnostic combiner behind multi-signal search.
 
-`search_notes` blends several retrieval signals (semantic cosine, exact substring, and — later —
-n-gram fuzzy #98, tag-centroid #179, per-modality semantic #201). Those live on incommensurable
-scales: cosine clusters in a narrow ~0.3–0.7 band, exact match is near-binary, a per-modality
-cosine sits a constant offset below within-modal. Normalize-and-sum inherits every pathology — a
-card's order wobbles with *what else* was retrieved.
+`search_notes` blends several retrieval signals (semantic cosine, exact substring, n-gram fuzzy,
+tag-centroid, per-modality semantic). Those live on incommensurable scales: cosine clusters in a
+narrow ~0.3–0.7 band, exact match is near-binary, a per-modality cosine sits a constant offset
+below within-modal. Normalize-and-sum inherits every pathology — a card's order wobbles with *what
+else* was retrieved.
 
 RRF sidesteps all of it by fusing on **rank position**, not raw score::
 
@@ -13,7 +13,7 @@ RRF sidesteps all of it by fusing on **rank position**, not raw score::
 Why it fits: it never reconciles a cosine-0.7 against a binary hit (magnitude is discarded); a note
 absent from a signal contributes nothing (rank = ∞), which *is* the graceful degradation we want
 for untagged / no-match cards; orderings are stable across queries; and a per-modality constant
-offset is invisible to a rank-based combiner, so the multimodal rankers (#201) plug in with no
+offset is invisible to a rank-based combiner, so the multimodal rankers plug in with no
 normalization. The one thing RRF gives up is magnitude — an exact literal hit should outrank a
 merely-similar one regardless of its rank gap — so the combiner supports a *priority tier*
 (`priority_signals`) that floats notes carrying a chosen signal above the rest, RRF-ordered within.
@@ -40,13 +40,13 @@ class FusedHit:
     """One note's fused result: its score and which signals contributed at what rank.
 
     ``signals`` maps each contributing signal name to the note's 1-based rank in that signal — the
-    seam per-result provenance (#182) reads to report *why* a result surfaced and to debug/tune.
+    seam per-result provenance reads to report *why* a result surfaced and to debug/tune.
     """
 
     note_id: int
     score: float
-    # Excluded from eq/hash: a dict field would make this frozen dataclass unhashable, and a later
-    # provenance consumer (#182) may reasonably expect "frozen ⇒ hashable". Identity is (id, score).
+    # Excluded from eq/hash: a dict field would make this frozen dataclass unhashable, and a
+    # provenance consumer may reasonably expect "frozen ⇒ hashable". Identity is (id, score).
     signals: dict[str, int] = field(default_factory=dict, compare=False)
 
 
@@ -76,7 +76,7 @@ def rrf_fuse(
     for signal in sorted(rankings):
         ids = rankings[signal]
         # Sanitize a non-finite weight to the default (1.0) before it reaches the score
-        # accumulation and the sort (#611). A NaN weight poisons a note's score to NaN, and
+        # accumulation and the sort. A NaN weight poisons a note's score to NaN, and
         # the native port orders NaN scores differently (Rust `total_cmp` total-orders NaN;
         # this Python `-h.score` sort key leaves NaN comparisons false → input-order-dependent),
         # which broke the frozen-reference parity contract. A non-finite weight is meaningless
@@ -100,12 +100,12 @@ def rrf_fuse(
     return hits
 
 
-# ── The SearchPipeline seam (#274) ───────────────────────────────────────────
+# ── The SearchPipeline seam ──────────────────────────────────────────────────
 
 
 @runtime_checkable
 class SearchPipeline(Protocol):
-    """The fusion seam `search_notes` composes against (#274).
+    """The fusion seam `search_notes` composes against.
 
     Today's Python composition (`rrf_fuse` above) is the **reference
     implementation** — the readable spec, what test doubles fake, and what the
@@ -141,7 +141,7 @@ class ReferenceSearchPipeline:
 
 
 class NativeSearchPipeline:
-    """The native fusion (#274): `shrike_kernel::fusion::rrf_fuse` via shrike_native.
+    """The native fusion: `shrike_kernel::fusion::rrf_fuse` via shrike_native.
 
     Same semantics by construction (the parity property suite is the drift
     alarm); GIL released for the fusion itself. Ordinary patchable Python.
@@ -170,8 +170,7 @@ class NativeSearchPipeline:
 
 
 def make_search_pipeline() -> SearchPipeline:
-    """The native fused pipeline — unconditional since the #278 cutover (the
-    SHRIKE_NATIVE_COMPUTE bake flag retired with it; the pure-Python rrf_fuse
-    stays in this module as the documented reference the parity tests pin
-    against the native fusion)."""
+    """The native fused pipeline. The pure-Python rrf_fuse stays in this module
+    as the documented reference the parity tests pin against the native
+    fusion."""
     return NativeSearchPipeline()

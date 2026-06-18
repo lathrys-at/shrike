@@ -18,9 +18,9 @@ from shrike.errors import ShrikeError
 # level group (collection, search, server, note, …) lives in a single module and
 # attaches its own subgroups (e.g. `collection` pulls in info/export/media), so
 # lazy-loading at this level already defers a whole branch — there's nothing
-# finer to split below it. Per the #683 rehome, only the eight top-level groups
-# appear here; the rehomed leaves (info, export, media, index, embedding, …) are
-# reached through their parent group.
+# finer to split below it. Only the eight top-level groups appear here; the
+# leaves (info, export, media, index, embedding, …) are reached through their
+# parent group.
 _LAZY_COMMANDS: dict[str, str] = {
     "collection": "shrike.cli.collection_cmd:collection",
     "search": "shrike.cli.search_cmd:search",
@@ -39,14 +39,14 @@ class ShrikeGroup(OrderedGroup):
 
     Subcommand modules are imported on demand (see ``_LAZY_COMMANDS``) so a bare
     `shrike` invocation stays cheap. ``OrderedGroup`` gives the canonical
-    subcommand order (#682 §G; the root group's name is ``shrike``).
+    subcommand order (the root group's name is ``shrike``).
     ``ShrikeError`` is caught here — from the dependency-light ``shrike.errors`` —
     to render server/connection failures as clean messages instead of tracebacks,
     without the standalone client needing ``click``.
     """
 
     def list_commands(self, ctx: click.Context) -> list[str]:
-        # The lazy table is the command set; order it canonically (#683/#682 §G)
+        # The lazy table is the command set; order it canonically
         # without forcing each module to import — OrderedGroup keys on group name.
         from shrike.cli.groups import CANONICAL_ORDER, _ordered
 
@@ -139,7 +139,7 @@ def cli(
 
     # The client auto-starts a local daemon from this spec on connection
     # failure. None (no collection configured) disables auto-start — e.g. when
-    # targeting a remote server. A capability config error (#498) disables
+    # targeting a remote server. A capability config error disables
     # auto-start with a warning rather than breaking every command — commands
     # against an already-running or remote server still work; `shrike server
     # start` surfaces the same error loudly.
@@ -160,7 +160,7 @@ def cli(
     ctx.obj["url"] = server_url
     ctx.obj["json"] = json_output
     ctx.obj["profile"] = profile
-    # The client injects --profile/--collection into every routed tool call (#68);
+    # The client injects --profile/--collection into every routed tool call;
     # None uses the server's active default.
     ctx.obj["client"] = ShrikeClient(server_url, spec=spec, collection=profile)
 

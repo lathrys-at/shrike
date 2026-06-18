@@ -1,24 +1,22 @@
-"""Per-collection cache layout (#67/#547): where a collection's derived caches live.
+"""Per-collection cache layout: where a collection's derived caches live.
 
-The vector index (``index.usearch`` + ``index.meta.json``, #67) and the
-derived-text store (``shrike.db``, #547) are each namespaced per collection
-under the shared cache dir, so one daemon serving several collections never
-collides them. The load-bearing boundary (#69): **index identity keys on a
-stable function of the collection FILE PATH, never the profile name** — every
-collection has a path; not every collection is registered. The path is the only
-identity always available, which is what lets #67 land independently of the
-registry (#66) and how the routing capstone (#68) wires them (a selector
-resolves name → path via the registry, and the path determines the namespace).
+The vector index (``index.usearch`` + ``index.meta.json``) and the derived-text
+store (``shrike.db``) are each namespaced per collection under the shared cache
+dir, so one daemon serving several collections never collides them. The
+load-bearing boundary: **index identity keys on a stable function of the
+collection FILE PATH, never the profile name** — every collection has a path;
+not every collection is registered. The path is the only identity always
+available, which is how the routing capstone wires them (a selector resolves
+name → path via the registry, and the path determines the namespace).
 
 The kernel owns the identity derivation and writes the files; this module is the
 host-side mirror so the harness/CLI can resolve the same
 ``<cache_dir>/index/<namespace>/`` (index) and
 ``<cache_dir>/derived/<namespace>/shrike.db`` (derived) the kernel writes
-(status reporting, the #68 routing, tests). The namespace itself comes from the
-kernel (``shrike_native.index_namespace``) — one implementation, no parity drift
-— with a pure-Python fallback used only when the native extension isn't
-importable (a plain client environment), pinned byte-for-byte against the kernel
-by a test.
+(status reporting, routing, tests). The namespace itself comes from the kernel
+(``shrike_native.index_namespace``) — one implementation, no parity drift — with
+a pure-Python fallback used only when the native extension isn't importable (a
+plain client environment), pinned byte-for-byte against the kernel by a test.
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ import os
 # namespaces — kept in sync with ``shrike_kernel::cache_layout::INDEX_SUBDIR``.
 INDEX_SUBDIR = "index"
 
-# The subdirectory holding the per-collection derived stores (#547), a parallel
+# The subdirectory holding the per-collection derived stores, a parallel
 # subtree to ``INDEX_SUBDIR`` — kept in sync with
 # ``shrike_kernel::cache_layout::DERIVED_SUBDIR`` / ``DERIVED_DB_NAME``.
 DERIVED_SUBDIR = "derived"
@@ -84,14 +82,14 @@ def collection_index_dir(cache_dir: str, collection_path: str) -> str:
 
     This is where the kernel writes ``index.usearch`` / ``index.meta.json`` for
     ``collection_path``; the host resolves the same location for diagnostics and
-    (in #68) per-collection routing. ``cache_dir`` is the base cache dir the
+    per-collection routing. ``cache_dir`` is the base cache dir the
     ``config.resolve_cache_dir`` cascade yields.
     """
     return os.path.join(cache_dir, INDEX_SUBDIR, index_namespace(collection_path))
 
 
 def derived_db_path(cache_dir: str, collection_path: str) -> str:
-    """The per-collection derived-store path: ``<cache_dir>/derived/<namespace>/shrike.db`` (#547).
+    """The per-collection derived-store path: ``<cache_dir>/derived/<namespace>/shrike.db``.
 
     The same path-derived ``<namespace>`` as :func:`collection_index_dir`, under
     a parallel ``derived/`` subtree — so a daemon serving several collections

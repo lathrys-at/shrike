@@ -18,7 +18,7 @@ from shrike.cli.groups import SearchGroup
 from shrike.cli.output import NOTE_ID, output_options, parse_comma_separated
 from shrike.schemas import CoverageCell, CoverageMatrix, CoverageRow, SearchMatch
 
-# The cross-modal coverage cells, styled for the matrix (#235): native is the
+# The cross-modal coverage cells, styled for the matrix: native is the
 # strong (green) form, via-derived-text the weaker (yellow) reachability,
 # unavailable a dim dash so the matrix reads at a glance.
 _COVERAGE_CELL_STYLE: dict[CoverageCell, str] = {
@@ -48,7 +48,7 @@ def search() -> None:
 def _search_match_badges(m: SearchMatch) -> str:
     """The ` · `-joined evidence badges for one search match (pretty output).
 
-    Provenance (#182) surfaces only the signals the other badges don't already imply — `text` is
+    Provenance surfaces only the signals the other badges don't already imply — `text` is
     covered by the score, `exact` by the `match:` field list — so the new, otherwise-invisible facet
     (a non-text modality like `image`, or a future lexical signal `fuzzy`/`tag`) shows on its own.
     """
@@ -212,7 +212,7 @@ def query(ctx: click.Context, expression: str, brief: bool, limit: int) -> None:
 
 
 def _render_coverage(coverage: CoverageMatrix) -> None:
-    """Render the cross-modal coverage matrix (#235) as a query×target table."""
+    """Render the cross-modal coverage matrix as a query×target table."""
     output.section("Coverage (query → target)")
     rows: list[list[str]] = []
     for q in _COVERAGE_MODALITIES:

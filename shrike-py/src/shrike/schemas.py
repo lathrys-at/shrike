@@ -49,13 +49,13 @@ from pydantic import BaseModel, Field, model_validator
 
 # Stable wire marker prefixing a tool's MCP isError text when the call failed
 # because the collection couldn't be acquired (another process holds it, under
-# cooperative locking — #65). The single source of truth shared by the server
+# cooperative locking). The single source of truth shared by the server
 # (collection.py builds the message) and the dependency-light client (which maps
 # it to CollectionBusyError). Not a response model: busy is a transport-level
 # error class, orthogonal to every tool's response (the op never ran).
 COLLECTION_BUSY_CODE = "collection_busy"
 
-# The action exchange's protocol version (#392) — mirrors shrike-schemas'
+# The action exchange's protocol version — mirrors shrike-schemas'
 # WIRE_PROTOCOL_VERSION (the schema contract test pins them equal). The
 # exchange evolves additively: a breaking change to an action ships as a NEW
 # action/tool name carrying its own types (upsert_notes_v2), so this bumps
@@ -184,11 +184,11 @@ class SubstringInfo(BaseModel):
     """Evidence that the query text occurs literally in a note.
 
     ``matched_fields``/``snippet`` are the field-text hit (the only case today). ``source`` names
-    which *derived* text the literal match was found in — ``field`` now; ``ocr``/``asr`` once #199
-    feeds those into the derived-text store (never VLM image-describe, which is embedding-only). For
-    a non-field source ``ref`` pins the single artifact that matched (a media filename); for the
-    ``field`` source it stays ``None`` and ``matched_fields`` enumerates the fields instead. The
-    ``source``/``ref`` seam lets a result say *where* an image/audio card's text matched.
+    which *derived* text the literal match was found in — ``field`` today (``ocr``/``asr`` are a
+    future seam; never VLM image-describe, which is embedding-only). For a non-field source ``ref``
+    pins the single artifact that matched (a media filename); for the ``field`` source it stays
+    ``None`` and ``matched_fields`` enumerates the fields instead. The ``source``/``ref`` seam lets
+    a result say *where* an image/audio card's text matched.
     """
 
     matched_fields: list[str] = []
@@ -198,13 +198,13 @@ class SubstringInfo(BaseModel):
 
 
 class FuzzyMatch(BaseModel):
-    """Evidence that the query *approximately* matched a note's derived text (#98).
+    """Evidence that the query *approximately* matched a note's derived text.
 
     A trigram/typo-tolerant hit from the derived-text store (the ``fuzzy`` retrieval signal), for
     near-misses an exact substring search would miss (``protien`` → ``protein``). ``source`` is
-    which derived text matched (``field`` today; ``ocr``/``asr`` when #199 lands), ``ref`` the field
-    name or media filename it hit, and ``snippet`` a window around the match — so an LLM/MCP client
-    can see what an image/audio card actually is from the text that matched it.
+    which derived text matched (``field`` today; ``ocr``/``asr`` are a future seam), ``ref`` the
+    field name or media filename it hit, and ``snippet`` a window around the match — so an LLM/MCP
+    client can see what an image/audio card actually is from the text that matched it.
     """
 
     source: str
@@ -213,12 +213,12 @@ class FuzzyMatch(BaseModel):
 
 
 class SignalContribution(BaseModel):
-    """One retrieval signal that contributed to a fused result, and at what rank (#182).
+    """One retrieval signal that contributed to a fused result, and at what rank.
 
     ``signal`` is the fusion signal's name — ``text`` / ``image`` for the per-modality semantic
     rankers (so the name *is* the matched-modality facet: ``image`` ⇒ "matched on the image"),
-    ``exact`` for a literal substring hit, and later ``fuzzy`` (#98) / ``tag`` (#179). ``rank`` is
-    the note's 1-based position in that signal's own ranking; the signal's *unweighted* RRF term
+    ``exact`` for a literal substring hit, and later ``fuzzy`` / ``tag``. ``rank`` is the note's
+    1-based position in that signal's own ranking; the signal's *unweighted* RRF term
     (``1/(k+rank)``) is derivable from it (the per-signal fusion weight is not carried in the
     response, so the full weighted contribution is not).
     """
@@ -233,7 +233,7 @@ class SearchMatch(Note):
     A hit can be semantically ranked, an exact-substring hit, or both. Each
     annotation below is independently optional and absent when its mechanism did
     not contribute — but a returned match always carries at least one. This is the
-    extension point for future retrieval backends (n-gram / fuzzy / prefix, #98):
+    extension point for future retrieval backends (n-gram / fuzzy / prefix):
     they add further optional evidence fields here, never a new param or tool.
     """
 
@@ -242,11 +242,11 @@ class SearchMatch(Note):
     score: float | None = None
     # Present when the query text occurs literally in the note.
     substring: SubstringInfo | None = None
-    # Present when the query trigram/typo-matched the note's derived text (the `fuzzy` signal, #98).
+    # Present when the query trigram/typo-matched the note's derived text (the `fuzzy` signal).
     # Independent of `score`/`substring` — a hit can be any combination. Carries the source-aware
     # window (where in which derived text it matched).
     fuzzy: FuzzyMatch | None = None
-    # Which signals surfaced this result, best (lowest) rank first (#182). Always non-empty for a
+    # Which signals surfaced this result, best (lowest) rank first. Always non-empty for a
     # returned match (it came from a fused hit). The unified provenance view over the fused ranking;
     # `score`/`substring` above stay as the per-signal detail. `signal: "image"` is the
     # matched-modality facet.
@@ -254,16 +254,15 @@ class SearchMatch(Note):
 
 
 class Neighbor(BaseModel):
-    """A similar-note candidate attached to an upsert result (#204/#531).
+    """A similar-note candidate attached to an upsert result.
 
     Neighbors are search results: a created/updated note's neighbors are a
     ``search_notes`` of its own content, so a neighbor carries the same shape
     a search match does. ``score`` is the cosine similarity when the candidate
     was semantically ranked — ``None`` for an exact-text-only hit (which has no
-    meaningful cosine to report). ``provenance`` says which signals surfaced it
-    (#208), in the same ``{signal, rank}`` shape as search provenance (#182) —
-    ANY search signal (``text``, ``exact``, ``image``, ``tag``, ``fuzzy``), not
-    just text.
+    meaningful cosine to report). ``provenance`` says which signals surfaced it,
+    in the same ``{signal, rank}`` shape as search provenance — ANY search
+    signal (``text``, ``exact``, ``image``, ``tag``, ``fuzzy``), not just text.
     """
 
     id: int
@@ -460,7 +459,7 @@ FieldOp = Annotated[
 
 
 class FieldMetadataInput(BaseModel):
-    """A per-field editor-metadata update (#119). Only the set attrs change."""
+    """A per-field editor-metadata update. Only the set attrs change."""
 
     name: str = Field(description="Name of the field to update.")
     font: str | None = Field(default=None, description="Edit-time font family.")
@@ -555,7 +554,7 @@ class DeckInput(BaseModel):
     name: str = Field(description='Deck name (e.g., "Japanese::Vocabulary"); "::" denotes nesting.')
 
 
-# -- media (#70) -------------------------------------------------------------
+# -- media -------------------------------------------------------------------
 # One store item carries exactly one source: base64 `data` (which needs an
 # explicit `filename` with an extension — the file's bytes don't tell us what it
 # is) or a `url` the server fetches (name/extension derived from the URL/Content-
@@ -665,7 +664,7 @@ class ListNotesResponse(BaseModel):
 
 
 class MigrateNoteTypeResponse(BaseModel):
-    # Result of changing a set of notes from one note type to another (#75).
+    # Result of changing a set of notes from one note type to another.
     # The two list fields surface the data-affecting parts of the migration so
     # the caller sees exactly what was lost / left empty.
     changed: list[int] = []  # note ids migrated (or that would be, on dry-run)
@@ -684,7 +683,7 @@ class SearchResultGroup(BaseModel):
 class SearchResponse(BaseModel):
     results: list[SearchResultGroup] = []
     message: str | None = None
-    # The two-tier live-search contract (#181): "partial" means the
+    # The two-tier live-search contract: "partial" means the
     # embedding-bearing signals (semantic + tag) were skipped because the
     # caller asked for the live tier — re-request with tier="full" to upgrade.
     # A response that is the final answer for its query/server state (full
@@ -726,7 +725,7 @@ class RenameTagResponse(BaseModel):
     notes_modified: int = 0
 
 
-# -- collection_prune (#89) --------------------------------------------------
+# -- collection_prune --------------------------------------------------------
 # One maintenance tool runs several cleanups. Each cleanup's result is its own
 # nested sub-model, present only when that cleanup was requested. The `| None`
 # here is genuine independent optionality ("this cleanup wasn't run"), not a
@@ -771,7 +770,7 @@ class DeleteDecksResponse(BaseModel):
     not_empty: list[str] = []
 
 
-# -- media responses (#70) ---------------------------------------------------
+# -- media responses ---------------------------------------------------------
 
 
 class StoreMediaOk(BaseModel):
@@ -872,7 +871,7 @@ class FindReplaceResponse(BaseModel):
 
 
 class ImportPackageResponse(BaseModel):
-    """The result of importing an `.apkg`/`.colpkg` (#72) — per-bucket note
+    """The result of importing an `.apkg`/`.colpkg` — per-bucket note
     counts from anki's importer, mirroring `ImportResponse.Log`.
 
     `new` notes were added; `updated` were same-GUID notes the importer
@@ -903,9 +902,9 @@ class ImportPackageResponse(BaseModel):
 
 class EmbeddingRunning(BaseModel):
     """A live embedding service. ``available`` is False when the /health
-    probe fails while the process is up (since #342 P4a the full fields ride
-    along either way); ``url``/``model`` stay optional for older wire shapes
-    and backends without them."""
+    probe fails while the process is up (the full fields ride along either
+    way); ``url``/``model`` stay optional for older wire shapes and backends
+    without them."""
 
     state: Literal["running"] = "running"
     available: bool = False
@@ -919,8 +918,8 @@ class EmbeddingRunning(BaseModel):
     # ``batch`` is "batched" or "serial"; both absent for a backend that doesn't report them.
     batch_safe: bool | None = None
     batch: Literal["serial", "batched"] | None = None
-    # The modalities this space embeds (#498/#235) — what the running backend
-    # advertises (text, or text+image for CLIP). Optional for older wire shapes.
+    # The modalities this space embeds — what the running backend advertises
+    # (text, or text+image for CLIP). Optional for older wire shapes.
     modalities: list[str] | None = None
 
 
@@ -941,7 +940,7 @@ class IndexProgress(BaseModel):
 
 
 class IndexModalityStat(BaseModel):
-    """One per-modality sub-index's size/ndim (#684).
+    """One per-modality sub-index's size/ndim.
 
     The aggregate ``size``/``ndim`` on the index collapse the per-modality
     sub-indexes (sum / the text modality's width), so a two-space (text+image)
@@ -967,10 +966,10 @@ class _IndexBase(BaseModel):
     path: str | None = None
     col_mod: int | None = None
     model_id: str | None = None
-    # Per-(non-text-)modality activation-gate calibration {modality: {n, mean, std}} (#201b); absent
+    # Per-(non-text-)modality activation-gate calibration {modality: {n, mean, std}}; absent
     # until a multimodal index is calibrated (text-only / uncalibrated indexes have none).
     activation: dict[str, dict[str, float]] | None = None
-    # Per-modality sub-index breakdown (#684): each sub-index's own size/ndim,
+    # Per-modality sub-index breakdown: each sub-index's own size/ndim,
     # which the aggregate size/ndim above can't express (text 768-dim, image
     # 512-dim under CLIP). Text-first. Empty list on older payloads / a server
     # that doesn't report it.
@@ -1004,7 +1003,7 @@ IndexStatus = Annotated[
 
 
 class DerivedStatus(BaseModel):
-    """The derived-text store's self-report (#98) — the FTS5 trigram sidecar.
+    """The derived-text store's self-report — the FTS5 trigram sidecar.
 
     Unlike the vector index this is a flat shape, not a discriminated union: the store has no
     per-state-only fields (no build progress to report, no persisted error variant — a failed build
@@ -1022,7 +1021,7 @@ class DerivedStatus(BaseModel):
 
 
 class RecognitionEngineStatus(BaseModel):
-    """One attached recognition engine's self-report (#228/#485).
+    """One attached recognition engine's self-report.
 
     ``state`` is ``ready`` (attached, sweeping/idle) or ``error`` (the engine's
     dependency is missing or a sweep failed) — the same lifecycle enum the
@@ -1036,7 +1035,7 @@ class RecognitionEngineStatus(BaseModel):
 
 
 class CoverageCell(StrEnum):
-    """How one (query-modality → target-modality) pair is reachable (#235).
+    """How one (query-modality → target-modality) pair is reachable.
 
     The honest cross-modal contract a caller needs to know what a query can
     actually retrieve:
@@ -1060,7 +1059,7 @@ class CoverageCell(StrEnum):
 
 
 class CoverageRow(BaseModel):
-    """One query modality's reachability to each target modality (#235).
+    """One query modality's reachability to each target modality.
 
     Every cell is a ``CoverageCell`` — there is no "absent" target, only an
     ``unavailable`` one, so the shape is stable for clients regardless of which
@@ -1072,7 +1071,7 @@ class CoverageRow(BaseModel):
 
 
 class CoverageMatrix(BaseModel):
-    """The cross-modal coverage matrix (#235): for each query modality, a
+    """The cross-modal coverage matrix: for each query modality, a
     ``CoverageRow`` naming how each target modality is reachable.
 
     Derived from the live embedding spaces (the ``native`` cells) plus the
@@ -1088,10 +1087,10 @@ class CoverageMatrix(BaseModel):
 
 
 class DedupStats(BaseModel):
-    """Rolling dedup best-match statistics (#207): one sample per upsert draft
+    """Rolling dedup best-match statistics: one sample per upsert draft
     note — the best SEMANTIC neighbor cosine, or a `no_match` tick when none
     ranked. The calibration feedstock for the dedup threshold, deliberately
-    separate from the #201 search-gate calibration (different population).
+    separate from the search-gate calibration (different population).
     `buckets[i]` counts best-scores in [i/20, (i+1)/20); 20 buckets over [0, 1].
     """
 
@@ -1101,7 +1100,7 @@ class DedupStats(BaseModel):
 
 
 class CollectionStatus(BaseModel):
-    """One collection's state in a multi-collection daemon's ``/status`` (#68).
+    """One collection's state in a multi-collection daemon's ``/status``.
 
     A row per known collection: the daemon's boot/default collection plus every
     registered profile. ``name`` is the routing handle (the registry profile
@@ -1138,8 +1137,8 @@ class ServerStatus(BaseModel):
     """
 
     running: Literal[True] = True
-    # The action exchange's protocol version (#392) — a future remote client
-    # checks this before speaking. ``ge=0`` mirrors the Rust ``u32`` (#606).
+    # The action exchange's protocol version — a future remote client
+    # checks this before speaking. ``ge=0`` mirrors the Rust ``u32``.
     wire_protocol_version: int = Field(ge=0)
     pid: int
     url: str
@@ -1150,42 +1149,42 @@ class ServerStatus(BaseModel):
     log: str | None = None
     # The PRIMARY embedding space's health — kept for back-compat (every
     # existing consumer reads ``embedding``). ``embedding_spaces`` below is the
-    # full per-space list (#681); this is ``embedding_spaces[0]`` when any space
+    # full per-space list; this is ``embedding_spaces[0]`` when any space
     # is live.
     embedding: EmbeddingStatus
-    # Per-space embedding health (#681): one entry per configured embedder — the
-    # primary runtime plus every secondary space (#233). A multi-space profile
+    # Per-space embedding health: one entry per configured embedder — the
+    # primary runtime plus every secondary space. A multi-space profile
     # (e.g. a text space + a text+image CLIP space) reports each here, keyed in
     # the CLI by its modalities. Single-space servers report a one-element list;
     # empty on older payloads (read ``embedding`` then).
     embedding_spaces: list[EmbeddingStatus] = []
     index: IndexStatus
-    # Derived-text store (#98): the FTS5 trigram sidecar backing substring/fuzzy lexical search.
+    # Derived-text store: the FTS5 trigram sidecar backing substring/fuzzy lexical search.
     # Defaulted so older payloads (and a build without FTS5 support) validate.
     derived: DerivedStatus = DerivedStatus()
-    # Collection-lock state (#64): the locking mode and whether the collection is
+    # Collection-lock state: the locking mode and whether the collection is
     # currently held open. In the default permanent-hold mode it's always held;
     # in cooperative mode it's released when idle. Defaulted so older payloads
     # (and the permanent-mode common case) validate.
     locking: Literal["permanent", "cooperative"] = "permanent"
     collection_held: bool = True
-    # Dedup best-match statistics (#207) — None until the first upsert with
+    # Dedup best-match statistics — None until the first upsert with
     # neighbors runs (and on payloads from older servers).
     dedup: DedupStats | None = None
-    # Per-engine recognition state (#228/#485): a map keyed by source
+    # Per-engine recognition state: a map keyed by source
     # (``ocr``/``vlm``), each row {state, backend, fingerprint}. An EMPTY map
     # means nothing is attached — distinct from an attached-but-errored engine,
     # which is a present row with state=error. Defaulted (empty) so older
     # payloads validate.
     recognition: dict[str, RecognitionEngineStatus] = {}
-    # The cross-modal coverage matrix (#498/#235): for each (query, target)
+    # The cross-modal coverage matrix: for each (query, target)
     # modality pair, how the target is reachable — ``native`` (one space embeds
     # both), ``via_derived_text`` (a recognizer derives text from the target
     # into the text space), or ``unavailable``. Derived from the live spaces and
     # attached recognizers; None on payloads from older servers (which sent the
     # flat ``{modality: bool}`` shape).
     coverage: CoverageMatrix | None = None
-    # Multi-collection routing (#68): one row per known collection — the
+    # Multi-collection routing: one row per known collection — the
     # daemon's boot/default collection plus every registered profile — with its
     # held/index/col_mod state. None on a single-collection server / older
     # payloads (the top-level embedding/index/derived/collection_held fields
@@ -1280,7 +1279,7 @@ class ShutdownResponse(BaseModel):
 
 
 class ReloadResponse(BaseModel):
-    # POST /reload — closed and re-opened the collection (#79).
+    # POST /reload — closed and re-opened the collection.
     status: Literal["reloaded"] = "reloaded"
     col_mod: int  # collection mod stamp after re-opening
     rebuilding: bool = False  # whether the re-open drift check started an index rebuild
@@ -1307,7 +1306,7 @@ class StopFailed(BaseModel):
 StopResponse = Annotated[StopSucceeded | StopFailed, Field(discriminator="stopped")]
 
 
-# -- the action exchange error envelope (#505) -------------------------------
+# -- the action exchange error envelope --------------------------------------
 # The UI edge (POST /actions/{name}) is schema-first WITHOUT the MCP JSON-RPC
 # envelope, so a failure needs its own one wire shape. ActionError is that
 # shape — defined once in shrike-schemas (canonical) and mirrored here. The
@@ -1334,11 +1333,11 @@ class ActionError(BaseModel):
     message: str
 
 
-# -- the collection/profile registry enumeration (#66) -----------------------
+# -- the collection/profile registry enumeration -----------------------------
 # `list_profiles` lets an agent discover which collections this server knows
 # about (by friendly name) and which one is the active default — the read half
 # of the multi-collection surface. Selection-as-routing (a per-call `collection`
-# selector) is the routing capstone (#68); this action only enumerates. These
+# selector) is the routing capstone; this action only enumerates. These
 # are host-side config shapes (like ServerStatus), not kernel wire types, so
 # they live here and not in shrike-schemas — the kernel never produces them.
 class ProfileEntry(BaseModel):
@@ -1347,8 +1346,8 @@ class ProfileEntry(BaseModel):
     the per-call selector resolves to when no selector is passed.
 
     Per-profile embedding/cache overrides exist in the registry (config) but
-    are deliberately not surfaced here: they're consumed by routing (#68) /
-    namespacing (#67), not actionable through enumeration."""
+    are deliberately not surfaced here: they're consumed by routing /
+    namespacing, not actionable through enumeration."""
 
     name: str
     path: str
@@ -1364,7 +1363,7 @@ class ListProfilesResponse(BaseModel):
     default: str | None = None
 
 
-# -- export to an Anki package (#71) -----------------------------------------
+# -- export to an Anki package -----------------------------------------------
 # `export_package` writes a .apkg/.colpkg. The kernel op returns the
 # ExportPackageResult (note_count + the on-disk path it wrote); the host action
 # wraps it into ExportPackageResponse, adding `bytes`/`format` and — for the
@@ -1375,7 +1374,7 @@ class ExportPackageResult(BaseModel):
     """The kernel export-op outcome: notes written + the path the package
     landed at. Internal wire — the host action wraps it for the tool response."""
 
-    note_count: int = Field(ge=0)  # mirrors the Rust ``u32`` (#606)
+    note_count: int = Field(ge=0)  # mirrors the Rust ``u32``
     out_path: str
 
 
@@ -1387,16 +1386,16 @@ class ExportPackageResult(BaseModel):
 # mirroring fetch_media's "GET the url for the bytes".
 class ExportPackagePath(BaseModel):
     delivery: Literal["path"]
-    note_count: int = Field(ge=0)  # Rust ``u32`` (#606)
-    bytes: int = Field(ge=0)  # Rust ``u64`` (#606)
+    note_count: int = Field(ge=0)  # Rust ``u32``
+    bytes: int = Field(ge=0)  # Rust ``u64``
     format: str  # "apkg" | "colpkg"
     path: str
 
 
 class ExportPackageUrl(BaseModel):
     delivery: Literal["url"]
-    note_count: int = Field(ge=0)  # Rust ``u32`` (#606)
-    bytes: int = Field(ge=0)  # Rust ``u64`` (#606)
+    note_count: int = Field(ge=0)  # Rust ``u32``
+    bytes: int = Field(ge=0)  # Rust ``u64``
     format: str
     url: str
 

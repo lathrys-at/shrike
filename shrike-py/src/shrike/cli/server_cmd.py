@@ -57,21 +57,21 @@ def _render_status(status: ServerStatus) -> None:
         held = "[green]held[/green]" if status.collection_held else "[dim]released (idle)[/dim]"
         output.kv("Locking", f"cooperative · collection {held}")
 
-    # §B section order (#684): Index → Derived text → Recognition → Embedding,
+    # Section order: Index → Derived text → Recognition → Embedding,
     # rendered via the SHARED block renderers so the standalone `server embedding
     # status` / `server index status` commands can't drift from these blocks.
     status_render.render_index(status.index)
     status_render.render_derived(status.derived)
     status_render.render_recognition(status.recognition)
-    # Per-space embedding (#681): the full list when the server reports it, else
+    # Per-space embedding: the full list when the server reports it, else
     # the single primary `embedding` (older payloads).
     status_render.render_embedding_spaces(status.embedding_spaces or [status.embedding])
 
-    # The cross-modal coverage matrix moved to `shrike search coverage` (#683):
+    # The cross-modal coverage matrix lives in `shrike search coverage`:
     # it's a retrieval concern, not a daemon-status one. `/status` still carries
     # `coverage`, but `server status` no longer renders it.
 
-    # Multi-collection routing (#68): per-collection rows. The figures above
+    # Multi-collection routing: per-collection rows. The figures above
     # (embedding/index/derived) are the DEFAULT collection's — the one the
     # operational commands (embedding/index/recognition, collection reload) act
     # on; tool calls route per --profile. Shown only when more than one
@@ -132,8 +132,8 @@ def server() -> None:
     """
 
 
-# Rehomed under `server` (#683): the embedding service and vector index are
-# daemon-control surfaces, so they live beneath the server group.
+# The embedding service and vector index are daemon-control surfaces, so they
+# live beneath the server group.
 server.add_command(embedding)
 server.add_command(index)
 
@@ -360,7 +360,7 @@ def server_start(
     resolved_log_level = log_level or log_config.get("level", "info")
 
     # Resolve embedding settings once for both the spawned server args and the
-    # config we persist — v2-first (#498): a config declaring embedders:/managed:
+    # config we persist — v2-first: a config declaring embedders:/managed:
     # resolves against the build's compiled features and rejects the legacy
     # flags; otherwise the legacy config → env → flag cascade runs unchanged.
     from shrike.harness.profiles import ProfileError
@@ -384,7 +384,7 @@ def server_start(
         )
     except ProfileError as e:
         raise click.ClickException(str(e)) from e
-    # A v2 config rides --config to the daemon (#498): structured entries
+    # A v2 config rides --config to the daemon: structured entries
     # (remote endpoints, api_key_env) have no flag spelling, so the daemon
     # resolves embedders:/recognizers:/managed: from the file itself. The
     # legacy flags it replaces are rejected under v2 (resolve_embedding_profile
@@ -449,7 +449,7 @@ def server_start(
 
     # Persist the resolved flags only when asked. `server start` is otherwise a
     # no-write operation: the config file stays user-managed, and start always
-    # reflects exactly the flags it was given (see #56).
+    # reflects exactly the flags it was given.
     if save_config_flag:
         config_path = ctx.obj["config_path"]
         config["collection"] = collection_path
@@ -468,7 +468,7 @@ def server_start(
         if resolved_locking["hold_seconds"] is not None:
             config["server"]["lock_hold_seconds"] = resolved_locking["hold_seconds"]
         # Remember embedding settings so `shrike embedding start` works later.
-        # Skipped for a v2 config (#498): the embedders:/managed: sections pass
+        # Skipped for a v2 config: the embedders:/managed: sections pass
         # through save_config verbatim — writing the bridged params back as a
         # legacy embedding: section would create the forbidden v2+legacy mix.
         if not any(config.get(k) is not None for k in ("embedders", "recognizers", "managed")):

@@ -2,9 +2,9 @@
 
 Several MCP surfaces touch a server-local filesystem path at the server user's
 privilege under the unauthenticated-loopback trust model: ``store_media``'s
-``path`` source reads a file in (#164/#170), ``export_package`` writes a
-``.apkg``/``.colpkg`` out (#71), and ``import_package`` will read one in (#72).
-Each is a *distinct capability with a distinct blast radius* — a single-file
+``path`` source reads a file in, ``export_package`` writes a
+``.apkg``/``.colpkg`` out, and ``import_package`` will read one in. Each is a
+*distinct capability with a distinct blast radius* — a single-file
 read, a collection-bearing write, a whole-collection overwrite — so each opts in
 through its **own** operator-allowed root list (``--media-path-root`` /
 ``--export-path-root`` / ``--import-path-root``). This module is the **mechanism**
@@ -58,7 +58,7 @@ def server_is_purely_local(
     allowed_hosts: list[str] | None,
     allowed_origins: list[str] | None,
 ) -> bool:
-    """Whether the server is in its default, purely-local configuration (#164).
+    """Whether the server is in its default, purely-local configuration.
 
     Gates every server-local filesystem capability (store_media ``path``, export
     ``output_path``, import source). Only when the bind is loopback,
@@ -82,8 +82,8 @@ def validate_path_root(raw: str) -> str:
 
     Returns the resolved absolute real path (symlinks collapsed) used for the
     containment checks below. Capability-agnostic — the same validation backs
-    ``--media-path-root`` (#170), ``--export-path-root`` (#71), and
-    ``--import-path-root`` (#72). Rejects the filesystem root (``dirname(p) == p``
+    ``--media-path-root``, ``--export-path-root``, and ``--import-path-root``.
+    Rejects the filesystem root (``dirname(p) == p``
     is true for ``/``, a Windows drive root — confining to ``/`` is no
     confinement) and a root that isn't an existing directory (so it can't 'refuse
     everything' or spring into existence later).

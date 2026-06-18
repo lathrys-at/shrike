@@ -1,4 +1,4 @@
-"""The export download store (#71): server-named temp packages + their tokens.
+"""The export download store: server-named temp packages + their tokens.
 
 The default export delivery (no server-local ``output_path``) writes the
 package to a temp file under the cache dir and hands the caller a one-shot
@@ -42,7 +42,7 @@ class _Pending:
 
 
 class ExportStore:
-    """Tracks server-named export temp files awaiting download (#71).
+    """Tracks server-named export temp files awaiting download.
 
     Thread-safe (a plain lock around the small map): the action mints on the
     event loop, the route resolves+reaps possibly on a worker thread. The temp

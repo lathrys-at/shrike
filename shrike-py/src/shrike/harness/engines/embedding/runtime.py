@@ -1,7 +1,7 @@
 """llama-server embedding backend + the runtime that owns its lifecycle.
 
-``LlamaServerBackend`` is a thin facade (#342 P4) composing the two native
-pieces: ``shrike_native.LlamaServerManager`` (subprocess lifecycle — spawn,
+``LlamaServerBackend`` is a thin facade composing the two native pieces:
+``shrike_native.LlamaServerManager`` (subprocess lifecycle — spawn,
 health-wait, orphan reaping, escalating stop) and
 ``shrike_native.RemoteEmbedder`` (the generic OpenAI-compatible embeddings
 client). One implementation of the
@@ -18,7 +18,7 @@ The backend exposes a simple sync interface:
 ``EmbeddingService`` is kept as a backward-compatible alias of
 ``LlamaServerBackend``. ``EmbeddingRuntime`` selects a backend by *kind*
 (``llama``/``onnx``) and manages start/stop; the server harness attaches the
-started backend to the kernel's embed slot itself (#342).
+started backend to the kernel's embed slot itself.
 """
 
 from __future__ import annotations
@@ -39,10 +39,8 @@ from shrike.harness.engines.embedding.batching import probe_max_safe_batch
 from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
 
 # Embedding backend kinds the runtime can construct (see EmbeddingRuntime).
-# The onnx/clip backends run the native (Rust) engines, unconditional since the
-# #278 cutover; "onnx-rs"/"clip-rs" — the kinds that selected those engines
-# during the dual-engine parity bake (#270/#271) — remain accepted as aliases so
-# existing configs keep working.
+# The onnx/clip backends run the native (Rust) engines; "onnx-rs"/"clip-rs"
+# remain accepted as aliases so existing configs keep working.
 SUPPORTED_BACKENDS = ("llama", "onnx", "clip")
 BACKEND_ALIASES = {"onnx-rs": "onnx", "clip-rs": "clip"}
 DEFAULT_BACKEND = "llama"
@@ -89,12 +87,12 @@ class LlamaServerBackend:
         self._model_name: str | None = None
         self._modalities = modalities
         # Per-modality projectors loaded with the server for a multimodal omni
-        # entry (#501); empty = a text-only embeddings server. Vector-affecting,
-        # so they fold into the fingerprint.
+        # entry; empty = a text-only embeddings server. Vector-affecting, so
+        # they fold into the fingerprint.
         self._mmprojs = list(mmprojs) if mmprojs else []
-        # The native lifecycle manager (#342 P4b): spawn + health-wait +
-        # PID-file orphan reaping + SIGTERM→SIGKILL stop, all crate-side
-        # (including the reserved-flag guard on the extra_args passthrough).
+        # The native lifecycle manager: spawn + health-wait + PID-file orphan
+        # reaping + SIGTERM→SIGKILL stop, all crate-side (including the
+        # reserved-flag guard on the extra_args passthrough).
         self._manager = shrike_native.LlamaServerManager(
             model,
             host=host,
@@ -110,8 +108,8 @@ class LlamaServerBackend:
             mmprojs=self._mmprojs,
         )
         self._pooling = pooling
-        # The native HTTP client (#342 P4a): one unpinned client for health and
-        # model metadata; a model-pinned twin is built once the name is known.
+        # The native HTTP client: one unpinned client for health and model
+        # metadata; a model-pinned twin is built once the name is known.
         self._client = shrike_native.RemoteEmbedder(self._base_url)
         self._remote: Any = None
 
@@ -142,9 +140,9 @@ class LlamaServerBackend:
         self._model_name = self.model_info().get("id") or Path(self._model).name
         self._remote = shrike_native.RemoteEmbedder(self._base_url, model=self._model_name)
 
-        # An image entry must have actually loaded a vision mmproj (#501) —
-        # fail fast at boot, not at the first image embed in a sweep. Unlike
-        # the probe below (which degrades in place), this re-raises, so it must
+        # An image entry must have actually loaded a vision mmproj — fail fast
+        # at boot, not at the first image embed in a sweep. Unlike the probe
+        # below (which degrades in place), this re-raises, so it must
         # stop the spawned child first — a degraded boot has no future start()
         # to reap the orphan, and it would hold its port + VRAM for the
         # daemon's life otherwise.
@@ -231,8 +229,8 @@ class LlamaServerBackend:
         Read from llama-server's ``/v1/models`` metadata (the same block the
         fingerprint uses). Falls back to probing — a tiny embed call whose vector
         length is the dimension — when the metadata omits it (an older llama.cpp),
-        so an empty-at-boot index can still be materialized at the right width
-        (#148). Returns ``None`` only if both routes fail.
+        so an empty-at-boot index can still be materialized at the right width.
+        Returns ``None`` only if both routes fail.
         """
         meta = self.model_info().get("meta") or {}
         n_embd = meta.get("n_embd")
@@ -292,8 +290,8 @@ class LlamaServerBackend:
         passthrough = list(self._manager.passthrough_tokens())
         if passthrough:
             base = f"{base}:args={' '.join(passthrough)}"
-        # The mmproj set is vector-affecting (#501): a different projector
-        # produces different image vectors, so changing it must rebuild. The
+        # The mmproj set is vector-affecting: a different projector produces
+        # different image vectors, so changing it must rebuild. The
         # text model's `/v1/models` meta says nothing about the projector, so
         # this is the only thing distinguishing two omni configs on the same
         # text model. Folded as name:size (sorted) — size disambiguates two
@@ -345,9 +343,9 @@ class LlamaServerBackend:
         return vectors
 
     def embed_images(self, images: list[bytes]) -> list[list[float]]:
-        """Embed images via the native multimodal dialect (#501) — direct
-        path for callers/tests; the kernel rides ``native_embedder``. Only
-        when the managed server loaded a vision projector."""
+        """Embed images via the native multimodal dialect — direct path for
+        callers/tests; the kernel rides ``native_embedder``. Only when the
+        managed server loaded a vision projector."""
         if IMAGE not in self._modalities:
             raise RuntimeError("this embedder does not serve images (no image modality)")
         if not self.running or self._remote is None:
@@ -356,14 +354,13 @@ class LlamaServerBackend:
         return vectors
 
     def native_embedder(self) -> Any:
-        """The kernel-slot handle (#342 P4): the model-pinned remote client
-        composed behind the engine contract, so kernel embeds run native
-        end-to-end (lane → pool thread → HTTP) and never re-enter this
-        facade — the same handover the onnx/clip facades make. The facade
-        keeps lifecycle (spawn, health-wait, the probe, orphan reaping),
-        identity assembly, and ``health()``. Composes the image half too for
-        a multimodal entry (#501). Must be called from a coroutine context
-        (it captures the running loop).
+        """The kernel-slot handle: the model-pinned remote client composed
+        behind the engine contract, so kernel embeds run native end-to-end
+        (lane → pool thread → HTTP) and never re-enter this facade — the same
+        handover the onnx/clip facades make. The facade keeps lifecycle
+        (spawn, health-wait, the probe, orphan reaping), identity assembly,
+        and ``health()``. Composes the image half too for a multimodal entry.
+        Must be called from a coroutine context (it captures the running loop).
         """
         if not self.running or self._remote is None:
             raise RuntimeError("Embedding service is not running")
@@ -376,13 +373,12 @@ class LlamaServerBackend:
         )
 
 
-# Backward-compatible alias: the llama-server backend was the original (and only)
-# embedding service. Existing imports of ``EmbeddingService`` keep working.
+# Backward-compatible alias so existing imports of ``EmbeddingService`` keep working.
 EmbeddingService = LlamaServerBackend
 
 
 class RemoteBackend:
-    """An embeddings endpoint Shrike does not manage (#498): a v2 ``embedders:``
+    """An embeddings endpoint Shrike does not manage: a v2 ``embedders:``
     entry with ``runtime: remote`` and an explicit ``endpoint`` (cloud, tailnet,
     any OpenAI-compatible server), or ``managed.llama_server.manage: attach``
     (an existing local llama-server someone else owns — never spawned, reaped,
@@ -394,11 +390,11 @@ class RemoteBackend:
     (referenced, never inline), proves connectivity/auth with one embed call,
     and runs the batch-safety probe; ``stop()`` just drops the client.
     Config-only — there is deliberately no flag spelling for this backend
-    (structured entries ride ``--config``, #498).
+    (structured entries ride ``--config``).
 
     A ``modalities: [text, image]`` entry against a llama.cpp multimodal
-    endpoint also serves images over the native dialect (#501): the same
-    remote engine embeds both, so the kernel composition exposes both halves
+    endpoint also serves images over the native dialect: the same remote
+    engine embeds both, so the kernel composition exposes both halves
     and ``start`` fails fast if the endpoint can't actually serve vision.
     """
 
@@ -418,7 +414,7 @@ class RemoteBackend:
         self._api_key_env = api_key_env
         self._batch_cap = batch_size
         self._modalities = modalities
-        # Router-managed (#567): this remote talks to a SHARED llama.cpp router
+        # Router-managed: this remote talks to a SHARED llama.cpp router
         # serving many models, so the endpoint's `/v1/models[0]` is NOT this
         # space's model. The pinned `model` is the authoritative identity, and
         # the embedding dim must come from an actual embed of THIS model (the
@@ -426,7 +422,7 @@ class RemoteBackend:
         # router-managed remote therefore REQUIRES an explicit model (the
         # routing key), which profiles.py guarantees.
         self._router_managed = router_managed
-        # The router-wide pooling (#567): vector-affecting, so it folds into the
+        # The router-wide pooling: vector-affecting, so it folds into the
         # router fingerprint (`remote:{model}:pool={pooling}`) — a pooling change
         # rebuilds every router space. Only meaningful for a router-managed
         # remote (the router launches with --pooling); None for any other remote
@@ -487,7 +483,7 @@ class RemoteBackend:
         # and it surfaces auth errors at start instead of first use.
         remote.embed_chunk([" "])
         # An image entry must hit an endpoint that actually serves vision
-        # (the native dialect's mmproj). Fail fast at start (#501) — the same
+        # (the native dialect's mmproj). Fail fast at start — the same
         # boundary every capability mismatch hits, not a first-image surprise.
         if IMAGE in self._modalities and not remote.vision_capable():
             raise RuntimeError(
@@ -539,9 +535,9 @@ class RemoteBackend:
         if self._router_managed:
             # The shared router's /v1/models[0] is NOT this space's model, so
             # meta.n_embd would be the WRONG dimension whenever two router
-            # models differ in width (#567). The pinned `_remote` client embeds
-            # THIS model, so the returned vector length is authoritative — probe
-            # it, never read the shared metadata.
+            # models differ in width. The pinned `_remote` client embeds THIS
+            # model, so the returned vector length is authoritative — probe it,
+            # never read the shared metadata.
             try:
                 vectors = self.embed_texts([" "])
             except Exception:
@@ -567,7 +563,7 @@ class RemoteBackend:
         to. The endpoint URL is deliberately excluded: two endpoints serving
         the same model share a vector space. ``textprep`` appended as always.
 
-        A router-managed remote (#567) is pinned to ``remote:{model_name}``
+        A router-managed remote is pinned to ``remote:{model_name}``
         unconditionally: the shared router's ``/v1/models[0]`` lists MANY models
         and is not this space's, so the ``meta:`` recipe would be IDENTICAL
         across every space sharing the router — collapsing their distinct vector
@@ -609,8 +605,8 @@ class RemoteBackend:
         return vectors
 
     def embed_images(self, images: list[bytes]) -> list[list[float]]:
-        """Embed images via the native multimodal dialect (#501) — the direct
-        path for callers/tests; the kernel rides ``native_embedder``. Available
+        """Embed images via the native multimodal dialect — the direct path
+        for callers/tests; the kernel rides ``native_embedder``. Available
         only when the entry declares image modality."""
         if IMAGE not in self._modalities:
             raise RuntimeError("this embedder does not serve images (no image modality)")
@@ -621,8 +617,8 @@ class RemoteBackend:
 
     def native_embedder(self) -> Any:
         """The kernel-slot handle — the same composition as the llama facade.
-        Composes the image half too when the entry declares image modality
-        (#501); the one remote engine serves both."""
+        Composes the image half too when the entry declares image modality;
+        the one remote engine serves both."""
         if not self.running:
             raise RuntimeError("Embedding service is not running")
         return shrike_native.NativeEmbedder.from_remote(
@@ -679,13 +675,13 @@ class EmbeddingRuntime:
         self._backend_kind = BACKEND_ALIASES.get(backend, backend)
         self._endpoint = endpoint
         self._api_key_env = api_key_env
-        # Router-managed remote (#567): the `remote` backend talks to a SHARED
+        # Router-managed remote: the `remote` backend talks to a SHARED
         # llama.cpp router (spawned once, owned by the harness), so its
         # fingerprint/dim derive from the pinned model, not the shared endpoint.
         self._router_managed = router_managed
         self._modalities = modalities
         # Per-modality multimodal projectors for a managed omni embeddings
-        # server (#501); empty for text-only or the in-process backends.
+        # server; empty for text-only or the in-process backends.
         self._mmprojs = list(mmprojs) if mmprojs else []
         self._model = model
         self._host = host
@@ -715,8 +711,8 @@ class EmbeddingRuntime:
     def backend_kind(self) -> str:
         return self._backend_kind
 
-    # Backward-compatible alias for the current backend (was ``service`` when the
-    # only backend was llama-server). Returns the active EmbedderBackend or None.
+    # Backward-compatible alias for the current backend. Returns the active
+    # EmbedderBackend or None.
     @property
     def service(self) -> EmbedderBackend | None:
         return self._backend
@@ -751,8 +747,8 @@ class EmbeddingRuntime:
             {"available": False} if self._backend is None else self._backend.health()
         )
         if self._backend is not None and self._backend.running:
-            # The space's modalities (#498/#235) — what /status reports per
-            # space, and what the coverage matrix is computed from.
+            # The space's modalities — what /status reports per space, and what
+            # the coverage matrix is computed from.
             info.setdefault("modalities", sorted(self._backend.modalities))
         info["state"] = self.state
         return info
@@ -782,7 +778,7 @@ class EmbeddingRuntime:
         unknown, ``FileNotFoundError`` / ``RuntimeError`` if it won't start, or
         ``ImportError`` if the ONNX optional dependency isn't installed.
 
-        **SSRF defense-in-depth (#592):** ``endpoint`` / ``api_key_env`` are
+        **SSRF defense-in-depth:** ``endpoint`` / ``api_key_env`` are
         config-only — they reach the runtime via the constructor
         (``profiles.py`` → ``plan_to_runtime_params``), never as a start-time
         override. They are rejected here with ``ValueError`` so that even a
@@ -830,7 +826,7 @@ class EmbeddingRuntime:
                 self._onnx_providers = list(onnx_providers) or None
             if batch_size is not None:
                 self._batch_size = batch_size
-            # endpoint/api_key_env are rejected above (config-only, #592) — no
+            # endpoint/api_key_env are rejected above (config-only) — no
             # override assignment here by design.
 
             if not self._configured:
@@ -853,12 +849,12 @@ class EmbeddingRuntime:
         """Construct (but don't start) the backend for the configured kind.
 
         The onnx/clip backends import onnxruntime lazily — it's a hard dependency
-        of the published wheel (#497), but an environment missing it still surfaces
+        of the published wheel, but an environment missing it still surfaces
         a clean ``ImportError`` only when that backend is actually selected.
         """
         if self._backend_kind == "remote":
-            # Config-only (#498): an unmanaged endpoint entry (or manage:
-            # attach). No flag spells this kind — it arrives via --config.
+            # Config-only: an unmanaged endpoint entry (or manage: attach).
+            # No flag spells this kind — it arrives via --config.
             assert self._endpoint is not None  # _configured checked by callers
             return RemoteBackend(
                 endpoint=self._endpoint,
@@ -867,7 +863,7 @@ class EmbeddingRuntime:
                 batch_size=self._batch_size,
                 modalities=self._modalities,
                 router_managed=self._router_managed,
-                # The router-wide pooling (#567) folds into a router space's
+                # The router-wide pooling folds into a router space's
                 # fingerprint; harmless (and None) for any non-router remote.
                 pooling=self._pooling if self._router_managed else None,
             )

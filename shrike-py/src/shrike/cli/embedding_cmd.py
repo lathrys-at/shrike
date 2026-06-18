@@ -23,7 +23,7 @@ def embedding() -> None:
 def embedding_status(ctx: click.Context) -> None:
     """Show the current state of the embedding service.
 
-    Reports one entry per configured embedding space (#681): a multi-space
+    Reports one entry per configured embedding space: a multi-space
     profile shows each space keyed by its modalities.
 
     \b
@@ -34,9 +34,8 @@ def embedding_status(ctx: click.Context) -> None:
     client: ShrikeClient = ctx.obj["client"]
     json_out: bool = ctx.obj["json"]
 
-    # Per-space (#681): pull the full status so every space is reported, not just
-    # the primary. The shared renderer keeps this identical to the `server
-    # status` Embedding block.
+    # Pull the full status so every space is reported, not just the primary. The
+    # shared renderer keeps this identical to the `server status` Embedding block.
     with output.spinner("Checking embedding service…"):
         full = client.server_status()
 
@@ -143,7 +142,7 @@ def embedding_start(
     client: ShrikeClient = ctx.obj["client"]
     json_out: bool = ctx.obj["json"]
 
-    # v2-first like `server start` (#498): a config declaring embedders:/managed:
+    # v2-first like `server start`: a config declaring embedders:/managed:
     # is the only home for these settings — the legacy flags/env are rejected/
     # ignored under it; a legacy config runs the old cascade unchanged.
     from shrike.harness.profiles import ProfileError
@@ -238,6 +237,6 @@ def _render_embedding(emb: EmbeddingStatus) -> None:
     """Render ONE embedding space's block (the `embedding start` confirmation).
 
     Delegates to the shared per-space renderer so the start-confirmation block
-    matches the `server status` / `server embedding status` Embedding blocks
-    (#684 §B). `start` only knows the space it just started, so it renders one."""
+    matches the `server status` / `server embedding status` Embedding blocks.
+    `start` only knows the space it just started, so it renders one."""
     status_render.render_embedding_spaces([emb])
