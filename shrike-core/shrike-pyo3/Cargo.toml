@@ -48,7 +48,7 @@ engine-remote = ["dep:shrike-engine", "shrike-engine/remote"]
 # (docs/distribution.md's hard boundary — the server gets OCR via the remote
 # recognizer rows, #502). Binding-path test coverage while #504 is pending is
 # tracked in #514.
-engine-apple = ["dep:shrike-recognize-apple"]
+engine-apple = ["dep:shrike-engine", "shrike-engine/engine-apple"]
 # llama-server lifecycle manager (manage-class, not an engine).
 manage-llama = ["dep:shrike-llama-server"]
 
@@ -79,8 +79,6 @@ shrike-llama-server = { path = "../shrike-llama-server", optional = true }
 shrike-engine-api = { path = "../shrike-engine-api" }
 shrike-error = { workspace = true }
 shrike-store = { path = "../shrike-store" }
-# The Apple Vision OCR engine (#342 P3) — attached native, like the embedders.
-shrike-recognize-apple = { path = "../shrike-recognize-apple", optional = true }
 shrike-index = { path = "../shrike-index" }
 shrike-schemas = { path = "../shrike-schemas" }
 # First-class observability bridges (#310): pyo3-log forwards `log` records to

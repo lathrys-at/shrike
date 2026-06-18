@@ -23,8 +23,8 @@ tensorrt = ["onnx", "ort/tensorrt"]
 directml = ["onnx", "ort/directml"]
 # ── remote (OpenAI-compatible HTTP: embeddings + VLM describe) ────────────────
 remote = ["dep:shrike-network", "dep:ureq", "dep:url", "dep:base64"]
-# NOTE: the `apple` family (engine-apple, over shrike-platform) lands in #709
-# (slice 2, stacked on this) — it adds the feature + the shrike-platform dep here.
+# ── apple (platform recognizers over shrike-platform's Swift/C-ABI glue) ──────
+engine-apple = ["dep:shrike-platform", "shrike-platform/engine-apple"]
 
 # Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-pyo3.
 [dependencies]
@@ -68,3 +68,8 @@ url = { version = "2", optional = true }
 # Media payloads for llama.cpp's native multimodal /embeddings dialect (#501)
 # and chat-completions images ride as base64 strings.
 base64 = { version = "0.22", optional = true }
+
+# ── apple deps (optional; pulled by feature `engine-apple`) ───────────────────
+# The raw Swift/C-ABI recognizer glue (#709). GLUE ONLY — it knows no engine
+# contract; this crate parses its raw JSON into engine-api types.
+shrike-platform = { path = "../shrike-platform", optional = true }

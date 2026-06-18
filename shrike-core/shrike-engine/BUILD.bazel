@@ -84,3 +84,26 @@ rust_test(
     size = "small",
     crate = ":shrike_engine",
 )
+
+# The APPLE cone (#709): the engine-apple `RecognizeMedia` impls over
+# shrike-platform's raw Swift/C-ABI glue. Its own target/test (no binding build
+# enables engine-apple yet — the server excludes platform engines, mobile's
+# attach is a later #504 slice), so the macOS lane exercises the recognizers and
+# the off-macOS lane the `unavailable` stubs. The OCR fixture rides compile_data
+# — include_bytes! resolves at rustc time in the sandbox.
+rust_library(
+    name = "shrike_engine_apple",
+    srcs = ENGINE_SRCS,
+    compile_data = ["src/apple/ocr_phrase.png"],
+    crate_name = "shrike_engine",
+    crate_features = ["engine-apple"],
+    edition = "2021",
+    deps = ENGINE_COMMON_DEPS + ["//shrike-core/shrike-platform:shrike_platform"],
+)
+
+rust_test(
+    name = "shrike_engine_apple_test",
+    size = "medium",
+    compile_data = ["src/apple/ocr_phrase.png"],
+    crate = ":shrike_engine_apple",
+)

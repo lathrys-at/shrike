@@ -1,127 +1,29 @@
-//! Apple SpeechAnalyzer ASR as a second engine in this crate (#410):
-//! on-device transcription (macOS 26+, Swift-only) behind the same Swift
-//! C ABI pattern as the OCR half. Segments carry `Locator::Span`
-//! (`[start_seconds, duration_seconds]`) — the time-axis counterpart of
-//! OCR's boxes.
+//! Apple SpeechAnalyzer ASR as a native engine (#410; Swift glue in
+//! `shrike-platform` since #709): on-device transcription (macOS 26+,
+//! Swift-only) behind the same Swift C-ABI pattern as the OCR half. Segments
+//! carry `Locator::Span` (`[start_seconds, duration_seconds]`) — the time-axis
+//! counterpart of OCR's boxes. This layer parses `shrike-platform`'s raw JSON
+//! into the engine-api types and implements [`RecognizeMedia`].
 //!
-//! Route 1 of the engine contract, like OCR: the C entries are synchronous
-//! (the Swift side bridges the async analyzer internally; safe on the
-//! kernel runtime's blocking pool), so the engine implements
-//! [`RecognizeMedia`].
+//! Route 1 of the engine contract, like OCR: the platform C entries are
+//! synchronous (the Swift side bridges the async analyzer internally; safe on
+//! the kernel runtime's blocking pool).
 //!
-//! **Two-state locale model**: `new(locale)` validates the locale is
-//! *supported* (and that the API exists — macOS 26+ at runtime AND at
-//! build-SDK time) but does NOT require the on-device model *installed* —
-//! a constructor must never drive a multi-hundred-MB download.
-//! [`AppleSpeechTranscriber::ensure_assets`] is the one explicit download
-//! path; transcribing with assets missing yields empty recognitions whose
-//! carried error the shim logs.
+//! **Two-state locale model**: `new(locale)` validates the locale is *supported*
+//! (and that the API exists — macOS 26+ at runtime AND at build-SDK time) but
+//! does NOT require the on-device model *installed* — a constructor must never
+//! drive a multi-hundred-MB download. [`AppleSpeechTranscriber::ensure_assets`]
+//! is the one explicit download path; transcribing with assets missing yields
+//! empty recognitions whose carried error the glue logs.
 //!
-//! Live transcription tests are opt-in via `SHRIKE_ASR_LIVE_TESTS=1` (they
-//! may download assets and synthesize audio via `say`); default `cargo
-//! test` stays fast and download-free.
+//! Live transcription tests are opt-in via `SHRIKE_ASR_LIVE_TESTS=1` (they may
+//! download assets and synthesize audio via `say`); default `cargo test` stays
+//! fast and download-free.
 
 use shrike_engine_api::{MediaItem, Recognition, RecognizeMedia};
-use shrike_error::NativeResult;
+use shrike_error::{NativeError, NativeResult};
 
-#[cfg(target_os = "macos")]
-mod imp {
-    use std::ffi::{c_char, CString};
-
-    use shrike_engine_api::Recognition;
-    use shrike_error::NativeResult;
-
-    use crate::glue::{parse_wire, SwiftString};
-
-    extern "C" {
-        fn shrike_av_transcribe_one(
-            ptr: *const u8,
-            len: usize,
-            mime: *const c_char,
-            locale: *const c_char,
-        ) -> *mut c_char;
-        fn shrike_av_speech_fingerprint(locale: *const c_char) -> *mut c_char;
-        fn shrike_av_speech_ensure_assets(locale: *const c_char) -> *mut c_char;
-    }
-
-    fn c_locale(locale: &str) -> CString {
-        // A locale id never carries an interior NUL; degrade to the default
-        // rather than panic if one ever does.
-        CString::new(locale).unwrap_or_else(|_| CString::new("en-US").expect("static"))
-    }
-
-    /// `apple-speech:{resolved-locale}:macos{X.Y.Z}`, or `unavailable` when
-    /// the API is absent (pre-26 OS or pre-26 build SDK) or the locale is
-    /// unsupported.
-    pub(super) fn fingerprint(locale: &str) -> NativeResult<String> {
-        let locale = c_locale(locale);
-        let raw = unsafe { shrike_av_speech_fingerprint(locale.as_ptr()) };
-        match SwiftString::wrap(raw) {
-            Some(s) => Ok(s.as_str().to_owned()),
-            None => Err(crate::speech_unavailable()),
-        }
-    }
-
-    pub(super) fn transcribe_one(bytes: &[u8], mime: Option<&str>, locale: &str) -> Recognition {
-        let locale = c_locale(locale);
-        let mime = mime.and_then(|m| CString::new(m).ok());
-        let raw = unsafe {
-            shrike_av_transcribe_one(
-                bytes.as_ptr(),
-                bytes.len(),
-                mime.as_ref().map_or(std::ptr::null(), |m| m.as_ptr()),
-                locale.as_ptr(),
-            )
-        };
-        let Some(json) = SwiftString::wrap(raw) else {
-            return crate::empty_recognition();
-        };
-        parse_wire(&json)
-    }
-
-    /// `ready` (already installed) / `installed` (downloaded now) /
-    /// `unsupported`, or an error string from the installer.
-    pub(super) fn ensure_assets(locale: &str) -> NativeResult<String> {
-        let locale = c_locale(locale);
-        let raw = unsafe { shrike_av_speech_ensure_assets(locale.as_ptr()) };
-        let json = SwiftString::wrap(raw).ok_or_else(crate::speech_unavailable)?;
-        #[derive(serde::Deserialize)]
-        struct Status {
-            status: String,
-            #[serde(default)]
-            error: Option<String>,
-        }
-        let parsed: Status = serde_json::from_str(json.as_str()).map_err(|e| {
-            shrike_error::NativeError::internal(format!("asset status unparseable: {e}"))
-        })?;
-        if let Some(error) = parsed.error {
-            return Err(shrike_error::NativeError::unavailable(format!(
-                "speech asset install failed: {error}"
-            )));
-        }
-        Ok(parsed.status)
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-mod imp {
-    use shrike_engine_api::Recognition;
-    use shrike_error::NativeResult;
-
-    pub(super) fn fingerprint(_locale: &str) -> NativeResult<String> {
-        Err(crate::speech_unavailable())
-    }
-
-    pub(super) fn transcribe_one(_bytes: &[u8], _mime: Option<&str>, _locale: &str) -> Recognition {
-        // Unreachable through the public API (new() fails first); kept
-        // total so the stub compiles the same call graph.
-        crate::empty_recognition()
-    }
-
-    pub(super) fn ensure_assets(_locale: &str) -> NativeResult<String> {
-        Err(crate::speech_unavailable())
-    }
-}
+use super::{empty_recognition, parse_wire, speech_unavailable};
 
 /// The ASR engine: a validated locale + its cached fingerprint (analyzer
 /// objects are per-call), so one instance serves concurrent lanes.
@@ -137,7 +39,8 @@ impl AppleSpeechTranscriber {
     /// [`Self::ensure_assets`].
     pub fn new(locale: Option<&str>) -> NativeResult<Self> {
         let locale = locale.unwrap_or("en-US").to_owned();
-        let fingerprint = imp::fingerprint(&locale)?;
+        let fingerprint =
+            shrike_platform::speech::fingerprint(&locale).ok_or_else(speech_unavailable)?;
         Ok(Self {
             locale,
             fingerprint,
@@ -157,7 +60,22 @@ impl AppleSpeechTranscriber {
     /// download — call it from operational code (or the live tests), never
     /// from a constructor.
     pub fn ensure_assets(&self) -> NativeResult<String> {
-        imp::ensure_assets(&self.locale)
+        let json =
+            shrike_platform::speech::ensure_assets(&self.locale).ok_or_else(speech_unavailable)?;
+        #[derive(serde::Deserialize)]
+        struct Status {
+            status: String,
+            #[serde(default)]
+            error: Option<String>,
+        }
+        let parsed: Status = serde_json::from_str(&json)
+            .map_err(|e| NativeError::internal(format!("asset status unparseable: {e}")))?;
+        if let Some(error) = parsed.error {
+            return Err(NativeError::unavailable(format!(
+                "speech asset install failed: {error}"
+            )));
+        }
+        Ok(parsed.status)
     }
 
     /// Transcribe one audio item; an unreadable/empty/failed item yields
@@ -165,9 +83,12 @@ impl AppleSpeechTranscriber {
     /// sink a batch.
     pub fn transcribe_one(&self, bytes: &[u8], mime: Option<&str>) -> Recognition {
         if bytes.is_empty() {
-            return crate::empty_recognition();
+            return empty_recognition();
         }
-        imp::transcribe_one(bytes, mime, &self.locale)
+        match shrike_platform::speech::transcribe_one(bytes, mime, &self.locale) {
+            Some(json) => parse_wire(&json),
+            None => empty_recognition(),
+        }
     }
 }
 
@@ -205,7 +126,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     mod live {
         use super::super::*;
-        use shrike_engine_api::Locator;
+        use shrike_engine_api::{Locator, MediaItem};
 
         fn live_engine() -> Option<AppleSpeechTranscriber> {
             match AppleSpeechTranscriber::new(None) {

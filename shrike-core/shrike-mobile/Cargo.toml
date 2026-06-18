@@ -50,7 +50,7 @@ engine-remote = ["dep:shrike-engine", "shrike-engine/remote"]
 # gated now; the real attach (composing the engine into the recognize slot) is
 # a later #504 slice — the gate is wired so a future flip is a feature change,
 # not a structural one. Off macOS the engine is its own unavailable stub.
-engine-apple = ["dep:shrike-recognize-apple"]
+engine-apple = ["dep:shrike-engine", "shrike-engine/engine-apple"]
 # Android platform engines — a placeholder gate (no crate yet; #428's engine
 # lands behind it in a later slice). Wired now so the matrix column is
 # complete and a future crate slots in without a structural change.
@@ -66,7 +66,6 @@ shrike-engine-api = { path = "../shrike-engine-api" }
 # The engine-contract impls, feature-gated by family (#708): mobile pulls only
 # the remote HTTP engines (engine-remote, the relay-offload path) — NO onnx.
 shrike-engine = { path = "../shrike-engine", default-features = false, optional = true }
-shrike-recognize-apple = { path = "../shrike-recognize-apple", optional = true }
 shrike-error = { workspace = true }
 shrike-schemas = { path = "../shrike-schemas" }
 serde = "1"
