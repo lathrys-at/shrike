@@ -70,7 +70,8 @@ cross-platform suite, builds the **sdist + wheel**, the **`create-cards.skill`**
 bundle (`scripts/package-skill.py`), and a **`SHA256SUMS`**, and attaches them to a
 GitHub Release. Final-release notes come from the matching `## [X.Y.Z]` section of
 `CHANGELOG.md`; an rc tag uses auto-generated commit notes instead. A final release
-(not an rc) is also published to PyPI as `shrike-mcp`, via trusted publishing.
+(not an rc) is also published to PyPI as `shrike-py` (renamed from `shrike-mcp`,
+#732; the old name is a deprecation shim), via trusted publishing.
 
 **Cut release candidates first, with the changelog left under `[Unreleased]`:**
 

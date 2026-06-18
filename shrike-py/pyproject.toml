@@ -71,7 +71,7 @@ socks = [
 # CUDA/TensorRT onnxruntime build for NVIDIA GPUs (--embedding-onnx-provider
 # CUDAExecutionProvider). NOTE: pip cannot enforce it, but onnxruntime-gpu must be
 # installed INSTEAD of the base onnxruntime carrier — the two wheels conflict (they
-# provide the same package); `pip install shrike-mcp[gpu]` pulls both, so uninstall
+# provide the same package); `pip install shrike-py[gpu]` pulls both, so uninstall
 # onnxruntime afterwards (or install onnxruntime-gpu by hand). Windows DirectML is
 # an analogous manual `pip install onnxruntime-directml`.
 gpu = [
@@ -141,7 +141,7 @@ disallow_untyped_defs = true
 check_untyped_defs = true
 
 # The native extension is built by scripts/build-native.sh (or ships inside the
-# platform-tagged shrike-mcp wheel). Where it IS installed its .pyi stubs apply (and
+# platform-tagged shrike-py wheel). Where it IS installed its .pyi stubs apply (and
 # stubtest gates them); on a stub-less environment (CI's lint lane) mypy must
 # not fail on the import.
 [[tool.mypy.overrides]]

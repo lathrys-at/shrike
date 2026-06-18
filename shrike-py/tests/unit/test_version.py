@@ -38,7 +38,7 @@ def test_version_is_derived() -> None:
 
     ``shrike.__version__`` now falls back to installed-distribution metadata when
     ``_version.py`` is absent (#243), so a bare ``!= "0.0.0+unknown"`` check would
-    pass on an *unbuilt* checkout that merely has ``shrike-mcp`` installed
+    pass on an *unbuilt* checkout that merely has ``shrike-py`` installed
     elsewhere — masking the #44 drift this guard exists to catch. So check
     generation at the source: import the generated module (its absence means the
     build hook didn't run) and confirm the package re-exports exactly it.

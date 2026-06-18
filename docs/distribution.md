@@ -117,7 +117,7 @@ inexpressible); the README's "choosing a backend" chapter.
 
 ### 1. DIY home server
 
-Source checkout, the platform-tagged `shrike-mcp` wheel (#497 — the published
+Source checkout, the platform-tagged `shrike-py` wheel (#497 — the published
 pure-Python wheel currently cannot run; that fix leads the milestone), or
 Docker/brew layered over the same wheel. The `server` kernel build. BYOM:
 runtimes `onnx` (in-process, CPU/GPU — the Raspberry Pi case) and `remote`
