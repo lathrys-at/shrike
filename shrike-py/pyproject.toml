@@ -11,16 +11,24 @@ exclude = ["**/BUILD.bazel"]
 # NB: the sdist file selection is intentionally *not* configured here. hatchling
 # derives it from git, which can't run in Bazel's hermetic sandbox; rather than make
 # the repo's `python -m build` sdist git-independent (which changes its contents), the
-# Bazel sdist (//:sdist) injects an explicit include into its own staged pyproject —
-# see tools/bazel/sdist_builder.py. So `python -m build` is unchanged, and //:sdist
-# ships the lean staged tree.
+# Bazel sdist (//shrike-py:sdist) injects an explicit include into its own staged
+# pyproject — see tools/bazel/sdist_builder.py. So `python -m build` is unchanged, and
+# //shrike-py:sdist ships the lean staged tree.
 
 # Version is derived from the git tag (hatch-vcs / setuptools-scm), never a
 # hand-edited constant — so it can't drift from the release tag. The build hook
 # writes the computed value to src/shrike/_version.py (gitignored), which
 # shrike/__init__.py re-exports as __version__.
+#
+# raw-options.root points setuptools-scm at the repository root (the parent of this
+# unit, #731): the harness now lives in shrike-py/, but the .git that carries the
+# release tag is one level up. Without this hatch-vcs can't detect the version from
+# inside shrike-py/ ("a repository was found in a parent directory"), so a lifted
+# `python -m build` and the dev `pip install -e shrike-py/` both fail. The path is
+# relative to this pyproject's directory.
 [tool.hatch.version]
 source = "vcs"
+raw-options = { root = ".." }
 
 [tool.hatch.build.hooks.vcs]
 version-file = "src/shrike/_version.py"
@@ -29,7 +37,12 @@ version-file = "src/shrike/_version.py"
 name = "shrike-mcp"
 dynamic = ["version"]
 description = "MCP server for Anki collection management"
-readme = "README.md"
+# The canonical project README lives at the repo root (one readme covering the Rust
+# core + the Python harness, #731). hatchling resolves a relative readme against this
+# pyproject's directory, so `../README.md` reaches it — keeping the PyPI long
+# description identical to the pre-relocation wheel AND in lockstep with the Bazel
+# wheel's `description_file = //:README.md` (the parity gate compares it).
+readme = "../README.md"
 requires-python = ">=3.12"
 license = "AGPL-3.0-or-later"
 dependencies = [

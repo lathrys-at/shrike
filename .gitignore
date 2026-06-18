@@ -13,8 +13,8 @@ coverage.xml
 htmlcov/
 .testmondata
 
-# Generated at build time by hatch-vcs (see pyproject.toml)
-src/shrike/_version.py
+# Generated at build time by hatch-vcs (see shrike-py/pyproject.toml; relocated #731)
+shrike-py/src/shrike/_version.py
 
 # Bazel (epic #241): convenience symlinks + machine-local rc. The pinned
 # launcher (./bazel) and bazelisk caches live under ~/.cache, not the repo.
@@ -26,17 +26,17 @@ src/shrike/_version.py
 target/
 
 # QA harness working dir — regenerated each launch (eval/run.py)
-tests/manual/skill_quality/run/
+shrike-py/tests/manual/skill_quality/run/
 
 # //scripts:serve launcher per-run output (script-fallback lane; #656)
 scripts/.run/
 
 # Packaged skills (scripts/package-skill.py)
 dist/
-tests/manual/skill_quality/runs/
+shrike-py/tests/manual/skill_quality/runs/
 
 # QA skill-variant A/B copies — throwaway; the swap script (use-variant.sh) is tracked
-tests/manual/skill_quality/variants/*/
+shrike-py/tests/manual/skill_quality/variants/*/
 
 # Multimodal eval image-bytes cache (URLs are pinned in resolved_urls.json)
 eval/multimodal/cache/
@@ -44,9 +44,9 @@ eval/multimodal/cache/
 # Search-quality eval image-bytes cache (#559): URLs pinned in resolved_urls.json,
 # attribution in ASSETS.md — the Commons bytes are NEVER committed (downloaded
 # on demand by the manual suite).
-tests/manual/search_quality/cache/
+shrike-py/tests/manual/search_quality/cache/
 # The PR2b runner's generated report (a local artifact, not committed).
-tests/manual/search_quality/RESULTS.md
+shrike-py/tests/manual/search_quality/RESULTS.md
 
 # MobileCLIP2 spike (#568): model bytes are NEVER committed — fetched on demand
 # into this gitignored scratch cache. Only the verify script + RESULTS.md +

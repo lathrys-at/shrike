@@ -1,4 +1,4 @@
-"""Launcher for the Shrike MCP server (`bazel run //bin:server`).
+"""Launcher for the Shrike MCP server (`bazel run //shrike-py/bin:server`).
 
 Thin entry point kept out of the `shrike` package so the binary target never
 collides with a package subdirectory. The real logic is `shrike.server.main`

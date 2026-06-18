@@ -618,7 +618,7 @@ def _register_custom_routes(
 
 def main() -> None:
     # prog is pinned so the help/usage text reads `shrike.server` regardless of
-    # entry point (python -m shrike.server via __main__, the //bin launcher, or
+    # entry point (python -m shrike.server via __main__, the //shrike-py/bin launcher, or
     # the foreground CLI) — the module became a package in #730, which would
     # otherwise surface argv[0] as `__main__.py`.
     parser = argparse.ArgumentParser(prog="shrike.server", description="Shrike MCP server for Anki")

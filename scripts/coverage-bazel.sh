@@ -27,12 +27,12 @@ for arg in "$@"; do
 done
 
 # The non-embedding py suites — the same scope as scripts/coverage.sh's
-# `-m "not embedding"` run. //tests/unit/... covers both the pre- and
+# `-m "not embedding"` run. //shrike-py/tests/unit/... covers both the pre- and
 # post-#259 target layout. A failing test still prints the (partial) report —
 # bazel collects no coverage for a failed target, so the number is an
 # undercount then — and the script exits with bazel's status at the end.
 bazel_status=0
-./bazel coverage //tests/unit/... //tests/integration:integration //tests/native:native || bazel_status=$?
+./bazel coverage //shrike-py/tests/unit/... //shrike-py/tests/integration:integration //shrike-py/tests/native:native || bazel_status=$?
 
 report="$(./bazel info output_path)/_coverage/_coverage_report.dat"
 if [ ! -f "$report" ]; then

@@ -49,9 +49,12 @@ fi
 source .venv/bin/activate
 
 # --------------------------------------------------------------- 2. deps -------
-echo "==> installing the harness and dev tooling (pip install -e \".[dev]\")"
+# pyproject.toml lives in the shrike-py/ unit (#731); install editable from there.
+# The .venv stays at the repo root so native-stale.sh / .envrc / the pytest
+# backstop (all keyed off $VIRTUAL_ENV / sys.prefix) keep working unchanged.
+echo "==> installing the harness and dev tooling (pip install -e \"shrike-py/[dev]\")"
 pip install -q --upgrade pip
-pip install -q -e ".[dev]"
+pip install -q -e "shrike-py/[dev]"
 
 # ------------------------------------------------------------- 3. native -------
 if "$HERE/native-stale.sh"; then
@@ -71,4 +74,4 @@ print(f"    shrike_native {shrike_native.version()} — {shrike_native.build_inf
 PY
 
 echo
-echo "ready. run:  pytest tests/unit -q"
+echo "ready. run:  pytest shrike-py/tests/unit -q"

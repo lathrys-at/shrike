@@ -9,15 +9,15 @@ package(default_visibility = ["//visibility:public"])
 # a client.py/schemas.py edit but not by a tools.py one, and Bazel's per-target
 # test caching actually pays off on source PRs. The :shrike umbrella at the
 # bottom aggregates everything for consumers that want the whole package
-# (//bin, the wheel, the integration/native suites).
+# (//shrike-py/bin, the wheel, the integration/native suites).
 #
 # Module layout (#730): the package is grouped into layered subpackages —
 # platform/ (paths, log, daemon, pathsafety), the top-level contract (schemas,
 # errors) + standalone client, harness/ (assembly + engines/), api/ (the verb
 # surface), server/ (the host), cli/. Per the reorg's "flat labels" decision the
-# targets here stay flat (//src/shrike:collection, not //src/shrike/harness:…) —
+# targets here stay flat (//shrike-py/src/shrike:collection, not //shrike-py/src/shrike/harness:…) —
 # only the srcs point at the new subpaths — so the #259 per-module test-cache
-# granularity and the test///bin dep labels are preserved.
+# granularity and the test///shrike-py/bin dep labels are preserved.
 #
 # Ground rules:
 #  - src-layout: every target sets imports=[".."] so src/ is on sys.path and
@@ -28,7 +28,7 @@ package(default_visibility = ["//visibility:public"])
 #    server in the foreground), is broken by the :cli_core split.
 #  - the optional embedding backends import their heavy deps (onnxruntime)
 #    lazily, so those wheels are deliberately NOT deps here — the test/binary
-#    targets that exercise them add the extras (//bin:server_embedding).
+#    targets that exercise them add the extras (//shrike-py/bin:server_embedding).
 #  - a new module goes in its own target (or an existing cluster) with explicit
 #    deps, and joins the umbrella's list.
 
@@ -414,8 +414,8 @@ py_library(
 
 # --- the umbrella -----------------------------------------------------------
 
-# The whole package, for consumers that genuinely want all of it: //bin's
-# launchers, //:wheel, the integration/native suites. No srcs of its own —
+# The whole package, for consumers that genuinely want all of it: //shrike-py/bin's
+# launchers, //shrike-py:wheel, the integration/native suites. No srcs of its own —
 # every module lives in exactly one sub-library above.
 py_library(
     name = "shrike",
@@ -458,7 +458,7 @@ filegroup(
     srcs = ["py.typed"],
 )
 
-# The package sources for //:wheel. py_wheel packages only the DIRECT files of its
+# The package sources for //shrike-py:wheel. py_wheel packages only the DIRECT files of its
 # deps (it does not walk a py_library's transitive closure), so the srcs-less
 # :shrike umbrella contributes nothing — the wheel names this glob instead. A glob
 # is right here: the artifact wants "the whole package tree" regardless of how the
@@ -474,7 +474,7 @@ filegroup(
     ),
 )
 
-# Source files for the //:sdist source distribution (#245) — the package tree minus
+# Source files for the //shrike-py:sdist source distribution (#245) — the package tree minus
 # the BUILD file, generated _version.py, and bytecode.
 filegroup(
     name = "dist_files",

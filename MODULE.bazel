@@ -39,7 +39,7 @@ pip.parse(
 )
 use_repo(pip, "shrike_pip")
 
-# Build-time tools for //:sdist (build / hatchling / hatch-vcs), in their own hub +
+# Build-time tools for //shrike-py:sdist (build / hatchling / hatch-vcs), in their own hub +
 # lock so they never enter the runtime dependency set (requirements_lock.txt).
 pip.parse(
     hub_name = "shrike_sdist_pip",

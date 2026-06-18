@@ -39,7 +39,7 @@ py_test(
     size = "small",
     srcs = ["library_smoke.py"],
     main = "library_smoke.py",
-    deps = ["//src/shrike:shrike"],
+    deps = ["//shrike-py/src/shrike:shrike"],
 )
 
 # De-dup tripwire (#566): tools/llama-server.lock and MODULE.bazel duplicate the

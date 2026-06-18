@@ -1338,7 +1338,7 @@ class TestFacadeReadinessBootWindow:
     ``DerivedTextStore.search_substring`` short-circuits to ``None`` (gated on
     ``available == _state==READY``) **even though the recognition rows it would
     return are already present in shrike.db**, written kernel-side by
-    ``recognition_sweep``. Under ``bazel test //tests/native:native
+    ``recognition_sweep``. Under ``bazel test //shrike-py/tests/native:native
     --local_test_jobs=10+`` (~10x process oversubscription) the un-awaited
     settle is descheduled past a test's ``search_substring`` read -> the read
     returns ``None`` -> the family asserts fail (~0.5%). The note's text vector

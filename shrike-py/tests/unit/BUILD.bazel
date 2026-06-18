@@ -5,7 +5,7 @@ load("@shrike_pip//:requirements.bzl", "requirement")
 package(default_testonly = True)
 
 # The unit suite, split per source sub-library (#259): each target depends on
-# exactly the //src/shrike libraries its files exercise, so an edit to one
+# exactly the //shrike-py/src/shrike libraries its files exercise, so an edit to one
 # module re-runs only the targets that transitively depend on it and the rest
 # replay from cache. The floor is :conftest — pytest loads conftest.py for
 # every file in this directory, and its wrapper/basic_note fixtures are built
@@ -29,8 +29,8 @@ py_library(
     ],
     deps = [
         "//shrike-core/shrike-pyo3:shrike_native",  # _native_shims re-exports its errors
-        "//src/shrike:collection",
-        "//tests/oracles",
+        "//shrike-py/src/shrike:collection",
+        "//shrike-py/tests/oracles",
         requirement("anki"),  # the pip TEST ORACLE (subprocess fixtures)
     ],
 )
@@ -115,7 +115,7 @@ _EMBED_HELPERS = [
 ]
 
 # The search-quality metric engine + manifest loader (#559): pure, native-free
-# tests over the shared //tests/manual/search_quality support (not a //src/shrike lib).
+# tests over the shared //shrike-py/tests/manual/search_quality support (not a //shrike-py/src/shrike lib).
 _SEARCH_QUALITY = ["test_search_quality_metrics.py"]
 
 _EMBEDDING = [
@@ -203,7 +203,7 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//src/shrike:client",
+        "//shrike-py/src/shrike:client",
         requirement("mcp"),  # test_client_busy drives the real FastMCP handler (#598)
     ],
 )
@@ -214,7 +214,7 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//src/shrike:daemon",
+        "//shrike-py/src/shrike:daemon",
     ],
 )
 
@@ -224,7 +224,7 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//src/shrike:log",
+        "//shrike-py/src/shrike:log",
     ],
 )
 
@@ -234,7 +234,7 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//src/shrike:index",
+        "//shrike-py/src/shrike:index",
     ],
 )
 
@@ -244,7 +244,7 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//src/shrike:cache_layout",
+        "//shrike-py/src/shrike:cache_layout",
     ],
 )
 
@@ -254,8 +254,8 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//src/shrike:harness",
-        "//src/shrike:schemas",
+        "//shrike-py/src/shrike:harness",
+        "//shrike-py/src/shrike:schemas",
     ],
 )
 
@@ -265,7 +265,7 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//src/shrike:pathsafety",
+        "//shrike-py/src/shrike:pathsafety",
     ],
 )
 
@@ -275,7 +275,7 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//src/shrike:derived",
+        "//shrike-py/src/shrike:derived",
     ],
 )
 
@@ -285,9 +285,9 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//src/shrike:embed_batching",
-        "//src/shrike:embed_text",
-        "//src/shrike:search_fusion",
+        "//shrike-py/src/shrike:embed_batching",
+        "//shrike-py/src/shrike:embed_text",
+        "//shrike-py/src/shrike:search_fusion",
     ],
 )
 
@@ -297,7 +297,7 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//src/shrike:embedding",
+        "//shrike-py/src/shrike:embedding",
     ],
 )
 
@@ -307,7 +307,7 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//tests/manual/search_quality",
+        "//shrike-py/tests/manual/search_quality",
     ],
 )
 
@@ -317,8 +317,8 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//src/shrike:actions",
-        "//src/shrike:registry",  # test_list_profiles builds a Registry snapshot directly
+        "//shrike-py/src/shrike:actions",
+        "//shrike-py/src/shrike:registry",  # test_list_profiles builds a Registry snapshot directly
     ],
 )
 
@@ -328,11 +328,11 @@ pytest_test(
     srcs = _TOOLS,
     deps = [
         ":conftest",
-        "//src/shrike:export_store",  # test_tools_export builds an ExportStore (#71)
-        "//src/shrike:harness",
-        "//src/shrike:index",
-        "//src/shrike:recognition",
-        "//src/shrike:tools",
+        "//shrike-py/src/shrike:export_store",  # test_tools_export builds an ExportStore (#71)
+        "//shrike-py/src/shrike:harness",
+        "//shrike-py/src/shrike:index",
+        "//shrike-py/src/shrike:recognition",
+        "//shrike-py/src/shrike:tools",
     ],
 )
 
@@ -343,7 +343,7 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//src/shrike:server",
+        "//shrike-py/src/shrike:server",
     ],
 )
 
@@ -356,9 +356,9 @@ pytest_test(
         # test_config.py drives server.main() (the daemon --config path, #610),
         # so the cluster needs the server library too — pytest sees the full
         # package on path, but Bazel needs the per-target dep declared.
-        "//src/shrike:server",
-        "//src/shrike:cli_core",
-        "//src/shrike:profiles",
+        "//shrike-py/src/shrike:server",
+        "//shrike-py/src/shrike:cli_core",
+        "//shrike-py/src/shrike:profiles",
     ],
 )
 
@@ -368,7 +368,7 @@ pytest_test(
     srcs = _CLI,
     deps = [
         ":conftest",
-        "//src/shrike:cli",
+        "//shrike-py/src/shrike:cli",
     ],
 )
 
@@ -390,8 +390,8 @@ _UNASSIGNED = glob(
 _GUARD = fail("unit test files not assigned to any target in tests/unit/BUILD.bazel " +
               "(add each to a cluster list): %s" % _UNASSIGNED) if _UNASSIGNED else None
 
-# Source files for the //:sdist source distribution (#245). testonly=False (overriding
-# the package default) so the non-testonly //:sdist can stage them.
+# Source files for the //shrike-py:sdist source distribution (#245). testonly=False (overriding
+# the package default) so the non-testonly //shrike-py:sdist can stage them.
 filegroup(
     name = "dist_files",
     testonly = False,

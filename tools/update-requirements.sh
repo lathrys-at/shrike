@@ -26,7 +26,7 @@ uvx "uv@${UV_VERSION}" pip compile pyproject.toml \
   --extra socks \
   -o requirements_lock.txt
 
-# Build-time tools for //:sdist, in their own lock so they stay out of the runtime
+# Build-time tools for //shrike-py:sdist, in their own lock so they stay out of the runtime
 # dependency set (consumed by the @shrike_sdist_pip hub in MODULE.bazel).
 exec uvx "uv@${UV_VERSION}" pip compile tools/sdist-requirements.in \
   --python-version 3.12 \

@@ -15,8 +15,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out_dir="${1:-$repo_root/dist}"
 cd "$repo_root"
 
-./bazel build //:wheel --stamp >&2
-built="$(./bazel cquery --output=files //:wheel 2>/dev/null)"
+./bazel build //shrike-py:wheel --stamp >&2
+built="$(./bazel cquery --output=files //shrike-py:wheel 2>/dev/null)"
 version="$(unzip -p "$built" '*.dist-info/METADATA' | sed -n 's/^Version: //p' | head -1)"
 # The built name is shrike_mcp-{STABLE_VERSION}-<python>-<abi>-<platform>.whl;
 # keep everything after the placeholder.

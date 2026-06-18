@@ -1,4 +1,4 @@
-"""Build the Python sdist for the //:sdist Bazel rule (#245).
+"""Build the Python sdist for the //shrike-py:sdist Bazel rule (#245).
 
 Invoked as a build action: stages the declared source files into a writable tree
 (Bazel inputs are read-only, and hatch-vcs's build hook writes _version.py into
@@ -9,7 +9,7 @@ install). The produced shrike_mcp-<version>.tar.gz is copied to the rule's outpu
 
 The explicit sdist file selection is injected into the *staged* pyproject.toml (not
 the repo's), so the repo's `python -m build` keeps its git-based sdist unchanged while
-//:sdist ships exactly the staged tree (everything the rule's srcs put here).
+//shrike-py:sdist ships exactly the staged tree (everything the rule's srcs put here).
 
 Args (read from a Bazel param file via @file): --version-file <stable-status.txt>,
 --out <output path>, then the source file paths (positional).

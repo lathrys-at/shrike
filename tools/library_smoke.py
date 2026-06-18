@@ -1,6 +1,6 @@
 """Phase 1 smoke (#243).
 
-Proves the `//src/shrike:shrike` library target and its declared deps import
+Proves the `//shrike-py/src/shrike:shrike` library target and its declared deps import
 cleanly on the hermetic toolchain: every core module loads (so the dep list is
 complete), and a pure, DB-free function runs. Cheap CI coverage of the wiring
 until the full pytest suite migrates in Phase 2 (#244).

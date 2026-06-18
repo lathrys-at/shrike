@@ -40,7 +40,7 @@ alias(
     tags = ["manual"],
 )
 
-# Integration conftest: spawns the server (//bin:server / //bin:server_embedding
+# Integration conftest: spawns the server (//shrike-py/bin:server / //shrike-py/bin:server_embedding
 # through runfiles — _server_launch_cmd), the MCP/CLI clients, the shared-server +
 # per-test reset machinery, and (under Bazel) assembles the model externals into
 # SHRIKE_TEST_MODEL_DIR + puts llama-server on PATH. model_cache.py rides along.
@@ -54,9 +54,9 @@ py_library(
         "model_cache.py",
     ],
     imports = ["../.."],
-    data = ["//bin:server"],
+    data = ["//shrike-py/bin:server"],
     deps = [
-        "//src/shrike",
+        "//shrike-py/src/shrike",
         "@rules_python//python/runfiles",
         requirement("httpx"),
     ],
@@ -114,7 +114,7 @@ pytest_test(
 
 # The llama-server core: the embedding-service lifecycle (incl. orphan reaping)
 # + semantic search / neighbors / index CLI against the GGUF model. The server
-# binary comes from the conftest's //bin:server data-dep (the lean default —
+# binary comes from the conftest's //shrike-py/bin:server data-dep (the lean default —
 # _server_launch_cmd falls back to it when server_embedding isn't in runfiles).
 pytest_test(
     name = "embedding_core",
@@ -131,7 +131,7 @@ pytest_test(
 
 # The backend zoo: per-backend contracts (llama / onnx fp32+int8 / clip,
 # conformance + native-attach + the fused pipeline) and the model lineages.
-# //bin:server_embedding carries the onnx/clip extras for the tests whose
+# //shrike-py/bin:server_embedding carries the onnx/clip extras for the tests whose
 # server loads a backend. Keeps llama_server + the GGUF too: test_backends
 # exercises LlamaServerBackend alongside the in-process ones.
 pytest_test(
@@ -148,7 +148,7 @@ pytest_test(
     ],
     data = [
         ":llama_server",
-        "//bin:server_embedding",
+        "//shrike-py/bin:server_embedding",
         "@model_clip_preprocessor//file",
         "@model_clip_text_onnx//file",
         "@model_clip_tokenizer//file",
@@ -168,7 +168,7 @@ pytest_test(
 # `manual` keeps `//...` from building it. It needs the CLIP + MiniLM ONNX
 # externals (the real 2-space proof) and the in-process search-quality support
 # (the shared metric engine + the Commons resolver + corpus). Run it explicitly:
-#   SHRIKE_SEARCH_QUALITY=1 bazel test //tests/integration:search_quality
+#   SHRIKE_SEARCH_QUALITY=1 bazel test //shrike-py/tests/integration:search_quality
 pytest_test(
     name = "search_quality",
     size = "large",
@@ -177,8 +177,8 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        "//tests/manual/search_quality",
-        "//tests/manual/search_quality:inprocess",
+        "//shrike-py/tests/manual/search_quality",
+        "//shrike-py/tests/manual/search_quality:inprocess",
         requirement("onnxruntime"),
         requirement("pillow"),
         requirement("tokenizers"),
@@ -207,8 +207,8 @@ py_library(
     deps = [requirement("httpx")],
 )
 
-# Source files for the //:sdist source distribution (#245). testonly=False (overriding
-# the package default) so the non-testonly //:sdist can stage them.
+# Source files for the //shrike-py:sdist source distribution (#245). testonly=False (overriding
+# the package default) so the non-testonly //shrike-py:sdist can stage them.
 filegroup(
     name = "dist_files",
     testonly = False,

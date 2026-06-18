@@ -11,8 +11,8 @@ py_library(
         "conftest.py",
     ],
     deps = [
-        "//src/shrike",
-        "//tests/oracles",
+        "//shrike-py/src/shrike",
+        "//shrike-py/tests/oracles",
         requirement("anki"),  # the pip TEST ORACLE (cross-core parity subprocesses)
     ],
 )
@@ -28,13 +28,13 @@ pytest_test(
         ":conftest",
         # test_search_quality.py drives the REAL search_notes action in-process
         # via the StubEmbedder + the shared metric engine (#559).
-        "//tests/manual/search_quality",
-        "//tests/manual/search_quality:inprocess",
+        "//shrike-py/tests/manual/search_quality",
+        "//shrike-py/tests/manual/search_quality:inprocess",
     ],
     size = "medium",
 )
 
-# Source files for the //:sdist source distribution (#245).
+# Source files for the //shrike-py:sdist source distribution (#245).
 filegroup(
     name = "dist_files",
     testonly = False,

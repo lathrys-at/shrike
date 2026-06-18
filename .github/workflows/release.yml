@@ -42,7 +42,7 @@ jobs:
       - name: Run the test graph
         run: |
           ./bazel test \
-            -- //... //tests/integration:embedding_core //tests/integration:embedding_backends
+            -- //... //shrike-py/tests/integration:embedding_core //shrike-py/tests/integration:embedding_backends
       - uses: ./.github/actions/bazel-save
         if: always()
 
