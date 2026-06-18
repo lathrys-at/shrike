@@ -890,15 +890,10 @@ def main() -> None:
 
         shrike_native.init_logging()
 
-    # Install the driven kernel runtime and spawn its committed threads BEFORE
-    # any kernel op: the set-once seam must win over the lazy multi-thread
-    # default, and the drive loops must be parked so the first op (the kernel
-    # open inside Harness.assemble) is driven. The harness donates every thread
-    # the kernel uses (one io, one sync, N compute); the asyncio bridge submits
-    # ops, invisibly driven by the io thread. shutdown() joins them at teardown.
+    # The driven runtime's committed threads, installed + started inside _serve()
+    # just before the kernel opens (so the set-once seam wins and the loops are
+    # parked before the first op), joined on teardown.
     driven = DrivenRuntime()
-    driven.install()
-    driven.start()
 
     # Refuse non-loopback binds unless explicitly opted in: every endpoint is
     # unauthenticated, so a non-loopback host hands the full collection API to
@@ -1339,6 +1334,17 @@ def main() -> None:
     cross_space_floor_margin = resolve_cross_space_margin(_margin_config)
 
     async def _serve() -> None:
+        # Install the driven runtime and park its committed N+2 threads BEFORE
+        # the first kernel op (the open below): the set-once seam must win over
+        # the lazy multi-thread default, and the loops must be parked so the open
+        # is driven. shrike-core spawns no thread of its own — the harness
+        # donates one io, one sync, and N compute threads, each GIL-released for
+        # the server's life; the asyncio bridge submits ops, invisibly driven by
+        # the io thread. driven.shutdown() closes the pools and joins them on
+        # teardown.
+        driven.install()
+        driven.start()
+
         # Assembly runs ON the loop: the kernel opens with a dedicated harness
         # thread driving its executor; the wrapper rides the shared core;
         # tools/routes register before the socket binds (no request is accepted

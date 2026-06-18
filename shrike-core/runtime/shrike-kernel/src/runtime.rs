@@ -639,6 +639,16 @@ fn mode() -> RuntimeMode {
     *MODE.get().unwrap_or(&RuntimeMode::Default)
 }
 
+/// Whether the runtime is installed in the driven model — the binding checks
+/// this right after [`init_driven_runtime`] so a lost install (a prior op
+/// already pinned the default runtime) is a loud error, not threads that quietly
+/// fail to drive. Does NOT trigger the lazy default install: an unset mode reads
+/// as "not driven" without pinning anything, so a later `init_driven_runtime`
+/// can still win.
+pub fn is_driven() -> bool {
+    MODE.get() == Some(&RuntimeMode::Driven)
+}
+
 /// Run a pool job body with the leaf-invariant tripwire armed AND its panic
 /// contained — the one place both modes converge, so resilience is uniform
 /// (default==driven) and DRY.

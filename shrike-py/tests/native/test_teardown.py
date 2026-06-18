@@ -182,7 +182,8 @@ def test_driven_runtime_boot_serve_and_clean_shutdown(tmp_path) -> None:
     close() the kernel (draining the actor) and drive_pools_shutdown() so the
     loops return and join. A regression that fails to drive an op hangs (caught
     by the subprocess timeout); one that fails to close a pool hangs a join; one
-    that joins after finalize would risk the #435 abort — all show as rc!=0.
+    that left the threads to be torn down at finalization would risk the
+    GIL-state abort the finalization gate guards — all show as rc!=0.
     """
     _run_teardown_script(
         tmp_path,

@@ -57,19 +57,24 @@ class DrivenRuntime:
             compute_threads if compute_threads is not None else _compute_thread_count()
         )
         self._threads: list[threading.Thread] = []
+        self._driven = False
 
-    @staticmethod
-    def install() -> None:
+    def install(self) -> None:
         """Install the driven runtime — call ONCE, before any kernel op, so the
-        set-once seam wins over the lazy multi-thread default. Tolerant of a
-        re-call within one process (the native side ignores an already-installed
-        runtime)."""
-        shrike_native.init_driven_runtime()
+        set-once seam wins over the lazy multi-thread default. Records whether
+        driven mode is actually active: in the normal server process it always
+        is (nothing has touched the runtime yet); a reused process where the
+        default runtime was already pinned reports ``False``, which makes
+        :meth:`start` a no-op so it never spawns threads with no driven queues to
+        drive (they would error)."""
+        self._driven = bool(shrike_native.init_driven_runtime())
 
     def start(self) -> None:
         """Spawn the committed N + 2 driver threads, each parked in its native
-        drive loop. Idempotent guard: a second call is a no-op."""
-        if self._threads:
+        drive loop. A no-op when driven mode isn't active (an un-installed or
+        already-default runtime) and idempotent (a second call after threads are
+        live)."""
+        if not self._driven or self._threads:
             return
         self._threads.append(
             threading.Thread(target=shrike_native.drive_io, name="shrike-drive-io")

@@ -220,20 +220,24 @@ fn decode_media_b64(py: Python<'_>, data: String) -> PyResult<Vec<u8>> {
 
 /// Install a `current_thread` runtime in the driven model — call ONCE, before
 /// any kernel op, so the set-once seam wins over the lazy multi-thread default.
-/// Tolerates a re-call within one process (a re-import): an already-installed
-/// runtime is the same install, not an error.
+/// Returns whether the runtime is now driven: `True` on a fresh install (or a
+/// benign re-call where driven was already installed), `False` if the default
+/// multi-thread runtime had already been pinned by an earlier op. The caller
+/// MUST NOT spawn drive threads when this is `False` — they would have no driven
+/// queues to consume and would error.
 #[cfg(feature = "anki-core")]
 #[pyfunction]
-fn init_driven_runtime(py: Python<'_>) -> PyResult<()> {
+fn init_driven_runtime(py: Python<'_>) -> PyResult<bool> {
     py.detach(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| NativeError::internal(format!("building the driven runtime: {e}")))?;
-        // An already-installed runtime (a second call in one process) is benign:
-        // the seam is set-once, so the first install stands.
+        // An already-installed runtime (a second call in one process) returns
+        // Err carrying the runtime back; the seam is set-once, so the first
+        // install stands. `is_driven` reports whether that install was driven.
         let _ = shrike_kernel::init_driven_runtime(runtime);
-        Ok(())
+        Ok(shrike_kernel::is_driven())
     })
     .map_err(to_py_err)
 }
