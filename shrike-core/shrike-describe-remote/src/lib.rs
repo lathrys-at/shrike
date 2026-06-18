@@ -408,6 +408,10 @@ impl RemoteDescriber {
         // The mime hint rides the data URL; `image/png` is the documented
         // pragmatic default (the dominant Anki case; llama-server sniffs
         // content regardless, and some cloud gateways reject non-image/*).
+        // `item.mime` is the ENGINE routing-hint (`shrike_engine_api::mime_for_name`
+        // via `MediaItem::from_named`) — describe-remote reuses that table by
+        // construction, NOT shrike-media's store/response MIME (the two are
+        // deliberately separate; see the #711 notes on both tables).
         let mime = item.mime.as_deref().unwrap_or("image/png");
         let data_url = format!(
             "data:{mime};base64,{}",

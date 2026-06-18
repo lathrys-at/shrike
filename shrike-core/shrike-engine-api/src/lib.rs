@@ -87,6 +87,15 @@ impl MediaItem {
 /// The extension→MIME map for the media kinds notes carry. Deliberately
 /// small: this exists to give engines a routing/decoding hint, not to be a
 /// general MIME database.
+///
+/// DELIBERATELY DISTINCT from `shrike_media::guess_mime`/`mime_extension`
+/// (#711): this is the engine routing-HINT (it carries `heic`/`aiff` an engine
+/// may route on, omits store/response kinds like `pdf`/`txt`/`css`), while
+/// shrike-media's tables are the store/response MIME the media write/fetch
+/// paths serve. Keeping them apart is what keeps shrike-engine-api a LEAF (no
+/// dep on shrike-media → no media-fetch/SSRF dependency in the engine
+/// contract). Do NOT "consolidate" them into one table — the leaf rule
+/// outranks table-count==1 (Chesterton's fence; the lead's #711 ruling).
 pub fn mime_for_name(name: &str) -> Option<String> {
     let ext = name.rsplit('.').next()?.to_ascii_lowercase();
     let mime = match ext.as_str() {

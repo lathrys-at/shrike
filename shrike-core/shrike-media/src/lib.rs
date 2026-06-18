@@ -113,8 +113,16 @@ pub fn safe_media_name(name: &str) -> String {
 
 /// Best-effort MIME from the filename extension (the subset the Python
 /// `mimetypes` table returns for media Anki actually stores). The store half's
-/// fetch/list responses read this; the one home for the extension→MIME map the
-/// collection write paths key against (#711).
+/// fetch/list responses read this; the one home for the store/response
+/// extension→MIME map the collection write paths key against (#711).
+///
+/// DELIBERATELY DISTINCT from `shrike_engine_api::mime_for_name` (#711): that
+/// one is the engine routing-HINT (carries `heic`/`aiff`, omits `pdf`/`txt`/
+/// `css`/`js`); these are the store/response MIME the fetch/list/write paths
+/// serve. They are NOT to be merged: folding `mime_for_name` in here would
+/// force shrike-engine-api (a LEAF, the kernel↔ort firewall) to depend on
+/// shrike-media, pulling a media-fetch/SSRF edge into the engine contract.
+/// (Chesterton's fence; the lead's #711 ruling — leaf purity > table-count==1.)
 pub fn guess_mime(filename: &str) -> Option<&'static str> {
     let ext = filename.rsplit('.').next()?.to_ascii_lowercase();
     Some(match ext.as_str() {
