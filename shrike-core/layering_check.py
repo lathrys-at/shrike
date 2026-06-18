@@ -45,10 +45,8 @@ PYO3_ALLOWED = {"shrike-pyo3"}
 # depend on them without inverting the layer graph. They live in LAYER_FLOOR
 # instead.)
 ENGINE_CRATES = {
-    "shrike-embed",
+    "shrike-engine",  # every engine-contract impl, feature-gated by family (#708)
     "shrike-recognize-apple",
-    "shrike-embed-remote",
-    "shrike-describe-remote",
     "shrike-llama-server",
 }
 

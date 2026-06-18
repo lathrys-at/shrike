@@ -38,11 +38,11 @@ bundled-sqlite = ["shrike-derived/bundled"]
 anki-core = ["dep:shrike-collection", "dep:shrike-kernel", "dep:shrike-media"]
 # ── The engine/manager matrix (#499) ─────────────────────────────────────────
 # In-process ONNX engines (text + CLIP) via ort load-dynamic.
-engine-ort = ["dep:shrike-embed"]
+engine-ort = ["dep:shrike-engine", "shrike-engine/onnx", "shrike-engine/cuda", "shrike-engine/tensorrt", "shrike-engine/directml"]
 # Embeddings AND VLM describe over any OpenAI-compatible endpoint (the managed
 # llama-server, an attached server, cloud/tailnet). shrike-describe-remote
 # joins the feature now that its kernel integration is attachable (#485).
-engine-remote = ["dep:shrike-embed-remote", "dep:shrike-describe-remote"]
+engine-remote = ["dep:shrike-engine", "shrike-engine/remote"]
 # Platform recognition engines (Apple Vision OCR; off-macOS it's the
 # unavailable stub). MOBILE-ONLY: never in the server build, on any OS
 # (docs/distribution.md's hard boundary — the server gets OCR via the remote
@@ -68,12 +68,11 @@ futures = "0.3"
 # Blocking Python backend calls ride the kernel runtime's blocking pool (#374 C).
 tokio = { version = "1", features = ["rt"] }
 shrike-derived = { path = "../shrike-derived", default-features = false }
-shrike-embed = { path = "../shrike-embed", optional = true }
-shrike-embed-remote = { path = "../shrike-embed-remote", optional = true }
-# VLM image→text describe over any OpenAI-compatible chat endpoint (#433/#485)
-# — the recognizer-attach sibling of shrike-embed-remote, same engine-remote
-# feature (pure Rust, server-side).
-shrike-describe-remote = { path = "../shrike-describe-remote", optional = true }
+# Every engine-contract impl, feature-gated by family (#708): onnx (ort text +
+# CLIP) under engine-ort, the remote HTTP engines (embed + describe) under
+# engine-remote. The kernel never names it — the binding composes its engines
+# into the kernel's Arc<dyn Embedder>/Arc<dyn Recognizer> slots.
+shrike-engine = { path = "../shrike-engine", default-features = false, optional = true }
 shrike-llama-server = { path = "../shrike-llama-server", optional = true }
 # The engine contract (#342): the binding composes engines (WithPolicy +
 # OnExecutor over the asyncio lane) into the kernel's Arc<dyn Embedder> slot.

@@ -171,7 +171,7 @@ impl AppleVisionRecognizer {
 #[cfg(feature = "engine-remote")]
 #[pyclass(frozen)]
 pub(crate) struct RemoteDescriber {
-    engine: Arc<shrike_describe_remote::RemoteDescriber>,
+    engine: Arc<shrike_engine::remote::RemoteDescriber>,
     /// The host-composed fingerprint (`describe:…:prompt=N`), folded into the
     /// engine identity at attach. `None` on the probe construction the host
     /// makes to read `model_info()` before it can compose the string; the
@@ -189,7 +189,7 @@ impl RemoteDescriber {
     /// are inert for a recognizer — only the fingerprint matters here.
     pub(crate) fn engine_arc(
         &self,
-    ) -> Arc<shrike_engine_api::WithPolicy<shrike_describe_remote::RemoteDescriber>> {
+    ) -> Arc<shrike_engine_api::WithPolicy<shrike_engine::remote::RemoteDescriber>> {
         Arc::new(shrike_engine_api::WithPolicy::new(
             Arc::clone(&self.engine),
             self.fingerprint.clone(),
@@ -212,8 +212,8 @@ impl RemoteDescriber {
     ) -> PyResult<Self> {
         // Construction validates the API key (header-injection guard) — the
         // same discipline as RemoteEmbedder.
-        let engine = shrike_describe_remote::RemoteDescriber::new(
-            shrike_describe_remote::RemoteDescriberConfig {
+        let engine = shrike_engine::remote::RemoteDescriber::new(
+            shrike_engine::remote::RemoteDescriberConfig {
                 base_url,
                 api_key,
                 model,
@@ -245,8 +245,8 @@ impl RemoteDescriber {
             .ok()
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
-        let info = shrike_describe_remote::ModelInfo { id: model_id, meta };
-        Ok(shrike_describe_remote::compose_fingerprint(
+        let info = shrike_engine::remote::ModelInfo { id: model_id, meta };
+        Ok(shrike_engine::remote::compose_fingerprint(
             &info,
             configured_model.as_deref(),
             mmproj.as_deref(),

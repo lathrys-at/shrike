@@ -809,8 +809,8 @@ pub unsafe extern "C" fn shrike_attach_remote_embedder(
             let space_key = cstr_opt(space_key);
 
             let result = (|| -> NativeResult<String> {
-                let engine = shrike_embed_remote::RemoteEmbedder::new(
-                    shrike_embed_remote::RemoteEmbedderConfig {
+                let engine = shrike_engine::remote::RemoteEmbedder::new(
+                    shrike_engine::remote::RemoteEmbedderConfig {
                         base_url,
                         api_key,
                         model,

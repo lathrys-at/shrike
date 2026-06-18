@@ -281,7 +281,7 @@ fn checked_div(py: Python<'_>, a: f64, b: f64) -> PyResult<f64> {
 #[cfg(feature = "engine-ort")]
 #[pyfunction]
 fn init_onnx_runtime(py: Python<'_>, dylib_path: String) -> PyResult<()> {
-    py.detach(move || shrike_embed::init_runtime(&dylib_path))
+    py.detach(move || shrike_engine::onnx::init_runtime(&dylib_path))
         .map_err(to_py_err)
 }
 
@@ -294,14 +294,14 @@ fn init_onnx_runtime(py: Python<'_>, dylib_path: String) -> PyResult<()> {
 #[cfg(feature = "engine-ort")]
 #[pyclass(frozen)]
 pub(crate) struct OnnxTextEmbedder {
-    inner: std::sync::Arc<shrike_embed::TextEmbedder>,
+    inner: std::sync::Arc<shrike_engine::onnx::TextEmbedder>,
 }
 
 #[cfg(feature = "engine-ort")]
 impl OnnxTextEmbedder {
     /// The loaded engine, shared — `NativeEmbedder` composes the kernel-slot
     /// handle from the same instance the facade probed (#342 P2).
-    pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_embed::TextEmbedder> {
+    pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_engine::onnx::TextEmbedder> {
         std::sync::Arc::clone(&self.inner)
     }
 }
@@ -320,8 +320,8 @@ impl OnnxTextEmbedder {
         normalize: bool,
         max_length: usize,
     ) -> PyResult<Self> {
-        let pooling = shrike_embed::Pooling::parse(pooling).map_err(to_py_err)?;
-        let cfg = shrike_embed::TextEmbedderConfig {
+        let pooling = shrike_engine::onnx::Pooling::parse(pooling).map_err(to_py_err)?;
+        let cfg = shrike_engine::onnx::TextEmbedderConfig {
             model_path,
             tokenizer_path,
             providers,
@@ -330,7 +330,7 @@ impl OnnxTextEmbedder {
             max_length,
         };
         let inner = py
-            .detach(move || shrike_embed::TextEmbedder::load(cfg))
+            .detach(move || shrike_engine::onnx::TextEmbedder::load(cfg))
             .map_err(to_py_err)?;
         Ok(Self {
             inner: std::sync::Arc::new(inner),
@@ -367,13 +367,13 @@ impl OnnxTextEmbedder {
 #[cfg(feature = "engine-ort")]
 #[pyclass(frozen)]
 pub(crate) struct ClipEmbedder {
-    inner: std::sync::Arc<shrike_embed::ClipEmbedder>,
+    inner: std::sync::Arc<shrike_engine::onnx::ClipEmbedder>,
 }
 
 #[cfg(feature = "engine-ort")]
 impl ClipEmbedder {
     /// The loaded engine, shared (see [`OnnxTextEmbedder::engine_arc`]).
-    pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_embed::ClipEmbedder> {
+    pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_engine::onnx::ClipEmbedder> {
         std::sync::Arc::clone(&self.inner)
     }
 }
@@ -396,7 +396,7 @@ impl ClipEmbedder {
         crop: u32,
         context: usize,
     ) -> PyResult<Self> {
-        let cfg = shrike_embed::ClipEmbedderConfig {
+        let cfg = shrike_engine::onnx::ClipEmbedderConfig {
             text_model_path,
             vision_model_path,
             tokenizer_path,
@@ -408,7 +408,7 @@ impl ClipEmbedder {
             context,
         };
         let inner = py
-            .detach(move || shrike_embed::ClipEmbedder::load(cfg))
+            .detach(move || shrike_engine::onnx::ClipEmbedder::load(cfg))
             .map_err(to_py_err)?;
         Ok(Self {
             inner: std::sync::Arc::new(inner),
@@ -442,13 +442,13 @@ impl ClipEmbedder {
 #[cfg(feature = "engine-remote")]
 #[pyclass(frozen)]
 pub(crate) struct RemoteEmbedder {
-    inner: std::sync::Arc<shrike_embed_remote::RemoteEmbedder>,
+    inner: std::sync::Arc<shrike_engine::remote::RemoteEmbedder>,
 }
 
 #[cfg(feature = "engine-remote")]
 impl RemoteEmbedder {
     /// The engine, shared (see the ort engines' `engine_arc`).
-    pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_embed_remote::RemoteEmbedder> {
+    pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_engine::remote::RemoteEmbedder> {
         std::sync::Arc::clone(&self.inner)
     }
 }
@@ -460,13 +460,14 @@ impl RemoteEmbedder {
     #[pyo3(signature = (base_url, *, api_key=None, model=None))]
     fn new(base_url: String, api_key: Option<String>, model: Option<String>) -> PyResult<Self> {
         // Construction validates the API key (header-injection guard, #383).
-        let engine =
-            shrike_embed_remote::RemoteEmbedder::new(shrike_embed_remote::RemoteEmbedderConfig {
+        let engine = shrike_engine::remote::RemoteEmbedder::new(
+            shrike_engine::remote::RemoteEmbedderConfig {
                 base_url,
                 api_key,
                 model,
-            })
-            .map_err(to_py_err)?;
+            },
+        )
+        .map_err(to_py_err)?;
         Ok(Self {
             inner: std::sync::Arc::new(engine),
         })
@@ -1059,7 +1060,10 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // The native image-prep pipeline version — folded into the clip-rs
     // fingerprint by the facade (a pixel-math change must invalidate vectors).
     #[cfg(feature = "engine-ort")]
-    m.add("IMAGE_PREP_VERSION_RS", shrike_embed::IMAGE_PREP_VERSION_RS)?;
+    m.add(
+        "IMAGE_PREP_VERSION_RS",
+        shrike_engine::onnx::IMAGE_PREP_VERSION_RS,
+    )?;
     // The kernel saver's built-in flush tuning (#355 item 2) — the host's
     // --index-save-* help text names the defaults it would override.
     #[cfg(feature = "anki-core")]

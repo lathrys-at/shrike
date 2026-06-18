@@ -5040,43 +5040,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "shrike-describe-remote"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "serde",
- "serde_json",
- "shrike-engine-api",
- "shrike-error",
- "shrike-network",
- "tracing",
- "ureq",
- "url",
-]
-
-[[package]]
-name = "shrike-embed"
+name = "shrike-engine"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "ndarray 0.17.2",
  "ort",
+ "serde",
+ "serde_json",
  "shrike-engine-api",
  "shrike-error",
  "shrike-image",
- "tokenizers",
- "tracing",
-]
-
-[[package]]
-name = "shrike-embed-remote"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "serde",
- "serde_json",
- "shrike-engine-api",
- "shrike-error",
  "shrike-network",
+ "tokenizers",
  "tracing",
  "ureq",
  "url",
@@ -5175,7 +5151,7 @@ dependencies = [
  "serde_json",
  "shrike-collection",
  "shrike-derived",
- "shrike-embed-remote",
+ "shrike-engine",
  "shrike-engine-api",
  "shrike-error",
  "shrike-kernel",
@@ -5217,9 +5193,7 @@ dependencies = [
  "shrike-cache",
  "shrike-collection",
  "shrike-derived",
- "shrike-describe-remote",
- "shrike-embed",
- "shrike-embed-remote",
+ "shrike-engine",
  "shrike-engine-api",
  "shrike-error",
  "shrike-index",

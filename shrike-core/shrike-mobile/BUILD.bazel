@@ -23,7 +23,7 @@ MOBILE_FEATURES = [
 MOBILE_DEPS = [
     "//shrike-core/shrike-collection:shrike_collection",
     "//shrike-core/shrike-derived:shrike_derived",
-    "//shrike-core/shrike-embed-remote:shrike_embed_remote",
+    "//shrike-core/shrike-engine:shrike_engine_remote",
     "//shrike-core/shrike-engine-api:shrike_engine_api",
     "//shrike-core/shrike-error:shrike_error",
     "//shrike-core/shrike-index:shrike_index",

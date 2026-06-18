@@ -45,7 +45,7 @@ anki-core = ["dep:shrike-collection", "dep:shrike-kernel"]
 # (the mobile app subordinates to a desktop/DIY kernel over the relay) and
 # any cloud endpoint with an api_key. This is the ONLY embedding runtime in
 # the mobile build: no in-process ort.
-engine-remote = ["dep:shrike-embed-remote"]
+engine-remote = ["dep:shrike-engine", "shrike-engine/remote"]
 # Platform recognition engines: Apple Vision OCR (mobile/macOS). Declared and
 # gated now; the real attach (composing the engine into the recognize slot) is
 # a later #504 slice — the gate is wired so a future flip is a feature change,
@@ -63,7 +63,9 @@ shrike-kernel = { path = "../shrike-kernel", optional = true }
 shrike-collection = { path = "../shrike-collection", optional = true }
 shrike-derived = { path = "../shrike-derived", default-features = false }
 shrike-engine-api = { path = "../shrike-engine-api" }
-shrike-embed-remote = { path = "../shrike-embed-remote", optional = true }
+# The engine-contract impls, feature-gated by family (#708): mobile pulls only
+# the remote HTTP engines (engine-remote, the relay-offload path) — NO onnx.
+shrike-engine = { path = "../shrike-engine", default-features = false, optional = true }
 shrike-recognize-apple = { path = "../shrike-recognize-apple", optional = true }
 shrike-error = { workspace = true }
 shrike-schemas = { path = "../shrike-schemas" }
