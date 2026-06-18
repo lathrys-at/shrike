@@ -1,8 +1,8 @@
-"""Local derived-text store — a sidecar SQLite (``shrike.db``) for data Shrike derives from notes.
+"""Local derived-text store — a sidecar SQLite (``shrike.db``) for data derived from notes.
 
 Its first artifact is an **FTS5 trigram** index over note text, backing fast substring and fuzzy
 (typo/partial) lexical search. The store is *source-seamed*: every indexed row is keyed
-``(note_id, source, ref)`` — ``source`` is where the text came from (``field`` today; ``ocr``/``asr``
+``(note_id, source, ref)``: ``source`` is the text's origin (``field`` today; ``ocr``/``asr``
 later; never VLM image-describe, which stays embedding-only) and ``ref`` is the field name
 or media filename. So a match's provenance can say *where* it hit, and new derived sources slot in
 without reshaping the store.

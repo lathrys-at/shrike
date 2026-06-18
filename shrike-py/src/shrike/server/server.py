@@ -34,7 +34,6 @@ from shrike.harness.engines.embedding.runtime import (
 )
 from shrike.harness.harness import CollectionManager, Harness, HarnessParams, KernelConfigError
 from shrike.platform.daemon import AlreadyRunningError, ServerLock
-
 from shrike.platform.log import configure_logging
 from shrike.platform.paths import cache_dir, state_dir
 from shrike.platform.pathsafety import (

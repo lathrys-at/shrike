@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Is the compiled shrike_native in the active venv stale or unbuilt? (#573)
+# Is the compiled shrike_native in the active venv stale or unbuilt?
 #
 #   exit 0  fresh — the extension matches the current native/ inputs and imports
 #   exit 1  stale, unbuilt, or unimportable — needs scripts/build-native.sh
@@ -20,7 +20,7 @@
 # The venv is resolved from $VIRTUAL_ENV (an activated shell / .envrc) OR
 # $SHRIKE_NATIVE_VENV — the latter is how the tests/conftest.py backstop passes
 # the running interpreter's sys.prefix, so the check works under .venv/bin/pytest
-# / an IDE runner / `uv run`, where VIRTUAL_ENV is unset (#574). Both empty is a
+# / an IDE runner / `uv run`, where VIRTUAL_ENV is unset. Both empty is a
 # bare CLI run with no venv at all — fair to reject.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"

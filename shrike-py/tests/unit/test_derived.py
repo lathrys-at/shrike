@@ -110,7 +110,7 @@ class TestFuzzy:
 
 
 class TestSourceSeam:
-    """A second source under one note id is searchable + removable independently (the source seam)."""
+    """A second source under one note id is searchable + removable independently."""
 
     def test_second_source_searchable_with_its_provenance(self, store):
         store.ingest(1, "ocr", {"diagram.png": "cristae folds visible in the image"})
