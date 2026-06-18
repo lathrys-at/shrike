@@ -418,12 +418,11 @@ impl CollectionCore {
                     ))
                 })?;
             // The sequential per-item prepare over the kernel's ONE prepare
-            // fn, then the batch write under the collection. The
-            // prepare is async now (the url path awaits the IP-pinned
-            // client); this standalone path is off the runtime (under
-            // `py.detach`), so it drives each prepare to completion via the
-            // kernel runtime's `block_on` (a legal block_on site — not a runtime
-            // worker thread).
+            // fn, then the batch write under the collection. The prepare is
+            // async (the url path awaits the IP-pinned client); this standalone
+            // path runs off the runtime (under `py.detach`), driving each
+            // prepare to completion via the kernel runtime's `block_on` (a legal
+            // block_on site — not a runtime worker thread).
             let prepared: Vec<_> = items
                 .into_iter()
                 .enumerate()

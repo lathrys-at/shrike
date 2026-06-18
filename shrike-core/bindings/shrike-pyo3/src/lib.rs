@@ -192,9 +192,9 @@ fn fetch_media_url(
     url: String,
     allow_private: bool,
 ) -> PyResult<(Vec<u8>, Option<String>)> {
-    // The fetch is async now; this standalone helper is off the
-    // runtime (under `py.detach`), so it drives the future to completion via the
-    // kernel runtime's `block_on` (a legal block_on site — not a runtime worker).
+    // The async fetch runs off the runtime (under `py.detach`), driven to
+    // completion via the kernel runtime's `block_on` (a legal block_on site —
+    // not a runtime worker).
     py.detach(|| shrike_kernel::block_on(shrike_media::fetch_media_url(&url, allow_private)))
         .map_err(to_py_err)
 }
@@ -473,9 +473,9 @@ impl RemoteEmbedder {
     }
 
     /// Embed one chunk of texts as a single request (one vector per input).
-    /// The engine is async now (route 2); this direct-call helper is
-    /// off the runtime (under `py.detach`), so it drives the future via
-    /// `shrike_kernel::block_on` (a legal block_on site — not a runtime worker).
+    /// The route-2 async engine is driven off the runtime (under `py.detach`)
+    /// via `shrike_kernel::block_on` (a legal block_on site — not a runtime
+    /// worker).
     fn embed_chunk(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<Vec<f32>>> {
         use shrike_engine_api::Embedder as _;
         py.detach(|| shrike_kernel::block_on(self.inner.embed(texts)))

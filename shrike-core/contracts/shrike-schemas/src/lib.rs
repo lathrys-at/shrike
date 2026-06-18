@@ -636,8 +636,8 @@ pub struct StoreMediaItem {
 
 impl StoreMediaItem {
     /// Pydantic's `model_validator`: exactly one source, and `data` needs a
-    /// `filename`. Serde can't express cross-field rules, so callers (the S2
-    /// action layer) validate explicitly.
+    /// `filename`. Serde can't express cross-field rules, so callers (the action
+    /// layer) validate explicitly.
     ///
     /// # Errors
     ///
