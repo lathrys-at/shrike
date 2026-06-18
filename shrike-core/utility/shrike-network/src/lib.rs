@@ -22,13 +22,22 @@
 //!   6to4 (2002::/16) and 3fff::/20 refusals (#591);
 //! - [`resolve_public_ip`]: resolve a host and refuse it unless EVERY resolved
 //!   address passes the allowlist, returning the first for pinning;
-//! - [`pinned_agent`]: a ureq agent whose resolver always hands back one fixed
-//!   `SocketAddr` (the vetted IP), with auto-redirects OFF (`redirects(0)`) so
-//!   the caller follows + re-vets each hop itself.
+//! - [`resolve_pinned`]: resolve an operator-trusted host to one address to pin
+//!   (no `is_global` gate);
+//! - [`same_host_redirect`]: vet a redirect for the endpoint posture (same-host
+//!   only), shared by every manual redirect-following loop;
+//! - the SYNC `ureq` builders ([`pinned_agent`], [`pinned_endpoint_agent`]) and
+//!   their ASYNC `reqwest` siblings ([`pinned_async_client`],
+//!   [`pinned_endpoint_async_client`], #721): a client whose connection is
+//!   pinned to one fixed `SocketAddr` (the vetted IP) with auto-redirects OFF,
+//!   so the caller follows + re-vets each hop itself. The async pair pins via
+//!   `reqwest::ClientBuilder::resolve` (a per-host DNS override, no connect-time
+//!   re-resolution) keeping SNI/cert/`Host` on the name.
 //!
-//! Pure Rust, NO async runtime (`ureq` is synchronous), NO engine crate and
-//! NOT `shrike-kernel` — it sits BELOW both, so the kernel-purity and
-//! engine-purity layering rules both stay satisfied.
+//! Pure Rust, NO engine crate and NOT `shrike-kernel` — it sits BELOW both, so
+//! the kernel-purity and engine-purity layering rules both stay satisfied. The
+//! `ureq` (sync) and `reqwest` (async) builders coexist during the #721 port;
+//! `ureq` is removed once S2 moves the consumers onto the async client.
 
 #![deny(missing_docs)]
 #![deny(
@@ -269,6 +278,84 @@ pub fn pinned_endpoint_agent(
     Ok((pinned_agent(pinned, port, timeout), base))
 }
 
+/// A reqwest async client that connects ONLY to `pinned` (the vetted IP),
+/// ignoring the host's real DNS, with auto-redirects OFF so the caller follows
+/// and re-vets each hop manually. The async sibling of [`pinned_agent`] (#721):
+/// `reqwest::ClientBuilder::resolve(host, addr)` installs a per-host DNS
+/// override for the client's life, so every connection to `host` uses `addr`
+/// and reqwest never re-resolves the name at connect time — closing the
+/// DNS-rebinding TOCTOU. The request URL keeps the hostname, so TLS SNI +
+/// certificate validation verify against the NAME and the `Host` header is
+/// right by construction, while the socket goes where we checked. The port
+/// comes from the request URL (the override uses port 0 by convention).
+///
+/// `host` must be the hostname (or IP literal) of the URL the returned client
+/// will be used against; mixing in a different host re-resolves through the
+/// system resolver, defeating the pin — callers build one client per pinned
+/// host (the [`resolve_public_ip`] → build → request pattern, per hop).
+///
+/// NOTE: a configured HTTP/SOCKS proxy short-circuits the DNS override —
+/// reqwest connects to the *proxy* and the proxy resolves the name, so the pin
+/// governs only the DIRECT-connection case (the SSRF surface). This matches the
+/// sync `ureq` agent's behavior exactly: a configured proxy is an operator
+/// opt-in to route through it. Proxy env (`HTTP_PROXY`/`ALL_PROXY`/…, SOCKS via
+/// the `socks` feature) is honored, preserving the current posture.
+///
+/// # Errors
+///
+/// Returns an `Unavailable` [`NativeError`] if the reqwest client cannot be
+/// built (a transport/TLS initialization failure).
+pub fn pinned_async_client(
+    pinned: IpAddr,
+    host: &str,
+    timeout: Duration,
+) -> NativeResult<reqwest::Client> {
+    // Port 0: "use the conventional port for the scheme, unless the URL names
+    // one" — reqwest always prefers the URL's port over the override's, so the
+    // socket address's port is irrelevant and 0 is the documented convention.
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve(host, SocketAddr::new(pinned, 0))
+        .build()
+        .map_err(|e| NativeError::unavailable(format!("could not build HTTP client: {e}")))
+}
+
+/// Build an IP-pinned async client for an OPERATOR-CONFIGURED endpoint base URL:
+/// parse it, resolve its host (WITHOUT the `is_global` gate — the operator
+/// trusts the host, e.g. loopback llama-server / a tailnet) via [`resolve_pinned`],
+/// and pin the connection to that one address. The async sibling of
+/// [`pinned_endpoint_agent`] (#721). Returns the client plus the parsed base URL
+/// (which the caller keeps for the [`same_host_redirect`] comparison). The pin
+/// closes the DNS-rebinding TOCTOU even for a trusted host; redirects are OFF so
+/// the caller applies [`same_host_redirect`] per hop.
+///
+/// # Errors
+///
+/// Returns an `InvalidInput` [`NativeError`] if `base_url` is not a valid URL,
+/// its scheme is not `http`/`https`, it has no host, or that host does not
+/// resolve; or an `Unavailable` [`NativeError`] if the client cannot be built.
+pub fn pinned_endpoint_async_client(
+    base_url: &str,
+    timeout: Duration,
+) -> NativeResult<(reqwest::Client, url::Url)> {
+    let base =
+        url::Url::parse(base_url).map_err(|e| invalid(format!("invalid endpoint URL: {e}")))?;
+    let scheme = base.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(invalid(format!(
+            "endpoint URL must be http(s), got scheme '{scheme}'"
+        )));
+    }
+    let host = base
+        .host_str()
+        .ok_or_else(|| invalid("endpoint URL has no host"))?
+        .to_string();
+    let pinned = resolve_pinned(&host)?;
+    let client = pinned_async_client(pinned, &host, timeout)?;
+    Ok((client, base))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +522,70 @@ mod tests {
         let from = url::Url::parse("http://trusted.example.com:8080/v1").unwrap();
         let target = same_host_redirect(&from, "http://trusted.example.com:9999/x").unwrap();
         assert_eq!(target.host_str(), Some("trusted.example.com"));
+    }
+
+    // ── async client builders (#721) ─────────────────────────────────────────
+    // The IP-pin / SNI / redirect-revet / size-cap behaviors that need a live
+    // socket are in tests/async_client.rs (they need a tokio runtime + a local
+    // server). These are the no-network construction-gate tests.
+
+    const T: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn pinned_async_client_builds_for_a_vetted_ip() {
+        // The untrusted-media sibling builds a client once its caller has vetted
+        // the IP (the is_global gate is the CALLER's resolve_public_ip step,
+        // exercised below; this proves the builder itself succeeds).
+        let ip: IpAddr = "93.184.216.34".parse().unwrap();
+        assert!(pinned_async_client(ip, "example.com", T).is_ok());
+    }
+
+    #[test]
+    fn pinned_async_client_path_refuses_non_global_before_any_socket() {
+        // The untrusted path gates on resolve_public_ip BEFORE building/connecting
+        // (the #592 control): a host resolving only to a non-global address is
+        // refused with no socket opened. This mirrors how the media consumer will
+        // drive it (resolve_public_ip -> pinned_async_client, per hop).
+        let err = resolve_public_ip("127.0.0.1").unwrap_err();
+        assert!(err.message.contains("non-public address"), "{err:?}");
+    }
+
+    #[test]
+    fn pinned_endpoint_async_client_allows_loopback() {
+        // The operator-trusted endpoint path resolves loopback (the primary
+        // local-llama use case) where the untrusted path refuses it — no
+        // is_global gate, just the pin.
+        let (_client, base) = pinned_endpoint_async_client("http://127.0.0.1:8080/v1", T).unwrap();
+        assert_eq!(base.host_str(), Some("127.0.0.1"));
+        assert_eq!(base.port(), Some(8080));
+    }
+
+    #[test]
+    fn pinned_endpoint_async_client_refuses_non_http_scheme() {
+        for bad in [
+            "ftp://example.com/",
+            "file:///etc/passwd",
+            "ws://example.com/",
+        ] {
+            let err = pinned_endpoint_async_client(bad, T).unwrap_err();
+            assert!(
+                err.message.contains("must be http(s)")
+                    || err.message.contains("invalid endpoint URL"),
+                "{bad}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_endpoint_async_client_refuses_malformed_or_hostless_url() {
+        // Not a URL at all -> a parse failure.
+        let err = pinned_endpoint_async_client("not a url", T).unwrap_err();
+        assert!(err.message.contains("invalid endpoint URL"), "{err:?}");
+        // An http(s) URL with an empty host (`http://`) is a parse error in the
+        // `url` crate (it never yields a hostless-but-valid http URL — the
+        // `host_str().is_none()` arm is defensive, matching the sync sibling),
+        // so it is refused at parse.
+        let err = pinned_endpoint_async_client("http://", T).unwrap_err();
+        assert!(err.message.contains("invalid endpoint URL"), "{err:?}");
     }
 }
