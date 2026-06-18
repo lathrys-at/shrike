@@ -16,6 +16,7 @@ rust_library(
     edition = "2021",
     deps = [
         "//shrike-core/shrike-error:shrike_error",
+        "//shrike-core/shrike-media:shrike_media",
         "//shrike-core/shrike-store:shrike_store",
         "//shrike-core/shrike-schemas:shrike_schemas",
         "@crates//:anki",

@@ -150,31 +150,12 @@ pub struct ServiceNote {
 /// because this is the pyo3 wire shape the binding hands across.
 pub type OwnedFieldRow = (i64, Vec<String>, Vec<String>);
 
-/// One store_media item after the kernel's off-actor prepare (#490): byte
-/// sources arrive fetched/decoded; `path` items pass through whole (their
-/// gates are collection policy and run under the write); a failed prepare
-/// carries its per-item error.
-pub struct PreparedMedia {
-    pub index: i64,
-    /// The caller's `filename`, echoed on errors.
-    pub filename: Option<String>,
-    pub source: PreparedMediaSource,
-}
-
-pub enum PreparedMediaSource {
-    /// Decoded base64 or a completed download; `name` already folds the
-    /// URL-derived fallback.
-    Bytes {
-        name: String,
-        data: Vec<u8>,
-        content_type: Option<String>,
-    },
-    /// A server-local path item, gated under the write.
-    Path { path: String },
-    /// The prepare failed (bad base64, refused/failed download, invalid
-    /// item); stored nothing.
-    Failed { error: String },
-}
+// `PreparedMedia`/`PreparedMediaSource` — the interface between the inbound
+// "acquire + validate untrusted bytes" half (`shrike-media`, #711) and this
+// crate's store-write tail (`store_prepared_media`). Defined in shrike-media
+// (the floor crate the kernel fans the prepare onto) and re-exported here so
+// `shrike_collection::PreparedMedia` keeps working for every consumer.
+pub use shrike_media::{PreparedMedia, PreparedMediaSource};
 
 /// The package format an export writes (#71). `.apkg` is the scoped,
 /// shareable note package; `.colpkg` is a whole-collection backup (no scope).

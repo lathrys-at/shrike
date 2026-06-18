@@ -18,6 +18,11 @@ name = "shrike_collection"
 # tag == the pip wheel version, bumped together.
 [dependencies]
 shrike-error = { workspace = true }
+# The inbound/untrusted-media crate (#711): the media store-write tail reads
+# the basename guard + the extension<->MIME map + the MEDIA_MAX_BYTES cap from
+# here, and consumes the `PreparedMedia` the kernel's off-actor prepare builds.
+# A layer-FLOOR crate (no kernel/engine coupling) — this edge points downward.
+shrike-media = { workspace = true }
 shrike-store = { path = "../shrike-store" }
 # The typed read seam (#391 phase 2): the read surface returns the canonical
 # wire types directly. schemas is a leaf (pure serde, no pyo3) — no cycle.

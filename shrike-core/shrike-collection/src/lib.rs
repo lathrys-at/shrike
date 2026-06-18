@@ -1413,7 +1413,7 @@ mod tests {
         assert_eq!(deleted.not_found, vec!["nope.png"]);
 
         // The byte-source size cap (the path source is deliberately uncapped).
-        let oversize = vec![0u8; shrike_store::MEDIA_MAX_BYTES + 1];
+        let oversize = vec![0u8; shrike_media::MEDIA_MAX_BYTES + 1];
         assert!(core
             .store_media_bytes(Some("big.bin"), &oversize, None)
             .is_err());

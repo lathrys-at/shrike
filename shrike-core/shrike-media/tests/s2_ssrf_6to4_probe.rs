@@ -9,7 +9,7 @@
 
 use std::net::IpAddr;
 
-use shrike_kernel::media_fetch::ip_is_allowed;
+use shrike_media::ip_is_allowed;
 
 #[test]
 fn ssrf_classifier_refuses_6to4_and_3fff_like_python() {

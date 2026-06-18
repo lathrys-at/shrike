@@ -22,6 +22,7 @@ members = [
     "shrike-index",
     "shrike-kernel",
     "shrike-llama-server",
+    "shrike-media",
     "shrike-mobile",
     "shrike-network",
     "shrike-pyo3",
@@ -54,5 +55,6 @@ pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
 shrike-cache = { path = "shrike-cache" }
 shrike-error = { path = "shrike-error" }
 shrike-image = { path = "shrike-image" }
+shrike-media = { path = "shrike-media" }
 shrike-network = { path = "shrike-network" }
 shrike-store = { path = "shrike-store" }

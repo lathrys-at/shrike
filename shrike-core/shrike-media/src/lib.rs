@@ -1,52 +1,169 @@
-//! The SSRF-guarded media URL fetch (#278 step 5b; kernel-owned since
-//! #389 B2) — the port of `_resolve_public_ip` / `_fetch_media_url` /
-//! `_decode_media_b64` (`path_within_any_root` stayed with the collection's
-//! write gates). **Trust-boundary code**: changes here go through the
-//! security-review gate.
+//! `shrike-media` — the inbound/untrusted-media crate (#711, epic #703).
 //!
-//! Pure Rust networking, NO anki coupling and NO async runtime: `ureq` is a
-//! synchronous client (no tokio, no owned threads — the #308 constraint).
-//! The SSRF model mirrors the Python implementation exactly:
+//! The "acquire + validate untrusted bytes" half of media handling, cracked
+//! out of `shrike-kernel`'s `media_fetch`. The *store* half (store/fetch/list/
+//! delete/prune) stays in `shrike-collection` — it is inseparable from
+//! `col.media`. This crate owns:
+//!
+//! - the SSRF-guarded media URL fetch ([`fetch_media_url`]) + base64 decode
+//!   ([`decode_media_b64`]) + the [`MEDIA_MAX_BYTES`] cap;
+//! - the per-item prepare ([`prepare_media_item`]) the kernel fans onto its
+//!   blocking pool, producing a [`PreparedMedia`] the collection's write tail
+//!   consumes;
+//! - [`safe_media_name`], the basename path-traversal guard;
+//! - the one extension→MIME home the store half reads
+//!   ([`guess_mime`]/[`mime_extension`]).
+//!
+//! **Trust-boundary code**: changes here go through the security-review gate.
+//! The SSRF model (origin of #164/#71/#72) is preserved exactly — it delegates
+//! the primitives to `shrike-network` (the one home for the is_global
+//! classifier + the IP-pinned agent), so the control is shared, not copied:
 //!
 //! - http/https only; every hop's host is resolved and refused unless every
-//!   address is **globally routable** (an allowlist mirroring Python
-//!   `ipaddress.is_global`, multicast rejected explicitly — parity-tested
-//!   against the Python classifier over an address corpus);
+//!   address is **globally routable** (`shrike_network::ip_is_allowed`, an
+//!   allowlist mirroring Python `ipaddress.is_global`, parity-tested);
 //! - the connection is **pinned to the vetted IP** via a custom resolver, so
 //!   the URL keeps the hostname (TLS SNI + certificate validation verify the
-//!   name, the Host header is right by construction) while the socket
-//!   connects to the address we vetted — closing the DNS-rebinding TOCTOU;
+//!   name, the Host header is right by construction) while the socket connects
+//!   to the address we vetted — closing the DNS-rebinding TOCTOU;
 //! - redirects are followed **manually**, re-vetting every hop, capped at
 //!   [`MAX_MEDIA_REDIRECTS`];
 //! - the body is size-capped while streaming ([`MEDIA_MAX_BYTES`]).
 //!
-//! With `allow_private` the guard and pinning are off (the operator opted
-//! into trusted internal hosts) — same switch as the Python facade.
+//! With `allow_private` the guard and pinning are off (the operator opted into
+//! trusted internal hosts) — same switch as the Python facade.
+//!
+//! Pure Rust, NO anki coupling and NO async runtime (`ureq` is synchronous —
+//! the #308 constraint), NO engine crate and NOT `shrike-kernel`: it sits BELOW
+//! both, so the kernel-purity and engine-purity layering rules both stay
+//! satisfied (//shrike-core:layering_check).
 
 use std::io::Read;
 
 use base64::Engine;
-use shrike_collection::{PreparedMedia, PreparedMediaSource};
 use shrike_error::{NativeError, NativeResult};
 use shrike_schemas::StoreMediaItem;
 use url::Url;
 
-// The SSRF classifier + the resolve-and-vet helper now live in the shared
-// `shrike-network` crate (#592) so the remote engine crates use the SAME control.
-// Re-exported here so the kernel's Python-facing binding
-// (anki_core::media_ip_allowed) and any in-tree caller keep importing them from
-// `media_fetch` unchanged — a pure move, store_media SSRF behavior + the parity
-// corpus are byte-identical.
+// The SSRF classifier + the resolve-and-vet helper live in the shared
+// `shrike-network` crate (#592) so the remote engine crates use the SAME
+// control. Re-exported here so the in-tree callers (the kernel's Python-facing
+// binding, any media caller) keep importing them from `shrike_media` unchanged.
 pub use shrike_network::{ip_is_allowed, resolve_public_ip};
 
-pub use shrike_store::MEDIA_MAX_BYTES;
+/// The byte-source size cap — caller-supplied/downloaded bytes only; a
+/// server-local `path` inside an operator-configured root is deliberately
+/// uncapped. The one policy value the collection write tail and the
+/// fetch/decode caps must agree on, so it lives where both can see it (#711:
+/// rehomed from shrike-store now that both sides depend on shrike-media).
+pub const MEDIA_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 pub const URL_FETCH_TIMEOUT_SECS: u64 = 30;
 /// The redirect hop cap (= `shrike_network::MAX_REDIRECTS`, kept as a named alias so
 /// existing call sites and the error message that quotes it are unchanged).
 pub const MAX_MEDIA_REDIRECTS: usize = shrike_network::MAX_REDIRECTS;
 
+/// One store_media item after the kernel's off-actor prepare (#490): byte
+/// sources arrive fetched/decoded; `path` items pass through whole (their
+/// gates are collection policy and run under the write); a failed prepare
+/// carries its per-item error. The interface between the acquire half (this
+/// crate) and the store half (`shrike-collection`, which re-exports this).
+pub struct PreparedMedia {
+    pub index: i64,
+    /// The caller's `filename`, echoed on errors.
+    pub filename: Option<String>,
+    pub source: PreparedMediaSource,
+}
+
+pub enum PreparedMediaSource {
+    /// Decoded base64 or a completed download; `name` already folds the
+    /// URL-derived fallback.
+    Bytes {
+        name: String,
+        data: Vec<u8>,
+        content_type: Option<String>,
+    },
+    /// A server-local path item, gated under the write.
+    Path { path: String },
+    /// The prepare failed (bad base64, refused/failed download, invalid
+    /// item); stored nothing.
+    Failed { error: String },
+}
+
 fn invalid(msg: impl Into<String>) -> NativeError {
     NativeError::invalid_input(msg)
+}
+
+/// `_safe_media_name`: reduce a caller-supplied name to a bare basename so it
+/// can only resolve inside the media dir (path-traversal guard for
+/// fetch/delete). Returns "" for a name that is only separators/dots — or
+/// only whitespace around them, which the emptiness check would otherwise
+/// pass (#382).
+pub fn safe_media_name(name: &str) -> String {
+    let normalized = name.replace('\\', "/");
+    let trimmed = normalized.trim_end_matches('/');
+    let base = trimmed.rsplit('/').next().unwrap_or("");
+    let checked = base.trim();
+    if checked.is_empty() || checked == "." || checked == ".." {
+        String::new()
+    } else {
+        base.to_string()
+    }
+}
+
+/// Best-effort MIME from the filename extension (the subset the Python
+/// `mimetypes` table returns for media Anki actually stores). The store half's
+/// fetch/list responses read this; the one home for the extension→MIME map the
+/// collection write paths key against (#711).
+pub fn guess_mime(filename: &str) -> Option<&'static str> {
+    let ext = filename.rsplit('.').next()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "avif" => "image/avif",
+        "ico" => "image/vnd.microsoft.icon",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "wav" => "audio/x-wav",
+        "flac" => "audio/x-flac",
+        "m4a" => "audio/mp4",
+        "opus" => "audio/opus",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "mov" => "video/quicktime",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" => "text/javascript",
+        "json" => "application/json",
+        _ => return None,
+    })
+}
+
+/// pylib `media.add_extension_based_on_mime`'s type map: the extension a stored
+/// file should carry given an HTTP `content_type` whose name lacks one.
+pub fn mime_extension(content_type: &str) -> Option<&'static str> {
+    Some(match content_type {
+        "audio/mpeg" => ".mp3",
+        "audio/ogg" => ".oga",
+        "audio/opus" => ".opus",
+        "audio/wav" => ".wav",
+        "audio/webm" => ".weba",
+        "audio/aac" => ".aac",
+        "image/jpeg" => ".jpg",
+        "image/png" => ".png",
+        "image/svg+xml" => ".svg",
+        "image/webp" => ".webp",
+        "image/avif" => ".avif",
+        _ => return None,
+    })
 }
 
 /// `_decode_media_b64`: cap on the ENCODED length first (base64 is ~4/3 of
@@ -266,6 +383,30 @@ mod tests {
         }
     }
 
+    /// The #591 SSRF parity regression, pinned at the media boundary too: the
+    /// allowlist must refuse 6to4 (2002::/16) and 3fff::/20 exactly like
+    /// Python's `ipaddress.is_global`. A 6to4 address embeds an IPv4 in bytes
+    /// 2..6, so `2002:7f00:0001::` is the 6to4 encoding of 127.0.0.1 —
+    /// fail-open to an internal IPv4 on the attacker-supplied `store_media`
+    /// url path if permitted.
+    #[test]
+    fn ssrf_classifier_refuses_6to4_and_3fff_like_python() {
+        for bad in [
+            "2002::1",        // 6to4 base
+            "2002:7f00:1::1", // 6to4 of 127.0.0.1 (internal!)
+            "2002:a00:1::1",  // 6to4 of 10.0.0.1 (internal!)
+            "2002:c0a8:1::1", // 6to4 of 192.168.0.1 (internal!)
+            "3fff::1",        // 3fff::/20 reserved-by-IANA
+        ] {
+            let ip: IpAddr = bad.parse().unwrap();
+            assert!(
+                !ip_is_allowed(ip),
+                "{bad} is NON-global per Python ipaddress.is_global but the SSRF \
+                 allowlist permitted it (parity divergence / SSRF reach)"
+            );
+        }
+    }
+
     #[test]
     fn b64_cap_applies_before_decoding() {
         let oversize = "A".repeat(MEDIA_MAX_BYTES / 3 * 4 + 8);
@@ -281,5 +422,29 @@ mod tests {
         // loopback never leaves the building, even before any socket opens
         let err = fetch_media_url("http://127.0.0.1:1/x", false).unwrap_err();
         assert!(err.message.contains("non-public address"));
+    }
+
+    #[test]
+    fn safe_media_name_guards_traversal() {
+        assert_eq!(safe_media_name("../../etc/passwd"), "passwd");
+        assert_eq!(safe_media_name("a\\b\\c.png"), "c.png");
+        assert_eq!(safe_media_name(".."), "");
+        assert_eq!(safe_media_name("dir/"), "dir");
+        assert_eq!(safe_media_name("plain.png"), "plain.png");
+        // Whitespace-only (or whitespace-wrapped dots) is no name at all (#382).
+        assert_eq!(safe_media_name("   "), "");
+        assert_eq!(safe_media_name(" .. "), "");
+        assert_eq!(safe_media_name("a/  "), "");
+    }
+
+    #[test]
+    fn mime_tables_cover_the_stored_kinds() {
+        assert_eq!(guess_mime("a.png"), Some("image/png"));
+        assert_eq!(guess_mime("clip.m4a"), Some("audio/mp4"));
+        assert_eq!(guess_mime("doc.pdf"), Some("application/pdf"));
+        assert_eq!(guess_mime("noext"), None);
+        assert_eq!(mime_extension("image/png"), Some(".png"));
+        assert_eq!(mime_extension("audio/ogg"), Some(".oga"));
+        assert_eq!(mime_extension("application/unknown"), None);
     }
 }

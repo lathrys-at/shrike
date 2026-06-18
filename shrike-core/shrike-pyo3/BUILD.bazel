@@ -65,6 +65,7 @@ rust_shared_library(
         "//shrike-core/shrike-index:shrike_index",
         "//shrike-core/shrike-kernel:shrike_kernel",
         "//shrike-core/shrike-llama-server:shrike_llama_server",
+        "//shrike-core/shrike-media:shrike_media",
         "//shrike-core/shrike-schemas:shrike_schemas",
         "@crates//:futures",
         "@crates//:tokio",

@@ -5022,6 +5022,7 @@ dependencies = [
  "regex",
  "serde_json",
  "shrike-error",
+ "shrike-media",
  "shrike-schemas",
  "shrike-store",
  "tempfile",
@@ -5125,7 +5126,6 @@ dependencies = [
 name = "shrike-kernel"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
  "blake2",
  "futures",
  "serde",
@@ -5136,13 +5136,11 @@ dependencies = [
  "shrike-engine-api",
  "shrike-error",
  "shrike-index",
- "shrike-network",
+ "shrike-media",
  "shrike-schemas",
  "shrike-store",
  "tokio",
  "tracing",
- "ureq",
- "url",
 ]
 
 [[package]]
@@ -5154,6 +5152,18 @@ dependencies = [
  "shrike-error",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "shrike-media"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "shrike-error",
+ "shrike-network",
+ "shrike-schemas",
+ "ureq",
+ "url",
 ]
 
 [[package]]
@@ -5206,6 +5216,7 @@ dependencies = [
  "shrike-index",
  "shrike-kernel",
  "shrike-llama-server",
+ "shrike-media",
  "shrike-recognize-apple",
  "shrike-schemas",
  "shrike-store",

@@ -196,7 +196,7 @@ fn fetch_media_url(
     url: String,
     allow_private: bool,
 ) -> PyResult<(Vec<u8>, Option<String>)> {
-    py.detach(|| shrike_kernel::media_fetch::fetch_media_url(&url, allow_private))
+    py.detach(|| shrike_media::fetch_media_url(&url, allow_private))
         .map_err(to_py_err)
 }
 
@@ -204,7 +204,7 @@ fn fetch_media_url(
 #[cfg(feature = "anki-core")]
 #[pyfunction]
 fn decode_media_b64(py: Python<'_>, data: String) -> PyResult<Vec<u8>> {
-    py.detach(|| shrike_kernel::media_fetch::decode_media_b64(&data))
+    py.detach(|| shrike_media::decode_media_b64(&data))
         .map_err(to_py_err)
 }
 

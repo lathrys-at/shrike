@@ -25,17 +25,13 @@ shrike-collection = { path = "../shrike-collection" }
 shrike-derived = { path = "../shrike-derived" }
 shrike-engine-api = { path = "../shrike-engine-api" }
 shrike-error = { workspace = true }
-# Shared SSRF-safety primitives (#592): the is_global classifier, resolve-and-vet,
-# and the IP-pinned agent builder — one home, shared with the remote engine
-# crates. A LOW utility crate (no engine dep, no kernel dep), so this edge keeps
-# the kernel pure.
-shrike-network = { workspace = true }
+# The inbound/untrusted-media crate (#711): the SSRF-guarded URL fetch + base64
+# decode + per-item prepare cracked out of the kernel. A layer-FLOOR utility
+# crate (no kernel/engine coupling, delegates the SSRF primitives to
+# shrike-network) — `store_media` fans `prepare_media_item` onto the blocking
+# pool. The kernel keeps no media externals (ureq/base64/url left with it).
+shrike-media = { workspace = true }
 shrike-store = { path = "../shrike-store" }
-# media URL fetch (#278 step 5b, kernel-owned since #389 B2): ureq is a
-# SYNCHRONOUS client — no tokio coupling; the prepare rides the blocking pool.
-ureq = "2"
-base64 = "0.22"
-url = "2"
 shrike-index = { path = "../shrike-index" }
 shrike-schemas = { path = "../shrike-schemas" }
 serde = "1"

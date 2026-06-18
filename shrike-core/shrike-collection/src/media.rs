@@ -14,74 +14,11 @@ use shrike_schemas::{
 
 use crate::{embed_text, CollectionCore};
 
-/// `_safe_media_name`: reduce a caller-supplied name to a bare basename so it
-/// can only resolve inside the media dir (path-traversal guard for
-/// fetch/delete). Returns "" for a name that is only separators/dots — or
-/// only whitespace around them, which the emptiness check would otherwise
-/// pass (#382).
-fn safe_media_name(name: &str) -> String {
-    let normalized = name.replace('\\', "/");
-    let trimmed = normalized.trim_end_matches('/');
-    let base = trimmed.rsplit('/').next().unwrap_or("");
-    let checked = base.trim();
-    if checked.is_empty() || checked == "." || checked == ".." {
-        String::new()
-    } else {
-        base.to_string()
-    }
-}
-
-/// Best-effort MIME from the filename extension (the subset the Python
-/// `mimetypes` table returns for media Anki actually stores).
-fn guess_mime(filename: &str) -> Option<&'static str> {
-    let ext = filename.rsplit('.').next()?.to_ascii_lowercase();
-    Some(match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "bmp" => "image/bmp",
-        "tif" | "tiff" => "image/tiff",
-        "avif" => "image/avif",
-        "ico" => "image/vnd.microsoft.icon",
-        "mp3" => "audio/mpeg",
-        "ogg" => "audio/ogg",
-        "wav" => "audio/x-wav",
-        "flac" => "audio/x-flac",
-        "m4a" => "audio/mp4",
-        "opus" => "audio/opus",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        "mkv" => "video/x-matroska",
-        "mov" => "video/quicktime",
-        "pdf" => "application/pdf",
-        "txt" => "text/plain",
-        "html" | "htm" => "text/html",
-        "css" => "text/css",
-        "js" => "text/javascript",
-        "json" => "application/json",
-        _ => return None,
-    })
-}
-
-/// pylib `media.add_extension_based_on_mime`'s type map.
-fn mime_extension(content_type: &str) -> Option<&'static str> {
-    Some(match content_type {
-        "audio/mpeg" => ".mp3",
-        "audio/ogg" => ".oga",
-        "audio/opus" => ".opus",
-        "audio/wav" => ".wav",
-        "audio/webm" => ".weba",
-        "audio/aac" => ".aac",
-        "image/jpeg" => ".jpg",
-        "image/png" => ".png",
-        "image/svg+xml" => ".svg",
-        "image/webp" => ".webp",
-        "image/avif" => ".avif",
-        _ => return None,
-    })
-}
+// The basename path-traversal guard + the extension<->MIME map live in the
+// inbound-media crate (`shrike-media`, #711) — the one home both the store
+// write tail (here) and the kernel's fetch/decode path read. Imported, not
+// re-defined.
+use shrike_media::{guess_mime, mime_extension, safe_media_name};
 
 /// `_path_within_any_root`: containment on resolved real paths (canonicalize
 /// collapses `..` and resolves symlinks on both sides), component-aware (the
@@ -102,10 +39,10 @@ pub fn path_within_any_root(path: &str, roots: &[String]) -> bool {
 /// server-local `path` inside an operator-configured root is deliberately
 /// uncapped.
 fn check_media_size(len: usize) -> NativeResult<()> {
-    if len > shrike_store::MEDIA_MAX_BYTES {
+    if len > shrike_media::MEDIA_MAX_BYTES {
         return Err(shrike_error::NativeError::invalid_input(format!(
             "file exceeds the {}-byte limit",
-            shrike_store::MEDIA_MAX_BYTES
+            shrike_media::MEDIA_MAX_BYTES
         )));
     }
     Ok(())

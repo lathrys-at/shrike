@@ -30,6 +30,7 @@ py_test(
         "//shrike-core/shrike-index:Cargo.toml",
         "//shrike-core/shrike-kernel:Cargo.toml",
         "//shrike-core/shrike-llama-server:Cargo.toml",
+        "//shrike-core/shrike-media:Cargo.toml",
         "//shrike-core/shrike-mobile:Cargo.toml",
         "//shrike-core/shrike-network:Cargo.toml",
         "//shrike-core/shrike-pyo3:Cargo.toml",

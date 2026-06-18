@@ -23,7 +23,7 @@ Structural rules over every workspace manifest:
    each floor crate's closure for the kernel-and-above set.
 
 Adding a crate to the floor as the #703 reorg lands new low-utility crates
-(`shrike-error`, `shrike-network`, `shrike-process`, `shrike-media`,
+(`shrike-error`, `shrike-network`, `shrike-process`,
 `shrike-cache`, `shrike-store`, …) is a ONE-LINE addition to `LAYER_FLOOR`
 below — the closure machinery handles the rest.
 """
@@ -60,11 +60,12 @@ ENGINE_CRATES = {
 # floor crate are constrained.
 #
 # As the #703 reorg adds further low-utility crates (the coming
-# shrike-process / shrike-media), extend this set — one line per crate.
+# shrike-process), extend this set — one line per crate.
 LAYER_FLOOR = {
     "shrike-cache",  # per-collection cache layout (#712) — index/derived subdirs + namespacing
     "shrike-error",
     "shrike-image",  # the CLIP byte->pixels->CHW pipeline (#707) — decode/resize/normalize + BMP encode
+    "shrike-media",  # inbound/untrusted-media (#711) — SSRF fetch + decode + prepare + MIME home
     "shrike-network",
     "shrike-schemas",
     "shrike-engine-api",  # the kernel<->ort firewall — a thin contract, stays floor

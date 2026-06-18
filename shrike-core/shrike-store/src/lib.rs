@@ -11,8 +11,9 @@
 //! the two traits with *two* impl crates each over disjoint backends —
 //! [`VectorIndex`] (`shrike-index`) and [`DerivedStore`] (`shrike-derived`) —
 //! which therefore CANNOT live in either impl crate (the dependency points the
-//! other way) plus [`MEDIA_MAX_BYTES`], the one policy value both the
-//! collection write tail and the kernel fetch/decode caps must agree on.
+//! other way). (The `MEDIA_MAX_BYTES` policy value moved to `shrike-media` in
+//! #711, now that both the collection write tail and the media fetch/decode
+//! caps depend on that crate.)
 //!
 //! Shape rules (the engine contract's, restated for stores):
 //! - **Sync traits.** Scheduling is the KERNEL's concern — index/derived calls
@@ -26,11 +27,6 @@
 
 use shrike_error::NativeResult;
 use std::collections::BTreeMap;
-
-/// The byte-source media size cap — ONE policy value: the collection's write
-/// tail and the kernel's fetch/decode caps must agree, so it lives where
-/// both can see it.
-pub const MEDIA_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// One modality's ranked hits for one query: `(keys, scores)`, best-first.
 pub type ModalityRanking = (Vec<i64>, Vec<f32>);

@@ -30,7 +30,6 @@ pub mod embed_set;
 pub mod fusion;
 pub mod index_orchestrator;
 pub mod index_set;
-pub mod media_fetch;
 pub mod recognize;
 pub mod tag_centroids;
 pub mod watermark;
@@ -2315,7 +2314,7 @@ impl Kernel {
             .enumerate()
             .map(|(i, item)| {
                 tokio::task::spawn_blocking(move || {
-                    crate::media_fetch::prepare_media_item(i as i64, item, allow_private_fetch)
+                    shrike_media::prepare_media_item(i as i64, item, allow_private_fetch)
                 })
             })
             .collect();

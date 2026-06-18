@@ -21,11 +21,8 @@ rust_library(
         "//shrike-core/shrike-derived:shrike_derived",
         "//shrike-core/shrike-engine-api:shrike_engine_api",
         "//shrike-core/shrike-error:shrike_error",
-        "//shrike-core/shrike-network:shrike_network",
+        "//shrike-core/shrike-media:shrike_media",
         "//shrike-core/shrike-store:shrike_store",
-        "@crates//:base64",
-        "@crates//:ureq",
-        "@crates//:url",
         "//shrike-core/shrike-index:shrike_index",
         "//shrike-core/shrike-schemas:shrike_schemas",
         "@crates//:blake2",
@@ -77,14 +74,4 @@ rust_test(
         "@crates//:futures",
         "@crates//:serde_json",
     ],
-)
-
-# SSRF classifier parity regression (#591): the allowlist must refuse 6to4
-# (2002::/16) and 3fff::/20 like Python's `ipaddress.is_global`.
-rust_test(
-    name = "s2_ssrf_6to4_probe_test",
-    size = "small",
-    srcs = ["tests/s2_ssrf_6to4_probe.rs"],
-    edition = "2021",
-    deps = [":shrike_kernel"],
 )
