@@ -90,6 +90,11 @@ fn fill_clozes(text: &str) -> std::borrow::Cow<'_, str> {
 /// Turn one raw Anki field value into stable plain text for embedding —
 /// byte-identical to `shrike.embed_text.normalize_for_embedding`. The
 /// HTML-strip step is injected (the adapter's service-layer `strip_html`).
+///
+/// # Errors
+///
+/// Propagates any error from the injected `strip_html` closure (called only
+/// when the value contains a `<` or `&`).
 pub fn normalize_for_embedding(
     value: &str,
     strip_html: &dyn Fn(&str) -> NativeResult<String>,
@@ -124,6 +129,11 @@ pub fn normalize_for_embedding(
 /// `Name: text`, newline-joined — mirrors
 /// `CollectionWrapper._render_embed_text` (the single render both the query
 /// and index paths must share).
+///
+/// # Errors
+///
+/// Propagates any error from the injected `strip_html` closure (via
+/// [`normalize_for_embedding`]).
 pub fn render_embed_text(
     names: &[String],
     values: &[String],
@@ -148,6 +158,10 @@ static MEDIA_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// True if a field value carries no content — no text and no media. Mirrors
 /// `shrike.embed_text.field_is_blank` (stricter than the embedding
 /// normalization: media makes a field non-blank).
+///
+/// # Errors
+///
+/// Propagates any error from the injected `strip_html` closure.
 pub fn field_is_blank(
     value: &str,
     strip_html: &dyn Fn(&str) -> NativeResult<String>,

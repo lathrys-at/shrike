@@ -97,6 +97,11 @@ impl CollectionCore {
     /// Store one media item from prepared bytes. The single-item entry knows
     /// no batch position, so `index` is 0 — the host overwrites it with the
     /// caller's.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error if the data exceeds the size cap, and
+    /// any error the underlying store write raises.
     pub fn store_media_bytes(
         &self,
         filename: Option<&str>,
@@ -150,6 +155,11 @@ impl CollectionCore {
     /// were fetched/decoded off-actor on the kernel's blocking pool; `path`
     /// items run their gates here (containment is collection policy). One
     /// collection job per batch; per-item errors never sink it.
+    ///
+    /// # Errors
+    ///
+    /// Infallible at the batch level — per-item failures (a blocked `path`, a
+    /// size-cap breach, a store-write error) ride the returned result vec.
     pub fn store_prepared_media(
         &self,
         prepared: &[PreparedMedia],
@@ -183,6 +193,11 @@ impl CollectionCore {
 
     /// Resolve filenames to where their bytes live — never the bytes
     /// (`_fetch_media`; the host layer fills the serving `url`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the media-dir read fails (a missing file is a
+    /// per-item `missing` result, not an error).
     pub fn fetch_media(&self, filenames: &[String]) -> NativeResult<Vec<MediaFetchResult>> {
         let mut results: Vec<MediaFetchResult> = Vec::new();
         for fn_ in filenames {
@@ -214,6 +229,10 @@ impl CollectionCore {
 
     /// List media files (sorted, optional glob `pattern`, optional limit) —
     /// `_list_media`. The host layer fills each file's serving `url`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the media-dir read fails.
     pub fn list_media(
         &self,
         pattern: Option<&str>,
@@ -258,6 +277,10 @@ impl CollectionCore {
 
     /// Move existing media files to Anki's recoverable trash (`_delete_media`;
     /// result lists echo the caller's references).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the media-dir read or the trash write fails.
     pub fn delete_media(&self, filenames: &[String]) -> NativeResult<DeleteMediaResponse> {
         let mut deleted: Vec<String> = Vec::new();
         let mut not_found: Vec<String> = Vec::new();
@@ -280,6 +303,10 @@ impl CollectionCore {
     }
 
     /// Read-only media diagnostics (`_media_check`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the media-check RPC fails.
     pub fn media_check(&self) -> NativeResult<CollectionCheckResponse> {
         let report = self.adapter.check_media()?;
         Ok(CollectionCheckResponse {
@@ -344,6 +371,11 @@ impl CollectionCore {
     /// `_prune` (#89): the four cleanups, preview-by-default at the tool
     /// layer. Returns the typed response plus the removed-note-id list out of
     /// band (kernel-internal — the host's index maintenance, never the wire).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any underlying read (empty notes/cards, unused
+    /// tags/media) or cleanup write fails.
     pub fn prune(
         &self,
         unused_tags: bool,

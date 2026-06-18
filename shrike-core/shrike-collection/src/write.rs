@@ -80,6 +80,11 @@ impl CollectionCore {
     /// follow with a drift reconcile (`reindex_if_needed`) and a derived
     /// rebuild, and must NOT advance the index watermark (the col_mod bump is
     /// the reconcile signal). Returns the per-bucket import summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the package is missing/unreadable/malformed, or the
+    /// import RPC fails.
     pub fn import_package(
         &self,
         package_path: &str,
@@ -92,6 +97,12 @@ impl CollectionCore {
     /// `note_type`?, `deck`?, `fields` map, `tags`?), per-item typed
     /// results out — `created`/`updated`/`ok`(dry_run)/`skipped`/`error`
     /// with the same `reason` vocabulary as `_upsert_notes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only for a whole-batch failure (e.g. the collection is
+    /// not open); per-note validation/duplicate failures ride the returned
+    /// result vec, not this `Result`.
     pub fn upsert_notes(
         &self,
         notes: &[NoteInput],
@@ -360,6 +371,10 @@ impl CollectionCore {
     /// Edit tags on a note set — `set_tags` is a full replace (mutually
     /// exclusive with add/remove, validated by the caller); add/remove apply
     /// subtractively-then-additively.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying tag write fails.
     pub fn update_note_tags(
         &self,
         note_ids: &[i64],
@@ -408,6 +423,10 @@ impl CollectionCore {
 
     /// Rename a tag collection-wide (empty `note_ids`) or exactly on a note
     /// set (never substring: renaming `jp` never touches `jp-verbs`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying tag write fails.
     pub fn rename_tag(
         &self,
         old: &str,
@@ -433,6 +452,12 @@ impl CollectionCore {
 
     /// Create or rename decks in bulk (id present = rename; never merges).
     /// Typed both directions (#391): per-item errors never sink the batch.
+    ///
+    /// # Errors
+    ///
+    /// Infallible at the batch level — per-deck failures ride the returned
+    /// result vec; the `Result` matches the [`Collection`](crate::contract::Collection)
+    /// trait.
     pub fn upsert_decks(&self, decks: &[DeckInput]) -> NativeResult<Vec<UpsertDeckResult>> {
         let mut results: Vec<UpsertDeckResult> = Vec::new();
         for (index, deck) in decks.iter().enumerate() {
@@ -487,6 +512,11 @@ impl CollectionCore {
 
     /// Delete decks by reference — only if empty (no cards in the deck or its
     /// subdecks). Result lists echo the caller's references.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a deck-name/ref read or the removal write fails (a
+    /// non-empty deck is reported in `not_empty`, not errored).
     pub fn delete_decks(&self, refs: &[String]) -> NativeResult<DeleteDecksResponse> {
         let all: Vec<(i64, String)> = self.adapter.deck_names()?;
         let mut deleted: Vec<String> = Vec::new();
@@ -550,6 +580,11 @@ impl CollectionCore {
     /// dry-run *preview* (Python-side `apply_replacement` samples) stays in
     /// the host; this is the apply path. Returns
     /// `{"notes_changed": N, "changed_ids": [...]}` as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid regex (when `regex`), or if the
+    /// before/after read or the find/replace write fails.
     #[allow(clippy::too_many_arguments)]
     pub fn find_replace_notes(
         &self,
@@ -589,6 +624,11 @@ impl CollectionCore {
 
     /// Delete note types by id — only if unused. Typed per-item results
     /// (`deleted`/`not_found`/`error`), same vocabulary as `_delete_note_types`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the notetype-names read fails; per-id failures ride
+    /// the returned result vec.
     pub fn delete_note_types(&self, ids: &[i64]) -> NativeResult<Vec<DeleteNoteTypeResult>> {
         let known: HashMap<i64, String> = self.adapter.notetype_names()?.into_iter().collect();
         let mut results: Vec<DeleteNoteTypeResult> = Vec::new();

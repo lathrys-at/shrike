@@ -151,6 +151,12 @@ impl CollectionCore {
     /// `upsert_note_types`: create or update note-type definitions in bulk
     /// (per-item try/except, the position-keyed replace with the #76
     /// unsound-move rejection).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a donor-notetype read fails; per-item failures (an
+    /// invalid definition, an unsound positional move) ride the returned
+    /// result vec.
     pub fn upsert_note_types(
         &self,
         note_types: &[NoteTypeInput],
@@ -328,6 +334,12 @@ impl CollectionCore {
 
     /// `update_note_type_fields`: identity-based ops (add/remove/rename/
     /// reposition by name), atomic via simulate-then-apply, one persist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the notetype is unknown, the op sequence is unsound
+    /// (validated against a simulated name list before any primitive runs), or
+    /// the persist write fails.
     pub fn update_note_type_fields(
         &self,
         note_type_name: &str,
@@ -354,6 +366,11 @@ impl CollectionCore {
     }
 
     /// `update_note_type_templates`: the by-identity template counterpart.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the notetype is unknown, the op sequence is unsound
+    /// (validated before any primitive runs), or the persist write fails.
     pub fn update_note_type_templates(
         &self,
         note_type_name: &str,
@@ -450,6 +467,11 @@ impl CollectionCore {
     /// model's template HTML + shared CSS. Literal mode inserts the
     /// replacement verbatim; regex mode accepts Python-style group refs
     /// (`\1`, `\g<n>`), translated to the regex crate's `${n}`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the notetype is unknown, the regex is invalid (when
+    /// `regex`), or the persist write fails.
     #[allow(clippy::too_many_arguments)]
     pub fn find_and_replace_note_types(
         &self,
@@ -549,6 +571,11 @@ impl CollectionCore {
 
     /// `update_note_type_field_metadata`: per-field editor metadata
     /// (font/size/description), validate-all-then-apply, one persist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the notetype or a named field is unknown, or the
+    /// persist write fails.
     pub fn update_note_type_field_metadata(
         &self,
         note_type_name: &str,
@@ -605,6 +632,18 @@ impl CollectionCore {
     /// drop/new-empty reporting and the same validations; on apply, the same
     /// `change_notetype` RPC (and the pylib-mirroring scm bump) as
     /// `models.change`. An empty `template_map` = map templates by ordinal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any note id is missing, the notes do not all share
+    /// one source type, the target notetype is unknown or equals the source,
+    /// the maps name unknown fields/templates or two sources map to one
+    /// target, or the migration write fails.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic in practice — the single `expect` reading the lone
+    /// source mid is reached only after the count is checked to be exactly one.
     pub fn migrate_note_type(
         &self,
         note_ids: &[i64],

@@ -48,6 +48,12 @@ impl CollectionCore {
     /// 4. Drop the temp dir.
     ///
     /// Both symlink doors (basename and temp name) are closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error if a `.colpkg` is given a non-whole
+    /// scope, and any error from re-acquiring the collection, creating the
+    /// temp dir, the anki export RPC, or the atomic rename onto `out_path`.
     pub fn export_package(&self, req: &ExportRequest) -> NativeResult<ExportOutcome> {
         self.ensure_open()?;
         if matches!(req.format, PackageFormat::Colpkg) && !matches!(req.scope, ExportScope::Whole) {

@@ -120,6 +120,10 @@ impl CollectionCore {
     /// only — the move-out assembly (#445) replaced a full per-note text
     /// clone, and no caller passes duplicates).
     /// The port of `CollectionWrapper.note_texts`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batched read or text normalization fails.
     pub fn note_texts(&self, note_ids: &[i64]) -> NativeResult<Vec<String>> {
         let strip = self.strip_fn();
         let mut rendered: HashMap<i64, String> = HashMap::new();
@@ -135,6 +139,10 @@ impl CollectionCore {
     /// Per-note embedding input `(note_id, text, image_names)` — the
     /// multimodal counterpart (`_note_embed_inputs`): text from the shared
     /// render, image names from the RAW field values, de-duplicated in order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batched read or text normalization fails.
     pub fn note_embed_inputs(
         &self,
         note_ids: &[i64],
@@ -168,6 +176,10 @@ impl CollectionCore {
 
     /// `(note_id, "field", field_name, raw_value)` for non-empty fields — what
     /// the derived-text store ingests (`derived_field_rows`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batched read fails.
     pub fn derived_field_rows(
         &self,
         note_ids: &[i64],
@@ -192,6 +204,10 @@ impl CollectionCore {
     /// probe, so the filter can never skip a note the extractor would
     /// return names for — then the raw-field extractor (same per-field
     /// extraction + in-order dedupe as `note_embed_inputs`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read fails.
     pub fn note_image_refs(&self) -> NativeResult<Vec<(i64, Vec<String>)>> {
         self.note_media_refs_filtered("<img", embed_text::extract_image_refs)
     }
@@ -202,6 +218,10 @@ impl CollectionCore {
     /// (#445): one SQL pass with an ASCII `lower()` pre-filter that exactly
     /// matches the extractor's own ASCII byte probe (`[sound:`), then the
     /// raw-field extractor with in-order dedupe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read fails.
     pub fn note_sound_refs(&self) -> NativeResult<Vec<(i64, Vec<String>)>> {
         self.note_media_refs_filtered("[sound:", embed_text::extract_sound_refs)
     }
@@ -249,6 +269,10 @@ impl CollectionCore {
     /// layer's membership source (#179): ONE pass over `notes.tags` (Anki
     /// keeps it space-delimited), exact leaf strings; hierarchy roll-up is
     /// the consumer's prefix aggregation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read fails.
     pub fn note_tag_rows(&self) -> NativeResult<Vec<(i64, Vec<String>)>> {
         let mut out = Vec::new();
         for r in self
@@ -274,6 +298,10 @@ impl CollectionCore {
     /// Whether ANY of `note_ids` currently carries a tag — the SQL half of
     /// the tag-centroid relevance probe (#445): one scoped aggregate lets an
     /// untagged write op skip the O(tagged-notes) recompute entirely.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read fails.
     pub fn any_tagged(&self, note_ids: &[i64]) -> NativeResult<bool> {
         if note_ids.is_empty() {
             return Ok(false);
@@ -293,6 +321,10 @@ impl CollectionCore {
     /// Total note count via one SQL aggregate (#445): the tag-centroid
     /// refresh previously ran `find_notes("")` — materializing every note id
     /// through a protobuf SearchResponse — just to take `.len()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the aggregate read fails.
     pub fn note_count(&self) -> NativeResult<usize> {
         let rows = self.adapter.db_rows("select count(*) from notes")?;
         rows.first()
@@ -305,6 +337,11 @@ impl CollectionCore {
     /// The raw Anki search escape hatch (`collection_query`): the full grammar
     /// straight to search, `list_notes`-shaped (`total` = the full match
     /// count before `limit`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a malformed search expression, or if the read
+    /// fails.
     pub fn query(
         &self,
         search: &str,
@@ -325,6 +362,10 @@ impl CollectionCore {
     /// unlike `derived_field_rows`, empty fields are included (`note_field_map`
     /// feeds substring_info + the find/replace preview, which want every
     /// field). Missing ids are absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batched read fails.
     pub fn note_field_map(&self, note_ids: &[i64]) -> NativeResult<Vec<OwnedFieldRow>> {
         // Owned names on this surface (the pyo3 binding's wire shape); the
         // Arc sharing is an internal property of `note_field_rows` (#445).
@@ -337,12 +378,20 @@ impl CollectionCore {
 
     /// One field value through the embedding normalization — the parity-test
     /// surface for byte-identity against the Python normalizer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTML-strip RPC the normalization uses fails.
     pub fn normalize_text(&self, value: &str) -> NativeResult<String> {
         embed_text::normalize_for_embedding(value, &self.strip_fn())
     }
 
     /// Map a deck reference (name, numeric id, `#id`) to a deck name —
     /// `_resolve_deck_ref`. None = an explicit id matching no deck.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the deck-name read fails.
     pub fn resolve_deck_ref(&self, reference: &str) -> NativeResult<Option<String>> {
         let name_of = |id: i64| -> NativeResult<Option<String>> {
             Ok(self
@@ -372,6 +421,11 @@ impl CollectionCore {
     /// Divergence from the Python original: "no filter given" raises
     /// invalid_input here instead of returning an `{"error": ...}` dict (the
     /// facade owns that wire shape).
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error if no filter is given or a referenced
+    /// deck/notetype is unknown, and any error the underlying read raises.
     #[allow(clippy::too_many_arguments)]
     pub fn list_notes(
         &self,
@@ -469,6 +523,10 @@ impl CollectionCore {
     /// meta-mode note carries an explicit `"content": null`, never a dropped
     /// key — every consumer reads via `.get(..)` + `as_*`, which treat `Null`
     /// exactly like absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batched read fails.
     pub fn note_dicts(&self, note_ids: &[i64], with_fields: bool) -> NativeResult<Vec<Value>> {
         self.typed_notes(note_ids, with_fields)?
             .iter()
@@ -562,6 +620,17 @@ impl CollectionCore {
     /// section is `Some`, an unrequested one `None` (the wire helper omits
     /// it, exactly like the hand-built dict it replaced).
     /// `sections` mirrors `include` (`"all"` expands; empty = summary).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any underlying read (deck tree, per-deck counts,
+    /// notetypes, tags) fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics only on an internal invariant violation — the deck tree / per-
+    /// deck counts are computed exactly when the section needing them is
+    /// requested, so the `expect`s reading them back never fire in practice.
     pub fn collection_info(
         &self,
         sections: &[String],

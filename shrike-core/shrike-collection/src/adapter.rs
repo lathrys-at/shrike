@@ -12,6 +12,11 @@
 //! generated contract (proto declaration order); the tripwire tests in this
 //! crate call every indexed RPC against a real temp collection, so a silent
 //! index shuffle on a tag bump fails loudly instead of corrupting calls.
+//!
+//! Error convention: every method here dispatches an anki service-layer RPC
+//! (or a DB-proxy command) and propagates its failure as a [`NativeError`].
+//! The per-method `# Errors` sections name only conditions beyond that shared
+//! "the underlying anki RPC fails" baseline.
 
 use anki::backend::{init_backend, Backend};
 use prost::Message;
@@ -114,12 +119,19 @@ const TAGS_REMOVE_NOTE_TAGS: u32 = 8;
 /// `anki_proto::notes::note_fields_check_response::State`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldsState {
+    /// The note is valid and not a duplicate.
     Normal,
+    /// The first field is empty.
     Empty,
+    /// The first field duplicates an existing note of that type.
     Duplicate,
+    /// A cloze notetype's fields contain no cloze deletion.
     MissingCloze,
+    /// A cloze field is used on a non-cloze notetype.
     NotetypeNotCloze,
+    /// A cloze deletion is in a non-cloze field.
     FieldNotCloze,
+    /// An unrecognized state code from anki (carries the raw value).
     Unknown(i32),
 }
 
@@ -168,11 +180,19 @@ fn proto_to_note(n: anki_proto::notes::Note) -> ServiceNote {
     }
 }
 
+/// The anki backend handle every RPC in this module dispatches through.
 pub struct ServiceAdapter {
     backend: Backend,
 }
 
 impl ServiceAdapter {
+    /// Initialize a fresh anki backend (preferred lang `en`), no collection
+    /// open yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if encoding the init request fails or the anki backend
+    /// cannot be initialized.
     pub fn new() -> NativeResult<Self> {
         let init = anki_proto::backend::BackendInit {
             preferred_langs: vec!["en".to_string()],
@@ -207,6 +227,12 @@ impl ServiceAdapter {
 
     // ── lifecycle ────────────────────────────────────────────────────────────
 
+    /// Open the collection at `collection_path` with its media folder/db.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the open RPC fails — most often lock contention
+    /// (another process holds the collection) or an unreadable file.
     pub fn open_collection(
         &self,
         collection_path: &str,
@@ -222,6 +248,11 @@ impl ServiceAdapter {
         Ok(())
     }
 
+    /// Close the open collection (no schema-11 downgrade).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the close RPC fails.
     pub fn close_collection(&self) -> NativeResult<()> {
         let req = anki_proto::collection::CloseCollectionRequest {
             downgrade_to_schema11: false,
@@ -235,6 +266,11 @@ impl ServiceAdapter {
     /// Run one read-only SQL query through the DB proxy, returning JSON rows.
     /// The same surface pylib's `DBProxy.all()` uses; read-only by Shrike
     /// convention (every write goes through a service RPC).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the DB-proxy command fails (e.g. malformed SQL) or
+    /// the response cannot be decoded.
     pub fn db_rows(&self, sql: &str) -> NativeResult<Vec<Vec<serde_json::Value>>> {
         let req = serde_json::json!({
             "kind": "query",
@@ -251,6 +287,11 @@ impl ServiceAdapter {
 
     /// `col.mod` — the drift watermark. The service layer has no RPC for the
     /// raw stamp; pylib reads it through the DB proxy, so we do exactly that.
+    /// The `col.mod` watermark read straight from the `col` table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails or the row shape is unexpected.
     pub fn col_mod(&self) -> NativeResult<i64> {
         let rows = self.db_rows("select mod from col")?;
         rows.first()
@@ -262,6 +303,11 @@ impl ServiceAdapter {
     // ── search ───────────────────────────────────────────────────────────────
 
     /// The full Anki search grammar, unordered (the wrapper's find_notes).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a malformed search expression, or if the RPC
+    /// fails.
     pub fn search_notes(&self, search: &str) -> NativeResult<Vec<i64>> {
         let req = anki_proto::search::SearchRequest {
             search: search.to_string(),
@@ -274,6 +320,11 @@ impl ServiceAdapter {
 
     // ── notetypes ────────────────────────────────────────────────────────────
 
+    /// Every notetype's `(id, name)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn notetype_names(&self) -> NativeResult<Vec<(i64, String)>> {
         let req = anki_proto::generic::Empty::default();
         let resp: anki_proto::notetypes::NotetypeNames =
@@ -283,6 +334,10 @@ impl ServiceAdapter {
 
     /// The full notetype proto (fields with editor metadata, templates, css,
     /// cloze-ness) — the read surface's serialization source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no notetype has that id, or the RPC fails.
     pub fn notetype(&self, notetype_id: i64) -> NativeResult<anki_proto::notetypes::Notetype> {
         let req = anki_proto::notetypes::NotetypeId { ntid: notetype_id };
         self.call(SVC_NOTETYPES, NOTETYPES_GET_NOTETYPE, &req)
@@ -292,6 +347,11 @@ impl ServiceAdapter {
 
     /// Deck id for an exact full name, or None (pylib's `id_for_name`; the
     /// service maps a missing name to NotFound, folded to None here).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails for any reason other than a
+    /// not-found name (which is folded to `Ok(None)`).
     pub fn deck_id_by_name(&self, name: &str) -> NativeResult<Option<i64>> {
         let req = anki_proto::generic::String {
             val: name.to_string(),
@@ -306,6 +366,10 @@ impl ServiceAdapter {
 
     /// Create a normal deck with `name` (pylib's `add_normal_deck_with_name`:
     /// a fresh default deck proto, renamed, added). Returns the new id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either RPC (new deck, add deck) fails.
     pub fn add_deck(&self, name: &str) -> NativeResult<i64> {
         let mut deck: anki_proto::decks::Deck = self.call(
             SVC_DECKS,
@@ -318,6 +382,11 @@ impl ServiceAdapter {
         Ok(resp.id)
     }
 
+    /// Rename a deck by id (full-name semantics).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn rename_deck(&self, deck_id: i64, new_name: &str) -> NativeResult<()> {
         let req = anki_proto::decks::RenameDeckRequest {
             deck_id,
@@ -327,6 +396,11 @@ impl ServiceAdapter {
         Ok(())
     }
 
+    /// Remove decks by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn remove_decks(&self, deck_ids: &[i64]) -> NativeResult<()> {
         let req = anki_proto::decks::DeckIds {
             dids: deck_ids.to_vec(),
@@ -338,6 +412,10 @@ impl ServiceAdapter {
 
     /// Every deck's (id, full name) — pylib's `all_names_and_ids()` call shape
     /// (keep the empty default deck, include filtered decks).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn deck_names(&self) -> NativeResult<Vec<(i64, String)>> {
         let req = anki_proto::decks::GetDeckNamesRequest {
             skip_empty_default: false,
@@ -350,6 +428,10 @@ impl ServiceAdapter {
 
     /// The scheduler's due tree (pylib's `sched.deck_due_tree()`): `now` must
     /// be the current epoch seconds so due counts are computed (0 skips them).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn deck_tree(&self, now: i64) -> NativeResult<anki_proto::decks::DeckTreeNode> {
         let req = anki_proto::decks::DeckTreeRequest { now };
         self.call(SVC_DECKS, DECKS_DECK_TREE, &req)
@@ -357,6 +439,11 @@ impl ServiceAdapter {
 
     // ── tags ─────────────────────────────────────────────────────────────────
 
+    /// Every tag in the collection's tag registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn all_tags(&self) -> NativeResult<Vec<String>> {
         let req = anki_proto::generic::Empty::default();
         let resp: anki_proto::generic::StringList = self.call(SVC_TAGS, TAGS_ALL_TAGS, &req)?;
@@ -365,6 +452,10 @@ impl ServiceAdapter {
 
     /// Collection-wide tag rename (prefix semantics: renames children like
     /// `old::sub`, never the substring `old-ish`) — pylib's `tags.rename`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn rename_tags(&self, old: &str, new: &str) -> NativeResult<usize> {
         let req = anki_proto::tags::RenameTagsRequest {
             current_prefix: old.to_string(),
@@ -376,6 +467,10 @@ impl ServiceAdapter {
     }
 
     /// Add space-separated `tags` to every note in `note_ids` (bulk_add).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn add_note_tags(&self, note_ids: &[i64], tags: &str) -> NativeResult<usize> {
         let req = anki_proto::tags::NoteIdsAndTagsRequest {
             note_ids: note_ids.to_vec(),
@@ -387,6 +482,10 @@ impl ServiceAdapter {
     }
 
     /// Remove space-separated `tags` from every note in `note_ids` (bulk_remove).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn remove_note_tags(&self, note_ids: &[i64], tags: &str) -> NativeResult<usize> {
         let req = anki_proto::tags::NoteIdsAndTagsRequest {
             note_ids: note_ids.to_vec(),
@@ -399,12 +498,22 @@ impl ServiceAdapter {
 
     // ── cards ────────────────────────────────────────────────────────────────
 
+    /// The card ids generated by one note.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn cards_of_note(&self, note_id: i64) -> NativeResult<Vec<i64>> {
         let req = anki_proto::notes::NoteId { nid: note_id };
         let resp: anki_proto::cards::CardIds = self.call(SVC_NOTES, NOTES_CARDS_OF_NOTE, &req)?;
         Ok(resp.cids)
     }
 
+    /// Move cards to a deck.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn set_card_deck(&self, card_ids: &[i64], deck_id: i64) -> NativeResult<()> {
         let req = anki_proto::cards::SetDeckRequest {
             card_ids: card_ids.to_vec(),
@@ -419,6 +528,11 @@ impl ServiceAdapter {
 
     /// Anki's own find_and_replace over note fields (Rust regex, undo-able).
     /// Empty `field_name` means all fields. Returns the changed-note count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid regex (when `regex`), or if the RPC
+    /// fails.
     #[allow(clippy::too_many_arguments)]
     pub fn find_and_replace(
         &self,
@@ -442,6 +556,11 @@ impl ServiceAdapter {
         Ok(resp.count as usize)
     }
 
+    /// Remove a notetype by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails (e.g. the notetype is still in use).
     pub fn remove_notetype(&self, notetype_id: i64) -> NativeResult<()> {
         let req = anki_proto::notetypes::NotetypeId { ntid: notetype_id };
         let _: anki_proto::collection::OpChanges =
@@ -468,17 +587,31 @@ impl ServiceAdapter {
 
     /// The stock Basic notetype as a schema11 dict (the donor pylib's
     /// `models.new` / `new_field` / `new_template` clone from).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails or the JSON cannot be decoded.
     pub fn stock_notetype_legacy(&self) -> NativeResult<serde_json::Value> {
         let req = anki_proto::notetypes::StockNotetype::default(); // kind 0 = Basic
         self.json_call(NOTETYPES_GET_STOCK_NOTETYPE_LEGACY, &req)
     }
 
+    /// One notetype as a schema11 dict.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no notetype has that id, the RPC fails, or the JSON
+    /// cannot be decoded.
     pub fn notetype_legacy(&self, notetype_id: i64) -> NativeResult<serde_json::Value> {
         let req = anki_proto::notetypes::NotetypeId { ntid: notetype_id };
         self.json_call(NOTETYPES_GET_NOTETYPE_LEGACY, &req)
     }
 
     /// Add a schema11 notetype dict; returns the new id (pylib's `models.add`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the dict is invalid or the RPC fails.
     pub fn add_notetype_legacy(&self, notetype: &serde_json::Value) -> NativeResult<i64> {
         let req = anki_proto::generic::Json {
             json: notetype.to_string().into_bytes(),
@@ -491,6 +624,10 @@ impl ServiceAdapter {
     /// Persist a mutated schema11 notetype dict (pylib's `update_dict` — the
     /// single write behind every structural op; Anki migrates note data/cards
     /// from the `ord` markers).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the dict is invalid or the RPC fails.
     pub fn update_notetype_legacy(&self, notetype: &serde_json::Value) -> NativeResult<()> {
         let req = anki_proto::generic::Json {
             json: notetype.to_string().into_bytes(),
@@ -501,6 +638,10 @@ impl ServiceAdapter {
     }
 
     /// Anki's history-safe note-type migration (pylib's `models.change`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the change request is invalid or the RPC fails.
     pub fn change_notetype(
         &self,
         req: &anki_proto::notetypes::ChangeNotetypeRequest,
@@ -516,6 +657,10 @@ impl ServiceAdapter {
     /// alias of the query path, so this is the same `kind: "query"` call);
     /// every other write goes through a service RPC and reads stay on
     /// `db_rows`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the DB-proxy command fails.
     pub fn db_execute(&self, sql: &str, args: &[serde_json::Value]) -> NativeResult<()> {
         let req = serde_json::json!({
             "kind": "query",
@@ -533,6 +678,10 @@ impl ServiceAdapter {
 
     /// Store bytes under (a collision-resolved variant of) `desired_name`;
     /// returns the ACTUAL name Anki chose (pylib's `media.write_data`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn add_media_file(&self, desired_name: &str, data: &[u8]) -> NativeResult<String> {
         let req = anki_proto::media::AddMediaFileRequest {
             desired_name: desired_name.to_string(),
@@ -543,6 +692,10 @@ impl ServiceAdapter {
     }
 
     /// Move media files to Anki's recoverable trash.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn trash_media_files(&self, fnames: &[String]) -> NativeResult<()> {
         let req = anki_proto::media::TrashMediaFilesRequest {
             fnames: fnames.to_vec(),
@@ -552,6 +705,10 @@ impl ServiceAdapter {
     }
 
     /// Anki's media check (unused/missing/missing-notes/trash state).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn check_media(&self) -> NativeResult<anki_proto::media::CheckMediaResponse> {
         self.call(
             SVC_MEDIA,
@@ -567,6 +724,11 @@ impl ServiceAdapter {
     /// Returns the exported note count (anki's `generic.UInt32`). The
     /// collection is held for the whole `with_col` export — the caller routes
     /// this through the collection actor so it serializes like every write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the package cannot be written to `out_path`, or the
+    /// RPC fails.
     pub fn export_anki_package(
         &self,
         out_path: &str,
@@ -596,6 +758,11 @@ impl ServiceAdapter {
 
     /// Export a `.colpkg` (whole-collection backup, `ExportCollectionPackage`).
     /// No scoping — a colpkg is the entire collection. Optionally includes media.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the package cannot be written to `out_path`, or the
+    /// RPC fails.
     pub fn export_collection_package(
         &self,
         out_path: &str,
@@ -622,6 +789,11 @@ impl ServiceAdapter {
     /// collection (bumps `col.mod`), so the caller MUST drive a drift reconcile
     /// afterward (never advance the index watermark — the col_mod bump is the
     /// signal). Returns per-bucket counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the package is missing/unreadable/malformed, or the
+    /// RPC fails.
     pub fn import_anki_package(
         &self,
         package_path: &str,
@@ -645,6 +817,11 @@ impl ServiceAdapter {
 
     // ── maintenance ──────────────────────────────────────────────────────────
 
+    /// Anki's empty-cards report (cards whose templates render to nothing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn get_empty_cards(&self) -> NativeResult<anki_proto::card_rendering::EmptyCardsReport> {
         self.call(
             SVC_CARD_RENDERING,
@@ -653,6 +830,11 @@ impl ServiceAdapter {
         )
     }
 
+    /// Remove cards (and orphaned notes) by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn remove_cards(&self, card_ids: &[i64]) -> NativeResult<()> {
         let req = anki_proto::cards::RemoveCardsRequest {
             card_ids: card_ids.to_vec(),
@@ -665,6 +847,11 @@ impl ServiceAdapter {
         Ok(())
     }
 
+    /// Clear tags no note references; returns the count removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn clear_unused_tags(&self) -> NativeResult<usize> {
         let resp: anki_proto::collection::OpChangesWithCount = self.call(
             SVC_TAGS,
@@ -680,6 +867,10 @@ impl ServiceAdapter {
     /// entities) — the SAME RPC pylib's `anki.utils.strip_html` calls, so the
     /// embed-text normalization is byte-identical to the Python facade's by
     /// construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn strip_html(&self, text: &str) -> NativeResult<String> {
         let req = anki_proto::card_rendering::StripHtmlRequest {
             text: text.to_string(),
@@ -692,12 +883,23 @@ impl ServiceAdapter {
 
     // ── notes ────────────────────────────────────────────────────────────────
 
+    /// A blank note of the given notetype (fields sized to the notetype).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no notetype has that id, or the RPC fails.
     pub fn new_note(&self, notetype_id: i64) -> NativeResult<ServiceNote> {
         let req = anki_proto::notetypes::NotetypeId { ntid: notetype_id };
         let resp: anki_proto::notes::Note = self.call(SVC_NOTES, NOTES_NEW_NOTE, &req)?;
         Ok(proto_to_note(resp))
     }
 
+    /// Add a note to a deck; returns the new note id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if anki rejects the note (empty first field, broken
+    /// cloze, first-field duplicate), or the RPC fails.
     pub fn add_note(&self, note: &ServiceNote, deck_id: i64) -> NativeResult<i64> {
         let req = anki_proto::notes::AddNoteRequest {
             note: Some(service_note_to_proto(note)),
@@ -708,6 +910,11 @@ impl ServiceAdapter {
         Ok(resp.note_id)
     }
 
+    /// Read one note by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no note has that id, or the RPC fails.
     pub fn get_note(&self, note_id: i64) -> NativeResult<ServiceNote> {
         let req = anki_proto::notes::NoteId { nid: note_id };
         let resp: anki_proto::notes::Note = self.call(SVC_NOTES, NOTES_GET_NOTE, &req)?;
@@ -739,6 +946,11 @@ impl ServiceAdapter {
     /// Contract: callers must pre-filter to existing ids — an absent id is
     /// silently skipped here (the `IN (…)` read just omits it; no per-note
     /// `GetNote`-style not-found error), mirroring the old per-note skip.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batched DB read returns an unexpected row
+    /// shape, or either RPC fails.
     pub fn set_note_tags_bulk(&self, note_ids: &[i64], tags: &[String]) -> NativeResult<usize> {
         if note_ids.is_empty() {
             return Ok(0);
@@ -786,6 +998,11 @@ impl ServiceAdapter {
         Ok(count)
     }
 
+    /// Replace one note's fields/tags, preserving untouched proto fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the note does not exist, or either RPC fails.
     pub fn update_note(&self, note: &ServiceNote) -> NativeResult<()> {
         // Round-trip through get_note so untouched proto fields (mtime/usn)
         // stay authoritative; we overwrite only fields/tags.
@@ -805,6 +1022,11 @@ impl ServiceAdapter {
         Ok(())
     }
 
+    /// Remove notes by id; returns the count removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn remove_notes(&self, note_ids: &[i64]) -> NativeResult<usize> {
         let req = anki_proto::notes::RemoveNotesRequest {
             note_ids: note_ids.to_vec(),
@@ -816,6 +1038,10 @@ impl ServiceAdapter {
     }
 
     /// Anki's own add-note validation — the #77 duplicate rule's source of truth.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC fails.
     pub fn fields_check(&self, note: &ServiceNote) -> NativeResult<FieldsState> {
         let req = service_note_to_proto(note);
         let resp: anki_proto::notes::NoteFieldsCheckResponse =

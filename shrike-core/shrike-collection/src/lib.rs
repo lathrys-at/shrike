@@ -17,6 +17,13 @@
 //!
 //! Pin policy: the anki git tag equals the pip wheel version; bumped together.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 mod adapter;
 pub mod contract;
 pub mod embed_text;
@@ -54,6 +61,12 @@ pub struct CollectionCore {
 impl CollectionCore {
     /// Open (creating if needed) a collection. `media_folder`/`media_db` are
     /// derived from the collection path exactly like anki's Python does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the anki backend cannot be created or the
+    /// collection at `collection_path` cannot be opened (e.g. another process
+    /// holds the lock, or the file is unreadable).
     pub fn open(collection_path: &str) -> NativeResult<Self> {
         let adapter = ServiceAdapter::new()?;
         let base = collection_path
@@ -69,12 +82,22 @@ impl CollectionCore {
         })
     }
 
+    /// Close the collection, releasing its lock for good.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the anki backend fails to close the collection.
     pub fn close(&self) -> NativeResult<()> {
         self.adapter.close_collection()
     }
 
     /// Release the collection (cooperative idle-release, #64): close, keeping
     /// the instance reusable via [`reopen`]. Already-closed is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Infallible in practice (a close failure on an already-half-open handle
+    /// is swallowed); the `Result` matches the [`Collection`] trait.
     pub fn release(&self) -> NativeResult<()> {
         let _ = self.adapter.close_collection();
         self.released
@@ -85,6 +108,11 @@ impl CollectionCore {
     /// Re-acquire if (and only if) idle-released — the open-on-demand half of
     /// cooperative locking, run before every serialized job. Returns whether
     /// a reopen happened. Contention surfaces as the BUSY tier via `reopen`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the BUSY tier (via [`reopen`](Self::reopen)) when a re-acquire
+    /// is needed but another process holds the collection.
     pub fn ensure_open(&self) -> NativeResult<bool> {
         if !self.released.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(false);
@@ -98,6 +126,12 @@ impl CollectionCore {
     /// usually Anki desktop — holds it), not corruption: it surfaces as the
     /// BUSY tier, mirroring the Python wrapper's contextual classification.
     /// The caller decides whether to retry; nothing here waits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the BUSY tier when the collection cannot be re-acquired —
+    /// overwhelmingly lock contention from another process (e.g. Anki
+    /// desktop), since the file opened cleanly at boot.
     pub fn reopen(&self) -> NativeResult<()> {
         self.released
             .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -121,16 +155,30 @@ impl CollectionCore {
     }
 
     /// The collection-modified watermark Shrike's drift detection leans on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection is not open or the read fails.
     pub fn col_mod(&self) -> NativeResult<i64> {
         self.adapter.col_mod()
     }
 
     /// The full Anki search grammar → note ids (read-only).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a malformed search expression, or if the read
+    /// fails.
     pub fn find_notes(&self, search: &str) -> NativeResult<Vec<i64>> {
         self.adapter.search_notes(search)
     }
 
     /// Resolve a notetype by name (case-sensitive, like the Python wrapper).
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error if no notetype has that name, or if the
+    /// read fails.
     pub fn notetype_id(&self, name: &str) -> NativeResult<i64> {
         self.notetype_id_opt(name)?
             .ok_or_else(|| NativeError::invalid_input(format!("unknown note type: {name}")))
@@ -165,6 +213,11 @@ impl CollectionCore {
             .collect())
     }
 
+    /// Read one note by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no note has that id, or if the read fails.
     pub fn get_note(&self, note_id: i64) -> NativeResult<ServiceNote> {
         self.adapter.get_note(note_id)
     }
@@ -172,6 +225,13 @@ impl CollectionCore {
     /// Create a note under the #77 policy: Anki's own `fields_check` runs
     /// first; structural problems (empty first field, broken cloze) are always
     /// errors, a first-field duplicate is governed by `policy`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error if the first field is empty, the cloze
+    /// is broken (or the note otherwise fails Anki's `fields_check`), or it is
+    /// a first-field duplicate under [`DuplicatePolicy::Error`]; also if the
+    /// write fails.
     pub fn create_note(
         &self,
         notetype_id: i64,
@@ -217,6 +277,11 @@ impl CollectionCore {
 
     /// Replace a note's fields/tags (the update half of upsert; existence
     /// errors surface as invalid_input from the service layer).
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error if the note does not exist, and any
+    /// error the write itself raises.
     pub fn update_note(
         &self,
         note_id: i64,
@@ -235,18 +300,31 @@ impl CollectionCore {
         self.adapter.update_note(&note)
     }
 
+    /// Permanently delete notes by id; returns the count removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write fails.
     pub fn delete_notes(&self, note_ids: &[i64]) -> NativeResult<usize> {
         self.adapter.remove_notes(note_ids)
     }
 
     /// The card ids generated by one note (lowest-ordinal first is not
     /// guaranteed; callers needing deck-of-note order sort upstream).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read fails.
     pub fn cards_of_note(&self, note_id: i64) -> NativeResult<Vec<i64>> {
         self.adapter.cards_of_note(note_id)
     }
 
     /// `(card_id, template_ordinal)` per card of one note — the identity the
     /// template data-safety tests assert on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read fails.
     pub fn card_ords_of_note(&self, note_id: i64) -> NativeResult<Vec<(i64, i64)>> {
         Ok(self
             .adapter
