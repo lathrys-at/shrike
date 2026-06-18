@@ -10,24 +10,28 @@
 //!
 //! ## Shape (mirrors `shrike-pyo3`'s `async_kernel.rs`, minus Python)
 //!
-//! - [`shrike_runtime_init`] installs a harness-driven `current_thread` tokio
-//!   runtime via [`shrike_kernel::init_driven_runtime`] AND commits **N + 2**
-//!   OS threads to drive it — the C-ABI analog of the server's
-//!   `DrivenRuntime`. One thread parks in [`shrike_kernel::drive_io_until_shutdown`]
-//!   (owns + drives tokio's IO/timer drivers and the async executor), one in
-//!   [`shrike_kernel::drive_sync`] (the serialized collection / anki-sync
-//!   thread), and N in [`shrike_kernel::drive_compute`] (CPU engine compute +
-//!   blocking-fs leaves). The IO driver is load-bearing: a `current_thread`
-//!   runtime polls `spawn_op`'d tasks ONLY while a thread drives it, so without
-//!   it the async ops below would never run and their callbacks would never
-//!   fire. [`shrike_runtime_shutdown`] drains every in-flight op, then closes
-//!   the kernel's pool queues and joins the committed threads at teardown.
-//!   A consumer that never calls [`shrike_runtime_init`] rides the kernel's
-//!   lazy default multi-thread runtime instead (whose worker threads drive
-//!   spawned tasks) — `shrike_runtime_init` is the opt-in to the driven model
-//!   the iOS lifecycle wants.
+//! - The threading model mirrors the server (`shrike-pyo3` + `driven_runtime.py`):
+//!   shrike-cabi IS shrike-core, so it spawns NO threads — it EXPOSES the
+//!   kernel's blocking drive entries and the HOST commits + joins the OS
+//!   threads (the iOS app's lifecycle owns thread count/affinity/QoS).
+//!   [`shrike_runtime_init`] installs the driven `current_thread` runtime
+//!   ([`shrike_kernel::init_driven_runtime`]) ONLY — no threads. The host then
+//!   spawns one thread in [`shrike_drive_io`] (owns + drives tokio's IO/timer
+//!   drivers and the async executor), calls [`shrike_runtime_probe`] (the
+//!   startup barrier — it confirms the IO thread owns the drivers before the
+//!   rest park, since tokio gives driver ownership to the first `block_on`
+//!   caller), then spawns one thread in [`shrike_drive_sync`] (the serialized
+//!   collection / anki-sync thread) and N in [`shrike_drive_compute`] (CPU
+//!   engine compute + blocking-fs leaves; N the host's choice — the "N >= 2"
+//!   engine overlap). The IO driver is load-bearing: a `current_thread` runtime
+//!   polls `spawn_op`'d tasks ONLY while a thread drives it, so without it the
+//!   async ops below would never run and their callbacks would never fire.
+//!   [`shrike_runtime_shutdown`] drains every in-flight op (so its callback
+//!   fires) then closes the kernel's pool queues — which makes the host's drive
+//!   entries return so the host JOINS its own threads. `shrike_runtime_init` is
+//!   required before any op; the full contract is on its doc-comment.
 //!
-//!   Resuming the process after an iOS suspension re-uses the same committed
+//!   Resuming the process after an iOS suspension re-uses the host's committed
 //!   threads — no re-init unless the host called [`shrike_runtime_shutdown`].
 //!   The fuller foreground/background pause (quiescing the drivers on
 //!   backgrounding) is #393, a later slice.
@@ -542,10 +546,11 @@ pub extern "C" fn shrike_runtime_probe() -> bool {
 
 /// Shut the driven runtime down (teardown). Sets the shutdown flag (new ops
 /// fast-fail), DRAINS every already-admitted op so its callback fires (bounded
-/// by [`DRAIN_TIMEOUT`]), then closes the kernel's pool queues — which makes the
+/// by `DRAIN_TIMEOUT`), then closes the kernel's pool queues — which makes the
 /// host's [`shrike_drive_io`]/[`shrike_drive_sync`]/[`shrike_drive_compute`]
-/// calls return so the host can join its threads. A no-op in the default
-/// multi-thread mode (nothing to shut down) or on a second call.
+/// calls return so the host can join its threads. A no-op when the runtime was
+/// never installed in driven mode, or on a second call (the flag is idempotent
+/// and the pools are already closed).
 ///
 /// **cabi drains; the host joins.** This is the deliberate asymmetry with
 /// `shrike-pyo3`, which exposes a bare `drive_pools_shutdown` because the server
