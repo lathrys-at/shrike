@@ -25,6 +25,7 @@ members = [
     "shrike-media",
     "shrike-mobile",
     "shrike-network",
+    "shrike-process",
     "shrike-pyo3",
     "shrike-recognize-apple",
     "shrike-schemas",
@@ -57,4 +58,5 @@ shrike-error = { path = "shrike-error" }
 shrike-image = { path = "shrike-image" }
 shrike-media = { path = "shrike-media" }
 shrike-network = { path = "shrike-network" }
+shrike-process = { path = "shrike-process" }
 shrike-store = { path = "shrike-store" }

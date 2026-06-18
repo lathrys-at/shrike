@@ -554,19 +554,19 @@ impl LlamaServerManager {
         pid_file: Option<String>,
         mmprojs: Vec<String>,
     ) -> Self {
-        let cfg = shrike_llama_server::LlamaServerConfig {
-            binary,
-            model: shrike_llama_server::ModelSpec::Single(model),
+        let cfg = shrike_llama_server::LlamaServerConfig::new(
+            shrike_llama_server::ModelSpec::Single(model),
             host,
             port,
-            log_dir: log_dir.map(std::path::PathBuf::from),
-            context_size,
-            threads,
-            gpu_layers,
-            pooling,
-            extra_args,
-            pid_file: pid_file.map(std::path::PathBuf::from),
-        };
+        )
+        .with_binary(binary)
+        .with_log_dir(log_dir.map(std::path::PathBuf::from))
+        .with_context_size(context_size)
+        .with_threads(threads)
+        .with_gpu_layers(gpu_layers)
+        .with_pooling(pooling)
+        .with_extra_args(extra_args)
+        .with_pid_file(pid_file.map(std::path::PathBuf::from));
         // Per-modality projectors for a multimodal embeddings server (#501):
         // an embeddings server (not chat_mode) that loads vision/audio
         // mmprojs to embed media. Empty = a text-only embeddings server.
@@ -600,22 +600,22 @@ impl LlamaServerManager {
         extra_args: Vec<String>,
         pid_file: Option<String>,
     ) -> Self {
-        let cfg = shrike_llama_server::LlamaServerConfig {
-            binary,
-            model: shrike_llama_server::ModelSpec::Router {
+        let cfg = shrike_llama_server::LlamaServerConfig::new(
+            shrike_llama_server::ModelSpec::Router {
                 dir: models_dir,
                 max: models_max,
             },
             host,
             port,
-            log_dir: log_dir.map(std::path::PathBuf::from),
-            context_size,
-            threads,
-            gpu_layers,
-            pooling,
-            extra_args,
-            pid_file: pid_file.map(std::path::PathBuf::from),
-        };
+        )
+        .with_binary(binary)
+        .with_log_dir(log_dir.map(std::path::PathBuf::from))
+        .with_context_size(context_size)
+        .with_threads(threads)
+        .with_gpu_layers(gpu_layers)
+        .with_pooling(pooling)
+        .with_extra_args(extra_args)
+        .with_pid_file(pid_file.map(std::path::PathBuf::from));
         let manager = shrike_llama_server::LlamaServerManager::new(cfg);
         Self {
             pid_cell: manager.pid_cell(),

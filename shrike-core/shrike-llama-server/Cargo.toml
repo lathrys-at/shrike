@@ -1,10 +1,13 @@
-# The llama-server lifecycle manager (#342 P4b): spawn, health-wait, orphan
-# reaping, escalating stop. NOT an Embedder — its product is a healthy
-# loopback *endpoint*; the host composes manager → endpoint →
-# shrike-embed-remote engine. A `manage`-class capability (#338): a mobile
-# build never includes it; a tailnet/cloud deployment composes the remote
-# engine with no manager at all. Deliberately NO dep on shrike-embed-remote —
-# the two concerns stay separable (the health-wait is one tiny GET).
+# The llama-server lifecycle policy (#342 P4b, #710): the thin `ManagedProcess`
+# impl over the generic `shrike-process` Supervisor. Owns the llama-specific
+# vocabulary only — argv, the reserved-flag/loopback-pin security guard, the
+# `/health` URL, `LLAMA_SERVER_PATH`, model/pooling/mmproj/router. NOT an
+# Embedder — its product is a healthy loopback *endpoint*; the host composes
+# manager → endpoint → shrike-embed-remote engine. A `manage`-class capability
+# (#338): a mobile build never includes it; a tailnet/cloud deployment composes
+# the remote engine with no manager at all. Deliberately NO dep on
+# shrike-embed-remote — the two concerns stay separable (the health-wait is one
+# tiny GET).
 [package]
 name = "shrike-llama-server"
 version = "0.1.0"
@@ -13,10 +16,12 @@ license = "AGPL-3.0-or-later"
 
 [dependencies]
 shrike-error = { workspace = true }
+# The generic spawn/health-wait/orphan-reap/stop lifecycle (#710); this crate is
+# its first policy impl. Carries libc + the port-ownership reaper, so neither
+# appears here directly any more.
+shrike-process = { workspace = true }
 shlex = "1"
 tracing = "0.1"
-# SYNCHRONOUS — no runtime; the host runs lifecycle off its loop.
+# SYNCHRONOUS — no runtime; the host runs lifecycle off its loop. The one HTTP
+# touchpoint (the `/health` probe) lives here, NOT in shrike-process.
 ureq = "2"
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"

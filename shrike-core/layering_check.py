@@ -23,7 +23,7 @@ Structural rules over every workspace manifest:
    each floor crate's closure for the kernel-and-above set.
 
 Adding a crate to the floor as the #703 reorg lands new low-utility crates
-(`shrike-error`, `shrike-network`, `shrike-process`,
+(`shrike-error`, `shrike-network`,
 `shrike-cache`, `shrike-store`, …) is a ONE-LINE addition to `LAYER_FLOOR`
 below — the closure machinery handles the rest.
 """
@@ -39,10 +39,11 @@ PYO3_ALLOWED = {"shrike-pyo3"}
 
 # Engine crates the kernel must NEVER name (#342). Grown as engine crates are
 # added; the kernel's only engine-shaped dep is shrike-engine-api (the traits).
-# (The shared LOW utility crates — shrike-network (the SSRF primitives), plus
-# the coming shrike-process — are intentionally NOT here: they
-# sit BELOW both the kernel and the engine crates, so BOTH may depend on them
-# without inverting the layer graph. They live in LAYER_FLOOR instead.)
+# (The shared LOW utility crates — shrike-network (the SSRF primitives),
+# shrike-process (the managed-subprocess lifecycle) — are intentionally NOT
+# here: they sit BELOW both the kernel and the engine crates, so BOTH may
+# depend on them without inverting the layer graph. They live in LAYER_FLOOR
+# instead.)
 ENGINE_CRATES = {
     "shrike-embed",
     "shrike-recognize-apple",
@@ -59,14 +60,15 @@ ENGINE_CRATES = {
 # shrike-network, an engine -> shrike-network, …) are fine — only edges OUT of a
 # floor crate are constrained.
 #
-# As the #703 reorg adds further low-utility crates (the coming
-# shrike-process), extend this set — one line per crate.
+# As the #703 reorg adds further low-utility crates, extend this set — one
+# line per crate.
 LAYER_FLOOR = {
     "shrike-cache",  # per-collection cache layout (#712) — index/derived subdirs + namespacing
     "shrike-error",
     "shrike-image",  # the CLIP byte->pixels->CHW pipeline (#707) — decode/resize/normalize + BMP encode
     "shrike-media",  # inbound/untrusted-media (#711) — SSRF fetch + decode + prepare + MIME home
     "shrike-network",
+    "shrike-process",  # generic managed-subprocess lifecycle (#710) — ManagedProcess + Supervisor + the orphan reaper
     "shrike-schemas",
     "shrike-engine-api",  # the kernel<->ort firewall — a thin contract, stays floor
     "shrike-store",
