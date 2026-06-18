@@ -1,4 +1,4 @@
-//! The CLIP byte→pixels→CHW pipeline (#707): decode → resize-shortest-edge →
+//! The CLIP byte→pixels→CHW pipeline: decode → resize-shortest-edge →
 //! center-crop → rescale/normalize → channel-major f32. The normalize/CHW
 //! transform has an `accel` (default) and a scalar fallback; the resize is
 //! `image`'s scalar Catmull-Rom throughout.

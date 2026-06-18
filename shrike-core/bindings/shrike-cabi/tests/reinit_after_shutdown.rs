@@ -1,4 +1,4 @@
-//! The #597 re-init-after-shutdown regression guard.
+//! The re-init-after-shutdown regression guard.
 //!
 //! A SEPARATE test binary on purpose: the runtime seam (`init_runtime`) is
 //! process-global and, after `shrike_runtime_shutdown`, terminally undriven —

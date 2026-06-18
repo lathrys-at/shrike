@@ -1,4 +1,4 @@
-//! The Shrike engine crate (#708): every engine-contract implementation, one
+//! The Shrike engine crate: every engine-contract implementation, one
 //! crate, feature-gated by family. The kernel never names it — it composes the
 //! `shrike-engine-api` traits these engines implement (the kernel↔engine
 //! firewall; `shrike-engine-api` stays a separate thin contract crate).
@@ -18,7 +18,7 @@
 //!   so this crate stays `build.rs`-free. This layer parses the glue's raw JSON
 //!   into engine-api types.
 //!
-//! Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in
+//! Pure Rust — NO pyo3; bound to Python in
 //! `shrike-pyo3`, to the C ABI in the mobile binding.
 
 #![deny(missing_docs)]

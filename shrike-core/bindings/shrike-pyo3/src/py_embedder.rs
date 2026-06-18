@@ -1,4 +1,4 @@
-//! `PyEmbedder` (#332, S3c-2b; simplified by #374 C): the kernel's
+//! `PyEmbedder`: the kernel's
 //! `Embedder` seam implemented over the *harness's* backend — the inversion
 //! that lets the kernel drive ANY Python-held embedder without the kernel
 //! knowing Python exists. Every production backend (ONNX, CLIP, llama)
@@ -22,7 +22,7 @@ use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 type VecResult = NativeResult<Vec<Vec<f32>>>;
 
 /// The refusal every gated site returns once the interpreter is exiting
-/// (#435) — the `Unavailable` tier, like any other unreachable backend.
+/// — the `Unavailable` tier, like any other unreachable backend.
 pub(crate) fn shutting_down() -> NativeError {
     NativeError::unavailable("interpreter is exiting; Python backend unreachable")
 }
@@ -62,7 +62,7 @@ impl PyEmbedderHandle {
 
     /// One blocking backend call on the pool — eager (scheduled before the
     /// returned future is polled), GIL acquired only on the pool thread.
-    /// Both attach windows ride the finalization gate (#435): an op still
+    /// Both attach windows ride the finalization gate: an op still
     /// running while the interpreter exits must not touch Python.
     fn dispatch(&self, payload: EmbedPayload) -> BoxFuture<'static, VecResult> {
         let backend = {
@@ -148,8 +148,8 @@ impl PyMediaResolver {
 
 impl ImageResolver for PyMediaResolver {
     fn read(&self, name: &str) -> Option<Vec<u8>> {
-        // Gate-refused (#435) ⇒ "unreadable", silently: a log line would just
-        // be dropped by the gated pyo3-log wrapper anyway (#450).
+        // Gate-refused ⇒ "unreadable", silently: a log line would just
+        // be dropped by the gated pyo3-log wrapper anyway.
         let _permit = crate::finalize_gate::permit()?;
         Python::attach(|py| {
             match self
@@ -159,7 +159,7 @@ impl ImageResolver for PyMediaResolver {
             {
                 Ok(bytes) => bytes,
                 // A raising/misbehaving resolver degrades to "unreadable"
-                // (the kernel skips the item), but never silently (#386).
+                // (the kernel skips the item), but never silently.
                 Err(e) => {
                     tracing::warn!(image = %name, error = %e, "media resolver read raised");
                     None
@@ -202,7 +202,7 @@ impl PyEmbedder {
     /// Capture `backend` (anything with a blocking `embed_texts(list[str])`).
     /// Identity metadata is read once here (the EmbedderBackend protocol's
     /// model_fingerprint()/embedding_dim) so the kernel never calls into
-    /// Python mid-op. No loop is captured — execution is the kernel's (#374).
+    /// Python mid-op. No loop is captured — execution is the kernel's.
     #[staticmethod]
     fn capture(py: Python<'_>, backend: Py<PyAny>) -> PyResult<Self> {
         let bound = backend.bind(py);
@@ -232,7 +232,7 @@ impl PyEmbedder {
 /// Test seam: drive one embed through the kernel's `Embedder` trait — proves
 /// the capture → blocking-pool → GIL-attach → completion chain before the
 /// orchestrator's embed-coupled ops consume it. Kernel-runtime-bound
-/// (`spawn_op`), so anki-core builds only (#404).
+/// (`spawn_op`), so anki-core builds only.
 #[cfg(feature = "anki-core")]
 #[pyfunction]
 pub(crate) fn embedder_probe<'py>(

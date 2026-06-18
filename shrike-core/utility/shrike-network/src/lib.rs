@@ -1,11 +1,11 @@
-//! `shrike-network` — the one home for Shrike's SSRF safety primitives (#592).
+//! `shrike-network` — the one home for Shrike's SSRF safety primitives.
 //!
 //! **Trust-boundary code**: changes here go through the security-review gate.
 //!
 //! This crate was extracted from the media URL fetch so the SSRF control is
 //! shared, not copied. Three consumers depend on it:
 //!
-//! - `shrike-media` (the inbound-media crate, #711): the attacker-supplied
+//! - `shrike-media` (the inbound-media crate): the attacker-supplied
 //!   `store_media` url path — resolves+vets EVERY hop's host against
 //!   `ipaddress.is_global` parity, pins the connection to the vetted IP,
 //!   follows redirects manually re-vetting each hop.
@@ -19,7 +19,7 @@
 //! What lives here:
 //! - the IPv4/IPv6 `ipaddress.is_global` classifier ([`ip_is_allowed`]) —
 //!   parity-tested against CPython over an address corpus, including the
-//!   6to4 (2002::/16) and 3fff::/20 refusals (#591);
+//!   6to4 (2002::/16) and 3fff::/20 refusals;
 //! - [`resolve_public_ip`]: resolve a host and refuse it unless EVERY resolved
 //!   address passes the allowlist, returning the first for pinning;
 //! - [`resolve_pinned`]: resolve an operator-trusted host to one address to pin
@@ -531,7 +531,7 @@ mod tests {
         }
     }
 
-    /// The #591 SSRF parity regression, moved with the classifier: the
+    /// The SSRF parity regression, moved with the classifier: the
     /// allowlist must refuse 6to4 (2002::/16) and 3fff::/20 exactly like
     /// Python's `ipaddress.is_global`. A 6to4 address embeds an IPv4 in bytes
     /// 2..6, so `2002:7f00:0001::` is the 6to4 encoding of 127.0.0.1 —
@@ -605,7 +605,7 @@ mod tests {
         assert!(err.message.contains("unsupported scheme"), "{err:?}");
     }
 
-    // The look-alike redirect class (#592 review): inputs crafted to *appear*
+    // The look-alike redirect class: inputs crafted to *appear*
     // same-host while resolving to a different host. These are exactly where a
     // future refactor of the host comparison could silently reopen SSRF, so they
     // are pinned as regression guards. `host_str()` is the authority — it parses

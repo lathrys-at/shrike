@@ -1,4 +1,4 @@
-//! The #504 current_thread-mode acceptance gate (the joint-review fix).
+//! The current_thread-mode acceptance gate.
 //!
 //! A SEPARATE test binary on purpose: the runtime seam (`init_runtime`) is
 //! process-global, so this proof must not share a process with the in-crate
@@ -138,7 +138,7 @@ fn full_flow_fires_callbacks_under_the_current_thread_driver() {
     assert!(!hits.is_empty(), "lexical search found the note");
     assert_eq!(hits[0][0].as_i64(), Some(nid), "the note is the top hit");
 
-    // delete — the maintained op (#604) returns {deleted, not_found}; the note
+    // delete — the maintained op returns {deleted, not_found}; the note
     // leaves and the count returns to zero.
     let deleted = ok(op(
         handle,

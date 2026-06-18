@@ -1,4 +1,4 @@
-//! Raw platform-bindings glue (#709): the Swift/C-ABI bridges to Apple's
+//! Raw platform-bindings glue: the Swift/C-ABI bridges to Apple's
 //! Vision OCR and SpeechAnalyzer ASR (Android later). **GLUE ONLY** — this
 //! crate knows no engine contract (no `shrike-engine-api` dep): it exposes safe
 //! Rust wrappers returning the recognizer's raw JSON strings + fingerprints,
@@ -28,7 +28,7 @@ mod glue;
 pub mod speech;
 pub mod vision;
 
-/// Reserved for the future Android JNI/NDK glue (#428's engine lands behind
+/// Reserved for the future Android JNI/NDK glue (lands behind
 /// `engine-android` in a later slice) — the natural home for the Kotlin bridge,
 /// mirroring how `vision`/`speech` host the Apple one.
 #[cfg(feature = "engine-android")]

@@ -6,9 +6,9 @@
 //! - [`session`]: the shared ort plumbing (runtime init, session building +
 //!   execution-provider resolution, tensor/normalization helpers).
 //!
-//! Pure Rust: no pyo3 (epic #265 convention 5) — bound to Python in
+//! Pure Rust: no pyo3 — bound to Python in
 //! `shrike-pyo3`. The GPU execution providers are additive sub-features
-//! (`cuda`/`tensorrt`/`directml`, each implying `onnx`, #384): the server
+//! (`cuda`/`tensorrt`/`directml`, each implying `onnx`): the server
 //! profile keeps the full set; slim builds drop the GPU EP glue.
 
 pub mod clip;

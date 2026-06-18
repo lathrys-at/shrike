@@ -1,4 +1,4 @@
-//! Async kernel bindings (#332, S3a; reshaped by #374): every op is spawned
+//! Async kernel bindings: every op is spawned
 //! onto the kernel's owned runtime at this edge (`spawn_op`) and surfaces as
 //! an `asyncio.Future` through the one-wake completion bridge.
 
@@ -15,7 +15,7 @@ use crate::asyncio_bridge::future_into_py;
 use crate::native_embedder::NativeEmbedder;
 use crate::py_embedder::{PyEmbedder, PyEmbedderHandle, PyMediaResolver};
 
-/// THE op edge (#397): spawn a kernel future onto the owned runtime
+/// THE op edge: spawn a kernel future onto the owned runtime
 /// (`spawn_op` — dropping the result detaches observation, never aborts) and
 /// bridge its completion to an `asyncio.Future`. Every awaitable below routes
 /// through here, so the spawn+bridge composition is audited in exactly one
@@ -39,7 +39,7 @@ pub(crate) struct AsyncCollection {
 }
 
 /// Open a collection asynchronously; resolves to an [`AsyncCollection`].
-/// Scheduling is the kernel's own (#374): the collection actor spawns onto
+/// Scheduling is the kernel's own: the collection actor spawns onto
 /// the owned runtime; this host just awaits completions.
 #[pyfunction]
 pub(crate) fn async_collection_open<'py>(
@@ -90,7 +90,7 @@ fn outcome_to_wire(outcome: shrike_error::NativeResult<CreateOutcome>) -> Upsert
     }
 }
 
-/// The full kernel bound for the harness (#332, S3d-1b; #374): one open
+/// The full kernel bound for the harness: one open
 /// collection + the kernel-internal index orchestration + the derived store,
 /// every op spawned onto the kernel's own runtime at this edge and awaited
 /// as an asyncio future. The harness attaches services (engines via
@@ -109,9 +109,9 @@ impl AsyncKernel {
     }
 
     /// Route a resolved embedder + image pair into the kernel's embed SET
-    /// keyed by space (#233). The explicit `space_key` wins; otherwise the key
+    /// keyed by space. The explicit `space_key` wins; otherwise the key
     /// is the embedder's own CONTENT fingerprint (so an unkeyed single-embedder
-    /// attach lands exactly one space, byte-identical to the pre-#233 slot).
+    /// attach lands exactly one space).
     fn attach_space(
         &self,
         space_key: Option<String>,
@@ -123,7 +123,7 @@ impl AsyncKernel {
     }
 }
 
-/// Either embedder shape at the attach seam (#342 P2): the native composition
+/// Either embedder shape at the attach seam: the native composition
 /// (engines direct to the kernel slot, no Python on the embed path) or the
 /// captured-Python-backend handle (llama until P4; the test seam + custom
 /// backends forever).
@@ -133,10 +133,10 @@ enum AnyEmbedder<'py> {
     Captured(PyRef<'py, PyEmbedder>),
 }
 
-/// Either recognizer shape (#342 P3) — the same split as [`AnyEmbedder`]:
+/// Either recognizer shape — the same split as [`AnyEmbedder`]:
 /// the native Vision engine (adapted onto the blocking pool at attach) or a
 /// captured Python backend (custom/test recognizers). The native variant
-/// exists only in `engine-apple` builds (#499) — without it the captured
+/// exists only in `engine-apple` builds — without it the captured
 /// handle is the sole shape.
 #[derive(FromPyObject)]
 enum AnyRecognizer<'py> {
@@ -147,7 +147,7 @@ enum AnyRecognizer<'py> {
     Captured(PyRef<'py, crate::py_recognizer::PyRecognizer>),
 }
 
-/// Map the harness's purpose string onto the kernel's routing enum (#485).
+/// Map the harness's purpose string onto the kernel's routing enum.
 /// The string IS the derived `source` it lands under (`"ocr"`/`"vlm"`/`"asr"`)
 /// — the same names the kernel's `RecognitionPurpose::source()` returns.
 fn purpose_from_str(purpose: &str) -> PyResult<shrike_kernel::RecognitionPurpose> {
@@ -181,7 +181,7 @@ fn image_pair(
 /// Open a kernel asynchronously; resolves to an [`AsyncKernel`]. Call from a
 /// coroutine context (the completion bridge resolves on the running loop).
 /// The embedding service attaches separately (`attach_embedder`) — the
-/// embedder slot is runtime-swappable (#342), so a kernel opens (and serves
+/// embedder slot is runtime-swappable, so a kernel opens (and serves
 /// lexical search + every collection op) with none.
 #[pyfunction]
 #[pyo3(signature = (collection_path, cache_dir, save_delay=None, save_threshold=None))]
@@ -203,12 +203,12 @@ pub(crate) fn async_kernel_open<'py>(
 
 #[pymethods]
 impl AsyncKernel {
-    /// Attach (or swap) an embedding space (#233) — embedding start / model
+    /// Attach (or swap) an embedding space — embedding start / model
     /// change / one call per space in the multi-space fan-out. Takes either
     /// embedder shape ([`AnyEmbedder`]): the native composition embeds without
     /// re-entering Python; the captured handle dispatches to the Python
     /// backend. `space_key` pins the space's identity (the CONTENT fingerprint,
-    /// reorder-stable, #233) — when `None` the kernel keys off the embedder's
+    /// reorder-stable) — when `None` the kernel keys off the embedder's
     /// own fingerprint, so an existing single-embedder host attaches exactly as
     /// before (one space, byte-identical). Follow up with `reindex_if_needed`
     /// (a model change is drift).
@@ -256,14 +256,14 @@ impl AsyncKernel {
         })
     }
 
-    /// The number of attached embedding spaces (#233) — the multi-space status
-    /// surface. The index/search path still consumes only the primary this PR.
+    /// The number of attached embedding spaces — the multi-space status
+    /// surface.
     fn embed_space_count(&self, py: Python<'_>) -> usize {
         py.detach(|| self.inner.embed_space_count())
     }
 
-    /// Attach the OCR recognition service (#228, the second #342 slot) — the
-    /// OCR-defaulting convenience over [`attach_recognizer_with`] (#485):
+    /// Attach the OCR recognition service (the second kernel slot) — the
+    /// OCR-defaulting convenience over [`attach_recognizer_with`]:
     /// existing hosts/tests keep the single-arg shape and target the OCR
     /// purpose. An OCR/ASR/describe engine plus the media-resolver callables it
     /// reads bytes through (independent of the embed slot — recognition works
@@ -277,7 +277,7 @@ impl AsyncKernel {
         self.attach_recognizer_with("ocr", recognizer, media_read, media_exists)
     }
 
-    /// Attach (or swap) the recognition service for a specific purpose (#485)
+    /// Attach (or swap) the recognition service for a specific purpose
     /// — OCR, describe, or ASR, each routed to its own pending set / source /
     /// fingerprint / destination by the kernel sweep. Takes either recognizer
     /// shape ([`AnyRecognizer`]); the Apple Vision engine (route 1, sync compute)
@@ -326,14 +326,14 @@ impl AsyncKernel {
         py.detach(|| self.inner.detach_recognizer())
     }
 
-    /// Detach the recognition service for a specific purpose (#485).
+    /// Detach the recognition service for a specific purpose.
     fn detach_recognizer_for(&self, py: Python<'_>, purpose: &str) -> PyResult<()> {
         let purpose = purpose_from_str(purpose)?;
         py.detach(|| self.inner.detach_recognizer_for(purpose));
         Ok(())
     }
 
-    /// One bounded recognition sweep (#228): recognize up to `max_items`
+    /// One bounded recognition sweep: recognize up to `max_items`
     /// pending images, persist gated text + segments, re-embed the affected
     /// notes. Returns a JSON report ({status, recognized, stored, remaining});
     /// the harness loops in the background while `remaining > 0`.
@@ -349,7 +349,7 @@ impl AsyncKernel {
         })
     }
 
-    /// Create a batch of notes (the #77 duplicate policy per item) and index
+    /// Create a batch of notes (the duplicate policy per item) and index
     /// them — ONE collection job, ONE read job, batched embeds (an awaitable;
     /// per-item results, one bad note never sinks the batch).
     fn upsert_notes<'py>(
@@ -390,7 +390,7 @@ impl AsyncKernel {
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         // The FFI still speaks JSON (the marshaling convention), parsed ONCE
-        // here into the typed seam (#391) and serialized once on the way out.
+        // here into the typed seam and serialized once on the way out.
         let notes: Vec<shrike_schemas::NoteInput> =
             serde_json::from_str(&notes_json).map_err(|e| {
                 crate::to_py_err(shrike_error::NativeError::invalid_input(format!(
@@ -417,7 +417,7 @@ impl AsyncKernel {
         kernel_op(py, async move { kernel.forget_notes(note_ids).await })
     }
 
-    /// Import an .apkg/.colpkg (#72) — awaitable. MUTATES the collection and
+    /// Import an .apkg/.colpkg — awaitable. MUTATES the collection and
     /// reconciles the index (the drift tail is kernel-side). The conflict
     /// conditions arrive as strings (`if_newer`/`always`/`never`); returns
     /// `(summary_json, reindexed)` — the per-bucket counts JSON and whether the
@@ -449,7 +449,7 @@ impl AsyncKernel {
 
     /// Advance the watermarks after a metadata-only change (tags/decks/
     /// templates) — no re-embed, no drift on next boot. Awaitable.
-    /// `membership_may_have_changed` is the tag-centroid relevance probe (#600):
+    /// `membership_may_have_changed` is the tag-centroid relevance probe:
     /// pass `True` only for a tag-membership change (a centroid input moved);
     /// `False` for deck/template/field-metadata edits, which would otherwise
     /// trigger a full O(collection) recompute behind no relevance signal.
@@ -464,7 +464,7 @@ impl AsyncKernel {
         })
     }
 
-    /// Delete notes in ONE maintained op (#604): the existence partition, the
+    /// Delete notes in ONE maintained op: the existence partition, the
     /// anki delete, and the sidecar drop (vectors/fingerprints/derived rows)
     /// run as a single kernel op. Returns `{"deleted": [...], "not_found": [...]}`
     /// JSON (the marshaling convention — parsed once on the Python side), so the
@@ -484,9 +484,9 @@ impl AsyncKernel {
         })
     }
 
-    // ── media + maintenance ops (#391 re-home) ──────────────────────────────
+    // ── media + maintenance ops ──────────────────────────────────────────────
 
-    /// The full store_media batch (#70): byte sources prepare concurrently
+    /// The full store_media batch: byte sources prepare concurrently
     /// on the kernel's blocking pool, the batch writes as one collection
     /// job. Per-item results JSON; the host fills nothing.
     #[pyo3(signature = (items_json, allow_private_fetch=false, path_roots=None))]
@@ -563,7 +563,7 @@ impl AsyncKernel {
         })
     }
 
-    /// The #89 prune with its kernel-side maintenance tail; response JSON
+    /// The prune with its kernel-side maintenance tail; response JSON
     /// (removed note ids stay kernel-internal).
     #[pyo3(signature = (unused_tags=true, empty_notes=true, empty_cards=true, unused_media=true, dry_run=true))]
     fn collection_prune<'py>(
@@ -584,7 +584,7 @@ impl AsyncKernel {
         })
     }
 
-    /// Export the collection (or a scope of it) to an Anki package (#71).
+    /// Export the collection (or a scope of it) to an Anki package.
     /// `format` is "apkg" | "colpkg"; `scope_kind` is "whole" | "deck" |
     /// "notes" (with `deck`/`note_ids` supplying the scope payload). The host
     /// has already gated `out_path` (the path-safety check). Returns the
@@ -636,7 +636,7 @@ impl AsyncKernel {
         })
     }
 
-    // ── tag + deck ops (#391 re-home, long-tail group 2) ────────────────────
+    // ── tag + deck ops ───────────────────────────────────────────────────────
 
     /// Edit tags on a note set (`set_tags` full-replace XOR add/remove);
     /// response JSON, watermark tail kernel-side.
@@ -707,9 +707,9 @@ impl AsyncKernel {
         })
     }
 
-    // ── note-type ops (#391 re-home, long-tail group 3) ─────────────────────
+    // ── note-type ops ──────────────────────────────────────────────────────
 
-    /// Create/update note-type definitions in bulk (#76 positional replace);
+    /// Create/update note-type definitions in bulk (positional replace);
     /// per-item results JSON.
     fn upsert_note_types<'py>(
         &self,
@@ -830,7 +830,7 @@ impl AsyncKernel {
         })
     }
 
-    /// Change notes' note type via name maps (#75); on apply the kernel
+    /// Change notes' note type via name maps; on apply the kernel
     /// re-embeds the changed notes. An empty `template_map_json` = map
     /// templates by ordinal (the established edge contract); JSON.
     fn migrate_note_type<'py>(
@@ -928,10 +928,10 @@ impl AsyncKernel {
         kernel_op(py, async move { kernel.reindex_if_needed().await })
     }
 
-    /// Cross-space search inputs as JSON (#234) — awaitable. Embeds the query
+    /// Cross-space search inputs as JSON — awaitable. Embeds the query
     /// texts into every SECONDARY text-capable space (on the kernel runtime,
     /// where embed is legal — `action_search_notes` runs on the collection-actor
-    /// thread and can't await embed, #503) and searches each secondary engine,
+    /// thread and can't await embed) and searches each secondary engine,
     /// returning the per-space `SpaceSemantic` rows the host threads into
     /// `action_search_notes` as `cross_space=`. EMPTY (`"[]"`) when there are no
     /// secondary spaces — the N=1 case, where the host call stays byte-identical.
@@ -955,9 +955,9 @@ impl AsyncKernel {
         kernel_op(py, async move { kernel.col_mod().await })
     }
 
-    /// Recalibrate every secondary cross-space image floor (#576) — awaitable.
+    /// Recalibrate every secondary cross-space image floor — awaitable.
     /// The harness drives this after a (re)build / model change. `margin` is the
-    /// harness-resolved `search.cross_space_fusion.margin` (#580 — the precision/
+    /// harness-resolved `search.cross_space_fusion.margin` (the precision/
     /// recall dial folded into `mean + margin·std`; 1.0 is the default). Returns
     /// the per-space derived floor as `[(space_key, floor_or_None), …]` so the
     /// harness can log/surface the values. No-op (empty) in the N=1 case.
@@ -1015,8 +1015,8 @@ impl AsyncKernel {
             kernel
                 .collection()
                 .run(move |_core| {
-                    // The job's attach window rides the finalization gate
-                    // (#435); the refusal is lazy (no Python touched here).
+                    // The job's attach window rides the finalization gate;
+                    // the refusal is lazy (no Python touched here).
                     let Some(_permit) = crate::finalize_gate::permit() else {
                         return Err(pyo3::exceptions::PyRuntimeError::new_err(
                             "interpreter is exiting; harness job not run",
@@ -1029,7 +1029,7 @@ impl AsyncKernel {
         })
     }
 
-    /// Cooperative idle-release (#64) — awaitable.
+    /// Cooperative idle-release — awaitable.
     fn release<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
         kernel_op(py, async move { kernel.release().await })
@@ -1043,7 +1043,7 @@ impl AsyncKernel {
     }
 
     /// Flush the index, then close the collection AND drain the actor
-    /// (`Kernel::close` — the #374 interpreter-teardown guard: nothing is
+    /// (`Kernel::close` — the interpreter-teardown guard: nothing is
     /// mid-job when this resolves). Awaitable.
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);

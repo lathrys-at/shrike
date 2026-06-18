@@ -1,4 +1,4 @@
-//! Slice-1 verification (#504): the open -> upsert -> search -> delete ->
+//! End-to-end verification: the open -> upsert -> search -> delete ->
 //! close flow driven through the C ABI from a Rust C-caller (mirroring the
 //! kernel's `no_cpython_smoke` — same HashEmbedder shape, here reached via
 //! the real `extern "C"` entry points), plus the `no_libpython`
@@ -198,7 +198,7 @@ fn c_abi_open_upsert_search_delete_close() {
         "the semantic signal contributed: {signals:?}"
     );
 
-    // delete: the maintained op (#604) returns {deleted, not_found}; the note
+    // delete: the maintained op returns {deleted, not_found}; the note
     // leaves and the count returns to zero.
     let deleted = ok(op(
         handle,
@@ -313,7 +313,7 @@ fn a_now_dispatch_fires_exactly_once() {
 // ── the no-libpython link property ──────────────────────────────────────────
 
 /// Mirror of the kernel's `no_cpython_smoke` link guarantee, made a direct
-/// artifact assertion (#504's verification line: "the no-Python property
+/// artifact assertion ("the no-Python property
 /// pinned by the link — no libpython anywhere in the artifact"). The test
 /// binary STATICALLY links the whole `shrike-cabi` crate and its kernel
 /// closure, so if any of it pulled in libpython, this binary would reference

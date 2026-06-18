@@ -1,8 +1,8 @@
-//! `PyRecognizer` (#228): the kernel's `Recognizer` seam implemented over the
+//! `PyRecognizer`: the kernel's `Recognizer` seam implemented over the
 //! harness's backend — the same inversion as `PyEmbedder` (the kernel drives
-//! ANY Python-held recognizer without knowing Python exists). Since #342 P3
+//! ANY Python-held recognizer without knowing Python exists).
 //! Apple Vision is native (`AppleVisionRecognizer` below, attached direct);
-//! what rides this capture seam is custom/test backends. Since #374 C the
+//! what rides this capture seam is custom/test backends. The
 //! blocking backend call rides the kernel runtime's blocking pool
 //! (`spawn_blocking` + `Python::attach`) — no loop machinery.
 //!
@@ -42,7 +42,7 @@ fn parse_results(raw: Vec<(String, f64, String)>) -> RecResult {
 }
 
 /// The kernel-facing handle: a Python backend whose blocking calls ride the
-/// kernel runtime's blocking pool (#374 — no captured loop). The fingerprint
+/// kernel runtime's blocking pool (no captured loop). The fingerprint
 /// is captured once at assembly so the kernel's invalidation rules never
 /// call into Python mid-op.
 pub(crate) struct PyRecognizerHandle {
@@ -54,9 +54,9 @@ impl Recognizer for PyRecognizerHandle {
     fn recognize(&self, items: Vec<MediaItem>) -> BoxFuture<'_, RecResult> {
         // The Python wire stays `list[bytes]` (the RecognizerBackend
         // contract); native engines are where the mime hint pays off. The
-        // blocking backend call rides the runtime's blocking pool (#374 C).
+        // blocking backend call rides the runtime's blocking pool.
         let items: Vec<Vec<u8>> = items.into_iter().map(|m| m.bytes).collect();
-        // Both attach windows ride the finalization gate (#435), exactly like
+        // Both attach windows ride the finalization gate, exactly like
         // PyEmbedderHandle::dispatch.
         let backend = {
             let Some(_permit) = crate::finalize_gate::permit() else {
@@ -99,7 +99,7 @@ impl Recognizer for PyRecognizerHandle {
     }
 }
 
-/// The native Apple Vision engine (#342 P3) as the Python-visible backend
+/// The native Apple Vision engine as the Python-visible backend
 /// object: construction fails `unavailable` off macOS (the same
 /// degrade-don't-crash a missing pyobjc gave the retired Python backend),
 /// `recognize` is the blocking wire shape for direct callers/tests, and the
@@ -132,7 +132,7 @@ impl AppleVisionRecognizer {
     }
 
     /// The platform identity: `apple-vision-swift:{revision}:macos{X.Y.Z}`
-    /// — the hard-cut Swift-glue lineage (#398); a changed fingerprint
+    /// — the hard-cut Swift-glue lineage; a changed fingerprint
     /// re-derives OCR rows exactly like a model change rebuilds vectors.
     fn model_fingerprint(&self) -> Option<String> {
         Some(self.engine.fingerprint_str().to_string())
@@ -159,7 +159,7 @@ impl AppleVisionRecognizer {
     }
 }
 
-/// The remote VLM describe engine (#433/#485) as the Python-visible backend
+/// The remote VLM describe engine as the Python-visible backend
 /// object: the recognizer-attach sibling of `RemoteEmbedder`. Construction
 /// validates the API key; the kernel attach path takes `engine_arc()` and
 /// adapts it onto the blocking pool via `Blocking` exactly like Apple Vision,
@@ -316,7 +316,7 @@ impl PyRecognizer {
     /// Capture the harness's recognizer backend. The fingerprint
     /// (`model_fingerprint()`, optional) is read once here so the kernel's
     /// invalidation rules never call into Python mid-op. No loop is
-    /// captured — execution is the kernel's (#374).
+    /// captured — execution is the kernel's.
     #[staticmethod]
     fn capture(py: Python<'_>, backend: Py<PyAny>) -> PyResult<Self> {
         let fingerprint = backend

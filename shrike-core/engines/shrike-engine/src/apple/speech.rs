@@ -1,5 +1,5 @@
-//! Apple SpeechAnalyzer ASR as a native engine (#410; Swift glue in
-//! `shrike-platform` since #709): on-device transcription (macOS 26+,
+//! Apple SpeechAnalyzer ASR as a native engine (Swift glue in
+//! `shrike-platform`): on-device transcription (macOS 26+,
 //! Swift-only) behind the same Swift C-ABI pattern as the OCR half. Segments
 //! carry `Locator::Span` (`[start_seconds, duration_seconds]`) — the time-axis
 //! counterpart of OCR's boxes. This layer parses `shrike-platform`'s raw JSON

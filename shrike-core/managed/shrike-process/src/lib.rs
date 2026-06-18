@@ -1,4 +1,4 @@
-//! Generic managed-subprocess lifecycle (#710, epic #703) — spawn, health-wait,
+//! Generic managed-subprocess lifecycle — spawn, health-wait,
 //! orphan reaping, escalating stop, extracted from `shrike-llama-server`'s
 //! process half so any subprocess-managed runtime (a sync-server, a future
 //! local model server) implements one small policy trait and inherits the
@@ -11,7 +11,7 @@
 //! layer floor with **no HTTP dependency**: its deps are `shrike-error` + `libc`
 //! + `tracing` only.
 //!
-//! The **orphan reaper is safety-critical** (#594/#654; see [`reaper`]): a
+//! The **orphan reaper is safety-critical** (see [`reaper`]): a
 //! recorded PID is terminated only when it is BOTH still alive AND still the
 //! process LISTENing on our port — both signals required, so a recycled PID can
 //! never take a bystander down with it. The kill gate and the port→PID
@@ -47,7 +47,7 @@ pub use reaper::{pid_owns_port, port_owner_pids};
 /// How long [`Supervisor::start`] waits for the process to become healthy
 /// before giving up and stopping it.
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
-/// 50ms, not 250 (#426): a localhost health GET costs ~1ms, and every service
+/// 50ms, not 250: a localhost health GET costs ~1ms, and every service
 /// start rounds up to one poll quantum — a small model loads faster than a
 /// single 250ms tick, so the coarser interval was pure added boot latency
 /// (felt acutely by the embedding test suites, which boot servers per fixture).
@@ -568,7 +568,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn s12_recycled_pid_with_unrelated_port_holder_is_not_killed() {
-        // #594 (audit S12-1): a recycled PID recorded for reaping, plus an
+        // A recycled PID recorded for reaping, plus an
         // UNRELATED process holding our port — the old `pid_alive(recorded) &&
         // port_held(ANY holder)` pair killed the bystander because it never
         // asked whether the recorded PID *is* the holder. The unrelated process
@@ -611,7 +611,7 @@ mod tests {
         // terminated. Detach via `sh -c '... & echo $!'` so the SIGTERM'd
         // process is reaped by init rather than zombied (a direct child would
         // linger as a zombie that `kill(pid, 0)` still reports alive).
-        // Capability gate (#652): this verifies a *positive* reap, which needs to
+        // Capability gate: this verifies a *positive* reap, which needs to
         // confirm ownership via `port_owner_pids` (lsof on unix). The bazel
         // darwin-sandbox provides no `lsof`, so ownership can never be
         // established there and the setup precondition could never hold. Probe

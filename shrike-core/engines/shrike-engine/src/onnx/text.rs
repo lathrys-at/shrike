@@ -1,4 +1,4 @@
-//! The native text-embedding engine (#270): ort + tokenizers + pooling.
+//! The native text-embedding engine: ort + tokenizers + pooling.
 //!
 //! The Rust counterpart of `shrike/embedding_onnx.py` — same model layout, same
 //! tokenization (the Python `tokenizers` package wraps this same crate), same
@@ -84,8 +84,8 @@ struct GraphInputs {
 pub struct TextEmbedder {
     /// Locked because ort 2.0.0-rc.12's run entrypoints all take `&mut self`
     /// (`Session::run<'s, …>(&'s mut self, …) -> Result<SessionOutputs<'s>>`,
-    /// likewise `run_with_options`/`run_binding`/`run_async`) — re-checked for
-    /// #384; drop the lock if a future ort makes `run` take `&self`.
+    /// likewise `run_with_options`/`run_binding`/`run_async`) — drop the lock
+    /// if a future ort makes `run` take `&self`.
     session: Mutex<ort::session::Session>,
     tokenizer: Tokenizer,
     inputs: GraphInputs,
@@ -229,7 +229,7 @@ impl TextEmbedder {
             return Ok(Vec::new());
         }
         // The GIL is released across this whole call (the binding detaches);
-        // this span is the harness's visibility into that window (#308).
+        // this span is the harness's visibility into that window.
         let span = tracing::debug_span!("embed.text_chunk", batch = texts.len());
         let _enter = span.enter();
         let encodings = self
@@ -282,7 +282,7 @@ impl TextEmbedder {
             .context(ErrorKind::InvalidInput, "onnx run failed")?;
         // The first output, by position — mirroring the Python backend's
         // `session.run(None, feed)[0]`. Pooling reads the borrowed view
-        // directly: no owned copy of the full [B,S,H] token tensor (#384).
+        // directly: no owned copy of the full [B,S,H] token tensor.
         let array = outputs[0]
             .try_extract_array::<f32>()
             .context(ErrorKind::Internal, "output extract")?;
@@ -315,7 +315,7 @@ impl TextEmbedder {
     }
 }
 
-/// The engine contract (#342, route 1): pure chunk-level compute — the host
+/// The engine contract (route 1): pure chunk-level compute — the host
 /// supplies identity + batch policy (`WithPolicy`) and execution (an adapter
 /// lane) at composition. `safe_batch` deliberately stays the trait default
 /// (1): batch safety is *probed on the loaded model* by the host, never
