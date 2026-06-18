@@ -548,7 +548,10 @@ impl DerivedEngine {
     ///
     /// # Errors
     ///
-    /// Returns an error if the backing store rejects the operation.
+    /// Returns an error if a schema/table statement (the FTS5 `idx`
+    /// drop+recreate or the row deletes), a row insert, the stale-row prune, or
+    /// the wrapping build transaction (including its commit) fails — the whole
+    /// build rolls back.
     pub fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
