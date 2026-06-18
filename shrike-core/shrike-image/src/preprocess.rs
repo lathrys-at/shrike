@@ -1,8 +1,7 @@
 //! The CLIP byte→pixels→CHW pipeline (#707): decode → resize-shortest-edge →
-//! center-crop → rescale/normalize → channel-major f32. Behind the `preprocess`
-//! feature because it pulls the `image` crate (decode/resize); a minimal-core or
-//! BMP-encoder-only consumer (`default-features = false`) gets none of this and
-//! no `image` dependency.
+//! center-crop → rescale/normalize → channel-major f32. The normalize/CHW
+//! transform has an `accel` (default) and a scalar fallback; the resize is
+//! `image`'s scalar Catmull-Rom throughout.
 
 use image::imageops::FilterType;
 use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};

@@ -5,17 +5,13 @@ package(default_visibility = ["//shrike-core:__subpackages__"])
 exports_files(["Cargo.toml"])
 
 # The engine contract (#342): the traits the kernel consumes and every engine
-# crate implements. A LEAF — no engine deps, no kernel dep, no pyo3. Its only
-# sibling dep is shrike-image's BMP-encoder-only target (:shrike_image_bmp, NO
-# `image` crate) for the probe's image set (#707).
+# crate implements. A LEAF — no engine deps, no kernel dep, no pyo3.
 rust_library(
     name = "shrike_engine_api",
     srcs = glob(["src/**/*.rs"]),
     edition = "2021",
     deps = [
         "//shrike-core/shrike-error:shrike_error",
-        # The BMP-encoder-only target (no `image` crate) — keeps this leaf a leaf.
-        "//shrike-core/shrike-image:shrike_image_bmp",
         "@crates//:futures",
         "@crates//:serde",
         "@crates//:tokio",
@@ -26,5 +22,10 @@ rust_test(
     name = "shrike_engine_api_test",
     size = "small",
     crate = ":shrike_engine_api",
-    deps = ["@crates//:serde_json"],
+    deps = [
+        # Test-only: decode the pure-Rust BMP probe images to verify validity
+        # (#211; production code emits raw bytes — no image dep in the leaf).
+        "@crates//:image",
+        "@crates//:serde_json",
+    ],
 )

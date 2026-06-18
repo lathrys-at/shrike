@@ -1,16 +1,11 @@
 # Generic image preprocessing for the CLIP pixel pipeline (#707, epic #703).
 #
-# A LEAF utility crate, two surfaces split by feature so a consumer takes only
-# what it needs:
-#   - always: a dependency-free 24-bit BMP encoder (no `image` crate).
-#   - `preprocess` (default): byte -> decode -> resize-shortest-edge ->
-#     center-crop -> rescale/normalize -> CHW f32 — pulls the `image` crate.
-# So shrike-engine-api's leaf probe takes `default-features = false` (encoder
-# only, no `image`), while shrike-embed takes `preprocess`. NO engine/kernel/
-# Shrike-domain logic — `shrike-embed`'s CLIP engine is just its first consumer
-# (enforced by //shrike-core:layering_check, LAYER_FLOOR). The only Shrike
-# coupling is the shared error taxonomy (shrike-error, itself a floor crate), so
-# call sites keep the `NativeResult` they already used.
+# A LEAF utility crate: byte -> decode -> resize-shortest-edge -> center-crop ->
+# rescale/normalize -> CHW f32. NO engine/kernel/Shrike-domain logic —
+# `shrike-embed`'s CLIP engine is its only consumer (enforced by
+# //shrike-core:layering_check, LAYER_FLOOR). The only Shrike coupling is the
+# shared error taxonomy (shrike-error, itself a floor crate), so call sites keep
+# the `NativeResult` they already used.
 [package]
 name = "shrike-image"
 version = "0.1.0"
@@ -18,24 +13,19 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [features]
-# `preprocess` (default): the decode/resize/normalize pipeline — pulls the
-# `image` crate. A BMP-encoder-only consumer (shrike-engine-api's leaf probe)
-# takes `default-features = false` to get `encode_bmp` WITHOUT the `image` dep.
-# `accel` (default, needs `preprocess`): the autovectorizable contiguous-plane
-# normalize/CHW path. Same affine math as the scalar reference (per-channel FMA),
-# so it matches within the golden image-prep tolerance — no IMAGE_PREP_VERSION_RS
-# bump; off => a plain scalar normalize loop (minimal-core).
-default = ["preprocess", "accel"]
-preprocess = ["dep:image"]
+# `accel` (default): the autovectorizable contiguous-plane normalize/CHW path.
+# It is the *same* affine math as the scalar reference (per-channel FMA), so it
+# matches within the golden image-prep tolerance — no IMAGE_PREP_VERSION_RS bump.
+# Off => a plain scalar normalize loop (minimal-core, no autovectorization hint).
+default = ["accel"]
 accel = []
 
 [dependencies]
 shrike-error = { workspace = true }
-# Decode, the scalar Catmull-Rom resize, and center-crop — only under the
-# `preprocess` feature. The format feature set mirrors `shrike-embed`'s prior
-# `image` dep exactly so decode behaviour is unchanged by the move (#707). Kept
-# optional so the dependency-free BMP encoder can ship without it (#707 leaf).
-image = { version = "0.25", default-features = false, optional = true, features = [
+# Decode, the scalar Catmull-Rom resize, and center-crop. The format feature set
+# mirrors `shrike-embed`'s prior `image` dep exactly so decode behaviour is
+# unchanged by the move (#707).
+image = { version = "0.25", default-features = false, features = [
     "png",
     "jpeg",
     "gif",

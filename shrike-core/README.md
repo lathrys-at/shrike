@@ -16,7 +16,7 @@ and `rules_rust` builds everything against the hermetic CPython toolchain.
 | `shrike-derived` | FTS5 trigram engine (substring/fuzzy search, OCR rows) | no |
 | `shrike-engine-api` | The engine contract (#342): kernel-facing async traits, sync compute traits, the `Blocking` adapter, the batch-safety probe | no |
 | `shrike-embed` | ort/tokenizers text + CLIP embedding engines | no |
-| `shrike-image` | Generic image preprocessing for the CLIP vision path (#707): decode/resize/center-crop/normalize → CHW, plus a dependency-free BMP encoder | no |
+| `shrike-image` | Generic image preprocessing for the CLIP vision path (#707): decode/resize/center-crop/normalize → CHW (with the SIMD `accel` normalize path) | no |
 | `shrike-embed-remote` | Text embedding over any OpenAI-compatible endpoint | no |
 | `shrike-describe-remote` | VLM image→text description over OpenAI-compatible chat completions (#433) | no |
 | `shrike-llama-server` | llama-server subprocess lifecycle (spawn/health/reap/stop) — a manager, not an engine | no |

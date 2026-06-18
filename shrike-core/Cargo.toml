@@ -53,6 +53,6 @@ license = "AGPL-3.0-or-later"
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
 shrike-cache = { path = "shrike-cache" }
 shrike-error = { path = "shrike-error" }
-shrike-image = { path = "shrike-image", default-features = false }
+shrike-image = { path = "shrike-image" }
 shrike-network = { path = "shrike-network" }
 shrike-store = { path = "shrike-store" }

@@ -5,39 +5,19 @@ package(default_visibility = ["//shrike-core:__subpackages__"])
 exports_files(["Cargo.toml"])
 
 # Generic image preprocessing for the CLIP pixel pipeline (#707): decode →
-# resize-shortest-edge → center-crop → rescale/normalize → CHW f32, plus a
-# dependency-free 24-bit BMP encoder. A layer-FLOOR crate (enforced by
-# //shrike-core:layering_check) — image/shrike-error only, NO kernel or engine
-# coupling.
-#
-# Two targets mirror the crate's Cargo features (hand-written rust_library does
-# no per-consumer feature resolution, so the split is explicit):
-#  - `shrike_image` — the FULL surface (`preprocess` + `accel`): the
-#    decode/resize/normalize pipeline; pulls the `image` crate. For shrike-embed.
-#  - `shrike_image_bmp` — `default-features = false`: ONLY the dependency-free
-#    BMP encoder, NO `image` crate. For shrike-engine-api's leaf probe, so the
-#    engine-contract crate never transitively links `image`.
+# resize-shortest-edge → center-crop → rescale/normalize → CHW f32. A layer-FLOOR
+# crate (enforced by //shrike-core:layering_check) — image/shrike-error only, NO
+# kernel or engine coupling. The accelerated normalize/CHW path is the default
+# (`accel`); shrike-embed is the sole consumer.
 rust_library(
     name = "shrike_image",
     srcs = glob(["src/**/*.rs"]),
-    crate_features = [
-        "preprocess",
-        "accel",
-    ],
+    crate_features = ["accel"],
     edition = "2021",
     deps = [
         "//shrike-core/shrike-error:shrike_error",
         "@crates//:image",
     ],
-)
-
-rust_library(
-    name = "shrike_image_bmp",
-    srcs = glob(["src/**/*.rs"]),
-    crate_features = [],  # neither `preprocess` nor `accel` → no `image` dep
-    crate_name = "shrike_image",
-    edition = "2021",
-    deps = ["//shrike-core/shrike-error:shrike_error"],
 )
 
 rust_test(
