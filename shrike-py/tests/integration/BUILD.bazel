@@ -85,10 +85,22 @@ _EMBEDDING_BACKENDS = [
 # Excluded from the :integration glob below so `bazel test //...` skips it.
 _SEARCH_QUALITY = ["test_search_quality.py"]
 
-# Non-embedding integration: one aggregate target, `-n auto` (xdist), mirroring the
-# pip `pytest tests/integration -n auto` lane — import + server-spawn cost amortized.
-# Glob-partitioned: everything that isn't an embedding half OR the manual
-# search-quality suite runs here.
+# Non-embedding integration: the server-spawn-bound suite (~230 tests), the
+# slowest non-manual target and the per-PR wall-clock bottleneck. Glob-partitioned:
+# everything that isn't an embedding half OR the manual search-quality suite runs
+# here.
+#
+# Sharded into 4 parallel Bazel test actions (`shard_count`) rather than one
+# `-n auto` xdist action: the launcher round-robins the collected items across
+# shards, each shard boots ONE shared session server and runs its ~1/4 SERIALLY
+# (`xdist = None`). This swaps the old scheduler-invisible xdist parallelism (a
+# single `large` action that secretly spawned ncpu worker+server subprocesses
+# while Bazel counted it as one test job and freely scheduled OTHER actions
+# alongside — silent oversubscription) for parallelism Bazel actually accounts:
+# each shard is one test job against `--local_test_jobs`, so the integration work
+# interleaves with the rest of the graph under a bounded core budget. The pip lane
+# keeps its own `pytest -n auto` (the conftest's per-xdist-worker server machinery
+# still serves it); this only retunes the Bazel target.
 pytest_test(
     name = "integration",
     size = "large",
@@ -96,6 +108,8 @@ pytest_test(
         ["test_*.py"],
         exclude = _EMBEDDING_CORE + _EMBEDDING_BACKENDS + _SEARCH_QUALITY,
     ),
+    shard_count = 4,
+    xdist = None,
     deps = [":conftest"],
 )
 
