@@ -1,5 +1,8 @@
 # Code conventions
 
+These are enforced, not aspirational: conformance is a required check in every code
+review (see CLAUDE.md), so a breach is a review finding.
+
 ## Style
 
 - **Type annotations on every function** (mypy runs with `disallow_untyped_defs`).

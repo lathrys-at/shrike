@@ -110,7 +110,10 @@ for driving work to merge — must-read.
 In addition to CI lint/test, and required:
 
 - **Code review on every behavioural change** before merge (skip trivial typo/doc/dep
-  PRs) — `/code-review`, escalate to `ultra` for larger changes.
+  PRs) — `/code-review`, escalate to `ultra` for larger changes. **Conformance to
+  [`docs/dev/conventions.md`](docs/dev/conventions.md) is a required check** — style, the
+  schema house style, performance rules, logging, and comment discipline. A convention
+  breach is a review finding, not a nit.
 - **Security review whenever the server API surface changes** — a new/changed MCP tool or
   HTTP route, anything touching auth/transport/SSRF/path handling — via `/security-review`,
   on top of the code review.
@@ -127,7 +130,9 @@ For delegated work, own the whole cycle, pipelined not serial:
 1. **PR at each checkpoint, as a draft** (`--draft`; CI runs immediately). Don't contort
    in-progress work to be mergeable, but don't hoard mergeable work either.
 2. **Self-review while still a draft** — a subagent self-check (latest Opus) for
-   substantive changes, skipped for mechanical ones. Keep working while it's in flight.
+   substantive changes, skipped for mechanical ones, covering correctness *and*
+   conformance to [`docs/dev/conventions.md`](docs/dev/conventions.md). Keep working while
+   it's in flight.
 3. **Mark ready, auto-merge, move on** — once findings are addressed and CI is green,
    `gh pr ready` then `gh pr merge --auto --squash`; don't poll. Add a cross-platform
    label (`rc`/`macos`/`linux-arm`) when warranted.
@@ -151,7 +156,8 @@ don't implement. The full playbook is the team-development skill; the load-beari
   REVIEW"**, then **HOLD** — no self-review, no self-merge; ask the lead when blocked.
 - **Lead incremental review** per PR (directly): alignment to plan + a correctness pass.
 - **Joint cross-review is the gate before any merge** — resume all authors to peer-review
-  along correctness/plan, performance, security, and cross-PR alignment.
+  along correctness/plan, convention adherence (`docs/dev/conventions.md`), performance,
+  security, and cross-PR alignment.
 - **Consolidate → user signoff → batch merge** in dependency order; nothing merges before
   signoff.
 
