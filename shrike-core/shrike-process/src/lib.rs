@@ -150,24 +150,13 @@ impl<P: ManagedProcess> Supervisor<P> {
         &self.policy
     }
 
-    /// Consume the supervisor and reclaim its policy by value. Intended for a
-    /// host that reshapes the policy *before* spawning (no child can exist yet —
-    /// nothing to stop). It suppresses [`Drop`] deliberately (which would only
-    /// stop a child, of which there is none pre-spawn) so the policy can move out
-    /// past the `Drop` impl; the other fields are dropped normally.
-    pub fn into_policy(self) -> P {
-        // Move every field out of a `Drop`-suppressed wrapper, then return the
-        // policy — `child`/`base_url`/`pid_cell` drop here as usual, so nothing
-        // leaks; only the supervisor's own (no-op pre-spawn) `Drop` is skipped.
-        let wrapped = std::mem::ManuallyDrop::new(self);
-        // SAFETY: each field is read exactly once out of the `ManuallyDrop`,
-        // which is never used again (no double-read, no use-after-move), so the
-        // bit-copies are the sole owners.
-        let policy = unsafe { std::ptr::read(&wrapped.policy) };
-        let _child = unsafe { std::ptr::read(&wrapped.child) };
-        let _base_url = unsafe { std::ptr::read(&wrapped.base_url) };
-        let _pid_cell = unsafe { std::ptr::read(&wrapped.pid_cell) };
-        policy
+    /// Mutably borrow the policy to reshape it *before* spawning (e.g. switch an
+    /// embeddings server to chat mode, add projectors). The cached `base_url` is
+    /// derived from the host/port only, so an in-place reshape that doesn't move
+    /// those keeps it valid; callers that would change host/port should rebuild
+    /// the supervisor instead.
+    pub fn policy_mut(&mut self) -> &mut P {
+        &mut self.policy
     }
 
     /// `http://{host}:{port}` — the endpoint the process serves.

@@ -193,16 +193,28 @@ struct LlamaPolicy {
 }
 
 impl LlamaPolicy {
-    /// Assemble a policy with a fresh (unbuilt) health agent — the one place the
-    /// `OnceLock` is seeded, so the manager's constructors/builders don't each
-    /// repeat the field.
-    fn assemble(cfg: LlamaServerConfig, embeddings: bool, mmprojs: Vec<String>) -> Self {
+    /// An embeddings server (the default) for `cfg`, no projectors.
+    fn embeddings(cfg: LlamaServerConfig) -> Self {
         Self {
             cfg,
-            embeddings,
-            mmprojs,
+            embeddings: true,
+            mmprojs: Vec::new(),
             health_agent: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Switch to a *chat* server (no `--embeddings`) with an optional projector
+    /// (#433). An in-place reshape — host/port (and so the supervisor's cached
+    /// base URL) are untouched.
+    fn set_chat_mode(&mut self, mmproj: Option<String>) {
+        self.embeddings = false;
+        self.mmprojs = mmproj.into_iter().collect();
+    }
+
+    /// Load multimodal projector(s) on the (still embeddings) server (#501). An
+    /// in-place reshape; `--embeddings` stays on.
+    fn set_mmprojs(&mut self, mmprojs: Vec<String>) {
+        self.mmprojs = mmprojs;
     }
 
     fn model(&self) -> &ModelSpec {
@@ -406,7 +418,7 @@ impl LlamaServerManager {
     /// tuning/passthrough/pid-file.
     pub fn new(cfg: LlamaServerConfig) -> Self {
         Self {
-            supervisor: Supervisor::new(LlamaPolicy::assemble(cfg, true, Vec::new())),
+            supervisor: Supervisor::new(LlamaPolicy::embeddings(cfg)),
         }
     }
 
@@ -415,16 +427,10 @@ impl LlamaServerManager {
     /// `llama-server -m model.gguf --mmproj proj.gguf`. A builder on the manager
     /// (not a config field) so the existing config constructors stay valid.
     /// Vision models want a generous `context_size` — image tokens are
-    /// expensive.
+    /// expensive. Reshapes the (pre-spawn) policy in place — host/port are
+    /// unchanged, so the supervisor's cached URL stays valid.
     pub fn chat_mode(mut self, mmproj: Option<String>) -> Self {
-        // A chat/embeddings reshape must happen before spawn; rebuild the
-        // (not-yet-started) supervisor around the reshaped policy.
-        let LlamaPolicy { cfg, .. } = self.take_policy();
-        self.supervisor = Supervisor::new(LlamaPolicy::assemble(
-            cfg,
-            false,
-            mmproj.into_iter().collect(),
-        ));
+        self.supervisor.policy_mut().set_chat_mode(mmproj);
         self
     }
 
@@ -433,24 +439,8 @@ impl LlamaServerManager {
     /// llama-server. Repeatable because per-modality mmprojs load together
     /// (vision + audio for an omni model). Keeps `--embeddings` on.
     pub fn with_mmprojs(mut self, mmprojs: Vec<String>) -> Self {
-        let LlamaPolicy {
-            cfg, embeddings, ..
-        } = self.take_policy();
-        self.supervisor = Supervisor::new(LlamaPolicy::assemble(cfg, embeddings, mmprojs));
+        self.supervisor.policy_mut().set_mmprojs(mmprojs);
         self
-    }
-
-    /// Move the policy out of the (pre-spawn) supervisor so a builder can reshape
-    /// it, leaving a throwaway placeholder behind. Sound pre-spawn only: no child
-    /// exists yet, and the chat/mmproj builders are only ever chained on a fresh
-    /// `new`.
-    fn take_policy(&mut self) -> LlamaPolicy {
-        let placeholder = Supervisor::new(LlamaPolicy::assemble(
-            LlamaServerConfig::default(),
-            true,
-            Vec::new(),
-        ));
-        std::mem::replace(&mut self.supervisor, placeholder).into_policy()
     }
 
     /// The shared observed-PID cell: `Some` while a child is believed alive.
