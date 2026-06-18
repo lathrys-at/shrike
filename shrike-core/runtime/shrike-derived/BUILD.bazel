@@ -1,0 +1,31 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//shrike-core:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# Native derived-text engine (#281): rusqlite + bundled SQLite (FTS5 + trigram
+# always compiled in). Pure Rust — NO pyo3 (enforced by //shrike-core:layering_check).
+rust_library(
+    name = "shrike_derived",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+    # Pinned explicitly (#499): the LINKAGE is bundled either way (crate-universe
+    # resolves @crates//:rusqlite with the workspace-unified `bundled` feature),
+    # but the crate's own `cfg!(feature = "bundled")` probe (`sqlite_bundled()`)
+    # reads Bazel's crate_features — without the pin it reported platform
+    # linkage under Bazel while actually linking bundled.
+    crate_features = ["bundled"],
+    deps = [
+        "//shrike-core/contracts/shrike-error:shrike_error",
+        "//shrike-core/contracts/shrike-store:shrike_store",
+        "@crates//:rusqlite",
+        "@crates//:tracing",
+    ],
+)
+
+rust_test(
+    name = "shrike_derived_test",
+    size = "small",
+    crate = ":shrike_derived",
+)

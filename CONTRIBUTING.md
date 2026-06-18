@@ -172,8 +172,8 @@ build (e.g. `build-native.sh`).
 ## Local checks before a PR
 
 ```bash
-ruff check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/
-ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/
+ruff check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/bindings/shrike-pyo3/python/
+ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/bindings/shrike-pyo3/python/
 mypy --config-file shrike-py/pyproject.toml shrike-py/src/shrike/
 pytest shrike-py/tests/unit -q
 pytest shrike-py/tests/integration -q -m "integration and not embedding"

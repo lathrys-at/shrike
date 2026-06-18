@@ -149,24 +149,39 @@ shrike-py/tests/                  # (the unit's test tree — under shrike-py/, 
 └── integration/                  # real server subprocess + HTTP transport
                                   #   conftest: shared session server + per-test reset; mcp/runner; isolated_server
 shrike-core/                      # the Rust workspace (the compute core) — sibling unit to shrike-py/
-├── shrike-kernel/                # THE kernel: collection + index orchestration + derived + fusion
-├── shrike-collection/            # anki via its protobuf service layer (the ONLY anki coupling)
-├── shrike-index/                 # per-modality USearch engine
-├── shrike-derived/               # FTS5 trigram engine
-├── shrike-engine-api/            # THE engine contract: kernel-facing traits, sync compute
-│                                 #   traits, the Blocking adapter, WithPolicy, the batch probe
-├── shrike-engine/                # engine-contract impls, feature-gated by family (#708):
-│                                 #   onnx::{text,clip,session} (ort/tokenizers, GPU EPs) + remote::{embed,
-│                                 #   describe,http} (one SSRF-pinned ureq client; embed + VLM describe),
-│                                 #   apple::{vision,speech} (the Apple recognizer RecognizeMedia impls,
-│                                 #   parsing shrike-platform's raw JSON; feature engine-apple)
-├── shrike-llama-server/          # llama-server lifecycle ONLY (spawn/health/reap/stop) — not an engine
-├── shrike-platform/             # raw Swift/C-ABI recognizer GLUE (#709) — Vision OCR + SpeechAnalyzer
+│                                 #   crates grouped by role (#766): contracts/ runtime/ engines/
+│                                 #   managed/ utility/ bindings/ (a pure path move; no crate renamed)
+├── contracts/                    # the floor: wire types + error taxonomy + the engine firewall
+│   ├── shrike-error/             # the shared error taxonomy
+│   ├── shrike-schemas/           # serde+schemars wire types (CANONICAL; schemas.py binds)
+│   ├── shrike-engine-api/        # THE engine contract: kernel-facing traits, sync compute
+│   │                             #   traits, the Blocking adapter, WithPolicy, the batch probe
+│   └── shrike-store/             # the derived-cache store primitive
+├── runtime/                      # THE kernel + the stores it orchestrates
+│   ├── shrike-kernel/            # THE kernel: collection + index orchestration + derived + fusion
+│   ├── shrike-collection/        # anki via its protobuf service layer (the ONLY anki coupling)
+│   ├── shrike-index/             # per-modality USearch engine
+│   ├── shrike-derived/           # FTS5 trigram engine
+│   └── shrike-cache/             # per-collection cache layout (index/derived subdirs + namespacing)
+├── engines/                      # engine-contract impls + the platform glue they parse
+│   ├── shrike-engine/            # engine-contract impls, feature-gated by family (#708):
+│   │                             #   onnx::{text,clip,session} (ort/tokenizers, GPU EPs) + remote::{embed,
+│   │                             #   describe,http} (one SSRF-pinned ureq client; embed + VLM describe),
+│   │                             #   apple::{vision,speech} (the Apple recognizer RecognizeMedia impls,
+│   │                             #   parsing shrike-platform's raw JSON; feature engine-apple)
+│   └── shrike-platform/          # raw Swift/C-ABI recognizer GLUE (#709) — Vision OCR + SpeechAnalyzer
 │                                 #   ASR behind a C ABI (off-macOS stub; needs Xcode); NO engine contract
 │                                 #   (returns raw JSON; shrike-engine::apple parses it). Android-ready.
-├── shrike-schemas/               # serde+schemars wire types (CANONICAL; schemas.py binds)
-├── shrike-ffi/                   # the shared error taxonomy
-└── shrike-pyo3/                  # the pyo3 binding (the ONLY pyo3 crate) + shrike_native package
+├── managed/                      # subprocess lifecycle (manage-class, not engines)
+│   ├── shrike-process/           # generic managed-subprocess lifecycle (ManagedProcess + reaper)
+│   └── shrike-llama-server/      # llama-server lifecycle ONLY (spawn/health/reap/stop) — not an engine
+├── utility/                      # low utility crates below the kernel + engines
+│   ├── shrike-network/           # the SSRF-pinned network primitives
+│   ├── shrike-image/             # the CLIP byte→pixels→CHW pipeline
+│   └── shrike-media/             # inbound/untrusted-media: SSRF fetch + decode + prepare + MIME home
+└── bindings/                     # the host-language bindings
+    ├── shrike-pyo3/              # the pyo3 binding (the ONLY pyo3 crate) + shrike_native package
+    └── shrike-cabi/              # the C-ABI mobile binding (cdylib, zero CPython)
 docs/
 └── mcp-tools.md                  # Tool documentation (human-readable; machine schema served live by the server)
 ```
@@ -328,12 +343,12 @@ Embedding tests use their own `collection_server` and are untouched by the reset
 ### Linting
 
 ```bash
-ruff check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/   # Lint
-ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/  # Format check
+ruff check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/bindings/shrike-pyo3/python/   # Lint
+ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/bindings/shrike-pyo3/python/  # Format check
 mypy --config-file shrike-py/pyproject.toml shrike-py/src/shrike/       # Type check
 ```
 
-(`shrike-core/shrike-pyo3/python/` is the extension's Python shim — outside `src/`, so
+(`shrike-core/bindings/shrike-pyo3/python/` is the extension's Python shim — outside `src/`, so
 it must be named explicitly or it sits in no lint scope at all, #437.)
 
 All three must pass cleanly. CI (`.github/workflows/test.yml`) **always runs on every PR** — there is no `ci`-label gate (retired in #678). On every push (Linux x64): a `lint` job and a `tests` job — ONE `bazel test` invocation over the full graph plus the `manual` embedding halves; Bazel's dependency analysis + the disk cache decide what re-executes (an unchanged target replays as "(cached) PASSED"). The `ci-ok` job emits the single required status check (`CI passed`); it always runs and is success iff every lane passed or legitimately skipped (it must stay a real *declared* job — a ruleset check pinned to the GitHub Actions integration is **not** satisfied by an API-posted check run, #664). Because CI actually runs, a PR is pending/blocked until it goes green — combined with **drafts-by-default** (see the PR loop below) nothing is mergeable before CI has run. The expensive **cross-platform ARM legs** stay opt-in by label: `rc` selects **all legs** (apply before tagging a release — it subsumes the per-leg labels), **`macos`** selects **only the macos-latest leg** (Apple-Silicon/ARM macOS — Swift/Vision glue, the PyO3 link path), and **`linux-arm`** selects **only the ubuntu-24.04-arm leg**. None of the ARM legs run on a plain PR or on merge to `main`.
@@ -549,7 +564,7 @@ The vector index is a **derived cache**, not a co-equal store. The Anki collecti
 
 1. **Startup check** — compare `col.mod` against the stored value. Match → load. `col.mod` mismatch → incremental reconcile in a background thread; missing/corrupt index or model change → full rebuild. The server accepts requests immediately; `search_notes` returns actionable status ("building 2847/5000 notes, try again shortly") until ready.
 2. **Incremental updates** — `upsert_notes`/`delete_notes` update the index in the same call (`index.add()`/`remove()`) and advance stored `col_mod`. An index update failure logs a warning but doesn't fail the tool call — the next startup's `col.mod` mismatch rebuilds.
-3. **Persistence** — saved on graceful shutdown (signal handler and `POST /shutdown`), at the end of a rebuild, and via a **debounced flush** during normal operation. The kernel's `DebouncedSaver` (`shrike-core/shrike-kernel/src/index_orchestrator.rs`) writes either **`save_delay` seconds after the last change** (idle debounce, default 60s) **or immediately once `save_threshold` unsaved changes accumulate** (burst cap, default 100), whichever comes first — riding the kernel runtime's `tokio::time` timers + blocking pool, driven by edit activity (no polling, no asyncio). This bounds what a hard kill discards: once a flush lands and the server idles, the on-disk index is current and reloads without a rebuild; edits since the last flush trigger a `col.mod`-mismatch rebuild (correct either way, at the cost of a re-embed). Configurable via config `index.*` / env / `--index-save-*`; cache location is `cache_dir`/`SHRIKE_CACHE_DIR`/`--cache-dir`. (Tombstone compaction is unnecessary on the pinned USearch — see the index code comments.)
+3. **Persistence** — saved on graceful shutdown (signal handler and `POST /shutdown`), at the end of a rebuild, and via a **debounced flush** during normal operation. The kernel's `DebouncedSaver` (`shrike-core/runtime/shrike-kernel/src/index_orchestrator.rs`) writes either **`save_delay` seconds after the last change** (idle debounce, default 60s) **or immediately once `save_threshold` unsaved changes accumulate** (burst cap, default 100), whichever comes first — riding the kernel runtime's `tokio::time` timers + blocking pool, driven by edit activity (no polling, no asyncio). This bounds what a hard kill discards: once a flush lands and the server idles, the on-disk index is current and reloads without a rebuild; edits since the last flush trigger a `col.mod`-mismatch rebuild (correct either way, at the cost of a re-embed). Configurable via config `index.*` / env / `--index-save-*`; cache location is `cache_dir`/`SHRIKE_CACHE_DIR`/`--cache-dir`. (Tombstone compaction is unnecessary on the pinned USearch — see the index code comments.)
 4. **Full rebuild** — `shrike server index rebuild` / `POST /index/rebuild`: drops the index and re-embeds all notes; progress via CLI + `/status`.
 5. **State machine** — `ready`, `building` (with progress), `unavailable` (embedding service not running), `error` (build failed). Exposed via `/status`, `search_notes` responses, and `shrike server status`.
 

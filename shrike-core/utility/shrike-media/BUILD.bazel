@@ -1,0 +1,44 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//shrike-core:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# The inbound/untrusted-media crate (#711): the SSRF-guarded URL fetch + base64
+# decode + size cap + the per-item prepare, the basename sanitizer, and the one
+# extension<->MIME home the store half reads. **Trust-boundary code** (#164/#71/
+# #72) — it delegates the SSRF primitives to shrike-network so the control is
+# shared, not copied. A layer-FLOOR crate (enforced by
+# //shrike-core:layering_check): shrike-network + shrike-error + shrike-schemas
+# only, NO kernel or engine coupling.
+rust_library(
+    name = "shrike_media",
+    srcs = ["src/lib.rs"],
+    edition = "2021",
+    deps = [
+        "//shrike-core/contracts/shrike-error:shrike_error",
+        "//shrike-core/utility/shrike-network:shrike_network",
+        "//shrike-core/contracts/shrike-schemas:shrike_schemas",
+        "@crates//:base64",
+        "@crates//:ureq",
+        "@crates//:url",
+    ],
+)
+
+rust_test(
+    name = "shrike_media_test",
+    size = "small",
+    crate = ":shrike_media",
+)
+
+# SSRF classifier parity regression (#591, moved here with the media boundary):
+# the allowlist must refuse 6to4 (2002::/16) and 3fff::/20 like Python's
+# `ipaddress.is_global`. Its own test binary, exercising the re-exported
+# `ip_is_allowed` at the media crate's surface.
+rust_test(
+    name = "s2_ssrf_6to4_probe_test",
+    size = "small",
+    srcs = ["tests/s2_ssrf_6to4_probe.rs"],
+    edition = "2021",
+    deps = [":shrike_media"],
+)

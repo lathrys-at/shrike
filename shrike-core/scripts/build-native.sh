@@ -5,7 +5,7 @@
 #   source .venv/bin/activate && scripts/build-native.sh
 #   pytest shrike-py/tests/unit -q     # facades now see the real extension
 #
-# Bazel builds //shrike-core/shrike-pyo3:native_so — the SAME _native.so the
+# Bazel builds //shrike-core/bindings/shrike-pyo3:native_so — the SAME _native.so the
 # release wheel ships (//shrike-py:wheel names it) — so the inner loop and the
 # canonical artifact share ONE build graph instead of a parallel cargo path.
 # `bazel cquery --output=files` locates the built .so (the house idiom from
@@ -38,10 +38,10 @@ for arg in "$@"; do
   esac
 done
 
-TARGET="//shrike-core/shrike-pyo3:native_so"
+TARGET="//shrike-core/bindings/shrike-pyo3:native_so"
 # Python imports `shrike_native._native` from a file literally named `_native.so`;
 # this is the in-source-tree copy pip installs from.
-DEST="shrike-core/shrike-pyo3/python/shrike_native/_native.so"
+DEST="shrike-core/bindings/shrike-pyo3/python/shrike_native/_native.so"
 
 # The first-class way to get a build artifact OUT of Bazel: build the target,
 # then `cquery --output=files` for its declared output path (config-correct —
@@ -57,7 +57,7 @@ echo "built $DEST (bazel ${MODE})"
 
 # Plain (non-editable) install: hatchling editables use an import hook that
 # mypy/stubtest cannot resolve, and the .so changes each rebuild anyway.
-python -m pip install -q --force-reinstall shrike-core/shrike-pyo3/python
+python -m pip install -q --force-reinstall shrike-core/bindings/shrike-pyo3/python
 python - <<'PY'
 import shrike_native
 print(f"shrike_native {shrike_native.version()} — {shrike_native.build_info()}")

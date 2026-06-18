@@ -10,24 +10,24 @@
 [workspace]
 resolver = "2"
 members = [
-    "shrike-cabi",
-    "shrike-cache",
-    "shrike-collection",
-    "shrike-derived",
-    "shrike-engine",
-    "shrike-engine-api",
-    "shrike-error",
-    "shrike-image",
-    "shrike-index",
-    "shrike-kernel",
-    "shrike-llama-server",
-    "shrike-media",
-    "shrike-network",
-    "shrike-process",
-    "shrike-pyo3",
-    "shrike-platform",
-    "shrike-schemas",
-    "shrike-store",
+    "bindings/shrike-cabi",
+    "bindings/shrike-pyo3",
+    "contracts/shrike-engine-api",
+    "contracts/shrike-error",
+    "contracts/shrike-schemas",
+    "contracts/shrike-store",
+    "engines/shrike-engine",
+    "engines/shrike-platform",
+    "managed/shrike-llama-server",
+    "managed/shrike-process",
+    "runtime/shrike-cache",
+    "runtime/shrike-collection",
+    "runtime/shrike-derived",
+    "runtime/shrike-index",
+    "runtime/shrike-kernel",
+    "utility/shrike-image",
+    "utility/shrike-media",
+    "utility/shrike-network",
 ]
 
 # Temporary: pyo3-log's published releases (and upstream main) cap pyo3 at
@@ -51,10 +51,10 @@ license = "AGPL-3.0-or-later"
 # interpreter — the key property for a hermetic Bazel build (and one wheel works
 # across 3.12+). Matches the hermetic toolchain's minor.
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
-shrike-cache = { path = "shrike-cache" }
-shrike-error = { path = "shrike-error" }
-shrike-image = { path = "shrike-image" }
-shrike-media = { path = "shrike-media" }
-shrike-network = { path = "shrike-network" }
-shrike-process = { path = "shrike-process" }
-shrike-store = { path = "shrike-store" }
+shrike-cache = { path = "runtime/shrike-cache" }
+shrike-error = { path = "contracts/shrike-error" }
+shrike-image = { path = "utility/shrike-image" }
+shrike-media = { path = "utility/shrike-media" }
+shrike-network = { path = "utility/shrike-network" }
+shrike-process = { path = "managed/shrike-process" }
+shrike-store = { path = "contracts/shrike-store" }

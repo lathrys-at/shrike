@@ -1,0 +1,185 @@
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_rust//rust:defs.bzl", "rust_shared_library")
+load("@shrike_pip//:requirements.bzl", "requirement")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+SHRIKE_PYO3_SRCS = [
+    "src/anki_core.rs",
+    "src/async_kernel.rs",
+    "src/asyncio_bridge.rs",
+    "src/finalize_gate.rs",
+    "src/gated_log.rs",
+    "src/kernel_actions.rs",
+    "src/lib.rs",
+    "src/native_embedder.rs",
+    "src/py_embedder.rs",
+    "src/py_recognizer.rs",
+]
+
+# On macOS the Python symbols stay undefined at link time (resolved by the
+# host interpreter at import).
+SHRIKE_PYO3_LINK_FLAGS = select({
+    "@platforms//os:macos": [
+        "-Clink-arg=-undefined",
+        "-Clink-arg=dynamic_lookup",
+    ],
+    "//conditions:default": [],
+})
+
+# The Shrike PyO3 binding crate (#269) — the ONE crate that sees pyo3. Built as
+# a cdylib against the stable ABI (abi3-py312, no libpython linked). This is
+# the SERVER build (#499; docs/distribution.md's matrix): the full engine/
+# manager set, matching the crate's cargo default features exactly — Bazel
+# crate_features don't inherit cargo defaults, so they're pinned here.
+rust_shared_library(
+    name = "shrike_pyo3_native",
+    srcs = SHRIKE_PYO3_SRCS,
+    edition = "2021",
+    rustc_flags = SHRIKE_PYO3_LINK_FLAGS,
+    crate_features = [
+        "anki-core",
+        # Inert for this crate under Bazel (the cargo feature only forwards to
+        # shrike-derived/bundled; here the derived TARGET pins `bundled`
+        # itself) — listed to mirror the cargo default set verbatim.
+        "bundled-sqlite",
+        "engine-ort",
+        "engine-remote",
+        # NO engine-apple: platform engines are never in the server build, on
+        # any OS (docs/distribution.md). Binding coverage is #514.
+        "manage-llama",
+    ],
+    deps = [
+        "//shrike-core/runtime/shrike-cache:shrike_cache",
+        "//shrike-core/runtime/shrike-collection:shrike_collection",
+        "//shrike-core/runtime/shrike-derived:shrike_derived",
+        "//shrike-core/engines/shrike-engine:shrike_engine",
+        "//shrike-core/contracts/shrike-engine-api:shrike_engine_api",
+        "//shrike-core/contracts/shrike-error:shrike_error",
+        "//shrike-core/contracts/shrike-store:shrike_store",
+        "//shrike-core/runtime/shrike-index:shrike_index",
+        "//shrike-core/runtime/shrike-kernel:shrike_kernel",
+        "//shrike-core/managed/shrike-llama-server:shrike_llama_server",
+        "//shrike-core/utility/shrike-media:shrike_media",
+        "//shrike-core/contracts/shrike-schemas:shrike_schemas",
+        "@crates//:futures",
+        "@crates//:tokio",
+        "@crates//:pyo3",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:log",
+        "@crates//:pyo3-log",
+        "@crates//:tracing",
+        "@crates//:tracing-error",
+        "@crates//:tracing-subscriber",
+    ],
+)
+
+# The lean (mobile) build's CI proof now lives on its OWN crate (#504):
+# //shrike-core/bindings/shrike-cabi is the real mobile binding (the C-ABI cdylib, zero
+# pyo3), and its `rust_shared_library` + `rust_test` exercise the mobile
+# feature set (anki-core + engine-remote, no ort, no managers) on the per-PR
+# `//...` lane — the `mobile_skeleton` reuse-of-shrike-pyo3-sources proof it
+# replaced was a placeholder until this crate existed.
+
+# Python imports `shrike_native._native` from a file literally named
+# `_native.so`; rules_rust emits lib<name>.dylib/.so, so copy it to the import
+# name inside the package dir (runfiles merge it with the source __init__.py).
+copy_file(
+    name = "native_so",
+    src = ":shrike_pyo3_native",
+    out = "python/shrike_native/_native.so",
+    allow_symlink = False,
+)
+
+# The importable shrike_native package: facade __init__ + stubs + py.typed +
+# the compiled extension.
+py_library(
+    name = "shrike_native",
+    srcs = ["python/shrike_native/__init__.py"],
+    data = [
+        "python/shrike_native/__init__.pyi",
+        "python/shrike_native/_native.pyi",
+        "python/shrike_native/py.typed",
+        ":native_so",
+    ],
+    imports = ["python"],
+)
+
+# Conventions smoke: the FFI exemplars round-trip (marshaling, GIL release,
+# error taxonomy → exception classes).
+py_test(
+    name = "smoke_test",
+    size = "small",
+    srcs = ["smoke_test.py"],
+    main = "smoke_test.py",
+    deps = [":shrike_native"],
+)
+
+# Typing gate (#269): mypy.stubtest verifies the shipped .pyi stubs against the
+# real compiled module, so a Rust signature drifting from its stub fails CI
+# instead of silently degrading call sites to Any.
+py_test(
+    name = "stubtest",
+    size = "medium",
+    srcs = ["stubtest_runner.py"],
+    data = ["stubtest_allowlist.txt"],
+    main = "stubtest_runner.py",
+    deps = [
+        ":shrike_native",
+        requirement("mypy"),
+    ],
+)
+
+# Platform config_settings for the //shrike-py:wheel platform tag (#497 — the
+# platform-tagged shrike-mcp wheel selects over these).
+config_setting(
+    name = "macos_arm64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:arm64",
+    ],
+)
+
+config_setting(
+    name = "macos_x86_64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "linux_x86_64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:arm64",
+    ],
+)
+
+# The shrike_native package payload for the release wheel: //shrike-py:wheel (the
+# platform-tagged shrike-mcp wheel) names this filegroup in its deps, so the
+# extension ships INSIDE shrike-mcp (#497) — the standalone shrike-native
+# py_wheel that used to live here was retired with it (no separate dist, no
+# version-skew surface).
+filegroup(
+    name = "wheel_files",
+    srcs = [
+        "python/shrike_native/__init__.py",
+        "python/shrike_native/__init__.pyi",
+        "python/shrike_native/_native.pyi",
+        "python/shrike_native/py.typed",
+        ":native_so",
+    ],
+)

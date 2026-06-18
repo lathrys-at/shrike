@@ -49,7 +49,7 @@ Enforced by `//shrike-core:layering_check`.
   `NativeInternalError` (RuntimeError). `parallel_sum`/`checked_div` in
   `shrike-pyo3` are the permanent executable exemplar.
 - **Typing:** the `shrike_native` package ships `.pyi` stubs + `py.typed`;
-  `//shrike-core/shrike-pyo3:stubtest` (mypy.stubtest) fails when a Rust signature
+  `//shrike-core/bindings/shrike-pyo3:stubtest` (mypy.stubtest) fails when a Rust signature
   drifts from its stub.
 
 ## Building and testing
@@ -74,9 +74,9 @@ shrike-describe-remote joins at #485), `engine-apple` (Vision OCR — MOBILE
 builds only, never the server set, on any OS; binding coverage is #514),
 `manage-llama` (llama-server lifecycle). The cargo default is the SERVER
 set, pinned verbatim on
-`//shrike-core/shrike-pyo3:shrike_pyo3_native`; the MOBILE set (anki-core +
+`//shrike-core/bindings/shrike-pyo3:shrike_pyo3_native`; the MOBILE set (anki-core +
 engine-remote + engine-apple — no ort, no managers) is proven by
-`//shrike-core/shrike-pyo3:mobile_skeleton`, which the per-PR `//...` lane builds so
+`//shrike-core/bindings/shrike-pyo3:mobile_skeleton`, which the per-PR `//...` lane builds so
 an ungated engine reference fails CI (the Bazel target is the authoritative
 proof — it really links; the cargo line below is the convenience check):
 

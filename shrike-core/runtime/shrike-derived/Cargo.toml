@@ -1,0 +1,29 @@
+[package]
+name = "shrike-derived"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Native derived-text engine: rusqlite (bundled SQLite) FTS5 trigram store (#281)."
+
+[lib]
+name = "shrike_derived"
+
+[features]
+# bundled (default): compile + statically link rusqlite's own SQLite with FTS5 +
+# trigram on — the deterministic-availability win this engine exists for (#281).
+# Without it (#300), libsqlite3-sys links the platform SQLite (pkg-config /
+# -lsqlite3; any sqlite3-ABI-compatible library via SQLITE3_LIB_DIR — including
+# libsql builds exposing the sqlite3 C API), and FTS5/trigram availability is
+# probed at runtime instead of guaranteed.
+default = ["bundled"]
+bundled = ["rusqlite/bundled"]
+
+# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-pyo3.
+[dependencies]
+shrike-error = { workspace = true }
+shrike-store = { path = "../../contracts/shrike-store" }
+# 0.36 to match anki's pin: only one crate may link sqlite3 (the links attr),
+# and the anki workspace (shrike-collection, #278) brings rusqlite 0.36.
+rusqlite = { version = "0.36" }
+tracing = "0.1"
