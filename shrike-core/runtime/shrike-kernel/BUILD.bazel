@@ -56,6 +56,23 @@ rust_test(
     ],
 )
 
+# The driven-runtime proof (the harness provides every thread): a full open →
+# upsert → search on a current_thread runtime driven by drive_io/drive_sync/
+# drive_compute, plus the N+2 shutdown-and-join. Its own test binary for the
+# same process-global-seam reason as current_thread above.
+rust_test(
+    name = "driven_mode_test",
+    size = "medium",
+    srcs = ["tests/driven_mode.rs"],
+    edition = "2021",
+    deps = [
+        ":shrike_kernel",
+        "//shrike-core/contracts/shrike-error:shrike_error",
+        "//shrike-core/runtime/shrike-collection:shrike_collection",
+        "@crates//:tokio",
+    ],
+)
+
 # The committed-but-errored regression: the maintained write tail is
 # best-effort — a committed note's call returns Ok despite a failed embed
 # tail. Own test binary (an integration test linking the public crate API +
