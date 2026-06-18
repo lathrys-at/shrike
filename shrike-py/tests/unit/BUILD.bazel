@@ -88,6 +88,8 @@ _DAEMON = [
     "test_daemon_lifecycle.py",
 ]
 
+_DRIVEN_RUNTIME = ["test_driven_runtime.py"]
+
 _LOG = ["test_logging.py"]
 
 _INDEX = ["test_index_policy.py"]
@@ -213,6 +215,16 @@ pytest_test(
     deps = [
         ":conftest",
         "//shrike-py/src/shrike:daemon",
+    ],
+)
+
+pytest_test(
+    name = "driven_runtime",
+    srcs = _DRIVEN_RUNTIME,
+    xdist = None,
+    deps = [
+        ":conftest",
+        "//shrike-py/src/shrike:driven_runtime",
     ],
 )
 
@@ -373,7 +385,8 @@ pytest_test(
 # Analysis-time completeness guard: every test_*.py must be named in exactly
 # one cluster (or _PIP_ONLY). A forgotten file fails the build loudly here
 # instead of silently never running under Bazel.
-_ASSIGNED = _PIP_ONLY + _CORE + _CLIENT + _DAEMON + _LOG + _INDEX + _CACHE_LAYOUT + \
+_ASSIGNED = _PIP_ONLY + _CORE + _CLIENT + _DAEMON + _DRIVEN_RUNTIME + _LOG + _INDEX + \
+            _CACHE_LAYOUT + \
             _HARNESS + _PATHSAFETY + _DERIVED + \
             _EMBED_HELPERS + _EMBEDDING + _SEARCH_QUALITY + _ACTIONS + _TOOLS + \
             _SERVER + _CONFIG + _CLI

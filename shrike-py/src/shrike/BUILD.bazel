@@ -199,6 +199,16 @@ py_library(
 )
 
 py_library(
+    name = "driven_runtime",
+    srcs = ["platform/driven_runtime.py"],
+    imports = [".."],
+    deps = [
+        ":pkg",
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
+    ],
+)
+
+py_library(
     name = "client",
     srcs = ["client.py"],
     imports = [".."],
@@ -368,6 +378,7 @@ py_library(
         ":collection",
         ":daemon",
         ":derived",
+        ":driven_runtime",  # the committed N+2 driver threads
         ":embedding",
         ":export_store",  # the export download store
         ":harness",
