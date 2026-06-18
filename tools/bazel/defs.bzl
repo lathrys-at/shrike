@@ -15,6 +15,17 @@ runfiles).
 or `xdist = 4`), or run serially with `xdist = None` (also `0` / `False`) — e.g.
 for an order-dependent target or one you want to step through under a debugger.
 
+`shard_count` splits the target into N parallel Bazel test *actions* (the launcher
+honours Bazel's shard protocol — see //tools/bazel:pytest_runner.py — partitioning
+collected items round-robin so the union across shards is the full set). This is
+Bazel-scheduled parallelism (each shard counts against `--local_test_jobs`), unlike
+`xdist`, whose worker subprocesses the scheduler can't see. **The two compose but
+oversubscribe** — a sharded target should run each shard serially (`xdist = None`)
+so the cores come from shards, not from N actions each spawning ncpu xdist workers.
+Worth it for a slow target whose per-test work dominates the fixed
+import/server-boot cost a shard pays once (the server-spawn-bound integration
+suite); a fast suite just multiplies that fixed cost by N. Default 1 (no split).
+
 Every other default is overridable per-target the same way: `size` (default
 "small"), `deps` / `data` / `args`, and any other `py_test` attribute
 (`tags`, `timeout`, `flaky`, `env`, …) passed through via `**kwargs`. The only
@@ -30,7 +41,7 @@ load("@shrike_pip//:requirements.bzl", "requirement")
 
 _RUNNER = "//tools/bazel:pytest_runner.py"
 
-def pytest_test(name, srcs, deps = [], data = [], args = [], size = "small", xdist = "auto", env = {}, **kwargs):
+def pytest_test(name, srcs, deps = [], data = [], args = [], size = "small", xdist = "auto", shard_count = 1, env = {}, **kwargs):
     # `-n <xdist>` (xdist worker count) unless a caller disables it with a falsy
     # value (None / 0 / False) for a serial run. str() so an int count works too.
     xdist_args = ["-n", str(xdist)] if xdist else []
@@ -45,6 +56,7 @@ def pytest_test(name, srcs, deps = [], data = [], args = [], size = "small", xdi
     py_test(
         name = name,
         size = size,
+        shard_count = shard_count,
         srcs = srcs + [_RUNNER],
         main = _RUNNER,
         # Each test file is passed to the launcher as a positional arg; cwd is the
