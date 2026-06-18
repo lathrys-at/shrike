@@ -5,15 +5,20 @@ shim, and the export download store.
 launchers keep working now that ``server`` is a package; ``python -m shrike.server``
 is served by ``__main__`` (which imports from ``shrike.server.server`` directly).
 
-The re-export is LAZY (module ``__getattr__``, PEP 562) rather than an eager
-``from shrike.server.server import main``: ``main`` resolves on first access
-instead of at package-import time. The eager form binds ``main`` while
-``server/__init__.py`` is still executing, which is fragile under the shared-process
-test runner (xdist) — if the package object is observed mid-initialization (a
-partially-imported ``shrike.server`` in ``sys.modules``), ``shrike.server.main`` is
-intermittently absent, and ``mock.patch("shrike.server.main", ...)`` then fails with
-``AttributeError: module 'shrike.server' ... does not have the attribute 'main'``.
-Resolving on access sidesteps any import-order/partial-module window.
+The re-export is LAZY (module ``__getattr__``, PEP 562): ``main`` resolves on first
+access, not at package-import time. It cannot be eager — ``shrike.server.server``
+imports a sibling submodule (``shrike.server._mcp_perf``), which runs this package's
+``__init__``; an eager ``from shrike.server.server import main`` here would re-enter
+``shrike.server.server`` while it is still mid-initialization (``main`` not yet bound)
+and raise ``ImportError`` at import time.
+
+The first successful resolve is CACHED into the package namespace (``globals()``), so
+``main`` becomes a real attribute thereafter. This closes the intermittent
+``AttributeError: module 'shrike.server' ... does not have the attribute 'main'``:
+once any access (the ``//bin`` launcher's import, a prior test, the CLI's
+``from shrike.server import main``) has resolved ``main``, the ``getattr`` that
+``mock.patch("shrike.server.main", ...)`` runs to read the original finds the cached
+real attribute and never re-imports a possibly-mid-initialization submodule.
 """
 
 from __future__ import annotations
@@ -30,5 +35,9 @@ def __getattr__(name: str) -> object:
     if name == "main":
         from shrike.server.server import main
 
+        # Cache into the package namespace so a later access — and mock.patch's
+        # restore — finds a real attribute instead of re-resolving (which could
+        # re-enter a mid-initialization submodule).
+        globals()["main"] = main
         return main
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
