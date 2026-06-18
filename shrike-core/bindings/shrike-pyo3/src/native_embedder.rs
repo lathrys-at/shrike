@@ -1,4 +1,4 @@
-//! `NativeEmbedder` (#342 P2, simplified by #374 C): the native engines
+//! `NativeEmbedder`: the native engines
 //! attached to the kernel slot DIRECTLY — no Python on the embed hot path,
 //! and since the owned runtime, no execution machinery here at all:
 //!
@@ -22,7 +22,7 @@ use shrike_engine_api::{Embedder, ImageEmbedder};
 // Used only inside the feature-gated engine constructors — a no-engine build
 // (anki-core alone) would otherwise warn on unused imports.
 // onnx/CLIP are route-1 (sync compute behind `Blocking` + `WithPolicy`); the
-// remote engines are route-2 async-direct (#721 S2 — `AsyncWithPolicy`, no
+// remote engines are route-2 async-direct (`AsyncWithPolicy`, no
 // `Blocking`).
 #[cfg(feature = "engine-remote")]
 use shrike_engine_api::AsyncWithPolicy;
@@ -67,15 +67,15 @@ impl NativeEmbedder {
     }
 
     /// Compose the remote-embeddings engine — llama-server today, any
-    /// OpenAI-compatible endpoint tomorrow. A route-2 async-direct engine
-    /// (#721 S2): it implements the async `Embedder`/`ImageEmbedder` traits
+    /// OpenAI-compatible endpoint tomorrow. A route-2 async-direct engine:
+    /// it implements the async `Embedder`/`ImageEmbedder` traits
     /// directly over the async reqwest client, so the kernel awaits it on its
     /// runtime — NO `Blocking` adapter, no parked blocking-pool thread. The
     /// host policy (fingerprint, dim, the proven-safe text `safe_batch` that
     /// chunks the text path) rides `AsyncWithPolicy` — the async sibling of
     /// `WithPolicy` + `Blocking`'s chunk loop.
     ///
-    /// `images` composes the image half too (#501): the one remote engine
+    /// `images` composes the image half too: the one remote engine
     /// impls both `Embedder` and `ImageEmbedder`, so a single wrapped instance
     /// serves both modalities — the same shape `from_clip` makes for the dual
     /// ONNX encoder. Set for a `modalities: [text, image]` remote entry against
@@ -131,7 +131,7 @@ impl NativeEmbedder {
 /// Test seam: one embed through the full native composition (edge spawn →
 /// blocking pool → engine chunk loop → completion), proving the assembly
 /// before the kernel's embed-coupled ops ride it. Kernel-runtime-bound
-/// (`spawn_op`), so anki-core builds only (#404).
+/// (`spawn_op`), so anki-core builds only.
 #[cfg(feature = "anki-core")]
 #[pyfunction]
 pub(crate) fn native_embedder_probe<'py>(

@@ -282,7 +282,7 @@ impl AsyncKernel {
     /// fingerprint / destination by the kernel sweep. Takes either recognizer
     /// shape ([`AnyRecognizer`]); the Apple Vision engine (route 1, sync compute)
     /// is adapted onto the blocking pool via `Blocking`, while the remote describe
-    /// engine (route 2, async-direct, #721 S2) attaches without an adapter.
+    /// engine (route 2, async-direct) attaches without an adapter.
     fn attach_recognizer_with(
         &self,
         purpose: &str,
@@ -303,7 +303,7 @@ impl AsyncKernel {
             }
             #[cfg(feature = "engine-remote")]
             AnyRecognizer::Describe(describe) => {
-                // Route 2: the remote describe engine is async-direct (#721 S2) —
+                // Route 2: the remote describe engine is async-direct —
                 // `engine_arc()` returns an `AsyncWithPolicy` that IS a
                 // `Recognizer`, so it attaches WITHOUT the `Blocking` adapter (the
                 // kernel awaits its reqwest IO on the runtime).

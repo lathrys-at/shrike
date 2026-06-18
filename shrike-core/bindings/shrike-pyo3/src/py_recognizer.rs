@@ -185,8 +185,8 @@ pub(crate) struct RemoteDescriber {
 impl RemoteDescriber {
     /// The kernel-facing engine: the route-2 async describe engine carrying the
     /// host fingerprint via `AsyncWithPolicy` (so the kernel-slot `Recognizer`
-    /// fingerprint reports it), attached DIRECTLY — no `Blocking` adapter (#721
-    /// S2). `AsyncWithPolicy`'s embed-side knobs (dim/batch_size) are inert for a
+    /// fingerprint reports it), attached DIRECTLY — no `Blocking` adapter.
+    /// `AsyncWithPolicy`'s embed-side knobs (dim/batch_size) are inert for a
     /// recognizer — only the fingerprint matters here.
     pub(crate) fn engine_arc(
         &self,
@@ -257,8 +257,8 @@ impl RemoteDescriber {
     /// Direct describe in the RecognizerBackend wire shape
     /// (`(text, confidence, segments_json)`; describe locates nothing so the
     /// segments JSON is always `""`) — for tests and direct callers; the
-    /// kernel path never comes through here. The engine is async now (#721 S2 —
-    /// route 2); this direct-call helper is off the runtime (under `py.detach`),
+    /// kernel path never comes through here. The engine is async now; this
+    /// direct-call helper is off the runtime (under `py.detach`),
     /// so it drives the future via `shrike_kernel::block_on` (a legal block_on
     /// site — not a runtime worker). A chunk-level failure (a down endpoint)
     /// raises; a per-item failure degrades to an empty recognition (the crate's
