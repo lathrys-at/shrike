@@ -33,10 +33,14 @@
 //! With `allow_private` the guard and pinning are off (the operator opted into
 //! trusted internal hosts) — same switch as the Python facade.
 //!
-//! Pure Rust, NO anki coupling and NO async runtime (`ureq` is synchronous —
-//! the #308 constraint), NO engine crate and NOT `shrike-kernel`: it sits BELOW
-//! both, so the kernel-purity and engine-purity layering rules both stay
-//! satisfied (//shrike-core:layering_check).
+//! Pure Rust, NO anki coupling, NO engine crate and NOT `shrike-kernel`: it
+//! sits BELOW both, so the kernel-purity and engine-purity layering rules both
+//! stay satisfied (//shrike-core:layering_check). The URL fetch is **async**
+//! (#721 S2): it rides `shrike_network::fetch_pinned_get` (the centralized
+//! IP-pinned, per-hop-re-vetting reqwest loop) instead of a blocking `ureq`
+//! call, so `prepare_media_item` is an `async fn` the host drives on its
+//! runtime (the kernel `tokio::spawn`s each item concurrently; the standalone
+//! binding drives it via `block_on`) — no thread parked on a network wait.
 
 #![deny(missing_docs)]
 #![deny(
@@ -44,8 +48,6 @@
     clippy::missing_panics_doc,
     clippy::missing_safety_doc
 )]
-
-use std::io::Read;
 
 use base64::Engine;
 use shrike_error::{NativeError, NativeResult};
@@ -216,99 +218,26 @@ pub fn decode_media_b64(data: &str) -> NativeResult<Vec<u8>> {
 
 /// `_fetch_media_url`: download into memory, returning (bytes, content_type).
 ///
+/// The SSRF posture (http/https only; per-hop is_global re-vet; IP-pin keeping
+/// SNI/cert/`Host` on the name; manual redirect following capped at
+/// [`MAX_MEDIA_REDIRECTS`]; the body size-capped while streaming) lives in the
+/// shared [`shrike_network::fetch_pinned_get`] (#721 S2) — the ONE audited copy
+/// every consumer rides. With `allow_private` the gate and pin are off (the
+/// operator opted into trusted internal hosts).
+///
 /// # Errors
 ///
 /// Returns an `InvalidInput` [`NativeError`] if the URL is malformed, uses a
 /// non-http(s) scheme, has no host, resolves to a non-public address (unless
 /// `allow_private`), exceeds the redirect cap, the request fails, or the body
-/// exceeds [`MEDIA_MAX_BYTES`].
-///
-/// # Panics
-///
-/// Panics if the redirect loop terminates without a non-redirect response — an
-/// invariant of the manual hop loop that cannot occur in practice.
-pub fn fetch_media_url(url: &str, allow_private: bool) -> NativeResult<(Vec<u8>, Option<String>)> {
-    let mut logical = url.to_string();
-    for _hop in 0..=MAX_MEDIA_REDIRECTS {
-        let parsed = Url::parse(&logical).map_err(|e| invalid(format!("invalid URL: {e}")))?;
-        let scheme = parsed.scheme();
-        if scheme != "http" && scheme != "https" {
-            return Err(invalid(format!("unsupported URL scheme: {scheme}")));
-        }
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| invalid("URL has no host"))?
-            .to_string();
-
-        // Pin the connection: the resolver hands ureq the vetted IP while the
-        // URL keeps the hostname, so SNI/cert/Host all see the name and the
-        // socket goes where we checked. With allow_private, system resolution.
-        let timeout = std::time::Duration::from_secs(URL_FETCH_TIMEOUT_SECS);
-        let agent = if allow_private {
-            ureq::AgentBuilder::new()
-                .timeout(timeout)
-                .redirects(0)
-                .build()
-        } else {
-            let pinned = resolve_public_ip(&host)?;
-            // The agent is rebuilt per hop and resolves only this URL, so the
-            // effective port comes from the parsed URL itself — the netloc
-            // string ureq hands the resolver doesn't split cleanly for
-            // bracketed IPv6 literals (#382).
-            let port = parsed.port_or_known_default().unwrap_or(0);
-            shrike_network::pinned_agent(pinned, port, timeout)
-        };
-
-        // ureq surfaces 3xx either as Ok (redirects disabled) or Error::Status
-        // depending on version details — handle both identically.
-        let mut redirect_from: Option<ureq::Response> = None;
-        let response = match agent.get(&logical).call() {
-            Ok(resp) if (300..400).contains(&resp.status()) => {
-                redirect_from = Some(resp);
-                None
-            }
-            Ok(resp) => Some(resp),
-            Err(ureq::Error::Status(code, resp)) if (300..400).contains(&code) => {
-                redirect_from = Some(resp);
-                None
-            }
-            Err(ureq::Error::Status(code, _)) => {
-                return Err(invalid(format!("HTTP error {code} fetching {logical}")));
-            }
-            Err(e) => return Err(invalid(format!("fetch failed: {e}"))),
-        };
-        if let Some(resp) = redirect_from {
-            let location = resp
-                .header("location")
-                .ok_or_else(|| invalid("redirect response without a Location header"))?;
-            // resolve relative against the LOGICAL url; re-vet next loop
-            logical = parsed
-                .join(location)
-                .map_err(|e| invalid(format!("bad redirect location: {e}")))?
-                .to_string();
-            continue;
-        }
-        let response = response.expect("non-redirect response present");
-
-        let content_type = response
-            .header("content-type")
-            .map(|ct| ct.split(';').next().unwrap_or("").trim().to_string())
-            .filter(|ct| !ct.is_empty());
-        let mut reader = response.into_reader().take(MEDIA_MAX_BYTES as u64 + 1);
-        let mut body = Vec::new();
-        reader
-            .read_to_end(&mut body)
-            .map_err(|e| invalid(format!("read failed: {e}")))?;
-        if body.len() > MEDIA_MAX_BYTES {
-            return Err(invalid(format!(
-                "download exceeds the {MEDIA_MAX_BYTES}-byte limit"
-            )));
-        }
-        return Ok((body, content_type));
-    }
-    Err(invalid(format!(
-        "too many redirects (>{MAX_MEDIA_REDIRECTS})"
-    )))
+/// exceeds [`MEDIA_MAX_BYTES`]; or an `Unavailable` [`NativeError`] if the HTTP
+/// client cannot be built.
+pub async fn fetch_media_url(
+    url: &str,
+    allow_private: bool,
+) -> NativeResult<(Vec<u8>, Option<String>)> {
+    let timeout = std::time::Duration::from_secs(URL_FETCH_TIMEOUT_SECS);
+    shrike_network::fetch_pinned_get(url, allow_private, timeout, MEDIA_MAX_BYTES).await
 }
 
 /// The filename a URL's path implies (basename-sanitized via the same rule
@@ -334,10 +263,11 @@ pub fn media_name_from_url(url: &str) -> Option<String> {
 
 /// One store_media item's prepare — validate, then decode/fetch the byte
 /// source (path items pass through; their gates are collection policy and
-/// run under the write). The ONE prepare both drivers share: the kernel's
-/// concurrent op fans it onto the blocking pool, the binding's sequential
-/// edge calls it inline.
-pub fn prepare_media_item(
+/// run under the write). The ONE prepare both drivers share, now **async**
+/// (#721 S2 — the url path awaits [`fetch_media_url`]): the kernel `tokio::spawn`s
+/// each item so they prepare concurrently on the runtime; the standalone binding
+/// drives it via `block_on`.
+pub async fn prepare_media_item(
     index: i64,
     item: StoreMediaItem,
     allow_private_fetch: bool,
@@ -357,7 +287,7 @@ pub fn prepare_media_item(
             Err(e) => PreparedMediaSource::Failed { error: e.message },
         }
     } else if let Some(url) = item.url.as_deref() {
-        match fetch_media_url(url, allow_private_fetch) {
+        match fetch_media_url(url, allow_private_fetch).await {
             Ok((bytes, ct)) => PreparedMediaSource::Bytes {
                 name: item
                     .filename
@@ -460,12 +390,14 @@ mod tests {
         assert!(decode_media_b64("not base64!!").is_err());
     }
 
-    #[test]
-    fn scheme_and_host_validation() {
-        assert!(fetch_media_url("ftp://example.com/x", false).is_err());
-        assert!(fetch_media_url("not a url", false).is_err());
+    #[tokio::test]
+    async fn scheme_and_host_validation() {
+        assert!(fetch_media_url("ftp://example.com/x", false).await.is_err());
+        assert!(fetch_media_url("not a url", false).await.is_err());
         // loopback never leaves the building, even before any socket opens
-        let err = fetch_media_url("http://127.0.0.1:1/x", false).unwrap_err();
+        let err = fetch_media_url("http://127.0.0.1:1/x", false)
+            .await
+            .unwrap_err();
         assert!(err.message.contains("non-public address"));
     }
 

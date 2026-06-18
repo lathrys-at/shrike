@@ -196,7 +196,10 @@ fn fetch_media_url(
     url: String,
     allow_private: bool,
 ) -> PyResult<(Vec<u8>, Option<String>)> {
-    py.detach(|| shrike_media::fetch_media_url(&url, allow_private))
+    // The fetch is async now (#721 S2); this standalone helper is off the
+    // runtime (under `py.detach`), so it drives the future to completion via the
+    // kernel runtime's `block_on` (a legal block_on site — not a runtime worker).
+    py.detach(|| shrike_kernel::block_on(shrike_media::fetch_media_url(&url, allow_private)))
         .map_err(to_py_err)
 }
 

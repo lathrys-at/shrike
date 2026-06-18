@@ -419,12 +419,21 @@ impl CollectionCore {
                 })?;
             // The sequential per-item prepare over the kernel's ONE prepare
             // fn (#389 B2 — the core's byte-source branches retired with the
-            // network half), then the batch write under the collection.
+            // network half), then the batch write under the collection. The
+            // prepare is async now (#721 S2 — the url path awaits the IP-pinned
+            // client); this standalone path is off the runtime (under
+            // `py.detach`), so it drives each prepare to completion via the
+            // kernel runtime's `block_on` (a legal block_on site — not a runtime
+            // worker thread).
             let prepared: Vec<_> = items
                 .into_iter()
                 .enumerate()
                 .map(|(i, item)| {
-                    shrike_media::prepare_media_item(i as i64, item, allow_private_fetch)
+                    shrike_kernel::block_on(shrike_media::prepare_media_item(
+                        i as i64,
+                        item,
+                        allow_private_fetch,
+                    ))
                 })
                 .collect();
             self.inner

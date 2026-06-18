@@ -14,11 +14,16 @@ license = "AGPL-3.0-or-later"
 
 [dependencies]
 shrike-error = { workspace = true }
+# The async URL fetch + the SSRF primitives (#721 S2): fetch_media_url delegates
+# to shrike_network::fetch_pinned_get (the centralized IP-pinned, per-hop-re-vetting
+# reqwest loop) — no HTTP client or runtime is owned here.
 shrike-network = { workspace = true }
 shrike-schemas = { path = "../../contracts/shrike-schemas" }
-# ureq is a synchronous client (no tokio, no owned threads — the #308
-# constraint); base64 decodes the data-source path; url parses + re-vets each
-# redirect hop.
-ureq = "2"
+# base64 decodes the data-source path; url derives a filename from a url item.
 base64 = "0.22"
 url = "2"
+
+[dev-dependencies]
+# Drives the async `fetch_media_url` validation test (the gates that need no
+# socket — scheme/host/is_global — assert before any connection).
+tokio = { version = "1", features = ["rt", "macros"] }

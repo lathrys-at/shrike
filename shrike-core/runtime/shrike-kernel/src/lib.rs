@@ -2506,10 +2506,12 @@ impl Kernel {
     // tail below.
 
     /// The full store_media batch: each item's byte source (base64 decode /
-    /// SSRF-guarded URL download) prepares CONCURRENTLY on the blocking pool
-    /// — the host facade's gather-over-to_thread, re-homed — then the batch
-    /// writes as ONE collection job (`path` items run their containment
-    /// gates under that job; they carry no prepare work).
+    /// SSRF-guarded URL download) prepares CONCURRENTLY — each item is a
+    /// `tokio::spawn`'d task on the runtime (#721 S2: the prepare is async now —
+    /// the URL fetch rides the async IP-pinned client, so no blocking-pool
+    /// thread parks on a network wait) — then the batch writes as ONE collection
+    /// job (`path` items run their containment gates under that job; they carry
+    /// no prepare work).
     ///
     /// # Errors
     ///
@@ -2525,8 +2527,8 @@ impl Kernel {
             .into_iter()
             .enumerate()
             .map(|(i, item)| {
-                tokio::task::spawn_blocking(move || {
-                    shrike_media::prepare_media_item(i as i64, item, allow_private_fetch)
+                runtime::handle().spawn(async move {
+                    shrike_media::prepare_media_item(i as i64, item, allow_private_fetch).await
                 })
             })
             .collect();
