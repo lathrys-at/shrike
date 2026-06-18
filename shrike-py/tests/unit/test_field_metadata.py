@@ -1,4 +1,4 @@
-"""Field editor-metadata get/set (#119): note_types.update_note_type_field_metadata + the
+"""Field editor-metadata get/set: note_types.update_note_type_field_metadata + the
 per-field metadata folded into collection_info note-type details."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""RemoteBackend (#498): the unmanaged-endpoint embedding facade.
+"""RemoteBackend: the unmanaged-endpoint embedding facade.
 
 Unit tests over a faked native ``RemoteEmbedder`` — the real wire is covered
 by the llama-server integration suite (an attached llama-server IS an
@@ -27,11 +27,10 @@ class _FakeRemoteEmbedder:
     ident: str | None = "served-model"
     fail_embed: Exception | None = None
     vision: bool = False
-    # Router fakes (#567): a pinned-model → embedding-dim map. When a chunk is
-    # embedded the vector length is taken from the INSTANCE's pinned model, so a
-    # shared router serving two different-width models returns the right dim per
-    # space. Empty (the default) = the legacy fixed dim-3 vector, so every
-    # pre-#567 test is unchanged.
+    # Router fakes: a pinned-model → embedding-dim map. When a chunk is embedded
+    # the vector length is taken from the INSTANCE's pinned model, so a shared
+    # router serving two different-width models returns the right dim per space.
+    # Empty (the default) = a fixed dim-3 vector.
     model_dims: dict[str, int] = {}
 
     def __init__(self, base_url: str, *, api_key: str | None = None, model: str | None = None):
@@ -171,8 +170,8 @@ def test_runtime_health_reports_modalities_when_running():
 
 
 class TestRemoteImagePath:
-    """#501B: a [text, image] remote entry serves images via the native
-    dialect, gated on the endpoint actually loading vision."""
+    """A [text, image] remote entry serves images via the native dialect, gated
+    on the endpoint actually loading vision."""
 
     def _entry(self, **kw):
         from shrike.harness.engines.embedding.base import IMAGE, TEXT
@@ -227,10 +226,10 @@ class TestRemoteImagePath:
 
 
 class TestRouterManagedRemoteBackend:
-    """Router-managed remote (#567): N spaces share ONE llama.cpp router, each
-    pinning its own model. The endpoint's /v1/models[0] is NOT this space's
-    model, so dim + fingerprint MUST come from the pinned model — never the
-    shared metadata (a dimension + vector-space collapse otherwise)."""
+    """Router-managed remote: N spaces share ONE llama.cpp router, each pinning
+    its own model. The endpoint's /v1/models[0] is NOT this space's model, so
+    dim + fingerprint MUST come from the pinned model — never the shared
+    metadata (a dimension + vector-space collapse otherwise)."""
 
     def test_two_router_models_with_different_dims_each_get_their_own(self):
         # The HARD requirement: the index is built at THIS model's width. A
@@ -280,7 +279,7 @@ class TestRouterManagedRemoteBackend:
 
     def test_non_router_remote_still_uses_meta_recipe(self):
         # Control: a NON-router remote (an attached llama-server) keeps the
-        # meta: fingerprint recipe + meta.n_embd dim — unchanged by #567.
+        # meta: fingerprint recipe + meta.n_embd dim.
         _FakeRemoteEmbedder.meta = {"n_params": 7, "n_embd": 512, "n_vocab": 1, "size": 9}
         be = RemoteBackend(endpoint="http://127.0.0.1:9000", model="attached")
         be.start()

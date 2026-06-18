@@ -104,13 +104,10 @@ def _read_prompt_md(sid: str) -> str:
 def _reset_fixture() -> None:
     """Clean rebuild + restart the QA server (stops any running one first).
 
-    Inlines what scripts/launch-qa-server.sh did before it was retired (#656):
-    stop any running server, wipe the run dir, rebuild the synthetic fixture
-    from the corpus, and start the server against run-local paths. The eval is a
+    Stops any running server, wipes the run dir, rebuilds the synthetic fixture
+    from the corpus, and starts the server against run-local paths. The eval is a
     pip-lane manual harness with its own GGUF model (SHRIKE_EMBEDDING_MODEL +
-    LLAMA_SERVER_PATH, asserted in _preflight); the //scripts:serve_<profile> launcher with
-    a llama profile supersedes this in a later wave of the offline-integration
-    epic (#565)."""
+    LLAMA_SERVER_PATH, asserted in _preflight)."""
     _log("reset: rebuilding fixture + launching clean QA server…")
     qa = ROOT / "tests" / "qa"
     run_dir = qa / "run"
@@ -175,7 +172,7 @@ def _parse_author_stream(stdout: str) -> tuple[str, dict[str, Any]]:
     blocks. Token counts come from the terminal ``result`` event's usage — the
     authoritative cumulative figures. (Per-turn ``assistant`` events carry an
     *early* usage snapshot with output not yet finalized, so summing them
-    undercounts output badly — the bug this replaces.)"""
+    undercounts output badly.)"""
     text = ""
     parts: list[str] = []
     tool_calls = thinking_blocks = num_turns = 0

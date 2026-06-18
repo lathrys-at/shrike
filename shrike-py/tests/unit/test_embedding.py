@@ -23,10 +23,10 @@ def svc(tmp_path: Path) -> EmbeddingService:
 
 
 class _StubManager:
-    """The native LlamaServerManager seam (#342 P4b): lifecycle logic
-    (find-binary precedence, command construction, reserved-flag stripping,
-    orphan reaping, stop escalation) is pinned in the Rust crate; these stubs
-    pin the FACADE's delegation policy."""
+    """The native LlamaServerManager seam: lifecycle logic (find-binary
+    precedence, command construction, reserved-flag stripping, orphan reaping,
+    stop escalation) is pinned in the Rust crate; these stubs pin the FACADE's
+    delegation policy."""
 
     def __init__(self, *, running: bool = False, pid: int | None = None) -> None:
         self._running = running
@@ -60,9 +60,9 @@ def _set_running(svc: EmbeddingService, pid: int = 123) -> None:
 
 
 class _StubClient:
-    """The native RemoteEmbedder seam (#342 P4): the HTTP behaviours (index
-    ordering, model pinning, auth, error mapping) are pinned in the Rust
-    crate; these stubs pin the FACADE's policy around the client."""
+    """The native RemoteEmbedder seam: the HTTP behaviours (index ordering,
+    model pinning, auth, error mapping) are pinned in the Rust crate; these
+    stubs pin the FACADE's policy around the client."""
 
     def __init__(
         self,
@@ -156,9 +156,9 @@ class TestStart:
         assert svc._remote is None
 
     def test_image_gate_failure_stops_the_spawned_server(self) -> None:
-        # #501B: a managed image entry whose server loaded no vision projector
-        # must NOT leave the spawned llama-server orphaned — start() stops it
-        # before re-raising (a degraded boot has no later start() to reap it).
+        # A managed image entry whose server loaded no vision projector must NOT
+        # leave the spawned llama-server orphaned — start() stops it before
+        # re-raising (a degraded boot has no later start() to reap it).
         from shrike.harness.engines.embedding.base import IMAGE, TEXT
 
         svc = EmbeddingService(model="/omni.gguf", modalities=frozenset({TEXT, IMAGE}))
@@ -331,9 +331,9 @@ class TestModelFingerprint:
             assert svc.model_fingerprint() == "meta:1:2:3:4:5" + self._TP
 
     def test_mmprojs_folded_in_with_size(self, tmp_path: Path) -> None:
-        # #501B: the projector set is vector-affecting; folded as name:size
-        # (size disambiguates two projectors sharing a basename), sorted, and
-        # omitted entirely when none (a text-only fingerprint is unchanged).
+        # The projector set is vector-affecting; folded as name:size (size
+        # disambiguates two projectors sharing a basename), sorted, and omitted
+        # entirely when none (a text-only fingerprint is unchanged).
         from shrike.harness.engines.embedding.base import IMAGE, TEXT
 
         proj = tmp_path / "vision.mmproj.gguf"
@@ -500,7 +500,7 @@ class TestEmbeddingRuntime:
             runtime.start()
         assert runtime.state == "failed"
 
-    # --- #602: backend-alias normalization on the start(backend=) override ---
+    # --- backend-alias normalization on the start(backend=) override ---
     # The ctor normalizes documented aliases ("onnx-rs"/"clip-rs") via
     # BACKEND_ALIASES; the start() override must do the same, or a documented
     # alias 400s on /embedding/start AND poisons _backend_kind for the daemon's
@@ -538,7 +538,7 @@ class TestEmbeddingRuntime:
         assert "Unknown embedding backend" not in str(ei.value)
         assert runtime.backend_kind in ("onnx", "clip", "llama", "remote")
 
-    # --- #592: endpoint/api_key_env are config-only; rejected as start() overrides ---
+    # --- endpoint/api_key_env are config-only; rejected as start() overrides ---
     # SSRF defense-in-depth — even a future careless POST /embedding/start body
     # that forwards these must not be able to point embedding traffic at an
     # attacker-chosen endpoint. They reach the runtime via the ctor only.

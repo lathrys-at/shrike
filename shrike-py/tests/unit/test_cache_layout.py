@@ -1,4 +1,4 @@
-"""Per-collection index namespacing — the host-side helper (#67).
+"""Per-collection index namespacing — the host-side helper.
 
 The kernel owns the identity derivation and the on-disk layout (those are
 pinned by Rust tests); this exercises the Python mirror the harness/CLI use to
@@ -28,7 +28,7 @@ def test_namespace_is_stable() -> None:
 
 def test_distinct_collections_get_distinct_namespaces() -> None:
     # The isolation property: two collections (even same basename) never
-    # collide — the whole point of #67.
+    # collide.
     a = cache_layout.index_namespace("/home/alice/collection.anki2")
     b = cache_layout.index_namespace("/home/bob/collection.anki2")
     assert a != b

@@ -4,11 +4,10 @@ These tests require llama-server on PATH and download a small (~20MB)
 GGUF model on first run. They are skipped automatically when
 llama-server is not available.
 
-Audited for cost (#441): the read-only classes share the session
-`collection_server` (no dedicated boot), each class is one test against one
-response, and the orphan-reap test fakes the orphan — the reap LOGIC is pinned
-by shrike-core/managed/shrike-llama-server's Rust tests; this lane proves only the wiring,
-which needs one real boot, not two.
+The read-only classes share the session `collection_server` (no dedicated boot),
+each class is one test against one response, and the orphan-reap test fakes the
+orphan — the reap LOGIC is pinned by shrike-core/managed/shrike-llama-server's Rust
+tests; this lane proves only the wiring, which needs one real boot, not two.
 """
 
 from __future__ import annotations
@@ -27,8 +26,8 @@ class TestEmbeddingHealth:
 
     def test_status_reports_embedding_fields(self, collection_server):
         # One /status fetch, every field of the embedding block asserted together —
-        # these are all properties of the same response. `available is True` also
-        # subsumes the old separate llama /health probe (availability requires it).
+        # these are all properties of the same response. `available is True`
+        # subsumes a separate llama /health probe (availability requires it).
         status_url = collection_server.url.rsplit("/", 1)[0] + "/status"
         resp = httpx.get(status_url, timeout=5.0)
         assert resp.status_code == 200
@@ -90,8 +89,8 @@ class TestEmbeddingServiceViaShrike:
         svc._manager = type("FakeMgr", (), {"running": lambda self: True, "pid": lambda self: 1})()
         svc._safe_batch = 16  # bypassing start()/__init__, simulate a batch-safe probe
         svc._batch_cap = None
-        # The native client pair __init__/start() would have built (#342 P4):
-        # the unpinned fallback drives REAL requests against live llama-server.
+        # The native client pair __init__/start() would have built: the unpinned
+        # fallback drives REAL requests against live llama-server.
         svc._client = shrike_native.RemoteEmbedder(collection_server.embedding_url)
         svc._remote = None
 
@@ -177,7 +176,7 @@ class TestOrphanReaping:
 
 
 class TestAttachMode:
-    """managed.llama_server.manage: attach (#498): a daemon that embeds via a
+    """managed.llama_server.manage: attach: a daemon that embeds via a
     llama-server another process owns — here, the collection_server's child.
     The attaching server never spawns, reaps, or stops it."""
 
@@ -208,7 +207,7 @@ class TestAttachMode:
         # pid (there is no child process to manage).
         assert emb["url"] == f"http://127.0.0.1:{collection_server.embedding_port}"
         assert emb.get("pid") is None
-        # The cross-modal coverage matrix golden for the attach shape (#498/#235):
+        # The cross-modal coverage matrix golden for the attach shape:
         # text-only space → text→text native, every other pair unavailable.
         assert emb["modalities"] == ["text"]
         assert status["coverage"] == {
@@ -225,7 +224,7 @@ class TestAttachMode:
 
 
 class TestSharedRouterWiring:
-    """The shared managed router (#567): ONE LlamaServerManager.router serving a
+    """The shared managed router: ONE LlamaServerManager.router serving a
     directory of GGUFs, with N model-pinned RemoteEmbedder clients routing by
     the request `model` field.
 

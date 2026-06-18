@@ -118,7 +118,7 @@ class TestDeterminism:
 
 
 class TestC0SeparatorContractScope:
-    """#612: the Python `\\s` whitespace class matches the C0 separators
+    """The Python `\\s` whitespace class matches the C0 separators
     U+001C-U+001F, but Rust's `\\s` (Unicode White_Space) does not — so the two
     normalizers diverge on those four code points. This is documented as a
     contract-SCOPE limit (the byte-identity holds over anki-sanitized field

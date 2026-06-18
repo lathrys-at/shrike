@@ -1,4 +1,4 @@
-"""Parity harness for the native CollectionCore binding (#278 series, step 1).
+"""Parity harness for the native CollectionCore binding.
 
 Ported wrapper-fixture cases (the duplicate-policy matrix, structural
 validation, the search grammar, the col_mod watermark, the CRUD round trip)
@@ -54,7 +54,7 @@ class TestRoundTrip:
 
 
 class TestDuplicatePolicy:
-    """The #77 policy matrix, byte-for-byte the Rust tripwire's semantics."""
+    """The duplicate-policy matrix, byte-for-byte the Rust tripwire's semantics."""
 
     def test_matrix(self, native_core):
         basic = native_core.notetype_id("Basic")
@@ -164,7 +164,7 @@ def test_cross_core_parity(tmp_path, native_core):
         check=True,
     )
     # The JSON is the LAST stdout line — the anki import can emit benign
-    # chatter to stdout first (#458) — and a parse failure must show what the
+    # chatter to stdout first — and a parse failure must show what the
     # subprocess actually printed, not an opaque JSONDecodeError.
     lines = [line for line in proc.stdout.splitlines() if line.strip()]
     try:
@@ -178,7 +178,7 @@ def test_cross_core_parity(tmp_path, native_core):
     basic = native_core.notetype_id("Basic")
     nid = native_core.create_note(basic, DEFAULT_DECK, ["same front", "back"], ["mytag"])
 
-    # Duplicate / empty classification parity (#77: anki's own fields_check).
+    # Duplicate / empty classification parity (anki's own fields_check).
     assert pip["dup_state"] == "DUPLICATE"
     assert native_core.create_note(basic, 1, ["same front", "x"], [], on_duplicate="skip") is None
     assert pip["empty_state"] == "EMPTY"

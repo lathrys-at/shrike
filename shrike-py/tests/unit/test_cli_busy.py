@@ -1,4 +1,4 @@
-"""CLI renders a busy collection as a clean, actionable message (#65)."""
+"""CLI renders a busy collection as a clean, actionable message."""
 
 from __future__ import annotations
 

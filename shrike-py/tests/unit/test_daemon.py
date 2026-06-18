@@ -1,7 +1,7 @@
 """Unit tests for daemon.stop_server's HTTP → SIGTERM → SIGKILL escalation.
 
-These cover the three-tier shutdown ladder (audit §5) by patching the
-side-effecting helpers, so no real process is spawned or signalled.
+These cover the three-tier shutdown ladder by patching the side-effecting
+helpers, so no real process is spawned or signalled.
 """
 
 from __future__ import annotations

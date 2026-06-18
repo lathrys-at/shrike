@@ -237,8 +237,8 @@ class TestPollProgress:
 
 
 class TestEmbeddingStatus:
-    # `embedding status` reads the full /status now (#681 per-space), so it
-    # mocks `server_status` and the embedding shows up under `embedding_spaces`.
+    # `embedding status` reads the full /status, so it mocks `server_status`
+    # and the embedding shows up under `embedding_spaces`.
     def test_available(self, run, fake):
         fake.server_status.return_value = _server(
             IndexReady(state="ready", size=5, ndim=384),
@@ -252,7 +252,7 @@ class TestEmbeddingStatus:
         assert "/m.gguf" in result.output
 
     def test_per_space(self, run, fake):
-        # A two-space profile (#681): each space is its own `Embedding […]`
+        # A two-space profile: each space is its own `Embedding […]`
         # block keyed by modalities — both must appear.
         fake.server_status.return_value = _server(
             IndexReady(state="ready", size=87, ndim=768),

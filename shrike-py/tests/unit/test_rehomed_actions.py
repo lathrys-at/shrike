@@ -1,4 +1,4 @@
-"""The action-core registry seam (#331): the kernel's list of re-homed actions
+"""The action-core registry seam: the kernel's list of re-homed actions
 and the Python binding's forwarding set must not drift silently."""
 
 from __future__ import annotations
@@ -8,10 +8,9 @@ import pytest
 shrike_native = pytest.importorskip("shrike_native")
 
 # The actions whose bodies run in shrike_kernel::actions — actions.py forwards
-# exactly these through the per-action bindings (slice 1: the read surface).
+# exactly these through the per-action bindings (the read surface).
 # Growing this list is deliberate: add the binding, rewire the action, then
-# extend this pin alongside the kernel's REHOMED_ACTIONS. (search_notes joined
-# with the assembly re-home — the S2 slice 2 of #331.)
+# extend this pin alongside the kernel's REHOMED_ACTIONS.
 REHOMED = ["collection_info", "list_notes", "collection_query", "search_notes"]
 
 

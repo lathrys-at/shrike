@@ -1,4 +1,4 @@
-"""Anki-base-dir discovery: base-dir resolution + prefs21.db reading (#66, slice 2).
+"""Anki-base-dir discovery: base-dir resolution + prefs21.db reading.
 
 The fixtures synthesize a real prefs21.db with Anki's exact schema (the
 ``profiles(name, data)`` table, a ``_global`` meta row, pickled blobs) so the

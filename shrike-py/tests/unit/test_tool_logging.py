@@ -1,4 +1,4 @@
-"""The _safe_tool logging policy (#328): ONE INFO line per served call — name +
+"""The _safe_tool logging policy: ONE INFO line per served call — name +
 given params + recorded outcome + duration — and the rejected-input/busy lines.
 Pinned with caplog against sync and async tools."""
 

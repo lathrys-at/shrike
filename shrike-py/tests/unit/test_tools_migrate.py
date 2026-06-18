@@ -1,11 +1,10 @@
-"""Tool-layer tests for migrate_note_type (#75): index re-embed + validation.
+"""Tool-layer tests for migrate_note_type: index re-embed + validation.
 
 Remapped fields change embedding text, so an applied migration must re-embed
-the changed notes (their ids are unchanged). Since the #391 re-home that
-tail runs inside the kernel's op, so the assertions read observable state
-(the embed-call log, the index watermark) rather than spying host-side
-kernel calls that no longer happen. Dry-run and validation failures must
-not touch the index.
+the changed notes (their ids are unchanged). That tail runs inside the kernel's
+op, so the assertions read observable state (the embed-call log, the index
+watermark) rather than spying host-side kernel calls that no longer happen.
+Dry-run and validation failures must not touch the index.
 """
 
 from __future__ import annotations

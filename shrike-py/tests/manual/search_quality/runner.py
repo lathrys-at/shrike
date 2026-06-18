@@ -1,4 +1,4 @@
-"""The real-model search-quality run engine (#559 PR2b).
+"""The real-model search-quality run engine.
 
 ONE engine, two consumers (the plan's "single source of truth"):
 
@@ -9,7 +9,7 @@ ONE engine, two consumers (the plan's "single source of truth"):
     ``tests/manual/search_quality/RESULTS.md`` (the dogfooding artifact).
 
 It builds a **real** 2-space collection (a dedicated text space + a separate
-CLIP image space, #229/#232/#234) from the manifest — downloading the pinned
+CLIP image space) from the manifest — downloading the pinned
 Commons images through the licensing-clean ``CommonsCache`` — then drives every
 manifest query through the REAL ``search_notes`` MCP action and feeds the
 returned-with-provenance + the graded gold to the pure metric engine. No planted
@@ -41,7 +41,7 @@ MANIFEST = DATA_DIR / "manifest.json"
 RESOLVED = DATA_DIR / "resolved_urls.json"
 CACHE = DATA_DIR / "cache"
 
-# The cross-space CLIP signal name the kernel emits (#234: image#<space-key>).
+# The cross-space CLIP signal name the kernel emits (image#<space-key>).
 CLIP_SIGNAL_PREFIX = "image#"
 CLIP_SPACE_KEY = "clip"
 

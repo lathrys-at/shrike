@@ -1,4 +1,4 @@
-"""Busy-acquire contention tests (#65): cooperative re-acquire against a held lock.
+"""Busy-acquire contention tests: cooperative re-acquire against a held lock.
 
 The holder is a real SUBPROCESS (a second native core on the same file). An
 in-process second handle is not a truthful stand-in: anki's collection runs
@@ -83,8 +83,8 @@ class TestBusyAcquire:
 
 class TestKernelBusyNormalization:
     """A kernel-routed op's NativeBusyError normalizes to the typed busy
-    surface in _safe_tool (the #65 contract: coded message, WARNING, no
-    traceback) — found by the post-series review."""
+    surface in _safe_tool (the busy contract: coded message, WARNING, no
+    traceback)."""
 
     def test_native_busy_normalizes_through_safe_tool(self, caplog):
         import logging

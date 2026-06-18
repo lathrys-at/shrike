@@ -1,4 +1,4 @@
-"""Cooperative-locking lifecycle tests (#64).
+"""Cooperative-locking lifecycle tests.
 
 Exercises CollectionWrapper's open-on-demand / idle-release behaviour and the
 acquire drift hook, plus that the default (permanent-hold) mode is unaffected.

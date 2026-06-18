@@ -1,4 +1,4 @@
-"""CLI collection routing — the global --profile/--collection selector (#68 S2).
+"""CLI collection routing — the global --profile/--collection selector.
 
 The root option is stored on the client as its per-call selector; these pin
 that wiring (the client itself injects it into each call — see

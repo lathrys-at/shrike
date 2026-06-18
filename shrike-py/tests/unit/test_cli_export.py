@@ -1,4 +1,4 @@
-"""`shrike collection export` CLI (#71 S2): the dual download/server-path strategy + flags.
+"""`shrike collection export` CLI: the dual download/server-path strategy + flags.
 
 The CLI talks to a mocked client; the export action + route are covered in
 test_tools_export.py / test_export.py (integration). These pin the CLI's own

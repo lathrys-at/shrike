@@ -69,7 +69,7 @@ class TestIndexBuild:
     def test_rebuild_endpoint_and_becomes_ready(self, collection_server):
         # Trigger + wait as ONE test: a test that starts a rebuild must wait it
         # out before returning, or the running rebuild leaks into whichever test
-        # samples /status next (#441 — the 'building' != 'ready' CI flake).
+        # samples /status next (the 'building' != 'ready' flake).
         base = _base_url(collection_server)
         resp = httpx.post(f"{base}/index/rebuild", timeout=30.0)
         assert resp.status_code == 200
@@ -90,9 +90,9 @@ class TestIndexBuild:
         assert idx["ndim"] is not None
         assert idx["ndim"] > 0
         assert body["embedding"]["available"] is True
-        # The cross-modal coverage matrix golden (#498/#235): a live text-only
-        # backend makes text→text native; with no recognizers attached, every
-        # media target is unavailable (no native space, no derived-text path).
+        # The cross-modal coverage matrix golden: a live text-only backend makes
+        # text→text native; with no recognizers attached, every media target is
+        # unavailable (no native space, no derived-text path).
         assert body["coverage"] == {
             "text": {"text": "native", "image": "unavailable", "audio": "unavailable"},
             "image": {"text": "unavailable", "image": "unavailable", "audio": "unavailable"},
@@ -135,7 +135,7 @@ class TestSearchNotes:
         # matches for a calculus query. Pass threshold=0 so it doesn't hinge on
         # the absolute score clearing the default 0.5 cutoff — with the small
         # quantized test model the right answers score just under 0.5, which
-        # would otherwise drop them and leave nothing to rank (#91).
+        # would otherwise drop them and leave nothing to rank.
         #
         # Assert calculus is present in the top-k tags rather than pinned to an
         # exact slot: "rate of change" legitimately pulls in mechanics notes
@@ -287,9 +287,9 @@ class TestUpsertNeighbors:
         semantic_mcp("delete_notes", {"ids": [r["id"]]})
 
     def test_unrelated_note_returns_no_neighbors(self, semantic_mcp, collection_server):
-        # #531: a note unrelated to everything in this bio/physics collection
-        # gets no neighbors — the holistic similarity gate ("none relevant →
-        # return nothing"): no semantic match clears the search floor, and a
+        # A note unrelated to everything in this bio/physics collection gets no
+        # neighbors — the holistic similarity gate ("none relevant → return
+        # nothing"): no semantic match clears the search floor, and a
         # fuzzy-trigram / tag coincidence does NOT qualify as a neighbor. There
         # is no magic neighbor_threshold; relevance is the gate.
         _wait_for_index_ready(collection_server)
@@ -343,12 +343,12 @@ class TestUpsertNeighbors:
     def test_neighbors_are_gated_search_results_of_the_content(
         self, semantic_mcp, collection_server
     ):
-        # #531: neighbors ARE search results of the note's own content (capped
-        # at k, minus the note), gated to similarity-backed hits. This pins the
-        # principle the fix is built on — neighbors route through the SAME RRF
-        # search pipeline as search_notes — and is what makes the feature
-        # platform-robust (RRF doesn't break-empty on one borderline cosine, so
-        # neighbors inherit search's green aarch64 behaviour).
+        # Neighbors ARE search results of the note's own content (capped at k,
+        # minus the note), gated to similarity-backed hits. This pins the
+        # principle — neighbors route through the SAME RRF search pipeline as
+        # search_notes — and is what makes the feature platform-robust (RRF
+        # doesn't break-empty on one borderline cosine, so neighbors inherit
+        # search's aarch64 behaviour).
         #
         # Asserted as the two load-bearing properties (not a brittle byte-equal
         # set: the neighbor path queries the note's normalized embed text, a
@@ -450,10 +450,9 @@ class TestDeleteIndexUpdate:
         assert note_id not in after_ids
 
 
-# NOTE: the old TestEmptyBootIndexing (its own server boot, ~5-8s) was deleted
-# in the #441 audit: the shared collection_server fixture IS that contract at
-# 50-note scale — it boots against an empty collection with NO explicit rebuild
-# (#148 materializes an empty ready index at boot), seeds via incremental
+# NOTE: the shared collection_server fixture IS the empty-boot-indexing contract
+# at 50-note scale — it boots against an empty collection with NO explicit
+# rebuild (an empty ready index materializes at boot), seeds via incremental
 # upserts, and waits for size >= 50; every search test then proves
 # searchability. test_rebuild_endpoint_and_becomes_ready asserts
 # `available is True` explicitly.
@@ -474,17 +473,17 @@ class TestIndexCLI:
         assert data["state"] == "ready"
         assert data["size"] >= 50
         assert data["ndim"] is not None
-        # Per-modality breakdown (#684): the breakdown carries a `text`
-        # sub-index whose ndim mirrors the aggregate (the aggregate ndim IS the
-        # text modality's), and the per-modality sizes sum to the aggregate.
+        # Per-modality breakdown: the breakdown carries a `text` sub-index whose
+        # ndim mirrors the aggregate (the aggregate ndim IS the text modality's),
+        # and the per-modality sizes sum to the aggregate.
         mods = {m["modality"]: m for m in data["modalities"]}
         assert "text" in mods
         assert mods["text"]["ndim"] == data["ndim"]
         assert sum(m["size"] for m in data["modalities"]) == data["size"]
         result = semantic_runner.invoke(["server", "index", "status"])
         assert result.exit_code == 0
-        # §B reshape (#684): the header is the section identity, `Status:` is its
-        # own line, and the per-modality breakdown reads `Vectors (text)`.
+        # The header is the section identity, `Status:` is its own line, and the
+        # per-modality breakdown reads `Vectors (text)`.
         assert "Index" in result.output
         assert "Status:" in result.output
         assert "Vectors (text)" in result.output
@@ -492,8 +491,8 @@ class TestIndexCLI:
 
     def test_index_rebuild_background(self, semantic_runner, collection_server):
         # ONE rebuild via the CLI, json mode (the richer assertion), waited out
-        # before returning (#441 — rebuild leaks were the CI race). The pretty
-        # variant added only exit-code/format checks, covered by status above.
+        # before returning (rebuild leaks are a CI race). The pretty variant adds
+        # only exit-code/format checks, covered by status above.
         data = semantic_runner.json(["server", "index", "rebuild", "--background"])
         assert "status" in data or "total" in data
         _wait_for_index_ready(collection_server)
@@ -512,15 +511,15 @@ class TestEmbeddingCLI:
     """Test shrike server embedding status via CLI."""
 
     def test_embedding_status_json_and_pretty(self, semantic_runner):
-        # Per-space (#681): JSON is now the per-space LIST (a one-element list on
-        # a single-space server), each entry the same EmbeddingStatus shape.
+        # Per-space: JSON is the per-space LIST (a one-element list on a
+        # single-space server), each entry the same EmbeddingStatus shape.
         data = semantic_runner.json(["server", "embedding", "status"])
         assert isinstance(data, list)
         assert data[0]["available"] is True
         assert "url" in data[0]
         result = semantic_runner.invoke(["server", "embedding", "status"])
         assert result.exit_code == 0
-        # §B reshape (#684): `Embedding [text]` header, `Status:` on its own line.
+        # `Embedding [text]` header, `Status:` on its own line.
         assert "Embedding [text]" in result.output
         assert "Status:" in result.output
         assert "available" in result.output.lower()
@@ -568,7 +567,7 @@ class TestServerStatusWithIndex:
     """Verify shrike server status shows index and embedding info.
 
     Index and embedding blocks are properties of the SAME response — one
-    pretty invocation and one json invocation assert both (#441)."""
+    pretty invocation and one json invocation assert both."""
 
     def test_server_status_pretty_shows_index_and_embedding(
         self, semantic_runner, collection_server
@@ -576,8 +575,8 @@ class TestServerStatusWithIndex:
         _wait_for_index_ready(collection_server)
         result = semantic_runner.invoke(["server", "status"])
         assert result.exit_code == 0
-        # §B reshape (#684): section headers are identities; `Status:` is its own
-        # line; the Embedding header carries the modalities (`Embedding [text]`).
+        # Section headers are identities; `Status:` is its own line; the
+        # Embedding header carries the modalities (`Embedding [text]`).
         assert "Index" in result.output
         assert "Embedding [text]" in result.output
         assert "Status:" in result.output
@@ -600,13 +599,12 @@ class TestServerStatusWithIndex:
 
 
 class TestEmbeddingLifecycle:
-    """The full embedding lifecycle as ONE woven flow on ONE server (#441).
+    """The full embedding lifecycle as ONE woven flow on ONE server.
 
-    Replaces the old TestEmbeddingLifecycle + TestNoEmbeddingBoot pair (two
-    dedicated servers, four llama-server boots) with one server booted
-    `--no-embedding` and two llama boots. The flow is a single ordered test:
-    every step's contract depends on the state the previous step left, which
-    is exactly why they were flaky as separate tests and cheap as one.
+    One server booted `--no-embedding`, two llama boots. The flow is a single
+    ordered test: every step's contract depends on the state the previous step
+    left, which is exactly why these are flaky as separate tests and cheap as
+    one.
     """
 
     @pytest.fixture(scope="class")
@@ -629,7 +627,7 @@ class TestEmbeddingLifecycle:
         mcp = MCPClient(lifecycle_server.url)
 
         # (a) Cold: --no-embedding suppressed auto-start despite the configured
-        # model (the old TestNoEmbeddingBoot contract).
+        # model.
         status = httpx.get(f"{base}/status", timeout=5.0).json()
         assert status["embedding"]["available"] is False
         assert status["index"]["state"] == "unavailable"
@@ -641,7 +639,7 @@ class TestEmbeddingLifecycle:
         assert status["embedding"]["available"] is True
 
         # (c) Seed two notes; the empty-at-boot index materialized at start, so
-        # incremental upserts index them (#148) — searchable.
+        # incremental upserts index them — searchable.
         mcp(
             "upsert_notes",
             {
@@ -688,7 +686,7 @@ class TestEmbeddingLifecycle:
         assert httpx.post(f"{base}/embedding/stop", timeout=10.0).json()["status"] == "not_running"
 
         # (e) CLI start with explicit model + port (llama boot #2) — the CLI
-        # wiring half of the old test_cli_stop_and_start.
+        # wiring half.
         cfg_dir = tmp_path_factory.mktemp("emb-lifecycle-cli")
         cfg = cfg_dir / "config.yml"
         cfg.write_text(
@@ -760,8 +758,8 @@ class TestSearchQuality:
         )
         nid = r["results"][0]["id"]
         try:
-            # The centroid refresh runs off the upsert tail since #445 —
-            # retry briefly until the new member's tag state lands.
+            # The centroid refresh runs off the upsert tail — retry briefly
+            # until the new member's tag state lands.
             deadline = time.monotonic() + 10
             while True:
                 result = semantic_mcp(

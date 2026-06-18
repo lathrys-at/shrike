@@ -1,4 +1,4 @@
-"""Tool-layer list_notes input validation (#599).
+"""Tool-layer list_notes input validation.
 
 A malformed ``modified_since`` is caller-supplied bad input: it must surface as
 a clean ToolInputError (WARNING, no traceback), not the catch-all "Unhandled

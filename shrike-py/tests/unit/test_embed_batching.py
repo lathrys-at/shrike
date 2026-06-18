@@ -125,16 +125,15 @@ def test_probe_texts_are_spiked() -> None:
 
 def test_probe_ceiling_covers_index_chunk() -> None:
     # The probe-set size is the batch ceiling, and the kernel hands embed calls chunks of up
-    # to its BATCH_SIZE (shrike_kernel::index_orchestrator::BATCH_SIZE, mirrored here — the
-    # facade-era shrike.index.BATCH_SIZE retired with #355). If the set were smaller, a
-    # probe-safe model would be capped below the chunk — never incorrect, but a silent
-    # throughput regression. Pin the "probe at the size we use".
+    # to its BATCH_SIZE (shrike_kernel::index_orchestrator::BATCH_SIZE, mirrored here). If the
+    # set were smaller, a probe-safe model would be capped below the chunk — never incorrect,
+    # but a silent throughput regression. Pin the "probe at the size we use".
     kernel_embed_chunk = 64
 
     assert len(BATCH_PROBE_TEXTS) >= kernel_embed_chunk
 
 
-# -- vision probe (#211) -----------------------------------------------------
+# -- vision probe -------------------------------------------------------------
 
 _NI = len(BATCH_PROBE_IMAGES)
 
@@ -194,11 +193,11 @@ def test_vision_batch_only_failure_falls_back_to_serial() -> None:
     assert probe_image_max_safe_batch(batch_only_broken) == 1
 
 
-# --- #602 S11b sibling check: the Python probe lane is NaN-safe (PASSES today) ---
+# --- The Python probe lane is NaN-safe ---
 # These confirm there is no Python-side twin of the Rust-only NaN-weight drift
 # concern: a model that emits NaN only under batching is classified serial, and
 # numpy's max propagates NaN so the `drift <= tol` comparison is False (→ variant
-# → serial), never silently "safe". They are passing controls, not regressions.
+# → serial), never silently "safe".
 
 
 def test_python_probe_treats_nan_drift_as_unsafe() -> None:

@@ -79,8 +79,8 @@ def pytest_configure(config: pytest.Config) -> None:
 # Dest dir-names come from model_cache's *_DIR_NAME constants (not re-spelled here),
 # so a model rename there can't silently drift this map into the wrong layout — which
 # would make model_cache miss the assembled file and fall back to a HuggingFace
-# download at test time (the #83/#93 flake). Key = the http_file external's runfiles
-# path (MODULE.bazel); value = the model_cache <dir>/<file> layout it assembles into.
+# download at test time. Key = the http_file external's runfiles path (MODULE.bazel);
+# value = the model_cache <dir>/<file> layout it assembles into.
 _BAZEL_MODELS: dict[str, list[str]] = {
     "model_minilm_int8_onnx/file/model.onnx": [f"{ONNX_MODEL_DIR_NAME}/model.onnx"],
     "model_minilm_tokenizer/file/tokenizer.json": [
@@ -209,8 +209,8 @@ _MCP_READ_TOOLS = frozenset(
     }
 )
 _CLI_READ_VERBS = frozenset({"list", "show", "status", "logs", "fetch", "check", "info"})
-# Whole groups that are read-only end to end (#683 rehome): `search` (semantic +
-# substring search, raw query, coverage) never mutates the collection, and its
+# Whole groups that are read-only end to end: `search` (semantic + substring
+# search, raw query, coverage) never mutates the collection, and its
 # default-command form `search <query>` has the query — not a verb — as args[1].
 _CLI_READ_GROUPS = frozenset({"search"})
 
@@ -306,7 +306,7 @@ def _wait_for_server(url: str, timeout: float = 10.0) -> None:
 def wait_for_index_ready(server: ServerInfo, timeout: float = 60.0) -> dict:
     """Poll /status until the index is ready and non-empty (shared by the
     embedding suites — every test that triggers a rebuild must wait it out
-    before returning, or the running rebuild leaks into later tests, #441)."""
+    before returning, or the running rebuild leaks into later tests)."""
     base = server.url.rsplit("/", 1)[0]
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -345,8 +345,7 @@ class MCPClient:
         # connect (~2.4ms) every time, and a session client makes ~700 calls.
         # 30s: an upsert call embeds its whole batch synchronously, and on a
         # cold CI runner the first llama embed also pays the one-time model
-        # preset build — 10s was a working-set assumption, not a contract
-        # (#441; the seeding upsert hit it).
+        # preset build, so a 10s ceiling is too tight.
         self._client = httpx.Client(timeout=30.0)
 
     def __call__(self, tool_name: str, arguments: dict | None = None) -> dict:
@@ -519,11 +518,10 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         # rules_python bootstrap sees the inherited COVERAGE_DIR and writes an
         # lcov on exit — but to a FIXED name (pylcov.dat), so the test process
         # and every server would overwrite each other (last writer wins, and
-        # the test exits last — which is exactly how server-side lines used to
-        # read as uncovered, #262). Bazel's LcovMerger scans COVERAGE_DIR
-        # recursively for *.dat, so giving each server its own subdirectory
-        # keeps every report and the merge picks them all up. No-op outside
-        # coverage runs (COVERAGE_DIR unset).
+        # the test exits last — so server-side lines read as uncovered). Bazel's
+        # LcovMerger scans COVERAGE_DIR recursively for *.dat, so giving each
+        # server its own subdirectory keeps every report and the merge picks
+        # them all up. No-op outside coverage runs (COVERAGE_DIR unset).
         env = None
         if os.environ.get("COVERAGE_DIR"):
             subprocess_cov = Path(os.environ["COVERAGE_DIR"]) / f"sub-{name}-{port}"
@@ -538,13 +536,12 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         processes.append(proc)
 
         # An embedding server's boot includes the llama-server spawn + model
-        # load, which on a cold/slow CI runner has blown a 30s ceiling twice
-        # in one day (PRs #459/#472, with warm caches) — give it the same
-        # generous deadline the collection_server availability poll uses
-        # (#444). Costs nothing when boots are fast; the no-embedding case
-        # stays tight. ``boot_timeout`` overrides for boots the heuristic
-        # can't see (an attach/remote --config boot embeds over HTTP before
-        # serving, #498).
+        # load, which on a cold/slow CI runner can blow a 30s ceiling even with
+        # warm caches — give it the same generous deadline the collection_server
+        # availability poll uses. Costs nothing when boots are fast; the
+        # no-embedding case stays tight. ``boot_timeout`` overrides for boots
+        # the heuristic can't see (an attach/remote --config boot embeds over
+        # HTTP before serving).
         timeout = boot_timeout if boot_timeout is not None else (120.0 if embedding_model else 10.0)
         try:
             _wait_for_server(url, timeout=timeout)
@@ -553,7 +550,7 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
             stdout, stderr = proc.communicate(timeout=5)
             # stdout/stderr are usually EMPTY here — the server logs to
             # --log-dir files — so include their tails, or a hung/slow boot
-            # on a CI runner is undiagnosable from the failure alone (#424).
+            # on a CI runner is undiagnosable from the failure alone.
             log_tails = []
             for log_file in sorted(Path(log_dir).glob("*.log")):
                 with suppress(OSError):
@@ -793,7 +790,7 @@ requires_clip = pytest.mark.skipif(
 )
 
 
-# -- Multimodal image-embed harness (#501) — manual, local-only ---------------
+# -- Multimodal image-embed harness — manual, local-only ----------------------
 #
 # jina-v5-omni (the only small multimodal embedding model) needs llama.cpp
 # patches that are NOT upstream as of b9616 — the official/pinned llama-server
@@ -830,7 +827,7 @@ requires_multimodal = pytest.mark.skipif(
 )
 
 
-# -- Search-quality adversarial suite (#559) — manual, local-only -------------
+# -- Search-quality adversarial suite — manual, local-only --------------------
 #
 # The real-model recall+precision suite downloads a ~30-image Wikimedia Commons
 # corpus and runs real CLIP — too heavy/non-hermetic for CI and the assets are
@@ -905,7 +902,7 @@ def distilroberta_model() -> Path:
     """A second, architecturally-different ONNX model: DistilRoBERTa (768-dim, BPE).
 
     Its own vector space (not comparable to MiniLM) and no ``[PAD]`` token, so it
-    exercises the RoBERTa-only paths the MiniLM can't (#172). Same retry/cache path.
+    exercises the RoBERTa-only paths the MiniLM can't. Same retry/cache path.
     """
     return cached_distilroberta_model_dir(default_model_cache_base())
 
@@ -913,13 +910,13 @@ def distilroberta_model() -> Path:
 @pytest.fixture(scope="session")
 def onnx_fp32_model() -> Path:
     """The fp32 (non-quantized) MiniLM ONNX model — batches bit-exact, so it proves the
-    batch-safety probe lets a safe model batch (#174). Same retry/cache path."""
+    batch-safety probe lets a safe model batch. Same retry/cache path."""
     return cached_onnx_fp32_model_dir(default_model_cache_base())
 
 
 @pytest.fixture(scope="session")
 def clip_model() -> Path:
-    """A small CLIP (int8 text+vision graphs) for image<->text tests (#162 Phase 3b).
+    """A small CLIP (int8 text+vision graphs) for image<->text tests.
 
     Use with ``ClipBackend(model=str(clip_model), variant="quantized")``. Same retry/cache path.
     """
@@ -933,7 +930,7 @@ def embedding_model() -> Path:
     Reuses an already-downloaded copy (a stable, CI-cached dir via
     ``$SHRIKE_TEST_MODEL_DIR``, else the shared dev-cache ``~/.cache/shrike-dev/models``)
     and downloads with retry/backoff so a transient HuggingFace 429 doesn't fail the
-    lane (#83).
+    lane.
     """
     model_path = cached_model_path(EMBEDDING_MODEL_NAME, default_model_cache_base())
     if model_path.exists() and model_path.stat().st_size > 0:
@@ -1059,20 +1056,19 @@ CONCEPTS: list[dict[str, Any]] = [
 @pytest.fixture(scope="session")
 def collection_server(server_factory, embedding_model: Path) -> ServerInfo:
     """ONE embedding-enabled server with a 50-note seeded collection, shared by
-    every read-only embedding/semantic class (#441 — was two servers: a bare
-    `embedding_server` plus a per-module seeded one). Session-scoped: the
-    embedding halves run serially (xdist=None in BUILD.bazel), and mutating
-    tests clean up after themselves.
+    every read-only embedding/semantic class. Session-scoped: the embedding
+    halves run serially (xdist=None in BUILD.bazel), and mutating tests clean up
+    after themselves.
 
     No explicit rebuild: an empty-at-boot server materializes a ready index at
-    boot (#148), so the seeding upserts index incrementally.
+    boot, so the seeding upserts index incrementally.
     """
     srv = server_factory("semantic", embedding_model=str(embedding_model))
 
     # Poll for embedding availability: on a fresh CI runner llama-server's
     # first boot builds its model-preset cache (~6s, single-threaded), which
     # can stall /status past a single short read timeout (warm locally, so it
-    # never reproduces). Mirrors the poll loop of the fixtures this replaced.
+    # never reproduces).
     status_url = srv.url.rsplit("/", 1)[0] + "/status"
     status: dict[str, Any] = {}
     deadline = time.monotonic() + 120.0
@@ -1110,9 +1106,9 @@ def collection_server(server_factory, embedding_model: Path) -> ServerInfo:
                     "tags": [concept["tag"]],
                 }
             )
-    # Chunked (#441): one 50-note call embeds 50 texts inside a single HTTP
-    # call window; chunks keep each call comfortably inside the client timeout
-    # even when the runner's first llama embed is cold.
+    # Chunked: one 50-note call embeds 50 texts inside a single HTTP call
+    # window; chunks keep each call comfortably inside the client timeout even
+    # when the runner's first llama embed is cold.
     created = 0
     for i in range(0, len(all_notes), 10):
         result = mcp("upsert_notes", {"notes": all_notes[i : i + 10]})

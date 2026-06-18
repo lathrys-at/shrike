@@ -1,8 +1,8 @@
-"""Unit tests for the derived-text store (#98) — the FTS5 trigram sidecar.
+"""Unit tests for the derived-text store — the FTS5 trigram sidecar.
 
 These run against real SQLite (FTS5 + the trigram tokenizer ship with CPython's sqlite3 on every
 platform we target). They exercise the store directly: build, substring + fuzzy lookups with their
-source/ref/snippet provenance, the multi-source seam (#199's future ``ocr``/``asr`` slot), the
+source/ref/snippet provenance, the multi-source seam (the future ``ocr``/``asr`` slot), the
 incremental ingest/remove path, drift detection + the col_mod watermark, and graceful degradation
 when FTS5 is unavailable.
 """
@@ -110,7 +110,7 @@ class TestFuzzy:
 
 
 class TestSourceSeam:
-    """A second source under one note id is searchable + removable independently (the #199 seam)."""
+    """A second source under one note id is searchable + removable independently (the source seam)."""
 
     def test_second_source_searchable_with_its_provenance(self, store):
         store.ingest(1, "ocr", {"diagram.png": "cristae folds visible in the image"})
@@ -188,7 +188,7 @@ class TestPersistence:
 
 
 class TestCorruptRecovery:
-    """A corrupt/unreadable sidecar is never fatal (review F1) — it's recreated, not crashed on."""
+    """A corrupt/unreadable sidecar is never fatal — it's recreated, not crashed on."""
 
     def test_garbage_file_is_recreated(self, tmp_path):
         path = tmp_path / "shrike.db"
@@ -204,7 +204,7 @@ class TestCorruptRecovery:
 
 class TestBuildFailure:
     def test_failed_build_rolls_back(self, store):
-        # Review F8: a build that raises mid-transaction rolls back, so a later size() SELECT on the
+        # A build that raises mid-transaction rolls back, so a later size() SELECT on the
         # shared connection sees the intact pre-build data, not a half-cleared index. A non-iterable
         # `rows` raises inside the locked transaction, *after* the two DELETEs.
         with pytest.raises(TypeError):
@@ -216,7 +216,7 @@ class TestBuildFailure:
 
 
 class TestConcurrentBuildGuard:
-    """The BUILDING claim is honest (review F7) and never strands the store."""
+    """The BUILDING claim is honest and never strands the store."""
 
     def test_second_trigger_while_building_is_a_noop(self, store):
         # Simulate a build already in flight: a second build_in_background must not spawn another
@@ -267,9 +267,9 @@ class TestStatus:
 
 
 class TestExternalBuildHooks:
-    """#451: the kernel-side rebuild drives the store's state machine through
-    claim/settle — same BUILDING dedupe as the retired thread path, ERROR on a
-    failed build, READY + watermark on success."""
+    """The kernel-side rebuild drives the store's state machine through
+    claim/settle — BUILDING dedupe, ERROR on a failed build, READY + watermark
+    on success."""
 
     def test_claim_dedupes_and_settle_ready(self, store):
         assert store.claim_external_build() is True

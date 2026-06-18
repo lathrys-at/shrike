@@ -27,7 +27,7 @@ def _resp(status: int = 200, json_body: dict | None = None) -> MagicMock:
 def _capture_post(body: dict):
     """A patched httpx.Client.post that records the URL + JSON body it was sent.
 
-    The actions edge (#687) POSTs the action's arguments as the JSON body to
+    The actions edge POSTs the action's arguments as the JSON body to
     ``/actions/{name}`` and gets the response-model dict back directly.
     """
     captured: dict = {}
@@ -42,7 +42,7 @@ def _capture_post(body: dict):
 
 
 class TestSelectorInjection:
-    """#68: the client injects its --profile/--collection selector into every
+    """The client injects its --profile/--collection selector into every
     routed action's arguments; list_profiles (registry-level) is exempt."""
 
     def test_selector_injected_into_arguments(self) -> None:
@@ -239,7 +239,7 @@ class TestLifecycle:
         popen.assert_called_once()
 
     def test_spawn_leaves_state_dir_alone_when_log_dir_set(self, tmp_path) -> None:
-        # #424: the darwin Bazel sandbox forbids creating the real platformdirs
+        # The darwin Bazel sandbox forbids creating the real platformdirs
         # state dir, and _spawn has no business touching it — the daemon side
         # (ServerLock, the meta/pid writers) creates it where it's used. With a
         # log_dir set, a spawn must not create the state dir at all.

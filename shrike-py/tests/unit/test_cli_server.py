@@ -103,8 +103,9 @@ class TestServerStatus:
         assert "boom" in result.output
 
     def test_coverage_matrix_not_in_status(self, run):
-        # The coverage matrix moved to `shrike search coverage` (#683): even when
-        # /status still carries `coverage`, `server status` must not render it.
+        # The coverage matrix lives in `shrike search coverage`, not `server
+        # status`: even when /status still carries `coverage`, `server status`
+        # must not render it.
         coverage = CoverageMatrix(
             text=CoverageRow(
                 text=CoverageCell.NATIVE,
@@ -121,15 +122,15 @@ class TestServerStatus:
         assert "via text" not in result.output
 
     def test_status_on_own_line_and_section_order(self, run):
-        # §B reshape (#684): the section header is the identity (`Index`,
-        # `Embedding`), `Status:` moves onto its own line, and the order is
+        # The section header is the identity (`Index`, `Embedding`), `Status:` is
+        # on its own line, and the order is
         # Index → Derived text → Recognition → Embedding.
         fake = MagicMock()
         fake.server_status.return_value = _server()
         with patch(f"{SC}.ShrikeClient", return_value=fake):
             result = run("server", "status")
         out = result.output
-        # Status moved to its own line (header carries no inline status now).
+        # Status is on its own line (the header carries no inline status).
         assert "Status:" in out
         assert "Index:" not in out
         assert "Embedding:" not in out
@@ -141,7 +142,7 @@ class TestServerStatus:
         assert i_index < i_derived < i_recog < i_embed
 
     def test_index_per_modality_breakdown(self, run):
-        # §C index (#684): each sub-index reports its own size/ndim.
+        # Each sub-index reports its own size/ndim.
         fake = MagicMock()
         fake.server_status.return_value = _server(
             index=IndexReady(
@@ -163,7 +164,7 @@ class TestServerStatus:
         assert "512 dims" in out
 
     def test_embedding_per_space(self, run):
-        # §C embedding (#681): one `Embedding [<modalities>]` block per space.
+        # One `Embedding [<modalities>]` block per space.
         fake = MagicMock()
         fake.server_status.return_value = _server(
             embedding=EmbeddingRunning(available=True, model="gemma", modalities=["text"]),
@@ -564,21 +565,20 @@ class TestWaitForServer:
 
     def test_server_main_patchable_even_without_real_attr(self):
         """`mock.patch("shrike.server.main", ...)` must hold even when `main` is not
-        a real attribute on the `shrike.server` module object — pins the #732 fix.
+        a real attribute on the `shrike.server` module object.
 
-        #730 made `shrike.server` a package whose `__init__` eagerly re-exported
-        `main` (`from shrike.server.server import main`), binding it as a real
-        module attribute. Under the shared-process test runner (xdist) the package
-        could be observed in a partially-initialized state where that attribute was
-        absent, and this exact `patch` raised `AttributeError: module
-        'shrike.server' ... does not have the attribute 'main'` (the CI failure on
-        #732). The re-export is now lazy (module `__getattr__`), so `main` resolves
-        on access regardless of whether it is materialized as a real attribute.
+        `shrike.server` is a package whose re-export of `main` is lazy (module
+        `__getattr__`), so `main` resolves on access regardless of whether it is
+        materialized as a real attribute. An eager re-export instead binds `main`
+        as a real attribute, and under the shared-process test runner (xdist) the
+        package could be observed in a partially-initialized state where that
+        attribute was absent, making this exact `patch` raise `AttributeError:
+        module 'shrike.server' ... does not have the attribute 'main'`.
 
-        This reproduces the failing state deterministically by removing any real
-        `main` attribute before patching: with the old eager re-export the patch
-        raises AttributeError (no `__getattr__` fallback); with the lazy re-export
-        it succeeds. So this test FAILS against the bug and PASSES against the fix.
+        This reproduces that failing state deterministically by removing any real
+        `main` attribute before patching: with an eager re-export the patch raises
+        AttributeError (no `__getattr__` fallback); with the lazy re-export it
+        succeeds.
         """
         import shrike.server
 

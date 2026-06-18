@@ -1,4 +1,4 @@
-"""Concurrency tests for CollectionWrapper (audit §3.1 / §180).
+"""Concurrency tests for CollectionWrapper.
 
 The wrapper serializes every `anki.Collection` access through a single worker
 thread. These tests fire concurrent operations — async writers on the event

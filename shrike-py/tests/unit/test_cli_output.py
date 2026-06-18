@@ -1,4 +1,4 @@
-"""Untrusted note/media content must render literally, never as Rich markup (#593).
+"""Untrusted note/media content must render literally, never as Rich markup.
 
 Note field/tag/deck/snippet text, note-type/field/template names, and media
 filenames are authored by anyone who can write the collection (Anki sync, a
@@ -192,13 +192,13 @@ def test_esc_neutralizes_markup() -> None:
     assert "[" not in output.esc(MALFORMED).replace("\\[", "")
 
 
-# --- End-to-end CLI adversarial cases (the joint-review must-fix) -------------
+# --- End-to-end CLI adversarial cases -----------------------------------------
 #
 # Drive the real CLI commands (`info --decks/--tags`, `collection check`) with a
 # stubbed client returning bracket-bearing collection content. These cover the
-# sibling render files (info_cmd/collection_cmd) the first sweep missed. Each
-# runs with `catch_exceptions=False` so an uncaught MarkupError fails the test,
-# and asserts the bracketed content survives literally (no restyle).
+# sibling render files (info_cmd/collection_cmd). Each runs with
+# `catch_exceptions=False` so an uncaught MarkupError fails the test, and asserts
+# the bracketed content survives literally (no restyle).
 
 
 @pytest.fixture
@@ -253,12 +253,11 @@ def test_collection_check_renders_bracketed_filename_literally(cli_run) -> None:
     assert "a[/z].png" in result.output
 
 
-# --- --json/--pretty mutual exclusion is order-independent (#607) -------------
+# --- --json/--pretty mutual exclusion is order-independent --------------------
 #
 # The mutual-exclusion guard must reject `--json --pretty` regardless of which
-# flag comes first. Before the fix, only `--json --pretty` errored — the eager
-# callbacks fire in token order and only _merge_pretty checked the other flag,
-# so `--pretty --json` silently let --json win.
+# flag comes first. The eager callbacks fire in token order, so the guard must
+# check the other flag from both, or `--pretty --json` silently lets --json win.
 
 _MUTEX = "--pretty and --json are mutually exclusive"
 

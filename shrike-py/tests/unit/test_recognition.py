@@ -1,14 +1,13 @@
-"""Apple Vision recognition tests (#221, native since #342 P3).
+"""Apple Vision recognition tests.
 
 The Vision tests render text with Pillow and OCR it through the real Vision
 framework via the native engine (`shrike_native.AppleVisionRecognizer`), so
-they're skipped off macOS — and, since the #496 boundary enforcement, on the
-server build entirely (platform engines are mobile-only; the engine is absent
-from default builds — re-homing this coverage onto an engine-apple test build
-is #514). The kernel-side seam and the gating policy are covered backend-free
-in the Rust + native suites; the Rust crate carries its own fixture-driven
-live tests. Two tests DO run on the server build: the unknown-kind error and
-the clean degrade when the engine isn't compiled in.
+they're skipped off macOS — and on the server build entirely (platform engines
+are mobile-only; the engine is absent from default builds). The kernel-side
+seam and the gating policy are covered backend-free in the Rust + native
+suites; the Rust crate carries its own fixture-driven live tests. Two tests DO
+run on the server build: the unknown-kind error and the clean degrade when the
+engine isn't compiled in.
 """
 
 from __future__ import annotations
@@ -101,7 +100,7 @@ def test_make_recognizer_rejects_unknown_kind():
 
 @pytest.mark.skipif(_HAS_ENGINE, reason="needs a build WITHOUT engine-apple (the server build)")
 def test_make_recognizer_without_engine_errors_cleanly():
-    # The #496 boundary: the server build doesn't compile platform engines, so
+    # The boundary: the server build doesn't compile platform engines, so
     # selecting `apple` degrades exactly like a missing optional dependency —
     # an ImportError the boot path catches (recognition state `error`, boot
     # undisturbed) — with a message pointing at the replacement path.

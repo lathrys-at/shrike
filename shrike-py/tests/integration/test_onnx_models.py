@@ -1,4 +1,4 @@
-"""Real ONNX models exercised directly through OnnxBackend (#172 review).
+"""Real ONNX models exercised directly through OnnxBackend.
 
 This is the *anchor* for the mocked unit tests in `tests/unit/test_embedding_onnx.py`:
 it runs OnnxBackend against actual ONNX exports, so the mocks' assumed
@@ -203,7 +203,7 @@ class TestOnnxRealFp32:
 
 @requires_onnxruntime
 class TestNativeAttach:
-    """#342 P2: the native-direct kernel attach — no Python on the embed path.
+    """The native-direct kernel attach — no Python on the embed path.
 
     The facade keeps construction (file/provider resolution, the probe,
     fingerprint assembly); ``native_embedder()`` hands the kernel a fully

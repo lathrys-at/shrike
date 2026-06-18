@@ -1,4 +1,4 @@
-"""The manual adversarial search-quality suite (#559, PR2) — real models.
+"""The manual adversarial search-quality suite — real models.
 
 MANUAL / LOCAL-ONLY, NEVER RUN IN CI. Three independent fences keep it off the
 CI lanes (mirroring the embedding tests):
@@ -19,10 +19,9 @@ Run it explicitly::
 It downloads a ~30-image Wikimedia Commons corpus (pinned URLs in
 ``tests/manual/search_quality/resolved_urls.json``; bytes cached in the gitignored
 ``tests/manual/search_quality/cache/``; attribution in ``ASSETS.md``) and runs real
-CLIP + MiniLM. The recall/precision/cross-lingual/calibrated-gate *classes* land
-in PR2b; PR2a proves the corpus loads, the Commons resolve→cache works, and the
-real 2-space loop (a dedicated text space + a separate CLIP space, #229)
-retrieves cross-modally through the REAL ``search_notes`` action.
+CLIP + MiniLM, proving the corpus loads, the Commons resolve→cache works, and the
+real 2-space loop (a dedicated text space + a separate CLIP space) retrieves
+cross-modally through the REAL ``search_notes`` action.
 """
 
 from __future__ import annotations
@@ -112,7 +111,7 @@ class TestCorpusManifest:
             "cross_lingual_exact",  # "manzana" via literal substring
             "over_return",  # null-gold precision probe
             "semantic_text",
-            "spurious_filename",  # #580 homonym pairs: floor-admit corroboration + ordering
+            "spurious_filename",  # homonym pairs: floor-admit corroboration + ordering
         ):
             assert required in classes, f"corpus is missing the {required!r} adversarial class"
 
@@ -139,12 +138,11 @@ class TestCommonsResolution:
 
 @requires_clip
 class TestRealTwoSpaceSmoke:
-    """The first real-model proof of the multi-space loop (#229/#232/#234): a
-    dedicated text space (MiniLM) + a SEPARATE CLIP space, attached in-process,
-    retrieve an image-bearing note CROSS-MODALLY through the REAL ``search_notes``
-    action — the highest-value PR2 assertion, smoke-sized here (PR2b scales it to
-    the full graded corpus). The image-only-meaning cards have answer-blind field
-    text, so the ONLY path to them is the CLIP image vector."""
+    """A real-model proof of the multi-space loop: a dedicated text space (MiniLM)
+    + a SEPARATE CLIP space, attached in-process, retrieve an image-bearing note
+    CROSS-MODALLY through the REAL ``search_notes`` action — smoke-sized here. The
+    image-only-meaning cards have answer-blind field text, so the ONLY path to
+    them is the CLIP image vector."""
 
     @pytest.mark.asyncio
     async def test_text_query_retrieves_image_note_via_clip_space(self, tmp_path) -> None:
@@ -188,8 +186,8 @@ class TestRealTwoSpaceSmoke:
 
             # A text query whose ANSWER is an image surfaces the right card via
             # the CLIP space — the modality-gap payoff. The signal carries the
-            # CLIP space key (#234: `image#<space>`), proving it came from the
-            # secondary space's cross-space contribution, not the text space.
+            # CLIP space key (`image#<space>`), proving it came from the secondary
+            # space's cross-space contribution, not the text space.
             matches = await ip.matches("a photograph of a cat", limit=5, threshold=0.2)
             cat = next((m for m in matches if m["id"] == id_by_handle["cat"]), None)
             assert cat is not None, "the cat image card was retrieved by a text query"
@@ -203,13 +201,13 @@ class TestRealTwoSpaceSmoke:
             clip.stop()
 
 
-# ── PR2b: the full real-model recall/precision suite over the graded corpus ──
+# ── The full real-model recall/precision suite over the graded corpus ──
 #
 # These build the WHOLE ≥30-image corpus once (a module-scoped fixture — the
 # build + every query is one ~15-30s run on real CLIP + MiniLM) and assert the
 # per-class thresholds. Thresholds are MEMBERSHIP/floor-based, never exact-slot,
-# so they survive the int8 cosine wobble (#559 methodology). The numbers behind
-# them are reproduced by `tests/manual/search_quality/search_quality.py` into RESULTS.md.
+# so they survive the int8 cosine wobble. The numbers behind them are reproduced
+# by `tests/manual/search_quality/search_quality.py` into RESULTS.md.
 
 
 @pytest.fixture(scope="module")
@@ -280,15 +278,14 @@ class TestRealPrecision:
     FPR counts only the explicit hard-negatives, never incidental non-answers."""
 
     def test_over_return_query_injects_no_clip_image_card(self, real_run) -> None:
-        # ASSERT-CLOSED (#576): the calibrated cross-space image floor closes the
+        # ASSERT-CLOSED: the calibrated cross-space image floor closes the
         # relative gate's ∅-gold over-return leak. A query that answers NOTHING
         # ("purple elephant…") has a near-zero text-space best, so the relative
-        # gate alone (`clip_best >= text_best ≈ 0`) used to admit a handful of
+        # gate alone (`clip_best >= text_best ≈ 0`) would admit a handful of
         # WEAK CLIP image cards (cos ~0.17–0.23). The per-space floor — calibrated
         # to ~0.25 on this corpus (CLIP-text→image pseudo-queries, mean+1·std) —
-        # now drops every one of them: the weak image best clears no floor. So the
-        # ∅-gold query surfaces NO `image#clip` card at all. (Was a
-        # characterization of the documented leak; #576 closed it.)
+        # drops every one of them: the weak image best clears no floor. So the
+        # ∅-gold query surfaces NO `image#clip` card at all.
         from tests.manual.search_quality.runner import clip_fired
 
         q = next(qq for qq in real_run.manifest.queries if qq.adversarial_class == "over_return")
@@ -309,9 +306,9 @@ class TestRealPrecision:
             )
         # NOTE: a weak `fuzzy` trigram near-miss may still surface (the only
         # remaining signal once the image floor closes — its precision is the
-        # fuzzy signal's own concern, tracked separately, not #576's cross-space
-        # floor). #576 asserts the cross-space IMAGE leak is closed; the lexical
-        # tier is unchanged by this work.
+        # fuzzy signal's own concern, tracked separately, not the cross-space
+        # floor). The cross-space IMAGE leak is closed; the lexical tier is
+        # unchanged.
 
     def test_planted_hard_negative_fpr_is_bounded(self, real_run) -> None:
         # The portrait hard-negatives (grade-0) may leak in at a LOW rank via the
@@ -331,11 +328,11 @@ class TestRealPrecision:
 
 @requires_clip
 class TestRealActivationGate:
-    """Cross-space FLOOR-ADMISSION (#580/#582) on REAL CLIP cosines. The relative
-    winner-take-all gate (#234) is RETIRED: an image card contributes its
-    `image#clip` signal whenever its OWN image cosine clears the calibrated floor
-    (the #582 per-note floor), independent of how the text space did. The
-    production invariants this class pins:
+    """Cross-space FLOOR-ADMISSION on REAL CLIP cosines. There is no relative
+    winner-take-all gate: an image card contributes its `image#clip` signal
+    whenever its OWN image cosine clears the calibrated per-note floor,
+    independent of how the text space did. The production invariants this class
+    pins:
       - the signal FIRES for clearly cross-modal queries (image is the path);
       - a text-answered fact query keeps its correct TEXT card at rank-1 and the
         portrait hard-negative does NOT out-rank the canonical answer (the
@@ -370,16 +367,15 @@ class TestRealActivationGate:
         )
 
     def test_floor_admit_does_not_let_portrait_outrank_the_canonical_answer(self, real_run) -> None:
-        # The #580 production behaviour: for a query the TEXT answers (a Curie/
+        # The production behaviour: for a query the TEXT answers (a Curie/
         # Napoleon fact), floor-admission may admit the portrait's CLIP image
         # signal (it clears the floor — the portrait IS a weak CLIP match for the
         # named entity), so the portrait (grade-0 hard-negative) MAY carry
         # `image#clip` at a lower rank. What must hold is that it never OUT-RANKS
         # the CANONICAL (highest-grade) text answer — a weaker grade-2 secondary
         # fact may legitimately rank below a rank-2 distractor, but the canonical
-        # answer must win against the portrait. (Stripping the portrait's
-        # image#clip provenance per-note is the #582 follow-up; the space-level
-        # signal admits the whole image ranking by design.)
+        # answer must win against the portrait. (The space-level signal admits the
+        # whole image ranking by design.)
         for q in real_run.manifest.queries:
             if q.adversarial_class != "gate_no_inject_portrait":
                 continue
@@ -414,12 +410,12 @@ class TestRealActivationGate:
 
 @requires_clip
 class TestSpuriousFilenameFloorAdmit:
-    """The #580 floor-admission win + precision guard on REAL CLIP cosines. The
+    """The floor-admission win + precision guard on REAL CLIP cosines. The
     homonym matched pairs (jaguar animal/car, crane bird/machine, bass fish/
     guitar): the disambiguated query lexically matches BOTH cards via the shared
-    filename word, so the pre-#580 relative gate (text wins on the filename)
-    would shut CLIP out. Floor-admission admits the on-topic CLIP hit, and the
-    CLIP encoder ranks the correct visual sense first."""
+    filename word, so a relative gate (text wins on the filename) would shut CLIP
+    out. Floor-admission admits the on-topic CLIP hit, and the CLIP encoder ranks
+    the correct visual sense first."""
 
     def test_on_topic_sense_wins_rank_one_and_corroborates(self, real_run) -> None:
         from tests.manual.search_quality.runner import clip_fired
@@ -455,10 +451,10 @@ class TestSpuriousFilenameFloorAdmit:
 
 @requires_clip
 class TestCrossLingualCharacterization:
-    """Cross-lingual behaviour — characterized, not over-pinned (#559): the
-    exact-match and image paths work regardless of model language, but SEMANTIC
-    cross-lingual recall depends on the English-centric models, so it's
-    documented (RESULTS.md), not hard-floored."""
+    """Cross-lingual behaviour — characterized, not over-pinned: the exact-match
+    and image paths work regardless of model language, but SEMANTIC cross-lingual
+    recall depends on the English-centric models, so it's documented (RESULTS.md),
+    not hard-floored."""
 
     def test_exact_substring_works_cross_lingually(self, real_run) -> None:
         # "manzana" is a literal substring of the apple card's back text — the

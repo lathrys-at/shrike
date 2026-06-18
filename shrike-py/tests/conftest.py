@@ -1,6 +1,6 @@
 """Top-level pytest hooks shared by every suite.
 
-The native-staleness backstop (#573): `pip install -e ".[dev]"` builds only the
+The native-staleness backstop: `pip install -e ".[dev]"` builds only the
 Python harness, never the Rust `shrike_native` extension (a separate cargo step
 in scripts/build-native.sh). After a pull that touches shrike-core/, an unguarded
 pytest run would silently import a stale `_native.so` and fail with confusing
@@ -27,7 +27,7 @@ import pytest
 def _repo_root() -> Path:
     """The repository root, where scripts/ lives.
 
-    The harness now lives in shrike-py/ (#731), so this file is at
+    The harness lives in shrike-py/, so this file is at
     shrike-py/tests/conftest.py — scripts/native-stale.sh is two levels up, NOT
     one. Resolve via `git rev-parse --show-toplevel` (path-independent, exactly
     how native-stale.sh itself finds the root) and fall back to walking up for

@@ -1,9 +1,8 @@
-"""The old note-type module functions, re-expressed over the native core.
+"""The note-type module functions, re-expressed over the native core.
 
-A test-only shim: the runtime implementations moved to Rust at the #278
-cutover; these keep the existing per-case unit tests (which exercise every
-edge of the old surface) running against the native core with their bodies
-untouched. Signatures mirror the retired shrike.note_types functions.
+A test-only shim: keeps the per-case unit tests (which exercise every edge of
+the surface) running against the native core with their bodies untouched.
+Signatures mirror the shrike.note_types functions.
 """
 
 from __future__ import annotations

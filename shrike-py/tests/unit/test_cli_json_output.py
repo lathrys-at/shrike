@@ -1,10 +1,10 @@
-"""CLI ``--json`` output carries no explicit nulls (#391 phase 2).
+"""CLI ``--json`` output carries no explicit nulls.
 
-Since the kernel read wire serializes unset Options as explicit ``null``
-(PR #482), the "MCP wire carries nulls, CLI --json doesn't" split hinges
-entirely on the ``exclude_none=True`` in ``output._to_jsonable``. These tests
-pin that invariant at the command layer: a response model with unset optional
-sections must render with those keys absent, not ``null``.
+Since the kernel read wire serializes unset Options as explicit ``null``,
+the "MCP wire carries nulls, CLI --json doesn't" split hinges entirely on the
+``exclude_none=True`` in ``output._to_jsonable``. These tests pin that invariant
+at the command layer: a response model with unset optional sections must render
+with those keys absent, not ``null``.
 """
 
 from __future__ import annotations

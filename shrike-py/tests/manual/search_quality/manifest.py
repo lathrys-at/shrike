@@ -1,4 +1,4 @@
-"""The search-quality manifest loader (#559).
+"""The search-quality manifest loader.
 
 Parses the reconciled manifest schema into typed objects the harness builds a
 collection from and the metric engine grades against. The schema::
@@ -19,9 +19,9 @@ collection from and the metric engine grades against. The schema::
 
 ``media[].handle`` is LOGICAL: the harness substitutes the
 ``store_media``-returned filename into ``$IMG:handle`` at build time, so a
-collision-rename is transparent (#559). ``source: generated`` is the PR1
+collision-rename is transparent. ``source: generated`` is the
 network-free path (image bytes inline as ``bytes_b64``, or synthesized);
-``source: commons`` is the PR2 resolve→pin→cache path (named here, not built).
+``source: commons`` is the resolve→pin→cache path (named here, not built).
 ``grade`` defaults to 3 when omitted on a gold row, 0 on a hard-negative row.
 """
 
@@ -69,7 +69,7 @@ class QuerySpec:
     modality: str
     top_k: int
     threshold: float | None
-    # PR1 degradation classes set these so the metric engine can require the
+    # The degradation classes set these so the metric engine can require the
     # response to *announce* the degradation (message / completeness / score).
     expects_degradation: bool = False
 

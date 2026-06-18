@@ -1,4 +1,4 @@
-"""Wikimedia Commons image resolution for the manual search-quality corpus (#559).
+"""Wikimedia Commons image resolution for the manual search-quality corpus.
 
 A resolve→pin→cache mechanism: a corpus entry can be pinned by its **committed
 URL** OR resolved fresh from a ``search_term``, and the per-image **licensing

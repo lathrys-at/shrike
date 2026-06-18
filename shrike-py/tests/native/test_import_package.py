@@ -1,6 +1,6 @@
-"""Import an .apkg into the collection — the kernel op + the DRIFT-REBUILD path (#72).
+"""Import an .apkg into the collection — the kernel op + the DRIFT-REBUILD path.
 
-The load-bearing #72 requirement: an import bumps col.mod, so the index MUST
+The load-bearing requirement: an import bumps col.mod, so the index MUST
 reconcile the imported notes afterward (the boot/reload drift path), and the
 op must NOT advance the watermark prematurely (which would suppress the drift
 signal). These tests build a REAL .apkg via the anki pip test oracle, import it
@@ -86,8 +86,8 @@ async def _open_kernel_with_index(tmp_path, backend):
 def _lexical_hits(tmp_path, query: str) -> list:
     """Substring/lexical hits from the per-collection derived (FTS5) store — a
     fresh engine on the same namespaced shrike.db the kernel's import rebuild
-    committed to. This is the surface that, before the #72 derived-rebuild fix,
-    stayed empty after an import until an unrelated drift trigger."""
+    committed to. This is the surface an import's derived rebuild must populate,
+    rather than leaving empty until an unrelated drift trigger."""
     from shrike.harness import cache_layout
 
     db_path = cache_layout.derived_db_path(
@@ -102,7 +102,7 @@ def _lexical_hits(tmp_path, query: str) -> list:
 
 class TestImportDriftRebuild:
     def test_import_reconciles_the_imported_notes(self, tmp_path) -> None:
-        """The core #72 path: import → BOTH derived caches reconcile the new
+        """The core import path: import → BOTH derived caches reconcile the new
         notes (vector index AND the FTS5 lexical store), and the watermark is
         left current (no spurious drift afterward)."""
 
@@ -133,8 +133,8 @@ class TestImportDriftRebuild:
 
             # And the DERIVED (FTS5) store was rebuilt too — an imported note is
             # findable by LEXICAL/substring search WITHOUT any intervening
-            # reload (the must-fix from the joint review: reindex_if_needed only
-            # touches the vector index; import must also drive rebuild_derived).
+            # reload (reindex_if_needed only touches the vector index; import
+            # must also drive rebuild_derived).
             assert _lexical_hits(tmp_path, "alpha"), (
                 "imported note must be lexically findable right after import — "
                 "the derived store must be rebuilt by the import op, not left "
@@ -167,8 +167,7 @@ class TestImportDriftRebuild:
             await kernel.close()
 
             # Lexical search works WITHOUT any embedder (the derived rebuild ran
-            # regardless of the vector index) — actually asserted now, not just
-            # claimed in a comment.
+            # regardless of the vector index).
             assert _lexical_hits(tmp_path, "one"), "imported note must be lexically findable"
 
         asyncio.run(flow())

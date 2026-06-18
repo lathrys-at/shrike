@@ -1,4 +1,4 @@
-"""The runtime-less asyncio bridge (#332, S3a).
+"""The runtime-less asyncio bridge.
 
 Kernel futures awaited natively on the asyncio loop: each poll is a plain loop
 callback, wakes re-enter via ``call_soon_threadsafe``, no tokio and no threads
@@ -113,7 +113,7 @@ def _settled_live_callbacks() -> int:
 
 
 class TestBridgeLifecycle:
-    """#387: the bridge releases its state however an op's observation ends.
+    """The bridge releases its state however an op's observation ends.
 
     ``bridge_parked_forever`` is a never-resolving future that *retains its
     waker* — the in-flight-op shape (a oneshot receiver parks its waker the
@@ -138,8 +138,8 @@ class TestBridgeLifecycle:
         finally:
             loop.close()
         # The loop died with the op still pending; dropping the asyncio
-        # future must release the callback — the waker's weak reference and
-        # the GC-visible callback↔future cycle are exactly what #387 fixed.
+        # future must release the callback — via the waker's weak reference,
+        # without leaving a GC-visible callback↔future cycle.
         del holder[:], loop
         assert _settled_live_callbacks() == baseline
 
@@ -173,7 +173,7 @@ class TestBridgeLifecycle:
 
 
 class TestPyEmbedder:
-    """S3c-2b: the kernel's Embedder seam driven by a harness backend."""
+    """The kernel's Embedder seam driven by a harness backend."""
 
     class _Backend:
         def __init__(self, fail: bool = False) -> None:

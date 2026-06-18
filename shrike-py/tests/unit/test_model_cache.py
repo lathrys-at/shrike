@@ -1,4 +1,4 @@
-"""Unit tests for the resilient test-model download helper (#83)."""
+"""Unit tests for the resilient test-model download helper."""
 
 from __future__ import annotations
 

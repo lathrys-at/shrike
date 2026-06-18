@@ -1,4 +1,4 @@
-"""Kernel↔host parity for the per-collection cache layout (#67/#547).
+"""Kernel↔host parity for the per-collection cache layout.
 
 The namespace + derived-store path each have one implementation (the kernel,
 ``shrike_kernel::cache_layout``) bound as ``shrike_native.index_namespace`` /
@@ -67,7 +67,7 @@ def test_host_helper_defers_to_the_kernel() -> None:
     assert cache_layout.index_namespace(path) == shrike_native.index_namespace(path)
 
 
-# -- derived-store path parity (#547) ----------------------------------------
+# -- derived-store path parity ------------------------------------------------
 
 _CACHE = "/var/cache/shrike"
 
@@ -92,7 +92,7 @@ def test_derived_db_path_existing_file_agrees(tmp_path) -> None:
 
 def test_derived_db_path_shares_index_namespace_distinct_subtree() -> None:
     # The derived path uses the SAME namespace as the index but a parallel
-    # `derived/` subtree (the deliberate index-vs-derived separation, #547).
+    # `derived/` subtree (the deliberate index-vs-derived separation).
     path = "/coll/sep.anki2"
     ns = cache_layout.index_namespace(path)
     derived = cache_layout.derived_db_path(_CACHE, path)

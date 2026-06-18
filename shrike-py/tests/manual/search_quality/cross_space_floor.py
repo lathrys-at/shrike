@@ -1,8 +1,8 @@
-"""#576 cross-space intra-modal floor — validation harness.
+"""Cross-space intra-modal floor — validation harness.
 
 Builds the REAL 2-space (MiniLM text + CLIP image) graded corpus ONCE, reports
-the harness-derived secondary image floor, then runs the #576 decision rule
-before (V0 = relative-only, the pre-#576 leak) vs after (V0+floor = the shipped
+the harness-derived secondary image floor, then runs the decision rule
+before (relative-only, the leak) vs after (relative+floor, the shipped
 calibrated default) on the three axes:
 
   - modality_gap recall  (R@k / MRR — must NOT regress)
@@ -10,7 +10,7 @@ calibrated default) on the three axes:
   - negative control      (gate_no_inject class metric; the authority is the
                            integration suite's TestRealActivationGate)
 
-This is the reproducible #576 decision artifact — the integration suite's
+This is the reproducible decision artifact — the integration suite's
 ``TestRealPrecision.test_over_return_query_injects_no_clip_image_card`` is the
 permanent guard; this script regenerates the before/after table on demand.
 

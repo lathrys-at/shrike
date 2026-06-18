@@ -52,13 +52,13 @@ def basic_note(wrapper):
     return results[0]["id"]
 
 
-# ── The unit-test kernel harness (#355) ─────────────────────────────────────
+# ── The unit-test kernel harness ─────────────────────────────────────────────
 #
-# The VectorIndex/IndexSaver facade retired with #355: the tool-layer unit
-# suites now drive a REAL AsyncKernel — the same kernel the server assembles —
-# from a dedicated asyncio loop thread. Every kernel awaitable is created and
-# awaited ON that loop (the binding's completion bridge binds to the running
-# loop at call time), and the sync test body waits on a thread-safe future.
+# The tool-layer unit suites drive a REAL AsyncKernel — the same kernel the
+# server assembles — from a dedicated asyncio loop thread. Every kernel
+# awaitable is created and awaited ON that loop (the binding's completion bridge
+# binds to the running loop at call time), and the sync test body waits on a
+# thread-safe future.
 
 
 @pytest.fixture(scope="session")
@@ -130,11 +130,10 @@ class KernelProxy:
 class KernelHarness:
     """A real ``AsyncKernel`` + kernel-mode ``CollectionWrapper`` per test.
 
-    The #355 replacement for the loop-free ``CollectionWrapper(path)`` +
-    mocked-``VectorIndex`` fixtures: writes route through the kernel's
-    maintained ops (index + derived + watermarks crate-side), and assertions
-    read observable state (``index_status_json``, the shared engine handle)
-    instead of mock call counts.
+    Writes route through the kernel's maintained ops (index + derived +
+    watermarks crate-side), and assertions read observable state
+    (``index_status_json``, the shared engine handle) instead of mock call
+    counts.
     """
 
     def __init__(self, loop: asyncio.AbstractEventLoop, tmp_path: Any) -> None:

@@ -1,6 +1,6 @@
-"""Manual, local-only end-to-end image-embedding harness (#501).
+"""Manual, local-only end-to-end image-embedding harness.
 
-This is the proof that #501's image path works end to end against a real
+This is the proof that the image path works end to end against a real
 multimodal embedding model: a `modalities: [text, image]` managed
 ``LlamaServerBackend`` embeds a note's text AND its images, and distinct
 images produce distinct vectors (the github.com/ggml-org/llama.cpp#13666
@@ -56,8 +56,8 @@ HOW TO RUN IT
        export SHRIKE_MULTIMODAL_VISION_MMPROJ=/path/to/...-vision-mmproj-F16.gguf
        pytest tests/integration/test_multimodal.py -v -m multimodal
 
-When a multimodal embedding model becomes a server default (the #237 eval) and
-the patches are upstream, this graduates into a pinned-fixture CI test.
+When a multimodal embedding model becomes a server default and the patches are
+upstream, this graduates into a pinned-fixture CI test.
 """
 
 from __future__ import annotations

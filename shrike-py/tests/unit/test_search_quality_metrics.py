@@ -1,10 +1,10 @@
-"""Unit tests for the search-quality metric engine + manifest loader (#559).
+"""Unit tests for the search-quality metric engine + manifest loader.
 
 Pure, fast, no server: the metric engine is a function of ``(returned, gold)``,
 so these pin its recall/precision/nDCG math and the failure-kind tagging
-directly — the same engine the in-process CI classes and the PR2 manual suite
+directly — the same engine the in-process CI classes and the manual suite
 consume. Because it's parameterizable (``k``/``weights``/``RRF_K``), the same
-tests double as the #234 sweep's correctness guard.
+tests double as the threshold/weight sweep's correctness guard.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ class TestRRFRecompute:
 
     def test_weights_are_a_sweep_seam(self) -> None:
         # The same ranks, different weights → different order: the engine is
-        # parameterizable for the #234 threshold/weight sweep.
+        # parameterizable for the threshold/weight sweep.
         cards = [RankedCard(1, {"text": 2}), RankedCard(2, {"fuzzy": 1})]
         assert rrf_order_from_ranks(cards, weights=RRF_WEIGHTS)[0] == 1
         assert rrf_order_from_ranks(cards, weights={**RRF_WEIGHTS, "fuzzy": 1.0})[0] == 2

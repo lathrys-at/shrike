@@ -1,4 +1,4 @@
-"""SearchPipeline seam (#274): protocol conformance + native==reference parity.
+"""SearchPipeline seam: protocol conformance + native==reference parity.
 
 `search_fusion.rrf_fuse` is the frozen, readable spec of the fusion semantics;
 the native pipeline (`shrike_kernel::fusion::rrf_fuse`) is a second implementation of
@@ -36,10 +36,9 @@ def _random_case(rng: random.Random) -> tuple[dict[str, list[int]], dict[str, fl
     for signal in rng.sample(SIGNALS, k=rng.randint(1, len(SIGNALS))):
         # Duplicates included deliberately — one-signal-one-rank is part of the spec.
         rankings[signal] = [rng.randint(1, 30) for _ in range(rng.randint(0, 25))]
-    # Include non-finite weights in the sample (#611): they must be sanitized
+    # Include non-finite weights in the sample: they must be sanitized
     # identically on both sides, so the property suite is the drift alarm for
-    # the NaN/inf parity too (it sampled only finite weights before, which is
-    # exactly why the NaN divergence went uncaught).
+    # the NaN/inf parity too.
     weight_choices = [0.25, 0.5, 1.0, 2.0, float("nan"), float("inf"), float("-inf")]
     weights = {s: rng.choice(weight_choices) for s in rankings if rng.random() < 0.7}
     priority = frozenset(s for s in rankings if rng.random() < 0.3)
@@ -61,7 +60,7 @@ class TestProtocol:
         ) == rrf_fuse(rankings, priority_signals=frozenset({"exact"}))
 
     def test_reference_sanitizes_non_finite_weight_to_default(self) -> None:
-        # The reference half of #611 (no native extension needed): a non-finite
+        # The reference half (no native extension needed): a non-finite
         # weight orders AND scores identically to the default-weight run, so a
         # NaN/inf weight can't reach the sort with a divergent ordering.
         rankings = {"text": [1, 2, 3], "exact": [3, 2]}
@@ -106,13 +105,12 @@ class TestNativeParity:
 
     @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
     def test_native_equals_reference_on_a_non_finite_weight(self, bad: float) -> None:
-        # #611 (= S9-1, the s9_nan_parity repro): a non-finite weight must not
-        # break the frozen-reference parity contract. Pre-fix a NaN weight
-        # diverged (ref=[3,2,1], native=[2,3,1]) — Rust total_cmp total-orders
-        # NaN while the Python sort key leaves NaN comparisons false
-        # (input-order-dependent); inf/-inf agreed but were equally meaningless.
-        # Both sides now sanitize a non-finite weight to the default (1.0), so
-        # the fused order is identical AND equals the all-default-weights order.
+        # A non-finite weight must not break the frozen-reference parity
+        # contract. Rust total_cmp total-orders NaN while the Python sort key
+        # leaves NaN comparisons false (input-order-dependent), so an unhandled
+        # NaN weight could diverge. Both sides sanitize a non-finite weight to
+        # the default (1.0), so the fused order is identical AND equals the
+        # all-default-weights order.
         rankings = {"text": [1, 2, 3], "exact": [3, 2]}
         weights = {"text": bad}
         priority = frozenset({"exact"})

@@ -1,6 +1,5 @@
-"""Media + prune: wrapper-vs-binding consistency (#278 step 5a; the
-subprocess half now exercises the NATIVE-backed wrapper end to end — the local halves; the SSRF
-URL-fetch path is step 5b under the security-review gate).
+"""Media + prune: wrapper-vs-binding consistency (the local halves; the SSRF
+URL-fetch path is covered separately under the security-review gate).
 
 Cross-core: the same store/fetch/list/delete/check/prune sequence through
 CollectionWrapper in a subprocess on a separate collection file, comparing the

@@ -1,4 +1,4 @@
-"""Collection-layer find-and-replace (#85)."""
+"""Collection-layer find-and-replace."""
 
 from __future__ import annotations
 

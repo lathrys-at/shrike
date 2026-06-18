@@ -1,4 +1,4 @@
-"""Collection-layer tests for prune (#89): unused tags, empty notes, empty cards.
+"""Collection-layer tests for prune: unused tags, empty notes, empty cards.
 
 Exercises CollectionWrapper._prune / _find_empty_notes and the media-safe blank
 rule (embed_text.field_is_blank) directly, no server.

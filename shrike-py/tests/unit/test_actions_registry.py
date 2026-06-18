@@ -1,4 +1,4 @@
-"""The action registry (#276): shape and contract pins.
+"""The action registry: shape and contract pins.
 
 The behavioural gate is the tools-layer unit files + the integration suite
 passing unmodified through ``register_tools`` (they do); this pins the registry
@@ -51,8 +51,7 @@ def test_registry_carries_the_full_tool_surface(kharness) -> None:
 
 def test_actions_are_translation_ready(kharness) -> None:
     # Coarse async impls with documented contracts and model return annotations —
-    # what lets another adapter (or the Rust registry at stretch slice 2) bind
-    # the same registry without FastMCP.
+    # what lets another adapter bind the same registry without FastMCP.
     ctx = ActionContext(wrapper=kharness.wrapper, kernel=kharness.kernel)
     for action in build_actions(ctx):
         assert inspect.iscoroutinefunction(action.impl), action.name
@@ -62,8 +61,8 @@ def test_actions_are_translation_ready(kharness) -> None:
 
 
 def test_build_actions_requires_a_kernel(wrapper) -> None:
-    # The standalone (facade) mode retired with #355: a kernel-less context is
-    # a configuration error, surfaced loudly at registry build time.
+    # A kernel-less context is a configuration error, surfaced loudly at
+    # registry build time.
     import pytest
 
     with pytest.raises(ValueError, match="kernel mode"):

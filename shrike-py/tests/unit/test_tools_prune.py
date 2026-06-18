@@ -1,11 +1,10 @@
-"""Tool-layer tests for collection_prune (#89): index maintenance + defaults.
+"""Tool-layer tests for collection_prune: index maintenance + defaults.
 
 Empty notes/cards delete notes, so their vectors must leave the index;
-clearing unused tags is a col_mod-only metadata change. Since the #391
-re-home the whole op — cleanups AND that maintenance tail — runs inside the
-kernel's collection_prune, so the assertions read observable state (the
-shared engine, the index watermark) rather than spying host-side kernel
-calls that no longer happen.
+clearing unused tags is a col_mod-only metadata change. The whole op —
+cleanups AND that maintenance tail — runs inside the kernel's collection_prune,
+so the assertions read observable state (the shared engine, the index
+watermark) rather than spying host-side kernel calls that no longer happen.
 """
 
 from __future__ import annotations
@@ -93,7 +92,7 @@ class TestCollectionPruneTool:
         assert kharness.engine.contains(blank)
 
     def test_applies_by_default(self, kharness, mcp_app):
-        # dry_run defaults to false now — omitting it applies the cleanup.
+        # dry_run defaults to false — omitting it applies the cleanup.
         blank = _blank_note(kharness)
         result = kharness.call_tool(mcp_app, "collection_prune", {"empty_notes": True})
         assert result["dry_run"] is False

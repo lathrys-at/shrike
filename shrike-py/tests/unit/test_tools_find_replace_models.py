@@ -1,13 +1,12 @@
-"""Tool-layer tests for find_replace_note_types (#76, findAndReplaceInModels).
+"""Tool-layer tests for find_replace_note_types (findAndReplaceInModels).
 
 Editing a note type's template HTML / CSS never changes any note's embedding
 text, so a successful replace must advance the kernel's stored watermark
 (avoiding a spurious rebuild) WITHOUT touching vectors — the same
 metadata-bump contract as the tag/deck ops. A no-op replace (no matches)
-saves nothing and bumps nothing. Since the #391 re-home that tail runs
-inside the kernel's op, so the assertions read observable state (the index
-watermark, col.mod itself) rather than spying host-side kernel calls that
-no longer happen.
+saves nothing and bumps nothing. That tail runs inside the kernel's op, so the
+assertions read observable state (the index watermark, col.mod itself) rather
+than spying host-side kernel calls that no longer happen.
 """
 
 from __future__ import annotations

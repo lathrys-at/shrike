@@ -1,11 +1,9 @@
-# NOTE (#278 cutover): the Python-engine degradation + cross-engine file-compat
-# tests retired with the Python engines; the native engine is the only path.
-"""Native derived-text engine (#281): on-disk round-trip + always-available FTS5.
+"""Native derived-text engine: on-disk round-trip + always-available FTS5.
 
 The behavioural gate is test_derived.py, which runs entirely on the native
-engine since the #278 cutover. This file pins the rest: a ``shrike.db`` written
-by one instance opens and searches identically under a fresh one (plain SQLite
-file compatibility), and the bundled-SQLite build never fails the FTS5 probe.
+engine. This file pins the rest: a ``shrike.db`` written by one instance opens
+and searches identically under a fresh one (plain SQLite file compatibility),
+and the bundled-SQLite build never fails the FTS5 probe.
 """
 
 from __future__ import annotations
@@ -61,17 +59,17 @@ class TestNativeDerivedEngine:
         reopened.close()
 
     def test_probe_passes_on_native_path(self) -> None:
-        # Under the default (bundled-SQLite) build the native probe must pass —
-        # the #281 guarantee. A platform-linked build (#300) probes the host
-        # library instead; this dev/CI build is the bundled one.
+        # Under the default (bundled-SQLite) build the native probe must pass.
+        # A platform-linked build probes the host library instead; this dev/CI
+        # build is the bundled one.
         import shrike_native
 
         assert DerivedTextStore._probe_fts5() is True
         assert shrike_native.derived_fts5_probe() is True
 
     def test_bundled_flag_matches_probe_guarantee(self) -> None:
-        # Diagnostics surface (#300): when the build claims bundled SQLite, the
-        # probe may never fail; otherwise it merely reports the host library.
+        # Diagnostics surface: when the build claims bundled SQLite, the probe
+        # may never fail; otherwise it merely reports the host library.
         import shrike_native
 
         if shrike_native.derived_sqlite_bundled():

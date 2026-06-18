@@ -1,9 +1,9 @@
-"""Unit coverage for the `shrike search` group (#683).
+"""Unit coverage for the `shrike search` group.
 
-The retrieval group rehomes `note search` to `search <query>` (a default-command
-group) and `collection query` to `search query`, and adds `search coverage` (the
-cross-modal coverage matrix, moved out of `server status`). These drive the group
-with a mocked client via Click's CliRunner — no server.
+The retrieval group exposes `search <query>` (a default-command group),
+`search query`, and `search coverage` (the cross-modal coverage matrix, not in
+`server status`). These drive the group with a mocked client via Click's
+CliRunner — no server.
 """
 
 from __future__ import annotations
@@ -172,7 +172,7 @@ def _match(**kw: Any) -> SearchMatch:
 
 class TestSearchMatchBadges:
     """The `search` pretty badge shows a non-text provenance facet, but not `text`/`exact`
-    which the score / `match:` badges already imply (#182 review)."""
+    which the score / `match:` badges already imply."""
 
     def test_image_facet_renders(self):
         # The keep-branch: a non-text modality is otherwise invisible from a bare score, so it
@@ -217,7 +217,7 @@ class TestSearchMatchBadges:
         assert _search_match_badges(m) == "image · 0.30 · match: Front"
 
     def test_fuzzy_facet_renders(self):
-        # A fuzzy-only near-miss (#98) is otherwise invisible (no score, no `match:`), so the
+        # A fuzzy-only near-miss is otherwise invisible (no score, no `match:`), so the
         # `fuzzy` facet surfaces on its own — like `image`, it's a non-{text,exact} signal.
         m = _match(
             fuzzy=FuzzyMatch(source="field", ref="Front", snippet="…protein…"),

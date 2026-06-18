@@ -1,4 +1,4 @@
-"""Exact substring search (#86): substring_info helper + wrapper.search_substring."""
+"""Exact substring search: substring_info helper + wrapper.search_substring."""
 
 from __future__ import annotations
 

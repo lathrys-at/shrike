@@ -1,4 +1,4 @@
-"""Custom-route access logging (#328): every guarded route — /status polls
+"""Custom-route access logging: every guarded route — /status polls
 included — logs method, path, status, and duration at INFO."""
 
 from __future__ import annotations

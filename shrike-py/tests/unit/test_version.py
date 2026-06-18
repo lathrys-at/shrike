@@ -1,10 +1,10 @@
 """Version consistency checks.
 
-Issue #44 was version drift: ``__version__`` was a hand-maintained constant that
-lagged the release tag. The fix (#42) makes the version *derived* from the git
-tag via hatch-vcs, so drift is structurally impossible. These tests verify the
-wiring: the version is generated (not the import fallback), well-formed, and
-consistent with the latest tag.
+The version is *derived* from the git tag via hatch-vcs rather than a
+hand-maintained ``__version__`` constant that could lag the release tag, so
+drift is structurally impossible. These tests verify the wiring: the version is
+generated (not the import fallback), well-formed, and consistent with the
+latest tag.
 """
 
 from __future__ import annotations
@@ -36,10 +36,10 @@ def _latest_release_tag() -> str | None:
 def test_version_is_derived() -> None:
     """The build hook generated _version.py — asserted *directly*.
 
-    ``shrike.__version__`` now falls back to installed-distribution metadata when
-    ``_version.py`` is absent (#243), so a bare ``!= "0.0.0+unknown"`` check would
+    ``shrike.__version__`` falls back to installed-distribution metadata when
+    ``_version.py`` is absent, so a bare ``!= "0.0.0+unknown"`` check would
     pass on an *unbuilt* checkout that merely has ``shrike-py`` installed
-    elsewhere — masking the #44 drift this guard exists to catch. So check
+    elsewhere — masking the drift this guard exists to catch. So check
     generation at the source: import the generated module (its absence means the
     build hook didn't run) and confirm the package re-exports exactly it.
     """
@@ -57,8 +57,7 @@ def test_version_is_derived() -> None:
 
 
 def test_version_at_least_latest_tag() -> None:
-    """The derived version is >= the latest release tag — it can never lag it
-    (the original #44 drift)."""
+    """The derived version is >= the latest release tag — it can never lag it."""
     latest = _latest_release_tag()
     if latest is None:
         pytest.skip("no git tags available in this checkout")
@@ -68,9 +67,9 @@ def test_version_at_least_latest_tag() -> None:
 
 def test_cli_version_flag_works() -> None:
     """`shrike --version` must not depend on the distribution being named
-    `shrike`. It broke once when the PyPI name became `shrike-mcp` but Click's
-    version_option still looked up metadata for `shrike` (#61). Feeding the
-    version directly from __version__ avoids the lookup."""
+    `shrike`. A PyPI name like `shrike-mcp` would break a Click version_option
+    that looked up metadata for `shrike`. Feeding the version directly from
+    __version__ avoids the lookup."""
     from click.testing import CliRunner
 
     from shrike.cli import cli
