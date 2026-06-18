@@ -106,9 +106,9 @@ cd jina-llama.cpp && cmake -B build && cmake --build build --config Release -j
   download home:
 
   ```bash
-  python -c "from pathlib import Path; \
-    from tests.integration.model_cache import cached_mobileclip2_model_dir; \
-    print(cached_mobileclip2_model_dir(Path.home() / '.cache' / 'shrike-test-models'))"
+  python -c "from tests.integration.model_cache import \
+      cached_mobileclip2_model_dir, default_model_cache_base; \
+    print(cached_mobileclip2_model_dir(default_model_cache_base()))"
   ```
 
 ### 3. Point the profile at them and run
@@ -198,9 +198,9 @@ fetch them (`tests/integration/model_cache.cached_multimodal_model_dir`) if you
 prefer one download home:
 
 ```bash
-python -c "from pathlib import Path; \
-  from tests.integration.model_cache import cached_multimodal_model_dir; \
-  print(cached_multimodal_model_dir(Path.home() / '.cache' / 'shrike-test-models'))"
+python -c "from tests.integration.model_cache import \
+    cached_multimodal_model_dir, default_model_cache_base; \
+  print(cached_multimodal_model_dir(default_model_cache_base()))"
 ```
 
 ### 3. Point the profile at them and run

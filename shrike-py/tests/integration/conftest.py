@@ -43,6 +43,7 @@ from tests.integration.model_cache import (
     cached_model_path,
     cached_onnx_fp32_model_dir,
     cached_onnx_model_dir,
+    default_model_cache_base,
     download_with_retry,
 )
 
@@ -858,8 +859,8 @@ def multimodal_paths() -> dict[str, str]:
     ``requires_multimodal``, so the binary is non-None whenever a consuming
     test runs.
 
-    The cache base is ``$SHRIKE_TEST_MODEL_DIR`` else the persistent
-    ``~/.cache/shrike-test-models`` (NOT a throwaway tmp — this 625 MB model
+    The cache base is ``$SHRIKE_TEST_MODEL_DIR`` else the shared dev-cache
+    ``~/.cache/shrike-dev/models`` (NOT a throwaway tmp — this 625 MB model
     shouldn't re-download per session)."""
     from tests.integration.model_cache import (
         MULTIMODAL_TEXT_NAME,
@@ -869,8 +870,7 @@ def multimodal_paths() -> dict[str, str]:
 
     binary = _multimodal_llama_server()
     assert binary is not None  # requires_multimodal gates every consumer
-    persistent_cache = Path.home() / ".cache" / "shrike-test-models"
-    model_dir = cached_multimodal_model_dir(persistent_cache)
+    model_dir = cached_multimodal_model_dir(default_model_cache_base())
     model = os.environ.get(MULTIMODAL_MODEL_ENV) or str(model_dir / MULTIMODAL_TEXT_NAME)
     vision = os.environ.get(MULTIMODAL_VISION_MMPROJ_ENV) or str(
         model_dir / MULTIMODAL_VISION_MMPROJ_NAME
@@ -889,51 +889,53 @@ requires_shrike_native = pytest.mark.skipif(
 
 
 @pytest.fixture(scope="session")
-def onnx_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def onnx_model() -> Path:
     """A small ONNX text-embedding model dir (model.onnx + tokenizer.json).
 
     Same all-MiniLM-L6-v2 as the GGUF fixture, in ONNX form (384-dim), so the two
     backends share the same vector space and semantic assertions. Downloaded with
-    retry/backoff and reused from the CI-cached model dir (``$SHRIKE_TEST_MODEL_DIR``).
+    retry/backoff and reused from the CI-cached model dir (``$SHRIKE_TEST_MODEL_DIR``,
+    else the shared dev-cache ``~/.cache/shrike-dev/models``).
     """
-    return cached_onnx_model_dir(tmp_path_factory.mktemp("onnx-model"))
+    return cached_onnx_model_dir(default_model_cache_base())
 
 
 @pytest.fixture(scope="session")
-def distilroberta_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def distilroberta_model() -> Path:
     """A second, architecturally-different ONNX model: DistilRoBERTa (768-dim, BPE).
 
     Its own vector space (not comparable to MiniLM) and no ``[PAD]`` token, so it
     exercises the RoBERTa-only paths the MiniLM can't (#172). Same retry/cache path.
     """
-    return cached_distilroberta_model_dir(tmp_path_factory.mktemp("distilroberta-model"))
+    return cached_distilroberta_model_dir(default_model_cache_base())
 
 
 @pytest.fixture(scope="session")
-def onnx_fp32_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def onnx_fp32_model() -> Path:
     """The fp32 (non-quantized) MiniLM ONNX model — batches bit-exact, so it proves the
     batch-safety probe lets a safe model batch (#174). Same retry/cache path."""
-    return cached_onnx_fp32_model_dir(tmp_path_factory.mktemp("onnx-fp32-model"))
+    return cached_onnx_fp32_model_dir(default_model_cache_base())
 
 
 @pytest.fixture(scope="session")
-def clip_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def clip_model() -> Path:
     """A small CLIP (int8 text+vision graphs) for image<->text tests (#162 Phase 3b).
 
     Use with ``ClipBackend(model=str(clip_model), variant="quantized")``. Same retry/cache path.
     """
-    return cached_clip_model_dir(tmp_path_factory.mktemp("clip-model"))
+    return cached_clip_model_dir(default_model_cache_base())
 
 
 @pytest.fixture(scope="session")
-def embedding_model(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def embedding_model() -> Path:
     """Provide a small embedding model for tests.
 
     Reuses an already-downloaded copy (a stable, CI-cached dir via
-    ``$SHRIKE_TEST_MODEL_DIR``, else a per-session temp dir) and downloads with
-    retry/backoff so a transient HuggingFace 429 doesn't fail the lane (#83).
+    ``$SHRIKE_TEST_MODEL_DIR``, else the shared dev-cache ``~/.cache/shrike-dev/models``)
+    and downloads with retry/backoff so a transient HuggingFace 429 doesn't fail the
+    lane (#83).
     """
-    model_path = cached_model_path(EMBEDDING_MODEL_NAME, tmp_path_factory.mktemp("models"))
+    model_path = cached_model_path(EMBEDDING_MODEL_NAME, default_model_cache_base())
     if model_path.exists() and model_path.stat().st_size > 0:
         return model_path
     return download_with_retry(EMBEDDING_MODEL_URL, model_path)

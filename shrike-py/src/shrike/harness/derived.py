@@ -81,8 +81,8 @@ class NativeDerivedEngine:
 
     A thin marshaling adapter over ``shrike_native.DerivedTextEngine``. Under
     the default build the extension bundles its own SQLite, so FTS5 + trigram
-    are deterministically available; a platform-linked build (#300,
-    ``scripts/build-native.sh --system-sqlite``) relies on the host library, so :meth:`probe`
+    are deterministically available; a platform-linked build (#300, a cargo-only
+    ``--no-default-features`` build) relies on the host library, so :meth:`probe`
     genuinely probes either way (trivially true when bundled). Native errors
     are translated to ``sqlite3.Error`` so the facade's recovery/fallback logic
     is engine-agnostic.

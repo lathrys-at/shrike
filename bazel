@@ -40,7 +40,13 @@ if [ -z "$expected" ]; then
   exit 1
 fi
 
-cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/shrike/bazelisk/${BAZELISK_VERSION}"
+# The shared dev-cache root (~/.cache/shrike-dev), namespaced distinctly from the
+# app's OWN runtime cache (which on Linux is ~/.cache/shrike via XDG). Pinned
+# artifacts go under a version-encoded subdir (BAZELISK_VERSION here) so a second
+# checkout on the same machine — pinning a different version — can't collide. See
+# CLAUDE.md "Cacheable dev artifacts".
+dev_cache="${XDG_CACHE_HOME:-$HOME/.cache}/shrike-dev/build"
+cache_dir="${dev_cache}/bazelisk/${BAZELISK_VERSION}"
 bin="${cache_dir}/bazelisk-${plat}"
 
 verify() { # $1=file $2=expected_sha256
@@ -84,6 +90,7 @@ elif [ -n "$pinned_version" ]; then
 fi
 
 # bazelisk reads .bazelversion in the repo root; keep its own download cache
-# under ours so it's easy to find/clear.
-export BAZELISK_HOME="${BAZELISK_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/shrike/bazelisk-home}"
+# (it version-keys the Bazel binaries internally) under our dev-cache so it's
+# easy to find/clear.
+export BAZELISK_HOME="${BAZELISK_HOME:-${dev_cache}/bazelisk-home}"
 exec "$bin" "$@"

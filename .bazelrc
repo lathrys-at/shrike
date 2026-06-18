@@ -2,7 +2,7 @@
 #
 # Machine/personal overrides go in .bazelrc.user (gitignored), e.g. a local
 # build cache:
-#   build --disk_cache=/Users/you/.cache/shrike/bazel-disk
+#   build --disk_cache=/Users/you/.cache/shrike-dev/build/bazel-disk
 # NOTE: Bazel does NOT expand ~ in flags — use an absolute path. CI passes
 # --disk_cache explicitly (persisted via actions/cache), so it isn't hardcoded here.
 

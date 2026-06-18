@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
-# Build the Shrike native extension with cargo and install it (editable) into the
-# active venv (#269). The canonical release artifact is the Bazel wheel (//shrike-py:wheel —
-# the platform-tagged shrike-mcp wheel ships shrike_native inside it since #497);
-# this is the fast inner loop for the pip lane:
+# Build the Shrike native extension via Bazel and install it into the active
+# venv (#269) — the fast inner loop for the pip lane:
 #
 #   source .venv/bin/activate && scripts/build-native.sh
-#   pytest tests/unit -q          # facades now see the real extension
+#   pytest shrike-py/tests/unit -q     # facades now see the real extension
+#
+# Bazel builds //shrike-core/shrike-pyo3:native_so — the SAME _native.so the
+# release wheel ships (//shrike-py:wheel names it) — so the inner loop and the
+# canonical artifact share ONE build graph instead of a parallel cargo path.
+# `bazel cquery --output=files` locates the built .so (the house idiom from
+# tools/build-wheel.sh / tools/build-sdist.sh); we copy it into the source-tree
+# package dir and pip install that. Bazel builds anki + the engines hermetically,
+# so this lane needs no protoc on PATH (the old cargo lane did).
 #
 # Flags:
-#   --release         optimized build (default: debug, fastest compile)
-#   --system-sqlite   link the platform SQLite instead of bundling (#300);
-#                     FTS5/trigram availability is then probed at runtime
+#   --release   optimized build (bazel `-c opt`; default: fastbuild)
 #
-# Since the cutover the anki collection core is a DEFAULT cargo feature —
-# every build pulls the anki tree and needs protoc on PATH (brew/apt).
+# The system-SQLite linkage check (#300) is gone from here: the hermetic Bazel
+# build always bundles SQLite (FTS5 + trigram guaranteed, no system-linkage
+# config), and platform linkage is by definition a non-hermetic cargo concern.
+# For that rare local check run cargo directly:
+#   (cd shrike-core && cargo build -p shrike-pyo3 \
+#       --no-default-features --features "anki-core,engine-ort,engine-remote,manage-llama")
 #
 # Lives in shrike-core/scripts/ (with the workspace it builds) and is symlinked
 # back into top-level scripts/; resolve the repo root via git so it works from
@@ -21,28 +29,31 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-PROFILE="debug"
-CARGO_FLAGS=()
+BAZEL_FLAGS=()
+MODE="fastbuild"
 for arg in "$@"; do
   case "$arg" in
-    --release) PROFILE="release"; CARGO_FLAGS+=(--release) ;;
-    # Drop ONLY the bundling: re-enable the rest of the default (server) set
-    # (#499 — a bare --no-default-features would also drop anki-core and every
-    # engine, leaving an extension the server can't run on).
-    --system-sqlite) CARGO_FLAGS+=(--no-default-features --features "anki-core,engine-ort,engine-remote,manage-llama") ;;
+    --release) BAZEL_FLAGS+=(-c opt); MODE="opt" ;;
     *) echo "unknown arg: $arg" >&2; exit 1 ;;
   esac
 done
 
-(cd shrike-core && cargo build -p shrike-pyo3 ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"})
-
-case "$(uname -s)" in
-  Darwin) LIB="shrike-core/target/${PROFILE}/libshrike_pyo3.dylib" ;;
-  *)      LIB="shrike-core/target/${PROFILE}/libshrike_pyo3.so" ;;
-esac
+TARGET="//shrike-core/shrike-pyo3:native_so"
+# Python imports `shrike_native._native` from a file literally named `_native.so`;
+# this is the in-source-tree copy pip installs from.
 DEST="shrike-core/shrike-pyo3/python/shrike_native/_native.so"
-cp "$LIB" "$DEST"
-echo "built $DEST (${PROFILE})"
+
+# The first-class way to get a build artifact OUT of Bazel: build the target,
+# then `cquery --output=files` for its declared output path (config-correct —
+# pass the same flags so an `-c opt` build resolves the opt output dir).
+./bazel build ${BAZEL_FLAGS[@]+"${BAZEL_FLAGS[@]}"} "$TARGET" >&2
+BUILT="$(./bazel cquery --output=files ${BAZEL_FLAGS[@]+"${BAZEL_FLAGS[@]}"} "$TARGET" 2>/dev/null)"
+
+# Copy out of the build dir (Bazel outputs are read-only; cp -f + chmod keeps the
+# source-tree copy writable for the next rebuild and for tooling).
+cp -f "$BUILT" "$DEST"
+chmod u+w "$DEST"
+echo "built $DEST (bazel ${MODE})"
 
 # Plain (non-editable) install: hatchling editables use an import hook that
 # mypy/stubtest cannot resolve, and the .so changes each rebuild anyway.

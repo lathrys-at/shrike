@@ -1078,8 +1078,9 @@ discipline below.
    would fork behaviour across build lanes.** anki source patches ride
    `MODULE.bazel` `crate.annotation` (e.g. `shrike-core/patches/anki-version-bazel.patch`
    patching anki's `src/version.rs`), which applies **only** on the Bazel
-   lane. The cargo inner loop — `scripts/build-native.sh` → `cargo build -p
-   shrike-pyo3`, and `cargo test` — builds the *unpatched* anki checkout. A
+   lane. The plain cargo lane — `cargo build`/`cargo test` in `shrike-core/`
+   (`scripts/build-native.sh` now builds via Bazel, so it gets the patch) —
+   builds the *unpatched* anki checkout. A
    patch that changed anki's runtime accessor to prefer an injected
    `Handle` would therefore make `cargo test`/`pytest` and Bazel disagree on a
    **correctness** invariant (which runtime runs sync). Closing that gap would

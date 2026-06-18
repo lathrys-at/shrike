@@ -48,7 +48,11 @@ CLIP_SPACE_KEY = "clip"
 
 def model_cache_base() -> Path:
     base = os.environ.get("SHRIKE_TEST_MODEL_DIR")
-    return Path(base) if base else (Path.home() / ".cache" / "shrike-test-models")
+    if base:
+        return Path(base)
+    from tests.integration.model_cache import default_model_cache_base
+
+    return default_model_cache_base()
 
 
 _IMG_TOKEN = re.compile(r"\$IMG:([A-Za-z0-9_-]+)")

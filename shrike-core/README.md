@@ -87,8 +87,9 @@ cd native && cargo check -p shrike-pyo3 --no-default-features \
 
 **SQLite linkage (#300):** `shrike-derived` bundles its own SQLite by default
 (FTS5 + trigram guaranteed — the #281 property; release wheels keep this).
-`scripts/build-native.sh --system-sqlite` (or `cargo build -p shrike-pyo3
---no-default-features --features <the server set minus bundled-sqlite>`)
+A platform-linkage check is a non-hermetic, cargo-only build (the Bazel graph and
+`scripts/build-native.sh` always bundle): `cargo build -p shrike-pyo3
+--no-default-features --features "anki-core,engine-ort,engine-remote,manage-llama"`
 links the platform libsqlite3 instead — any sqlite3-ABI-compatible library works via the standard
 libsqlite3-sys overrides (pkg-config / `SQLITE3_LIB_DIR`), including libsql
 builds exposing the sqlite3 C API. Under platform linkage FTS5/trigram are

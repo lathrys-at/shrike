@@ -200,24 +200,39 @@ source .venv/bin/activate
 One step, idempotent (re-run it any time as a repair button). It picks the
 pinned interpreter (`.python-version`, via pyenv if present else `python3.12`),
 installs the editable package + dev tooling, and builds the Rust `shrike_native`
-extension — `pip install` alone does **not** build it (that's a separate cargo
-step, #573). Refreshes after that are automatic if you use direnv (`.envrc`
+extension — `pip install` alone does **not** build it (that's a separate Bazel
+build via `scripts/build-native.sh`, #573). Refreshes after that are automatic if you use direnv (`.envrc`
 rebuilds a stale extension on `cd`); without direnv, `pytest` fails loud if the
 extension is stale rather than silently importing a stale `.so` (see Tests
 below). Python 3.12 is used (managed via pyenv; `.python-version` is at repo
 root). The `anki` package requires Python >= 3.11.
 
-**Cacheable dev artifacts go in the repo-root `.cache/`, not `~/.cache`.**
-Downloaded toolchains, test models, and build inputs cache under `<repo>/.cache/`
-(gitignored) so they stay with the checkout instead of polluting your home or
-colliding across checkouts. Use this rule for any new cacheable dev/build work,
-and don't redirect a build system's output directory elsewhere just to manage
-disk (bound disk via controlled parallelism + cleanup instead). Two
-intentional exceptions live under `~/.cache`: the `./bazel`/bazelisk launcher
-cache and the shared test-model cache (`SHRIKE_TEST_MODEL_DIR`, default
-`~/.cache/shrike-test-models`). This is dev/build caching; it is separate from
-the *application's* runtime cache dir (the platform `Cache` directory under
-Platform directories below).
+**Cacheable dev artifacts go under a Shrike-owned cache, never `/tmp` and never a
+bare `~/.cache`.** Two tiers, by lifetime:
+
+- **Shared dev cache — `~/.cache/shrike-dev/`** (`$XDG_CACHE_HOME` honored):
+  expensive, checkout-*independent* artifacts shared across every checkout/worktree
+  — the `./bazel` launcher's bazelisk + Bazel binaries (under `build/`) and the
+  downloaded test-fixture models (under `models/`, overridable via
+  `SHRIKE_TEST_MODEL_DIR`, which CI sets). Anything pinned sits under a
+  version-encoded subdir (`build/bazelisk/<version>/`, `models/<pinned-dir-name>/`)
+  so a second checkout pinning a different version can't collide or serve a stale
+  artifact. The `shrike-dev` namespace is deliberately distinct from the
+  *application's* own runtime cache (on Linux that's `~/.cache/shrike/` via XDG —
+  see Platform directories), which would otherwise collide.
+- **Per-checkout cache — `<repo>/.cache/`** (gitignored): cheap, checkout-*specific*
+  scratch and derived data that belongs with this tree — and the home for any
+  throwaway/temp file a script or agent needs.
+
+**Never `/tmp`.** Don't write scratch, fixtures, or caches to `/tmp`/`$TMPDIR`
+(it accumulates across runs, survives failures, and bleeds between users), and
+don't write guidance or code that sends an agent or a test there — use
+`<repo>/.cache/` (or, under Bazel, the sandbox's `$TEST_TMPDIR`) instead. Tests
+that need scratch base it under the workspace, not the system temp dir. Don't
+redirect a build system's output directory elsewhere just to manage disk (bound
+disk via controlled parallelism + cleanup instead). This is dev/build caching; it
+is separate from the *application's* runtime cache dir (the platform `Cache`
+directory under Platform directories below).
 
 ## Running commands
 

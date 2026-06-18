@@ -32,8 +32,8 @@ local disk cache makes unchanged targets free. Python itself is hermetic
 | | pip lane | Bazel lane |
 |---|---|---|
 | Purpose | fast iteration, debugging | the authoritative gate (CI, release) |
-| Build | `scripts/build-native.sh` (cargo → venv) | `./bazel build/test ...` |
-| Test | `pytest tests/unit tests/native -q` | `./bazel test //...` |
+| Build | `scripts/build-native.sh` (bazel → venv) | `./bazel build/test ...` |
+| Test | `pytest shrike-py/tests/unit shrike-py/tests/native -q` | `./bazel test //...` |
 | Debug affordances | `-x`, `-s`, `pdb`, `--testmon`, warm xdist | `--test_output=errors`, per-target logs |
 | Coverage | `scripts/coverage.sh` (the published number + the fail_under gate) | `scripts/coverage-bazel.sh` (#262; subprocess-capturing, report-only) |
 

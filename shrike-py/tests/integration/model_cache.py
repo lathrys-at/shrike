@@ -16,6 +16,21 @@ from pathlib import Path
 
 import httpx
 
+
+def default_model_cache_base() -> Path:
+    """The shared dev-cache models dir (the ``$SHRIKE_TEST_MODEL_DIR``-unset default):
+    ``~/.cache/shrike-dev/models`` (``$XDG_CACHE_HOME`` honored). Fixture models are
+    expensive and checkout-independent, so they live in the shared dev cache — NOT
+    per-checkout, ``~/.cache`` top-level, or a per-session ``/tmp`` dir (CLAUDE.md
+    "Cacheable dev artifacts"). Each model is keyed by its pinned dir-name/filename,
+    so two checkouts pinning different models never collide. Pass this where a
+    *fallback_dir* is taken; the ``cached_*`` resolvers give ``$SHRIKE_TEST_MODEL_DIR``
+    precedence over it (CI / cross-checkout overrides set it)."""
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    base = Path(cache_home) if cache_home else Path.home() / ".cache"
+    return base / "shrike-dev" / "models"
+
+
 # Pinned test embedding model. Bump manually (URL + name together) to change it;
 # the CI cache-warmer and the test fixture both read these so they stay in sync.
 EMBEDDING_MODEL_URL = (

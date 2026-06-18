@@ -33,6 +33,7 @@ from pathlib import Path
 import pytest
 
 from tests.integration.conftest import requires_clip, requires_search_quality
+from tests.integration.model_cache import default_model_cache_base
 
 pytestmark = [pytest.mark.integration, pytest.mark.search_quality, requires_search_quality]
 
@@ -49,7 +50,7 @@ MIN_IMAGE_NOTES = 30
 
 def _model_cache_base() -> Path:
     base = os.environ.get("SHRIKE_TEST_MODEL_DIR")
-    return Path(base) if base else (Path.home() / ".cache" / "shrike-test-models")
+    return Path(base) if base else default_model_cache_base()
 
 
 class TestCorpusManifest:
