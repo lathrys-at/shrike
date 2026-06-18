@@ -368,15 +368,16 @@ added nothing and deleted a large adaptation layer (a hand-rolled executor, a ti
 asyncio loop, a polling bridge) that bought runtime-portability the platforms never demanded. The
 shape:
 
-- Process-global runtime in `shrike_kernel::runtime`; only the `Handle` escapes. `init_runtime`
-  can install a `current_thread` runtime that runs the whole kernel on one thread (which keeps "no
-  `block_in_place`" honest).
+- Runtime in `shrike_kernel::runtime`; only the `Handle` escapes. The kernel spawns no threads of
+  its own — the harness drives a `current_thread` runtime and donates every thread (see the
+  driven-model decision below).
 - **The collection is a task-actor** — one spawned task owns the core and runs jobs off an mpsc,
-  FIFO by construction (serialization from the loop, not thread affinity).
+  FIFO by construction (serialization from the loop, not thread affinity; no `block_in_place`).
 - **The action exchange is the edge** — `spawn_op` returns a oneshot-backed future pollable
   anywhere; dropping it **detaches** (never a `JoinHandle` abort, which could corrupt a
   half-applied write).
-- **Timers** ride `tokio::time`; **engine execution** is one eager `spawn_blocking` (`Blocking<E>`).
+- **Timers** ride `tokio::time`; **engine execution** is one eager dispatch through `Blocking<E>`,
+  routed to the driven compute pool.
 
 ### anki keeps its sync runtime; the kernel pins sync off the runtime worker
 
@@ -386,9 +387,100 @@ pinned by `runtime_singularity`), but client sync will wake it, so two runtimes 
 Patching anki to keep one runtime was rejected because (1) the patch mechanism is **Bazel-only**,
 so it would make `cargo test` and Bazel disagree on a correctness invariant unless we fork anki,
 and (2) the panic hazard is **runtime-agnostic** — `block_on` panics from inside *any* runtime
-worker, so injecting the kernel's handle wouldn't remove it. The fix is a dispatch discipline:
-sync ops that may `block_on` **must go through `spawn_blocking`** (a blocking-pool thread isn't a
-runtime context), pinned by the `sync_dispatch_pin` panic-repro test.
+worker, so injecting the kernel's handle wouldn't remove it. The invariant is now **structural**:
+every kernel-side sync op routes through `dispatch_sync`, which enqueues onto the non-runtime
+`drive_sync` thread (see the driven-model decision below), where anki's `block_on` is legal by
+construction — not by a `spawn_blocking` discipline a caller must remember. The `sync_dispatch_pin`
+test pins the hazard and the safe site.
+
+### One threading model across both bindings: the harness drives, shrike-core spawns nothing
+
+The two host bindings drove the kernel with divergent threading. The PyO3 server rode the kernel's
+lazy **multi-thread** runtime (tokio owned and spawned its own worker + blocking-pool threads) and
+bridged completion to the asyncio loop; `shrike-cabi` built a **`current_thread`** runtime with one
+dedicated thread parked in `block_on` to drive it, firing detached ops whose completion arrived via
+a C callback, with a bespoke iOS suspend-drain on top. So shrike-core dictated thread *policy* and
+each binding reinvented how the runtime was driven.
+
+The north star unifies them: **the harness owns every thread; shrike-core spawns none** (tokio's
+`spawn_blocking` pool included). shrike-core keeps owning its runtime, now a **`current_thread`**
+runtime it drives no threads for. The harness commits **N + 2** threads to the kernel for its life,
+through three drive entries, and submits work on its own request threads:
+
+- **`drive_io` ×1** — owns and drives tokio's IO + timer drivers via the runtime's `block_on` until
+  shutdown, and runs the async executor (the collection actor's dispatch, the debounced saver's
+  timers, every spawned op). Per tokio, the first `block_on` caller takes ownership of the drivers
+  and the others hook into it, so this thread must win that race (see the barrier below).
+- **`drive_sync` ×1** — the `SerializedCollection` actor's execution thread: serialized anki /
+  collection (SQLite) work and the anki client-sync release-run-reopen. One thread is a consequence
+  of anki's single-writer collection, not a tuning choice. Because it is never a runtime context,
+  anki's own `block_on` is legal here by construction — which makes the sync-dispatch invariant
+  (§ above) **structural** instead of a `spawn_blocking` discipline. `sync_dispatch_pin` is
+  re-expressed against this dispatch site.
+- **`drive_compute` ×N** — CPU-bound engine compute (ort/CLIP, and apple via the `Blocking<E>`
+  adapter) plus blocking-fs leaves. This is the only place real parallelism lives, so the engine
+  search/batch overlap property becomes **"N ≥ 2"**. N is the harness's choice, sized to its cores.
+
+Submission differs by host. The **server keeps the asyncio bridge** (`spawn_op` + an awaited
+`asyncio.Future`): its MCP handlers are coroutines on one loop and must not block it. **Threaded
+hosts** (cabi, synchronous hosts, tests) use `submit_blocking` — submit a unit of work and block
+the request thread on a completion channel. The bridge is preserved, not retired; what changed
+underneath is invisible to a handler (`drive_io` drives the runtime instead of tokio workers, and
+`Blocking<E>` dispatches to `drive_compute` instead of `spawn_blocking`).
+
+This **replaces** the prior model, in which the kernel self-drove a lazy multi-thread tokio runtime
+(tokio spawning its own worker + blocking-pool threads) and `dispatch_sync`/`dispatch_compute`
+bottomed out in `spawn_blocking`. The driven `current_thread` runtime is the runtime going
+forward; the transitional multi-thread default that let the bindings cut over incrementally is
+removed in #840, leaving the driven model alone. The harness installs the runtime via
+`init_driven_runtime` before any kernel op.
+
+Decisions and invariants:
+
+- **Startup driver-ownership barrier.** tokio gives IO/timer-driver ownership to the first
+  `block_on` caller, which MUST be `drive_io`. The harness spawns `drive_io` first, then a
+  `runtime_probe` — schedule a trivial executor-only op and block until it completes, proving the
+  IO thread owns the drivers — BEFORE spawning `drive_sync`/`drive_compute`. Without it a leaf could
+  win ownership and timers/IO would advance only while that leaf parks in `recv`, a flaky
+  starvation (#836).
+- **Per-binding thread provisioning.** The binding (`shrike-pyo3`, `shrike-cabi`) *exposes* the
+  drive entries; the harness *above* it owns the threads. The server's `driven_runtime.py` spawns
+  N + 2 `threading.Thread`s into the GIL-releasing pyo3 `drive_io`/`drive_sync`/`drive_compute`
+  entries (GIL-released for the thread's life, so native compute gets real parallelism). cabi
+  exposes blocking C entries `shrike_drive_io`/`shrike_drive_sync`/`shrike_drive_compute` +
+  `shrike_runtime_probe`; the native host (Swift/Kotlin) spawns and joins the OS threads. cabi
+  spawns nothing — it is shrike-core. `shrike_runtime_init` installs the runtime only.
+- **Shutdown is host-shaped.** The server drains via the bridge (`manager.close` awaits each
+  `kernel.close`) and then calls `drive_pools_shutdown`. cabi has no bridge-await — its ops are
+  detached fire-and-forget with a C callback as their only observation — so its shutdown entry
+  retains a thinned admit/inflight gate: set a terminal shutdown flag (new ops fast-fail), drain
+  in-flight ops while `drive_io` is still live (bounded by `DRAIN_TIMEOUT`, mirroring the server's
+  committed-thread join timeout), then `shutdown_driven_pools` closes the queues so the host can
+  join its threads. This subsumes the iOS-runtime lift (#714).
+- **Remote engines went async.** `embed-remote`/`describe-remote` implement the async
+  `Embedder`/`Recognizer` traits directly (reqwest IO on `drive_io`) behind an SSRF-pinned async
+  HTTP client; `media_fetch` too. So `drive_compute` stays pure CPU, and engine-api's two
+  conformance routes map cleanly onto the two pools: sync-compute-behind-`Blocking<E>` →
+  `drive_compute`, async-direct → `drive_io`.
+- **Deadlock leaf-invariant.** Every pool job is a leaf: an enqueued `drive_sync`/`drive_compute`
+  job never enqueues-and-awaits further pool work — the read→compute→write orchestration fans out
+  and awaits on the async side (`drive_io`), and compute is handed its inputs after the actor reads
+  (the "discover ids → one batched read → compute" pattern keeps compute collection-free). A fixed
+  pool can't exhaust itself. A debug-build thread-local tripwire asserts it.
+
+Read concurrency: the single `drive_sync` thread serializes all collection access, so reads and
+writes do not run concurrently, and a background rebuild/reconcile competes with data-plane ops on
+that one thread.
+
+Follow-ups:
+
+- **#840 — remove the transitional multi-thread fallback.** The set-once seam carrying both the
+  driven and the prior multi-thread default existed only to let the bindings cut over incrementally;
+  #840 deletes the default path so the driven `current_thread` model is the sole runtime, completing
+  this decision.
+- **#832 — chunk/stream the derived rebuild**, so a large rebuild does not monopolize `drive_sync`.
+- **#833 — a boot/drift "maintenance window"** returning try-again-later on data-plane routes during
+  a rebuild/reconcile; #833 owns the concurrent-reads-vs-modifications decision.
 
 ### Wire-protocol versioning: name-versioned actions, one backstop
 
