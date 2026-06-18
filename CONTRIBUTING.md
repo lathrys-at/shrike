@@ -112,8 +112,8 @@ with reality).
   closed issues.
 - **Code comments document the code, not its history.** Future-facing invariants
   and interface docstrings stay; `(#NNN)` citations and historical narrative go in
-  issues, PRs, and `decisions.md`. The rule is in
-  [`docs/dev/conventions.md`](docs/dev/conventions.md).
+  issues, PRs, and `decisions.md`. The rule is in the Conventions section of
+  [`CLAUDE.md`](CLAUDE.md).
 
 ## Defect & limitation workflow
 
