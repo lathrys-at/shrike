@@ -556,6 +556,13 @@ fn driven_missing() -> NativeError {
 
 /// Test-support: install + drive the runtime so a test can run kernel futures.
 ///
+/// **Not part of the stable API** — these are test fixtures for driving the
+/// kernel runtime in tests (the kernel's own integration binaries, and the cabi
+/// in-crate smoke), `pub` only so those external test crates can reach them.
+/// They compile only where the kernel does: the kernel is the `anki-core`
+/// capability (an optional, `anki-core`-gated dependency of the bindings), so a
+/// compute-only / minimal-core build pulls in neither the kernel nor this module.
+///
 /// The runtime is harness-driven with no lazy fallback, so a test process must
 /// commit the driver threads itself — the maintainer's "1 + N injected fixture".
 /// This module donates them, once per process (the seam is set-once and the
