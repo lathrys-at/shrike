@@ -5052,6 +5052,7 @@ dependencies = [
  "shrike-error",
  "shrike-image",
  "shrike-network",
+ "shrike-platform",
  "tokenizers",
  "tracing",
  "ureq",
@@ -5155,7 +5156,6 @@ dependencies = [
  "shrike-engine-api",
  "shrike-error",
  "shrike-kernel",
- "shrike-recognize-apple",
  "shrike-schemas",
  "tokio",
  "tracing",
@@ -5170,6 +5170,10 @@ dependencies = [
  "ureq",
  "url",
 ]
+
+[[package]]
+name = "shrike-platform"
+version = "0.1.0"
 
 [[package]]
 name = "shrike-process"
@@ -5200,24 +5204,12 @@ dependencies = [
  "shrike-kernel",
  "shrike-llama-server",
  "shrike-media",
- "shrike-recognize-apple",
  "shrike-schemas",
  "shrike-store",
  "tokio",
  "tracing",
  "tracing-error",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "shrike-recognize-apple"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "shrike-engine-api",
- "shrike-error",
- "tracing",
 ]
 
 [[package]]

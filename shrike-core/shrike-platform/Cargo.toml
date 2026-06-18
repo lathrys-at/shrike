@@ -1,0 +1,28 @@
+# Raw platform-bindings glue (#709): the Swift/C-ABI bridges to Apple's Vision
+# OCR + SpeechAnalyzer ASR (Android later). GLUE ONLY — no engine contract (no
+# shrike-engine-api dep): exposes safe Rust wrappers returning the recognizer's
+# raw JSON; shrike-engine::apple parses them. The swiftc toolchain (build.rs) is
+# quarantined here, pulled only when engine-apple is on (mobile, never server).
+# macOS-only innards behind a 3-function C ABI; off macOS the calls return None
+# and the crate compiles to a stub, so the workspace builds everywhere. Building
+# on macOS requires full Xcode (the Swift Vision module isn't in the Command
+# Line Tools); running needs nothing extra.
+[package]
+name = "shrike-platform"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+build = "build.rs"
+
+[features]
+# The Apple platform recognizers (Vision OCR + SpeechAnalyzer ASR). The feature
+# gates the engine-side consumer; the glue itself compiles unconditionally (the
+# stub off macOS), so the off-macOS build needs no Swift toolchain.
+engine-apple = []
+# Android platform glue — a placeholder gate (no JNI/NDK bridge yet; #428 lands
+# behind it). Wired now so a future bridge slots in without a structural change.
+engine-android = []
+
+# Pure Rust, NO dependencies — and NO engine-api dep (the kernel↔ort firewall
+# sits ABOVE this glue): the engine layer parses the raw JSON this crate returns.
+[dependencies]

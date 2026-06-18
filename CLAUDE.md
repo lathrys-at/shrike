@@ -19,9 +19,9 @@ no engine, no platform, no transport; the contracts live in `shrike-engine-api`
 engine-contract impls live in one crate, `shrike-engine`, feature-gated by family:
 `onnx` (ort text + CLIP), `remote` (`remote::embed` over any OpenAI-compatible
 embeddings endpoint + `remote::describe` VLM image→text over chat-completions,
-sharing one SSRF-pinned `remote::http` client), with the Apple Vision/Speech
-recognizers (`engine-apple`, over `shrike-platform`'s Swift glue) joining in #709
-— with `shrike-llama-server` as the *lifecycle manager* producing the local
+sharing one SSRF-pinned `remote::http` client), and `engine-apple` (the Apple
+Vision/Speech `RecognizeMedia` impls, parsing `shrike-platform`'s raw Swift/C-ABI
+glue) — with `shrike-llama-server` as the *lifecycle manager* producing the local
 endpoint the remote engines talk to (manage-class, not an engine). Every production backend
 attaches native — kernel embeds/recognitions never enter Python;
 `PyEmbedder`/`PyRecognizer` capture remains the custom/test-backend escape hatch.
@@ -61,7 +61,7 @@ CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP, server/ = the h
                                                       ├──▶ DerivedEngine (FTS5 trigram sidecar, shrike.db)
                                                       ├──▶ EmbedService slot ◀── shrike-engine via shrike-engine-api
                                                       │       (onnx ort/CLIP; remote::embed ◀── shrike-llama-server)
-                                                      └──▶ RecognizeService slot ◀── shrike-engine remote::describe + shrike-recognize-apple (Vision OCR; →shrike-platform in #709)
+                                                      └──▶ RecognizeService slot ◀── shrike-engine (remote::describe; apple Vision OCR ◀── shrike-platform glue)
 ```
 
 ## Project layout
@@ -157,10 +157,13 @@ shrike-core/                      # the Rust workspace (the compute core) — si
 │                                 #   traits, the Blocking adapter, WithPolicy, the batch probe
 ├── shrike-engine/                # engine-contract impls, feature-gated by family (#708):
 │                                 #   onnx::{text,clip,session} (ort/tokenizers, GPU EPs) + remote::{embed,
-│                                 #   describe,http} (one SSRF-pinned ureq client; embed + VLM describe).
-│                                 #   The apple cone (engine-apple over shrike-platform) lands in #709.
+│                                 #   describe,http} (one SSRF-pinned ureq client; embed + VLM describe),
+│                                 #   apple::{vision,speech} (the Apple recognizer RecognizeMedia impls,
+│                                 #   parsing shrike-platform's raw JSON; feature engine-apple)
 ├── shrike-llama-server/          # llama-server lifecycle ONLY (spawn/health/reap/stop) — not an engine
-├── shrike-recognize-apple/       # Apple Vision OCR engine (Swift glue behind Rust; off-macOS stub; needs Xcode)
+├── shrike-platform/             # raw Swift/C-ABI recognizer GLUE (#709) — Vision OCR + SpeechAnalyzer
+│                                 #   ASR behind a C ABI (off-macOS stub; needs Xcode); NO engine contract
+│                                 #   (returns raw JSON; shrike-engine::apple parses it). Android-ready.
 ├── shrike-schemas/               # serde+schemars wire types (CANONICAL; schemas.py binds)
 ├── shrike-ffi/                   # the shared error taxonomy
 └── shrike-pyo3/                  # the pyo3 binding (the ONLY pyo3 crate) + shrike_native package
@@ -511,7 +514,7 @@ The embedding service can be cycled independently of the Shrike server. `Embeddi
 
 ### Recognition (OCR)
 
-**Recognition is the kernel's second injected capability** (the slot pattern, sibling of the embed slot): an OCR engine the harness attaches at assembly turns note media into searchable text. Off by default. **The server build no longer compiles the Apple Vision engine** (platform engines — `engine-apple` — are mobile-only on every OS; the server's replacement is the remote recognizer rows): `--ocr-backend apple` (config `recognition.ocr`, env `SHRIKE_OCR_BACKEND`) degrades the recognition state to `error` without disturbing boot, like the off-macOS case always did. The engine itself (`shrike-recognize-apple`, in mobile/`engine-apple` builds) is native; the platform glue is **Swift bolted behind Rust** (`swift/Recognize.swift` exports a 3-function C ABI driving Apple's Swift-only `RecognizeTextRequest` API, macOS 15+; Vision + the Swift runtime ship with the OS, but **building it on macOS needs full Xcode** — swiftc/the bazel genrule invoke via xcrun; the server build no longer pays that). Fingerprint `apple-vision-swift:{revision}:macos{X.Y.Z}`; off-macOS an unavailable stub. The Python contract is `RecognizerBackend` (`harness/engines/recognition/recognition.py`): a *blocking* `recognize(items: list[bytes]) -> list[tuple[str, float, str]]` (text, confidence, segments-JSON) plus `model_fingerprint()`; `PyRecognizer.capture` bridges it to the kernel (the custom/test seam; blocking calls ride the kernel runtime's blocking pool via `spawn_blocking` + GIL attach).
+**Recognition is the kernel's second injected capability** (the slot pattern, sibling of the embed slot): an OCR engine the harness attaches at assembly turns note media into searchable text. Off by default. **The server build no longer compiles the Apple Vision engine** (platform engines — `engine-apple` — are mobile-only on every OS; the server's replacement is the remote recognizer rows): `--ocr-backend apple` (config `recognition.ocr`, env `SHRIKE_OCR_BACKEND`) degrades the recognition state to `error` without disturbing boot, like the off-macOS case always did. The engine impl (`shrike-engine::apple`, in mobile/`engine-apple` builds) is native and parses the raw JSON the **glue crate** `shrike-platform` returns; that glue is **Swift bolted behind Rust** (`swift/Recognize.swift` exports a 3-function C ABI driving Apple's Swift-only `RecognizeTextRequest` API, macOS 15+; Vision + the Swift runtime ship with the OS, but **building it on macOS needs full Xcode** — swiftc/the bazel genrule invoke via xcrun; the server build no longer pays that). Fingerprint `apple-vision-swift:{revision}:macos{X.Y.Z}`; off-macOS an unavailable stub. The Python contract is `RecognizerBackend` (`harness/engines/recognition/recognition.py`): a *blocking* `recognize(items: list[bytes]) -> list[tuple[str, float, str]]` (text, confidence, segments-JSON) plus `model_fingerprint()`; `PyRecognizer.capture` bridges it to the kernel (the custom/test seam; blocking calls ride the kernel runtime's blocking pool via `spawn_blocking` + GIL attach).
 
 **One pass, many consumers** (the load-bearing rule): the kernel's `recognize_pending(max_items)` sweeps bounded batches of pending (note, image) pairs — pending = a resolvable image with no OCR row *and no below-gate marker* (a gate-dropped item is recorded in the derived store's `gated` table, so it's judged once, not re-OCR'd every sweep), or everything after the recognizer *fingerprint* changes (an OS upgrade re-derives rows AND markers, like a model change rebuilds vectors) — and persists BOTH the flattened text (derived rows, `source='ocr'` → substring/fuzzy search + provenance) and the per-segment structure (the `segments` table; boxes today). Gating (`RecognitionGate` kernel-side): confidence + substance to store at all, a higher substance bar to mint a vector. Gated text embeds via the TEXT encoder as extra vectors under the note key in the `text` space (no modality gap; max-over-items ranking falls out), and the per-note fingerprint folds the OCR text — byte-identical with none, so upgrades never spuriously rebuild. The derived store's drift rebuild is **field-source-scoped** (schema v2): a boot drift never discards recognition rows. The harness drives sweeps in the background (`recognition_sweep`, one batch per executor occupancy); `/status` carries `recognition: {state, backend}`.
 

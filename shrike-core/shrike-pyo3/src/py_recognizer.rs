@@ -109,12 +109,12 @@ impl Recognizer for PyRecognizerHandle {
 #[cfg(feature = "engine-apple")]
 #[pyclass(frozen)]
 pub(crate) struct AppleVisionRecognizer {
-    engine: Arc<shrike_recognize_apple::AppleVisionRecognizer>,
+    engine: Arc<shrike_engine::apple::AppleVisionRecognizer>,
 }
 
 #[cfg(feature = "engine-apple")]
 impl AppleVisionRecognizer {
-    pub(crate) fn engine_arc(&self) -> Arc<shrike_recognize_apple::AppleVisionRecognizer> {
+    pub(crate) fn engine_arc(&self) -> Arc<shrike_engine::apple::AppleVisionRecognizer> {
         Arc::clone(&self.engine)
     }
 }
@@ -125,7 +125,7 @@ impl AppleVisionRecognizer {
     #[new]
     fn new() -> PyResult<Self> {
         let engine =
-            shrike_recognize_apple::AppleVisionRecognizer::new().map_err(crate::to_py_err)?;
+            shrike_engine::apple::AppleVisionRecognizer::new().map_err(crate::to_py_err)?;
         Ok(Self {
             engine: Arc::new(engine),
         })

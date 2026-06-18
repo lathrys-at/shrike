@@ -25,7 +25,7 @@ members = [
     "shrike-network",
     "shrike-process",
     "shrike-pyo3",
-    "shrike-recognize-apple",
+    "shrike-platform",
     "shrike-schemas",
     "shrike-store",
 ]

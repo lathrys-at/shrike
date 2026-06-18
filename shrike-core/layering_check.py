@@ -46,7 +46,6 @@ PYO3_ALLOWED = {"shrike-pyo3"}
 # instead.)
 ENGINE_CRATES = {
     "shrike-engine",  # every engine-contract impl, feature-gated by family (#708)
-    "shrike-recognize-apple",
     "shrike-llama-server",
 }
 
@@ -66,6 +65,7 @@ LAYER_FLOOR = {
     "shrike-image",  # the CLIP byte->pixels->CHW pipeline (#707) — decode/resize/normalize + BMP encode
     "shrike-media",  # inbound/untrusted-media (#711) — SSRF fetch + decode + prepare + MIME home
     "shrike-network",
+    "shrike-platform",  # raw Swift/C-ABI recognizer glue (#709) — GLUE ONLY, no engine contract; reached only via shrike-engine::apple
     "shrike-process",  # generic managed-subprocess lifecycle (#710) — ManagedProcess + Supervisor + the orphan reaper
     "shrike-schemas",
     "shrike-engine-api",  # the kernel<->ort firewall — a thin contract, stays floor

@@ -1,44 +1,15 @@
-//! Apple Vision OCR as a native engine crate (#342 P3; Swift glue since
-//! #398): Apple's new `RecognizeTextRequest` (macOS 15+, Swift-only) at
-//! accurate level with language correction, per-line text + confidence +
-//! normalized top-left boxes — the one-pass text+positions contract. The
-//! platform glue is Swift bolted behind Rust: `swift/Recognize.swift`
-//! exports a 3-function C ABI, `imp.rs` is the `extern "C"` shim, and the
-//! fingerprint took a hard cut (`apple-vision-swift:…`) so the new model
-//! lineage re-derives existing OCR rows exactly once.
-//!
-//! Route 1 of the engine contract: the C entries are synchronous (the Swift
-//! side bridges the async API internally — safe because these run on the
-//! kernel runtime's *blocking* pool via the `Blocking` adapter, disjoint
-//! from Swift's cooperative executor), so the engine implements
-//! [`RecognizeMedia`] (pure chunk compute, no execution assumptions). The
-//! struct holds only its cached fingerprint, so it is naturally
-//! `Send + Sync`.
-//!
-//! Since #410 the crate also houses the ASR engine
-//! ([`AppleSpeechTranscriber`] — SpeechAnalyzer, macOS 26+): same Swift
-//! static lib, same C-ABI patterns, segments carrying time spans instead
-//! of boxes.
-//!
-//! Off macOS the crate compiles to the same API with constructors returning
-//! `NativeError::unavailable` — the workspace builds everywhere without
-//! platform surgery in the build graph (build.rs no-ops, no Swift toolchain
-//! needed).
+//! Apple Vision OCR as a native engine (#342 P3; Swift glue since #398, in
+//! `shrike-platform` since #709): Apple's `RecognizeTextRequest` (macOS 15+,
+//! Swift-only) at accurate level with language correction, per-line text +
+//! confidence + normalized top-left boxes — the one-pass text+positions
+//! contract. This layer parses `shrike-platform`'s raw JSON into the engine-api
+//! types and implements [`RecognizeMedia`]; the platform crate owns the Swift
+//! glue and the `SwiftString` memory discipline.
 
 use shrike_engine_api::{MediaItem, Recognition, RecognizeMedia};
-use shrike_error::{NativeError, NativeResult};
+use shrike_error::NativeResult;
 
-#[cfg(target_os = "macos")]
-mod glue;
-#[cfg(target_os = "macos")]
-mod imp;
-#[cfg(not(target_os = "macos"))]
-mod imp_stub;
-#[cfg(not(target_os = "macos"))]
-use imp_stub as imp;
-
-mod speech;
-pub use speech::AppleSpeechTranscriber;
+use super::{empty_recognition, parse_wire, unavailable};
 
 /// The engine: stateless beyond its cached fingerprint (Vision objects are
 /// per-call), so one instance serves concurrent lanes.
@@ -47,10 +18,11 @@ pub struct AppleVisionRecognizer {
 }
 
 impl AppleVisionRecognizer {
-    /// Construct, failing `unavailable` where Vision isn't (non-macOS).
+    /// Construct, failing `unavailable` where Vision isn't (non-macOS, below the
+    /// macOS-15 API floor).
     pub fn new() -> NativeResult<Self> {
         Ok(Self {
-            fingerprint: imp::fingerprint()?,
+            fingerprint: shrike_platform::vision::fingerprint().ok_or_else(unavailable)?,
         })
     }
 
@@ -72,7 +44,10 @@ impl AppleVisionRecognizer {
         if bytes.is_empty() {
             return empty_recognition();
         }
-        imp::recognize_one(bytes)
+        match shrike_platform::vision::recognize_one(bytes) {
+            Some(json) => parse_wire(&json),
+            None => empty_recognition(),
+        }
     }
 }
 
@@ -84,27 +59,6 @@ impl RecognizeMedia for AppleVisionRecognizer {
     fn fingerprint(&self) -> Option<String> {
         Some(self.fingerprint.clone())
     }
-}
-
-pub(crate) fn empty_recognition() -> Recognition {
-    Recognition {
-        text: String::new(),
-        confidence: 0.0,
-        segments: Vec::new(),
-    }
-}
-
-// Keep the unavailable error constructions in one place for the stubs.
-#[allow(dead_code)]
-pub(crate) fn unavailable() -> NativeError {
-    NativeError::unavailable("Apple Vision OCR is only available on macOS")
-}
-
-pub(crate) fn speech_unavailable() -> NativeError {
-    NativeError::unavailable(
-        "Apple SpeechAnalyzer ASR is only available on macOS 26+ (and a macOS 26 build SDK), \
-         for a supported locale",
-    )
 }
 
 #[cfg(test)]
@@ -122,6 +76,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     mod live {
         use super::super::*;
+        use shrike_engine_api::MediaItem;
 
         fn engine() -> AppleVisionRecognizer {
             AppleVisionRecognizer::new().expect("Vision is available on macOS")
@@ -155,9 +110,9 @@ mod tests {
 
         #[test]
         fn reads_the_checked_in_fixture() {
-            // A pre-rendered PNG (tests/fixtures) — black "ELECTRON TRANSPORT
-            // CHAIN" on white, the same phrase the Python live tests render.
-            let png = include_bytes!("../tests/fixtures/ocr_phrase.png");
+            // A pre-rendered PNG — black "ELECTRON TRANSPORT CHAIN" on white,
+            // the same phrase the Python live tests render.
+            let png = include_bytes!("ocr_phrase.png");
             let r = engine().recognize_one(png);
             assert!(
                 r.text.to_lowercase().contains("electron transport chain"),
@@ -179,7 +134,7 @@ mod tests {
 
         #[test]
         fn chunk_preserves_order_and_flattens_lines() {
-            let png = include_bytes!("../tests/fixtures/ocr_phrase.png");
+            let png = include_bytes!("ocr_phrase.png");
             let items = vec![
                 MediaItem::from_named("a.png", png.to_vec()),
                 MediaItem::untyped(Vec::new()),
