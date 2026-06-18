@@ -8,7 +8,7 @@ import logging
 import pytest
 from mcp.server.transport_security import TransportSecurityMiddleware
 
-from shrike.server import (
+from shrike.server.server import (
     _build_transport_security,
     _is_loopback,
     _server_is_purely_local,

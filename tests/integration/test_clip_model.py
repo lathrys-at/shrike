@@ -113,7 +113,7 @@ class TestClipImageIndex:
         the server does it (native_embedder + the media-dir resolver pair)."""
         import shrike_native
 
-        from shrike.server import _make_image_resolver
+        from shrike.server.server import _make_image_resolver
 
         collection = str(tmp_path / "c.anki2")
         media_dir = collection[: -len(".anki2")] + ".media"
