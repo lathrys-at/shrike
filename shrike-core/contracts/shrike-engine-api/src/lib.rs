@@ -54,9 +54,10 @@ pub mod probe;
 
 use std::sync::Arc;
 
+use futures::channel::oneshot;
 use futures::future::BoxFuture;
 
-use shrike_error::{ErrorKind, NativeResult, ResultExt};
+use shrike_error::{NativeError, NativeResult};
 
 // ── media items ──────────────────────────────────────────────────────────────
 
@@ -523,40 +524,96 @@ impl<E: Recognizer> Recognizer for AsyncWithPolicy<E> {
     }
 }
 
-// ── the adapter: sync compute onto the owned runtime ───────────────
+// ── the adapter: sync compute onto a blocking pool ─────────────────
 
-/// Route-1 engines become kernel-facing async engines here: each call moves
-/// the chunk loop onto the runtime's blocking pool via
-/// `tokio::task::spawn_blocking`. **Eager by contract**: the work is
-/// scheduled inside `embed()` itself, before the returned future is first
-/// polled — that is what lets the kernel build engine futures ahead of
-/// lexical/sibling work and genuinely overlap them (the search/add
-/// overlap properties).
+/// Where [`Blocking`] runs a unit of sync engine compute.
 ///
-/// Must be called in runtime context (kernel ops are — the action-exchange
-/// edge spawns every op onto the kernel runtime); calling an adapted engine
-/// off-runtime is a contract violation and panics fast in tokio.
+/// The adapter is told *that* it should hand work to a blocking pool but never
+/// *which* one — the host injects the pool. A `submit` schedules the job
+/// **eagerly**: it must run (or be queued to run) by the time `submit` returns,
+/// so the future [`Blocking`] hands back is already in flight before its first
+/// poll. The kernel relies on this to build engine futures ahead of sibling
+/// work and overlap them (the search/add overlap property).
 ///
-/// Dropping a returned future detaches it (a `JoinHandle` drop never aborts
-/// the blocking task) — wasted compute at worst, consistent with the edge's
-/// detach semantics.
-pub struct Blocking<E>(pub Arc<E>);
+/// The job is the runtime-agnostic [`tokio::task`]-style erased closure: it
+/// owns the channel that carries its result back to the awaiting future, so the
+/// dispatcher need only run it.
+pub trait BlockingDispatch: Send + Sync {
+    /// Schedule `job` on the pool, eagerly. The job runs to completion exactly
+    /// once and delivers its own result.
+    fn submit(&self, job: Box<dyn FnOnce() + Send + 'static>);
+}
 
+/// The dispatcher [`Blocking`] uses when the host injects none: tokio's blocking
+/// pool via [`tokio::task::spawn_blocking`]. Requires an ambient tokio runtime
+/// (kernel ops run inside one); off-runtime it panics, the same contract the
+/// adapter has always had. Keeping a built-in default lets this crate be
+/// exercised standalone with no executor wired in.
+pub struct DefaultDispatch;
+
+impl BlockingDispatch for DefaultDispatch {
+    fn submit(&self, job: Box<dyn FnOnce() + Send + 'static>) {
+        tokio::task::spawn_blocking(job);
+    }
+}
+
+/// Route-1 engines become kernel-facing async engines here: each call moves the
+/// chunk loop onto a blocking pool and returns a future of the result.
+/// **Eager by contract**: the work is scheduled inside the call itself, before
+/// the returned future is first polled — that is what lets the kernel build
+/// engine futures ahead of lexical/sibling work and genuinely overlap them (the
+/// search/add overlap properties).
+///
+/// The pool is the injected [`BlockingDispatch`], or [`DefaultDispatch`]
+/// (tokio's blocking pool) when none is given. The host wires its own pool — a
+/// committed compute pool sized to its cores — at the engine's construction
+/// site.
+///
+/// Dropping a returned future detaches it (the result channel closes; the job
+/// runs to completion anyway) — wasted compute at worst, consistent with the
+/// action-exchange edge's detach semantics.
+pub struct Blocking<E> {
+    engine: Arc<E>,
+    dispatch: Arc<dyn BlockingDispatch>,
+}
+
+impl<E> Blocking<E> {
+    /// Adapt `engine` over the default blocking pool ([`DefaultDispatch`]).
+    pub fn new(engine: Arc<E>) -> Self {
+        Self {
+            engine,
+            dispatch: Arc::new(DefaultDispatch),
+        }
+    }
+
+    /// Adapt `engine` over a host-injected blocking pool.
+    pub fn with_dispatch(engine: Arc<E>, dispatch: Arc<dyn BlockingDispatch>) -> Self {
+        Self { engine, dispatch }
+    }
+}
+
+/// Run `work` on `dispatch`'s pool, returning an eagerly-scheduled future of its
+/// result. The result rides a oneshot the job owns; awaiting the returned future
+/// yields it (or an internal error if the pool dropped the job — a vanished
+/// pool, i.e. host shutdown).
 fn run_blocking<T: Send + 'static>(
+    dispatch: &Arc<dyn BlockingDispatch>,
     work: impl FnOnce() -> NativeResult<T> + Send + 'static,
 ) -> BoxFuture<'static, NativeResult<T>> {
-    let handle = tokio::task::spawn_blocking(work);
+    let (tx, rx) = oneshot::channel();
+    dispatch.submit(Box::new(move || {
+        let _ = tx.send(work());
+    }));
     Box::pin(async move {
-        handle
-            .await
-            .context(ErrorKind::Internal, "blocking engine task failed")?
+        rx.await
+            .map_err(|_| NativeError::internal("the blocking pool dropped an engine job"))?
     })
 }
 
 impl<E: EmbedText + 'static> Embedder for Blocking<E> {
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
-        let engine = Arc::clone(&self.0);
-        run_blocking(move || {
+        let engine = Arc::clone(&self.engine);
+        run_blocking(&self.dispatch, move || {
             let chunk = engine.safe_batch().max(1);
             let mut out = Vec::with_capacity(texts.len());
             for piece in texts.chunks(chunk) {
@@ -567,18 +624,18 @@ impl<E: EmbedText + 'static> Embedder for Blocking<E> {
     }
 
     fn fingerprint(&self) -> Option<String> {
-        self.0.fingerprint()
+        self.engine.fingerprint()
     }
 
     fn dim(&self) -> Option<usize> {
-        self.0.dim()
+        self.engine.dim()
     }
 }
 
 impl<E: EmbedImages + 'static> ImageEmbedder for Blocking<E> {
     fn embed_images(&self, images: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
-        let engine = Arc::clone(&self.0);
-        run_blocking(move || {
+        let engine = Arc::clone(&self.engine);
+        run_blocking(&self.dispatch, move || {
             // Chunk by the probed vision safe_batch, exactly like the
             // text path — a batch-variant int8 vision graph embeds serially so
             // an image vector never depends on its batch-mates.
@@ -594,12 +651,12 @@ impl<E: EmbedImages + 'static> ImageEmbedder for Blocking<E> {
 
 impl<E: RecognizeMedia + 'static> Recognizer for Blocking<E> {
     fn recognize(&self, items: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
-        let engine = Arc::clone(&self.0);
-        run_blocking(move || engine.recognize_chunk(&items))
+        let engine = Arc::clone(&self.engine);
+        run_blocking(&self.dispatch, move || engine.recognize_chunk(&items))
     }
 
     fn fingerprint(&self) -> Option<String> {
-        self.0.fingerprint()
+        self.engine.fingerprint()
     }
 }
 
@@ -660,7 +717,7 @@ mod tests {
             batch_cap: 2,
             calls: std::sync::Mutex::new(Vec::new()),
         });
-        let adapted = Blocking(Arc::clone(&toy));
+        let adapted = Blocking::new(Arc::clone(&toy));
         let texts: Vec<String> = ["a", "bb", "ccc", "dddd", "eeeee"]
             .iter()
             .map(|s| s.to_string())
@@ -691,7 +748,7 @@ mod tests {
             batch_cap: 2,
             calls: std::sync::Mutex::new(Vec::new()),
         });
-        let adapted = Blocking(Arc::clone(&toy));
+        let adapted = Blocking::new(Arc::clone(&toy));
         // Distinct byte lengths so the per-image vector is identifiable.
         let images: Vec<MediaItem> = [1usize, 2, 3, 4, 5]
             .iter()
@@ -725,13 +782,13 @@ mod tests {
             None,
             1, // min(text, vision) collapsed to serial for the variant vision graph
         ));
-        let adapted = Blocking(toy);
+        let adapted = Blocking::new(toy);
         let images: Vec<MediaItem> = (0..3).map(|_| MediaItem::untyped(vec![0u8; 4])).collect();
         let rt = test_runtime();
         let _guard = rt.enter();
         let _ = rt.block_on(adapted.embed_images(images)).unwrap();
         assert_eq!(
-            *adapted.0.engine.calls.lock().unwrap(),
+            *adapted.engine.engine.calls.lock().unwrap(),
             vec![1, 1, 1],
             "each image embedded alone"
         );
@@ -749,7 +806,7 @@ mod tests {
             batch_cap: 8,
             calls: std::sync::Mutex::new(Vec::new()),
         });
-        let adapted = Blocking(Arc::clone(&toy));
+        let adapted = Blocking::new(Arc::clone(&toy));
         let fut = adapted.embed(vec!["scheduled before any poll".into()]);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while toy.calls.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
@@ -760,6 +817,62 @@ mod tests {
             "the engine ran without the future being polled (eager scheduling)"
         );
         drop(fut); // and dropping the unpolled future detached, not panicked
+    }
+
+    /// A dispatcher that records each submission and runs the job inline, so a
+    /// test can observe both that `submit` was called and that the result still
+    /// plumbs back through the returned future.
+    struct RecordingDispatch {
+        submits: Arc<std::sync::Mutex<usize>>,
+    }
+
+    impl BlockingDispatch for RecordingDispatch {
+        fn submit(&self, job: Box<dyn FnOnce() + Send + 'static>) {
+            *self.submits.lock().unwrap() += 1;
+            job();
+        }
+    }
+
+    /// An injected dispatcher is used (its `submit` fires eagerly, inside the
+    /// `embed` call) and the result plumbs back unchanged — the same output the
+    /// default dispatcher produces, so swapping the host pool is behaviour-
+    /// preserving.
+    #[test]
+    fn injected_dispatch_is_used_eagerly_and_preserves_results() {
+        let toy = Arc::new(Toy {
+            batch_cap: 2,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let submits = Arc::new(std::sync::Mutex::new(0usize));
+        let dispatch: Arc<dyn BlockingDispatch> = Arc::new(RecordingDispatch {
+            submits: Arc::clone(&submits),
+        });
+        let adapted = Blocking::with_dispatch(Arc::clone(&toy), dispatch);
+        let texts: Vec<String> = ["a", "bb", "ccc", "dddd", "eeeee"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // `submit` fires during `embed`, before the future is ever polled.
+        let fut = adapted.embed(texts);
+        assert_eq!(
+            *submits.lock().unwrap(),
+            1,
+            "the injected dispatcher's submit ran eagerly, inside embed"
+        );
+
+        let rt = test_runtime();
+        let out = rt.block_on(fut).unwrap();
+        assert_eq!(
+            out,
+            vec![vec![1.0], vec![2.0], vec![3.0], vec![4.0], vec![5.0]],
+            "the injected pool yields the same result as the default — order preserved across chunks"
+        );
+        assert_eq!(
+            *toy.calls.lock().unwrap(),
+            vec![2, 2, 1],
+            "the chunk loop still runs unchanged on the injected pool"
+        );
     }
 
     #[test]
@@ -778,7 +891,7 @@ mod tests {
         assert_eq!(tuned.fingerprint().as_deref(), Some("host:fp:textprep=3"));
         assert_eq!(tuned.dim(), Some(384));
         // The adapter chunks by the POLICY batch, not the engine's.
-        let adapted = Blocking(Arc::new(tuned));
+        let adapted = Blocking::new(Arc::new(tuned));
         let texts: Vec<String> = ["a", "bb", "ccc"].iter().map(|s| s.to_string()).collect();
         let rt = test_runtime();
         let _guard = rt.enter();
