@@ -12,7 +12,7 @@ them is **who invokes it**:
 
 | Directory | Who invokes it | Holds |
 |-----------|----------------|-------|
-| [`bin/`](../bin/README.md) | the end user / a spawned server | Shipped/runnable product entry points (`py_binary` launchers over `//src/shrike:shrike`). **Load-bearing**, not cruft. |
+| [`shrike-py/bin/`](../shrike-py/bin/README.md) | the end user / a spawned server | Shipped/runnable product entry points (`py_binary` launchers over `//shrike-py/src/shrike:shrike`). **Load-bearing**, not cruft. |
 | `tools/` | **the build** (Bazel, CI) | Build-system internals: Bazel macros, version-pin locks + their writers/checkers, sdist/wheel/requirements builders, workspace-status, hermetic-toolchain CI smoke tests. |
 | [`scripts/`](../scripts/README.md) | **a human** at a dev shell | Dev/maintenance entry points: environment setup, the native build, coverage runners. |
 
