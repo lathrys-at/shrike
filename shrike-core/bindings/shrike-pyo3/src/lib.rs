@@ -280,6 +280,31 @@ fn drive_pools_shutdown(py: Python<'_>) {
     py.detach(shrike_kernel::shutdown_driven_pools)
 }
 
+/// Block until the driven runtime is being driven, by scheduling a trivial
+/// executor-only op and blocking this thread until it completes. The harness
+/// calls it after spawning the IO thread and BEFORE the sync/compute threads:
+/// tokio's `current_thread` runtime hands the IO/timer drivers to the FIRST
+/// `block_on` caller, which MUST be the IO thread, so the op completing — while
+/// the IO thread is the only driver present — proves it owns the drivers.
+///
+/// The op touches nothing but the executor: the collection and compute pools are
+/// not yet driven when the barrier runs. Implemented with `spawn_op` + a
+/// `std::sync::mpsc` channel filled from the op body (rather than awaiting
+/// `spawn_op`'s future, which has no driver to block on from this thread). GIL
+/// released so the IO thread can run the op without contending for it.
+#[cfg(feature = "anki-core")]
+#[pyfunction]
+fn runtime_probe(py: Python<'_>) {
+    py.detach(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
+        drop(shrike_kernel::spawn_op(async move {
+            let _ = tx.send(());
+            Ok(())
+        }));
+        let _ = rx.recv();
+    })
+}
+
 /// One derived-store MATCH row: (note_id, source, ref, txt, snippet).
 type MatchRow = (i64, String, String, Option<String>, Option<String>);
 /// Per-query, per-modality parallel rankings: {modality: (note_ids, distances)}.
@@ -1084,6 +1109,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(drive_sync, m)?)?;
         m.add_function(wrap_pyfunction!(drive_compute, m)?)?;
         m.add_function(wrap_pyfunction!(drive_pools_shutdown, m)?)?;
+        m.add_function(wrap_pyfunction!(runtime_probe, m)?)?;
     }
     // The engine/manager matrix: a class is present exactly when its
     // feature is compiled — a lean build simply lacks the name (the Python
