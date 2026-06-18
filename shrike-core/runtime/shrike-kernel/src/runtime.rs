@@ -271,8 +271,10 @@ pub fn drive_io<F: Future<Output = ()> + Send + 'static>(until: F) -> NativeResu
 /// The same as [`drive_io`] but parked on the pools' built-in shutdown signal,
 /// so a host with no shutdown future of its own (the binding) gets one
 /// `drive_io` thread whose `until` and the pool-queue close are tripped by one
-/// call. The signal is registered BEFORE the wait so a shutdown that races this
-/// thread's start is not missed.
+/// call. No lost wakeup against a racing shutdown: `shutdown_driven_pools` uses
+/// `notify_one`, which stores a permit when no waiter is parked yet, so a
+/// shutdown that fires before this thread reaches the await is consumed by it
+/// immediately.
 ///
 /// # Errors
 ///
@@ -285,12 +287,7 @@ pub fn drive_io_until_shutdown() -> NativeResult<()> {
         ));
     }
     let pools = DRIVEN.get().ok_or_else(driven_missing)?;
-    block_on(async {
-        // `notified()` registers the waiter before the await, so a `notify_one`
-        // (or the permit `notify_waiters` sets) that happens after this point is
-        // observed — no lost wakeup against a racing shutdown.
-        pools.shutdown.notified().await;
-    });
+    block_on(pools.shutdown.notified());
     Ok(())
 }
 
