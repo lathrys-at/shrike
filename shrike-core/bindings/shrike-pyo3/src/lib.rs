@@ -44,10 +44,6 @@
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-// Trait imports for the remote engine's chunk methods (text + the #501
-// native multimodal image path).
-#[cfg(feature = "engine-remote")]
-use shrike_engine_api::{EmbedImages as _, EmbedText as _};
 use shrike_error::{ErrorKind, NativeError};
 
 #[cfg(feature = "anki-core")]
@@ -477,8 +473,12 @@ impl RemoteEmbedder {
     }
 
     /// Embed one chunk of texts as a single request (one vector per input).
+    /// The engine is async now (#721 S2 — route 2); this direct-call helper is
+    /// off the runtime (under `py.detach`), so it drives the future via
+    /// `shrike_kernel::block_on` (a legal block_on site — not a runtime worker).
     fn embed_chunk(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<Vec<f32>>> {
-        py.detach(|| self.inner.embed_chunk(&texts))
+        use shrike_engine_api::Embedder as _;
+        py.detach(|| shrike_kernel::block_on(self.inner.embed(texts)))
             .map_err(to_py_err)
     }
 
@@ -487,12 +487,13 @@ impl RemoteEmbedder {
     /// kernel slot rides the `NativeEmbedder` composition instead. Bytes in,
     /// one vector per image; vision-gated inside the engine.
     fn embed_image_chunk(&self, py: Python<'_>, images: Vec<Vec<u8>>) -> PyResult<Vec<Vec<f32>>> {
+        use shrike_engine_api::ImageEmbedder as _;
         py.detach(|| {
             let items: Vec<shrike_engine_api::MediaItem> = images
                 .into_iter()
                 .map(shrike_engine_api::MediaItem::untyped)
                 .collect();
-            self.inner.embed_image_chunk(&items)
+            shrike_kernel::block_on(self.inner.embed_images(items))
         })
         .map_err(to_py_err)
     }
@@ -502,19 +503,19 @@ impl RemoteEmbedder {
     /// this at start so a `modalities: [text, image]` entry against a
     /// text-only endpoint fails fast at boot, not at first image embed.
     fn vision_capable(&self, py: Python<'_>) -> bool {
-        py.detach(|| self.inner.props().is_some_and(|p| p.vision))
+        py.detach(|| shrike_kernel::block_on(self.inner.props()).is_some_and(|p| p.vision))
     }
 
     /// `GET /health` returns 200.
     fn health_ok(&self, py: Python<'_>) -> bool {
-        py.detach(|| self.inner.health_ok())
+        py.detach(|| shrike_kernel::block_on(self.inner.health_ok()))
     }
 
     /// `(model_id, meta_json)` from `/v1/models` — `(None, "{}")` when the
     /// endpoint doesn't serve it; fingerprint assembly stays facade policy.
     fn model_info(&self, py: Python<'_>) -> (Option<String>, String) {
         py.detach(|| {
-            let info = self.inner.model_info();
+            let info = shrike_kernel::block_on(self.inner.model_info());
             let meta = serde_json::Value::Object(info.meta).to_string();
             (info.id, meta)
         })

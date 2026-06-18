@@ -183,14 +183,15 @@ pub(crate) struct RemoteDescriber {
 
 #[cfg(feature = "engine-remote")]
 impl RemoteDescriber {
-    /// The kernel-facing engine: the pure-compute describe engine carrying the
-    /// host fingerprint via `WithPolicy` (so `Blocking`'s `Recognizer`
-    /// fingerprint reports it). `WithPolicy`'s embed-side knobs (dim/safe_batch)
-    /// are inert for a recognizer — only the fingerprint matters here.
+    /// The kernel-facing engine: the route-2 async describe engine carrying the
+    /// host fingerprint via `AsyncWithPolicy` (so the kernel-slot `Recognizer`
+    /// fingerprint reports it), attached DIRECTLY — no `Blocking` adapter (#721
+    /// S2). `AsyncWithPolicy`'s embed-side knobs (dim/batch_size) are inert for a
+    /// recognizer — only the fingerprint matters here.
     pub(crate) fn engine_arc(
         &self,
-    ) -> Arc<shrike_engine_api::WithPolicy<shrike_engine::remote::RemoteDescriber>> {
-        Arc::new(shrike_engine_api::WithPolicy::new(
+    ) -> Arc<shrike_engine_api::AsyncWithPolicy<shrike_engine::remote::RemoteDescriber>> {
+        Arc::new(shrike_engine_api::AsyncWithPolicy::new(
             Arc::clone(&self.engine),
             self.fingerprint.clone(),
             None,
@@ -253,21 +254,24 @@ impl RemoteDescriber {
         ))
     }
 
-    /// Blocking direct describe in the RecognizerBackend wire shape
+    /// Direct describe in the RecognizerBackend wire shape
     /// (`(text, confidence, segments_json)`; describe locates nothing so the
     /// segments JSON is always `""`) — for tests and direct callers; the
-    /// kernel path never comes through here. A chunk-level failure (a down
-    /// endpoint) raises; a per-item failure degrades to an empty recognition
-    /// (the crate's settled error split).
+    /// kernel path never comes through here. The engine is async now (#721 S2 —
+    /// route 2); this direct-call helper is off the runtime (under `py.detach`),
+    /// so it drives the future via `shrike_kernel::block_on` (a legal block_on
+    /// site — not a runtime worker). A chunk-level failure (a down endpoint)
+    /// raises; a per-item failure degrades to an empty recognition (the crate's
+    /// settled error split).
     fn recognize(
         &self,
         py: Python<'_>,
         items: Vec<Vec<u8>>,
     ) -> PyResult<Vec<(String, f64, String)>> {
-        use shrike_engine_api::RecognizeMedia as _;
+        use shrike_engine_api::Recognizer as _;
         py.detach(|| {
             let media: Vec<MediaItem> = items.into_iter().map(MediaItem::untyped).collect();
-            let recognitions = self.engine.recognize_chunk(&media)?;
+            let recognitions = shrike_kernel::block_on(self.engine.recognize(media))?;
             Ok(recognitions
                 .into_iter()
                 .map(|r| {
@@ -285,7 +289,7 @@ impl RemoteDescriber {
 
     /// `GET /health` returns 200 — the host's connectivity probe at attach.
     fn health_ok(&self, py: Python<'_>) -> bool {
-        py.detach(|| self.engine.health_ok())
+        py.detach(|| shrike_kernel::block_on(self.engine.health_ok()))
     }
 
     /// `(model_id, meta_json)` from `/v1/models` — `(None, "{}")` when the
@@ -293,7 +297,7 @@ impl RemoteDescriber {
     /// (`compose_fingerprint`).
     fn model_info(&self, py: Python<'_>) -> (Option<String>, String) {
         py.detach(|| {
-            let info = self.engine.model_info();
+            let info = shrike_kernel::block_on(self.engine.model_info());
             let meta = serde_json::Value::Object(info.meta).to_string();
             (info.id, meta)
         })

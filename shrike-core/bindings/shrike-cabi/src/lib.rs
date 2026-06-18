@@ -27,9 +27,9 @@
 //!   work is never an option here: `spawn_op`'s detach-not-abort contract
 //!   means the op always runs; the callback is the only way to observe it.
 //! - [`shrike_attach_remote_embedder`] composes the remote embeddings engine
-//!   (`RemoteEmbedder` -> `WithPolicy` -> `Blocking`) into the kernel's
-//!   `Arc<dyn Embedder>` slot, mirroring `native_embedder.rs::from_remote`
-//!   minus the PyO3 wrappers.
+//!   (route 2 async-direct, #721 S2: `RemoteEmbedder` -> `AsyncWithPolicy`, no
+//!   `Blocking` adapter) into the kernel's `Arc<dyn Embedder>` slot, mirroring
+//!   `native_embedder.rs::from_remote` minus the PyO3 wrappers.
 //! - [`shrike_string_free`] returns ownership of a string this library
 //!   allocated (the only strings the caller frees through this ABI are the
 //!   ones it received from a callback, which are borrowed for the callback's
@@ -744,9 +744,10 @@ fn default_top_k() -> usize {
 /// Compose the remote-embeddings engine into one of the kernel's embed SPACES
 /// (#233) — the relay-offload path (a desktop/DIY kernel over the relay) or any
 /// OpenAI-compatible cloud endpoint. Mirrors `native_embedder.rs::from_remote`
-/// minus the PyO3 wrappers: `RemoteEmbedder` -> `WithPolicy`
-/// (host-assembled fingerprint/dim/safe_batch) -> `Blocking` (the one adapter
-/// onto the runtime's blocking pool) -> `Arc<dyn Embedder>`.
+/// minus the PyO3 wrappers: `RemoteEmbedder` -> `AsyncWithPolicy`
+/// (host-assembled fingerprint/dim + the `safe_batch` text chunking) ->
+/// `Arc<dyn Embedder>`. Route 2 async-direct (#721 S2): no `Blocking` adapter —
+/// the kernel awaits the engine's reqwest IO on its runtime.
 ///
 /// The embed slot is an ORDERED SET of spaces since #233: a Swift/Kotlin caller
 /// that wants a dedicated text space PLUS a separate platform vision space
@@ -816,14 +817,18 @@ pub unsafe extern "C" fn shrike_attach_remote_embedder(
                         model,
                     },
                 )?;
-                let tuned = Arc::new(shrike_engine_api::WithPolicy::new(
-                    Arc::new(engine),
-                    fingerprint.clone(),
-                    (dim != 0).then_some(dim),
-                    safe_batch,
-                ));
+                // Route 2: the remote embedder is async-direct (#721 S2) — it
+                // implements the async `Embedder` trait, so it attaches WITHOUT
+                // the `Blocking` adapter. `AsyncWithPolicy` carries the host
+                // fingerprint/dim and chunks the text path by `safe_batch` (the
+                // async sibling of `WithPolicy` + `Blocking`'s chunk loop).
                 let embedder: Arc<dyn shrike_engine_api::Embedder> =
-                    Arc::new(shrike_engine_api::Blocking(tuned));
+                    Arc::new(shrike_engine_api::AsyncWithPolicy::new(
+                        Arc::new(engine),
+                        fingerprint.clone(),
+                        (dim != 0).then_some(dim),
+                        safe_batch,
+                    ));
                 // The explicit space key wins; otherwise the tuned engine's
                 // fingerprint (the same key `attach_embedder` would derive).
                 let key = space_key.or(fingerprint);

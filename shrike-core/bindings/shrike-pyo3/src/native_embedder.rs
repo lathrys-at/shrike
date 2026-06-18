@@ -21,8 +21,13 @@ use pyo3::prelude::*;
 use shrike_engine_api::{Embedder, ImageEmbedder};
 // Used only inside the feature-gated engine constructors — a no-engine build
 // (anki-core alone) would otherwise warn on unused imports.
-#[cfg(any(feature = "engine-ort", feature = "engine-remote"))]
+// onnx/CLIP are route-1 (sync compute behind `Blocking` + `WithPolicy`); the
+// remote engines are route-2 async-direct (#721 S2 — `AsyncWithPolicy`, no
+// `Blocking`).
+#[cfg(feature = "engine-ort")]
 use shrike_engine_api::{Blocking, WithPolicy};
+#[cfg(feature = "engine-remote")]
+use shrike_engine_api::AsyncWithPolicy;
 
 /// The assembled native embedder the kernel slot takes: the text half always,
 /// the image half when the engine embeds images (CLIP). Both halves are views
@@ -62,15 +67,20 @@ impl NativeEmbedder {
     }
 
     /// Compose the remote-embeddings engine — llama-server today, any
-    /// OpenAI-compatible endpoint tomorrow. Network requests run on the
-    /// blocking pool, never a runtime worker.
+    /// OpenAI-compatible endpoint tomorrow. A route-2 async-direct engine
+    /// (#721 S2): it implements the async `Embedder`/`ImageEmbedder` traits
+    /// directly over the async reqwest client, so the kernel awaits it on its
+    /// runtime — NO `Blocking` adapter, no parked blocking-pool thread. The
+    /// host policy (fingerprint, dim, the proven-safe text `safe_batch` that
+    /// chunks the text path) rides `AsyncWithPolicy` — the async sibling of
+    /// `WithPolicy` + `Blocking`'s chunk loop.
     ///
     /// `images` composes the image half too (#501): the one remote engine
-    /// impls both `EmbedText` and `EmbedImages`, so a single adapted
-    /// instance serves both modalities — the same shape `from_clip` makes
-    /// for the dual ONNX encoder. Set for a `modalities: [text, image]`
-    /// remote entry against a llama.cpp multimodal endpoint; left off (the
-    /// default) for a text-only endpoint or a cloud API.
+    /// impls both `Embedder` and `ImageEmbedder`, so a single wrapped instance
+    /// serves both modalities — the same shape `from_clip` makes for the dual
+    /// ONNX encoder. Set for a `modalities: [text, image]` remote entry against
+    /// a llama.cpp multimodal endpoint; left off (the default) for a text-only
+    /// endpoint or a cloud API.
     #[cfg(feature = "engine-remote")]
     #[staticmethod]
     #[pyo3(signature = (engine, *, fingerprint, dim, safe_batch, images=false))]
@@ -81,16 +91,15 @@ impl NativeEmbedder {
         safe_batch: usize,
         images: bool,
     ) -> Self {
-        let tuned = Arc::new(WithPolicy::new(
+        let tuned = Arc::new(AsyncWithPolicy::new(
             engine.engine_arc(),
             fingerprint,
             dim,
             safe_batch,
         ));
-        let adapted = Arc::new(Blocking(tuned));
         Self {
-            text: Arc::clone(&adapted) as Arc<dyn Embedder>,
-            images: images.then_some(adapted as Arc<dyn ImageEmbedder>),
+            text: Arc::clone(&tuned) as Arc<dyn Embedder>,
+            images: images.then_some(tuned as Arc<dyn ImageEmbedder>),
         }
     }
 

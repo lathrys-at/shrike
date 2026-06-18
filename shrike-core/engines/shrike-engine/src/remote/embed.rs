@@ -63,11 +63,6 @@ pub struct RemoteEmbedderConfig {
     /// the right one (a single-model llama-server ignores it). `None` omits
     /// the field.
     pub model: Option<String>,
-    /// The per-request text-batch size — the host's probed + capped safe batch
-    /// (#721 S2: a route-2 engine owns its own request chunking; the host passes
-    /// the size it determined). `None`/0 = one request for the whole input.
-    /// Images always ride one request per item (#501).
-    pub batch_size: Option<usize>,
 }
 
 /// The engine: a thin, stateless HTTP client wrapper.
@@ -78,8 +73,6 @@ pub struct RemoteEmbedderConfig {
 pub struct RemoteEmbedder {
     http: RemoteHttpClient,
     model: Option<String>,
-    /// The per-request text-batch size; `None` = the whole input in one request.
-    batch_size: Option<usize>,
     /// The endpoint's resolved multimodal capabilities, cached after the first
     /// successful `GET /props` (#708): the marker + vision flag are per-process
     /// invariants of the endpoint, so the image path reads them ONCE rather than
@@ -127,7 +120,6 @@ impl RemoteEmbedder {
         Ok(Self {
             http,
             model: cfg.model,
-            batch_size: cfg.batch_size.filter(|&n| n > 1),
             props: OnceLock::new(),
         })
     }
@@ -239,21 +231,17 @@ impl RemoteEmbedder {
 }
 
 impl Embedder for RemoteEmbedder {
-    /// Embed the whole batch, chunked by the host's `batch_size` (one request
-    /// per chunk, in order). A route-2 engine owns its own chunking (#721 S2):
-    /// the old `Blocking` adapter's `safe_batch` chunk loop moves in here.
+    /// Embed the given texts as ONE `POST /v1/embeddings` request. The host's
+    /// proven-safe batch chunking lives in the [`shrike_engine_api::AsyncWithPolicy`]
+    /// wrapper (the async sibling of `WithPolicy` + `Blocking`'s chunk loop), so
+    /// this engine just serves whatever slice it is handed (#721 S2).
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
         Box::pin(
             async move {
                 if texts.is_empty() {
                     return Ok(Vec::new());
                 }
-                let chunk = self.batch_size.unwrap_or(texts.len()).max(1);
-                let mut out = Vec::with_capacity(texts.len());
-                for piece in texts.chunks(chunk) {
-                    out.extend(self.embed_one_request(piece).await?);
-                }
-                Ok(out)
+                self.embed_one_request(&texts).await
             }
             .instrument(tracing::debug_span!("embed.remote")),
         )
@@ -382,7 +370,6 @@ mod tests {
             base_url,
             api_key: key.map(String::from),
             model: model.map(String::from),
-            batch_size: None,
         })
         .unwrap()
     }
@@ -529,7 +516,6 @@ mod tests {
                 base_url: "http://127.0.0.1:9".into(),
                 api_key: Some(key.into()),
                 model: None,
-                batch_size: None,
             })
             .err()
             .expect("construction must reject the key");
@@ -592,30 +578,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_size_chunks_into_multiple_requests() {
-        // batch_size=2 over 3 inputs → two requests (2 then 1), order preserved.
-        let r1 = serde_json::json!({"data": [
+    async fn embed_sends_all_inputs_in_one_request() {
+        // The engine itself sends whatever slice it is handed as ONE request —
+        // host-batch chunking lives in AsyncWithPolicy (tested there). Three
+        // inputs → one /v1/embeddings request carrying all three.
+        let body = serde_json::json!({"data": [
             {"index": 0, "embedding": [1.0]},
             {"index": 1, "embedding": [2.0]},
+            {"index": 2, "embedding": [3.0]},
         ]})
         .to_string();
-        let r2 = serde_json::json!({"data": [{"index": 0, "embedding": [3.0]}]}).to_string();
-        let (url, rx) = canned_server(vec![("HTTP/1.1 200 OK", r1), ("HTTP/1.1 200 OK", r2)]);
-        let eng = RemoteEmbedder::new(RemoteEmbedderConfig {
-            base_url: url,
-            api_key: None,
-            model: None,
-            batch_size: Some(2),
-        })
-        .unwrap();
-        let out = eng
+        let (url, rx) = one_shot_server("HTTP/1.1 200 OK", body);
+        let out = engine(url, None, None)
             .embed(vec!["a".into(), "b".into(), "c".into()])
             .await
             .unwrap();
         assert_eq!(out, vec![vec![1.0], vec![2.0], vec![3.0]]);
-        // Two distinct requests reached the server (the chunk split).
-        assert!(rx.recv().unwrap().starts_with("POST /v1/embeddings"));
-        assert!(rx.recv().unwrap().starts_with("POST /v1/embeddings"));
+        let raw = rx.recv().unwrap();
+        assert!(raw.starts_with("POST /v1/embeddings"), "{raw}");
+        assert!(raw.contains(r#""input":["a","b","c"]"#), "one request: {raw}");
     }
 
     // ── SSRF redirect re-vet (#592) ─────────────────────────────────────────

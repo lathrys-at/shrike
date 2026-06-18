@@ -280,8 +280,9 @@ impl AsyncKernel {
     /// Attach (or swap) the recognition service for a specific purpose (#485)
     /// — OCR, describe, or ASR, each routed to its own pending set / source /
     /// fingerprint / destination by the kernel sweep. Takes either recognizer
-    /// shape ([`AnyRecognizer`]); the native engines are adapted onto the
-    /// blocking pool here via `Blocking`, exactly like OCR.
+    /// shape ([`AnyRecognizer`]); the Apple Vision engine (route 1, sync compute)
+    /// is adapted onto the blocking pool via `Blocking`, while the remote describe
+    /// engine (route 2, async-direct, #721 S2) attaches without an adapter.
     fn attach_recognizer_with(
         &self,
         purpose: &str,
@@ -302,8 +303,11 @@ impl AsyncKernel {
             }
             #[cfg(feature = "engine-remote")]
             AnyRecognizer::Describe(describe) => {
-                let adapted: Arc<dyn shrike_kernel::Recognizer> =
-                    Arc::new(shrike_engine_api::Blocking(describe.engine_arc()));
+                // Route 2: the remote describe engine is async-direct (#721 S2) —
+                // `engine_arc()` returns an `AsyncWithPolicy` that IS a
+                // `Recognizer`, so it attaches WITHOUT the `Blocking` adapter (the
+                // kernel awaits its reqwest IO on the runtime).
+                let adapted: Arc<dyn shrike_kernel::Recognizer> = describe.engine_arc();
                 self.inner
                     .attach_recognizer_with(purpose, adapted, resolver);
             }
