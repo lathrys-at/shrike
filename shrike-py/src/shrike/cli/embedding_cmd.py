@@ -144,7 +144,7 @@ def embedding_start(
 
     # v2-first like `server start`: a config declaring embedders:/managed:
     # is the only home for these settings — the legacy flags/env are rejected/
-    # ignored under it; a legacy config runs the old cascade unchanged.
+    # ignored under it; a legacy config runs the legacy cascade.
     from shrike.harness.profiles import ProfileError
 
     try:

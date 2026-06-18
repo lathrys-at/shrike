@@ -256,8 +256,8 @@ class LlamaServerBackend:
 
         An explicit pooling type is folded in: it isn't in the model metadata,
         but changing it changes every vector, so it must invalidate the index.
-        Left out when ``pooling`` is unset, so an index built before this setting
-        existed still matches (the GGUF's own pooling is unchanged).
+        Left out when ``pooling`` is unset, so an unset-pooling index keeps the
+        same fingerprint (the GGUF's own pooling is then in force).
 
         The generic ``--embedding-arg`` passthrough is also folded in, under a
         conservative policy: *any* change to it forces a rebuild. Shrike can't
@@ -296,8 +296,8 @@ class LlamaServerBackend:
         # this is the only thing distinguishing two omni configs on the same
         # text model. Folded as name:size (sorted) — size disambiguates two
         # different projectors sharing a basename, matching the `file:`
-        # fallback's convention. Omitted when none, so a text-only index built
-        # before this matches unchanged.
+        # fallback's convention. Omitted when none, so a text-only fingerprint
+        # carries no mmproj segment.
         if self._mmprojs:
             parts = []
             for p in self._mmprojs:

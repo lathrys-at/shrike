@@ -423,8 +423,7 @@ def _migrate_legacy(config: Mapping[str, Any]) -> Capabilities:
     """Synthesize v2 capabilities from the legacy ``embedding:`` /
     ``recognition:`` sections — the one-release warn-and-map. Legacy
     semantics are preserved (degrade, don't refuse): a legacy OCR selection
-    the build can't serve becomes a warning + an absent capability, exactly
-    the boot behavior the old flag had."""
+    the build can't serve becomes a warning + an absent capability."""
     warnings: list[str] = []
     emb = config.get("embedding") or {}
     embedders: list[EmbedderEntry] = []

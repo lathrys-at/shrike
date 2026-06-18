@@ -496,8 +496,8 @@ def embedding_args(resolved: dict[str, Any], *, no_embedding: bool = False) -> l
     ``resolved`` comes from :func:`resolve_embedding` (config → env → flags).
     """
     args: list[str] = []
-    # Only emit a non-default backend so existing llama-only command lines stay
-    # byte-for-byte unchanged.
+    # Only emit a non-default backend, so a llama-only command line carries no
+    # backend flag.
     if resolved.get("backend") and resolved["backend"] != "llama":
         args.extend(["--embedding-backend", str(resolved["backend"])])
     if resolved.get("llama_server"):

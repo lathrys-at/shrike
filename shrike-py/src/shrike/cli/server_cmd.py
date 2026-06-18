@@ -362,7 +362,7 @@ def server_start(
     # Resolve embedding settings once for both the spawned server args and the
     # config we persist — v2-first: a config declaring embedders:/managed:
     # resolves against the build's compiled features and rejects the legacy
-    # flags; otherwise the legacy config → env → flag cascade runs unchanged.
+    # flags; otherwise the legacy config → env → flag cascade runs.
     from shrike.harness.profiles import ProfileError
 
     try:

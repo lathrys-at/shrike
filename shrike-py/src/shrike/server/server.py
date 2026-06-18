@@ -366,7 +366,7 @@ def _register_custom_routes(
         # Per-collection rows: the boot/default collection plus every registered
         # profile, with each one's held/index/col_mod. Only emitted when the
         # manager knows of more than the single boot collection, so a
-        # single-collection daemon's payload is unchanged.
+        # single-collection daemon's payload carries no `collections` key.
         if manager is not None:
             rows = manager.status_rows()
             if len(rows) > 1:
