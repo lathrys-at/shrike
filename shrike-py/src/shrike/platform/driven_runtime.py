@@ -60,13 +60,12 @@ class DrivenRuntime:
         self._driven = False
 
     def install(self) -> None:
-        """Install the driven runtime — call ONCE, before any kernel op, so the
-        set-once seam wins over the lazy multi-thread default. Records whether
-        driven mode is actually active: in the normal server process it always
-        is (nothing has touched the runtime yet); a reused process where the
-        default runtime was already pinned reports ``False``, which makes
-        :meth:`start` a no-op so it never spawns threads with no driven queues to
-        drive (they would error)."""
+        """Install the driven runtime — call ONCE, before any kernel op (the
+        kernel has no lazy fallback, so an op before this panics). Records whether
+        the runtime is installed: in the normal server process it always is
+        (nothing has touched the runtime yet). The seam is set-once, so a reused
+        process where it was already installed still reports ``True`` and
+        :meth:`start` is idempotent either way."""
         self._driven = bool(shrike_native.init_driven_runtime())
 
     def start(self) -> None:

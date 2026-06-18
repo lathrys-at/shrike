@@ -107,8 +107,9 @@ for its life, and submits work on its own request threads.
 
 (This replaced an earlier model in which the kernel self-drove a lazy multi-thread
 tokio runtime and engine/sync dispatch bottomed out in `spawn_blocking`; that model is
-being retired — its last transitional remnant, the lazy multi-thread default, is
-removed in #840.)
+gone — its last transitional remnant, the lazy multi-thread default, was removed, so
+the driven `current_thread` runtime is now the only model. An op before the harness
+installs the runtime panics; there is no fallback.)
 
 The N + 2 committed threads come from three drive entries:
 

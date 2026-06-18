@@ -13,8 +13,8 @@ use std::sync::Arc;
 use shrike_engine_api::Blocking;
 
 /// The kernel's compute pool as a [`BlockingDispatch`]: each job is handed to
-/// [`shrike_kernel::submit_compute`], which schedules it eagerly on
-/// `drive_compute` (or the blocking pool in default mode).
+/// [`shrike_kernel::submit_compute`], which schedules it eagerly on the committed
+/// `drive_compute` pool.
 #[cfg(feature = "anki-core")]
 struct KernelDispatch;
 

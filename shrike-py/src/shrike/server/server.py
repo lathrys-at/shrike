@@ -1335,9 +1335,9 @@ def main() -> None:
 
     async def _serve() -> None:
         # Install the driven runtime and park its committed N+2 threads BEFORE
-        # the first kernel op (the open below): the set-once seam must win over
-        # the lazy multi-thread default, and the loops must be parked so the open
-        # is driven. shrike-core spawns no thread of its own — the harness
+        # the first kernel op (the open below): the kernel has no lazy fallback,
+        # so it must be installed and the loops parked or the open would panic /
+        # never be driven. shrike-core spawns no thread of its own — the harness
         # donates one io, one sync, and N compute threads, each GIL-released for
         # the server's life; the asyncio bridge submits ops, invisibly driven by
         # the io thread. driven.shutdown() closes the pools and joins them on
