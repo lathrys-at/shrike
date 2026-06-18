@@ -44,9 +44,11 @@ tracing = "0.1"
 # contract (BoxFuture at the dyn seams); the runtime itself is tokio (#374).
 futures = { version = "0.3", features = ["executor"] }
 # The owned runtime (#374): the kernel is idiomatic async Rust on its own
-# tokio — already transitive via anki, so zero new tree weight. `time` feeds
-# the debounced saver; `sync` the actor channels.
-tokio = { version = "1", features = ["rt-multi-thread", "rt", "sync", "time"] }
+# tokio — already transitive via anki, so zero new tree weight. The runtime is
+# a harness-driven `current_thread` runtime (the harness donates every thread),
+# so no `rt-multi-thread`. `time` feeds the debounced saver; `sync` the actor
+# channels.
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 # Integration tests (tests/*.rs) link the library crate, so they need the
 # crate's own deps re-declared as dev-deps to `use` them directly: the #590
