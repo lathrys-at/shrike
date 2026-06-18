@@ -76,6 +76,7 @@ fn item_level_status(code: u16) -> bool {
     matches!(code, 400 | 413 | 415 | 422)
 }
 
+/// Construction parameters for [`RemoteDescriber`] (VLM image→text over HTTP).
 pub struct RemoteDescriberConfig {
     /// e.g. `http://127.0.0.1:8090` (no trailing slash needed).
     pub base_url: String,
@@ -185,6 +186,10 @@ struct ChatResponse {
 impl RemoteDescriber {
     /// Construction validates the API key (header-injection guard, in
     /// [`RemoteHttpClient::new`]) and pins the endpoint's IP.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API key is invalid or the endpoint host can't be resolved/pinned.
     pub fn new(cfg: RemoteDescriberConfig) -> NativeResult<Self> {
         let timeout = cfg.timeout.unwrap_or(DESCRIBE_TIMEOUT);
         let http = RemoteHttpClient::new(&cfg.base_url, cfg.api_key, timeout)?;

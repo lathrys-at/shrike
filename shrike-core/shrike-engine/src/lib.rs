@@ -20,6 +20,13 @@
 //! Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in
 //! `shrike-pyo3`, to the C ABI in the mobile binding.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 #[cfg(feature = "onnx")]
 pub mod onnx;
 

@@ -50,6 +50,7 @@ fn no_item_level(_code: u16) -> bool {
     false
 }
 
+/// Construction parameters for [`RemoteEmbedder`] (embeddings over an HTTP endpoint).
 pub struct RemoteEmbedderConfig {
     /// e.g. `http://127.0.0.1:8373` (no trailing slash needed).
     pub base_url: String,
@@ -97,14 +98,21 @@ struct EmbeddingsResponse {
 /// at every server start, so it is read here, never assumed.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LlamaProps {
+    /// Whether the endpoint serves a vision modality.
     pub vision: bool,
+    /// Whether the endpoint serves an audio modality.
     pub audio: bool,
+    /// The per-process media marker a multimodal prompt references.
     pub media_marker: Option<String>,
 }
 
 impl RemoteEmbedder {
     /// Construction validates the API key (header-injection guard, in
     /// [`RemoteHttpClient::new`]) and pins the endpoint's IP.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API key is invalid or the endpoint host can't be resolved/pinned.
     pub fn new(cfg: RemoteEmbedderConfig) -> NativeResult<Self> {
         let http = RemoteHttpClient::new(&cfg.base_url, cfg.api_key, EMBED_TIMEOUT)?;
         Ok(Self {

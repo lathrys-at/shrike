@@ -13,6 +13,10 @@ use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 /// Must be called once per process before the first session is created. The
 /// path comes from the installed onnxruntime Python wheel (located by the
 /// facade), so the native and Python backends run the *same* runtime build.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::Unavailable`] if the onnxruntime library can't be initialised.
 pub fn init_runtime(dylib_path: &str) -> NativeResult<()> {
     // commit() returns false when an environment is already committed — fine,
     // init is process-wide and idempotent for our single-dylib use.

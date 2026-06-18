@@ -20,6 +20,10 @@ pub struct AppleVisionRecognizer {
 impl AppleVisionRecognizer {
     /// Construct, failing `unavailable` where Vision isn't (non-macOS, below the
     /// macOS-15 API floor).
+    ///
+    /// # Errors
+    ///
+    /// Returns an `unavailable` error where Apple Vision is not available.
     pub fn new() -> NativeResult<Self> {
         Ok(Self {
             fingerprint: shrike_platform::vision::fingerprint().ok_or_else(unavailable)?,

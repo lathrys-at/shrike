@@ -21,12 +21,20 @@ use super::session::{build_session, int_tensor, l2_normalize};
 /// rejected Python-side before construction).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pooling {
+    /// Mean-pool the token embeddings.
     Mean,
+    /// Take the CLS token embedding.
     Cls,
+    /// Take the last token's embedding (last-token models).
     Last,
 }
 
 impl Pooling {
+    /// Parse a pooling name (`mean`/`cls`/`last`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] for any other value.
     pub fn parse(s: &str) -> NativeResult<Self> {
         match s {
             "mean" => Ok(Pooling::Mean),
@@ -39,13 +47,19 @@ impl Pooling {
     }
 }
 
+/// Construction parameters for [`TextEmbedder`] (a text-only ONNX encoder).
 pub struct TextEmbedderConfig {
+    /// Path to the ONNX model.
     pub model_path: String,
+    /// Path to the tokenizer JSON.
     pub tokenizer_path: String,
     /// Already resolved Python-side (intersected with available, CPU appended).
     pub providers: Vec<String>,
+    /// Token-pooling strategy.
     pub pooling: Pooling,
+    /// Whether to L2-normalize the output (scale-only; not fingerprinted).
     pub normalize: bool,
+    /// Tokenizer truncation length.
     pub max_length: usize,
 }
 
@@ -66,6 +80,7 @@ struct GraphInputs {
     unsupported: Vec<String>,
 }
 
+/// A text-only ONNX embedder (tokenize → run → pool → optional normalize).
 pub struct TextEmbedder {
     /// Locked because ort 2.0.0-rc.12's run entrypoints all take `&mut self`
     /// (`Session::run<'s, …>(&'s mut self, …) -> Result<SessionOutputs<'s>>`,
@@ -82,6 +97,11 @@ pub struct TextEmbedder {
 }
 
 impl TextEmbedder {
+    /// Load the ONNX session and tokenizer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model/tokenizer can't be loaded or the session built.
     pub fn load(cfg: TextEmbedderConfig) -> NativeResult<Self> {
         let (session, active) = build_session(&cfg.model_path, &cfg.providers)?;
 
@@ -179,18 +199,31 @@ impl TextEmbedder {
         &self.inputs.unsupported
     }
 
+    /// The execution providers actually registered, in order.
     pub fn active_providers(&self) -> &[String] {
         &self.active_providers
     }
 
     /// The embedding width, once known (set by the first embed; readable
     /// beforehand only if the graph declares a static last output dim).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the dim mutex is poisoned (a prior holder panicked).
     pub fn dim(&self) -> Option<usize> {
         *self.dim.lock().expect("dim lock poisoned")
     }
 
     /// Embed one chunk of texts as a single batch — the unit the Python
     /// facade's batch-safety probe and chunking build on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if tokenization or the ONNX run fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the session or dim mutex is poisoned.
     pub fn embed_chunk(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());

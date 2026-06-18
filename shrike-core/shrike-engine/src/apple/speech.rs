@@ -37,6 +37,11 @@ impl AppleSpeechTranscriber {
     /// `unavailable` where SpeechAnalyzer isn't (non-macOS, pre-26 OS or
     /// build SDK, unsupported locale). Never downloads assets — see
     /// [`Self::ensure_assets`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an `unavailable` error where SpeechAnalyzer or the locale is
+    /// not available.
     pub fn new(locale: Option<&str>) -> NativeResult<Self> {
         let locale = locale.unwrap_or("en-US").to_owned();
         let fingerprint =
@@ -59,6 +64,11 @@ impl AppleSpeechTranscriber {
     /// `installed` / `unsupported`. The ONE path allowed to drive the
     /// download — call it from operational code (or the live tests), never
     /// from a constructor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `unavailable` error if the locale is unavailable, or an
+    /// error if the asset-status JSON can't be retrieved or parsed.
     pub fn ensure_assets(&self) -> NativeResult<String> {
         let json =
             shrike_platform::speech::ensure_assets(&self.locale).ok_or_else(speech_unavailable)?;

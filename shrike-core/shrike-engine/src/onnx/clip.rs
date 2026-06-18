@@ -27,13 +27,19 @@ use super::session::{build_session, extract_2d, graph_inputs, int_tensor, l2_nor
 /// Python binding keep reading `IMAGE_PREP_VERSION_RS` from this crate.
 pub use shrike_image::IMAGE_PREP_VERSION_RS;
 
+/// Construction parameters for [`ClipEmbedder`] (a CLIP text+vision ONNX pair).
 pub struct ClipEmbedderConfig {
+    /// Path to the text-encoder ONNX model.
     pub text_model_path: String,
+    /// Path to the vision-encoder ONNX model.
     pub vision_model_path: String,
+    /// Path to the CLIP tokenizer JSON.
     pub tokenizer_path: String,
     /// Already resolved Python-side (intersected with available, CPU appended).
     pub providers: Vec<String>,
+    /// Per-channel pixel mean for normalization.
     pub image_mean: Vec<f32>,
+    /// Per-channel pixel std for normalization.
     pub image_std: Vec<f32>,
     /// Shortest-edge resize target (preprocessor "size").
     pub resize: u32,
@@ -43,6 +49,7 @@ pub struct ClipEmbedderConfig {
     pub context: usize,
 }
 
+/// A CLIP dual-encoder embedding text and images into one shared space.
 pub struct ClipEmbedder {
     // Locked because ort 2.0.0-rc.12's run entrypoints all take `&mut self`
     // (see the note on `super::text::TextEmbedder`'s session).
@@ -58,6 +65,11 @@ pub struct ClipEmbedder {
 }
 
 impl ClipEmbedder {
+    /// Load both ONNX sessions and the tokenizer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a model/tokenizer file can't be loaded or a session can't be built.
     pub fn load(cfg: ClipEmbedderConfig) -> NativeResult<Self> {
         let prep =
             PreprocessConfig::from_slices(cfg.resize, cfg.crop, &cfg.image_mean, &cfg.image_std)?;
@@ -100,15 +112,29 @@ impl ClipEmbedder {
         })
     }
 
+    /// The execution providers actually registered, in order.
     pub fn active_providers(&self) -> &[String] {
         &self.active_providers
     }
 
+    /// The embedding width once known (set by the first embed).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the dim mutex is poisoned (a prior holder panicked).
     pub fn dim(&self) -> Option<usize> {
         *self.dim.lock().expect("dim lock poisoned")
     }
 
     /// Embed one chunk of texts (the unit the facade's probe/chunking build on).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if tokenization or the ONNX run fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the session or dim mutex is poisoned.
     pub fn embed_text_chunk(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
@@ -154,6 +180,14 @@ impl ClipEmbedder {
     /// Embed one chunk of images, each an encoded [`MediaItem`] (PNG/JPEG/…).
     /// The mime hint is unused today — the decoder sniffs magic bytes — but
     /// the typed item keeps the signature aligned with the engine contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an image can't be decoded/preprocessed or the ONNX run fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the session or dim mutex is poisoned.
     pub fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>> {
         if images.is_empty() {
             return Ok(Vec::new());
@@ -182,6 +216,10 @@ impl ClipEmbedder {
     }
 
     /// Internal bytes-shaped entry, kept for the binding's probe path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an image can't be decoded/preprocessed or the ONNX run fails.
     pub fn embed_image_bytes_chunk(&self, images: Vec<Vec<u8>>) -> NativeResult<Vec<Vec<f32>>> {
         let items: Vec<MediaItem> = images.into_iter().map(MediaItem::untyped).collect();
         self.embed_image_chunk(&items)

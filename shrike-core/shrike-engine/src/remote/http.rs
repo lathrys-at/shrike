@@ -63,7 +63,9 @@ fn backoff(attempt: u32) -> Duration {
 /// its configured identity.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModelInfo {
+    /// The endpoint's reported model id, if any.
     pub id: Option<String>,
+    /// The raw `meta` block (n_params, n_embd, …) for fingerprint policy.
     pub meta: serde_json::Map<String, serde_json::Value>,
 }
 
