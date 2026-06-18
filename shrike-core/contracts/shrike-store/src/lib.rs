@@ -166,12 +166,21 @@ pub trait VectorIndex: Send + Sync {
 /// fingerprint meta) and the `col_mod` watermark.
 pub trait DerivedStore: Send + Sync {
     /// Full (re)build from `(note_id, source, ref, text)` rows, committing
-    /// under the `col_mod` snapshot.
+    /// under the `col_mod` snapshot. `live_notes` is the authoritative set of
+    /// note ids currently in the collection: recognition rows are pruned only
+    /// for notes absent from it, never merely for notes absent from `rows` (a
+    /// note can be live yet contribute no field rows — all-blank fields, or a
+    /// snapshot taken before the note was written).
     ///
     /// # Errors
     ///
     /// Returns an error if the backing store rejects the rebuild transaction.
-    fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()>;
+    fn build(
+        &self,
+        rows: &[(i64, String, String, String)],
+        live_notes: &[i64],
+        col_mod: i64,
+    ) -> NativeResult<()>;
     /// Replace one note's rows for `source` with `(ref, text)` pairs.
     ///
     /// # Errors

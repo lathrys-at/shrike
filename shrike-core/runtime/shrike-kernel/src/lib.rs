@@ -1495,19 +1495,21 @@ impl Kernel {
     /// snapshot `col_mod` the build committed under, and the post-commit
     /// `col_mod` (equal means nothing interleaved).
     async fn rebuild_derived_once(&self) -> NativeResult<(usize, i64, i64)> {
-        let (rows, dmod) = self
+        let (rows, live_notes, dmod) = self
             .collection
             .run(|core| -> NativeResult<_> {
                 let ids = core.find_notes("")?;
                 let rows = core.derived_field_rows(&ids)?;
                 let dmod = core.col_mod()?;
-                Ok((rows, dmod))
+                Ok((rows, ids, dmod))
             })
             .await??;
         let n = rows.len();
         let derived = Arc::clone(&self.derived);
-        // Blocking-fs leaf (the FTS5 rebuild) → the compute pool.
-        runtime::dispatch_compute(move || derived.build(&rows, dmod)).await?;
+        // Blocking-fs leaf (the FTS5 rebuild) → the compute pool. `live_notes`
+        // (the collection's note set) governs the recognition-row prune, so a
+        // row for a live note that this field snapshot misses is never dropped.
+        runtime::dispatch_compute(move || derived.build(&rows, &live_notes, dmod)).await?;
         let now = self.collection.run(|core| core.col_mod()).await??;
         Ok((n, dmod, now))
     }
@@ -6186,8 +6188,15 @@ mod no_cpython_smoke {
                     .is_empty(),
                 "B's ingest landed"
             );
-            // …and commit the stale build: B's rows are erased (the hazard).
-            kernel.derived.build(&stale.0, stale.1).unwrap();
+            // …and commit the stale build: B's FIELD rows are erased (the
+            // hazard). The stale snapshot's own note ids are its live set — this
+            // is the field-row erase the converge loop heals, distinct from the
+            // recognition-row prune that keys off the live collection.
+            let stale_live: Vec<i64> = stale.0.iter().map(|r| r.0).collect();
+            kernel
+                .derived
+                .build(&stale.0, &stale_live, stale.1)
+                .unwrap();
             assert!(
                 kernel
                     .derived

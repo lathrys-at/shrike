@@ -1520,7 +1520,7 @@ mod search_tests {
         let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
         let ids = core.find_notes("deck:*").unwrap();
         let rows = core.derived_field_rows(&ids).unwrap();
-        e.build(&rows, 1).unwrap();
+        e.build(&rows, &ids, 1).unwrap();
         e
     }
 
@@ -1658,8 +1658,13 @@ mod search_tests {
         fail_lexical: bool,
     }
     impl shrike_store::DerivedStore for FlakyDerived {
-        fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()> {
-            self.inner.build(rows, col_mod)
+        fn build(
+            &self,
+            rows: &[(i64, String, String, String)],
+            live_notes: &[i64],
+            col_mod: i64,
+        ) -> NativeResult<()> {
+            self.inner.build(rows, live_notes, col_mod)
         }
         fn ingest(&self, n: i64, s: &str, r: &[(String, String)]) -> NativeResult<()> {
             self.inner.ingest(n, s, r)

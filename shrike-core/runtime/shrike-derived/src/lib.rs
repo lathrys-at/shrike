@@ -544,7 +544,12 @@ impl DerivedEngine {
     /// drop+recreate or the row deletes), a row insert, the stale-row prune, or
     /// the wrapping build transaction (including its commit) fails — the whole
     /// build rolls back.
-    pub fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()> {
+    pub fn build(
+        &self,
+        rows: &[(i64, String, String, String)],
+        live_notes: &[i64],
+        col_mod: i64,
+    ) -> NativeResult<()> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
         // FTS5's per-row delete writes a tombstone per token list — on a
@@ -597,9 +602,11 @@ impl DerivedEngine {
             }
         }
         // Prune recognition rows (and their segments, and below-gate markers)
-        // for notes no longer in the collection: the build rows are the
-        // authoritative note set.
-        let live: std::collections::HashSet<i64> = rows.iter().map(|r| r.0).collect();
+        // for notes no longer in the collection. The authoritative note set is
+        // `live_notes` (the collection), NOT the field rows: a note can be live
+        // yet contribute no field rows (all-blank fields, or a snapshot taken
+        // before it was written), and its recognition rows must survive.
+        let live: std::collections::HashSet<i64> = live_notes.iter().copied().collect();
         let stale: Vec<i64> = {
             let mut stmt = tx
                 .prepare(
@@ -953,8 +960,13 @@ impl DerivedEngine {
 /// the concrete engine keeps its full API while the kernel consumes
 /// `Arc<dyn DerivedStore>`.
 impl shrike_store::DerivedStore for DerivedEngine {
-    fn build(&self, rows: &[(i64, String, String, String)], col_mod: i64) -> NativeResult<()> {
-        Self::build(self, rows, col_mod)
+    fn build(
+        &self,
+        rows: &[(i64, String, String, String)],
+        live_notes: &[i64],
+        col_mod: i64,
+    ) -> NativeResult<()> {
+        Self::build(self, rows, live_notes, col_mod)
     }
     fn ingest(
         &self,
@@ -1058,6 +1070,20 @@ impl shrike_store::DerivedStore for DerivedEngine {
     }
 }
 
+/// `build` with the live note set taken from the snapshot's own rows — the
+/// "no notes vanished and none are missing from the snapshot" case most tests
+/// want. Tests exercising the prune pass an explicit `live_notes`. Shared by
+/// every test module below.
+#[cfg(test)]
+fn build_snapshot_live(
+    e: &DerivedEngine,
+    rows: &[(i64, String, String, String)],
+    col_mod: i64,
+) -> NativeResult<()> {
+    let live: Vec<i64> = rows.iter().map(|r| r.0).collect();
+    e.build(rows, &live, col_mod)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1144,7 +1170,8 @@ mod tests {
         // query, so a scoped literal/fuzzy search has exact recall within
         // scope and zero hits outside it.
         let (e, _dir) = store();
-        e.build(
+        build_snapshot_live(
+            &e,
             &[
                 (1, "field".into(), "Front".into(), "the krebs cycle".into()),
                 (
@@ -1305,7 +1332,8 @@ mod tests {
     #[test]
     fn build_ingest_remove_count_round_trip() {
         let (e, dir) = store();
-        e.build(
+        build_snapshot_live(
+            &e,
             &[
                 (1, "field".into(), "Front".into(), "the mitochondria".into()),
                 (
@@ -1345,7 +1373,8 @@ mod tests {
         // over an already-populated store must leave exactly the new rows
         // searchable (the rowid↔rowmap pairing is rebuilt from scratch).
         let (e, dir) = store();
-        e.build(
+        build_snapshot_live(
+            &e,
             &[
                 (1, "field".into(), "F".into(), "alpha alpha".into()),
                 (2, "field".into(), "F".into(), "beta beta".into()),
@@ -1354,8 +1383,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(e.count().unwrap(), 2);
-        e.build(&[(2, "field".into(), "F".into(), "gamma gamma".into())], 2)
-            .unwrap();
+        build_snapshot_live(
+            &e,
+            &[(2, "field".into(), "F".into(), "gamma gamma".into())],
+            2,
+        )
+        .unwrap();
         assert_eq!(e.count().unwrap(), 1);
         assert!(e
             .match_rows("\"alpha\"", 10, false, None, &[])
@@ -1371,7 +1404,8 @@ mod tests {
     #[test]
     fn match_returns_snippet_and_text_when_asked() {
         let (e, dir) = store();
-        e.build(
+        build_snapshot_live(
+            &e,
             &[(7, "field".into(), "F".into(), "alpha beta gamma".into())],
             1,
         )
@@ -1385,8 +1419,7 @@ mod tests {
     #[test]
     fn bad_match_expression_is_invalid_input() {
         let (e, dir) = store();
-        e.build(&[(1, "field".into(), "F".into(), "abc".into())], 1)
-            .unwrap();
+        build_snapshot_live(&e, &[(1, "field".into(), "F".into(), "abc".into())], 1).unwrap();
         let err = e.match_rows("AND AND (", 10, false, None, &[]).unwrap_err();
         assert_eq!(err.kind(), shrike_error::ErrorKind::InvalidInput);
         std::fs::remove_dir_all(dir).ok();
@@ -1398,7 +1431,8 @@ mod tests {
         // recognition-derived rows (re-recognition is expensive) — except for
         // notes that vanished from the collection.
         let (e, _dir) = store();
-        e.build(
+        build_snapshot_live(
+            &e,
             &[(1, "field".into(), "Front".into(), "the mitochondria".into())],
             100,
         )
@@ -1420,7 +1454,8 @@ mod tests {
             .unwrap();
 
         // Rebuild with note 1 present, note 2 gone.
-        e.build(
+        build_snapshot_live(
+            &e,
             &[(
                 1,
                 "field".into(),
@@ -1475,6 +1510,54 @@ mod tests {
         );
     }
 
+    /// A rebuild whose field-row snapshot is STALE — it predates a note the
+    /// collection now has — must keep that note's recognition rows. The prune
+    /// keys off `live_notes` (the collection), not the field snapshot: a live
+    /// note can contribute no field rows (all-blank fields, or a snapshot taken
+    /// before the note was written). Without this, the boot rebuild raced a
+    /// recognition sweep and dropped the row; the kernel's converge loop could
+    /// not heal it because a recognition ingest does not bump col.mod.
+    #[test]
+    fn rebuild_with_stale_field_snapshot_keeps_a_live_notes_recognition_rows() {
+        let (e, _dir) = store();
+        // Note 1's OCR row is in the store (a recognition sweep ingested it).
+        e.ingest(
+            1,
+            "ocr",
+            &[("diagram.png".into(), "electron transport chain".into())],
+        )
+        .unwrap();
+
+        // The field-row snapshot carries no rows for note 1 (taken before the
+        // note was written), but note 1 IS live in the collection.
+        e.build(&[], &[1], 200).unwrap();
+
+        // The recognition row survived the stale-snapshot rebuild.
+        let ocr = e.refs_for_source("ocr").unwrap();
+        assert_eq!(
+            ocr,
+            vec![(1, "diagram.png".to_string())],
+            "a live note's OCR row must survive a rebuild whose field snapshot \
+             predates the note"
+        );
+        let hits = e
+            .search_substring("electron transport", 10, None, &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(hits[0].0, 1);
+        assert_eq!(hits[0].1, "ocr");
+
+        // A note genuinely absent from `live_notes` is still pruned.
+        e.ingest(2, "ocr", &[("gone.png".into(), "orphaned".into())])
+            .unwrap();
+        e.build(&[], &[1], 201).unwrap();
+        assert_eq!(
+            e.refs_for_source("ocr").unwrap(),
+            vec![(1, "diagram.png".to_string())],
+            "note 2 — not in live_notes — is pruned"
+        );
+    }
+
     #[test]
     fn gated_markers_persist_survive_ingest_and_invalidate() {
         // Below-gate markers round-trip, survive a sibling image's
@@ -1516,7 +1599,8 @@ mod tests {
 
         // A rebuild prunes markers of notes gone from the collection — even
         // marker-only notes (note 2 has no text rows at all).
-        e.build(
+        build_snapshot_live(
+            &e,
             &[(3, "field".into(), "Front".into(), "still here".into())],
             100,
         )
@@ -1532,8 +1616,7 @@ mod tests {
     #[test]
     fn schema_version_bump_resets_data() {
         let (e, dir) = store();
-        e.build(&[(1, "field".into(), "F".into(), "abc".into())], 9)
-            .unwrap();
+        build_snapshot_live(&e, &[(1, "field".into(), "F".into(), "abc".into())], 9).unwrap();
         drop(e);
         let path = dir.join("shrike.db");
         let e2 = DerivedEngine::open(path.to_str().unwrap(), 2).unwrap();
@@ -1661,7 +1744,8 @@ mod lexical_tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
-        e.build(
+        build_snapshot_live(
+            &e,
             &[
                 (
                     1,
@@ -1721,7 +1805,8 @@ mod lexical_tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
-        e.build(
+        build_snapshot_live(
+            &e,
             &[
                 // A normal field row + a VLM-describe row, same distinctive term.
                 (
@@ -1798,7 +1883,8 @@ mod hardening_tests {
         let (dir, path) = temp_db();
         {
             let e = DerivedEngine::open(path.to_str().unwrap(), 1).unwrap();
-            e.build(
+            build_snapshot_live(
+                &e,
                 &[(1, "field".into(), "Front".into(), "consistent text".into())],
                 100,
             )
@@ -1870,7 +1956,7 @@ mod hardening_tests {
                 )
             })
             .collect();
-        e.build(&rows, 100).unwrap();
+        build_snapshot_live(&e, &rows, 100).unwrap();
         assert_eq!(e.count().unwrap(), n);
 
         // A scope wider than the inline cap rides the staged TEMP table and

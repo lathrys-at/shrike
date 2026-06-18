@@ -744,13 +744,20 @@ impl DerivedTextEngine {
             .map_err(to_py_err)
     }
 
+    #[pyo3(signature = (rows, col_mod, live_notes=None))]
     fn build(
         &self,
         py: Python<'_>,
         rows: Vec<(i64, String, String, String)>,
         col_mod: i64,
+        live_notes: Option<Vec<i64>>,
     ) -> PyResult<()> {
-        py.detach(|| self.inner.build(&rows, col_mod))
+        // `live_notes` is the authoritative collection note set governing the
+        // recognition-row prune. The standalone host rebuilds in one synchronous
+        // pass with no concurrent recognition ingest, so when it is omitted the
+        // snapshot's own note ids are the live set.
+        let live = live_notes.unwrap_or_else(|| rows.iter().map(|r| r.0).collect());
+        py.detach(|| self.inner.build(&rows, &live, col_mod))
             .map_err(to_py_err)
     }
 
