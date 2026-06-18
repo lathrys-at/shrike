@@ -35,17 +35,15 @@
 //! - the centralized redirect-following loops the consumers ride
 //!   ([`fetch_pinned_get`] for the untrusted-media GET — is_global per hop;
 //!   [`post_pinned_with_revet`] for the operator-endpoint POST — same-host per
-//!   hop, #721 S2): ONE audited copy of the per-hop SSRF re-vet, one helper per
+//!   hop): ONE audited copy of the per-hop SSRF re-vet, one helper per
 //!   posture. Engine policy (retry/backoff/`Retry-After`/api-key/item-level
 //!   status) stays with the consumer — the helpers own only the pinned-send +
 //!   per-hop re-vet + the body size-cap.
 //!
 //! Pure Rust, NO engine crate and NOT `shrike-kernel` — it sits BELOW both, so
 //! the kernel-purity and engine-purity layering rules both stay satisfied. The
-//! transport is async `reqwest` only: the synchronous `ureq` agents were
-//! removed in #721 S2 once every consumer (media fetch + the remote engines)
-//! moved onto the async client (`ureq` survives only in the unrelated
-//! `shrike-llama-server` loopback health probe, a managed-crate concern).
+//! transport is async `reqwest` only; synchronous `ureq` survives only in the
+//! unrelated `shrike-llama-server` loopback health probe, a managed-crate concern.
 
 #![deny(missing_docs)]
 #![deny(
@@ -242,7 +240,7 @@ pub fn same_host_redirect(from: &url::Url, location: &str) -> NativeResult<url::
 /// A reqwest async client that connects ONLY to `pinned` (the vetted IP),
 /// ignoring the host's real DNS, with auto-redirects OFF so the caller follows
 /// and re-vets each hop manually (the low-level builder under
-/// [`fetch_pinned_get`], #721): `reqwest::ClientBuilder::resolve(host, addr)`
+/// [`fetch_pinned_get`]): `reqwest::ClientBuilder::resolve(host, addr)`
 /// installs a per-host DNS
 /// override for the client's life, so every connection to `host` uses `addr`
 /// and reqwest never re-resolves the name at connect time — closing the
@@ -287,7 +285,7 @@ pub fn pinned_async_client(
 /// parse it, resolve its host (WITHOUT the `is_global` gate — the operator
 /// trusts the host, e.g. loopback llama-server / a tailnet) via [`resolve_pinned`],
 /// and pin the connection to that one address (the low-level builder under
-/// [`post_pinned_with_revet`], #721). Returns the client plus the parsed base URL
+/// [`post_pinned_with_revet`]). Returns the client plus the parsed base URL
 /// (which the caller keeps for the [`same_host_redirect`] comparison). The pin
 /// closes the DNS-rebinding TOCTOU even for a trusted host; redirects are OFF so
 /// the caller applies [`same_host_redirect`] per hop.
@@ -318,7 +316,7 @@ pub fn pinned_endpoint_async_client(
     Ok((client, base))
 }
 
-// ── the centralized per-hop re-vet loops (#721 S2) ───────────────────────────
+// ── the centralized per-hop re-vet loops ───────────────────────────
 // ONE audited copy of the manual redirect-following + SSRF re-vet the two
 // consumers (the untrusted-media GET, the operator-endpoint POST) used to
 // hand-roll. The posture differs only in how each hop is re-vetted; engine
@@ -655,7 +653,7 @@ mod tests {
         assert_eq!(target.host_str(), Some("trusted.example.com"));
     }
 
-    // ── async client builders (#721) ─────────────────────────────────────────
+    // ── async client builders ─────────────────────────────────────────
     // The IP-pin / SNI / redirect-revet / size-cap behaviors that need a live
     // socket are in tests/async_client.rs (they need a tokio runtime + a local
     // server). These are the no-network construction-gate tests.
@@ -674,7 +672,7 @@ mod tests {
     #[test]
     fn pinned_async_client_path_refuses_non_global_before_any_socket() {
         // The untrusted path gates on resolve_public_ip BEFORE building/connecting
-        // (the #592 control): a host resolving only to a non-global address is
+        // (the SSRF control): a host resolving only to a non-global address is
         // refused with no socket opened. This mirrors how the media consumer will
         // drive it (resolve_public_ip -> pinned_async_client, per hop).
         let err = resolve_public_ip("127.0.0.1").unwrap_err();
