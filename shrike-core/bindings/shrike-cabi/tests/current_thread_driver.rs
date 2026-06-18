@@ -1,33 +1,32 @@
-//! The current_thread-mode acceptance gate.
+//! The driven-mode acceptance gate, with the test PLAYING THE HOST.
 //!
-//! A SEPARATE test binary on purpose: the runtime seam (`init_runtime`) is
-//! process-global, so this proof must not share a process with the in-crate
+//! A SEPARATE test binary on purpose: the runtime seam (`init_driven_runtime`)
+//! is process-global, so this proof must not share a process with the in-crate
 //! suite (which runs on the lazily-installed DEFAULT multi-thread runtime).
-//! Here we call `shrike_runtime_init` FIRST, so this process owns the
-//! `current_thread` runtime + its dedicated driver thread.
+//! Here we call `shrike_runtime_init` FIRST, then — playing the host's role —
+//! park the committed threads in the C drive entries.
 //!
-//! What it pins: under the `current_thread` mode the C ABI advertises, the
-//! full open -> upsert -> search -> delete -> close flow runs and the
-//! completion callbacks ACTUALLY FIRE. Before the driver fix, a
-//! `current_thread` runtime had no thread driving it (every op is a
-//! fire-and-forget `Handle::spawn`), so a `shrike_op` task was never polled
-//! and its callback never fired — the flow would hang. This test would hang
-//! (then fail on the recv timeout) on a regression that drops the driver.
+//! What it pins: under the driven mode the C ABI advertises, the full open ->
+//! upsert -> search -> delete -> close flow runs and the completion callbacks
+//! ACTUALLY FIRE. A `current_thread` runtime polls a `spawn_op`'d task only
+//! while a thread drives it; cabi exposes the drive entries and the host parks
+//! them, so a regression that fails to drive (or a startup race where the IO
+//! thread doesn't own the drivers — guarded by `shrike_runtime_probe`) would
+//! hang and fail on the recv timeout.
 //!
 //! Lexical-only (no embedder): the public C ABI can't attach an embedder
 //! (the kernel handle is opaque), so search relies on the lexical signal —
 //! exactly like the kernel's own `current_thread.rs` proof. The point here is
-//! that the callbacks FIRE under the driven current_thread runtime, not the
-//! semantic ranking.
+//! that the callbacks FIRE under the driven runtime, not the semantic ranking.
+
+mod host;
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use shrike_cabi::{
-    shrike_close, shrike_op, shrike_open, shrike_runtime_init, shrike_runtime_shutdown,
-    ShrikeHandle,
-};
+use host::Host;
+use shrike_cabi::{shrike_close, shrike_op, shrike_open, ShrikeHandle};
 
 /// The callback: send the borrowed JSON back through the channel whose Sender
 /// is `user_data`. Fires once per op.
@@ -86,13 +85,10 @@ fn ok(v: serde_json::Value) -> serde_json::Value {
 
 #[test]
 fn full_flow_fires_callbacks_under_the_current_thread_driver() {
-    // FIRST runtime touch in this process: install current_thread + its driver.
-    assert!(
-        shrike_runtime_init(),
-        "shrike_runtime_init must install the current_thread runtime first in this process"
-    );
-    // A second init is a no-op false (one runtime, one driver).
-    assert!(!shrike_runtime_init(), "a second runtime_init is a no-op");
+    // Play the host: install the driven runtime + park the committed N+2 threads
+    // (IO first, then probe, then sync + compute). The whole flow below is driven
+    // by these threads.
+    let host = Host::start();
 
     let dir = std::env::temp_dir().join(format!("shrike-cabi-ct-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -150,14 +146,12 @@ fn full_flow_fires_callbacks_under_the_current_thread_driver() {
     let info = ok(op(handle, "collection_info", "{}"));
     assert_eq!(info.get("note_count").and_then(|v| v.as_i64()), Some(0));
 
-    // close — the spawn+std-channel bridge must complete under the driver
+    // close — the spawn+std-channel bridge must complete under the IO driver
     // (it would hang if the driver weren't driving the spawned close).
     unsafe { shrike_close(handle) };
 
-    // Teardown: stop the driver thread cleanly and join it.
-    shrike_runtime_shutdown();
-    // A second shutdown is a no-op.
-    shrike_runtime_shutdown();
+    // Teardown: cabi drains + closes the pools, then the host joins its threads.
+    host.shutdown();
 
     std::fs::remove_dir_all(dir).ok();
 }

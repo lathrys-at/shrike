@@ -2,24 +2,25 @@
 //! shutdown begins must still COMPLETE, not be abandoned.
 //!
 //! A SEPARATE test binary (own process — the runtime seam is process-global and
-//! terminally undriven after shutdown). This is the deterministic complement to
+//! terminally undriven after shutdown). The test plays the host (committed
+//! drive threads). This is the deterministic complement to
 //! `op_racing_shutdown.rs`: `shrike_op` admits (increments INFLIGHT) and spawns
 //! the op SYNCHRONOUSLY before it returns, so once `shrike_op` has returned the
 //! op is provably in flight. Calling `shrike_runtime_shutdown` after that must
-//! DRAIN it — drive it to completion and fire its callback with a SUCCESS
-//! result — rather than exiting the driver and stranding it. A regression that
-//! made the driver exit-on-notify (without draining) would surface the op as a
-//! timeout (orphaned) or an `unavailable` fast-fail (abandoned), both failing
-//! the success assertion here.
+//! DRAIN it — drive it to completion (the IO thread is still live during the
+//! drain) and fire its callback with a SUCCESS result — BEFORE
+//! `shutdown_driven_pools` closes the queues. A regression that closed the pools
+//! before draining would surface the op as a timeout (orphaned) or an
+//! `unavailable` fast-fail (abandoned), both failing the success assertion here.
+
+mod host;
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use shrike_cabi::{
-    shrike_close, shrike_op, shrike_open, shrike_runtime_init, shrike_runtime_shutdown,
-    ShrikeHandle,
-};
+use host::Host;
+use shrike_cabi::{shrike_close, shrike_op, shrike_open, ShrikeHandle};
 
 extern "C" fn collect(user_data: *mut c_void, result_json: *const c_char) {
     let tx = unsafe { Box::from_raw(user_data as *mut mpsc::Sender<String>) };
@@ -55,10 +56,9 @@ fn open(collection: &str, cache: &str) -> *mut ShrikeHandle {
 
 #[test]
 fn an_inflight_op_completes_through_the_shutdown_drain() {
-    assert!(
-        shrike_runtime_init(),
-        "first init installs the current_thread runtime"
-    );
+    // Play the host: install + park the committed threads (IO first, then probe,
+    // then sync + compute).
+    let mut host = Host::start();
     let dir = std::env::temp_dir().join(format!("shrike-cabi-drain-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let collection = dir.join("c.anki2").to_string_lossy().into_owned();
@@ -82,9 +82,11 @@ fn an_inflight_op_completes_through_the_shutdown_drain() {
         )
     };
 
-    // Now shut down. The driver MUST drain the in-flight op to completion
-    // before exiting, so its callback fires with a SUCCESS result.
-    shrike_runtime_shutdown();
+    // Now shut down — WITHOUT joining yet, so we can assert the drain's effect
+    // first. shrike_runtime_shutdown MUST drain the in-flight op to completion
+    // (the IO thread is still live during the drain) BEFORE closing the pools,
+    // so its callback fires with a SUCCESS result.
+    host.shutdown_no_join();
 
     let raw = rx
         .recv_timeout(Duration::from_secs(10))
@@ -137,5 +139,7 @@ fn an_inflight_op_completes_through_the_shutdown_drain() {
         .recv_timeout(Duration::from_secs(10))
         .expect("close returns, not hang");
     closer.join().expect("the closer thread completes");
+    // Join the committed drive threads (they returned when the pools closed).
+    host.join();
     std::fs::remove_dir_all(dir).ok();
 }

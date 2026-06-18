@@ -8,21 +8,21 @@
 //!
 //! What it pins: an op issued CONCURRENTLY with `shrike_runtime_shutdown` must
 //! always fire its callback within a bounded timeout — it either COMPLETES (it
-//! was admitted before the shutdown flag store, so the driver drained it) or
+//! was admitted before the shutdown flag store, so the drain waited for it) or
 //! FAST-FAILS `unavailable` (it reached admission after the store) — but NEVER
 //! orphans (callback never fires → hang). The strictly-after case is closed
-//! elsewhere; this closes the notify→store window it left open. Pre-fix this repro is
+//! elsewhere; this closes the admit↔store window it left open. Pre-fix this repro is
 //! red-by-design (the op can be stranded on the dying runtime); post-fix it
-//! passes deterministically.
+//! passes deterministically. The test plays the host (committed drive threads).
+
+mod host;
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use shrike_cabi::{
-    shrike_close, shrike_op, shrike_open, shrike_runtime_init, shrike_runtime_shutdown,
-    ShrikeHandle,
-};
+use host::Host;
+use shrike_cabi::{shrike_close, shrike_op, shrike_open, ShrikeHandle};
 
 extern "C" fn collect(user_data: *mut c_void, result_json: *const c_char) {
     let tx = unsafe { Box::from_raw(user_data as *mut mpsc::Sender<String>) };
@@ -58,10 +58,8 @@ fn open(collection: &str, cache: &str) -> *mut ShrikeHandle {
 
 #[test]
 fn op_racing_shutdown_always_fires_its_callback_bounded() {
-    assert!(
-        shrike_runtime_init(),
-        "first init installs the current_thread runtime"
-    );
+    // Play the host: install + park the committed threads.
+    let mut host = Host::start();
     let dir = std::env::temp_dir().join(format!("shrike-cabi-race-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let collection = dir.join("c.anki2").to_string_lossy().into_owned();
@@ -87,7 +85,9 @@ fn op_racing_shutdown_always_fires_its_callback_bounded() {
         };
     });
     // No sleep: maximise the chance the op lands inside the shutdown window.
-    shrike_runtime_shutdown();
+    // shutdown_no_join so the drive threads stay live through the drain (joined
+    // at the end); the drain itself is what waits for an admitted-before-store op.
+    host.shutdown_no_join();
     op_thread
         .join()
         .expect("op thread returns (shrike_op itself never blocks)");
@@ -119,5 +119,7 @@ fn op_racing_shutdown_always_fires_its_callback_bounded() {
         .recv_timeout(Duration::from_secs(10))
         .expect("close returns, not hang");
     closer.join().expect("the closer thread completes");
+    // Join the committed drive threads (they returned when the pools closed).
+    host.join();
     std::fs::remove_dir_all(dir).ok();
 }

@@ -10,15 +10,27 @@
 //!
 //! ## Shape (mirrors `shrike-pyo3`'s `async_kernel.rs`, minus Python)
 //!
-//! - [`shrike_runtime_init`] installs a `current_thread` tokio runtime via
-//!   [`shrike_kernel::init_runtime`] AND starts a dedicated driver thread
-//!   parked in `Runtime::block_on` for the runtime's life (the suspension-aware
-//!   single-async-thread mode the iOS lifecycle wants). The driver is
-//!   load-bearing: a `current_thread` runtime polls `spawn_op`'d tasks ONLY
-//!   while a thread drives it, so without it the async ops below would never
-//!   run and their callbacks would never fire. [`shrike_runtime_shutdown`]
-//!   stops + joins the driver at teardown (fuller suspension handling
-//!   lands in a later slice).
+//! - [`shrike_runtime_init`] installs a harness-driven `current_thread` tokio
+//!   runtime via [`shrike_kernel::init_driven_runtime`] AND commits **N + 2**
+//!   OS threads to drive it — the C-ABI analog of the server's
+//!   `DrivenRuntime`. One thread parks in [`shrike_kernel::drive_io_until_shutdown`]
+//!   (owns + drives tokio's IO/timer drivers and the async executor), one in
+//!   [`shrike_kernel::drive_sync`] (the serialized collection / anki-sync
+//!   thread), and N in [`shrike_kernel::drive_compute`] (CPU engine compute +
+//!   blocking-fs leaves). The IO driver is load-bearing: a `current_thread`
+//!   runtime polls `spawn_op`'d tasks ONLY while a thread drives it, so without
+//!   it the async ops below would never run and their callbacks would never
+//!   fire. [`shrike_runtime_shutdown`] drains every in-flight op, then closes
+//!   the kernel's pool queues and joins the committed threads at teardown.
+//!   A consumer that never calls [`shrike_runtime_init`] rides the kernel's
+//!   lazy default multi-thread runtime instead (whose worker threads drive
+//!   spawned tasks) — `shrike_runtime_init` is the opt-in to the driven model
+//!   the iOS lifecycle wants.
+//!
+//!   Resuming the process after an iOS suspension re-uses the same committed
+//!   threads — no re-init unless the host called [`shrike_runtime_shutdown`].
+//!   The fuller foreground/background pause (quiescing the drivers on
+//!   backgrounding) is #393, a later slice.
 //! - [`shrike_open`] / [`shrike_close`] manage a kernel handle (an opaque
 //!   `Arc<Kernel>` boxed behind a raw pointer).
 //! - [`shrike_op`] dispatches one named action — its params a JSON string —
@@ -235,66 +247,83 @@ fn outcome_json(outcome: NativeResult<String>) -> String {
 
 // ── runtime ─────────────────────────────────────────────────────────────────
 
-/// The `current_thread` runtime's DRIVER state.
-///
-/// A `current_thread` tokio runtime has no worker threads: a spawned task
-/// makes progress ONLY while some thread is parked inside
-/// [`tokio::runtime::Runtime::block_on`] driving it (tokio's documented
-/// contract — `Handle::spawn`'d tasks are suspended once `block_on` returns,
-/// and only `Runtime::block_on` drives the IO/timer drivers). Every async
-/// C-ABI op here is fire-and-forget (`spawn_op` = `handle().spawn(...)` +
-/// detach), so without a driver a `current_thread` runtime would never poll
-/// them and the completion callback would NEVER fire.
-///
-/// So `shrike_runtime_init` installs a `current_thread` runtime AND starts one
-/// dedicated OS thread parked in `shrike_kernel::block_on(park)` for the
-/// runtime's whole life — the canonical "runtime on a dedicated thread, post
-/// work via the Handle" mobile shape (one async-executing thread the host can
-/// suspend/stop deterministically). `park` awaits this `Notify`; once
-/// the runtime is driven, every `spawn_op` task — and `shrike_close`'s
-/// spawned close — runs to completion. `shrike_runtime_shutdown` notifies and
-/// joins the driver.
-#[cfg(feature = "anki-core")]
-struct Driver {
-    shutdown: Arc<tokio::sync::Notify>,
-    thread: std::thread::JoinHandle<()>,
-}
+// The driven model, mirroring the server (`shrike-pyo3` + `driven_runtime.py`):
+// shrike-cabi IS shrike-core, so it spawns NO threads — it EXPOSES the kernel's
+// blocking drive entries as a C ABI, and the HOST (the Swift/Kotlin app; the
+// lifecycle tests, playing host) commits the OS threads and joins them.
+//
+// A `current_thread` tokio runtime has no worker threads: a spawned task makes
+// progress ONLY while some thread is parked inside
+// `tokio::runtime::Runtime::block_on` driving it (tokio's documented contract —
+// `Handle::spawn`'d tasks are suspended once `block_on` returns). Every async
+// C-ABI op here is fire-and-forget (`spawn_op` is a detached `handle().spawn`)
+// with a C callback as its only observation point, so without a live IO driver
+// the ops would never poll and their callbacks would never fire.
+//
+// So [`shrike_runtime_init`] installs the driven `current_thread` runtime ONLY
+// (no threads); the host parks its committed threads via [`shrike_drive_io`]
+// (×1), [`shrike_drive_sync`] (×1), and [`shrike_drive_compute`] (×N, N the
+// host's choice). [`shrike_runtime_shutdown`] drains every in-flight op (so its
+// callback fires) and then closes the kernel's pool queues; the drive entries
+// return and the HOST joins its own threads.
 
+/// How long [`shrike_runtime_shutdown`] waits for in-flight ops to drain before
+/// it closes the pools regardless. A bounded drain mirrors the server's
+/// committed-thread join timeout (`driven_runtime.py`): an unbounded wait would
+/// let one hung op (e.g. a remote embed with no response) wedge teardown
+/// forever, and on iOS the OS watchdog kills an unbounded wait anyway — so a
+/// bounded drain that then proceeds is strictly safer than a host that can't
+/// shut down. On timeout the remaining ops are stranded on the now-undriven
+/// runtime (their callbacks won't fire), which is the lesser evil at teardown;
+/// the host is expected to quiesce before shutdown for a clean drain.
 #[cfg(feature = "anki-core")]
-static DRIVER: std::sync::Mutex<Option<Driver>> = std::sync::Mutex::new(None);
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Terminal "the dedicated driver is shutting down / shut down" flag.
+/// Terminal "the runtime is shutting down / shut down" flag.
 ///
-/// Set (under [`ADMIT_LOCK`]) by [`shrike_runtime_shutdown`] **before** it wakes
-/// the driver to drain. Once set, [`admit_op`] refuses new ops, so they
-/// FAST-FAIL a completion through the callback instead of being dispatched onto
-/// a runtime that is being torn down (the undriven `current_thread` runtime
-/// would queue a task that is never polled — its callback would never fire and
-/// [`shrike_close`]'s `rx.recv()` would block forever; a hang
-/// realistic on a racy iOS suspend/teardown). Ops admitted BEFORE the store are
-/// counted in [`INFLIGHT`] and the driver drains them to completion first.
+/// Set (under [`ADMIT_LOCK`]) at the head of [`shrike_runtime_shutdown`], before
+/// the drain. Once set, [`admit_op`] refuses new ops, so they FAST-FAIL a
+/// completion through the callback instead of being spawned onto a runtime that
+/// is being torn down (an undriven `current_thread` runtime would queue a task
+/// that is never polled — its callback would never fire and [`shrike_close`]'s
+/// `rx.recv()` would block forever; a hang realistic on a racy iOS
+/// suspend/teardown). Ops admitted BEFORE the store are counted in [`INFLIGHT`]
+/// and the shutdown drains them to completion first.
 ///
-/// It is distinct from "`DRIVER` is `None`": that is ALSO the pre-init state of
-/// the default multi-thread lane, whose worker threads DO drive spawned tasks.
-/// This flag is only ever true after a real driver shutdown, so the
-/// multi-thread default lane (where `shrike_runtime_init` was never called) and
-/// every pre-shutdown op are wholly unaffected.
+/// It starts `false` — the state of the default multi-thread lane too (a
+/// consumer that called neither [`shrike_runtime_init`] nor the drive entries,
+/// whose lazy-default worker threads DO drive spawned tasks), so that lane and
+/// every pre-shutdown op are wholly unaffected. It is never cleared in-process:
+/// the kernel runtime + mode are `OnceLock`s, so re-driving after shutdown is a
+/// no-op (the drive entries return at once on the already-tripped pools) and the
+/// runtime stays terminally undriven — pinned by `reinit_after_shutdown`, which
+/// asserts ops still fast-fail after a re-init, not that re-init "fails".
 #[cfg(feature = "anki-core")]
 static DRIVER_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// In-flight op accounting for the drain-on-shutdown. An op admitted by
-/// [`admit_op`] increments this; [`finish_op`] decrements it when the op's task
-/// (and its callback) has run. The driver's shutdown path drains until this is
-/// zero, so an op that was admitted BEFORE shutdown still completes rather than
-/// being stranded on the dying runtime.
+/// In-flight op accounting for the drain-on-shutdown, paired with [`DRAIN_GATE`].
+/// An op admitted by [`admit_op`] increments this; [`finish_op`] decrements it
+/// AFTER the op's task has fired its callback (see `spawn_completion`). The
+/// shutdown path waits for this to reach zero (bounded), so an op admitted
+/// BEFORE shutdown still completes + fires its callback rather than being
+/// stranded on the dying runtime.
 #[cfg(feature = "anki-core")]
 static INFLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Woken (via `notify_waiters`) each time [`finish_op`] brings [`INFLIGHT`] to
-/// zero, so the driver's drain loop can re-check and exit.
+/// The drain gate: a `std` condvar the teardown thread waits on for
+/// `INFLIGHT == 0`. It is a `std` primitive ON PURPOSE — the teardown thread is
+/// a C-ABI caller thread, never a runtime worker, so it must NOT `block_on` a
+/// tokio `Notify` here (that would re-enter / contend with the IO driver's
+/// `block_on` on the `current_thread` runtime — the one shape that hangs).
+/// [`finish_op`] signals it from the op tail; the waiter loops on the predicate
+/// under the mutex, so a wakeup that races the predicate isn't lost. The mutex
+/// guards nothing but the condvar's wait/notify pairing — `INFLIGHT` stays the
+/// source of truth for the lock-free `admit_op`/`finish_op` fast path, and the
+/// waiter re-reads it under the lock each loop.
 #[cfg(feature = "anki-core")]
-static DRAINED: std::sync::LazyLock<tokio::sync::Notify> =
-    std::sync::LazyLock::new(tokio::sync::Notify::new);
+static DRAIN_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(feature = "anki-core")]
+static DRAINED: std::sync::Condvar = std::sync::Condvar::new();
 
 /// Serializes the admission decision against shutdown. The op path takes
 /// it to atomically "check the flag AND increment INFLIGHT"; shutdown takes it
@@ -306,7 +335,7 @@ static ADMIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Try to admit one op for dispatch onto the runtime. Returns `true` (and
 /// counts the op in [`INFLIGHT`]) when the runtime is still driven; `false`
-/// when the driver has been shut down — the caller then fast-fails through the
+/// when the runtime has been shut down — the caller then fast-fails through the
 /// callback rather than spawning onto a dying/undriven runtime. The flag read +
 /// the increment are under [`ADMIT_LOCK`], paired with the same lock in
 /// [`shrike_runtime_shutdown`], so the admit↔shutdown race window is closed:
@@ -321,25 +350,46 @@ fn admit_op() -> bool {
     true
 }
 
-/// Mark one admitted op finished (after its task + callback ran). When this
-/// brings [`INFLIGHT`] to zero it wakes the driver's drain loop.
+/// Mark one admitted op finished — called from the op task's tail AFTER its
+/// callback has fired (the `spawn_completion` ordering, which is what makes
+/// `INFLIGHT == 0` mean "every callback has fired"). When this brings
+/// [`INFLIGHT`] to zero it wakes the teardown thread's drain wait. The mutex is
+/// taken only to publish the wakeup under the same lock the waiter loops under,
+/// closing the lost-wakeup window (a bare decrement → notify could otherwise
+/// slip between the waiter's predicate check and its `wait`).
 #[cfg(feature = "anki-core")]
 fn finish_op() {
     if INFLIGHT.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
-        DRAINED.notify_waiters();
+        let _guard = DRAIN_GATE.lock().expect("drain gate poisoned");
+        DRAINED.notify_all();
     }
 }
 
-/// Install a `current_thread` tokio runtime as the process kernel runtime AND
-/// start its driver thread. Returns `true` if this call installed it, `false`
-/// if a runtime was already installed (idempotent-friendly — a second call is
-/// a no-op `false`, never a second driver).
+/// Install the driven `current_thread` kernel runtime — install ONLY, no
+/// threads (shrike-cabi is shrike-core; the HOST owns thread provisioning).
+/// Returns whether the runtime is now driven: `true` on a fresh install (or a
+/// benign re-call where driven was already installed), `false` if the lazy
+/// default multi-thread runtime had already been pinned by an earlier op. The
+/// caller MUST NOT park drive threads when this is `false` — they would have no
+/// driven queues to consume and would return at once.
 ///
-/// If never called, the kernel lazily installs its DEFAULT multi-thread
-/// runtime on first use (whose worker threads drive spawned tasks with no
-/// dedicated driver) — fine for a host that doesn't want the single-thread
-/// mode. A mobile host calls this once at startup for the suspension-aware
-/// single-async-thread shape, and `shrike_runtime_shutdown` at teardown.
+/// Mirrors `shrike-pyo3`'s `init_driven_runtime`: a second call finds the
+/// runtime already set (the seam is set-once), so the first install stands and
+/// this returns `is_driven()` either way. If never called, the kernel lazily
+/// installs its DEFAULT multi-thread runtime on first use (whose worker threads
+/// drive spawned tasks) — fine for a host that doesn't want the driven model.
+///
+/// # Host contract (the committed-thread lifecycle)
+///
+/// 1. `shrike_runtime_init()` — install the driven runtime.
+/// 2. spawn one thread in [`shrike_drive_io`].
+/// 3. [`shrike_runtime_probe`] — block until that IO thread is driving (it must
+///    own the IO/timer drivers before the others park — see the probe's doc).
+/// 4. spawn one thread in [`shrike_drive_sync`] and N in [`shrike_drive_compute`]
+///    (N is the host's choice — the source of the "N >= 2" engine overlap).
+/// 5. open / run ops / close via the rest of this ABI.
+/// 6. [`shrike_runtime_shutdown`] — drains in-flight ops + closes the pools.
+/// 7. the host JOINS the threads it spawned (they have returned by now).
 #[no_mangle]
 pub extern "C" fn shrike_runtime_init() -> bool {
     ffi_guard("shrike_runtime_init", false, || {
@@ -352,56 +402,12 @@ pub extern "C" fn shrike_runtime_init() -> bool {
                 Ok(rt) => rt,
                 Err(_) => return false,
             };
-            // Install first: a second init (or a prior lazy default) loses the
-            // race and we must NOT start a driver for a runtime we don't own.
-            if shrike_kernel::init_runtime(rt).is_err() {
-                return false;
-            }
-            let shutdown = Arc::new(tokio::sync::Notify::new());
-            let park = Arc::clone(&shutdown);
-            // The dedicated driver: parked in Runtime::block_on (via the
-            // kernel's block_on, which calls it on the installed runtime) for
-            // the runtime's life, so every Handle::spawn'd op is driven.
-            let thread = std::thread::Builder::new()
-                .name("shrike-cabi-rt".to_string())
-                .spawn(move || {
-                    // Drive the runtime for its life. On the shutdown signal,
-                    // DRAIN already-spawned ops before returning: a
-                    // current_thread runtime only polls spawned tasks while a
-                    // thread is inside block_on, so returning the instant we're
-                    // notified would strand any op admitted just before shutdown
-                    // (never polled, callback never fires). Instead, keep driving
-                    // until INFLIGHT hits zero — every in-flight op runs to
-                    // completion and fires its callback first. Ops admitted AFTER
-                    // shutdown set the flag are fast-failed by `admit_op`, so they
-                    // never enter INFLIGHT and can't keep the drain spinning.
-                    shrike_kernel::block_on(async move {
-                        park.notified().await;
-                        loop {
-                            // Register interest BEFORE the check so a
-                            // concurrent finish_op's notify_waiters can't be
-                            // lost between the load and the await.
-                            let drained = DRAINED.notified();
-                            if INFLIGHT.load(std::sync::atomic::Ordering::Acquire) == 0 {
-                                break;
-                            }
-                            drained.await;
-                        }
-                    });
-                })
-                .expect("the driver thread spawns");
-            *DRIVER.lock().expect("driver lock poisoned") = Some(Driver { shutdown, thread });
-            // Clear the terminal shutdown flag for this freshly installed driver.
-            // This is a DEFENSIVE no-op given the kernel runtime is a OnceLock: a
-            // second `shrike_runtime_init` finds the runtime already set and
-            // returns `false` BEFORE reaching here, so re-init does NOT re-enable
-            // dispatch in-process — once shut down, the runtime stays terminally
-            // undriven (the documented contract). The store only ever runs on the
-            // FIRST successful init (where the flag is already false), and is
-            // published after the driver so an op can't observe "not shut down"
-            // before the driver exists.
-            DRIVER_SHUTDOWN.store(false, std::sync::atomic::Ordering::Release);
-            true
+            // The seam is set-once: an already-installed runtime returns Err
+            // carrying the runtime back, so the first install stands. `is_driven`
+            // reports whether that install was the driven one (a prior lazy
+            // default → false → the host must not park drive threads).
+            let _ = shrike_kernel::init_driven_runtime(rt);
+            shrike_kernel::is_driven()
         }
         #[cfg(not(feature = "anki-core"))]
         {
@@ -410,46 +416,210 @@ pub extern "C" fn shrike_runtime_init() -> bool {
     })
 }
 
-/// Stop the `current_thread` driver thread started by [`shrike_runtime_init`]
-/// (teardown). Sets the shutdown flag, wakes the driver to DRAIN every
-/// already-admitted op, and joins it; a no-op if no driver is running (the
-/// default multi-thread mode, or already shut down). After this the
-/// `current_thread` runtime is no longer driven.
+/// Park the calling thread as the driven runtime's IO/timer driver until
+/// [`shrike_runtime_shutdown`] closes the pools. The host spawns ONE thread
+/// here. Returns `true` on a clean return, `false` on a misuse (the runtime is
+/// not in driven mode — the host called this without a successful
+/// [`shrike_runtime_init`]). The C-ABI analog of `shrike-pyo3`'s `drive_io`.
 ///
-/// **An op is never orphaned by shutdown — sequential OR concurrent.** An op
-/// issued strictly after this has returned fast-fails through
-/// the callback (the flag is set; the runtime is provably undriven). An op
-/// issued CONCURRENTLY with this resolves to one of two safe outcomes, never a
-/// hang: either it was admitted before the flag store and the driver drains it
-/// to completion (its callback fires), or it reaches admission after the store
-/// and fast-fails through the callback. The host should still drain-then-
-/// shutdown for predictable results, but a racy iOS suspend/teardown can no
-/// longer strand an op's callback.
+/// This thread must be the FIRST to enter `block_on` (the host enforces it via
+/// [`shrike_runtime_probe`]): tokio gives IO/timer-driver ownership to the first
+/// `block_on` caller, and only the owner drives timers + IO continuously. If a
+/// `drive_sync`/`drive_compute` thread won that race instead, this thread would
+/// hook in as a non-owner and timers/IO would advance only while that other leaf
+/// is parked in `recv`, not while it runs a job — flaky starvation.
+#[no_mangle]
+pub extern "C" fn shrike_drive_io() -> bool {
+    ffi_guard("shrike_drive_io", false, || {
+        #[cfg(feature = "anki-core")]
+        {
+            shrike_kernel::drive_io_until_shutdown().is_ok()
+        }
+        #[cfg(not(feature = "anki-core"))]
+        {
+            false
+        }
+    })
+}
+
+/// Park the calling thread as the serialized collection / anki-sync execution
+/// thread until the pools are shut down. The host spawns ONE thread here, AFTER
+/// [`shrike_runtime_probe`] confirms the IO driver owns the runtime. Returns
+/// `true` on a clean return, `false` on a misuse (not driven mode). The C-ABI
+/// analog of `shrike-pyo3`'s `drive_sync`. This thread is never a runtime
+/// context, so anki's own `block_on` is legal here by construction.
+#[no_mangle]
+pub extern "C" fn shrike_drive_sync() -> bool {
+    ffi_guard("shrike_drive_sync", false, || {
+        #[cfg(feature = "anki-core")]
+        {
+            shrike_kernel::drive_sync().is_ok()
+        }
+        #[cfg(not(feature = "anki-core"))]
+        {
+            false
+        }
+    })
+}
+
+/// Park the calling thread as one of the N CPU-compute workers until the pools
+/// are shut down. The host spawns N threads here (N its choice — the "N >= 2"
+/// engine-overlap property), AFTER [`shrike_runtime_probe`]. Returns `true` on a
+/// clean return, `false` on a misuse (not driven mode). The C-ABI analog of
+/// `shrike-pyo3`'s `drive_compute`.
+#[no_mangle]
+pub extern "C" fn shrike_drive_compute() -> bool {
+    ffi_guard("shrike_drive_compute", false, || {
+        #[cfg(feature = "anki-core")]
+        {
+            shrike_kernel::drive_compute().is_ok()
+        }
+        #[cfg(not(feature = "anki-core"))]
+        {
+            false
+        }
+    })
+}
+
+/// Block the calling thread until the [`shrike_drive_io`] thread is driving the
+/// runtime — the host's startup barrier. Returns `true` once it is driving;
+/// `false` on a misuse (not driven mode, or the runtime has been shut down).
+///
+/// # Preconditions
+///
+/// Call ONCE at startup, AFTER spawning the [`shrike_drive_io`] thread and
+/// BEFORE spawning the `drive_sync`/`drive_compute` threads. Calling it before
+/// the IO thread is spawned would block until that thread appears (the barrier's
+/// job, but the host must actually spawn it); calling it after shutdown returns
+/// `false` at once (the guard below).
+///
+/// Why it exists: tokio gives IO/timer-driver ownership to the FIRST thread to
+/// enter the runtime's `block_on`. [`shrike_drive_io`] must win that race. The
+/// probe schedules a TRIVIAL executor-only task (`spawn_op` + a std channel, the
+/// `shrike_close` bridge shape) and blocks until it completes — and a spawned
+/// task only completes once some thread is inside `block_on` driving the
+/// executor. At probe time only the IO thread has been spawned, so the probe
+/// completing PROVES the IO thread is in its `block_on` and owns the drivers;
+/// the host then parks the rest behind that guarantee.
+///
+/// The task is deliberately trivial — NOT an open: an open needs the
+/// `drive_sync` thread (the anki collection actor), which isn't parked yet, so
+/// it would hang. This task touches only the executor the IO thread drives.
+#[no_mangle]
+pub extern "C" fn shrike_runtime_probe() -> bool {
+    ffi_guard("shrike_runtime_probe", false, || {
+        #[cfg(feature = "anki-core")]
+        {
+            // Short-circuit on a not-driven OR shut-down runtime BEFORE the
+            // spawn+recv. Post-shutdown the runtime is undriven and never
+            // dropped (a OnceLock), so the spawned task would never run and its
+            // `tx` would never send NOR drop — `rx.recv()` would block FOREVER,
+            // not error. This guard is what makes "false when shut down" honest
+            // (the probe is a startup-only barrier, so this is the teardown-race
+            // safety net, not a hot path).
+            if !shrike_kernel::is_driven()
+                || DRIVER_SHUTDOWN.load(std::sync::atomic::Ordering::Acquire)
+            {
+                return false;
+            }
+            // Schedule an executor-only task and block on its std-channel reply
+            // (the shrike_close bridge: never Runtime::block_on from this C
+            // thread). Once the IO thread is in its block_on the task runs and
+            // sends, so this returns true.
+            let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
+            drop(shrike_kernel::spawn_op(async move {
+                let _ = tx.send(());
+                Ok(())
+            }));
+            rx.recv().is_ok()
+        }
+        #[cfg(not(feature = "anki-core"))]
+        {
+            false
+        }
+    })
+}
+
+/// Shut the driven runtime down (teardown). Sets the shutdown flag (new ops
+/// fast-fail), DRAINS every already-admitted op so its callback fires (bounded
+/// by [`DRAIN_TIMEOUT`]), then closes the kernel's pool queues — which makes the
+/// host's [`shrike_drive_io`]/[`shrike_drive_sync`]/[`shrike_drive_compute`]
+/// calls return so the host can join its threads. A no-op in the default
+/// multi-thread mode (nothing to shut down) or on a second call.
+///
+/// **cabi drains; the host joins.** This is the deliberate asymmetry with
+/// `shrike-pyo3`, which exposes a bare `drive_pools_shutdown` because the server
+/// drains its ops via the asyncio bridge (`manager.close()` awaits every
+/// `kernel.close()`) BEFORE closing the pools. cabi has no bridge-await: its ops
+/// are detached fire-and-forget with a C callback as their only observation, so
+/// the drain is folded INTO this one call and the drain-before-pools-close
+/// ordering can't be split apart by the host (closing the pools first would
+/// strand an in-flight op's callback — a `current_thread` runtime stops polling
+/// spawned tasks the instant the IO driver's `block_on` returns).
+///
+/// **An op is never orphaned by a clean shutdown — sequential OR concurrent.**
+/// An op issued strictly after this has returned fast-fails through the callback
+/// (the flag is set; the runtime is provably undriven). An op issued
+/// CONCURRENTLY resolves to one of two safe outcomes, never a hang: either it
+/// was admitted before the flag store and the drain waits for it to complete (its
+/// callback fires), or it reaches admission after the store and fast-fails
+/// through the callback. The host should still drain-then-shutdown for
+/// predictable results — a racy iOS suspend/teardown can no longer strand a
+/// callback within the drain window, and a hung op past the window loses only
+/// itself (teardown still completes).
 #[no_mangle]
 pub extern "C" fn shrike_runtime_shutdown() {
     ffi_guard("shrike_runtime_shutdown", (), || {
         #[cfg(feature = "anki-core")]
-        if let Some(driver) = DRIVER.lock().expect("driver lock poisoned").take() {
-            // Set the flag BEFORE notifying the driver, under ADMIT_LOCK
-            // so it is atomic with respect to op admission. The ordering closes
-            // the concurrent-op race: an op issued while shutdown runs either
-            //   (a) was admitted before this store → it's counted in INFLIGHT,
-            //       so the driver's drain loop waits for it to complete + fire;
-            //   (b) reaches `admit_op` after this store → it fast-fails through
-            //       the callback (the runtime is being torn down).
-            // Neither outcome strands the op on a dying runtime.
+        {
+            // 1. Set the flag under ADMIT_LOCK so it is atomic with respect to op
+            //    admission. The ordering closes the concurrent-op race: an op
+            //    issued while shutdown runs either
+            //      (a) was admitted before this store → it's counted in INFLIGHT,
+            //          so the drain below waits for it to complete + fire;
+            //      (b) reaches `admit_op` after this store → it fast-fails through
+            //          the callback (the runtime is being torn down).
+            // Idempotent: a second shutdown re-sets an already-set flag (a no-op)
+            // and drains a zero count, then shutdown_driven_pools no-ops on the
+            // already-taken senders.
             {
                 let _guard = ADMIT_LOCK.lock().expect("admit lock poisoned");
                 DRIVER_SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
             }
-            // Wake the driver: it resolves `park`, then DRAINS every already-
-            // admitted op (keeps driving until INFLIGHT == 0) before returning
-            // from block_on and exiting. Join so teardown is deterministic and
-            // the runtime is provably undriven once this returns.
-            driver.shutdown.notify_one();
-            let _ = driver.thread.join();
+            // 2. Drain in-flight ops WHILE the IO driver is still live — it keeps
+            //    polling the spawned tasks, so each fires its callback and then
+            //    `finish_op` decrements INFLIGHT. We wait off the runtime on the
+            //    std condvar (this C thread must not block_on the runtime), looped
+            //    on the predicate so a wakeup can't be lost, and BOUNDED so one
+            //    hung op can't wedge teardown forever (it then strands on the
+            //    undriven runtime — the lesser evil; see DRAIN_TIMEOUT).
+            drain_inflight(DRAIN_TIMEOUT);
+            // 3. NOW close the pool queues + trip the IO driver's shutdown. Done
+            //    after the drain so the IO thread was live for every callback.
+            //    This makes the host's drive_* calls return; the host joins them.
+            shrike_kernel::shutdown_driven_pools();
         }
     })
+}
+
+/// Wait for [`INFLIGHT`] to reach zero, bounded by `timeout`. The std condvar
+/// waiter loops on the predicate under [`DRAIN_GATE`] (lost-wakeup-safe), and
+/// returns early if the deadline passes — the caller then proceeds with
+/// teardown regardless (see [`DRAIN_TIMEOUT`]).
+#[cfg(feature = "anki-core")]
+fn drain_inflight(timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut guard = DRAIN_GATE.lock().expect("drain gate poisoned");
+    while INFLIGHT.load(std::sync::atomic::Ordering::Acquire) != 0 {
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            tracing::warn!("shutdown drain timed out with in-flight ops; proceeding to teardown");
+            return;
+        };
+        let (g, _timed_out) = DRAINED
+            .wait_timeout(guard, remaining)
+            .expect("drain gate poisoned");
+        guard = g;
+    }
 }
 
 // ── open / close ────────────────────────────────────────────────────────────
@@ -538,14 +708,14 @@ pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
             return;
         }
         let handle = Box::from_raw(handle);
-        // Post-shutdown fast-path: admit the close like any op. If
-        // the driver is shut down, `admit_op` returns false and the spawn +
-        // std-channel bridge below (which would block forever on rx.recv(),
-        // since the spawned close is queued onto an undriven runtime and never
-        // runs) is skipped. Free the handle without driving the close — the
-        // runtime is dead and the process is tearing down, so the actor cannot
-        // drain anyway; dropping the Box reclaims the memory and is the most we
-        // can soundly do. When admitted, the close is counted in INFLIGHT so a
+        // Post-shutdown fast-path: admit the close like any op. If the runtime
+        // is shut down, `admit_op` returns false and the spawn + std-channel
+        // bridge below (which would block forever on rx.recv(), since the
+        // spawned close is queued onto an undriven runtime and never runs) is
+        // skipped. Free the handle without driving the close — the runtime is
+        // dead and the process is tearing down, so the actor cannot drain
+        // anyway; dropping the Box reclaims the memory and is the most we can
+        // soundly do. When admitted, the close is counted in INFLIGHT so a
         // CONCURRENT shutdown DRAINS it (drives it to completion) rather than
         // stranding this thread on rx.recv() — the close path.
         if !admit_op() {
@@ -554,17 +724,18 @@ pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
         }
         let kernel = Arc::clone(&handle.kernel);
         // Drive close to completion on the kernel runtime via the SPAWN +
-        // std-channel bridge: spawn the close onto the
-        // runtime (`spawn_op` — driven by the parked current_thread driver, or
-        // by the default multi-thread workers if no driver was installed) and
-        // block THIS C thread on a plain std channel for the result. This
-        // never calls `Runtime::block_on` from the C thread, so it can't
-        // contend with the driver thread's `block_on` on a current_thread
-        // runtime — the one shape that would otherwise hang. Dropping the
-        // returned future detaches our observation; the spawned close (and its
-        // std-channel send) still runs to completion (spawn_op's contract).
-        // `finish_op` runs in the task tail (a drop guard, so a panic in
-        // close() can't leak the count) — pairing the `admit_op` above.
+        // std-channel bridge: spawn the close onto the runtime (`spawn_op` —
+        // driven by the committed drive_io thread, or by the default
+        // multi-thread workers if no driven runtime was installed) and block
+        // THIS C thread on a plain std channel for the result. This never calls
+        // `Runtime::block_on` from the C thread, so it can't contend with the
+        // IO driver's `block_on` on the current_thread runtime — the one shape
+        // that would otherwise hang. Dropping the returned future detaches our
+        // observation; the spawned close (and its std-channel send) still runs
+        // to completion (spawn_op's contract). `finish_op` runs in the task tail
+        // (a drop guard, so a panic in close() can't leak the count) — pairing
+        // the `admit_op` above, and decrementing AFTER `tx.send` so a concurrent
+        // shutdown's drain waits for this close to finish.
         let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
         drop(shrike_kernel::spawn_op(async move {
             struct FinishGuard;
@@ -573,6 +744,9 @@ pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
                     finish_op();
                 }
             }
+            // Declared first ⇒ dropped last: close + signal the C thread, THEN
+            // finish_op decrements (so a concurrent shutdown's drain only sees
+            // INFLIGHT reach zero after this close has fully completed).
             let _finish = FinishGuard;
             let _ = kernel.close().await;
             let _ = tx.send(());
@@ -907,13 +1081,21 @@ fn to_json<T: serde::Serialize>(value: &T) -> NativeResult<String> {
 /// shutdown drain waits for it to complete. `finish_op` runs even if the
 /// inner future or the callback panics — tokio's task harness unwinds the task,
 /// but the count must not leak, so it's released via a drop guard.
+///
+/// **Invariant — the callback fires BEFORE `finish_op` decrements INFLIGHT.**
+/// This is what makes `INFLIGHT == 0` mean "every admitted op's callback has
+/// fired", which the shutdown drain (`drain_inflight`) relies on. `_finish` is
+/// declared FIRST so it drops LAST (Rust drops locals in reverse declaration
+/// order): `completion.fire(...)` runs, then `_finish` drops and `finish_op`
+/// decrements. Reordering the two — or decrementing INFLIGHT inside the future
+/// before the fire — would let the drain observe zero, trip
+/// `shutdown_driven_pools`, and strand the last callback on the undriven
+/// runtime (the exact regression `inflight_op_drains` pins).
 #[cfg(feature = "anki-core")]
 fn spawn_completion(
     completion: Completion,
     fut: impl std::future::Future<Output = NativeResult<String>> + Send + 'static,
 ) {
-    // Decrement INFLIGHT on the way out no matter how the task ends (normal or
-    // a panic in the future/callback), so a panicked op can't wedge the drain.
     struct FinishGuard;
     impl Drop for FinishGuard {
         fn drop(&mut self) {
@@ -924,6 +1106,8 @@ fn spawn_completion(
     // spawned task, so this never needs the (crate-private) runtime handle.
     // We drop the returned future immediately — detach, never abort.
     drop(shrike_kernel::spawn_op(async move {
+        // Declared first ⇒ dropped last: fire the callback, THEN finish_op
+        // decrements (the invariant in this fn's doc).
         let _finish = FinishGuard;
         completion.fire(fut.await);
         Ok(())

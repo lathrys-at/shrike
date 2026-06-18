@@ -9,23 +9,25 @@
 //! process trips over the terminal shutdown.
 //!
 //! What it pins: after `shrike_runtime_shutdown` the `current_thread` runtime
-//! exists but is undriven (the only driver thread was joined). Before the fix,
-//! a later `shrike_op` spawned a task that was never polled, so its completion
-//! callback NEVER fired, and `shrike_close` then blocked forever on
+//! exists but is undriven (the host's drive threads have returned). Before the
+//! fix, a later `shrike_op` spawned a task that was never polled, so its
+//! completion callback NEVER fired, and `shrike_close` then blocked forever on
 //! `rx.recv()` — a silent hang, realistic on a racy iOS suspend/teardown.
 //! After the fix both FAST-FAIL: `shrike_op` reports an `unavailable` error
 //! THROUGH THE CALLBACK, and `shrike_close` returns (frees the handle) instead
 //! of blocking. This test would hang (then fail on the recv timeout) on a
-//! regression that drops the post-shutdown guard.
+//! regression that drops the post-shutdown guard. The test plays the host: it
+//! shuts down (cabi drains + closes the pools) and joins its drive threads
+//! BEFORE the post-shutdown assertions, so the runtime is provably undriven.
+
+mod host;
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use shrike_cabi::{
-    shrike_close, shrike_op, shrike_open, shrike_runtime_init, shrike_runtime_shutdown,
-    ShrikeHandle,
-};
+use host::Host;
+use shrike_cabi::{shrike_close, shrike_op, shrike_open, ShrikeHandle};
 
 /// The callback: send the borrowed JSON back through the channel whose Sender
 /// is `user_data`. Fires once per op.
@@ -63,11 +65,9 @@ fn open(collection: &str, cache: &str) -> *mut ShrikeHandle {
 
 #[test]
 fn post_shutdown_op_and_close_fast_fail_via_callback_not_hang() {
-    // FIRST runtime touch in this process: install current_thread + its driver.
-    assert!(
-        shrike_runtime_init(),
-        "shrike_runtime_init must install the current_thread runtime first in this process"
-    );
+    // Play the host: install + park the committed threads (IO first, then probe,
+    // then sync + compute).
+    let host = Host::start();
 
     let dir = std::env::temp_dir().join(format!("shrike-cabi-postshutdown-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -78,8 +78,10 @@ fn post_shutdown_op_and_close_fast_fail_via_callback_not_hang() {
     let handle = open(&collection, &cache);
     assert!(!handle.is_null());
 
-    // Tear the driver down — the current_thread runtime is now undriven.
-    shrike_runtime_shutdown();
+    // Tear down AND join: cabi drains + closes the pools, the drive threads
+    // return, the host joins them — the runtime is now provably undriven for the
+    // post-shutdown assertions below.
+    host.shutdown();
 
     // A post-shutdown op MUST fire its callback with an error (proving no
     // silent hang). The recv timeout is the test's teeth: pre-fix, the spawned

@@ -89,17 +89,26 @@ rust_library(
     deps = CABI_DEPS,
 )
 
-# The current_thread-mode gate: a SEPARATE test
-# binary (the runtime seam is process-global, so it must not share a process
-# with the multi-thread suite above) that calls `shrike_runtime_init` FIRST,
-# then drives the full open -> upsert -> search -> delete -> close flow under
-# the `current_thread` runtime + its dedicated driver thread and asserts the
-# completion callbacks ACTUALLY FIRE (with a recv timeout, so a runtime with
-# no driver fails as a timeout rather than hanging the lane).
+# The driven-mode gate: a SEPARATE test binary (the runtime seam is
+# process-global, so it must not share a process with the multi-thread suite
+# above). It plays the host — installs the driven runtime, parks the committed
+# threads in the C drive entries (IO first, then the probe barrier, then sync +
+# compute) — drives the full open -> upsert -> search -> delete -> close flow,
+# and asserts the completion callbacks ACTUALLY FIRE (with a recv timeout, so an
+# undriven runtime fails as a timeout rather than hanging the lane).
 rust_test(
     name = "current_thread_driver_test",
     size = "medium",
-    srcs = ["tests/current_thread_driver.rs"],
+    srcs = [
+        "tests/current_thread_driver.rs",
+        # The shared "test plays the host" harness (a `mod host;` subdirectory
+        # module — not its own test binary). Each lifecycle binary lists it so
+        # Bazel compiles it in (cargo finds it implicitly; Bazel needs it named).
+        "tests/host/mod.rs",
+    ],
+    # With more than one src, rules_rust can't infer the crate root (it looks for
+    # `<name>.rs`/`lib.rs`), so name the test file explicitly.
+    crate_root = "tests/current_thread_driver.rs",
     crate_features = CABI_FEATURES,
     edition = "2021",
     deps = [
@@ -116,7 +125,11 @@ rust_test(
 rust_test(
     name = "post_shutdown_test",
     size = "small",
-    srcs = ["tests/post_shutdown.rs"],
+    srcs = [
+        "tests/host/mod.rs",
+        "tests/post_shutdown.rs",
+    ],
+    crate_root = "tests/post_shutdown.rs",
     crate_features = CABI_FEATURES,
     edition = "2021",
     deps = [
@@ -127,13 +140,17 @@ rust_test(
 
 # The re-init-after-shutdown regression guard: YET another separate test
 # binary (own process — the runtime seam is process-global + terminally undriven
-# after shutdown). Pins the actual OnceLock behaviour: a re-init after shutdown
-# is a no-op false, the flag stays set, and a subsequent op STILL fast-fails
-# (dispatch can't be re-enabled in-process).
+# after shutdown). Pins the load-bearing guarantee: re-init can't resurrect a
+# shut-down runtime — DRIVER_SHUTDOWN stays terminal, so a subsequent op STILL
+# fast-fails (dispatch can't be re-enabled in-process).
 rust_test(
     name = "reinit_after_shutdown_test",
     size = "small",
-    srcs = ["tests/reinit_after_shutdown.rs"],
+    srcs = [
+        "tests/host/mod.rs",
+        "tests/reinit_after_shutdown.rs",
+    ],
+    crate_root = "tests/reinit_after_shutdown.rs",
     crate_features = CABI_FEATURES,
     edition = "2021",
     deps = [
@@ -144,11 +161,15 @@ rust_test(
 
 # The concurrent-op race gate: own process. An op issued concurrently with
 # shrike_runtime_shutdown always fires its callback (completes or fast-fails),
-# never orphans — closing the notify->store window.
+# never orphans — closing the admit->store window.
 rust_test(
     name = "op_racing_shutdown_test",
     size = "small",
-    srcs = ["tests/op_racing_shutdown.rs"],
+    srcs = [
+        "tests/host/mod.rs",
+        "tests/op_racing_shutdown.rs",
+    ],
+    crate_root = "tests/op_racing_shutdown.rs",
     crate_features = CABI_FEATURES,
     edition = "2021",
     deps = [
@@ -162,7 +183,11 @@ rust_test(
 rust_test(
     name = "inflight_op_drains_test",
     size = "small",
-    srcs = ["tests/inflight_op_drains.rs"],
+    srcs = [
+        "tests/host/mod.rs",
+        "tests/inflight_op_drains.rs",
+    ],
+    crate_root = "tests/inflight_op_drains.rs",
     crate_features = CABI_FEATURES,
     edition = "2021",
     deps = [

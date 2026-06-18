@@ -6,24 +6,30 @@
 //! `post_shutdown.rs` or `current_thread_driver.rs`. This file holds exactly
 //! ONE test for that reason.
 //!
-//! What it pins (the ACTUAL `OnceLock` behaviour, vs. an overclaim): the kernel
-//! runtime is a `OnceLock`, so a second `shrike_runtime_init` finds it already
-//! set, returns `false`, installs NO new driver, and never reaches the
-//! clear-on-init `store(DRIVER_SHUTDOWN, false)`. So a re-init after shutdown is
-//! a no-op: the flag stays `true`, dispatch is NOT re-enabled in-process, and a
-//! subsequent `shrike_op`/`shrike_close` STILL fast-fails through the callback
-//! (the runtime stays terminally undriven — the documented contract). A
-//! regression that made re-init silently re-enable a dead runtime would flip
-//! this test (the op would hang, then trip the recv timeout).
+//! What it pins (the load-bearing guarantee, not an impl detail): after a
+//! shutdown, a re-init CANNOT resurrect the dead runtime. The kernel runtime +
+//! mode are `OnceLock`s, so `init_driven_runtime` on the second call finds them
+//! already set and installs nothing — and `shrike_runtime_init` returns
+//! `is_driven()`, which is STILL `true` (the mode OnceLock is never reset). So
+//! re-init returning `true` is NOT the guarantee; the guarantee is that
+//! `DRIVER_SHUTDOWN` stays terminally `true` (never cleared in-process) →
+//! `admit_op` returns false → a subsequent `shrike_op`/`shrike_close` STILL
+//! fast-fails through the callback. Re-driving after shutdown is also a no-op
+//! (the drive entries return at once on the already-tripped pools), so a host
+//! cannot bring a dead runtime back. A regression that re-enabled dispatch on
+//! re-init would flip this test (the op would hang, then trip the recv timeout).
+//!
+//! The test plays the host: install + park the committed threads, shut them
+//! down + join, then re-init and prove ops still fast-fail.
+
+mod host;
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use shrike_cabi::{
-    shrike_close, shrike_op, shrike_open, shrike_runtime_init, shrike_runtime_shutdown,
-    ShrikeHandle,
-};
+use host::Host;
+use shrike_cabi::{shrike_close, shrike_op, shrike_open, shrike_runtime_init, ShrikeHandle};
 
 extern "C" fn collect(user_data: *mut c_void, result_json: *const c_char) {
     let tx = unsafe { Box::from_raw(user_data as *mut mpsc::Sender<String>) };
@@ -59,29 +65,36 @@ fn open(collection: &str, cache: &str) -> *mut ShrikeHandle {
 
 #[test]
 fn reinit_after_shutdown_is_a_noop_and_ops_still_fast_fail() {
-    assert!(
-        shrike_runtime_init(),
-        "first init installs the current_thread runtime"
-    );
+    // Play the host: install + park the committed threads.
+    let host = Host::start();
     let dir = std::env::temp_dir().join(format!("shrike-cabi-reinit-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let collection = dir.join("c.anki2").to_string_lossy().into_owned();
     let cache = dir.join("cache").to_string_lossy().into_owned();
     let handle = open(&collection, &cache);
 
-    shrike_runtime_shutdown();
+    // Shut down + join: the runtime is now terminally undriven.
+    host.shutdown();
 
-    // Re-init: the kernel runtime OnceLock is already set → no new driver,
-    // returns false, and the clear-on-init never runs.
+    // Re-init: the kernel runtime + mode OnceLocks are already set → no new
+    // install. `shrike_runtime_init` returns `is_driven()`, which stays `true`
+    // (the mode OnceLock is never reset) — so the return value is NOT the
+    // guarantee, and asserting `!reinit` would be wrong. The guarantee is that
+    // dispatch is NOT re-enabled: DRIVER_SHUTDOWN stays terminally set, so ops
+    // still fast-fail (asserted below). We pin the actual return so a future
+    // change to it is a deliberate, visible decision.
     let reinit = shrike_runtime_init();
     assert!(
-        !reinit,
-        "re-init is a no-op false (the kernel runtime OnceLock is already set) — \
-         the clear-on-init never runs and the runtime stays undriven"
+        reinit,
+        "re-init returns is_driven() == true (the mode OnceLock is never reset); \
+         this is NOT the guarantee — the guarantee is that ops still fast-fail"
     );
 
-    // So a post-(shutdown+reinit) op STILL fast-fails — dispatch was NOT
-    // re-enabled (it can't be, in-process). No hang.
+    // The load-bearing guarantee: a post-(shutdown+reinit) op STILL fast-fails —
+    // dispatch was NOT re-enabled (it can't be, in-process; DRIVER_SHUTDOWN is
+    // terminal). No hang. Re-driving would also be a no-op (the drive entries
+    // return at once on the tripped pools), so we don't re-park — the runtime
+    // stays dead and the op must fast-fail without any driver.
     let (ud, rx) = user_data();
     let c_action = CString::new("collection_info").unwrap();
     let c_params = CString::new("{}").unwrap();
