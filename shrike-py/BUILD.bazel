@@ -21,7 +21,7 @@ load("//tools/bazel:sdist.bzl", "py_sdist")
 # keeps the two in lockstep.
 py_wheel(
     name = "wheel",
-    distribution = "shrike-mcp",
+    distribution = "shrike-py",
     version = "{STABLE_VERSION}",
     stamp = 1,
     python_tag = "cp312",

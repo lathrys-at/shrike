@@ -3,7 +3,7 @@
 #
 # The //shrike-py:sdist rule stamps the tag-derived version (STABLE_VERSION) into the sdist,
 # but Bazel computes the output *filename* at analysis time — before stamping — so it
-# ships as `sdist.tar.gz`. This copies it to the real shrike_mcp-<version>.tar.gz
+# ships as `sdist.tar.gz`. This copies it to the real shrike_py-<version>.tar.gz
 # (the version read from the tarball's top-level directory). Used by release.yml and
 # locally.
 #
@@ -16,10 +16,10 @@ cd "$repo_root"
 
 ./bazel build //shrike-py:sdist --stamp >&2
 built="$(./bazel cquery --output=files //shrike-py:sdist 2>/dev/null)"
-# The sdist's top-level dir is shrike_mcp-<version>/ — read the version from it.
-version="$(tar tzf "$built" | head -1 | sed -E 's#^shrike_mcp-(.*)/.*#\1#')"
+# The sdist's top-level dir is shrike_py-<version>/ — read the version from it.
+version="$(tar tzf "$built" | head -1 | sed -E 's#^shrike_py-(.*)/.*#\1#')"
 
 mkdir -p "$out_dir"
-dest="$out_dir/shrike_mcp-${version}.tar.gz"
+dest="$out_dir/shrike_py-${version}.tar.gz"
 cp -f "$built" "$dest"
 echo "$dest"

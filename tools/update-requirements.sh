@@ -18,7 +18,8 @@ UV_VERSION=0.11.19
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-uvx "uv@${UV_VERSION}" pip compile pyproject.toml \
+# pyproject.toml lives in the shrike-py/ unit (#731).
+uvx "uv@${UV_VERSION}" pip compile shrike-py/pyproject.toml \
   --python-version 3.12 \
   --universal \
   --generate-hashes \

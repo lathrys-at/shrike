@@ -34,7 +34,7 @@ raw-options = { root = ".." }
 version-file = "src/shrike/_version.py"
 
 [project]
-name = "shrike-mcp"
+name = "shrike-py"
 dynamic = ["version"]
 description = "MCP server for Anki collection management"
 # The canonical project README lives at the repo root (one readme covering the Rust

@@ -10,6 +10,6 @@ except ImportError:
     from importlib.metadata import PackageNotFoundError, version
 
     try:
-        __version__ = version("shrike-mcp")
+        __version__ = version("shrike-py")
     except PackageNotFoundError:
         __version__ = "0.0.0+unknown"

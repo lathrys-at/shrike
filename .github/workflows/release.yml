@@ -46,7 +46,7 @@ jobs:
       - uses: ./.github/actions/bazel-save
         if: always()
 
-  # The platform-tagged shrike-mcp wheels (#497): cp312-abi3 with the native
+  # The platform-tagged shrike-py wheels (#497): cp312-abi3 with the native
   # extension inside, one per supported platform. The linux pair builds on
   # ubuntu-22.04 deliberately — auditwheel grades the manylinux tag by the
   # glibc symbols the extension links, so the oldest supported runner gives the
@@ -77,7 +77,7 @@ jobs:
       - name: Build the platform wheel with Bazel
         # The committed ./bazel wrapper fetches the pinned Bazel; the wrapper
         # script stamps the tag-derived version in and renames to the real
-        # shrike_mcp-<version>-cp312-abi3-<platform>.whl filename under dist/.
+        # shrike_py-<version>-cp312-abi3-<platform>.whl filename under dist/.
         run: tools/build-wheel.sh
       - name: Repair the linux wheel to a manylinux tag (auditwheel)
         # py_wheel emits plain linux_* platform tags, which PyPI rejects;
@@ -106,7 +106,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           if [[ "$version" != *-* ]]; then
-            if ! ls dist/shrike_mcp-"${version}"-*.whl >/dev/null 2>&1; then
+            if ! ls dist/shrike_py-"${version}"-*.whl >/dev/null 2>&1; then
               echo "::error::built wheel doesn't match tag ${GITHUB_REF_NAME}: $(ls dist)"
               exit 1
             fi
@@ -147,7 +147,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           if [[ "$version" != *-* ]]; then
-            if ! ls "dist/shrike_mcp-${version}.tar.gz" >/dev/null 2>&1; then
+            if ! ls "dist/shrike_py-${version}.tar.gz" >/dev/null 2>&1; then
               echo "::error::built artifacts don't match tag ${GITHUB_REF_NAME}: $(ls dist)"
               exit 1
             fi
@@ -215,8 +215,11 @@ jobs:
 
   # Publish the Python package to PyPI on a final release, via trusted publishing
   # (OIDC, no API token). Skipped for pre-release (rc) tags. Requires a trusted
-  # publisher configured on PyPI for `shrike-mcp`, pointing at this repo, this
-  # workflow file, and the `pypi` environment.
+  # publisher configured on PyPI for `shrike-py` (the renamed distribution, #732)
+  # AND for the `shrike-mcp` deprecation stub, both pointing at this repo, this
+  # workflow file, and the `pypi` environment. *** MANUAL STEP: the maintainer must
+  # wire both trusted publishers on PyPI before the next release tag — the rename
+  # (#732) does not and cannot configure PyPI. ***
   publish-pypi:
     name: Publish to PyPI
     needs: [build-wheels, build-sdist]
