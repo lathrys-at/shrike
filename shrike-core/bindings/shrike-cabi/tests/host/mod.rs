@@ -69,10 +69,7 @@ impl Host {
         // 3. Now sync + N compute — they hook into the IO thread's drivers.
         threads.push(spawn("shrike-sync", shrike_drive_sync));
         for i in 0..COMPUTE_THREADS {
-            threads.push(spawn(
-                &format!("shrike-work-{i}"),
-                shrike_drive_compute,
-            ));
+            threads.push(spawn(&format!("shrike-work-{i}"), shrike_drive_compute));
         }
         Host { threads }
     }

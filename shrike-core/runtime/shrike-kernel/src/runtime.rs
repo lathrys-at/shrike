@@ -648,9 +648,7 @@ pub mod testing {
     /// its completion (the threaded-host submission shape — the request thread
     /// must not `block_on` the runtime the IO thread owns). A timeout turns a
     /// regression that fails to drive the op into a bounded failure, not a hang.
-    fn submit_and_wait<T: Send + 'static>(
-        fut: impl Future<Output = T> + Send + 'static,
-    ) -> T {
+    fn submit_and_wait<T: Send + 'static>(fut: impl Future<Output = T> + Send + 'static) -> T {
         let (tx, rx) = std::sync::mpsc::sync_channel::<T>(1);
         drop(spawn_op(async move {
             let _ = tx.send(fut.await);
