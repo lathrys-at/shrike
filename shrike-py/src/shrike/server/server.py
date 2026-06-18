@@ -34,6 +34,7 @@ from shrike.harness.engines.embedding.runtime import (
 )
 from shrike.harness.harness import CollectionManager, Harness, HarnessParams, KernelConfigError
 from shrike.platform.daemon import AlreadyRunningError, ServerLock
+from shrike.platform.driven_runtime import DrivenRuntime
 from shrike.platform.log import configure_logging
 from shrike.platform.paths import cache_dir, state_dir
 from shrike.platform.pathsafety import (
@@ -889,6 +890,11 @@ def main() -> None:
 
         shrike_native.init_logging()
 
+    # The driven runtime's committed threads, installed + started inside _serve()
+    # just before the kernel opens (so the set-once seam wins and the loops are
+    # parked before the first op), joined on teardown.
+    driven = DrivenRuntime()
+
     # Refuse non-loopback binds unless explicitly opted in: every endpoint is
     # unauthenticated, so a non-loopback host hands the full collection API to
     # anyone on the network. Fail fast, before touching the collection.
@@ -1328,6 +1334,17 @@ def main() -> None:
     cross_space_floor_margin = resolve_cross_space_margin(_margin_config)
 
     async def _serve() -> None:
+        # Install the driven runtime and park its committed N+2 threads BEFORE
+        # the first kernel op (the open below): the set-once seam must win over
+        # the lazy multi-thread default, and the loops must be parked so the open
+        # is driven. shrike-core spawns no thread of its own — the harness
+        # donates one io, one sync, and N compute threads, each GIL-released for
+        # the server's life; the asyncio bridge submits ops, invisibly driven by
+        # the io thread. driven.shutdown() closes the pools and joins them on
+        # teardown.
+        driven.install()
+        driven.start()
+
         # Assembly runs ON the loop: the kernel opens with a dedicated harness
         # thread driving its executor; the wrapper rides the shared core;
         # tools/routes register before the socket binds (no request is accepted
@@ -1420,6 +1437,13 @@ def main() -> None:
             with contextlib.suppress(Exception):
                 export_store.close()  # reap any pending download temps
             server_lock.release()
+            # Close the driven pools and join the committed threads last: the
+            # index saves above are the durability point (runtime-independent),
+            # so the kernel is quiesced enough that the queues close and the
+            # joins are prompt. Joining before exit keeps the threads from being
+            # torn down mid-work (the finalization-abort class).
+            with contextlib.suppress(Exception):
+                driven.shutdown()
             logger.info("Shutdown complete")
             sys.exit(0)
 
@@ -1497,11 +1521,18 @@ def main() -> None:
         logger.info("Server drained; shutting down")
         with contextlib.suppress(Exception):
             # Close every routed collection too, default last (it stops the
-            # shared embedding runtime after the routed ones detach).
+            # shared embedding runtime after the routed ones detach). This awaits
+            # each kernel.close() (a kernel op still driven by the io thread), so
+            # it MUST precede the driven shutdown below.
             await manager.close()
         with contextlib.suppress(Exception):
             export_store.close()  # reap any pending download temps
         server_lock.release()
+        # The kernel is quiesced (every actor drained by manager.close above), so
+        # closing the pool queues lets the committed threads return; join them
+        # before this function unwinds and the interpreter finalizes.
+        with contextlib.suppress(Exception):
+            driven.shutdown()
         logger.info("Shutdown complete")
 
     asyncio.run(_serve())

@@ -170,6 +170,64 @@ def test_exit_with_logging_bridge_and_inflight_ops_is_clean(tmp_path) -> None:
     )
 
 
+def test_driven_runtime_boot_serve_and_clean_shutdown(tmp_path) -> None:
+    """The S5 go-live flip: a kernel on the DRIVEN current_thread runtime, with
+    the harness's committed N+2 threads, boots, serves an op, and shuts down
+    cleanly — joining every committed thread before the interpreter finalizes.
+
+    This is the production server's threading model end to end: install the
+    driven runtime before any op, donate one io + one sync + N compute threads
+    (each GIL-released in its native drive loop), run a real upsert + search via
+    the asyncio bridge (driven by the io thread, not tokio workers), then
+    close() the kernel (draining the actor) and drive_pools_shutdown() so the
+    loops return and join. A regression that fails to drive an op hangs (caught
+    by the subprocess timeout); one that fails to close a pool hangs a join; one
+    that left the threads to be torn down at finalization would risk the
+    GIL-state abort the finalization gate guards — all show as rc!=0.
+    """
+    _run_teardown_script(
+        tmp_path,
+        """
+        import threading
+
+        shrike_native.init_driven_runtime()
+        io = threading.Thread(target=shrike_native.drive_io, name="drive-io")
+        sync = threading.Thread(target=shrike_native.drive_sync, name="drive-sync")
+        compute = [
+            threading.Thread(target=shrike_native.drive_compute, name=f"drive-compute-{{i}}")
+            for i in range(2)
+        ]
+        threads = [io, sync, *compute]
+        for t in threads:
+            t.start()
+
+        async def main():
+            kernel = await open_kernel({collection!r}, {cache!r})
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            results = await kernel.upsert_notes(
+                [(basic, 1, ["driven flip", "served"], [])], "error"
+            )
+            assert all(r[0] == "created" for r in results), results
+            hits = await kernel.search("driven", 3)
+            assert hits, "the bridge served a search under the driven runtime"
+            # Clean shutdown: close drains the actor (a kernel op, still driven
+            # by the io thread), THEN close the pools so the committed threads
+            # return.
+            await kernel.close()
+
+        asyncio.run(main())
+
+        # The kernel is quiesced; close the pools and join every committed
+        # thread before the interpreter exits.
+        shrike_native.drive_pools_shutdown()
+        for t in threads:
+            t.join(timeout=10)
+            assert not t.is_alive(), f"{{t.name}} did not return after shutdown"
+        """,
+    )
+
+
 def test_exit_after_gate_close_drops_late_python_work(tmp_path) -> None:
     """The gate's refusal path, exercised deterministically.
 

@@ -71,9 +71,14 @@ with contextlib.suppress(ImportError):
         async_kernel_open,  # noqa: F401
         decode_media_b64,  # noqa: F401
         derived_db_path,  # noqa: F401
+        drive_compute,  # noqa: F401
+        drive_io,  # noqa: F401
+        drive_pools_shutdown,  # noqa: F401
+        drive_sync,  # noqa: F401
         embedder_probe,  # noqa: F401
         fetch_media_url,  # noqa: F401
         index_namespace,  # noqa: F401
+        init_driven_runtime,  # noqa: F401
         native_embedder_probe,  # noqa: F401
         rehomed_actions,  # noqa: F401
         rrf_fuse,  # noqa: F401
