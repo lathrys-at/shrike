@@ -43,6 +43,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use shrike_error::NativeResult;
 use shrike_kernel::{
     drive_compute, drive_io, drive_sync, init_driven_runtime, spawn_op, submit_blocking, Kernel,
 };
@@ -110,13 +111,36 @@ fn full_flow_on_a_driven_runtime() {
         .unwrap();
     let drive_sync_thread = sync_id_rx.recv().unwrap();
 
-    // drive_compute ×2 — N≥2 cooperate on one shared queue.
+    // drive_compute ×2 — N≥2 cooperate on one shared queue. Each reports its
+    // thread id (before parking) so the submit_blocking assertion can prove the
+    // work ran on a compute thread, not the request thread.
+    let (compute_id_tx, compute_id_rx) = mpsc::channel();
     let _compute: Vec<_> = (0..2)
         .map(|i| {
+            let id_tx = compute_id_tx.clone();
             thread::Builder::new()
                 .name(format!("test-drive-compute-{i}"))
-                .spawn(|| drive_compute().expect("drive_compute runs in driven mode"))
+                .spawn(move || {
+                    id_tx
+                        .send(thread::current().id())
+                        .expect("compute id receiver alive");
+                    // Drop the id sender BEFORE parking — the thread never
+                    // returns from `drive_compute`, so a retained sender would
+                    // hang any iter()-style drain of the id channel.
+                    drop(id_tx);
+                    drive_compute().expect("drive_compute runs in driven mode");
+                })
                 .unwrap()
+        })
+        .collect();
+    drop(compute_id_tx);
+    // Receive EXACTLY the two ids (don't iter()-drain — the threads park, and
+    // their senders drop just before parking, but recv-by-count is unambiguous).
+    let compute_threads: Vec<_> = (0..2)
+        .map(|_| {
+            compute_id_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("a compute thread registered its id")
         })
         .collect();
 
@@ -192,11 +216,102 @@ fn full_flow_on_a_driven_runtime() {
     assert!(recv(&search_rx) > 0, "lexical search found the note");
 
     // ── submit_blocking: CPU work on the compute pool, blocking this thread. ──
-    let computed = submit_blocking(|| Ok::<u64, shrike_error::NativeError>(0x5031));
+    // The work returns the THREAD it ran on, so we pin "ran on drive_compute"
+    // (not just the return value) — matching how the drive_sync claim is pinned.
+    let request_thread = thread::current().id();
+    let (value, ran_on) = submit_blocking(|| {
+        Ok::<(u64, thread::ThreadId), shrike_error::NativeError>((0x5031, thread::current().id()))
+    })
+    .unwrap();
+    assert_eq!(value, 0x5031, "submit_blocking returned the work's value");
+    assert_ne!(
+        ran_on, request_thread,
+        "submit_blocking offloaded off the request thread"
+    );
+    assert!(
+        compute_threads.contains(&ran_on),
+        "submit_blocking ran on a drive_compute thread (the CPU pool), not elsewhere"
+    );
+
+    // ── N≥2 overlap: two compute jobs that each rendezvous at a shared barrier
+    // can only BOTH arrive if they run concurrently on different threads. With
+    // N=1 the second job would never start until the first returned, so the
+    // first would block at the barrier forever (caught by the join timeout). The
+    // submitter threads block on submit_blocking, so run them off-thread. ──
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let overlap: Vec<_> = (0..2)
+        .map(|_| {
+            let b = Arc::clone(&barrier);
+            thread::spawn(move || {
+                submit_blocking(move || {
+                    // wait_timeout isn't on Barrier; the outer join has the
+                    // deadline. Both jobs must be on the pool simultaneously to
+                    // pass this rendezvous.
+                    b.wait();
+                    Ok::<thread::ThreadId, shrike_error::NativeError>(thread::current().id())
+                })
+            })
+        })
+        .collect();
+    let overlap_threads: Vec<thread::ThreadId> = overlap
+        .into_iter()
+        .map(|h| {
+            h.join()
+                .expect("overlap submitter thread joins")
+                .expect("overlap job ran")
+        })
+        .collect();
+    assert_ne!(
+        overlap_threads[0], overlap_threads[1],
+        "the two barrier-rendezvous jobs ran on DIFFERENT compute threads (N≥2 overlap)"
+    );
+
+    // ── Panic resilience: a panicking pool job must lose ONLY
+    // that job (a clean Err to its caller) while the pool thread SURVIVES — the
+    // same isolation default-mode `spawn_blocking` already gives. Without it, a
+    // panic on the single drive_sync thread (or a drive_compute thread) would
+    // kill the OS thread and wedge the pool. ──
+
+    // Compute pool: a panicking submit_blocking → Err, then the NEXT job still
+    // runs (the compute thread survived).
+    let panicked = submit_blocking(|| -> NativeResult<()> { panic!("boom in a compute job") });
+    assert!(
+        panicked.is_err(),
+        "a panicking compute job returns a clean Err, not an unwind"
+    );
+    let after = submit_blocking(|| Ok::<u64, shrike_error::NativeError>(42)).unwrap();
     assert_eq!(
-        computed.unwrap(),
-        0x5031,
-        "submit_blocking ran the work on the compute pool and returned it"
+        after, 42,
+        "the compute pool survived the panic — the next job ran (not a timeout/wedge)"
+    );
+
+    // Sync pool (the single drive_sync thread — the wedge risk is sharpest here):
+    // a panicking collection job → Err, then the next collection op succeeds.
+    let (pj_tx, pj_rx) = mpsc::channel();
+    let k = Arc::clone(&kernel);
+    submit(async move {
+        let r = k
+            .collection()
+            .run(|_core| panic!("boom in a collection job"))
+            .await;
+        let _ = pj_tx.send(r.is_err());
+        Ok(())
+    });
+    assert!(
+        recv(&pj_rx),
+        "a panicking collection job returns a clean Err (drive_sync did not die)"
+    );
+    let (ok_tx, ok_rx) = mpsc::channel();
+    let k = Arc::clone(&kernel);
+    submit(async move {
+        let v = k.collection().run(|_core| 7_i64).await?;
+        let _ = ok_tx.send(v);
+        Ok(())
+    });
+    assert_eq!(
+        recv(&ok_rx),
+        7,
+        "the drive_sync thread survived the panic — the next collection op ran (not a wedge)"
     );
 
     // ── Teardown: close, resolve drive_io's `until`, join drive_io. ──

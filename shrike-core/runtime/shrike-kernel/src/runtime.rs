@@ -25,7 +25,7 @@
 //!   thread submits a unit of work and blocks on its completion).
 //!
 //! The mode is decided once, by which `init_*` ran (or the lazy default), and is
-//! published before any [`handle`]/[`block_on`]/dispatch call observes it.
+//! published before any `handle`/[`block_on`]/dispatch call observes it.
 //!
 //! # The sync-dispatch invariant
 //!
@@ -113,7 +113,7 @@ thread_local! {
 }
 
 /// Build the multi-thread default runtime (the lazy-init body, shared by
-/// [`handle`] and [`block_on`]).
+/// `handle` and [`block_on`]).
 fn build_default_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("shrike-kernel")
@@ -122,7 +122,7 @@ fn build_default_runtime() -> tokio::runtime::Runtime {
         .expect("the kernel runtime must build")
 }
 
-/// The runtime, installing the multi-thread default (and [`RuntimeMode::Default`])
+/// The runtime, installing the multi-thread default (and `RuntimeMode::Default`)
 /// on first use if no host installed one.
 fn runtime() -> &'static tokio::runtime::Runtime {
     RUNTIME.get_or_init(|| {
@@ -136,7 +136,7 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 }
 
 /// Install a custom-built runtime before the first kernel op (a host with tuned
-/// pools; the degenerate single-thread proof). Runs in [`RuntimeMode::Default`]
+/// pools; the degenerate single-thread proof). Runs in `RuntimeMode::Default`
 /// — tokio drives the installed runtime itself, so dispatch keeps falling
 /// through to `spawn_blocking`. A host that wants the harness-driven model uses
 /// [`init_driven_runtime`] instead.
@@ -144,7 +144,7 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 /// # Errors
 ///
 /// Returns `Err` carrying the supplied runtime back if one is already installed
-/// (the seam is set-once — the first [`handle`]/[`block_on`] call installs the
+/// (the seam is set-once — the first `handle`/[`block_on`] call installs the
 /// multi-thread default if no host did).
 pub fn init_runtime(runtime: tokio::runtime::Runtime) -> Result<(), tokio::runtime::Runtime> {
     RUNTIME.set(runtime)?;
@@ -157,7 +157,7 @@ pub fn init_runtime(runtime: tokio::runtime::Runtime) -> Result<(), tokio::runti
 /// Install a `current_thread` runtime in the **driven model**: the
 /// harness will park threads in [`drive_io`]/[`drive_sync`]/[`drive_compute`] to
 /// provide every thread the kernel uses. shrike-core spawns none of its own —
-/// the [`dispatch_sync`]/[`dispatch_compute`] helpers enqueue onto the driven
+/// the `dispatch_sync`/`dispatch_compute` helpers enqueue onto the driven
 /// queues instead of `spawn_blocking`.
 ///
 /// The supplied runtime SHOULD be a `current_thread` runtime (that is the whole
@@ -334,6 +334,10 @@ pub fn drive_compute() -> NativeResult<()> {
 pub fn submit_blocking<T: Send + 'static>(
     work: impl FnOnce() -> NativeResult<T> + Send + 'static,
 ) -> NativeResult<T> {
+    debug_assert!(
+        !IN_POOL_JOB.with(Cell::get),
+        "leaf-invariant: a pool job must not submit-and-block on further pool work (submit_blocking)"
+    );
     match mode() {
         RuntimeMode::Driven => {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -439,7 +443,7 @@ enum QueueKind {
     Compute,
 }
 
-/// The shared body of [`dispatch_sync`]/[`dispatch_compute`]: branch on mode,
+/// The shared body of `dispatch_sync`/`dispatch_compute`: branch on mode,
 /// enqueue (driven) or `spawn_blocking` (default), and return an eager future of
 /// the result. Boxed so the two arms unify to one return type.
 fn enqueue<T: Send + 'static>(
@@ -489,13 +493,26 @@ fn mode() -> RuntimeMode {
     *MODE.get().unwrap_or(&RuntimeMode::Default)
 }
 
-/// Run a pool job body with the leaf-invariant tripwire armed (debug builds),
-/// so any [`dispatch_sync`]/[`dispatch_compute`] called from within it asserts.
-/// A panic in `work` is handled by the RAII guard: it clears the flag on unwind
-/// too, so a panicking job can't leave the tripwire armed on a REUSED
-/// blocking-pool thread (default mode) and spuriously trip a later legitimate
-/// dispatch.
-fn run_in_pool_job<T>(work: impl FnOnce() -> T) -> T {
+/// Run a pool job body with the leaf-invariant tripwire armed AND its panic
+/// contained — the one place both modes converge, so resilience is uniform
+/// (default==driven) and DRY.
+///
+/// - **Tripwire**: sets the `IN_POOL_JOB` thread-local for the duration, so a
+///   `dispatch_*` called from within asserts (debug builds). An RAII guard
+///   clears it even on unwind, so a panicking job can't leave it armed on a
+///   reused blocking-pool thread (default mode) and spuriously trip a later
+///   legitimate dispatch.
+/// - **Panic containment**: `work` is run under `catch_unwind` and a caught
+///   panic becomes `Err(Internal)` rather than unwinding out. In DRIVEN mode the
+///   pool runs jobs on a long-lived OS thread with no per-job isolation, so an
+///   uncaught panic would KILL that thread — and the single `drive_sync` thread
+///   dying would wedge every future collection op (its receiver was taken with
+///   no replacement). Default mode's `spawn_blocking` already isolates a panic
+///   (tokio turns it into a `JoinError`) and reuses the thread; catching here
+///   gives DRIVEN the SAME "a panic loses only that one job, the pool survives,
+///   the caller gets a clean Err" resilience — the spec's default==driven parity.
+fn run_in_pool_job<T>(work: impl FnOnce() -> NativeResult<T>) -> NativeResult<T> {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     struct Disarm;
     impl Drop for Disarm {
         fn drop(&mut self) {
@@ -504,7 +521,20 @@ fn run_in_pool_job<T>(work: impl FnOnce() -> T) -> T {
     }
     IN_POOL_JOB.with(|f| f.set(true));
     let _disarm = Disarm;
-    work()
+    match catch_unwind(AssertUnwindSafe(work)) {
+        Ok(result) => result,
+        Err(payload) => {
+            // Recover a human-readable message from the panic payload for the
+            // log + the returned Err (the most common payload shapes).
+            let what = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            tracing::error!(panic = %what, "a pool job panicked; the pool thread survives");
+            Err(NativeError::internal(format!("pool job panicked: {what}")))
+        }
+    }
 }
 
 fn driven_missing() -> NativeError {
