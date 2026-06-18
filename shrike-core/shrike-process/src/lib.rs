@@ -8,8 +8,8 @@
 //! the argv vocabulary, the host/port it listens on, where it logs, and a
 //! `health_check` hook — and [`Supervisor`] drives the rest. Keeping the health
 //! probe a hook (not an HTTP call here) is what lets this crate stay at the
-//! layer floor with **no HTTP dependency**: its closure is `shrike-error` +
-//! `libc` only.
+//! layer floor with **no HTTP dependency**: its deps are `shrike-error` + `libc`
+//! + `tracing` only.
 //!
 //! The **orphan reaper is safety-critical** (#594/#654; see [`reaper`]): a
 //! recorded PID is terminated only when it is BOTH still alive AND still the
