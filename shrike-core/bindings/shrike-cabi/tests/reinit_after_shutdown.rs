@@ -1,6 +1,6 @@
 //! The re-init-after-shutdown regression guard.
 //!
-//! A SEPARATE test binary on purpose: the runtime seam (`init_runtime`) is
+//! A SEPARATE test binary on purpose: the runtime seam (`init_driven_runtime`) is
 //! process-global and, after `shrike_runtime_shutdown`, terminally undriven —
 //! so this proof must run in its own process, never sharing one with
 //! `post_shutdown.rs` or `current_thread_driver.rs`. This file holds exactly

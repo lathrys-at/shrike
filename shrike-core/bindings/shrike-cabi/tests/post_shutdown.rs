@@ -1,6 +1,6 @@
 //! The post-shutdown fast-fail gate.
 //!
-//! A SEPARATE test binary on purpose: the runtime seam (`init_runtime`) is
+//! A SEPARATE test binary on purpose: the runtime seam (`init_driven_runtime`) is
 //! process-global AND, after `shrike_runtime_shutdown`, terminally undriven —
 //! so this proof must run in its own process, never sharing one with the
 //! `current_thread_driver` flow (which needs the driver alive for its whole

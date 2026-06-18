@@ -1,6 +1,6 @@
 //! The concurrent-op race gate.
 //!
-//! A SEPARATE test binary on purpose: the runtime seam (`init_runtime`) is
+//! A SEPARATE test binary on purpose: the runtime seam (`init_driven_runtime`) is
 //! process-global and terminally undriven after `shrike_runtime_shutdown`, so
 //! this proof must run in its own process, never sharing one with the other
 //! `current_thread`-mode tests. This file holds exactly ONE #[test] for that

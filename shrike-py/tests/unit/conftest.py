@@ -61,15 +61,19 @@ def basic_note(wrapper):
 # thread-safe future.
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="session", autouse=True)
 def _driven_runtime():
     """Install + park the kernel's committed driver threads for the session.
 
     The kernel runs a harness-driven ``current_thread`` runtime with no lazy
-    fallback, so the ``KernelHarness`` (a real ``AsyncKernel``) only makes
-    progress while a driver thread drives it. Install once (the seam is set-once
-    and the threads outlive any kernel, as in production) via the production
-    :class:`DrivenRuntime`, and tear down at session end."""
+    fallback, so any test that opens a kernel — the ``KernelHarness`` *and* a
+    standalone ``CollectionWrapper`` (the ``wrapper`` fixture) — only makes
+    progress while a driver thread drives it. Autouse so it installs once per
+    test process regardless of which fixture opens the kernel (Bazel splits the
+    unit suite across processes, so a per-fixture dependency wouldn't cover a
+    target whose kernel-opening test doesn't use ``kernel_loop``). Install once
+    (the seam is set-once and the threads outlive any kernel, as in production)
+    via the production :class:`DrivenRuntime`, and tear down at session end."""
     from shrike.platform.driven_runtime import DrivenRuntime
 
     runtime = DrivenRuntime()
