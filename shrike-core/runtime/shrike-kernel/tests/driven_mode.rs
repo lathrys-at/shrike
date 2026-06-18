@@ -28,15 +28,16 @@
 //!      pool and blocks the caller until it completes; with N=2 compute threads
 //!      the engine overlap property ("N ≥ 2") holds.
 //!
+//!   4. **The full N+2 shutdown joins.** `shutdown_driven_pools` closes the
+//!      pool queues (so `drive_sync`/`drive_compute` see `recv == None` and
+//!      return) and trips the `drive_io_until_shutdown` signal, so all N+2
+//!      committed threads return and are joined — the binding's shutdown
+//!      sequencing in its kernel form. A regression that fails to close a queue
+//!      or wake the IO thread hangs a join, caught by the join deadline below,
+//!      never an infinite hang.
+//!
 //! Lexical-only (no embedder): the degenerate kernel is lexical-only, exactly
 //! like `current_thread.rs`. The point is the threading model, not the ranking.
-//!
-//! Note on teardown: the driven pool senders live in the process-global seam
-//! and are not closed in-process (a real harness/binding closes them at
-//! shutdown), so the `drive_sync`/`drive_compute` parkers idle on
-//! an empty queue and are left to die at process exit. Only `drive_io` returns
-//! here (its `until` resolves), and we join it. This is a test of the kernel's
-//! threading mechanism, not the binding's shutdown sequencing.
 
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -45,8 +46,8 @@ use std::time::Duration;
 
 use shrike_error::NativeResult;
 use shrike_kernel::{
-    drive_compute, drive_io, drive_sync, init_driven_runtime, spawn_op, submit_blocking,
-    submit_compute, Kernel,
+    drive_compute, drive_io_until_shutdown, drive_sync, init_driven_runtime, shutdown_driven_pools,
+    spawn_op, submit_blocking, submit_compute, Kernel,
 };
 
 /// Receive with a TIMEOUT so a runtime that never drives the op (the bug this
@@ -78,30 +79,20 @@ fn full_flow_on_a_driven_runtime() {
     )
     .unwrap_or_else(|_| panic!("this binary owns the runtime seam"));
 
-    // drive_io's shutdown signal: a watch channel resolved true at teardown.
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
     // ── The harness's committed N+2 threads ──────────────────────────────────
-    // drive_io ×1 — owns + drives the runtime until shutdown resolves.
+    // drive_io ×1 — owns + drives the runtime until shutdown_driven_pools trips
+    // the built-in signal at teardown.
     let io = thread::Builder::new()
         .name("test-drive-io".into())
         .spawn(move || {
-            let mut rx = shutdown_rx;
-            drive_io(async move {
-                while !*rx.borrow() {
-                    if rx.changed().await.is_err() {
-                        break;
-                    }
-                }
-            })
-            .expect("drive_io runs in driven mode");
+            drive_io_until_shutdown().expect("drive_io runs in driven mode");
         })
         .unwrap();
 
     // drive_sync ×1 — the serialized collection / anki-sync thread. It reports
     // its own thread id so we can prove the collection job ran HERE.
     let (sync_id_tx, sync_id_rx) = mpsc::channel();
-    let _sync = thread::Builder::new()
+    let sync = thread::Builder::new()
         .name("test-drive-sync".into())
         .spawn(move || {
             sync_id_tx
@@ -116,7 +107,7 @@ fn full_flow_on_a_driven_runtime() {
     // thread id (before parking) so the submit_blocking assertion can prove the
     // work ran on a compute thread, not the request thread.
     let (compute_id_tx, compute_id_rx) = mpsc::channel();
-    let _compute: Vec<_> = (0..2)
+    let compute: Vec<_> = (0..2)
         .map(|i| {
             let id_tx = compute_id_tx.clone();
             thread::Builder::new()
@@ -335,7 +326,8 @@ fn full_flow_on_a_driven_runtime() {
         "the drive_sync thread survived the panic — the next collection op ran (not a wedge)"
     );
 
-    // ── Teardown: close, resolve drive_io's `until`, join drive_io. ──
+    // ── Teardown: close (drains the actor), then shutdown_driven_pools, then
+    // join ALL N+2 committed threads — the binding's shutdown sequence. ──
     let (close_tx, close_rx) = mpsc::channel();
     let k = Arc::clone(&kernel);
     submit(async move {
@@ -343,13 +335,28 @@ fn full_flow_on_a_driven_runtime() {
         Ok(())
     });
     recv(&close_rx).expect("close succeeds");
-
     drop(kernel);
-    shutdown_tx.send(true).unwrap();
-    io.join()
-        .expect("drive_io thread joins after its shutdown signal");
-    // The pool parkers idle on the empty process-global queue and die at exit
-    // (see the module note); not joined here.
+
+    // The kernel is quiesced, so closing the pool queues (and tripping the IO
+    // signal) lets every committed thread return promptly. Joining proves the
+    // shutdown is clean — a queue left open or an un-woken IO thread would hang
+    // a join, which a watchdog turns into a test failure instead of a hang.
+    shutdown_driven_pools();
+
+    let threads = std::iter::once(io)
+        .chain(std::iter::once(sync))
+        .chain(compute);
+    let (joined_tx, joined_rx) = mpsc::channel();
+    let joiner = thread::spawn(move || {
+        for t in threads {
+            t.join().expect("a committed drive thread joins cleanly");
+        }
+        let _ = joined_tx.send(());
+    });
+    joined_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("shutdown_driven_pools lets all N+2 committed threads join (no hang)");
+    joiner.join().expect("the join watchdog thread finishes");
 
     let _ = std::fs::remove_dir_all(dir);
 }

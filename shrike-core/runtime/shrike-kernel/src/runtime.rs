@@ -65,7 +65,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use shrike_error::{NativeError, NativeResult};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
@@ -95,14 +95,42 @@ type PoolJob = Box<dyn FnOnce() + Send + 'static>;
 /// [`drive_compute`] threads behind a mutex (each `recv` hands a job to one
 /// waiter). `None` in default mode.
 struct DrivenPools {
-    sync_tx: mpsc::UnboundedSender<PoolJob>,
-    compute_tx: mpsc::UnboundedSender<PoolJob>,
+    /// The senders are `Option` so [`shutdown_driven_pools`] can `.take()` them:
+    /// dropping every sender closes the queue, so the [`drive_sync`] /
+    /// [`drive_compute`] parkers see `recv() == None` and return for the harness
+    /// to join (the same end-the-loop-by-dropping-the-sender shape the
+    /// collection actor uses). Held under a mutex because the static is shared
+    /// and the take races concurrent enqueues. A `None` here is treated like a
+    /// gone pool — the awaiting future sees the closed receiver.
+    sync_tx: Mutex<Option<mpsc::UnboundedSender<PoolJob>>>,
+    compute_tx: Mutex<Option<mpsc::UnboundedSender<PoolJob>>>,
     /// Taken once by the [`drive_sync`] thread.
     sync_rx: Mutex<Option<mpsc::UnboundedReceiver<PoolJob>>>,
     /// Shared by every [`drive_compute`] thread (cloned Arc; the mutex is the
     /// dequeue lock — held only to pop, never across a running job).
     compute_rx: Arc<Mutex<mpsc::UnboundedReceiver<PoolJob>>>,
+    /// Tripped by [`shutdown_driven_pools`] to resolve a [`drive_io`] parked on
+    /// [`drive_io_until_shutdown`] (the binding's IO thread), so all N + 2
+    /// committed threads return from one shutdown call.
+    shutdown: Notify,
 }
+
+impl DrivenPools {
+    /// A live clone of the sync sender, or `None` once
+    /// [`shutdown_driven_pools`] has taken it.
+    fn sync_sender(&self) -> Option<mpsc::UnboundedSender<PoolJob>> {
+        self.sync_tx.lock().expect("driven sync sender poisoned").clone()
+    }
+
+    /// A live clone of the compute sender, or `None` post-shutdown.
+    fn compute_sender(&self) -> Option<mpsc::UnboundedSender<PoolJob>> {
+        self.compute_tx
+            .lock()
+            .expect("driven compute sender poisoned")
+            .clone()
+    }
+}
+
 static DRIVEN: OnceLock<DrivenPools> = OnceLock::new();
 
 thread_local! {
@@ -176,10 +204,11 @@ pub fn init_driven_runtime(
     let (sync_tx, sync_rx) = mpsc::unbounded_channel::<PoolJob>();
     let (compute_tx, compute_rx) = mpsc::unbounded_channel::<PoolJob>();
     let _ = DRIVEN.set(DrivenPools {
-        sync_tx,
-        compute_tx,
+        sync_tx: Mutex::new(Some(sync_tx)),
+        compute_tx: Mutex::new(Some(compute_tx)),
         sync_rx: Mutex::new(Some(sync_rx)),
         compute_rx: Arc::new(Mutex::new(compute_rx)),
+        shutdown: Notify::new(),
     });
     let _ = MODE.set(RuntimeMode::Driven);
     Ok(())
@@ -232,6 +261,33 @@ pub fn drive_io<F: Future<Output = ()> + Send + 'static>(until: F) -> NativeResu
         ));
     }
     block_on(until);
+    Ok(())
+}
+
+/// **Driven mode: drive the runtime until [`shutdown_driven_pools`] is called.**
+/// The same as [`drive_io`] but parked on the pools' built-in shutdown signal,
+/// so a host with no shutdown future of its own (the binding) gets one
+/// `drive_io` thread whose `until` and the pool-queue close are tripped by one
+/// call. The signal is registered BEFORE the wait so a shutdown that races this
+/// thread's start is not missed.
+///
+/// # Errors
+///
+/// Returns an error if called in default mode, or if no driven pools are
+/// installed.
+pub fn drive_io_until_shutdown() -> NativeResult<()> {
+    if mode() != RuntimeMode::Driven {
+        return Err(NativeError::internal(
+            "drive_io_until_shutdown is a driven-mode entry point; the default runtime self-drives",
+        ));
+    }
+    let pools = DRIVEN.get().ok_or_else(driven_missing)?;
+    block_on(async {
+        // `notified()` registers the waiter before the await, so a `notify_one`
+        // (or the permit `notify_waiters` sets) that happens after this point is
+        // observed — no lost wakeup against a racing shutdown.
+        pools.shutdown.notified().await;
+    });
     Ok(())
 }
 
@@ -316,6 +372,42 @@ pub fn drive_compute() -> NativeResult<()> {
     Ok(())
 }
 
+/// **Driven mode: signal every committed thread to return so the harness can
+/// join them.** Drops the pool senders (closing the [`drive_sync`] /
+/// [`drive_compute`] queues, so their `recv` yields `None` and they return) and
+/// trips the [`drive_io_until_shutdown`] signal. Call it once, AFTER kernel work
+/// has quiesced (the collection actor drained), so no in-flight enqueue is
+/// holding a transient sender clone — then the queues close promptly and the
+/// joins are immediate. Idempotent: a second call finds the senders already
+/// taken and only re-trips the signal.
+///
+/// In **default mode** there are no committed threads to signal, so this is a
+/// no-op (tokio owns its own pool).
+///
+/// # Panics
+///
+/// Panics if a sender-slot mutex is poisoned (a prior holder panicked).
+pub fn shutdown_driven_pools() {
+    let Some(pools) = DRIVEN.get() else {
+        return; // default mode (or no driven install) — nothing to signal
+    };
+    // Drop the senders: this is what closes the queues. Each parker returns
+    // once its receiver sees every sender gone — the transient clones held by
+    // an in-flight enqueue drop as that call returns, so a quiesced kernel
+    // closes immediately.
+    drop(pools.sync_tx.lock().expect("driven sync sender poisoned").take());
+    drop(
+        pools
+            .compute_tx
+            .lock()
+            .expect("driven compute sender poisoned")
+            .take(),
+    );
+    // Wake the IO thread. `notify_one` stores a permit if no waiter is parked
+    // yet, so a shutdown racing `drive_io_until_shutdown`'s start is not lost.
+    pools.shutdown.notify_one();
+}
+
 /// **Submit a unit of (possibly batched) blocking work and block until it
 /// completes** — the submission path for THREADED harnesses (cabi, a
 /// synchronous host, tests). Submits onto the driven compute pool and blocks the
@@ -347,7 +439,8 @@ pub fn submit_blocking<T: Send + 'static>(
             DRIVEN
                 .get()
                 .ok_or_else(driven_missing)?
-                .compute_tx
+                .compute_sender()
+                .ok_or_else(|| NativeError::internal("the compute pool is gone"))?
                 .send(job)
                 .map_err(|_| NativeError::internal("the compute pool is gone"))?;
             rx.recv()
@@ -468,8 +561,8 @@ pub fn submit_compute(job: Box<dyn FnOnce() + Send + 'static>) {
     });
     match mode() {
         RuntimeMode::Driven => {
-            if let Some(pools) = DRIVEN.get() {
-                let _ = pools.compute_tx.send(contained);
+            if let Some(sender) = DRIVEN.get().and_then(DrivenPools::compute_sender) {
+                let _ = sender.send(contained);
             }
         }
         RuntimeMode::Default => {
@@ -498,14 +591,16 @@ fn enqueue<T: Send + 'static>(
             let job: PoolJob = Box::new(move || {
                 let _ = tx.send(run_in_pool_job(work));
             });
-            // If the queue is gone (shutdown), the receiver closes empty → the
-            // internal error below.
+            // If the queue is gone (shutdown took the sender), the receiver
+            // closes empty → the internal error below.
             if let Some(pools) = DRIVEN.get() {
                 let sender = match kind {
-                    QueueKind::Sync => &pools.sync_tx,
-                    QueueKind::Compute => &pools.compute_tx,
+                    QueueKind::Sync => pools.sync_sender(),
+                    QueueKind::Compute => pools.compute_sender(),
                 };
-                let _ = sender.send(job);
+                if let Some(sender) = sender {
+                    let _ = sender.send(job);
+                }
             }
             Box::pin(async move {
                 rx.await
