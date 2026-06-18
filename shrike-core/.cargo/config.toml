@@ -22,3 +22,15 @@ rustflags = [
     "-C", "link-arg=dynamic_lookup",
     "-C", "link-arg=-Wl,-rpath,/usr/lib/swift",
 ]
+
+# Keep ALL local cargo scratch — test temp dirs (the many `std::env::temp_dir()`
+# call sites in #[cfg(test)] code), plus rustc/rustdoc/linker/build-script temp —
+# under the workspace, never the host temp dir. So `cargo test`/`cargo build`
+# stops accumulating in /tmp (or, on macOS, /var/folders). `force = true`
+# overrides the inherited TMPDIR; the target `<repo>/.cache/cargo-tmp` is a
+# committed (empty) dir so it exists before the first rustc/rustdoc temp write.
+# Resolves relative to this file's parent (shrike-core/), hence `../`. Bazel
+# ignores this file and sandboxes TMPDIR (TEST_TMPDIR) itself, so this is the
+# cargo lane only.
+[env]
+TMPDIR = { value = "../.cache/cargo-tmp", relative = true, force = true }

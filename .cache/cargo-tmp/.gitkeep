@@ -1,0 +1,3 @@
+Anchor: keeps <repo>/.cache/cargo-tmp present in every checkout. cargo's TMPDIR
+redirect (shrike-core/.cargo/config.toml [env]) points here, and rustc/rustdoc
+need the dir to exist before writing temp. Contents are gitignored.

@@ -6,7 +6,14 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
-.cache/
+# Ignore the repo-root dev cache's contents (not the dir itself, so the anchor
+# below can be re-included) — keep the committed anchor for cargo's TMPDIR
+# redirect (shrike-core/.cargo/config.toml [env] TMPDIR): the dir must exist
+# before the first rustc/rustdoc temp write; its contents stay ignored.
+/.cache/*
+!/.cache/cargo-tmp/
+/.cache/cargo-tmp/*
+!/.cache/cargo-tmp/.gitkeep
 .coverage
 .coverage.*
 coverage.xml
