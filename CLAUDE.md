@@ -15,11 +15,14 @@ kernel's service slots (`attach_embedder`/`attach_recognizer`), and serves. The
 kernel composes `Arc<dyn Embedder>`/`Arc<dyn Recognizer>` it is *given* — it names
 no engine, no platform, no transport; the contracts live in `shrike-engine-api`
 (async traits the kernel consumes; sync compute traits engines implement; the one
-`Blocking` adapter onto the runtime's blocking pool; the batch-safety probe). Each
-engine is its own crate: `shrike-embed` (ort text + CLIP), `shrike-recognize-apple`
-(Vision OCR), `shrike-embed-remote` (any OpenAI-compatible embeddings endpoint) —
-with `shrike-llama-server` as the *lifecycle manager* producing the local endpoint
-the remote engine talks to (manage-class, not an engine). Every production backend
+`Blocking` adapter onto the runtime's blocking pool; the batch-safety probe). The
+engine-contract impls live in one crate, `shrike-engine`, feature-gated by family:
+`onnx` (ort text + CLIP), `remote` (`remote::embed` over any OpenAI-compatible
+embeddings endpoint + `remote::describe` VLM image→text over chat-completions,
+sharing one SSRF-pinned `remote::http` client), with the Apple Vision/Speech
+recognizers (`engine-apple`, over `shrike-platform`'s Swift glue) joining in #709
+— with `shrike-llama-server` as the *lifecycle manager* producing the local
+endpoint the remote engines talk to (manage-class, not an engine). Every production backend
 attaches native — kernel embeds/recognitions never enter Python;
 `PyEmbedder`/`PyRecognizer` capture remains the custom/test-backend escape hatch.
 The kernel owns the collection (anki via its protobuf service layer ONLY), the
@@ -56,9 +59,9 @@ CLI (shrike)  ──HTTP/JSON-RPC──▶  MCP Server (FastMCP, server/ = the h
                                                       ├──▶ IndexOrchestrator (per-modality USearch HNSW)
                                                       │       └──▶ index.usearch (+ index.image.usearch) + index.meta.json
                                                       ├──▶ DerivedEngine (FTS5 trigram sidecar, shrike.db)
-                                                      ├──▶ EmbedService slot ◀── engine crates via shrike-engine-api
-                                                      │       (shrike-embed ort/CLIP; shrike-embed-remote ◀── shrike-llama-server)
-                                                      └──▶ RecognizeService slot ◀── shrike-recognize-apple (Vision OCR)
+                                                      ├──▶ EmbedService slot ◀── shrike-engine via shrike-engine-api
+                                                      │       (onnx ort/CLIP; remote::embed ◀── shrike-llama-server)
+                                                      └──▶ RecognizeService slot ◀── shrike-engine remote::describe + shrike-recognize-apple (Vision OCR; →shrike-platform in #709)
 ```
 
 ## Project layout
@@ -152,11 +155,10 @@ shrike-core/                      # the Rust workspace (the compute core) — si
 ├── shrike-derived/               # FTS5 trigram engine
 ├── shrike-engine-api/            # THE engine contract: kernel-facing traits, sync compute
 │                                 #   traits, the Blocking adapter, WithPolicy, the batch probe
-├── shrike-embed/                 # ort/tokenizers text + CLIP engines (implement the contract in-crate)
-├── shrike-embed-remote/          # EmbedText over any OpenAI-compatible endpoint (ureq; llama/cloud/tailnet)
-├── shrike-describe-remote/       # VLM image→text describe over OpenAI-compatible chat completions
-│                                 #   (embedding-space-only destination — attach waits on the
-│                                 #   kernel's per-engine destination policy)
+├── shrike-engine/                # engine-contract impls, feature-gated by family (#708):
+│                                 #   onnx::{text,clip,session} (ort/tokenizers, GPU EPs) + remote::{embed,
+│                                 #   describe,http} (one SSRF-pinned ureq client; embed + VLM describe).
+│                                 #   The apple cone (engine-apple over shrike-platform) lands in #709.
 ├── shrike-llama-server/          # llama-server lifecycle ONLY (spawn/health/reap/stop) — not an engine
 ├── shrike-recognize-apple/       # Apple Vision OCR engine (Swift glue behind Rust; off-macOS stub; needs Xcode)
 ├── shrike-schemas/               # serde+schemars wire types (CANONICAL; schemas.py binds)
