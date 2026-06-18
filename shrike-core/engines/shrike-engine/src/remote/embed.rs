@@ -596,7 +596,10 @@ mod tests {
         assert_eq!(out, vec![vec![1.0], vec![2.0], vec![3.0]]);
         let raw = rx.recv().unwrap();
         assert!(raw.starts_with("POST /v1/embeddings"), "{raw}");
-        assert!(raw.contains(r#""input":["a","b","c"]"#), "one request: {raw}");
+        assert!(
+            raw.contains(r#""input":["a","b","c"]"#),
+            "one request: {raw}"
+        );
     }
 
     // ── SSRF redirect re-vet (#592) ─────────────────────────────────────────

@@ -20,15 +20,18 @@ rust_library(
         "//shrike-core/utility/shrike-network:shrike_network",
         "//shrike-core/contracts/shrike-schemas:shrike_schemas",
         "@crates//:base64",
-        "@crates//:ureq",
         "@crates//:url",
     ],
 )
 
+# `fetch_media_url` is async now (#721 S2); its no-socket validation test is
+# `#[tokio::test]`, so the test build needs tokio (a dev-only dep — appended
+# here, on top of the lib deps `crate` inherits).
 rust_test(
     name = "shrike_media_test",
     size = "small",
     crate = ":shrike_media",
+    deps = ["@crates//:tokio"],
 )
 
 # SSRF classifier parity regression (#591, moved here with the media boundary):

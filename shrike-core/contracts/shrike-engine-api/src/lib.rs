@@ -820,8 +820,12 @@ mod tests {
     #[test]
     fn async_with_policy_overrides_identity_and_chunks_by_batch() {
         let toy = Arc::new(AsyncToy::default());
-        let tuned =
-            AsyncWithPolicy::new(Arc::clone(&toy), Some("host:fp:textprep=3".into()), Some(384), 2);
+        let tuned = AsyncWithPolicy::new(
+            Arc::clone(&toy),
+            Some("host:fp:textprep=3".into()),
+            Some(384),
+            2,
+        );
         // The host policy wins over the engine's own answers.
         assert_eq!(tuned.fingerprint().as_deref(), Some("host:fp:textprep=3"));
         assert_eq!(tuned.dim(), Some(384));
@@ -838,7 +842,11 @@ mod tests {
             vec![vec![1.0], vec![2.0], vec![3.0], vec![4.0], vec![5.0]],
             "order mirrors input across chunks"
         );
-        assert_eq!(*toy.calls.lock().unwrap(), vec![2, 2, 1], "split by batch_size");
+        assert_eq!(
+            *toy.calls.lock().unwrap(),
+            vec![2, 2, 1],
+            "split by batch_size"
+        );
 
         // dim falls back to the engine's when the host pins none; batch_size 0
         // floors to 1 (no zero-length chunk loop).
@@ -847,8 +855,14 @@ mod tests {
         assert_eq!(bare.fingerprint(), None);
         let single = Arc::new(AsyncToy::default());
         let one = AsyncWithPolicy::new(Arc::clone(&single), None, None, 0);
-        let _ = rt.block_on(one.embed(vec!["a".into(), "bb".into()])).unwrap();
-        assert_eq!(*single.calls.lock().unwrap(), vec![1, 1], "batch_size 0 → serial");
+        let _ = rt
+            .block_on(one.embed(vec!["a".into(), "bb".into()]))
+            .unwrap();
+        assert_eq!(
+            *single.calls.lock().unwrap(),
+            vec![1, 1],
+            "batch_size 0 → serial"
+        );
     }
 
     #[test]

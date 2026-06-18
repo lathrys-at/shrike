@@ -33,12 +33,12 @@
 //!   `reqwest::ClientBuilder::resolve` (a per-host DNS override, no connect-time
 //!   re-resolution) keeping SNI/cert/`Host` on the name;
 //! - the centralized redirect-following loops the consumers ride
-//!   ([`fetch_pinned_get`] for the untrusted-media GET, [`post_pinned_with_revet`]
-//!   for the operator-endpoint POST, #721 S2): ONE audited copy of the per-hop
-//!   SSRF re-vet, parameterised by which posture re-vets each hop
-//!   ([`RevetPolicy`]). Engine policy (retry/backoff/`Retry-After`/api-key/
-//!   item-level status) stays with the consumer — the helpers own only the
-//!   pinned-send + per-hop re-vet + the body size-cap.
+//!   ([`fetch_pinned_get`] for the untrusted-media GET — is_global per hop;
+//!   [`post_pinned_with_revet`] for the operator-endpoint POST — same-host per
+//!   hop, #721 S2): ONE audited copy of the per-hop SSRF re-vet, one helper per
+//!   posture. Engine policy (retry/backoff/`Retry-After`/api-key/item-level
+//!   status) stays with the consumer — the helpers own only the pinned-send +
+//!   per-hop re-vet + the body size-cap.
 //!
 //! Pure Rust, NO engine crate and NOT `shrike-kernel` — it sits BELOW both, so
 //! the kernel-purity and engine-purity layering rules both stay satisfied. The
@@ -371,7 +371,9 @@ pub async fn fetch_pinned_get(
                 .timeout(timeout)
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .map_err(|e| NativeError::unavailable(format!("could not build HTTP client: {e}")))?
+                .map_err(|e| {
+                    NativeError::unavailable(format!("could not build HTTP client: {e}"))
+                })?
         } else {
             // The is_global gate, applied to EVERY hop's host (a redirect to a
             // private/metadata host is refused here, before any socket to it).
@@ -418,7 +420,9 @@ pub async fn fetch_pinned_get(
             let chunk = chunk.map_err(|e| invalid(format!("read failed: {e}")))?;
             body.extend_from_slice(&chunk);
             if body.len() > max_bytes {
-                return Err(invalid(format!("download exceeds the {max_bytes}-byte limit")));
+                return Err(invalid(format!(
+                    "download exceeds the {max_bytes}-byte limit"
+                )));
             }
         }
         return Ok((body, content_type));

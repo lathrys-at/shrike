@@ -268,7 +268,10 @@ impl RemoteDescriber {
                 "describe",
                 item_level_status,
             )
-            .instrument(tracing::debug_span!("describe.remote_one", bytes = item.bytes.len()))
+            .instrument(tracing::debug_span!(
+                "describe.remote_one",
+                bytes = item.bytes.len()
+            ))
             .await?
         {
             PostOutcome::Response(resp) => resp,

@@ -293,10 +293,7 @@ async fn media_get_body_is_size_capped_while_streaming() {
 async fn media_get_follows_same_host_redirect() {
     // The media loop follows a relative same-host redirect manually (still
     // capped) and reads the final body.
-    let (port, _rx) = canned_server(vec![
-        redirect_response("/final"),
-        ok_response("{\"v\":2}"),
-    ]);
+    let (port, _rx) = canned_server(vec![redirect_response("/final"), ok_response("{\"v\":2}")]);
     let url = format!("http://127.0.0.1:{port}/start");
     let (body, _ct) = fetch_pinned_get(&url, true, T, CAP).await.unwrap();
     assert_eq!(body, b"{\"v\":2}");

@@ -5,19 +5,21 @@ package(default_visibility = ["//shrike-core:__subpackages__"])
 exports_files(["Cargo.toml"])
 
 # The shared SSRF-safety crate (#592): the is_global classifier, the
-# resolve-and-vet helper, and the IP-pinned client builders (sync ureq + async
-# reqwest, #721). Depended on by BOTH shrike-media (the inbound-media fetch) and
-# the remote engine crates — kernel-unaware and engine-unaware, so it sits below
-# both (//shrike-core:layering_check stays green).
+# resolve-and-vet helper, the IP-pinned async reqwest client builders, and the
+# centralized per-hop re-vet loops (#721 S2). Depended on by BOTH shrike-media
+# (the inbound-media fetch) and the remote engine crates — kernel-unaware and
+# engine-unaware, so it sits below both (//shrike-core:layering_check stays
+# green). The transport is async reqwest only (ureq removed in #721 S2);
+# futures-util's StreamExt size-caps the body while streaming.
 rust_library(
     name = "shrike_network",
     srcs = ["src/lib.rs"],
     edition = "2021",
     deps = [
         "//shrike-core/contracts/shrike-error:shrike_error",
+        "@crates//:futures-util",
         "@crates//:reqwest",
         "@crates//:tracing",
-        "@crates//:ureq",
         "@crates//:url",
     ],
 )
@@ -39,6 +41,7 @@ rust_test(
     edition = "2021",
     deps = [
         ":shrike_network",
+        "//shrike-core/contracts/shrike-error:shrike_error",
         "@crates//:futures-util",
         "@crates//:reqwest",
         "@crates//:serde_json",

@@ -24,10 +24,10 @@ use shrike_engine_api::{Embedder, ImageEmbedder};
 // onnx/CLIP are route-1 (sync compute behind `Blocking` + `WithPolicy`); the
 // remote engines are route-2 async-direct (#721 S2 — `AsyncWithPolicy`, no
 // `Blocking`).
-#[cfg(feature = "engine-ort")]
-use shrike_engine_api::{Blocking, WithPolicy};
 #[cfg(feature = "engine-remote")]
 use shrike_engine_api::AsyncWithPolicy;
+#[cfg(feature = "engine-ort")]
+use shrike_engine_api::{Blocking, WithPolicy};
 
 /// The assembled native embedder the kernel slot takes: the text half always,
 /// the image half when the engine embeds images (CLIP). Both halves are views
