@@ -28,7 +28,8 @@ echo "Building the Bazel wheel…" >&2
 bazel_whl="$("$repo_root/tools/build-wheel.sh" "$work/bazel")"
 
 echo "Building the hatchling wheel…" >&2
-uv build --wheel --out-dir "$work/hatch" >&2
+# pyproject.toml lives in the shrike-py/ unit (#731) — point uv at it.
+uv build --wheel "$repo_root/shrike-py" --out-dir "$work/hatch" >&2
 hatch_whl="$(ls "$work"/hatch/*.whl | head -1)"
 
 python3 - "$bazel_whl" "$hatch_whl" <<'PY'

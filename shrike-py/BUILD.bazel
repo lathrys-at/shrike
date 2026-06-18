@@ -112,6 +112,10 @@ py_wheel(
 # exported there (//:README.md etc.) for staging.
 py_sdist(
     name = "sdist",
+    # pyproject.toml lives in this unit dir, so the sdist's project root is shrike-py/
+    # within the staged tree (#731). The repo-root README/LICENSE/CHANGELOG are copied
+    # into it at build time so the tarball is self-contained.
+    project_subdir = "shrike-py",
     srcs = [
         "//shrike-py/src/shrike:dist_files",
         "//shrike-py/tests/unit:dist_files",
