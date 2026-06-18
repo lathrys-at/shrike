@@ -22,7 +22,14 @@ cuda = ["onnx", "ort/cuda"]
 tensorrt = ["onnx", "ort/tensorrt"]
 directml = ["onnx", "ort/directml"]
 # ── remote (OpenAI-compatible HTTP: embeddings + VLM describe) ────────────────
-remote = ["dep:shrike-network", "dep:ureq", "dep:url", "dep:base64"]
+remote = [
+    "dep:shrike-network",
+    "dep:reqwest",
+    "dep:tokio",
+    "dep:futures",
+    "dep:url",
+    "dep:base64",
+]
 # ── apple (platform recognizers over shrike-platform's Swift/C-ABI glue) ──────
 engine-apple = ["dep:shrike-platform", "shrike-platform/engine-apple"]
 
@@ -54,15 +61,27 @@ ndarray = { version = "0.17", optional = true }
 shrike-image = { workspace = true, optional = true }
 
 # ── remote deps (optional; pulled by feature `remote`) ────────────────────────
-# Shared SSRF-safety primitives (#592): pin the configured endpoint's IP and
-# refuse cross-host redirects, using the SAME control as the kernel's media
-# fetch. A LOW utility crate (no engine/kernel dep), so this stays pure.
+# Shared SSRF-safety primitives (#592) + the centralized async re-vet loops
+# (#721 S2): pin the configured endpoint's IP and refuse cross-host redirects via
+# the SAME control as the kernel's media fetch (post_pinned_with_revet). A LOW
+# utility crate (no engine/kernel dep), so this stays pure.
 shrike-network = { workspace = true, optional = true }
-# SYNCHRONOUS client — no tokio, no runtime (the workspace's runtime-less HTTP
-# precedent, same as the kernel's media fetch). The async-first port (reqwest
-# over an async IP-pinned connector) is #721's job, gated on shrike-network
-# gaining an async variant.
-ureq = { version = "2", features = ["json"], optional = true }
+# ASYNC client (#721 S2 — route 2): the engines implement engine-api's async
+# traits directly and the kernel awaits them on its runtime. reqwest is built by
+# shrike-network's pinned-endpoint builder; this crate uses its header/Response
+# types. default-features = false matches shrike-network (rustls-tls only, no
+# native-tls); json for the request body, the rest of the transport rides the
+# pinned client shrike-network hands back.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+], optional = true }
+# The bounded-retry backoff is `tokio::time::sleep` (no parked thread); the test
+# tier uses the macro/rt to drive the async engines.
+tokio = { version = "1", features = ["time"], optional = true }
+# BoxFuture for the async-trait impls (Embedder/ImageEmbedder/Recognizer return
+# `BoxFuture`, the engine-api convention — no async-trait crate).
+futures = { version = "0.3", default-features = false, optional = true }
 # Parse the configured base_url to pin its host + compare redirect targets.
 url = { version = "2", optional = true }
 # Media payloads for llama.cpp's native multimodal /embeddings dialect (#501)
@@ -73,3 +92,10 @@ base64 = { version = "0.22", optional = true }
 # The raw Swift/C-ABI recognizer glue (#709). GLUE ONLY — it knows no engine
 # contract; this crate parses its raw JSON into engine-api types.
 shrike-platform = { path = "../../engines/shrike-platform", optional = true }
+
+[dev-dependencies]
+# The remote engines are async now (#721 S2 — route 2); their tests are
+# `#[tokio::test]` driving the canned blocking test server, so the test tier
+# needs the macros + a multi-thread runtime (the server thread blocks on accept
+# while the test awaits the client).
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

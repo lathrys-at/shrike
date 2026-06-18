@@ -4,16 +4,18 @@
 //! same-host redirect re-vet (#592), and the bounded transient retry
 //! (backoff + `Retry-After`).
 //!
-//! **Sync `ureq`** — runtime-less, on the kernel runtime's blocking pool via the
-//! `Blocking` adapter. The transport (the pinned [`ureq::Agent`] + the per-URL
-//! POST in [`RemoteHttpClient::post_one_url_with_retry`]) is the ONE swap-point
-//! for the async-first port (#721: reqwest/hyper over `shrike-network`'s async
-//! IP-pinned connector). #721 also must convert the engines' `.enter()` spans to
-//! `.instrument(span)` — holding a span guard across an `.await` leaks it.
+//! **Async `reqwest`** (#721 S2 — route 2): the engines implement engine-api's
+//! async traits directly and the kernel awaits them on its runtime, so the
+//! transport here is async and the backoff is `tokio::time::sleep` (no parked
+//! thread). The SSRF pinning + the per-hop same-host redirect loop live in
+//! [`shrike_network`] (the one audited home: [`shrike_network::pinned_endpoint_async_client`]
+//! pins the connection, [`shrike_network::post_pinned_with_revet`] follows
+//! redirects re-vetting each hop as same-host); the engine policy below owns the
+//! send + retry + status handling.
 //!
 //! SSRF posture (#592): `base_url` is operator-configured and trusted (a loopback
 //! llama-server, a tailnet host, a cloud API the operator chose), so it is NOT
-//! `is_global`-gated. But the agent is built with auto-redirects OFF and **pinned
+//! `is_global`-gated. But the client is built with auto-redirects OFF and **pinned
 //! to `base_url`'s resolved IP** (closing the DNS-rebinding TOCTOU), and a
 //! redirect is followed only when it stays on the SAME host (a remote endpoint
 //! that 30x-es you to a different host is the SSRF vector —
@@ -24,7 +26,9 @@
 
 use std::time::Duration;
 
+use serde::de::DeserializeOwned;
 use shrike_error::{NativeError, NativeResult};
+use shrike_network::{post_pinned_with_revet, RevetStep};
 
 /// Metadata round-trip ceiling (`/v1/models`, `/props`, `/health` reads).
 pub(crate) const META_TIMEOUT: Duration = Duration::from_secs(5);
@@ -32,8 +36,8 @@ pub(crate) const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Bounded retry on an idempotent request: cloud endpoints 429/503 routinely
 /// (rate limits, cold scale-up), so a transient failure must not sink the
-/// request. This is a sync engine on the runtime's blocking pool, so the
-/// backoff is a plain `std::thread::sleep`.
+/// request. The backoff rides `tokio::time::sleep` (the engines are async now —
+/// route 2 — so a sleep never parks a thread).
 const BACKOFF_BASE: Duration = Duration::from_millis(250);
 /// A server-supplied `Retry-After` is honored but never trusted past this.
 const RETRY_AFTER_CAP: Duration = Duration::from_secs(10);
@@ -46,8 +50,14 @@ fn retryable_status(code: u16) -> bool {
 
 /// The `Retry-After` seconds form, capped. The HTTP-date form is ignored
 /// (the default backoff covers it).
-fn retry_after(resp: &ureq::Response) -> Option<Duration> {
-    let secs: u64 = resp.header("retry-after")?.trim().parse().ok()?;
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let secs: u64 = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
     Some(Duration::from_secs(secs).min(RETRY_AFTER_CAP))
 }
 
@@ -72,25 +82,43 @@ pub struct ModelInfo {
 /// One bounded-retry POST's terminal outcome, parameterised so both engines
 /// share the loop:
 ///
-/// - `Response` — a non-3xx response (2xx, or a 4xx/5xx the caller maps).
+/// - `Response` — a non-3xx response (2xx, or a 4xx/5xx the caller maps),
+///   carrying the response's status + body bytes (already read off the wire).
 /// - `ItemRejected` — a status the `item_level` predicate condemned as a
 ///   per-item problem (describe's 400/413/415/422). The caller degrades the
 ///   single item; embed's predicate never returns true, so it never sees this.
 pub(crate) enum PostOutcome {
-    Response(Box<ureq::Response>),
+    Response(HttpResponse),
     ItemRejected,
+}
+
+/// A terminal (non-3xx) response after the redirect loop: the full body bytes
+/// (reqwest's body is consumed async, so it is buffered here and the engines
+/// deserialize from it synchronously). A `PostOutcome::Response` is always a
+/// success body by the time it reaches the engine — the retry loop has already
+/// mapped 4xx/5xx to an error or item-rejection — so only the body is carried
+/// (the status is consumed inside the loop). The payloads are small JSON.
+pub(crate) struct HttpResponse {
+    body: Vec<u8>,
+}
+
+impl HttpResponse {
+    /// Deserialize the JSON body into `T` (consuming the buffered body).
+    pub(crate) fn into_json<T: DeserializeOwned>(self) -> Result<T, serde_json::Error> {
+        serde_json::from_slice(&self.body)
+    }
 }
 
 /// The shared SSRF-pinned HTTP client: `base_url` + the parsed base host (for
 /// the same-host redirect comparison) + the optional bearer key + the pinned
-/// `ureq` agent. Cheap and `Send + Sync`; each call is one request. The struct
-/// is deliberately NOT `Debug` — it holds the API key.
+/// async `reqwest` client. Cheap and `Send + Sync`; each call is one request.
+/// The struct is deliberately NOT `Debug` — it holds the API key.
 pub(crate) struct RemoteHttpClient {
     base_url: String,
     /// `base_url` parsed once, for the same-host redirect comparison.
     base: url::Url,
     api_key: Option<String>,
-    agent: ureq::Agent,
+    client: reqwest::Client,
 }
 
 impl RemoteHttpClient {
@@ -100,12 +128,19 @@ impl RemoteHttpClient {
     /// The API key is interpolated into the `Authorization` header, so a
     /// control character (a pasted key with a stray newline) or
     /// leading/trailing whitespace must fail loudly here as `invalid_input`,
-    /// not as a garbled or injected header later. `agent_timeout` is the
-    /// agent-level backstop; each request sets its own via `.timeout()`.
+    /// not as a garbled or injected header later. `client_timeout` is the
+    /// client-level backstop; each request also sets its own `.timeout()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `InvalidInput` [`NativeError`] if the API key contains control
+    /// characters or surrounding whitespace, or if `base_url` is not a valid
+    /// http(s) URL whose host resolves; an `Unavailable` [`NativeError`] if the
+    /// pinned client cannot be built.
     pub(crate) fn new(
         base_url: &str,
         api_key: Option<String>,
-        agent_timeout: Duration,
+        client_timeout: Duration,
     ) -> NativeResult<Self> {
         if let Some(key) = &api_key {
             if key.chars().any(char::is_control) || key.trim() != key {
@@ -116,55 +151,66 @@ impl RemoteHttpClient {
         }
         let base_url = base_url.trim_end_matches('/').to_string();
         // SSRF posture (#592): pin the connection to base_url's resolved IP with
-        // auto-redirects OFF. The agent-level timeout is a backstop; each request
+        // auto-redirects OFF. The client-level timeout is a backstop; each request
         // sets its own via `.timeout()`.
-        let (agent, base) = shrike_network::pinned_endpoint_agent(&base_url, agent_timeout)?;
+        let (client, base) =
+            shrike_network::pinned_endpoint_async_client(&base_url, client_timeout)?;
         Ok(Self {
             base_url,
             base,
             api_key,
-            agent,
+            client,
         })
     }
 
-    fn request(&self, method: &str, path: &str, timeout: Duration) -> ureq::Request {
-        self.request_abs(method, &format!("{}{}", self.base_url, path), timeout)
-    }
-
-    /// Build a request to an ABSOLUTE url (the redirect loop sends to the
-    /// validated same-host target, not a base-relative path).
-    fn request_abs(&self, method: &str, url: &str, timeout: Duration) -> ureq::Request {
-        let mut req = self.agent.request(method, url).timeout(timeout);
+    /// Apply the bearer header (if any) and per-request timeout to a builder.
+    fn authed(
+        &self,
+        builder: reqwest::RequestBuilder,
+        timeout: Duration,
+    ) -> reqwest::RequestBuilder {
+        let builder = builder.timeout(timeout);
         if let Some(key) = &self.api_key {
-            req = req.set("Authorization", &format!("Bearer {key}"));
+            builder.header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"))
+        } else {
+            builder
         }
-        req
     }
 
     /// `GET /health` is 200 — llama-server's readiness; other services may
     /// not serve it (treated as not-healthy, the caller decides what that
     /// means for its lifecycle).
-    pub(crate) fn health_ok(&self) -> bool {
-        self.request("GET", "/health", HEALTH_TIMEOUT)
-            .call()
-            .map(|r| r.status() == 200)
-            .unwrap_or(false)
+    pub(crate) async fn health_ok(&self) -> bool {
+        let url = format!("{}/health", self.base_url);
+        match self
+            .authed(self.client.get(&url), HEALTH_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(resp) => resp.status().as_u16() == 200,
+            Err(_) => false,
+        }
     }
 
     /// A bare `GET <path>` for engine-specific metadata reads (e.g. llama.cpp's
     /// `/props`); `None` on any failure. The caller parses the JSON body.
-    pub(crate) fn get_json(&self, path: &str) -> Option<serde_json::Value> {
-        let resp = self.request("GET", path, META_TIMEOUT).call().ok()?;
-        resp.into_json::<serde_json::Value>().ok()
+    pub(crate) async fn get_json(&self, path: &str) -> Option<serde_json::Value> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .authed(self.client.get(&url), META_TIMEOUT)
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        resp.json::<serde_json::Value>().await.ok()
     }
 
     /// The first `/v1/models` entry's id + meta (empty on any failure or
     /// shape mismatch — identity falls back to host config, never errors).
-    pub(crate) fn model_info(&self) -> ModelInfo {
-        let Ok(resp) = self.request("GET", "/v1/models", META_TIMEOUT).call() else {
-            return ModelInfo::default();
-        };
-        let Ok(body) = resp.into_json::<serde_json::Value>() else {
+    pub(crate) async fn model_info(&self) -> ModelInfo {
+        let Some(body) = self.get_json("/v1/models").await else {
             return ModelInfo::default();
         };
         let Some(entry) = body.get("data").and_then(|d| d.get(0)) else {
@@ -186,15 +232,22 @@ impl RemoteHttpClient {
     /// The bounded-retry POST both engines share. Auto-redirects are OFF, so a
     /// 3xx surfaces as a response we follow ONLY if it stays on the SAME host
     /// (the pinned base host); a cross-host redirect is refused (the SSRF
-    /// vector). Capped at `shrike_network::MAX_REDIRECTS`. Each URL gets its own
-    /// transient-retry.
+    /// vector). The per-hop same-host re-vet + cap live in
+    /// [`shrike_network::post_pinned_with_revet`]; each URL gets its own
+    /// transient-retry here.
     ///
     /// `op` labels the error string ("embeddings"/"describe"); `timeout` is the
     /// per-request ceiling; `item_level` classifies a status as a per-item
     /// rejection (`PostOutcome::ItemRejected`) rather than an endpoint failure —
     /// embed passes `|_| false` (it has no item-level concept), describe passes
     /// its 400/413/415/422 predicate.
-    pub(crate) fn post_json_with_retry(
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Unavailable` [`NativeError`] on a transport failure, an
+    /// exhausted transient retry, a refused cross-host redirect, or the redirect
+    /// cap; the body is mapped by the caller.
+    pub(crate) async fn post_json_with_retry(
         &self,
         path: &str,
         payload: &serde_json::Value,
@@ -203,36 +256,32 @@ impl RemoteHttpClient {
         op: &str,
         item_level: fn(u16) -> bool,
     ) -> NativeResult<PostOutcome> {
-        let mut current = format!("{}{}", self.base_url, path);
-        let mut from = self.base.clone();
-        for _hop in 0..=shrike_network::MAX_REDIRECTS {
-            let resp = match self
-                .post_one_url_with_retry(&current, payload, attempts, timeout, op, item_level)?
+        let start = format!("{}{}", self.base_url, path);
+        post_pinned_with_revet(start, self.base.clone(), |url| async move {
+            // Each absolute URL gets the bounded transient-retry; a 3xx comes
+            // back as RevetStep::Redirect for the shared loop to re-vet + follow,
+            // a terminal outcome (2xx/mapped 4xx-5xx, or item-rejected) as Done.
+            match self
+                .post_one_url_with_retry(&url, payload, attempts, timeout, op, item_level)
+                .await?
             {
-                PostOutcome::Response(resp) => resp,
-                PostOutcome::ItemRejected => return Ok(PostOutcome::ItemRejected),
-            };
-            if (300..400).contains(&resp.status()) {
-                let location = resp.header("location").ok_or_else(|| {
-                    NativeError::unavailable("redirect response without a Location header")
-                })?;
-                let target = shrike_network::same_host_redirect(&from, location)?;
-                current = target.to_string();
-                from = target;
-                continue;
+                PostOneOutcome::Redirect(location) => Ok(RevetStep::Redirect(location)),
+                PostOneOutcome::Response(resp) => Ok(RevetStep::Done(PostOutcome::Response(resp))),
+                PostOneOutcome::ItemRejected => Ok(RevetStep::Done(PostOutcome::ItemRejected)),
             }
-            return Ok(PostOutcome::Response(resp));
-        }
-        Err(NativeError::unavailable(format!(
-            "too many redirects (>{})",
-            shrike_network::MAX_REDIRECTS
-        )))
+        })
+        .await
     }
 
-    /// One absolute URL's bounded-retry POST (the per-URL half the redirect
-    /// loop drives). A 3xx is returned as `Response` for the caller to
-    /// follow/refuse. **This is the transport seam #721 ports to async.**
-    fn post_one_url_with_retry(
+    /// One absolute URL's bounded-retry POST (the per-URL half the shared
+    /// redirect loop drives). A 3xx is returned as `Redirect(location)` for the
+    /// loop to re-vet/follow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Unavailable` [`NativeError`] on a transport failure, an
+    /// exhausted transient retry, or a 3xx without a `Location` header.
+    async fn post_one_url_with_retry(
         &self,
         url: &str,
         payload: &serde_json::Value,
@@ -240,76 +289,117 @@ impl RemoteHttpClient {
         timeout: Duration,
         op: &str,
         item_level: fn(u16) -> bool,
-    ) -> NativeResult<PostOutcome> {
+    ) -> NativeResult<PostOneOutcome> {
         let mut attempt = 1u32;
         loop {
-            let err = match self.request_abs("POST", url, timeout).send_json(payload) {
-                Ok(resp) => return Ok(PostOutcome::Response(Box::new(resp))),
-                // ureq surfaces a 3xx either as Ok (redirects disabled) or as
-                // Error::Status depending on version — return it for the
-                // redirect loop to follow/refuse, identically to the Ok case.
-                Err(ureq::Error::Status(code, resp)) if (300..400).contains(&code) => {
-                    return Ok(PostOutcome::Response(Box::new(resp)));
+            let send = self
+                .authed(self.client.post(url), timeout)
+                .json(payload)
+                .send()
+                .await;
+
+            // A transport error (connection refused, TLS, timeout) is transient
+            // by policy; a response (any status) is inspected for its code.
+            let resp = match send {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if attempt >= attempts {
+                        return Err(NativeError::unavailable(format!(
+                            "{op} request failed after {attempts} attempt(s): {e}"
+                        )));
+                    }
+                    let delay = backoff(attempt);
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = attempts,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %e,
+                        "transient {op} failure; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
                 }
-                Err(e) => e,
             };
+            let status = resp.status().as_u16();
+            let headers = resp.headers().clone();
+
+            // 3xx: hand the Location to the redirect loop (auto-redirects OFF).
+            if (300..400).contains(&status) {
+                let location = headers
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| {
+                        NativeError::unavailable("redirect response without a Location header")
+                    })?
+                    .to_string();
+                return Ok(PostOneOutcome::Redirect(location));
+            }
+
+            // 2xx: read the body and return it for the caller to map.
+            if status < 300 {
+                let body = resp.bytes().await.map(|b| b.to_vec()).map_err(|e| {
+                    NativeError::unavailable(format!("{op} response read failed: {e}"))
+                })?;
+                return Ok(PostOneOutcome::Response(HttpResponse { body }));
+            }
+
             // Item-level: this item is unprocessable (oversized, rejected,
             // malformed) — the caller degrades to the empty result, never sinks
             // the batch, never retries (a bad item won't improve). embed's
             // predicate is `|_| false`, so this branch is describe-only.
-            if let ureq::Error::Status(code, _) = &err {
-                if item_level(*code) {
-                    tracing::warn!(status = code, "endpoint rejected an item; item skipped");
-                    return Ok(PostOutcome::ItemRejected);
-                }
+            if item_level(status) {
+                tracing::warn!(status, "endpoint rejected an item; item skipped");
+                return Ok(PostOneOutcome::ItemRejected);
             }
-            let transient = match &err {
-                ureq::Error::Status(code, _) => retryable_status(*code),
-                ureq::Error::Transport(_) => true,
-            };
+
+            // A 4xx/5xx: transient (429/5xx) retries; anything else fails now.
+            let transient = retryable_status(status);
             if !transient || attempt >= attempts {
+                let detail = error_detail(resp, status).await;
                 let suffix = if transient {
                     format!(" after {attempts} attempt(s)")
                 } else {
                     String::new()
                 };
-                let detail = match err {
-                    ureq::Error::Status(code, resp) => {
-                        let msg = resp
-                            .into_json::<serde_json::Value>()
-                            .ok()
-                            .and_then(|b| {
-                                b.get("error")?.get("message")?.as_str().map(String::from)
-                            })
-                            .unwrap_or_default();
-                        if msg.is_empty() {
-                            format!("status {code}")
-                        } else {
-                            format!("status {code}: {msg}")
-                        }
-                    }
-                    ureq::Error::Transport(t) => t.to_string(),
-                };
                 return Err(NativeError::unavailable(format!(
                     "{op} request failed{suffix}: {detail}"
                 )));
             }
-            let delay = match &err {
-                ureq::Error::Status(_, resp) => {
-                    retry_after(resp).unwrap_or_else(|| backoff(attempt))
-                }
-                ureq::Error::Transport(_) => backoff(attempt),
-            };
+            let delay = retry_after(&headers).unwrap_or_else(|| backoff(attempt));
             tracing::warn!(
                 attempt,
                 max_attempts = attempts,
                 delay_ms = delay.as_millis() as u64,
-                error = %err,
+                status,
                 "transient {op} failure; retrying"
             );
-            std::thread::sleep(delay);
+            tokio::time::sleep(delay).await;
             attempt += 1;
         }
+    }
+}
+
+/// The per-URL POST's outcome before the redirect loop maps it onto
+/// [`PostOutcome`]: a redirect to re-vet, a terminal response, or item-rejected.
+enum PostOneOutcome {
+    Redirect(String),
+    Response(HttpResponse),
+    ItemRejected,
+}
+
+/// The terminal error detail for a non-transient/exhausted status: the
+/// endpoint's own `error.message` when it serves one, else `status N`.
+async fn error_detail(resp: reqwest::Response, status: u16) -> String {
+    let body = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+    let msg = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|b| b.get("error")?.get("message")?.as_str().map(String::from))
+        .unwrap_or_default();
+    if msg.is_empty() {
+        format!("status {status}")
+    } else {
+        format!("status {status}: {msg}")
     }
 }
 
@@ -319,6 +409,9 @@ impl RemoteHttpClient {
 /// A `status_line` may carry extra header lines
 /// (`"HTTP/1.1 429 …\r\nRetry-After: 1"`). Shared by both engines' test
 /// modules — the SSRF/redirect/api-key/retry vectors run against ONE harness.
+/// A plain blocking std-thread server: the engines' async tests drive it from a
+/// tokio runtime, which is fine (the server thread blocks on `accept`, the test
+/// awaits the client request).
 #[cfg(test)]
 pub(crate) mod test_server {
     use std::io::{BufRead, BufReader, Read, Write};

@@ -1,12 +1,13 @@
-//! The remote VLM describe engine (#433): [`RecognizeMedia`] over any
+//! The remote VLM describe engine (#433): a [`Recognizer`] over any
 //! OpenAI-compatible chat-completions endpoint with vision content parts —
 //! llama-server with a multimodal GGUF locally (`--mmproj`, spawned via
 //! `shrike-llama-server`'s `chat_mode`), a cloud service with a key
 //! (OpenAI / OpenRouter / Gemini's OpenAI-compat endpoint accept the
 //! identical shape; Anthropic's native API differs — reach Claude via an
-//! OpenAI-compat gateway). Route 1 of the engine contract: sync `ureq`, so
-//! the `Blocking` adapter moves each request onto the runtime's blocking
-//! pool. The shared SSRF/retry/api-key machinery lives in [`super::http`]
+//! OpenAI-compat gateway). A **route-2 async-direct engine** (#721 S2): it
+//! implements engine-api's async [`Recognizer`] trait directly over the async
+//! `reqwest` client, so the kernel awaits it on its runtime (no `Blocking`
+//! adapter). The shared SSRF/retry/api-key machinery lives in [`super::http`]
 //! (#708 dedup); this module holds only the describe-specific dialect.
 //!
 //! Scope discipline: this crate **talks to an endpoint**, nothing else — the
@@ -38,9 +39,11 @@
 use std::time::Duration;
 
 use base64::Engine as _;
+use futures::future::BoxFuture;
 use serde::Deserialize;
-use shrike_engine_api::{MediaItem, Recognition, RecognizeMedia};
+use shrike_engine_api::{MediaItem, Recognition, Recognizer};
 use shrike_error::{ErrorKind, NativeResult, ResultExt};
+use tracing::Instrument as _;
 
 use super::http::{ModelInfo, PostOutcome, RemoteHttpClient};
 
@@ -120,7 +123,7 @@ impl Default for RemoteDescriberConfig {
 /// The engine: a thin, stateless HTTP client wrapper.
 ///
 /// SSRF posture lives in [`RemoteHttpClient`] (#592, same as [`super::embed`]):
-/// the agent is pinned to `base_url`'s resolved IP with auto-redirects OFF, and
+/// the client is pinned to `base_url`'s resolved IP with auto-redirects OFF, and
 /// a redirect is followed only when it stays on the SAME host.
 pub struct RemoteDescriber {
     http: RemoteHttpClient,
@@ -205,25 +208,23 @@ impl RemoteDescriber {
     }
 
     /// `GET /health` is 200 — llama-server's readiness.
-    pub fn health_ok(&self) -> bool {
-        self.http.health_ok()
+    pub async fn health_ok(&self) -> bool {
+        self.http.health_ok().await
     }
 
     /// The first `/v1/models` entry's id + meta (empty on any failure or
     /// shape mismatch — identity falls back to host config, never errors).
-    pub fn model_info(&self) -> ModelInfo {
-        self.http.model_info()
+    pub async fn model_info(&self) -> ModelInfo {
+        self.http.model_info().await
     }
 
     /// One image through one chat-completions request. `Ok(empty)` for an
     /// item-level failure (empty bytes, 4xx the image caused, an empty
     /// caption); `Err` only for an endpoint-level failure.
-    fn describe_one(&self, item: &MediaItem) -> NativeResult<Recognition> {
+    async fn describe_one(&self, item: &MediaItem) -> NativeResult<Recognition> {
         if item.bytes.is_empty() {
             return Ok(empty_recognition());
         }
-        let span = tracing::debug_span!("describe.remote_one", bytes = item.bytes.len());
-        let _enter = span.enter();
 
         // The mime hint rides the data URL; `image/png` is the documented
         // pragmatic default (the dominant Anki case; llama-server sniffs
@@ -257,14 +258,19 @@ impl RemoteDescriber {
         }
 
         // Item-level rejection (a 4xx the image caused) → empty recognition.
-        let resp = match self.http.post_json_with_retry(
-            "/v1/chat/completions",
-            &payload,
-            DESCRIBE_ATTEMPTS,
-            self.timeout,
-            "describe",
-            item_level_status,
-        )? {
+        let resp = match self
+            .http
+            .post_json_with_retry(
+                "/v1/chat/completions",
+                &payload,
+                DESCRIBE_ATTEMPTS,
+                self.timeout,
+                "describe",
+                item_level_status,
+            )
+            .instrument(tracing::debug_span!("describe.remote_one", bytes = item.bytes.len()))
+            .await?
+        {
             PostOutcome::Response(resp) => resp,
             PostOutcome::ItemRejected => return Ok(empty_recognition()),
         };
@@ -302,9 +308,18 @@ fn empty_recognition() -> Recognition {
     }
 }
 
-impl RecognizeMedia for RemoteDescriber {
-    fn recognize_chunk(&self, items: &[MediaItem]) -> NativeResult<Vec<Recognition>> {
-        items.iter().map(|m| self.describe_one(m)).collect()
+impl Recognizer for RemoteDescriber {
+    fn recognize(&self, items: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
+        Box::pin(
+            async move {
+                let mut out = Vec::with_capacity(items.len());
+                for item in &items {
+                    out.push(self.describe_one(item).await?);
+                }
+                Ok(out)
+            }
+            .instrument(tracing::debug_span!("describe.remote")),
+        )
     }
 }
 
@@ -332,11 +347,12 @@ mod tests {
         MediaItem::from_named(name, bytes.to_vec())
     }
 
-    #[test]
-    fn describes_pinning_request_shape() {
+    #[tokio::test]
+    async fn describes_pinning_request_shape() {
         let (url, rx) = one_shot_server("HTTP/1.1 200 OK", chat_ok("  A red square.  "));
         let out = engine(url, Some("smolvlm"), Some("sk-test"))
-            .recognize_chunk(&[item(&[1, 2, 3], "a.png")])
+            .recognize(vec![item(&[1, 2, 3], "a.png")])
+            .await
             .unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "A red square.");
@@ -349,44 +365,52 @@ mod tests {
         assert!(raw.contains("\"model\":\"smolvlm\""), "{raw}");
         assert!(raw.contains("\"temperature\":0"), "{raw}");
         assert!(raw.contains("\"max_tokens\":384"), "{raw}");
-        assert!(raw.contains("Authorization: Bearer sk-test"), "{raw}");
+        // reqwest/hyper emits header names lowercased (HTTP headers are
+        // case-insensitive); match case-insensitively on the bearer line.
+        assert!(
+            raw.to_ascii_lowercase()
+                .contains("authorization: bearer sk-test"),
+            "{raw}"
+        );
         assert!(
             raw.contains("search indexing"),
             "the prompt rode along: {raw}"
         );
     }
 
-    #[test]
-    fn unnamed_item_defaults_to_png_mime() {
+    #[tokio::test]
+    async fn unnamed_item_defaults_to_png_mime() {
         let (url, rx) = one_shot_server("HTTP/1.1 200 OK", chat_ok("x"));
-        let items = [MediaItem::untyped(vec![9])];
-        engine(url, None, None).recognize_chunk(&items).unwrap();
+        let items = vec![MediaItem::untyped(vec![9])];
+        engine(url, None, None).recognize(items).await.unwrap();
         assert!(
             rx.recv().unwrap().contains("data:image/png;base64,"),
             "default mime"
         );
     }
 
-    #[test]
-    fn empty_caption_yields_empty_recognition() {
+    #[tokio::test]
+    async fn empty_caption_yields_empty_recognition() {
         let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", chat_ok("   "));
         let out = engine(url, None, None)
-            .recognize_chunk(&[item(&[1], "a.png")])
+            .recognize(vec![item(&[1], "a.png")])
+            .await
             .unwrap();
         assert_eq!((out[0].text.as_str(), out[0].confidence), ("", 0.0));
     }
 
-    #[test]
-    fn empty_bytes_short_circuit_without_a_request() {
+    #[tokio::test]
+    async fn empty_bytes_short_circuit_without_a_request() {
         // No server at all — must not even attempt a request.
         let out = engine("http://127.0.0.1:9".into(), None, None)
-            .recognize_chunk(&[MediaItem::untyped(Vec::new())])
+            .recognize(vec![MediaItem::untyped(Vec::new())])
+            .await
             .unwrap();
         assert_eq!(out[0].text, "");
     }
 
-    #[test]
-    fn item_level_4xx_degrades_the_item_not_the_chunk() {
+    #[tokio::test]
+    async fn item_level_4xx_degrades_the_item_not_the_chunk() {
         // 400 → empty recognition; the queued 200 must NOT be consumed (no
         // retry of a condemned image).
         let (url, _rx) = canned_server(vec![
@@ -394,27 +418,30 @@ mod tests {
             ("HTTP/1.1 200 OK", chat_ok("never sent")),
         ]);
         let out = engine(url, None, None)
-            .recognize_chunk(&[item(&[1], "big.png")])
+            .recognize(vec![item(&[1], "big.png")])
+            .await
             .unwrap();
         assert_eq!((out[0].text.as_str(), out[0].confidence), ("", 0.0));
     }
 
-    #[test]
-    fn endpoint_level_failure_errors_the_chunk() {
+    #[tokio::test]
+    async fn endpoint_level_failure_errors_the_chunk() {
         // Connection refused: the chunk must Err so the kernel's sweep
         // leaves every item pending (N empty recognitions would burn the
         // backlog into stored nothing).
         let err = engine("http://127.0.0.1:9".into(), None, None)
-            .recognize_chunk(&[item(&[1], "a.png")])
+            .recognize(vec![item(&[1], "a.png")])
+            .await
             .unwrap_err();
         assert!(err.to_string().contains("describe request failed"), "{err}");
     }
 
-    #[test]
-    fn auth_failure_errors_the_chunk_not_the_item() {
+    #[tokio::test]
+    async fn auth_failure_errors_the_chunk_not_the_item() {
         let (url, _rx) = one_shot_server("HTTP/1.1 401 Unauthorized", "{}".into());
         let err = engine(url, None, None)
-            .recognize_chunk(&[item(&[1], "a.png")])
+            .recognize(vec![item(&[1], "a.png")])
+            .await
             .unwrap_err();
         assert!(err.to_string().contains("describe request failed"), "{err}");
         assert!(
@@ -425,8 +452,8 @@ mod tests {
 
     // ── SSRF redirect re-vet (#592) ─────────────────────────────────────────
 
-    #[test]
-    fn cross_host_redirect_is_refused() {
+    #[tokio::test]
+    async fn cross_host_redirect_is_refused() {
         // The endpoint 30x-es to a DIFFERENT host (the SSRF vector). The 200
         // queued behind it must NEVER be followed — refused as a chunk error.
         let (url, _rx) = canned_server(vec![
@@ -437,13 +464,14 @@ mod tests {
             ("HTTP/1.1 200 OK", chat_ok("leaked")),
         ]);
         let err = engine(url, None, None)
-            .recognize_chunk(&[item(&[1], "a.png")])
+            .recognize(vec![item(&[1], "a.png")])
+            .await
             .unwrap_err();
         assert!(err.to_string().contains("cross-host redirect"), "{err}");
     }
 
-    #[test]
-    fn same_host_redirect_is_followed_repinned() {
+    #[tokio::test]
+    async fn same_host_redirect_is_followed_repinned() {
         // A same-host redirect IS followed and lands on the same pinned host.
         let (url, rx) = canned_server(vec![
             (
@@ -453,29 +481,31 @@ mod tests {
             ("HTTP/1.1 200 OK", chat_ok("after redirect")),
         ]);
         let out = engine(url, None, None)
-            .recognize_chunk(&[item(&[1], "a.png")])
+            .recognize(vec![item(&[1], "a.png")])
+            .await
             .unwrap();
         assert_eq!(out[0].text, "after redirect");
         assert!(rx.recv().unwrap().starts_with("POST /v1/chat/completions"));
         assert!(rx.recv().unwrap().starts_with("POST /v2/chat/completions"));
     }
 
-    #[test]
-    fn retries_through_transient_503() {
+    #[tokio::test]
+    async fn retries_through_transient_503() {
         let (url, rx) = canned_server(vec![
             ("HTTP/1.1 503 Service Unavailable", "{}".into()),
             ("HTTP/1.1 200 OK", chat_ok("after retry")),
         ]);
         let out = engine(url, None, None)
-            .recognize_chunk(&[item(&[1], "a.png")])
+            .recognize(vec![item(&[1], "a.png")])
+            .await
             .unwrap();
         assert_eq!(out[0].text, "after retry");
         assert!(rx.recv().unwrap().starts_with("POST /v1/chat/completions"));
         assert!(rx.recv().unwrap().starts_with("POST /v1/chat/completions"));
     }
 
-    #[test]
-    fn honors_retry_after_on_429() {
+    #[tokio::test]
+    async fn honors_retry_after_on_429() {
         let (url, _rx) = canned_server(vec![
             (
                 "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1",
@@ -485,7 +515,8 @@ mod tests {
         ]);
         let started = std::time::Instant::now();
         let out = engine(url, None, None)
-            .recognize_chunk(&[item(&[1], "a.png")])
+            .recognize(vec![item(&[1], "a.png")])
+            .await
             .unwrap();
         assert_eq!(out[0].text, "ok");
         assert!(
@@ -495,20 +526,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn exhausted_retries_map_to_unavailable() {
+    #[tokio::test]
+    async fn exhausted_retries_map_to_unavailable() {
         let (url, _rx) = canned_server(vec![
             ("HTTP/1.1 503 Service Unavailable", "{}".to_string());
             3
         ]);
         let err = engine(url, None, None)
-            .recognize_chunk(&[item(&[1], "a.png")])
+            .recognize(vec![item(&[1], "a.png")])
+            .await
             .unwrap_err();
         assert!(err.to_string().contains("after 3 attempt(s)"), "{err}");
     }
 
-    #[test]
-    fn bad_api_key_rejected_at_construction() {
+    #[tokio::test]
+    async fn bad_api_key_rejected_at_construction() {
         for key in ["sk\r\nX-Injected: 1", " sk-test", "sk-test ", "sk\ttest"] {
             let err = RemoteDescriber::new(RemoteDescriberConfig {
                 base_url: "http://127.0.0.1:9".into(),
@@ -521,19 +553,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn model_info_reads_id_and_meta_and_defaults_empty() {
+    #[tokio::test]
+    async fn model_info_reads_id_and_meta_and_defaults_empty() {
         let body = serde_json::json!({"data": [{
             "id": "smolvlm-500m",
             "meta": {"n_params": 507000000, "n_embd": 960},
         }]})
         .to_string();
         let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body);
-        let info = engine(url, None, None).model_info();
+        let info = engine(url, None, None).model_info().await;
         assert_eq!(info.id.as_deref(), Some("smolvlm-500m"));
         assert_eq!(info.meta["n_embd"], 960);
         assert_eq!(
-            engine("http://127.0.0.1:9".into(), None, None).model_info(),
+            engine("http://127.0.0.1:9".into(), None, None)
+                .model_info()
+                .await,
             ModelInfo::default()
         );
     }
@@ -564,11 +598,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn health_ok_only_on_200() {
+    #[tokio::test]
+    async fn health_ok_only_on_200() {
         let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", "{}".into());
-        assert!(engine(url, None, None).health_ok());
-        assert!(!engine("http://127.0.0.1:9".into(), None, None).health_ok());
+        assert!(engine(url, None, None).health_ok().await);
+        assert!(
+            !engine("http://127.0.0.1:9".into(), None, None)
+                .health_ok()
+                .await
+        );
     }
 
     /// A 64×64 solid-red PNG, generated once and inlined — the live tier's
@@ -588,8 +626,8 @@ mod tests {
     /// ggml-org/SmolVLM-500M-Instruct-GGUF -c 8192`); optional
     /// `SHRIKE_DESCRIBE_MODEL` / `SHRIKE_DESCRIBE_API_KEY`. Skipped when
     /// unset — default `cargo test` stays hermetic.
-    #[test]
-    fn live_endpoint_describes_the_fixture() {
+    #[tokio::test]
+    async fn live_endpoint_describes_the_fixture() {
         let Ok(url) = std::env::var("SHRIKE_DESCRIBE_URL") else {
             return;
         };
@@ -601,7 +639,8 @@ mod tests {
         })
         .unwrap();
         let out = engine
-            .recognize_chunk(&[item(RED_SQUARE_PNG, "red.png")])
+            .recognize(vec![item(RED_SQUARE_PNG, "red.png")])
+            .await
             .unwrap();
         assert!(
             !out[0].text.is_empty(),
@@ -609,7 +648,7 @@ mod tests {
         );
         assert_eq!(out[0].confidence, 1.0);
         // And the identity ingredients are servable.
-        let info = engine.model_info();
+        let info = engine.model_info().await;
         let fp = compose_fingerprint(&info, None, None);
         assert!(fp.starts_with("describe:"), "{fp}");
         assert!(fp.ends_with(":prompt=1"), "{fp}");

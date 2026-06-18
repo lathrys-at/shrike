@@ -443,6 +443,64 @@ impl<E: RecognizeMedia> RecognizeMedia for WithPolicy<E> {
     }
 }
 
+/// Host-assembled identity over a route-2 ASYNC engine (#721). The async sibling
+/// of [`WithPolicy`]: a route-2 engine ([`Embedder`]/[`ImageEmbedder`]/
+/// [`Recognizer`]) does its own IO and owns its own chunking, so there is no
+/// `safe_batch` to carry and no [`Blocking`] adapter to wrap it — but the host
+/// still injects the fingerprint/dim policy the engine can't know (text-prep
+/// versions, the describe prompt version, a probed dim). `AsyncWithPolicy`
+/// overrides exactly those, delegating `embed`/`embed_images`/`recognize` to the
+/// inner engine unchanged. Wrap the engine and hand the result straight to the
+/// kernel slot — no adapter in between.
+pub struct AsyncWithPolicy<E> {
+    engine: Arc<E>,
+    fingerprint: Option<String>,
+    dim: Option<usize>,
+}
+
+impl<E> AsyncWithPolicy<E> {
+    /// Wrap `engine` with its host-assembled identity (fingerprint, dim). Unlike
+    /// [`WithPolicy::new`] there is no `safe_batch`: a route-2 engine owns its
+    /// own request chunking.
+    pub fn new(engine: Arc<E>, fingerprint: Option<String>, dim: Option<usize>) -> Self {
+        Self {
+            engine,
+            fingerprint,
+            dim,
+        }
+    }
+}
+
+impl<E: Embedder> Embedder for AsyncWithPolicy<E> {
+    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+        self.engine.embed(texts)
+    }
+
+    fn fingerprint(&self) -> Option<String> {
+        self.fingerprint.clone()
+    }
+
+    fn dim(&self) -> Option<usize> {
+        self.dim.or_else(|| self.engine.dim())
+    }
+}
+
+impl<E: ImageEmbedder> ImageEmbedder for AsyncWithPolicy<E> {
+    fn embed_images(&self, images: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+        self.engine.embed_images(images)
+    }
+}
+
+impl<E: Recognizer> Recognizer for AsyncWithPolicy<E> {
+    fn recognize(&self, items: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
+        self.engine.recognize(items)
+    }
+
+    fn fingerprint(&self) -> Option<String> {
+        self.fingerprint.clone()
+    }
+}
+
 // ── the adapter: sync compute onto the owned runtime (#374 C) ───────────────
 
 /// Route-1 engines become kernel-facing async engines here: each call moves
@@ -707,6 +765,50 @@ mod tests {
         assert_eq!(*toy.calls.lock().unwrap(), vec![2, 1]);
         // safe_batch is floored at 1 (a zero would loop forever).
         assert_eq!(WithPolicy::new(toy, None, None, 0).safe_batch(), 1);
+    }
+
+    /// A route-2 async engine: it owns its own work (here trivial) and returns a
+    /// future directly, the `RemoteEmbedder` shape `AsyncWithPolicy` wraps.
+    struct AsyncToy;
+
+    impl Embedder for AsyncToy {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            Box::pin(async move { Ok(texts.iter().map(|t| vec![t.len() as f32]).collect()) })
+        }
+
+        fn fingerprint(&self) -> Option<String> {
+            Some("async-toy:engine".into())
+        }
+
+        fn dim(&self) -> Option<usize> {
+            Some(7)
+        }
+    }
+
+    /// `AsyncWithPolicy` overrides the host-injected identity (fingerprint/dim)
+    /// while delegating `embed` to the route-2 engine unchanged — the async
+    /// sibling of `with_policy_overrides_identity_and_batch` (#721).
+    #[test]
+    fn async_with_policy_overrides_identity_and_delegates_embed() {
+        let tuned = AsyncWithPolicy::new(
+            Arc::new(AsyncToy),
+            Some("host:fp:textprep=3".into()),
+            Some(384),
+        );
+        // The host policy wins over the engine's own answers.
+        assert_eq!(tuned.fingerprint().as_deref(), Some("host:fp:textprep=3"));
+        assert_eq!(tuned.dim(), Some(384));
+        // embed delegates straight through.
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        let out = rt
+            .block_on(tuned.embed(vec!["a".into(), "bb".into()]))
+            .unwrap();
+        assert_eq!(out, vec![vec![1.0], vec![2.0]]);
+        // dim falls back to the engine's when the host pins none.
+        let bare = AsyncWithPolicy::new(Arc::new(AsyncToy), None, None);
+        assert_eq!(bare.dim(), Some(7));
+        assert_eq!(bare.fingerprint(), None);
     }
 
     #[test]

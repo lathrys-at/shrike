@@ -5151,8 +5151,10 @@ name = "shrike-engine"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
+ "futures",
  "ndarray 0.17.2",
  "ort",
+ "reqwest",
  "serde",
  "serde_json",
  "shrike-engine-api",
@@ -5161,8 +5163,8 @@ dependencies = [
  "shrike-network",
  "shrike-platform",
  "tokenizers",
+ "tokio",
  "tracing",
- "ureq",
  "url",
 ]
 
@@ -6247,8 +6249,6 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
- "serde",
- "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]
