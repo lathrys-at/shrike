@@ -43,6 +43,13 @@
 //! platform API unavailable) is `NativeError::unavailable`; a contract
 //! violation (malformed payload, wrong arity) is `internal`.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 pub mod probe;
 
 use std::sync::Arc;
@@ -61,11 +68,14 @@ use shrike_error::{ErrorKind, NativeResult, ResultExt};
 /// `None` is always legal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaItem {
+    /// The raw media payload.
     pub bytes: Vec<u8>,
+    /// MIME hint (a filename-derived guess; `None` is always legal).
     pub mime: Option<String>,
 }
 
 impl MediaItem {
+    /// A media item with a MIME hint.
     pub fn new(bytes: Vec<u8>, mime: Option<String>) -> Self {
         Self { bytes, mime }
     }
@@ -180,7 +190,9 @@ impl<T: ImageEmbedder + ?Sized> ImageEmbedder for Arc<T> {
 /// per-note fingerprint hashes *names of present media* via `exists` (no
 /// byte read); bytes are read only for items actually being processed.
 pub trait ImageResolver: Send + Sync {
+    /// Read a media file's bytes by name, or `None` if it is unresolvable.
     fn read(&self, name: &str) -> Option<Vec<u8>>;
+    /// Whether a media file is present (a cheap stat, no byte read).
     fn exists(&self, name: &str) -> bool;
 }
 
@@ -196,7 +208,9 @@ pub trait ImageResolver: Send + Sync {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Locator {
+    /// Normalized OCR box `[x, y, w, h]`.
     Bbox([f64; 4]),
+    /// ASR time span `[start_seconds, duration_seconds]`.
     Span([f64; 2]),
 }
 
@@ -205,8 +219,11 @@ pub enum Locator {
 /// locators stay off the wire entirely).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
+    /// The segment's recognized text.
     pub text: String,
+    /// Engine-defined confidence for this segment.
     pub confidence: f64,
+    /// Where the segment sits in its medium, if known.
     #[serde(flatten)]
     pub locator: Option<Locator>,
 }
@@ -216,8 +233,11 @@ pub struct Segment {
 /// (#228's one-pass/many-consumers rule: never flatten-and-discard).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Recognition {
+    /// The flattened text in reading order.
     pub text: String,
+    /// Engine-defined aggregate confidence for the item.
     pub confidence: f64,
+    /// The retained per-segment structure (never flatten-and-discarded).
     #[serde(default)]
     pub segments: Vec<Segment>,
 }
@@ -254,6 +274,12 @@ impl<T: Recognizer + ?Sized> Recognizer for Arc<T> {
 /// receives at most [`EmbedText::safe_batch`] texts per call — the adapter
 /// owns the batch loop.
 pub trait EmbedText: Send + Sync + 'static {
+    /// Embed a chunk of at most [`EmbedText::safe_batch`] texts, order-preserving.
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine's error if the compute fails (model unavailable,
+    /// malformed input).
     fn embed_chunk(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>>;
 
     /// The largest batch this engine is proven safe to embed in one call
@@ -262,10 +288,12 @@ pub trait EmbedText: Send + Sync + 'static {
         1
     }
 
+    /// The engine's model fingerprint, or `None` if it has none.
     fn fingerprint(&self) -> Option<String> {
         None
     }
 
+    /// The embedding dimensionality, if known up front.
     fn dim(&self) -> Option<usize> {
         None
     }
@@ -291,6 +319,13 @@ impl<T: EmbedText + ?Sized> EmbedText for Arc<T> {
 
 /// Chunk-level image embedding, pure compute (the CLIP image half).
 pub trait EmbedImages: Send + Sync + 'static {
+    /// Embed a chunk of at most [`EmbedImages::safe_batch`] images,
+    /// order-preserving.
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine's error if the compute fails (model unavailable,
+    /// undecodable image).
     fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>>;
 
     /// The largest image batch this engine is proven safe to embed in one
@@ -315,8 +350,14 @@ impl<T: EmbedImages + ?Sized> EmbedImages for Arc<T> {
 
 /// Chunk-level media recognition, pure compute.
 pub trait RecognizeMedia: Send + Sync + 'static {
+    /// Recognize a chunk of media items, order-preserving.
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine's error if the compute fails (engine unavailable).
     fn recognize_chunk(&self, items: &[MediaItem]) -> NativeResult<Vec<Recognition>>;
 
+    /// The engine's model fingerprint, or `None` if it has none.
     fn fingerprint(&self) -> Option<String> {
         None
     }
@@ -347,6 +388,8 @@ pub struct WithPolicy<E> {
 }
 
 impl<E> WithPolicy<E> {
+    /// Wrap `engine` with its precomputed policy (fingerprint, dim, proven
+    /// safe batch size — floored at 1).
     pub fn new(
         engine: Arc<E>,
         fingerprint: Option<String>,

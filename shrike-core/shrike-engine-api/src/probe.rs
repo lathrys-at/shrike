@@ -327,11 +327,21 @@ pub fn batch_probe_images() -> Vec<Vec<u8>> {
 /// error (`unavailable` — the host fails loud, e.g. a model needing an input
 /// the engine doesn't supply); a **batch-only** failure (e.g. a graph fixed
 /// to batch size 1) is *not* an error — it returns 1.
+///
+/// # Errors
+///
+/// Returns an `unavailable` [`NativeError`] if the serial reference embed fails
+/// on every one of [`PROBE_ATTEMPTS`] attempts.
 pub fn probe_max_safe_batch<E: EmbedText + ?Sized>(engine: &E) -> NativeResult<usize> {
     probe_with(engine, BATCH_DRIFT_TOL, PROBE_ATTEMPTS)
 }
 
 /// [`probe_max_safe_batch`] with explicit tolerance/attempts (tests).
+///
+/// # Errors
+///
+/// Returns an `unavailable` [`NativeError`] if the serial reference embed fails
+/// on every one of `attempts` attempts.
 pub fn probe_with<E: EmbedText + ?Sized>(
     engine: &E,
     tol: f64,
@@ -343,6 +353,11 @@ pub fn probe_with<E: EmbedText + ?Sized>(
 
 /// Max-abs serial-vs-batched drift over the probe set — for sensitivity
 /// pins (the >10×-tolerance assertion against the real int8 fixtures).
+///
+/// # Errors
+///
+/// Returns the engine's error if either the serial reference or the batched
+/// embed fails.
 pub fn max_probe_drift<E: EmbedText + ?Sized>(engine: &E) -> NativeResult<f64> {
     let texts = owned_texts();
     let reference = serial_reference(&texts, |items| engine.embed_chunk(items))?;
@@ -362,11 +377,21 @@ pub fn max_probe_drift<E: EmbedText + ?Sized>(engine: &E) -> NativeResult<f64> {
 /// int8 vision a user dropped on disk), where the vision graph batches
 /// non-deterministically and the text probe would wrongly clear it. A host
 /// runs both and takes `min(text_safe, vision_safe)`.
+///
+/// # Errors
+///
+/// Returns an `unavailable` [`NativeError`] if the serial reference embed fails
+/// on every one of [`PROBE_ATTEMPTS`] attempts.
 pub fn probe_image_max_safe_batch<E: EmbedImages + ?Sized>(engine: &E) -> NativeResult<usize> {
     probe_image_with(engine, BATCH_DRIFT_TOL, PROBE_ATTEMPTS)
 }
 
 /// [`probe_image_max_safe_batch`] with explicit tolerance/attempts (tests).
+///
+/// # Errors
+///
+/// Returns an `unavailable` [`NativeError`] if the serial reference embed fails
+/// on every one of `attempts` attempts.
 pub fn probe_image_with<E: EmbedImages + ?Sized>(
     engine: &E,
     tol: f64,
@@ -383,6 +408,11 @@ pub fn probe_image_with<E: EmbedImages + ?Sized>(
 
 /// Max-abs serial-vs-batched drift over the vision probe set — the image
 /// mirror of [`max_probe_drift`], for the vision sensitivity pin.
+///
+/// # Errors
+///
+/// Returns the engine's error if either the serial reference or the batched
+/// embed fails.
 pub fn max_probe_image_drift<E: EmbedImages + ?Sized>(engine: &E) -> NativeResult<f64> {
     let images = owned_images();
     let reference = serial_reference(&images, |items| engine.embed_image_chunk(items))?;

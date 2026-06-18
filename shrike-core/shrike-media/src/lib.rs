@@ -38,6 +38,13 @@
 //! both, so the kernel-purity and engine-purity layering rules both stay
 //! satisfied (//shrike-core:layering_check).
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 use std::io::Read;
 
 use base64::Engine;
@@ -58,6 +65,7 @@ pub use shrike_network::{ip_is_allowed, resolve_public_ip};
 /// rehomed from shrike-store now that both sides depend on shrike-media).
 pub const MEDIA_MAX_BYTES: usize = 64 * 1024 * 1024;
 
+/// Per-request timeout for an inbound media URL fetch.
 pub const URL_FETCH_TIMEOUT_SECS: u64 = 30;
 /// The redirect hop cap (= `shrike_network::MAX_REDIRECTS`, kept as a named alias so
 /// existing call sites and the error message that quotes it are unchanged).
@@ -69,25 +77,37 @@ pub const MAX_MEDIA_REDIRECTS: usize = shrike_network::MAX_REDIRECTS;
 /// carries its per-item error. The interface between the acquire half (this
 /// crate) and the store half (`shrike-collection`, which re-exports this).
 pub struct PreparedMedia {
+    /// The item's index in the caller's batch (echoed in results).
     pub index: i64,
     /// The caller's `filename`, echoed on errors.
     pub filename: Option<String>,
+    /// The prepared source (bytes, a server-local path, or a failure).
     pub source: PreparedMediaSource,
 }
 
+/// The outcome of preparing one `store_media` item off the collection actor.
 pub enum PreparedMediaSource {
     /// Decoded base64 or a completed download; `name` already folds the
     /// URL-derived fallback.
     Bytes {
+        /// Final filename (already folds the URL-derived fallback).
         name: String,
+        /// The fetched/decoded payload.
         data: Vec<u8>,
+        /// MIME hint from the source, if any.
         content_type: Option<String>,
     },
     /// A server-local path item, gated under the write.
-    Path { path: String },
+    Path {
+        /// The server-local path to store from.
+        path: String,
+    },
     /// The prepare failed (bad base64, refused/failed download, invalid
     /// item); stored nothing.
-    Failed { error: String },
+    Failed {
+        /// The per-item failure message.
+        error: String,
+    },
 }
 
 fn invalid(msg: impl Into<String>) -> NativeError {
@@ -177,6 +197,11 @@ pub fn mime_extension(content_type: &str) -> Option<&'static str> {
 /// `_decode_media_b64`: cap on the ENCODED length first (base64 is ~4/3 of
 /// the payload, so the string length bounds the decoded size — no allocating
 /// an oversize payload just to reject it).
+///
+/// # Errors
+///
+/// Returns an `InvalidInput` [`NativeError`] if the encoded length exceeds the
+/// [`MEDIA_MAX_BYTES`] limit or `data` is not valid base64.
 pub fn decode_media_b64(data: &str) -> NativeResult<Vec<u8>> {
     if data.len() > MEDIA_MAX_BYTES / 3 * 4 + 4 {
         return Err(invalid(format!(
@@ -190,6 +215,18 @@ pub fn decode_media_b64(data: &str) -> NativeResult<Vec<u8>> {
 }
 
 /// `_fetch_media_url`: download into memory, returning (bytes, content_type).
+///
+/// # Errors
+///
+/// Returns an `InvalidInput` [`NativeError`] if the URL is malformed, uses a
+/// non-http(s) scheme, has no host, resolves to a non-public address (unless
+/// `allow_private`), exceeds the redirect cap, the request fails, or the body
+/// exceeds [`MEDIA_MAX_BYTES`].
+///
+/// # Panics
+///
+/// Panics if the redirect loop terminates without a non-redirect response — an
+/// invariant of the manual hop loop that cannot occur in practice.
 pub fn fetch_media_url(url: &str, allow_private: bool) -> NativeResult<(Vec<u8>, Option<String>)> {
     let mut logical = url.to_string();
     for _hop in 0..=MAX_MEDIA_REDIRECTS {

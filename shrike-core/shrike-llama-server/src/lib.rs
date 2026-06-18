@@ -12,6 +12,13 @@
 //! value token for the value-taking ones) before the command is built. The
 //! supervisor never sees an unstripped argv.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -63,6 +70,7 @@ pub enum ModelSpec {
     /// on first request — `/health` is 200 once the router is listening, before
     /// any model loads, so the health-wait is unchanged.
     Router {
+        /// Models directory (`--models-dir`).
         dir: String,
         /// Max models loaded simultaneously (`--models-max`); `None` = the
         /// server default (LRU-evicts beyond it).
@@ -91,13 +99,23 @@ impl std::fmt::Display for ModelSpec {
 pub struct LlamaServerConfig {
     /// Explicit binary override (`--llama-server`); beats env and PATH.
     pub binary: Option<String>,
+    /// Model to load (`--model` single, or `--models-dir` router); `None` runs
+    /// the server with no model preloaded.
     pub model: Option<ModelSpec>,
+    /// Listen host (Shrike pins this to loopback).
     pub host: String,
+    /// Listen port.
     pub port: u16,
+    /// Directory for the child's stderr log; `None` discards it.
     pub log_dir: Option<PathBuf>,
+    /// `--ctx-size` override; `None` uses the server default.
     pub context_size: Option<u32>,
+    /// `--threads` override; `None` uses the server default.
     pub threads: Option<u32>,
+    /// `--n-gpu-layers` override; `None` uses the server default.
     pub gpu_layers: Option<i32>,
+    /// `--pooling` override (folded into the model fingerprint); `None` uses the
+    /// model's GGUF default.
     pub pooling: Option<String>,
     /// Raw passthrough entries (each shlex-split at command-build time).
     pub extra_args: Vec<String>,
@@ -468,6 +486,12 @@ impl LlamaServerManager {
     /// Spawn llama-server and wait for it to become healthy. Reaps any orphan
     /// first. On health timeout the child is stopped and the error carries its
     /// exit code (if it died).
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Unavailable` [`NativeError`] if the binary cannot be resolved, the
+    /// spawn fails, or the server does not become healthy within the health-wait
+    /// window.
     pub fn start(&mut self) -> NativeResult<()> {
         self.supervisor.start()
     }
@@ -491,6 +515,11 @@ impl LlamaServerManager {
     }
 
     /// Resolve the binary (override > `LLAMA_SERVER_PATH` > PATH), validated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Unavailable` [`NativeError`] if no usable `llama-server` binary is
+    /// found.
     pub fn find_binary(&self) -> NativeResult<String> {
         self.supervisor.policy().find_binary()
     }

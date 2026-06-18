@@ -142,7 +142,7 @@ pub fn ip_is_allowed(addr: IpAddr) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`ErrorKind::InvalidInput`] if `host` does not resolve, or if any
+/// Returns an `InvalidInput` [`NativeError`] if `host` does not resolve, or if any
 /// resolved address fails the SSRF allowlist (non-global or multicast).
 pub fn resolve_public_ip(host: &str) -> NativeResult<IpAddr> {
     let addrs: Vec<SocketAddr> = (host, 0u16)
@@ -170,7 +170,7 @@ pub fn resolve_public_ip(host: &str) -> NativeResult<IpAddr> {
 ///
 /// # Errors
 ///
-/// Returns [`ErrorKind::InvalidInput`] if `host` does not resolve to any
+/// Returns an `InvalidInput` [`NativeError`] if `host` does not resolve to any
 /// address.
 pub fn resolve_pinned(host: &str) -> NativeResult<IpAddr> {
     (host, 0u16)
@@ -194,7 +194,7 @@ pub fn resolve_pinned(host: &str) -> NativeResult<IpAddr> {
 ///
 /// # Errors
 ///
-/// Returns [`ErrorKind::InvalidInput`] if `location` is not a valid URL
+/// Returns an `InvalidInput` [`NativeError`] if `location` is not a valid URL
 /// relative to `from`, if the resolved scheme is not `http`/`https`, or if the
 /// target host is absent or differs from `from`'s host.
 pub fn same_host_redirect(from: &url::Url, location: &str) -> NativeResult<url::Url> {
@@ -246,7 +246,7 @@ pub fn pinned_agent(pinned: IpAddr, port: u16, timeout: Duration) -> ureq::Agent
 ///
 /// # Errors
 ///
-/// Returns [`ErrorKind::InvalidInput`] if `base_url` is not a valid URL, its
+/// Returns an `InvalidInput` [`NativeError`] if `base_url` is not a valid URL, its
 /// scheme is not `http`/`https`, it has no host, or that host does not resolve.
 pub fn pinned_endpoint_agent(
     base_url: &str,
