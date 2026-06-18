@@ -261,22 +261,43 @@ pub fn media_name_from_url(url: &str) -> Option<String> {
 
 /// One store_media item's prepare — validate, then decode/fetch the byte
 /// source (path items pass through; their gates are collection policy and
-/// run under the write). The ONE prepare both drivers share, **async**
-/// (the url path awaits [`fetch_media_url`]): the kernel `tokio::spawn`s
-/// each item so they prepare concurrently on the runtime; the standalone binding
-/// drives it via `block_on`.
+/// run under the write). Decodes base64 inline; for a driver that wants the
+/// CPU decode off its IO thread, [`prepare_media_item_with_decode`] takes an
+/// injected decoder. The url path awaits [`fetch_media_url`].
 pub async fn prepare_media_item(
     index: i64,
     item: StoreMediaItem,
     allow_private_fetch: bool,
 ) -> PreparedMedia {
+    prepare_media_item_with_decode(index, item, allow_private_fetch, |data| async move {
+        decode_media_b64(&data)
+    })
+    .await
+}
+
+/// [`prepare_media_item`] with the base64 decode injected as `decode`, so a
+/// driver can move the CPU decode off the thread driving the async fetch.
+/// The kernel routes `decode` through its compute pool while the url fetch rides
+/// the IO driver; the standalone driver supplies an inline decoder (what
+/// [`prepare_media_item`] does). `decode` runs only for a `data` item — `path`
+/// and `url` items never call it.
+pub async fn prepare_media_item_with_decode<F, Fut>(
+    index: i64,
+    item: StoreMediaItem,
+    allow_private_fetch: bool,
+    decode: F,
+) -> PreparedMedia
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = NativeResult<Vec<u8>>>,
+{
     let filename = item.filename.clone();
     let source = if let Err(e) = item.validate() {
         PreparedMediaSource::Failed { error: e }
     } else if let Some(path) = item.path {
         PreparedMediaSource::Path { path }
-    } else if let Some(data) = item.data.as_deref() {
-        match decode_media_b64(data) {
+    } else if let Some(data) = item.data {
+        match decode(data).await {
             Ok(bytes) => PreparedMediaSource::Bytes {
                 name: item.filename.unwrap_or_default(),
                 data: bytes,

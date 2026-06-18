@@ -436,6 +436,48 @@ pub(crate) fn dispatch_compute<T: Send + 'static>(
     enqueue(QueueKind::Compute, work)
 }
 
+/// **Schedule a fire-and-forget compute job on the blocking pool, eagerly** —
+/// the seam the engine `Blocking` adapter's injected dispatcher calls. The job
+/// is the type-erased closure that owns its own result channel (engine-api wraps
+/// the engine compute so the awaiting future learns the outcome), so this only
+/// has to run it on the right pool:
+///
+/// - **Driven mode:** enqueue onto the [`drive_compute`] pool (N threads, the
+///   N ≥ 2 engine overlap).
+/// - **Default mode:** `Handle::spawn_blocking` (tokio's blocking pool).
+///
+/// **Eager by contract**: the job is queued/scheduled inside this call, before
+/// control returns to the adapter — what keeps the engine future in flight
+/// before its first poll (the search/add overlap property).
+///
+/// The job runs through [`run_in_pool_job`] for the same panic containment and
+/// leaf-invariant tripwire every kernel pool job gets: a panicking engine job
+/// loses only itself (its result channel drops, the awaiting future gets a clean
+/// error), the pool thread survives. If the pool is gone (shutdown) the job is
+/// dropped; its result channel closes and the awaiting future sees the error.
+pub fn submit_compute(job: Box<dyn FnOnce() + Send + 'static>) {
+    debug_assert!(
+        !IN_POOL_JOB.with(Cell::get),
+        "leaf-invariant: a pool job must not submit further pool work (submit_compute)"
+    );
+    let contained: PoolJob = Box::new(move || {
+        let _ = run_in_pool_job(move || {
+            job();
+            Ok::<(), NativeError>(())
+        });
+    });
+    match mode() {
+        RuntimeMode::Driven => {
+            if let Some(pools) = DRIVEN.get() {
+                let _ = pools.compute_tx.send(contained);
+            }
+        }
+        RuntimeMode::Default => {
+            handle().spawn_blocking(contained);
+        }
+    }
+}
+
 /// Which driven queue an enqueue targets.
 #[derive(Clone, Copy)]
 enum QueueKind {
@@ -679,5 +721,31 @@ mod leaf_invariant {
         } else {
             assert!(out.is_ok(), "release: the assert is compiled out");
         }
+    }
+
+    /// `submit_compute` (default mode) schedules the fire-and-forget job on the
+    /// blocking pool — it runs to completion off the calling thread. The job
+    /// carries its own result channel (the engine `Blocking` adapter's shape), so
+    /// we observe completion + the thread it ran on through one.
+    #[test]
+    fn submit_compute_runs_off_thread_in_default_mode() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        let caller = std::thread::current().id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        submit_compute(Box::new(move || {
+            let _ = tx.send(std::thread::current().id());
+        }));
+        let ran_on = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("submit_compute scheduled the job on the blocking pool");
+        assert_ne!(
+            ran_on, caller,
+            "submit_compute ran the job off the calling thread (on the blocking pool)"
+        );
     }
 }

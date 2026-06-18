@@ -45,7 +45,8 @@ use std::time::Duration;
 
 use shrike_error::NativeResult;
 use shrike_kernel::{
-    drive_compute, drive_io, drive_sync, init_driven_runtime, spawn_op, submit_blocking, Kernel,
+    drive_compute, drive_io, drive_sync, init_driven_runtime, spawn_op, submit_blocking,
+    submit_compute, Kernel,
 };
 
 /// Receive with a TIMEOUT so a runtime that never drives the op (the bug this
@@ -283,6 +284,26 @@ fn full_flow_on_a_driven_runtime() {
     assert_eq!(
         after, 42,
         "the compute pool survived the panic — the next job ran (not a timeout/wedge)"
+    );
+
+    // ── submit_compute: a fire-and-forget job runs on the compute pool. ──
+    // This is the seam the engine `Blocking` adapter's injected dispatcher calls
+    // (it owns its own result channel; here the job reports the thread it ran on
+    // so we pin "ran on drive_compute", not the request thread).
+    let (sc_tx, sc_rx) = mpsc::channel();
+    submit_compute(Box::new(move || {
+        let _ = sc_tx.send(thread::current().id());
+    }));
+    let sc_ran_on = sc_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("submit_compute scheduled the job on the compute pool");
+    assert_ne!(
+        sc_ran_on, request_thread,
+        "submit_compute offloaded off the request thread"
+    );
+    assert!(
+        compute_threads.contains(&sc_ran_on),
+        "submit_compute ran on a drive_compute thread (the CPU pool)"
     );
 
     // Sync pool (the single drive_sync thread — the wedge risk is sharpest here):

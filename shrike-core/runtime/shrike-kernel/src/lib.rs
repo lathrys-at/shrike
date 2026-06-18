@@ -54,7 +54,7 @@ use shrike_store::{DerivedStore, VectorIndex};
 pub mod runtime;
 pub use runtime::{
     block_on, drive_compute, drive_io, drive_sync, init_driven_runtime, init_runtime, spawn_op,
-    submit_blocking,
+    submit_blocking, submit_compute,
 };
 
 // The multi-engine routing key: re-exported so the pyo3 binding maps
@@ -2517,11 +2517,12 @@ impl Kernel {
 
     /// The full store_media batch: each item's byte source (base64 decode /
     /// SSRF-guarded URL download) prepares CONCURRENTLY — each item is a
-    /// `tokio::spawn`'d task on the runtime (the prepare is async now —
-    /// the URL fetch rides the async IP-pinned client, so no blocking-pool
-    /// thread parks on a network wait) — then the batch writes as ONE collection
-    /// job (`path` items run their containment gates under that job; they carry
-    /// no prepare work).
+    /// `tokio::spawn`'d task on the runtime. The URL fetch rides the async
+    /// IP-pinned client (no blocking-pool thread parks on a network wait); the
+    /// CPU base64 decode routes through the compute pool (`dispatch_compute`), so
+    /// it lands off the IO driver. The batch then writes as ONE collection job
+    /// (`path` items run their containment gates under that job; they carry no
+    /// prepare work).
     ///
     /// # Errors
     ///
@@ -2538,7 +2539,15 @@ impl Kernel {
             .enumerate()
             .map(|(i, item)| {
                 runtime::handle().spawn(async move {
-                    shrike_media::prepare_media_item(i as i64, item, allow_private_fetch).await
+                    shrike_media::prepare_media_item_with_decode(
+                        i as i64,
+                        item,
+                        allow_private_fetch,
+                        |data| {
+                            runtime::dispatch_compute(move || shrike_media::decode_media_b64(&data))
+                        },
+                    )
+                    .await
                 })
             })
             .collect();
