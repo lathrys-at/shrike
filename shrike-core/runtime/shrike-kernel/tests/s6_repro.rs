@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use shrike_error::{NativeError, NativeResult};
-use shrike_kernel::{block_on, Embedder, Kernel};
+use shrike_kernel::runtime::testing;
+use shrike_kernel::{Embedder, Kernel};
 
 /// An embedder whose every embed fails — stands in for a transient backend
 /// outage AFTER the collection write has already committed.
@@ -47,7 +48,7 @@ fn temp_dir() -> std::path::PathBuf {
 
 #[test]
 fn upsert_wire_returns_ok_results_even_when_the_embed_tail_fails() {
-    block_on(async {
+    testing::run_with_sync(async {
         let dir = temp_dir();
         let kernel = Kernel::open(
             dir.join("c.anki2").to_str().unwrap(),

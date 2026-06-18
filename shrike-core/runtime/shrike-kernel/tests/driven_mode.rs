@@ -83,7 +83,7 @@ fn full_flow_on_a_driven_runtime() {
     // drive_io ×1 — owns + drives the runtime until shutdown_driven_pools trips
     // the built-in signal at teardown.
     let io = thread::Builder::new()
-        .name("test-drive-io".into())
+        .name("shrike-io".into())
         .spawn(move || {
             drive_io_until_shutdown().expect("drive_io runs in driven mode");
         })
@@ -93,7 +93,7 @@ fn full_flow_on_a_driven_runtime() {
     // its own thread id so we can prove the collection job ran HERE.
     let (sync_id_tx, sync_id_rx) = mpsc::channel();
     let sync = thread::Builder::new()
-        .name("test-drive-sync".into())
+        .name("shrike-sync".into())
         .spawn(move || {
             sync_id_tx
                 .send(thread::current().id())
@@ -111,7 +111,7 @@ fn full_flow_on_a_driven_runtime() {
         .map(|i| {
             let id_tx = compute_id_tx.clone();
             thread::Builder::new()
-                .name(format!("test-drive-compute-{i}"))
+                .name(format!("shrike-work-{i}"))
                 .spawn(move || {
                     id_tx
                         .send(thread::current().id())
