@@ -296,7 +296,7 @@ impl AsyncKernel {
             #[cfg(feature = "engine-apple")]
             AnyRecognizer::Native(native) => {
                 let adapted: Arc<dyn shrike_kernel::Recognizer> =
-                    Arc::new(shrike_engine_api::Blocking(native.engine_arc()));
+                    Arc::new(crate::compute_dispatch::blocking(native.engine_arc()));
                 self.inner
                     .attach_recognizer_with(purpose, adapted, resolver);
             }

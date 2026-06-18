@@ -21,13 +21,13 @@ use pyo3::prelude::*;
 use shrike_engine_api::{Embedder, ImageEmbedder};
 // Used only inside the feature-gated engine constructors — a no-engine build
 // (anki-core alone) would otherwise warn on unused imports.
-// onnx/CLIP are route-1 (sync compute behind `Blocking` + `WithPolicy`); the
-// remote engines are route-2 async-direct (`AsyncWithPolicy`, no
-// `Blocking`).
+// onnx/CLIP are route-1 (sync compute behind `Blocking` + `WithPolicy`, the
+// adapter wired to the kernel's compute pool via `compute_dispatch`); the
+// remote engines are route-2 async-direct (`AsyncWithPolicy`, no `Blocking`).
 #[cfg(feature = "engine-remote")]
 use shrike_engine_api::AsyncWithPolicy;
 #[cfg(feature = "engine-ort")]
-use shrike_engine_api::{Blocking, WithPolicy};
+use shrike_engine_api::WithPolicy;
 
 /// The assembled native embedder the kernel slot takes: the text half always,
 /// the image half when the engine embeds images (CLIP). Both halves are views
@@ -61,7 +61,7 @@ impl NativeEmbedder {
             safe_batch,
         ));
         Self {
-            text: Arc::new(Blocking(tuned)),
+            text: Arc::new(crate::compute_dispatch::blocking(tuned)),
             images: None,
         }
     }
@@ -120,7 +120,7 @@ impl NativeEmbedder {
             dim,
             safe_batch,
         ));
-        let adapted = Arc::new(Blocking(tuned));
+        let adapted = Arc::new(crate::compute_dispatch::blocking(tuned));
         Self {
             text: Arc::clone(&adapted) as Arc<dyn Embedder>,
             images: Some(adapted as Arc<dyn ImageEmbedder>),
