@@ -47,7 +47,14 @@ def _driven_runtime() -> Iterator[None]:
     op only makes progress while a driver thread drives it. Install once (the seam
     is set-once and the threads outlive any kernel, exactly as in production) and
     tear down at session end. A no-op on a build without the kernel bridge (the
-    compute-only extension), which those tests skip anyway."""
+    compute-only extension), which those tests skip anyway.
+
+    Process-global guard: when the unit and native suites share one pytest process
+    (``pytest tests/unit tests/native``), both trees' autouse fixtures fire — but
+    the kernel runtime is set-once, so only the FIRST may park the driver threads
+    (a second ``drive_sync`` would hit "already claimed"). A marker on the
+    ``shrike_native`` module (the one object both conftests share) elects the
+    single owner."""
     try:
         import shrike_native
 
@@ -60,7 +67,12 @@ def _driven_runtime() -> Iterator[None]:
         # kernel-driving tests skip on the missing CollectionCore/AsyncKernel.
         yield
         return
+    if getattr(shrike_native, "_shrike_test_driven", False):
+        # Another suite's fixture already owns the driven runtime this process.
+        yield
+        return
 
+    shrike_native._shrike_test_driven = True
     runtime = DrivenRuntime()
     runtime.install()
     runtime.start()
@@ -68,6 +80,7 @@ def _driven_runtime() -> Iterator[None]:
         yield
     finally:
         runtime.shutdown()
+        shrike_native._shrike_test_driven = False
 
 
 @pytest.fixture

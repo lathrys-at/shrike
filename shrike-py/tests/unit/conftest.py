@@ -73,14 +73,30 @@ def _driven_runtime():
     unit suite across processes, so a per-fixture dependency wouldn't cover a
     target whose kernel-opening test doesn't use ``kernel_loop``). Install once
     (the seam is set-once and the threads outlive any kernel, as in production)
-    via the production :class:`DrivenRuntime`, and tear down at session end."""
+    via the production :class:`DrivenRuntime`, and tear down at session end.
+
+    Process-global guard: when the unit and native suites share one pytest
+    process (``pytest tests/unit tests/native``), both trees' autouse fixtures
+    fire — but the kernel runtime is set-once, so only the FIRST may park the
+    driver threads (a second ``drive_sync`` would hit "already claimed"). A marker
+    on the ``shrike_native`` module (the one object both conftests share) elects
+    the single owner."""
+    import shrike_native
+
     from shrike.platform.driven_runtime import DrivenRuntime
 
+    if getattr(shrike_native, "_shrike_test_driven", False):
+        # Another suite's fixture already owns the driven runtime this process.
+        yield
+        return
+
+    shrike_native._shrike_test_driven = True
     runtime = DrivenRuntime()
     runtime.install()
     runtime.start()
     yield
     runtime.shutdown()
+    shrike_native._shrike_test_driven = False
 
 
 @pytest.fixture(scope="session")
