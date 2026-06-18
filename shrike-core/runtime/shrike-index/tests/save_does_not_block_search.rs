@@ -1,14 +1,14 @@
-//! Regression: `MultiModalIndex::save` must not hold the engine state
-//! lock across the on-disk write, so a search issued *during* a save is not
+//! Regression: `MultiModalIndex::save` must not hold the engine state lock
+//! across the on-disk write, so a search issued *during* a save is not
 //! serialized behind the whole multi-file usearch write.
 //!
-//! The guarded-against bug: the save held `Mutex<State>` across every
+//! The guarded-against bug: the save holding `Mutex<State>` across every
 //! `sub.index.save(tmp)` + rename, the same lock `search_by_modality` takes.
 //! The absolute stall ratio is build-dependent, so this asserts the
-//! *structural* property — a concurrent search completes in well under the
-//! full save window — not a brittle multiplier. The collection is sized so a
-//! single search is far cheaper than a full save (the gap the bug closed),
-//! while the index build stays quick enough for the unit suite.
+//! *structural* property — a concurrent search completes in well under the full
+//! save window — not a brittle multiplier. The collection is sized so a single
+//! search is far cheaper than a full save, while the index build stays quick
+//! enough for the unit suite.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

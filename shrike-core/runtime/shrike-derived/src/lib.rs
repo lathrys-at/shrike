@@ -6,15 +6,15 @@
 //! `shrike.db`). On a schema-version mismatch — or an `idx`↔`rowmap` pairing
 //! inconsistency found at open — the derived data is dropped and the next
 //! drift rebuilds: the derived-cache answer, no migrations. The bundled
-//! SQLite always has FTS5 + the trigram tokenizer, which is this engine's
-//! user-facing win: the facade's availability probe stops being load-bearing.
+//! SQLite always has FTS5 + the trigram tokenizer, so the facade's
+//! availability probe stops being load-bearing.
 //!
 //! **The single mutexed connection is a correctness invariant, not just
-//! thread-safety**: `idx` is an FTS5 virtual table, so nothing at the
-//! schema level (no FK, no trigger) ties its rowids to `rowmap` — the pairing
-//! holds because every write rides this one connection's
-//! `last_insert_rowid()` under [`DerivedEngine::lock`]. A future move to a
-//! connection pool must make the coupling structural first.
+//! thread-safety**: `idx` is an FTS5 virtual table, so nothing at the schema
+//! level (no FK, no trigger) ties its rowids to `rowmap` — the pairing holds
+//! because every write rides this one connection's `last_insert_rowid()` under
+//! [`DerivedEngine::lock`]. A move to a connection pool must make the coupling
+//! structural first.
 //!
 //! MATCH-expression building, trigram filtering, and the state machine stay
 //! facade-side; this crate is storage + queries only. Pure Rust — no pyo3.
@@ -64,9 +64,9 @@ pub struct DerivedEngine {
 }
 
 fn db_err(e: rusqlite::Error) -> NativeError {
-    // Every SQLite failure here is a runtime-resource fault, not a bug — keep
-    // the explicit Unavailable kind, but carry the rusqlite error as the
-    // recoverable `#[source]` cause instead of flattening it into the message.
+    // Every SQLite failure here is a runtime-resource fault, not a bug — the
+    // explicit Unavailable kind, carrying the rusqlite error as the recoverable
+    // `#[source]` cause rather than flattening it into the message.
     NativeError::with_source(ErrorKind::Unavailable, "sqlite", e)
 }
 
@@ -89,11 +89,11 @@ fn is_busy(e: &rusqlite::Error) -> bool {
 }
 
 /// How many extra times a read retries past a transient busy before surfacing
-/// it. The connection's `busy_timeout` (5s) already absorbs the common
-/// lock-acquisition wait; this is the belt for a busy that surfaces despite it
-/// (e.g. a snapshot conflict). A surviving busy then surfaces as `unavailable`
-/// — the caller (kernel search) propagates it rather than silently degrading to
-/// a fallback that can't serve OCR/ASR-only text.
+/// it. The connection's `busy_timeout` (5s) absorbs the common lock-acquisition
+/// wait; this is the belt for a busy that surfaces despite it (e.g. a snapshot
+/// conflict). A surviving busy surfaces as `unavailable` — the caller (kernel
+/// search) propagates it rather than silently degrading to a fallback that
+/// can't serve OCR/ASR-only text.
 const BUSY_RETRIES: usize = 5;
 
 /// Run a fallible read, retrying a transient `SQLITE_BUSY`/`LOCKED` up to
@@ -117,9 +117,9 @@ impl DerivedEngine {
     /// Open (or create) the store and ensure the schema, resetting the derived
     /// data on a schema-version mismatch (no migrations — it's a rebuildable
     /// cache). Errors are `unavailable` — the facade recovers by discarding.
-    /// The current sidecar schema. v2: the `segments` table for
-    /// recognition structure (boxes/spans) + recognition meta keys. A bump
-    /// drops everything — recognition rows re-derive via the pending sweep.
+    /// The current sidecar schema. v2: the `segments` table for recognition
+    /// structure (boxes/spans) + recognition meta keys. A bump drops
+    /// everything — recognition rows re-derive via the pending sweep.
     pub const SCHEMA_VERSION: i64 = 2;
 
     /// Open (or create) the sidecar database at `path`, migrating to
@@ -130,24 +130,23 @@ impl DerivedEngine {
     /// Returns an error if the database cannot be opened or its schema migrated.
     pub fn open(path: &str, schema_version: i64) -> NativeResult<Self> {
         let conn = Connection::open(path).map_err(db_err)?;
-        // Plain rollback journaling + synchronous=NORMAL. This store has
-        // exactly one connection (the engine mutex serializes everything), so
-        // WAL's concurrent-reader payoff never materializes — while its
-        // -wal/-shm sidecars complicate the one-file story the relay/sync
-        // design wants. DELETE keeps the
-        // store a single file between transactions; NORMAL may lose the last
-        // transaction on power loss (never integrity), which a rebuildable
-        // cache absorbs: the col_mod watermark lags, reads as drift, rebuilds.
-        // (Opening a previously-WAL file converts it back; WAL is the one
-        // persistent journal mode.)
+        // Plain rollback journaling + synchronous=NORMAL. This store has exactly
+        // one connection (the engine mutex serializes everything), so WAL's
+        // concurrent-reader payoff never materializes — while its -wal/-shm
+        // sidecars complicate the one-file story the relay/sync design wants.
+        // DELETE keeps the store a single file between transactions; NORMAL may
+        // lose the last transaction on power loss (never integrity), which a
+        // rebuildable cache absorbs: the col_mod watermark lags, reads as drift,
+        // rebuilds. (Opening a previously-WAL file converts it back; WAL is the
+        // one persistent journal mode.)
         conn.pragma_update(None, "journal_mode", "DELETE")
             .map_err(db_err)?;
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(db_err)?;
-        // "One connection" holds per ENGINE, but two engines can share the
-        // file (the kernel's + the Python facade's read surface). With the
-        // default busy_timeout of 0 a read overlapping a write transaction
-        // got an instant SQLITE_BUSY instead of waiting out a brief lock.
+        // "One connection" holds per ENGINE, but two engines can share the file
+        // (the kernel's + the Python facade's read surface). With the default
+        // busy_timeout of 0, a read overlapping a write transaction gets an
+        // instant SQLITE_BUSY instead of waiting out a brief lock.
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(db_err)?;
 
@@ -171,10 +170,9 @@ impl DerivedEngine {
         Self::create_tables(&conn)?;
         // The idx↔rowmap pairing has no schema-level enforcement (see the
         // module docs) — verify it at open and treat a mismatch exactly like
-        // corruption: drop the derived data so the next drift rebuild
-        // restores a consistent store (recognition rows re-derive via the
-        // pending sweep). A silent mismatch would serve provenance for the
-        // wrong notes.
+        // corruption: drop the derived data so the next drift rebuild restores
+        // a consistent store (recognition rows re-derive via the pending sweep).
+        // A silent mismatch would serve provenance for the wrong notes.
         let idx_rows: i64 = conn
             .query_row("SELECT count(*) FROM idx", [], |r| r.get(0))
             .map_err(db_err)?;
@@ -236,13 +234,13 @@ impl DerivedEngine {
             [],
         )
         .map_err(db_err)?;
-        // Below-gate recognition markers: a (note, source, ref) the
-        // recognizer judged and the gate dropped — no text row exists, but
-        // the pending sweep must count it DONE (or it re-recognizes forever).
-        // Invalidated with the recognized rows on a recognizer-fingerprint
-        // change ([`Self::clear_gated`]). IF NOT EXISTS + create_tables-on-open
-        // retrofits existing stores, like the rowmap_source index — no schema
-        // bump (an absent/empty table just means nothing is marked yet).
+        // Below-gate recognition markers: a (note, source, ref) the recognizer
+        // judged and the gate dropped — no text row exists, but the pending
+        // sweep must count it DONE (or it re-recognizes forever). Invalidated
+        // with the recognized rows on a recognizer-fingerprint change
+        // ([`Self::clear_gated`]). IF NOT EXISTS + create_tables-on-open adds
+        // this to an existing store with no schema bump (an absent/empty table
+        // just means nothing is marked yet).
         conn.execute(
             "CREATE TABLE IF NOT EXISTS gated(\
              note_id INTEGER NOT NULL, source TEXT NOT NULL, ref TEXT NOT NULL, \
@@ -258,8 +256,7 @@ impl DerivedEngine {
         // (source, note_id): refs_for_source/texts_for_source filter on
         // `source` alone — without this leading-column index they full-scan
         // rowmap, and texts_for_source(OCR) sits on every upsert's tail.
-        // IF NOT EXISTS + create_tables-on-open retrofits existing
-        // stores.
+        // IF NOT EXISTS + create_tables-on-open adds it to an existing store.
         conn.execute(
             "CREATE INDEX IF NOT EXISTS rowmap_source ON rowmap(source, note_id)",
             [],
@@ -289,7 +286,7 @@ impl DerivedEngine {
     /// live col.mod`), so stamping it past an un-ingested write certifies that
     /// write as searchable when it is not — the heal gate then goes quiet and
     /// the note is permanently invisible to substring/fuzzy. The kernel enforces
-    /// this with its [`crate`]-external watermark tracker: a failed/partial
+    /// this via its [`crate`]-external watermark tracker: a failed/partial
     /// ingest, or a value covering a concurrent in-flight write, leaves the
     /// watermark behind for the next drift to heal — never advances it here.
     ///
@@ -408,9 +405,9 @@ impl DerivedEngine {
         source: &str,
         refs_text: &[(String, String)],
     ) -> NativeResult<()> {
-        // prepare_cached: the two insert statements parse once per
-        // connection, not once per row (a rebuild would pay ~2 prepares
-        // per field row; the cache also serves every later ingest).
+        // prepare_cached: the two insert statements parse once per connection,
+        // not once per row (a rebuild would otherwise pay ~2 prepares per field
+        // row; the cache also serves every later ingest).
         let mut ins_idx = conn
             .prepare_cached("INSERT INTO idx(txt) VALUES(?1)")
             .map_err(db_err)?;
@@ -452,11 +449,11 @@ impl DerivedEngine {
         tx.commit().map_err(db_err)
     }
 
-    /// Replace MANY notes' text rows for one source in ONE transaction:
-    /// callers hold whole upsert batches, and one-commit-per-note
-    /// under DELETE journaling is journal create+fsync+delete per note. The
-    /// delete half batches across all ids; inserts pair idx↔rowmap per row
-    /// exactly like `ingest`.
+    /// Replace MANY notes' text rows for one source in ONE transaction: callers
+    /// hold whole upsert batches, and one-commit-per-note under DELETE
+    /// journaling is a journal create+fsync+delete per note. The delete half
+    /// batches across all ids; inserts pair idx↔rowmap per row exactly like
+    /// `ingest`.
     ///
     /// # Errors
     ///
@@ -469,10 +466,8 @@ impl DerivedEngine {
         if notes.is_empty() {
             return Ok(());
         }
-        // Duplicate ids: LAST entry wins — matching the per-note loop this
-        // replaced (each occurrence delete+inserted, so the final one stood).
-        // The batch deletes each id's rows ONCE up front, so without this
-        // guard a duplicate would double-insert.
+        // Duplicate ids: LAST entry wins. The batch deletes each id's rows ONCE
+        // up front, so without this guard a duplicate would double-insert.
         let mut last: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
         for (i, (id, _)) in notes.iter().enumerate() {
             last.insert(*id, i);
@@ -553,12 +548,12 @@ impl DerivedEngine {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
         // FTS5's per-row delete writes a tombstone per token list — on a
-        // rebuild that's a second insert-sized cost. When ONLY field rows
-        // exist (no recognition rows to preserve — the common case), drop
-        // and recreate the table instead: measured 40× faster than even a
-        // whole-table DELETE at 50k rows, and FTS5's 'delete-all' shortcut
-        // is unavailable on a content-ful table. DDL is transactional
-        // in SQLite, and the recreate reuses the schema's own DDL string.
+        // rebuild that's a second insert-sized cost. When ONLY field rows exist
+        // (no recognition rows to preserve — the common case), drop and recreate
+        // the table instead: measured 40× faster than even a whole-table DELETE
+        // at 50k rows, and FTS5's 'delete-all' shortcut is unavailable on a
+        // content-ful table. DDL is transactional in SQLite, and the recreate
+        // reuses the schema's own DDL string.
         let has_other: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM rowmap WHERE source != 'field')",
@@ -581,7 +576,7 @@ impl DerivedEngine {
         }
         {
             // Parse the two insert statements once, not once per row
-            // (~2 prepares × every field row of the collection per rebuild).
+            // (~2 prepares × every field row of the collection, per rebuild).
             let mut ins_idx = tx
                 .prepare_cached("INSERT INTO idx(txt) VALUES(?1)")
                 .map_err(db_err)?;
@@ -888,12 +883,12 @@ impl DerivedEngine {
             Some(_) => "AND 0 ".to_string(), // an empty scope matches nothing
             None => String::new(),
         };
-        // Hidden-source exclusion: a VectorOnly recognition source is
-        // dropped BEFORE ranking/limiting, so its rows never surface on a
-        // lexical query yet stay stored for provenance + reconcile. Bound as
-        // positional params (starting after the three fixed ones below) — the
-        // source strings are kernel-controlled, but binding keeps the path
-        // injection-safe by construction.
+        // Hidden-source exclusion: a VectorOnly recognition source is dropped
+        // BEFORE ranking/limiting, so its rows never surface on a lexical query
+        // yet stay stored for provenance + reconcile. Bound as positional params
+        // (starting after the three fixed ones below) — the source strings are
+        // kernel-controlled, but binding keeps the path injection-safe by
+        // construction.
         let exclude_clause = if exclude_sources.is_empty() {
             String::new()
         } else {
@@ -909,10 +904,10 @@ impl DerivedEngine {
              FROM idx JOIN rowmap m ON m.rowid = idx.rowid \
              WHERE idx MATCH ?2 {scope_clause}{exclude_clause}ORDER BY rank LIMIT ?3"
         );
-        // Retry a transient busy: two engines share the file, so a read
-        // can lose the lock to a concurrent write even with `busy_timeout`. The
-        // closure re-prepares + re-runs per attempt; a busy at prepare or step
-        // bubbles as a `rusqlite::Error` for `with_busy_retry` to retry, while a
+        // Retry a transient busy: two engines share the file, so a read can lose
+        // the lock to a concurrent write even with `busy_timeout`. The closure
+        // re-prepares + re-runs per attempt; a busy at prepare or step bubbles
+        // as a `rusqlite::Error` for `with_busy_retry` to retry, while a
         // non-busy FTS5/MATCH fault returns `Ok(Err(invalid_input))` (a real
         // query error, not a lock — surfaced without retry). A busy surviving
         // the retries surfaces as `unavailable`; the kernel caller propagates it
@@ -1192,9 +1187,8 @@ mod tests {
     fn probe_reports_linkage_capability() {
         // Under the bundled default the probe MUST pass (the bundled-SQLite
         // guarantee); under platform linkage it reports whatever the host
-        // library has —
-        // on this dev host the test only runs if the store above worked, so
-        // the probe must agree.
+        // library has — and since this test only runs when the store above
+        // worked, the probe must agree.
         assert!(fts5_trigram_available());
         if sqlite_bundled() {
             assert!(fts5_trigram_available());
@@ -1550,9 +1544,9 @@ mod tests {
 }
 
 // ── lexical search policy ────────────────────────────────────────────────────
-// The MATCH-expression building + result filtering. One implementation: the
-// Python facade delegates here through the binding, and the kernel's search
-// assembly calls it directly.
+// MATCH-expression building + result filtering. One implementation: the Python
+// facade delegates here through the binding, and the kernel's search assembly
+// calls it directly.
 
 /// FTS5's trigram tokenizer can't match a term shorter than 3 chars.
 pub const MIN_TRIGRAM: usize = 3;

@@ -1,17 +1,17 @@
-//! Concurrency regression guards: the `save`-vs-`search`/`add`/`remove`
-//! safety the fix relies on is INFERRED (usearch 2.25.3 documents concurrent
-//! search+update but is silent on save-vs-search and save-vs-mutate), so these
-//! pin the load-bearing properties directly under contention:
+//! Concurrency regression guards: the `save`-vs-`search`/`add`/`remove` safety
+//! is INFERRED (usearch 2.25.3 documents concurrent search+update but is silent
+//! on save-vs-search and save-vs-mutate), so these pin the load-bearing
+//! properties directly under contention:
 //!
 //! (a) searches racing repeated saves stay correct and never crash,
 //! (b) add/remove racing a save never tears the on-disk file (the save_mutation
 //!     guard), and
 //! (c) two concurrent saves to the same dir don't corrupt the files.
 //!
-//! IMPORTANT (a flaw these avoid): usearch is an
-//! APPROXIMATE index — a self-query legitimately misses its own key for a few
-//! permil of keys even with ZERO concurrency. So (a) asserts STRUCTURAL
-//! validity (non-empty, keys in range, finite distances), never exact recall.
+//! IMPORTANT: usearch is an APPROXIMATE index — a self-query legitimately
+//! misses its own key for a few permil of keys even with ZERO concurrency. So
+//! (a) asserts STRUCTURAL validity (non-empty, keys in range, finite
+//! distances), never exact recall.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -62,7 +62,7 @@ fn tmpdir(tag: &str) -> std::path::PathBuf {
 ///
 /// NOTE: top-1 == self is NOT asserted — usearch is approximate, so a
 /// self-query legitimately misses its own key for a few permil of keys even
-/// with zero concurrency. Asserting exact recall would flake independent of the
+/// with zero concurrency. Asserting exact recall would flake regardless of the
 /// save.
 #[test]
 fn searches_during_repeated_saves_stay_correct_and_never_crash() {
