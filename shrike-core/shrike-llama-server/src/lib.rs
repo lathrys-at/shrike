@@ -185,9 +185,26 @@ struct LlamaPolicy {
     /// (#501 — jina-v5-omni ships separate vision/audio mmprojs, loaded together
     /// for both).
     mmprojs: Vec<String>,
+    /// The health-probe agent, built once on the first poll and reused across
+    /// the whole (up to 30s, ~600-poll) health-wait — the supervisor calls
+    /// `health_check` per poll, so caching keeps the original "build one agent,
+    /// poll many" shape rather than reallocating a client every 50ms.
+    health_agent: std::sync::OnceLock<ureq::Agent>,
 }
 
 impl LlamaPolicy {
+    /// Assemble a policy with a fresh (unbuilt) health agent — the one place the
+    /// `OnceLock` is seeded, so the manager's constructors/builders don't each
+    /// repeat the field.
+    fn assemble(cfg: LlamaServerConfig, embeddings: bool, mmprojs: Vec<String>) -> Self {
+        Self {
+            cfg,
+            embeddings,
+            mmprojs,
+            health_agent: std::sync::OnceLock::new(),
+        }
+    }
+
     fn model(&self) -> &ModelSpec {
         self.cfg
             .model
@@ -349,12 +366,15 @@ impl ManagedProcess for LlamaPolicy {
         "llama-server-stderr.log"
     }
 
-    /// `GET /health` → 200, via a short-timeout ureq agent. This is the one HTTP
-    /// touchpoint — kept in the policy so `shrike-process` carries no HTTP dep.
+    /// `GET /health` → 200, via a short-timeout ureq agent built once and reused
+    /// across the health-wait. This is the one HTTP touchpoint — kept in the
+    /// policy so `shrike-process` carries no HTTP dep.
     fn health_check(&self, base_url: &str) -> bool {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(2))
-            .build();
+        let agent = self.health_agent.get_or_init(|| {
+            ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(2))
+                .build()
+        });
         let url = format!("{base_url}/health");
         matches!(agent.get(&url).call(), Ok(r) if r.status() == 200)
     }
@@ -386,11 +406,7 @@ impl LlamaServerManager {
     /// tuning/passthrough/pid-file.
     pub fn new(cfg: LlamaServerConfig) -> Self {
         Self {
-            supervisor: Supervisor::new(LlamaPolicy {
-                cfg,
-                embeddings: true,
-                mmprojs: Vec::new(),
-            }),
+            supervisor: Supervisor::new(LlamaPolicy::assemble(cfg, true, Vec::new())),
         }
     }
 
@@ -404,11 +420,11 @@ impl LlamaServerManager {
         // A chat/embeddings reshape must happen before spawn; rebuild the
         // (not-yet-started) supervisor around the reshaped policy.
         let LlamaPolicy { cfg, .. } = self.take_policy();
-        self.supervisor = Supervisor::new(LlamaPolicy {
+        self.supervisor = Supervisor::new(LlamaPolicy::assemble(
             cfg,
-            embeddings: false,
-            mmprojs: mmproj.into_iter().collect(),
-        });
+            false,
+            mmproj.into_iter().collect(),
+        ));
         self
     }
 
@@ -420,11 +436,7 @@ impl LlamaServerManager {
         let LlamaPolicy {
             cfg, embeddings, ..
         } = self.take_policy();
-        self.supervisor = Supervisor::new(LlamaPolicy {
-            cfg,
-            embeddings,
-            mmprojs,
-        });
+        self.supervisor = Supervisor::new(LlamaPolicy::assemble(cfg, embeddings, mmprojs));
         self
     }
 
@@ -433,11 +445,11 @@ impl LlamaServerManager {
     /// exists yet, and the chat/mmproj builders are only ever chained on a fresh
     /// `new`.
     fn take_policy(&mut self) -> LlamaPolicy {
-        let placeholder = Supervisor::new(LlamaPolicy {
-            cfg: LlamaServerConfig::default(),
-            embeddings: true,
-            mmprojs: Vec::new(),
-        });
+        let placeholder = Supervisor::new(LlamaPolicy::assemble(
+            LlamaServerConfig::default(),
+            true,
+            Vec::new(),
+        ));
         std::mem::replace(&mut self.supervisor, placeholder).into_policy()
     }
 
