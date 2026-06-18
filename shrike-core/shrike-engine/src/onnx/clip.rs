@@ -19,8 +19,8 @@ use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 use shrike_image::PreprocessConfig;
 use tokenizers::Tokenizer;
 
-use super::session::{build_session, extract_2d, graph_inputs, int_tensor, l2_normalize_rows};
 use super::session::GraphInput;
+use super::session::{build_session, extract_2d, graph_inputs, int_tensor, l2_normalize_rows};
 
 /// The pixel-math version of the CLIP preprocessing pipeline, re-exported from
 /// `shrike-image` (its owner since #707) so the facade's fingerprint and the
