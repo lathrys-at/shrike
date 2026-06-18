@@ -146,7 +146,7 @@ pub(crate) fn l2_normalize(mut vectors: Array2<f32>) -> Array2<f32> {
     vectors
 }
 
-/// Backwards-compat alias used by both engines.
+/// Alias used by both engines.
 pub(crate) use l2_normalize as l2_normalize_rows;
 
 #[cfg(test)]

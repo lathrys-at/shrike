@@ -54,8 +54,8 @@ impl AppleSpeechTranscriber {
 
     /// The platform identity: `apple-speech:{resolved-locale}:macos{X.Y.Z}`
     /// — locale + OS version (no public model-version accessor exists, so
-    /// the OS version is the honest proxy; an asset update without an OS
-    /// bump won't re-derive — accepted and documented).
+    /// the OS version is the proxy; an asset update without an OS bump
+    /// won't re-derive, an accepted limitation).
     pub fn fingerprint_str(&self) -> &str {
         &self.fingerprint
     }

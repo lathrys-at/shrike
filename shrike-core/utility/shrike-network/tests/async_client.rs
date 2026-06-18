@@ -8,10 +8,10 @@
 //! gates (scheme/host/resolution, the is_global gate) live in the crate's unit
 //! tests; these need a tokio runtime + a local server, so they live out here.
 //!
-//! S2 centralized the consumer loops into `fetch_pinned_get` (untrusted-media
-//! GET, is_global per hop) and `post_pinned_with_revet` (operator-endpoint POST,
-//! same-host per hop). These tests drive the REAL helpers (not a reconstructed
-//! loop) so the one audited SSRF surface is exactly what is exercised.
+//! The consumer loops are `fetch_pinned_get` (untrusted-media GET, is_global per
+//! hop) and `post_pinned_with_revet` (operator-endpoint POST, same-host per
+//! hop). These tests drive the REAL helpers (not a reconstructed loop) so the
+//! one audited SSRF surface is exactly what is exercised.
 
 use std::net::IpAddr;
 use std::time::Duration;

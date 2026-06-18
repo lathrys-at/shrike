@@ -2,7 +2,7 @@
 
 Covers profile resolution, the path-free invariant, arg parsing, the
 effective-config composition (dir-name → absolute path rewrite), the run-server
-argv, and the --import MVP stub — all WITHOUT any model download, so this is the
+argv, and the --import stub — all WITHOUT any model download, so this is the
 non-manual target CI runs.
 """
 
@@ -551,8 +551,8 @@ def test_compose_explicit_profile_providers_wins() -> None:
 
 
 def test_compose_does_not_overlay_remote_or_platform() -> None:
-    # providers: is onnx-only (profiles.py:291) — never injected onto remote or
-    # platform entries.
+    # providers: is onnx-only (profiles.py's guard) — never injected onto remote
+    # or platform entries.
     profile = {
         "embedders": [
             {"runtime": "remote", "modalities": ["text"], "endpoint": "http://x"},
@@ -697,7 +697,7 @@ def test_server_argv_daemon_omits_foreground() -> None:
     assert "--foreground" not in argv
 
 
-# -- the --import MVP stub -----------------------------------------------------
+# -- the --import stub ---------------------------------------------------------
 
 
 def test_import_is_a_loud_stub() -> None:

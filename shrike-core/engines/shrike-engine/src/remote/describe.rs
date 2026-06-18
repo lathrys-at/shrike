@@ -18,12 +18,11 @@
 //! `EMBED_TEXT_VERSION` — and the projector name for a local vision server,
 //! which `/v1/models` meta does NOT reflect).
 //!
-//! **Destination rule (settled in docs/dev/decisions.md): VLM descriptions go
-//! to the embedding space only, never the trigram index.** Today's
-//! recognition pipeline ingests recognized text into the derived (lexical)
-//! store unconditionally, so this engine is constructible and tested but
-//! must NOT occupy a recognition slot until the kernel grows a per-engine
-//! destination policy.
+//! **Destination rule (docs/dev/decisions.md): VLM descriptions go to the
+//! embedding space only, never the trigram index.** The recognition pipeline
+//! ingests recognized text into the derived (lexical) store unconditionally,
+//! so this engine is constructible and tested but must NOT occupy a
+//! recognition slot until the kernel grows a per-engine destination policy.
 //!
 //! Error semantics — the load-bearing split, proven against the kernel's
 //! sweep: a **per-item permanent** failure (400/413/415/422 — *this image*
@@ -226,9 +225,9 @@ impl RemoteDescriber {
             return Ok(empty_recognition());
         }
 
-        // The mime hint rides the data URL; `image/png` is the documented
-        // pragmatic default (the dominant Anki case; llama-server sniffs
-        // content regardless, and some cloud gateways reject non-image/*).
+        // The mime hint rides the data URL; `image/png` is the pragmatic
+        // default (the dominant Anki case; llama-server sniffs content
+        // regardless, and some cloud gateways reject non-image/*).
         // `item.mime` is the ENGINE routing-hint (`shrike_engine_api::mime_for_name`
         // via `MediaItem::from_named`) — describe-remote reuses that table by
         // construction, NOT shrike-media's store/response MIME (the two are

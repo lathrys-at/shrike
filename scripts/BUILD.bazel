@@ -47,7 +47,7 @@ _SERVE_DEPS = [
     requirement("onnxruntime"),
 ]
 
-# text-onnx — the minimal MiniLM-int8 text-only profile (the MVP end-to-end proof).
+# text-onnx — the minimal MiniLM-int8 text-only profile (the end-to-end proof).
 serve_profile(
     name = "text_onnx",
     profile = "text-onnx",

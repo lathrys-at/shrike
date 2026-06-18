@@ -7,9 +7,8 @@
 # The coverage-specific flags (instrumentation filter, the CC-collector bypass,
 # the combined report) live in .bazelrc under `coverage --…`.
 #
-# Report-only, like CI's coverage posture: the fail_under ratchet stays on the
-# pip lane (scripts/coverage.sh), which also remains the basis of the published
-# number until the bazel number replaces it. Note the metric
+# Report-only, like CI's coverage posture: the fail_under ratchet and the
+# published number stay on the pip lane (scripts/coverage.sh). Note the metric
 # difference when comparing: lcov totals are line coverage; coverage.py's total
 # folds in branch coverage (pyproject sets branch=true), so the two can differ
 # by a point or so.

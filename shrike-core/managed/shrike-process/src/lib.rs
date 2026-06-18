@@ -1,8 +1,7 @@
 //! Generic managed-subprocess lifecycle — spawn, health-wait,
-//! orphan reaping, escalating stop, extracted from `shrike-llama-server`'s
-//! process half so any subprocess-managed runtime (a sync-server, a future
-//! local model server) implements one small policy trait and inherits the
-//! whole lifecycle.
+//! orphan reaping, escalating stop. Any subprocess-managed runtime (a
+//! sync-server, a future local model server) implements one small policy trait
+//! and inherits the whole lifecycle.
 //!
 //! [`ManagedProcess`] is the policy seam: a runtime supplies binary resolution,
 //! the argv vocabulary, the host/port it listens on, where it logs, and a
@@ -47,10 +46,10 @@ pub use reaper::{pid_owns_port, port_owner_pids};
 /// How long [`Supervisor::start`] waits for the process to become healthy
 /// before giving up and stopping it.
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
-/// 50ms, not 250: a localhost health GET costs ~1ms, and every service
-/// start rounds up to one poll quantum — a small model loads faster than a
-/// single 250ms tick, so the coarser interval was pure added boot latency
-/// (felt acutely by the embedding test suites, which boot servers per fixture).
+/// 50ms, not 250: a localhost health GET costs ~1ms, and every service start
+/// rounds up to one poll quantum — a small model loads faster than a single
+/// 250ms tick, so a coarser interval is pure added boot latency (the embedding
+/// test suites boot a server per fixture).
 pub const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// The SIGTERM grace window before escalating to SIGKILL.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);

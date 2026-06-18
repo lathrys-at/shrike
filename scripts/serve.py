@@ -296,9 +296,8 @@ def load_profile(name: str) -> dict[str, Any]:
 def _model_names_in_profile(profile: Mapping[str, Any]) -> list[str]:
     """Every onnx embedder model dir-name the profile names, in order.
 
-    Only onnx embedders carry a materializable model dir-name (the MVP surface).
-    Remote/managed entries name endpoints/binaries, not bundled model dirs, and
-    are left to later waves.
+    Only onnx embedders carry a materializable model dir-name. Remote/managed
+    entries name endpoints/binaries, not bundled model dirs.
     """
     names: list[str] = []
     for entry in profile.get("embedders") or []:
@@ -325,7 +324,7 @@ def compose_effective_config(
     provider list, overlaid onto every **onnx** entry that does not
     already declare its own ``providers:`` — an explicit profile choice wins over
     detection. Remote/platform entries are untouched (``providers:`` is onnx-only,
-    mirroring the guard at ``profiles.py:291``).
+    mirroring ``profiles.py``'s guard).
     """
     config: dict[str, Any] = {k: v for k, v in profile.items() if k != "embedders"}
     embedders: list[Any] = []
@@ -545,8 +544,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.import_path is not None:
-        # MVP stub: real .apkg import is a later-wave seam. Refuse
-        # loudly rather than silently start an empty collection.
+        # The .apkg import seam is stubbed — refuse loudly rather than silently
+        # start an empty collection.
         raise SystemExit(
             "--import is not wired yet (the .apkg seed seam lands in a later wave); "
             "use --seed qa or run without a seed for a fresh empty collection"

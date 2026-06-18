@@ -6,11 +6,11 @@
 //! reaping, and escalating stop are all the supervisor's; the orphan reaper
 //! lives in `shrike-process`, gated on the dual signal.
 //!
-//! Security boundary preserved verbatim: `--host` is Shrike-owned — the
-//! embedding backend is deliberately pinned to loopback (audit §1.1) — so
-//! [`LlamaServerConfig`]'s passthrough strips every reserved flag (with its
-//! value token for the value-taking ones) before the command is built. The
-//! supervisor never sees an unstripped argv.
+//! Security boundary: `--host` is Shrike-owned — the embedding backend is
+//! deliberately pinned to loopback (audit §1.1) — so [`LlamaServerConfig`]'s
+//! passthrough strips every reserved flag (with its value token for the
+//! value-taking ones) before the command is built. The supervisor never sees an
+//! unstripped argv.
 
 #![deny(missing_docs)]
 #![deny(
@@ -25,8 +25,8 @@ use std::time::Duration;
 use shrike_error::{NativeError, NativeResult};
 use shrike_process::{is_executable, which, ManagedProcess, Supervisor};
 
-// Re-export the shared lifecycle constants so existing `shrike_llama_server::*`
-// users keep resolving (the values are the supervisor's now).
+// Re-export the shared lifecycle constants (owned by the supervisor) so
+// `shrike_llama_server::*` resolves them.
 pub use shrike_process::{HEALTH_POLL_INTERVAL, HEALTH_TIMEOUT, SHUTDOWN_TIMEOUT, SIGKILL_TIMEOUT};
 
 /// llama-server flags Shrike owns; the generic passthrough must not override
@@ -205,8 +205,8 @@ struct LlamaPolicy {
     mmprojs: Vec<String>,
     /// The health-probe agent, built once on the first poll and reused across
     /// the whole (up to 30s, ~600-poll) health-wait — the supervisor calls
-    /// `health_check` per poll, so caching keeps the original "build one agent,
-    /// poll many" shape rather than reallocating a client every 50ms.
+    /// `health_check` per poll, so caching builds one agent and polls many
+    /// rather than reallocating a client every 50ms.
     health_agent: std::sync::OnceLock<ureq::Agent>,
 }
 
@@ -443,7 +443,7 @@ impl LlamaServerManager {
     /// Reconfigure as a *chat* server (no `--embeddings`) with an optional
     /// multimodal projector — the shape a remote-describe deployment runs:
     /// `llama-server -m model.gguf --mmproj proj.gguf`. A builder on the manager
-    /// (not a config field) so the existing config constructors stay valid.
+    /// (not a config field) so the config constructors stay valid.
     /// Vision models want a generous `context_size` — image tokens are
     /// expensive. Reshapes the (pre-spawn) policy in place — host/port are
     /// unchanged, so the supervisor's cached URL stays valid.
