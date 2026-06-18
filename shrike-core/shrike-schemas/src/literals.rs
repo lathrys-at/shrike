@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 macro_rules! literal_bool {
     ($name:ident, $value:literal) => {
+        #[doc = concat!("A unit type that (de)serializes as the constant bool `", stringify!($value), "`.")]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
         pub struct $name;
 
@@ -52,10 +53,12 @@ literal_bool!(LiteralFalse, false);
 
 macro_rules! literal_str {
     ($name:ident, $value:literal) => {
+        #[doc = concat!("A unit type that (de)serializes as the constant string `\"", $value, "\"`.")]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
         pub struct $name;
 
         impl $name {
+            /// The constant string this type represents.
             pub const VALUE: &'static str = $value;
         }
 

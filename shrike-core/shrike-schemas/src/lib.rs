@@ -16,6 +16,13 @@
 //! - Unknown keys are ignored (Pydantic's `extra="ignore"`; serde's default).
 //! - Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-pyo3.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 pub mod literals;
 
 use std::collections::BTreeMap;
@@ -51,39 +58,56 @@ fn default_standard() -> String {
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// A card template in a note-type create/update request.
 pub struct TemplateInput {
+    /// Template name.
     pub name: String,
+    /// Front-side (question) template HTML.
     pub front: String,
+    /// Back-side (answer) template HTML.
     pub back: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// A note in an `upsert_notes` request (id present = update, absent = create).
 pub struct NoteInput {
     #[serde(default)]
+    /// Note id; present updates that note, absent creates one.
     pub id: Option<i64>,
     #[serde(default)]
+    /// Target deck (create only).
     pub deck: Option<String>,
     #[serde(default)]
+    /// Note type name (create only).
     pub note_type: Option<String>,
     #[serde(default)]
+    /// Field name → value.
     pub fields: Option<BTreeMap<String, String>>,
     #[serde(default)]
+    /// Tags to set on the note.
     pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// A note type in an `upsert_note_types` request (id present = update).
 pub struct NoteTypeInput {
     #[serde(default)]
+    /// Note-type id; present updates it, absent creates one.
     pub id: Option<i64>,
     #[serde(default)]
+    /// Note-type name.
     pub name: Option<String>,
     #[serde(default)]
+    /// Field names, in order.
     pub fields: Option<Vec<String>>,
     #[serde(default)]
+    /// Card templates.
     pub templates: Option<Vec<TemplateInput>>,
     #[serde(default)]
+    /// Shared template CSS.
     pub css: Option<String>,
     #[serde(default)]
+    /// Whether this is a cloze note type.
     pub is_cloze: Option<bool>,
 }
 
@@ -92,12 +116,18 @@ pub struct NoteTypeInput {
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// A note as returned by the read surfaces (`list_notes`, search).
 pub struct Note {
+    /// Note id.
     pub id: i64,
+    /// Note type name.
     pub note_type: String,
+    /// Deck name.
     pub deck: String,
     #[serde(default)]
+    /// The note's tags.
     pub tags: Vec<String>,
+    /// Last-modified timestamp.
     pub modified: String,
     /// Independent projection: present in "full" mode, omitted in "meta" mode.
     #[serde(default)]
@@ -105,28 +135,40 @@ pub struct Note {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// Exact-substring match evidence on a search result.
 pub struct SubstringInfo {
     #[serde(default)]
+    /// Field names that contained the substring.
     pub matched_fields: Vec<String>,
     #[serde(default)]
+    /// A snippet around the match, if available.
     pub snippet: Option<String>,
     #[serde(default = "default_source_field")]
+    /// Where the matched text came from (`field`, later `ocr`/`asr`).
     pub source: String,
     #[serde(default)]
+    /// The field name or media filename the text came from.
     pub r#ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// Fuzzy (trigram/typo) match evidence on a search result.
 pub struct FuzzyMatch {
+    /// Where the matched text came from (`field`, later `ocr`/`asr`).
     pub source: String,
+    /// The field name or media filename the text came from.
     pub r#ref: String,
     #[serde(default)]
+    /// A snippet around the match, if available.
     pub snippet: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// One search signal's contribution to a fused result (provenance).
 pub struct SignalContribution {
+    /// The signal name (`text`, `exact`, `image`, `tag`, `fuzzy`).
     pub signal: String,
+    /// This note's rank within that signal's ranking.
     pub rank: i64,
 }
 
@@ -134,14 +176,19 @@ pub struct SignalContribution {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct SearchMatch {
     #[serde(flatten)]
+    /// The matched note (flattened onto the wire).
     pub note: Note,
     #[serde(default)]
+    /// Fused relevance score; `None` for an exact-only hit.
     pub score: Option<f64>,
     #[serde(default)]
+    /// Exact-substring evidence, if the exact signal matched.
     pub substring: Option<SubstringInfo>,
     #[serde(default)]
+    /// Fuzzy-match evidence, if the fuzzy signal matched.
     pub fuzzy: Option<FuzzyMatch>,
     #[serde(default)]
+    /// Which signals surfaced this result, with per-signal ranks.
     pub provenance: Vec<SignalContribution>,
 }
 
@@ -150,12 +197,14 @@ pub struct SearchMatch {
 /// `search_notes` of its own content — so a neighbor mirrors a search match.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct Neighbor {
+    /// The neighbor note's id.
     pub id: i64,
     /// Cosine similarity when semantically ranked; None for an exact-text-only
     /// hit (no meaningful cosine to report).
     #[serde(default)]
     pub score: Option<f64>,
     #[serde(default)]
+    /// The neighbor's tags.
     pub tags: Vec<String>,
     /// Which signals surfaced the candidate (#208) — the search-provenance
     /// shape (#182): ANY search signal (`text`, `exact`, `image`, `tag`,
@@ -165,80 +214,122 @@ pub struct Neighbor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// A card template as returned in note-type detail.
 pub struct TemplateInfo {
+    /// Template name.
     pub name: String,
+    /// Front-side template HTML.
     pub front: String,
+    /// Back-side template HTML.
     pub back: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// A note-type field's editor metadata.
 pub struct FieldDetail {
+    /// Field name.
     pub name: String,
+    /// Editor font family.
     pub font: String,
+    /// Editor font size in px.
     pub size: i64,
+    /// Editor field description/hint.
     pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// A note type's templates/CSS/fields detail (the `detail` projection).
 pub struct NoteTypeDetail {
+    /// The note type's card templates.
     pub templates: Vec<TemplateInfo>,
+    /// Shared template CSS.
     pub css: String,
     #[serde(default)]
+    /// Per-field editor metadata.
     pub fields: Vec<FieldDetail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// A note type in `collection_info` (with optional detail).
 pub struct NoteTypeInfo {
+    /// Note-type name.
     pub name: String,
+    /// Note-type id.
     pub id: i64,
     #[serde(default)]
+    /// Field names, in order.
     pub fields: Vec<String>,
     #[serde(default = "default_standard")]
+    /// Kind: `standard` or `cloze`.
     pub r#type: String,
     #[serde(default)]
+    /// Templates/CSS/field detail; present only when requested.
     pub detail: Option<NoteTypeDetail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// A deck in `collection_info`.
 pub struct DeckInfo {
+    /// Deck name.
     pub name: String,
+    /// Deck id.
     pub id: i64,
     #[serde(default)]
+    /// Number of notes in the deck.
     pub note_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The collection summary (paths, timestamps, top-level counts).
 pub struct Summary {
+    /// Collection file path.
     pub path: String,
+    /// Collection creation timestamp.
     pub created: String,
+    /// Collection last-modified timestamp.
     pub modified: String,
+    /// Total note count.
     pub notes: i64,
+    /// Total card count.
     pub cards: i64,
+    /// Total deck count.
     pub decks: i64,
+    /// Total note-type count.
     pub note_types: i64,
+    /// Total tag count.
     pub tags: i64,
+    /// Cards due today.
     pub due_today: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// Per-deck note/due counts in `Stats`.
 pub struct DeckStat {
     #[serde(default)]
+    /// Notes in the deck.
     pub notes: i64,
     #[serde(default)]
+    /// Cards due in the deck.
     pub due: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// Collection statistics (the `stats` section of `collection_info`).
 pub struct Stats {
     #[serde(default)]
+    /// Total note count.
     pub total_notes: i64,
     #[serde(default)]
+    /// Total card count.
     pub total_cards: i64,
     #[serde(default)]
+    /// Cards due today.
     pub cards_due_today: i64,
     #[serde(default)]
+    /// New (unreviewed) cards.
     pub new_cards: i64,
     #[serde(default)]
+    /// Per-deck note/due breakdown, keyed by deck name.
     pub decks_summary: BTreeMap<String, DeckStat>,
 }
 
@@ -250,6 +341,12 @@ pub struct Stats {
 /// structural problems caught before it).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+// A plain string-enum: documenting individual variants makes schemars emit a
+// `oneOf` of described consts instead of a flat `enum`, which diverges from
+// the Pydantic str-Enum the schema contract test compares against (see
+// `ActionErrorCode` and test_schema_contract.py). The type doc is harmless;
+// the variants stay undocumented by design.
+#[allow(missing_docs)]
 pub enum NoteValidationReason {
     Duplicate,
     Empty,
@@ -263,6 +360,12 @@ pub enum NoteValidationReason {
 /// What a dry-run validated note *would* have done.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+// A plain string-enum: documenting individual variants makes schemars emit a
+// `oneOf` of described consts instead of a flat `enum`, which diverges from
+// the Pydantic str-Enum the schema contract test compares against (see
+// `ActionErrorCode` and test_schema_contract.py). The type doc is harmless;
+// the variants stay undocumented by design.
+#[allow(missing_docs)]
 pub enum UpsertAction {
     Create,
     Update,
@@ -271,163 +374,263 @@ pub enum UpsertAction {
 /// The only skip reason (`on_duplicate="skip"`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+// A plain string-enum: documenting individual variants makes schemars emit a
+// `oneOf` of described consts instead of a flat `enum`, which diverges from
+// the Pydantic str-Enum the schema contract test compares against (see
+// `ActionErrorCode` and test_schema_contract.py). The type doc is harmless;
+// the variants stay undocumented by design.
+#[allow(missing_docs)]
 pub enum SkipReason {
     Duplicate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
+/// One note's outcome in an `upsert_notes` response (status-tagged).
 pub enum UpsertNoteResult {
+    /// The note was created.
     Created {
+        /// The created/updated note's id.
         id: i64,
         #[serde(default)]
+        /// Similar existing notes (the dedup signal).
         neighbors: Vec<Neighbor>,
         #[serde(default)]
+        /// True if neighbors couldn't be computed (index unavailable).
         neighbors_unavailable: bool,
     },
+    /// The note was updated.
     Updated {
+        /// The created/updated note's id.
         id: i64,
         #[serde(default)]
+        /// Similar existing notes (the dedup signal).
         neighbors: Vec<Neighbor>,
         #[serde(default)]
+        /// True if neighbors couldn't be computed (index unavailable).
         neighbors_unavailable: bool,
     },
     /// A dry-run outcome: validated, nothing written.
     Ok {
+        /// The item's index in the request batch.
         index: i64,
+        /// What a dry-run would have done (create/update).
         action: UpsertAction,
     },
+    /// The note was skipped (a duplicate under `on_duplicate="skip"`).
     Skipped {
+        /// The item's index in the request batch.
         index: i64,
+        /// Why the item was skipped.
         reason: SkipReason,
     },
+    /// The note failed validation or write.
     Error {
+        /// The item's index in the request batch.
         index: i64,
+        /// The failure message.
         error: String,
         #[serde(default)]
+        /// The machine-readable validation reason, when applicable.
         reason: Option<NoteValidationReason>,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
+/// One note type's outcome in `upsert_note_types` (status-tagged).
 pub enum NoteTypeResult {
-    Created { id: i64, name: String },
-    Updated { id: i64, name: String },
-    Error { index: i64, error: String },
+    /// The note type was created.
+    Created {
+        /// The created note-type id.
+        id: i64,
+        /// The note-type name.
+        name: String,
+    },
+    /// The note type was updated.
+    Updated {
+        /// The updated note-type id.
+        id: i64,
+        /// The note-type name.
+        name: String,
+    },
+    /// The item failed; `index` is its batch position.
+    Error {
+        /// The item's index in the request batch.
+        index: i64,
+        /// The failure message.
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
+/// A by-name field edit op for `update_note_type_fields` (op-tagged).
 pub enum FieldOp {
+    /// Add a field (optionally at `position`).
     Add {
+        /// The field name the op addresses.
         name: String,
         // 0-based insert position; mirror the Python `ge=0` so the advertised
         // schema declares the bound it enforces (#606).
         #[serde(default)]
         #[schemars(range(min = 0))]
+        /// 0-based insert position; absent appends.
         position: Option<i64>,
     },
+    /// Remove a field by name.
     Remove {
+        /// The field name the op addresses.
         name: String,
     },
+    /// Rename a field.
     Rename {
+        /// The field name the op addresses.
         name: String,
+        /// The field's new name.
         new_name: String,
     },
+    /// Move a field to `position`.
     Reposition {
+        /// The field name the op addresses.
         name: String,
         #[schemars(range(min = 0))]
+        /// 0-based target position.
         position: i64,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// Per-field editor metadata to set (`update_note_type_field_metadata`).
 pub struct FieldMetadataInput {
+    /// The field to update.
     pub name: String,
     #[serde(default)]
+    /// Editor font family; absent leaves it unchanged.
     pub font: Option<String>,
     // Edit-time font size in px; mirror the Python `ge=1` so the advertised
     // schema declares the bound it enforces (#606).
     #[serde(default)]
     #[schemars(range(min = 1))]
+    /// Editor font size in px; absent leaves it unchanged.
     pub size: Option<i64>,
     #[serde(default)]
+    /// Editor description; absent leaves it unchanged.
     pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The result of `update_note_type_fields`.
 pub struct UpdateNoteTypeFieldsResponse {
+    /// The note-type id.
     pub id: i64,
+    /// The note-type name.
     pub name: String,
+    /// The resulting field names, in order.
     pub fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The result of `update_note_type_field_metadata`.
 pub struct UpdateNoteTypeFieldMetadataResponse {
+    /// The note-type id.
     pub id: i64,
+    /// The note-type name.
     pub name: String,
+    /// Field names whose metadata changed.
     pub fields_updated: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
+/// A by-name template edit op for `update_note_type_templates` (op-tagged).
 pub enum TemplateOp {
+    /// Add a template (optionally at `position`).
     Add {
+        /// The template name the op addresses.
         name: String,
+        /// Front-side template HTML.
         front: String,
+        /// Back-side template HTML.
         back: String,
         // 0-based insert position; mirror the Python `ge=0` (#606).
         #[serde(default)]
         #[schemars(range(min = 0))]
+        /// 0-based insert position; absent appends.
         position: Option<i64>,
     },
+    /// Remove a template by name.
     Remove {
+        /// The template name the op addresses.
         name: String,
     },
+    /// Rename a template.
     Rename {
+        /// The template name the op addresses.
         name: String,
+        /// The template's new name.
         new_name: String,
     },
+    /// Move a template to `position`.
     Reposition {
+        /// The template name the op addresses.
         name: String,
         #[schemars(range(min = 0))]
+        /// 0-based target position.
         position: i64,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The result of `update_note_type_templates`.
 pub struct UpdateNoteTypeTemplatesResponse {
+    /// The note-type id.
     pub id: i64,
+    /// The note-type name.
     pub name: String,
+    /// The resulting template names, in order.
     pub templates: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The result of `find_replace_note_types`.
 pub struct FindReplaceNoteTypesResponse {
+    /// The note-type id.
     pub id: i64,
+    /// The note-type name.
     pub name: String,
+    /// Number of replacements made.
     pub replacements: i64,
+    /// Templates whose text changed.
     pub templates_changed: Vec<String>,
+    /// Whether the shared CSS changed.
     pub css_changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// A deck in an `upsert_decks` request (id present = rename/reparent).
 pub struct DeckInput {
     #[serde(default)]
+    /// Deck id; present renames/reparents, absent creates.
     pub id: Option<i64>,
+    /// The deck name (target name on rename).
     pub name: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// One `store_media` item: exactly one of `data`/`url`/`path`.
 pub struct StoreMediaItem {
     #[serde(default)]
+    /// Target filename (required with `data`).
     pub filename: Option<String>,
     #[serde(default)]
+    /// Base64-encoded bytes.
     pub data: Option<String>,
     #[serde(default)]
+    /// A URL the server fetches (SSRF-guarded).
     pub url: Option<String>,
     #[serde(default)]
+    /// A server-local path (gated; off by default).
     pub path: Option<String>,
 }
 
@@ -435,6 +638,11 @@ impl StoreMediaItem {
     /// Pydantic's `model_validator`: exactly one source, and `data` needs a
     /// `filename`. Serde can't express cross-field rules, so callers (the S2
     /// action layer) validate explicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error message if not exactly one of `data`/`url`/`path` is
+    /// set, or if `data` is given without a non-empty `filename`.
     pub fn validate(&self) -> Result<(), String> {
         let sources = [&self.data, &self.url, &self.path]
             .iter()
@@ -454,36 +662,57 @@ impl StoreMediaItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
+/// One deck's outcome in `upsert_decks` (status-tagged).
 pub enum UpsertDeckResult {
+    /// The deck was created.
     Created {
+        /// The created/updated deck's id.
         id: i64,
+        /// The deck name.
         name: String,
     },
+    /// The deck was renamed/reparented.
     Updated {
+        /// The created/updated deck's id.
         id: i64,
+        /// The deck name.
         name: String,
     },
+    /// The item failed.
     Error {
+        /// The item's index in the request batch.
         index: i64,
         #[serde(default)]
+        /// The deck name, when known.
         name: Option<String>,
+        /// The failure message.
         error: String,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
+/// One note type's outcome in `delete_note_types` (status-tagged).
 pub enum DeleteNoteTypeResult {
+    /// The note type was deleted.
     Deleted {
+        /// The note-type id.
         id: i64,
+        /// The note-type name.
         name: String,
     },
+    /// No note type with that id.
     NotFound {
+        /// The note-type id.
         id: i64,
     },
+    /// Deletion failed (e.g. the note type is in use).
     Error {
+        /// The note-type id.
         id: i64,
+        /// The note-type name.
         name: String,
+        /// The failure message.
         error: String,
     },
 }
@@ -493,55 +722,78 @@ pub enum DeleteNoteTypeResult {
 // ============================================================================
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `collection_info` response (each section is caller-selectable).
 pub struct CollectionInfo {
     #[serde(default)]
+    /// Top-level summary, when requested.
     pub summary: Option<Summary>,
     #[serde(default)]
+    /// Note types, when requested.
     pub note_types: Option<Vec<NoteTypeInfo>>,
     #[serde(default)]
+    /// Decks, when requested.
     pub decks: Option<Vec<DeckInfo>>,
     #[serde(default)]
+    /// Tags, when requested.
     pub tags: Option<Vec<String>>,
     #[serde(default)]
+    /// Statistics, when requested.
     pub stats: Option<Stats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `list_notes`/`collection_query` response.
 pub struct ListNotesResponse {
     #[serde(default)]
+    /// The matched notes (up to `limit`).
     pub notes: Vec<Note>,
     #[serde(default)]
+    /// Total matches before the limit.
     pub total: i64,
     #[serde(default = "default_limit")]
+    /// The applied limit.
     pub limit: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `migrate_note_type` response.
 pub struct MigrateNoteTypeResponse {
     #[serde(default)]
+    /// Ids of the migrated notes.
     pub changed: Vec<i64>,
+    /// Source note-type name.
     pub from_note_type: String,
+    /// Target note-type name.
     pub to_note_type: String,
     #[serde(default)]
+    /// Source fields with no mapping (content lost).
     pub dropped_fields: Vec<String>,
     #[serde(default)]
+    /// Target fields nothing mapped into.
     pub new_empty_fields: Vec<String>,
     #[serde(default)]
+    /// Whether this was a preview (nothing written).
     pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// One query's results in a `search_notes` response.
 pub struct SearchResultGroup {
+    /// The query this group answers.
     pub source: String,
     #[serde(default)]
+    /// The ranked matches for the query.
     pub matches: Vec<SearchMatch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `search_notes` response (one group per query).
 pub struct SearchResponse {
     #[serde(default)]
+    /// Per-query result groups.
     pub results: Vec<SearchResultGroup>,
     #[serde(default)]
+    /// An optional advisory (e.g. index still building).
     pub message: Option<String>,
     /// The two-tier live-search contract (#181): "partial" = the
     /// embedding-bearing signals were skipped at the caller's request
@@ -557,6 +809,12 @@ pub struct SearchResponse {
 /// `Literal["partial", "full"]`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "lowercase")]
+// A plain string-enum: documenting individual variants makes schemars emit a
+// `oneOf` of described consts instead of a flat `enum`, which diverges from
+// the Pydantic str-Enum the schema contract test compares against (see
+// `ActionErrorCode` and test_schema_contract.py). The type doc is harmless;
+// the variants stay undocumented by design.
+#[allow(missing_docs)]
 pub enum Completeness {
     Partial,
     #[default]
@@ -575,215 +833,306 @@ impl Default for SearchResponse {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `upsert_notes` response.
 pub struct UpsertNotesResponse {
     #[serde(default)]
+    /// Per-item outcomes.
     pub results: Vec<UpsertNoteResult>,
     #[serde(default)]
+    /// Whether this was a preview (nothing written).
     pub dry_run: bool,
     #[serde(default)]
+    /// An optional advisory.
     pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `upsert_note_types` response.
 pub struct UpsertNoteTypesResponse {
     #[serde(default)]
+    /// Per-item outcomes.
     pub results: Vec<NoteTypeResult>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `delete_notes` response.
 pub struct DeleteNotesResponse {
     #[serde(default)]
+    /// Ids that were deleted.
     pub deleted: Vec<i64>,
     #[serde(default)]
+    /// Requested ids that didn't exist.
     pub not_found: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `delete_note_types` response.
 pub struct DeleteNoteTypesResponse {
     #[serde(default)]
+    /// Per-item outcomes.
     pub results: Vec<DeleteNoteTypeResult>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `update_note_tags` response.
 pub struct UpdateNoteTagsResponse {
     #[serde(default)]
+    /// Number of notes whose tags changed.
     pub notes_modified: i64,
     #[serde(default)]
+    /// Requested ids that didn't exist.
     pub not_found: Vec<i64>,
     #[serde(default)]
+    /// An optional advisory.
     pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `rename_tag` response.
 pub struct RenameTagResponse {
     #[serde(default)]
+    /// Number of notes whose tags changed.
     pub notes_modified: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The unused-tags cleanup result in `collection_prune`.
 pub struct PruneUnusedTags {
     #[serde(default)]
+    /// Number of unused tags cleared.
     pub removed: i64,
     #[serde(default)]
+    /// The tags that were (or would be) cleared.
     pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The empty-notes cleanup result in `collection_prune`.
 pub struct PruneEmptyNotes {
     #[serde(default)]
+    /// Ids of the empty notes removed (or that would be).
     pub removed: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The empty-cards cleanup result in `collection_prune`.
 pub struct PruneEmptyCards {
     #[serde(default)]
+    /// Number of empty cards removed.
     pub cards_removed: i64,
     #[serde(default)]
+    /// Notes orphaned by card removal and deleted.
     pub notes_deleted: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The unused-media cleanup result in `collection_prune`.
 pub struct PruneUnusedMedia {
     #[serde(default)]
+    /// Number of unused media files trashed.
     pub removed: i64,
     #[serde(default)]
+    /// The media filenames that were (or would be) trashed.
     pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `collection_prune` response (each section present only if its cleanup ran).
 pub struct CollectionPruneResponse {
     #[serde(default = "default_true")]
+    /// Whether this was a preview (nothing changed).
     pub dry_run: bool,
     #[serde(default)]
+    /// Unused-tags cleanup, if it ran.
     pub unused_tags: Option<PruneUnusedTags>,
     #[serde(default)]
+    /// Empty-notes cleanup, if it ran.
     pub empty_notes: Option<PruneEmptyNotes>,
     #[serde(default)]
+    /// Empty-cards cleanup, if it ran.
     pub empty_cards: Option<PruneEmptyCards>,
     #[serde(default)]
+    /// Unused-media cleanup, if it ran.
     pub unused_media: Option<PruneUnusedMedia>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `upsert_decks` response.
 pub struct UpsertDecksResponse {
     #[serde(default)]
+    /// Per-item outcomes.
     pub results: Vec<UpsertDeckResult>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `delete_decks` response.
 pub struct DeleteDecksResponse {
     #[serde(default)]
+    /// Deck names that were deleted.
     pub deleted: Vec<String>,
     #[serde(default)]
+    /// Requested names that didn't exist.
     pub not_found: Vec<String>,
     #[serde(default)]
+    /// Decks not deleted because they weren't empty.
     pub not_empty: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
+/// One `store_media` item's outcome (status-tagged).
 pub enum StoreMediaResult {
+    /// The file was stored.
     Stored {
+        /// The item's index in the request batch.
         index: i64,
+        /// The stored filename (use this — Anki may rename on collision).
         filename: String,
         #[serde(default)]
+        /// The detected MIME type, if known.
         mime: Option<String>,
+        /// Stored size in bytes.
         size_bytes: i64,
         #[serde(default)]
+        /// True if an identical file already existed (no new write).
         deduped: bool,
     },
+    /// The item failed.
     Error {
+        /// The item's index in the request batch.
         index: i64,
         #[serde(default)]
+        /// The requested filename, echoed on error.
         filename: Option<String>,
+        /// The failure message.
         error: String,
     },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `store_media` response.
 pub struct StoreMediaResponse {
     #[serde(default)]
+    /// Per-item outcomes.
     pub results: Vec<StoreMediaResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
+/// One `fetch_media` item's outcome (status-tagged; never returns bytes).
 pub enum MediaFetchResult {
+    /// The file exists; GET `url` (or read `path`) for bytes.
     Found {
+        /// The media filename.
         filename: String,
         #[serde(default)]
+        /// The server's `GET /media/<name>` URL, if servable.
         url: Option<String>,
+        /// The server-side path of the file.
         path: String,
         #[serde(default)]
+        /// The detected MIME type, if known.
         mime: Option<String>,
+        /// File size in bytes.
         size_bytes: i64,
     },
+    /// No such media file.
     Missing {
+        /// The media filename.
         filename: String,
     },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `fetch_media` response.
 pub struct FetchMediaResponse {
     #[serde(default)]
+    /// Per-item outcomes.
     pub results: Vec<MediaFetchResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// One media file in a `list_media` response.
 pub struct MediaFileInfo {
+    /// The media filename.
     pub filename: String,
     #[serde(default)]
+    /// The server's `GET /media/<name>` URL, if servable.
     pub url: Option<String>,
     #[serde(default)]
+    /// The detected MIME type, if known.
     pub mime: Option<String>,
+    /// File size in bytes.
     pub size_bytes: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `list_media` response.
 pub struct ListMediaResponse {
+    /// The collection's media directory.
     pub media_dir: String,
     #[serde(default)]
+    /// Number of files returned.
     pub count: i64,
     #[serde(default)]
+    /// The media files.
     pub files: Vec<MediaFileInfo>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `delete_media` response.
 pub struct DeleteMediaResponse {
     #[serde(default)]
+    /// Filenames moved to Anki's trash.
     pub deleted: Vec<String>,
     #[serde(default)]
+    /// Requested filenames that didn't exist.
     pub not_found: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The read-only `collection_check` media diagnostics.
 pub struct CollectionCheckResponse {
+    /// The collection's media directory.
     pub media_dir: String,
     #[serde(default)]
+    /// Media files referenced by no note.
     pub unused: Vec<String>,
     #[serde(default)]
+    /// Referenced media files that are absent.
     pub missing: Vec<String>,
     #[serde(default)]
+    /// Notes referencing a missing media file.
     pub missing_media_notes: Vec<i64>,
     #[serde(default)]
+    /// Whether the media trash is non-empty.
     pub have_trash: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// One before/after preview row in `find_replace_notes`.
 pub struct FindReplaceSample {
+    /// The note id.
     pub id: i64,
+    /// The field that changed.
     pub field: String,
+    /// The field value before replacement.
     pub before: String,
+    /// The field value after replacement.
     pub after: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `find_replace_notes` response.
 pub struct FindReplaceResponse {
     #[serde(default)]
+    /// Number of notes changed (or that would change).
     pub notes_changed: i64,
     #[serde(default)]
+    /// Whether this was a preview (nothing written).
     pub dry_run: bool,
     #[serde(default)]
+    /// Before/after preview rows.
     pub samples: Vec<FindReplaceSample>,
 }
 
@@ -793,24 +1142,34 @@ pub struct FindReplaceResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ImportPackageResponse {
     #[serde(default)]
+    /// Notes newly added.
     pub new: i64,
     #[serde(default)]
+    /// Existing notes updated.
     pub updated: i64,
     #[serde(default)]
+    /// Notes skipped as duplicates.
     pub duplicate: i64,
     #[serde(default)]
+    /// Notes skipped due to a conflict.
     pub conflicting: i64,
     #[serde(default)]
+    /// Notes matched by first field.
     pub first_field_match: i64,
     #[serde(default)]
+    /// Notes skipped for a missing note type.
     pub missing_notetype: i64,
     #[serde(default)]
+    /// Notes skipped for a missing deck.
     pub missing_deck: i64,
     #[serde(default)]
+    /// Notes skipped for an empty first field.
     pub empty_first_field: i64,
     #[serde(default)]
+    /// Total notes found in the package.
     pub found_notes: i64,
     #[serde(default)]
+    /// Whether the import reconciled the vector index.
     pub reindexed: bool,
 }
 
@@ -820,6 +1179,12 @@ pub struct ImportPackageResponse {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+// A plain string-enum: documenting individual variants makes schemars emit a
+// `oneOf` of described consts instead of a flat `enum`, which diverges from
+// the Pydantic str-Enum the schema contract test compares against (see
+// `ActionErrorCode` and test_schema_contract.py). The type doc is harmless;
+// the variants stay undocumented by design.
+#[allow(missing_docs)]
 pub enum BatchMode {
     Serial,
     Batched,
@@ -827,45 +1192,63 @@ pub enum BatchMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "state", rename_all = "snake_case")]
+/// An embedding space's health (state-tagged).
 pub enum EmbeddingStatus {
+    /// The embedding service is running.
     Running {
         #[serde(default)]
+        /// Whether embeds can currently be served.
         available: bool,
         #[serde(default)]
+        /// The backend PID, if it runs a subprocess.
         pid: Option<i64>,
         #[serde(default)]
+        /// The backend endpoint URL, if any.
         url: Option<String>,
         #[serde(default)]
+        /// The loaded model identifier.
         model: Option<String>,
         #[serde(default)]
+        /// The actually-loaded compute provider (e.g. CPU/CoreML).
         provider: Option<String>,
         #[serde(default)]
+        /// Whether the model is proven safe to batch.
         batch_safe: Option<bool>,
         #[serde(default)]
+        /// Whether embeds run batched or serially.
         batch: Option<BatchMode>,
         /// The modalities this space embeds (#498/#235).
         #[serde(default)]
         modalities: Option<Vec<String>>,
     },
+    /// The service is stopped.
     Stopped {
         #[serde(default)]
+        /// Always false in this (non-running) state.
         available: LiteralFalse,
     },
+    /// The service failed to start.
     Failed {
         #[serde(default)]
+        /// Always false in this (non-running) state.
         available: LiteralFalse,
     },
+    /// No embedder is configured for this space.
     NotConfigured {
         #[serde(default)]
+        /// Always false in this (non-running) state.
         available: LiteralFalse,
     },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// Build progress for the vector index.
 pub struct IndexProgress {
     #[serde(default)]
+    /// Notes embedded so far.
     pub indexed: i64,
     #[serde(default)]
+    /// Total notes to embed.
     pub total: i64,
 }
 
@@ -873,10 +1256,13 @@ pub struct IndexProgress {
 /// `IndexModalityStat`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct IndexModalityStat {
+    /// The modality name (`text`, `image`).
     pub modality: String,
     #[serde(default)]
+    /// Vectors in this sub-index.
     pub size: i64,
     #[serde(default)]
+    /// This sub-index's dimensionality; `None` if empty.
     pub ndim: Option<i64>,
 }
 
@@ -884,18 +1270,25 @@ pub struct IndexModalityStat {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct IndexBase {
     #[serde(default)]
+    /// Whether the index can currently serve searches.
     pub available: bool,
     #[serde(default)]
+    /// Total vectors (the note count).
     pub size: i64,
     #[serde(default)]
+    /// The text modality's dimensionality; `None` before any vectors.
     pub ndim: Option<i64>,
     #[serde(default)]
+    /// The on-disk index path.
     pub path: Option<String>,
     #[serde(default)]
+    /// The `col.mod` the index was last built at.
     pub col_mod: Option<i64>,
     #[serde(default)]
+    /// The model fingerprint the vectors were built with.
     pub model_id: Option<String>,
     #[serde(default)]
+    /// Per-modality activation-gate calibration stats.
     pub activation: Option<BTreeMap<String, BTreeMap<String, f64>>>,
     /// Per-modality sub-index breakdown (#684): each sub-index's own size/ndim.
     #[serde(default)]
@@ -904,29 +1297,46 @@ pub struct IndexBase {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "state", rename_all = "snake_case")]
+/// The vector index's state (state-tagged).
 pub enum IndexStatus {
+    /// The embedding service isn't running; on-disk vectors only.
     Unavailable {
         #[serde(flatten)]
+        /// The shared on-disk index contents.
         base: IndexBase,
     },
+    /// A build/rebuild is in progress.
     Building {
         #[serde(flatten)]
+        /// The shared on-disk index contents.
         base: IndexBase,
+        /// Build progress.
         progress: IndexProgress,
     },
+    /// The index is built and serving.
     Ready {
         #[serde(flatten)]
+        /// The shared on-disk index contents.
         base: IndexBase,
     },
+    /// The last build failed.
     Error {
         #[serde(flatten)]
+        /// The shared on-disk index contents.
         base: IndexBase,
+        /// The build-failure message.
         error: String,
     },
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+// A plain string-enum: documenting individual variants makes schemars emit a
+// `oneOf` of described consts instead of a flat `enum`, which diverges from
+// the Pydantic str-Enum the schema contract test compares against (see
+// `ActionErrorCode` and test_schema_contract.py). The type doc is harmless;
+// the variants stay undocumented by design.
+#[allow(missing_docs)]
 pub enum DerivedState {
     #[default]
     Unavailable,
@@ -936,23 +1346,36 @@ pub enum DerivedState {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The derived-text (FTS5) store's status.
 pub struct DerivedStatus {
     #[serde(default)]
+    /// The store's lifecycle state.
     pub state: DerivedState,
     #[serde(default)]
+    /// Whether lexical lookups can be served.
     pub available: bool,
     #[serde(default)]
+    /// Whether the runtime SQLite has FTS5 + the trigram tokenizer.
     pub fts5: bool,
     #[serde(default)]
+    /// Indexed row count.
     pub size: i64,
     #[serde(default)]
+    /// The sidecar database path.
     pub path: Option<String>,
     #[serde(default)]
+    /// The `col.mod` the store was last reconciled to.
     pub col_mod: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+// A plain string-enum: documenting individual variants makes schemars emit a
+// `oneOf` of described consts instead of a flat `enum`, which diverges from
+// the Pydantic str-Enum the schema contract test compares against (see
+// `ActionErrorCode` and test_schema_contract.py). The type doc is harmless;
+// the variants stay undocumented by design.
+#[allow(missing_docs)]
 pub enum LockingMode {
     #[default]
     Permanent,
@@ -961,6 +1384,12 @@ pub enum LockingMode {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+// A plain string-enum: documenting individual variants makes schemars emit a
+// `oneOf` of described consts instead of a flat `enum`, which diverges from
+// the Pydantic str-Enum the schema contract test compares against (see
+// `ActionErrorCode` and test_schema_contract.py). The type doc is harmless;
+// the variants stay undocumented by design.
+#[allow(missing_docs)]
 pub enum RecognitionState {
     Unavailable,
     Building,
@@ -978,20 +1407,27 @@ pub enum RecognitionState {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct RecognitionEngineStatus {
     #[serde(default)]
+    /// The engine's lifecycle state.
     pub state: RecognitionState,
     #[serde(default)]
+    /// The engine backend name.
     pub backend: Option<String>,
     #[serde(default)]
+    /// The engine's model fingerprint.
     pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// Dedup best-match statistics surfaced on `/status`.
 pub struct DedupStats {
     #[serde(default)]
+    /// Number of neighbor lookups sampled.
     pub samples: i64,
     #[serde(default)]
+    /// Lookups that found no neighbor.
     pub no_match: i64,
     #[serde(default)]
+    /// A histogram of best-match scores.
     pub buckets: Vec<i64>,
 }
 
@@ -1000,18 +1436,26 @@ pub struct DedupStats {
 /// per-collection mirror of `shrike.schemas.CollectionStatus`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct CollectionStatus {
+    /// The profile/collection name.
     pub name: String,
+    /// The collection file path.
     pub path: String,
+    /// Whether it's a registered profile (vs the boot default).
     pub registered: bool,
     #[serde(default)]
+    /// Whether it's the active default.
     pub is_default: bool,
     #[serde(default)]
+    /// Whether it's the currently-open collection.
     pub active: bool,
     #[serde(default)]
+    /// Whether its collection lock is currently held.
     pub held: Option<bool>,
     #[serde(default)]
+    /// The index state for this collection, if known.
     pub index_state: Option<String>,
     #[serde(default)]
+    /// The collection's `col.mod`, if known.
     pub col_mod: Option<i64>,
 }
 
@@ -1019,6 +1463,12 @@ pub struct CollectionStatus {
 /// Rust mirror of `shrike.schemas.CoverageCell`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+// A plain string-enum: documenting individual variants makes schemars emit a
+// `oneOf` of described consts instead of a flat `enum`, which diverges from
+// the Pydantic str-Enum the schema contract test compares against (see
+// `ActionErrorCode` and test_schema_contract.py). The type doc is harmless;
+// the variants stay undocumented by design.
+#[allow(missing_docs)]
 pub enum CoverageCell {
     // A single live space embeds both the query and target modality.
     Native,
@@ -1036,10 +1486,13 @@ pub enum CoverageCell {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CoverageRow {
     #[serde(default)]
+    /// How the text modality is reachable from this query modality.
     pub text: CoverageCell,
     #[serde(default)]
+    /// How the image modality is reachable.
     pub image: CoverageCell,
     #[serde(default)]
+    /// How the audio modality is reachable.
     pub audio: CoverageCell,
 }
 
@@ -1049,40 +1502,57 @@ pub struct CoverageRow {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CoverageMatrix {
     #[serde(default)]
+    /// Reachability when the query is text.
     pub text: CoverageRow,
     #[serde(default)]
+    /// Reachability when the query is an image.
     pub image: CoverageRow,
     #[serde(default)]
+    /// Reachability when the query is audio.
     pub audio: CoverageRow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `GET /status` payload — the running server's full self-report.
 pub struct ServerStatus {
     #[serde(default)]
+    /// Always true (the server answered).
     pub running: LiteralTrue,
     /// The action exchange's protocol version (#392).
     pub wire_protocol_version: u32,
+    /// The server PID.
     pub pid: i64,
+    /// The server's base URL.
     pub url: String,
+    /// The open collection's path.
     pub collection: String,
+    /// The active log level.
     pub log_level: String,
+    /// The log directory.
     pub log_dir: String,
     #[serde(default)]
+    /// How long the server has been up.
     pub uptime: Option<String>,
     #[serde(default)]
+    /// A recent log tail, if requested.
     pub log: Option<String>,
+    /// The primary embedding space's health.
     pub embedding: EmbeddingStatus,
     /// Per-space embedding health (#681): one entry per configured embedder (the
     /// primary plus every secondary space). `embedding` above stays the primary
     /// for back-compat; this is the full list. Empty on older payloads.
     #[serde(default)]
     pub embedding_spaces: Vec<EmbeddingStatus>,
+    /// The vector index state.
     pub index: IndexStatus,
     #[serde(default)]
+    /// The derived-text store status.
     pub derived: DerivedStatus,
     #[serde(default)]
+    /// The collection-lock mode (permanent/cooperative).
     pub locking: LockingMode,
     #[serde(default = "default_true")]
+    /// Whether the collection lock is currently held.
     pub collection_held: bool,
     /// Dedup best-match statistics (#207) — None until the first upsert with
     /// neighbors runs.
@@ -1109,51 +1579,95 @@ pub struct ServerStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
+/// The `POST /index/rebuild` outcome (status-tagged).
 pub enum IndexRebuildResponse {
-    Started { total: i64 },
-    Complete { size: i64 },
-    AlreadyBuilding { progress: IndexProgress },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum IndexSaveResponse {
-    Saved { size: i64, pending: i64 },
-    Empty,
-    Building { progress: IndexProgress },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum EmbeddingStartResponse {
+    /// A rebuild started over `total` notes.
     Started {
+        /// Total notes to embed.
+        total: i64,
+    },
+    /// The index is already current (`size` vectors).
+    Complete {
+        /// The current vector count.
+        size: i64,
+    },
+    /// A build is already in progress.
+    AlreadyBuilding {
+        /// The in-progress build's progress.
+        progress: IndexProgress,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+/// The `POST /index/save` outcome (status-tagged).
+pub enum IndexSaveResponse {
+    /// The index was flushed (`size` vectors, `pending` unsaved before).
+    Saved {
+        /// The vector count after the flush.
+        size: i64,
+        /// Unsaved changes that were pending before the flush.
+        pending: i64,
+    },
+    /// Nothing to save (no vectors).
+    Empty,
+    /// Refused — a build is in progress.
+    Building {
+        /// The in-progress build's progress.
+        progress: IndexProgress,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+/// The `POST /embedding/start` outcome (status-tagged).
+pub enum EmbeddingStartResponse {
+    /// The service started.
+    Started {
+        /// The embedding space's resulting health.
         embedding: EmbeddingStatus,
+        /// The index state after attaching.
         index: IndexStatus,
     },
+    /// The service was already running.
     AlreadyRunning {
+        /// The embedding space's resulting health.
         embedding: EmbeddingStatus,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
+/// The `POST /embedding/stop` outcome (status-tagged).
 pub enum EmbeddingStopResponse {
-    Stopped { index: IndexStatus },
+    /// The service stopped; the index is now unavailable.
+    Stopped {
+        /// The index state after stopping (now unavailable).
+        index: IndexStatus,
+    },
+    /// The service wasn't running.
     NotRunning,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `POST /shutdown` acknowledgement.
 pub struct ShutdownResponse {
+    /// The shutdown status string.
     pub status: String,
+    /// The server PID that is shutting down.
     pub pid: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+/// The `POST /reload` outcome.
 pub struct ReloadResponse {
     #[serde(default)]
+    /// Always `reloaded`.
     pub status: ReloadedLiteral,
+    /// The reopened collection's `col.mod`.
     pub col_mod: i64,
     #[serde(default)]
+    /// Whether a background rebuild was triggered by drift.
     pub rebuilding: bool,
 }
 
@@ -1163,9 +1677,12 @@ pub struct ReloadResponse {
 /// selector resolves to when none is passed).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ProfileEntry {
+    /// The profile's friendly name.
     pub name: String,
+    /// The collection file path (the index identity).
     pub path: String,
     #[serde(default)]
+    /// Whether it's the active default.
     pub is_default: bool,
 }
 
@@ -1175,8 +1692,10 @@ pub struct ProfileEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ListProfilesResponse {
     #[serde(default)]
+    /// The registered profiles.
     pub profiles: Vec<ProfileEntry>,
     #[serde(default)]
+    /// The active-default profile name, if set.
     pub default: Option<String>,
 }
 
@@ -1186,7 +1705,9 @@ pub struct ListProfilesResponse {
 /// download `url` / `bytes`, which the kernel doesn't know about).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ExportPackageResult {
+    /// Notes written to the package.
     pub note_count: u32,
+    /// Where the package landed on disk.
     pub out_path: String,
 }
 
@@ -1201,18 +1722,25 @@ pub enum ExportPackageResponse {
     /// The server wrote the package to a contained server-local path; the
     /// caller (sharing the disk) reads it there.
     Path {
+        /// Notes written to the package.
         note_count: u32,
+        /// Package size in bytes.
         bytes: u64,
         /// "apkg" or "colpkg".
         format: String,
+        /// The server-local path of the package.
         path: String,
     },
     /// The server wrote a temp package and serves it at `url` (GET it; the
     /// temp file is reaped after download / on a TTL / at shutdown).
     Url {
+        /// Notes written to the package.
         note_count: u32,
+        /// Package size in bytes.
         bytes: u64,
+        /// "apkg" or "colpkg".
         format: String,
+        /// The download URL (GET it).
         url: String,
     },
 }
@@ -1222,16 +1750,23 @@ pub enum ExportPackageResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(untagged)]
 pub enum StopResponse {
+    /// The server stopped (or was already stopped).
     Succeeded {
         #[serde(default)]
+        /// Always true in the success variant.
         stopped: LiteralTrue,
         #[serde(default)]
+        /// The stopped server's PID, if known.
         pid: Option<i64>,
         #[serde(default)]
+        /// Whether a forceful kill was needed.
         forced: bool,
     },
+    /// The stop attempt failed.
     Failed {
+        /// Always false in the failure variant.
         stopped: LiteralFalse,
+        /// Why the stop failed.
         reason: String,
     },
 }
@@ -1263,6 +1798,12 @@ pub enum StopResponse {
 /// matching Pydantic's str-Enum (the contract normalizer compares them).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+// A plain string-enum: documenting individual variants makes schemars emit a
+// `oneOf` of described consts instead of a flat `enum`, which diverges from
+// the Pydantic str-Enum the schema contract test compares against (see
+// `ActionErrorCode` and test_schema_contract.py). The type doc is harmless;
+// the variants stay undocumented by design.
+#[allow(missing_docs)]
 pub enum ActionErrorCode {
     InputError,
     CollectionBusy,
@@ -1278,7 +1819,9 @@ pub enum ActionErrorCode {
 /// server log); for the caller-actionable codes it carries the actionable text.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ActionError {
+    /// The machine-readable error class.
     pub code: ActionErrorCode,
+    /// A non-leaking human-readable message.
     pub message: String,
 }
 
@@ -1300,6 +1843,11 @@ macro_rules! catalog {
 
         /// Deserialize `json` as the named type and re-serialize it — the
         /// instance-level wire-parity probe (parse + emit through Rust).
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if `name` is not a known wire type, or if `json`
+        /// fails to deserialize as that type or re-serialize.
         pub fn roundtrip(name: &str, json: &str) -> Result<String, String> {
             match name {
                 $($name => {
