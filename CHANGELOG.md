@@ -50,10 +50,11 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
 - The published PyPI distribution is renamed `shrike-mcp` → `shrike-py` (#732):
   it is CLI + server + daemon, not just an MCP server, so the old name undersold
   it. **The import name `shrike` and the `shrike` command are unchanged** — only
-  the install name moves: `pip install shrike-py`. The old `shrike-mcp` name now
-  resolves to a thin shim that depends on `shrike-py` and emits a
-  `DeprecationWarning` on import, so an existing `pip install shrike-mcp` keeps
-  working while it migrates. (The Python harness also moved into a top-level
+  the install name moves: `pip install shrike-py`. A final `shrike-mcp` release is
+  published once that simply depends on `shrike-py`, so an existing
+  `pip install shrike-mcp` keeps working and pulls the renamed package — then
+  `shrike-mcp` is frozen; switch your install to `shrike-py`. (The Python harness
+  also moved into a top-level
   `shrike-py/` directory in #731; the extension still ships inside the platform
   wheel — there is no separate `shrike-native` distribution.)
 - The skill-quality eval harness moved from `tests/qa/` to `tests/manual/skill_quality/`, flattening the redundant nested `eval/` into the unit root (#698). Internal dev/test tooling only; nothing user-facing changes.

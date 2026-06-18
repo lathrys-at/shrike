@@ -5,7 +5,7 @@ Invoked as a build action: stages the declared source files into a writable tree
 src/shrike), pins the version from STABLE_VERSION via SETUPTOOLS_SCM_PRETEND_VERSION
 (so the sandbox needs no git), and runs hatchling through the `build` API with no
 isolation (build/hatchling/hatch-vcs come from this binary's runfiles, not a pip
-install). The produced shrike_mcp-<version>.tar.gz is copied to the rule's output.
+install). The produced shrike_py-<version>.tar.gz is copied to the rule's output.
 
 The explicit sdist file selection is injected into the *staged* pyproject.toml (not
 the repo's), so the repo's `python -m build` keeps its git-based sdist unchanged while

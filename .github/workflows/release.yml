@@ -215,11 +215,13 @@ jobs:
 
   # Publish the Python package to PyPI on a final release, via trusted publishing
   # (OIDC, no API token). Skipped for pre-release (rc) tags. Requires a trusted
-  # publisher configured on PyPI for `shrike-py` (the renamed distribution, #732)
-  # AND for the `shrike-mcp` deprecation stub, both pointing at this repo, this
-  # workflow file, and the `pypi` environment. *** MANUAL STEP: the maintainer must
-  # wire both trusted publishers on PyPI before the next release tag — the rename
-  # (#732) does not and cannot configure PyPI. ***
+  # publisher configured on PyPI for `shrike-py` (the renamed distribution, #732),
+  # pointing at this repo, this workflow file, and the `pypi` environment.
+  # *** MANUAL STEP: the maintainer must wire that trusted publisher on PyPI before
+  # the next release tag — the rename (#732) does not and cannot configure PyPI. ***
+  # The old `shrike-mcp` name is NOT published here: it was retired by a final,
+  # frozen one-time upload (the recipe in docs/distribution.md), not republished
+  # per release.
   publish-pypi:
     name: Publish to PyPI
     needs: [build-wheels, build-sdist]

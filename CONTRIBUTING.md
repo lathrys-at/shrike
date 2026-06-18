@@ -71,7 +71,9 @@ bundle (`scripts/package-skill.py`), and a **`SHA256SUMS`**, and attaches them t
 GitHub Release. Final-release notes come from the matching `## [X.Y.Z]` section of
 `CHANGELOG.md`; an rc tag uses auto-generated commit notes instead. A final release
 (not an rc) is also published to PyPI as `shrike-py` (renamed from `shrike-mcp`,
-#732; the old name is a deprecation shim), via trusted publishing.
+#732), via trusted publishing. The old `shrike-mcp` name was published once as a
+frozen alias depending on `shrike-py` (the one-time recipe in docs/distribution.md);
+it is not republished per release.
 
 **Cut release candidates first, with the changelog left under `[Unreleased]`:**
 

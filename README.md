@@ -27,7 +27,7 @@ Install Shrike from PyPI:
 pipx install shrike-py   # or: pip install shrike-py
 ```
 
-The package is `shrike-py`; the command it installs is `shrike`. (It was published as `shrike-mcp` before; that name now resolves to a thin shim that depends on `shrike-py` and warns on import, so an existing `pip install shrike-mcp` keeps working while it migrates.)
+The package is `shrike-py`; the command it installs is `shrike`. (It was published as `shrike-mcp` before; a final `shrike-mcp` release that depends on `shrike-py` is published once so an existing `pip install shrike-mcp` keeps working and pulls the renamed package — but it is frozen, so switch your install to `shrike-py`.)
 
 Point Shrike at your collection and start the daemon:
 

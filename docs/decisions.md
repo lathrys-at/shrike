@@ -1454,3 +1454,45 @@ file tree, so it needed only the path update. The `.venv` stays at the repo root
 (install is `pip install -e shrike-py/[dev]`) so `native-stale.sh`, the `.envrc`
 auto-rebuild, and the pytest backstop — all keyed off `$VIRTUAL_ENV`/`sys.prefix`
 — keep working unchanged.
+
+## The published distribution renamed `shrike-mcp` → `shrike-py` (#732, June 2026)
+
+**The PyPI distribution is `shrike-py`, not `shrike-mcp`.** Shrike is a full CLI +
+MCP server + daemon for managing Anki collections; `shrike-mcp` undersold it as
+just an MCP server. The name was freed by renaming the Rust PyO3 crate
+`shrike-py → shrike-pyo3` (#713/#764) — `import shrike_native` is unaffected (the
+module name is independent of the crate name). **The import name `shrike` and the
+`shrike` CLI are unchanged** — this is a *distribution* rename, not an API one.
+The three functional sites are the pyproject `name`, the Bazel `py_wheel`
+`distribution`, and the `importlib.metadata` version fallback in `__init__.py`;
+the built artifact filenames follow `distribution` (`shrike_py-<version>-…`), so
+the build-wheel/sdist scripts' filename plumbing and release.yml's version-sanity
+globs move with it.
+
+**No committed deprecation stub — a one-time frozen alias, by recipe.** An
+earlier plan committed a `shrike-mcp-shim/` package (depending on `shrike-py`,
+emitting a `DeprecationWarning` on `import shrike_mcp`) and published it every
+release. That was dropped: there are no existing `shrike-mcp` users to break, and
+a permanent stub directory + a per-release publish is cruft for a name nobody is
+installing. Instead, the repo carries a **short one-time recipe** (in
+`docs/distribution.md`): the maintainer publishes, *once and by hand*, a frozen
+`shrike-mcp==<rename version>` whose only content is `dependencies =
+["shrike-py>=<rename version>"]` — so the PyPI name isn't left dangling and any
+stray `pip install shrike-mcp` still resolves to the renamed package — then never
+touches it again. It is metadata-only (the depends-on is the whole mechanism); a
+runtime `DeprecationWarning` was dropped along with the committed package, since a
+dist-only rename leaves the import name stable and there is no committed module to
+carry one. release.yml publishes only `shrike-py`; the `shrike-mcp` alias is not a
+CI artifact.
+
+**PyPI trusted publishing is a maintainer step the repo can't perform.**
+`shrike-py` needs a trusted publisher configured on PyPI before the next release
+tag — the rename PR cannot configure PyPI. Flagged in a release.yml comment and
+the PR. (The one-time `shrike-mcp` alias is a manual `python -m build` +
+`twine upload`, so it needs no CI publisher.)
+
+(Also fixed here: a #731-introduced regression in the dev lock-regen path —
+`tools/update-requirements.sh` compiled `pyproject.toml` from the repo root, but
+#731 moved it to `shrike-py/pyproject.toml`. CI never caught it because
+`./bazel test //...` resolves the committed lock and never runs the script; it
+surfaced regenerating the lock's `# via` annotations for the rename.)

@@ -4,7 +4,7 @@ hatchling builds the sdist from the explicit [tool.hatch.build.targets.sdist] in
 (git-independent — see pyproject.toml), with the version stamped from STABLE_VERSION
 (the git tag, via tools/workspace_status.sh) so the Bazel sdist matches the pip path.
 The output name is fixed (the version isn't known at analysis time, like py_wheel);
-tools/build-sdist.sh renames it to the versioned shrike_mcp-<version>.tar.gz.
+tools/build-sdist.sh renames it to the versioned shrike_py-<version>.tar.gz.
 """
 
 def _py_sdist_impl(ctx):
