@@ -73,22 +73,29 @@ class DrivenRuntime:
         """Spawn the committed N + 2 driver threads, each parked in its native
         drive loop. A no-op when driven mode isn't active (an un-installed or
         already-default runtime) and idempotent (a second call after threads are
-        live)."""
+        live).
+
+        The IO thread is started and confirmed driving (``runtime_probe``) before
+        the sync/compute threads are spawned. tokio's ``current_thread`` runtime
+        gives ownership of the IO/timer drivers to the FIRST ``block_on`` caller,
+        which MUST be the IO thread; a sync/compute leaf reaching its own
+        ``block_on`` first would win that ownership and leave the drivers
+        advancing only while it parks in ``recv``, starving timers/IO."""
         if not self._driven or self._threads:
             return
-        self._threads.append(
-            threading.Thread(target=shrike_native.drive_io, name="shrike-drive-io")
-        )
-        self._threads.append(
-            threading.Thread(target=shrike_native.drive_sync, name="shrike-drive-sync")
-        )
-        for i in range(self._compute_threads):
-            self._threads.append(
-                threading.Thread(
-                    target=shrike_native.drive_compute, name=f"shrike-drive-compute-{i}"
-                )
-            )
-        for thread in self._threads:
+        io = threading.Thread(target=shrike_native.drive_io, name="shrike-drive-io")
+        self._threads.append(io)
+        io.start()
+        # The barrier: returns once the IO thread is inside its block_on and owns
+        # the drivers, so the leaves below can't claim driver ownership.
+        shrike_native.runtime_probe()
+        leaves = [threading.Thread(target=shrike_native.drive_sync, name="shrike-drive-sync")]
+        leaves += [
+            threading.Thread(target=shrike_native.drive_compute, name=f"shrike-drive-compute-{i}")
+            for i in range(self._compute_threads)
+        ]
+        for thread in leaves:
+            self._threads.append(thread)
             thread.start()
         logger.info(
             "Driven runtime: %d committed threads (1 io, 1 sync, %d compute)",

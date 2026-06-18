@@ -10,6 +10,7 @@ error with no driven queues to drive.
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -30,6 +31,7 @@ def fake_native(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     native.drive_io = lambda: None
     native.drive_sync = lambda: None
     native.drive_compute = lambda: None
+    native.runtime_probe = lambda: None
     monkeypatch.setattr(driven_runtime, "shrike_native", native)
     return native
 
@@ -60,6 +62,41 @@ def test_start_is_a_noop_when_driven_mode_inactive(fake_native: MagicMock) -> No
     rt.install()
     rt.start()
     assert rt._threads == []
+
+
+def test_io_is_confirmed_driving_before_leaves_spawn(
+    fake_native: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The driver-ownership barrier: the IO thread must be started and
+    # confirmed driving (runtime_probe) before any sync/compute leaf is started,
+    # or a leaf could claim tokio's IO/timer drivers first. Record the ordering
+    # of thread starts and the probe call against one shared log.
+    events: list[str] = []
+    fake_native.runtime_probe = lambda: events.append("probe")
+
+    real_start = threading.Thread.start
+
+    def recording_start(self: threading.Thread) -> None:
+        events.append(f"start:{self.name}")
+        real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", recording_start)
+
+    rt = DrivenRuntime(compute_threads=2)
+    rt.install()
+    rt.start()
+    rt.shutdown()
+
+    probe_at = events.index("probe")
+    io_at = events.index("start:shrike-drive-io")
+    leaf_starts = [
+        i
+        for i, e in enumerate(events)
+        if e.startswith("start:shrike-drive-sync") or e.startswith("start:shrike-drive-compute-")
+    ]
+    assert io_at < probe_at, events
+    assert leaf_starts, events
+    assert probe_at < min(leaf_starts), events
 
 
 def test_start_is_idempotent(fake_native: MagicMock) -> None:
