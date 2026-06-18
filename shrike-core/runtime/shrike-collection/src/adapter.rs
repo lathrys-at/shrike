@@ -3,7 +3,7 @@
 //! Everything in this file talks to anki exclusively through its **protobuf
 //! service layer** — `Backend::run_service_method(service, method, bytes)` and
 //! `Backend::run_db_command_bytes(json)`, the exact surface pylib's rsbridge
-//! binds — never the bare crate API (binding constraint).
+//! binds — never the bare crate API.
 //! An anki tag bump is churn in this file only: re-extract the index tables
 //! from the generated dispatcher, run the tripwire tests, done.
 //!
@@ -22,10 +22,9 @@ use anki::backend::{init_backend, Backend};
 use prost::Message;
 use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 
-// In test builds every dispatch is recorded, so the method-constant
-// coverage tripwire can assert each declared index is genuinely
-// exercised against a real collection — the interim gate until the
-// indices derive from anki's descriptors at build time.
+// In test builds every dispatch is recorded, so the method-constant coverage
+// tripwire can assert each declared index is genuinely exercised against a real
+// collection.
 #[cfg(test)]
 pub(crate) static DISPATCHED_METHODS: std::sync::Mutex<std::collections::BTreeSet<(u32, u32)>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
@@ -46,8 +45,8 @@ const SVC_NOTETYPES: u32 = 23;
 const SVC_NOTES: u32 = 25;
 const SVC_CARD_RENDERING: u32 = 27;
 const SVC_SEARCH: u32 = 29;
-// import_export. NOT a runtime-spinning service: its export/import
-// methods are `with_col` calls (no sync/network), so dispatching it is safe.
+// import_export — NOT a runtime-spinning service: its export/import methods are
+// `with_col` calls (no sync/network), so dispatching it is safe.
 const SVC_IMPORT_EXPORT: u32 = 37;
 const SVC_MEDIA: u32 = 39;
 const SVC_TAGS: u32 = 43;
@@ -285,9 +284,9 @@ impl ServiceAdapter {
         serde_json::from_slice(&out).context(ErrorKind::Internal, "db response")
     }
 
-    /// `col.mod` — the drift watermark. The service layer has no RPC for the
-    /// raw stamp; pylib reads it through the DB proxy, so we do exactly that.
-    /// The `col.mod` watermark read straight from the `col` table.
+    /// `col.mod` — the drift watermark, read straight from the `col` table. The
+    /// service layer has no RPC for the raw stamp; pylib reads it through the DB
+    /// proxy, so this does the same.
     ///
     /// # Errors
     ///
@@ -570,11 +569,11 @@ impl ServiceAdapter {
 
     // ── notetype JSON (schema11) RPCs — pylib's update_dict/new_field path ───
     //
-    // The note-type structural ops operate on the schema11 JSON
-    // dicts through the SAME legacy RPCs pylib's ModelManager uses
-    // (update_dict → update_notetype_legacy, new_field → a stock-Basic clone),
-    // so the ord-based data/card migration semantics are identical by
-    // construction — not re-derived against the proto representation.
+    // The note-type structural ops operate on the schema11 JSON dicts through
+    // the SAME legacy RPCs pylib's ModelManager uses (update_dict →
+    // update_notetype_legacy, new_field → a stock-Basic clone), so the ord-based
+    // data/card migration semantics are identical by construction — not
+    // re-derived against the proto representation.
 
     fn json_call<Req: Message>(
         &self,
@@ -653,10 +652,9 @@ impl ServiceAdapter {
 
     /// One write through the DB proxy. Exists ONLY for the pylib-mirroring
     /// `set_schema_modified` bump before `change_notetype` (pylib itself does
-    /// `update col set scm=?` via this proxy — its `execute` is literally an
-    /// alias of the query path, so this is the same `kind: "query"` call);
-    /// every other write goes through a service RPC and reads stay on
-    /// `db_rows`.
+    /// `update col set scm=?` via this proxy — its `execute` is an alias of the
+    /// query path, so this is the same `kind: "query"` call); every other write
+    /// goes through a service RPC and reads stay on `db_rows`.
     ///
     /// # Errors
     ///
@@ -743,8 +741,8 @@ impl ServiceAdapter {
                 with_scheduling,
                 // Deck configs ride with scheduling — they are meaningless
                 // without it (an apkg with no review data has no use for the
-                // deck's scheduling config), so we bind them together rather
-                // than expose a second knob that only matters when the first is on.
+                // deck's scheduling config), so they bind together rather than
+                // expose a second knob that only matters when the first is on.
                 with_deck_configs: with_scheduling,
                 with_media,
                 legacy,
@@ -921,12 +919,11 @@ impl ServiceAdapter {
     }
 
     /// Set the exact tag list on many notes in ONE read + ONE `UpdateNotes`
-    /// write: one batched DB read for the current note rows, then
-    /// one transaction + one undo entry — instead of the get+update round trip
-    /// and a journal commit per note. The service layer has no batched
-    /// `GetNotes`; the DB proxy does (the same
-    /// `db_rows` surface `col_mod`/the prune reads use), so the whole read is
-    /// one `SELECT … WHERE id IN (…)` round trip.
+    /// write: one batched DB read for the current note rows, then one
+    /// transaction + one undo entry — instead of the get+update round trip and a
+    /// journal commit per note. The service layer has no batched `GetNotes`; the
+    /// DB proxy does (the same `db_rows` surface `col_mod`/the prune reads use),
+    /// so the whole read is one `SELECT … WHERE id IN (…)` round trip.
     ///
     /// `UpdateNotes` re-loads each note from storage by id (anki's
     /// `update_note_inner`); `note_differs_from_db` is only a skip-if-identical
@@ -1087,23 +1084,21 @@ fn decode_backend_error(bytes: &[u8]) -> NativeError {
 // ── runtime-singularity pin ──────────────────────────────────────────────────
 // anki's Backend owns a LAZY tokio runtime whose only initializer is
 // `runtime_handle()`, consumed solely by the sync/AnkiWeb/AnkiHub services.
-// Shrike dispatches none of those services TODAY, so anki's runtime stays cold
-// and the kernel's owned runtime is the only one alive. This test pins
-// exactly that: not one of the runtime-spinning service indices appears in the
+// Shrike dispatches none of those services, so anki's runtime stays cold and
+// the kernel's owned runtime is the only one alive. This test pins exactly
+// that: not one of the runtime-spinning service indices appears in the
 // dispatched set.
 //
-// When sync support DOES land (waking these
-// services): the invariant the kernel guarantees is NOT "one runtime" but
-// "sync ops never run on a runtime worker thread". anki's sync paths
-// `block_on`, which panics from any runtime-worker thread regardless of which
-// runtime owns it — so the fix is the `spawn_blocking` dispatch discipline in
-// `shrike_kernel::runtime` (pinned by its `sync_dispatch_pin` panic-repro
-// test), NOT a runtime-handle-injection patch to anki (rejected: the anki
-// patch mechanism is Bazel-only, so it would fork sync behaviour across build
-// lanes — see docs/dev/decisions.md). This test stays as the today-true pin that
-// none of those services is on a Shrike call path yet.
-// (Backend dispatcher, tag 25.09.4: sync=41, ankiweb=45, ankihub=47 — none
-// may appear in the service indices above.)
+// Once sync support lands (waking these services), the invariant the kernel
+// guarantees is NOT "one runtime" but "sync ops never run on a runtime worker
+// thread". anki's sync paths `block_on`, which panics from any runtime-worker
+// thread regardless of which runtime owns it — so the fix is the
+// `spawn_blocking` dispatch discipline in `shrike_kernel::runtime` (pinned by
+// its `sync_dispatch_pin` panic-repro test), NOT a runtime-handle-injection
+// patch to anki (rejected: the anki patch mechanism is Bazel-only, so it would
+// fork sync behaviour across build lanes — see docs/dev/decisions.md).
+// (Backend dispatcher, tag 25.09.4: sync=41, ankiweb=45, ankihub=47 — none may
+// appear in the service indices above.)
 #[cfg(test)]
 mod runtime_singularity {
     /// The dispatcher indices of anki's runtime-spinning services at the

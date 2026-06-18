@@ -1,7 +1,7 @@
-//! The collection contract: the typed
-//! surface the kernel and the host bindings drive — anki never leaks through
-//! it (the canonical impl, this crate's `CollectionCore`, keeps its protobuf
-//! adapter private). Every method speaks shrike-schemas types, not JSON strings.
+//! The collection contract: the typed surface the kernel and the host bindings
+//! drive — anki never leaks through it (the canonical impl, this crate's
+//! `CollectionCore`, keeps its protobuf adapter private). Every method speaks
+//! shrike-schemas types, not JSON strings.
 //!
 //! Lives in `shrike-collection` (not the store-contract crate) because this
 //! crate is the SOLE implementer and every consumer (kernel/pyo3/cabi) already

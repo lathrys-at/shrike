@@ -32,7 +32,8 @@ impl CollectionCore {
     /// redirect this operator-privileged write outside the root by planting a
     /// symlink — at the requested basename, OR (the subtler door) at the temp
     /// name if it were predictable. The host's parent-dir gate catches only a
-    /// symlinked *parent*. So we never hand anki an attacker-influenceable path:
+    /// symlinked *parent*. So anki is never handed an attacker-influenceable
+    /// path:
     ///
     /// 1. mkdtemp a **securely-random, exclusively-created** subdir inside the
     ///    target's parent (`tempfile` — random name + `O_EXCL`/mkdir semantics,
@@ -103,11 +104,11 @@ impl CollectionCore {
             PackageFormat::Colpkg => {
                 // anki's colpkg exporter reads the media folder unconditionally
                 // (it walks it to build the package's media map), and errors if
-                // it's absent. A real anki profile always has the folder; ours
-                // is lazily created on first media write, so a collection that
-                // never stored media has none yet. Create it (empty) so a media-
-                // free collection still backs up — matching anki desktop, where
-                // the folder always exists.
+                // it's absent. A real anki profile always has the folder;
+                // Shrike's is lazily created on first media write, so a
+                // collection that never stored media has none yet. Create it
+                // (empty) so a media-free collection still backs up — matching
+                // anki desktop, where the folder always exists.
                 std::fs::create_dir_all(&self.media_dir).map_err(|e| {
                     NativeError::internal(format!("ensure media dir for colpkg export: {e}"))
                 })?;
@@ -121,7 +122,7 @@ impl CollectionCore {
                     .export_collection_package(out, req.with_media, req.legacy)?;
                 // Re-open: the colpkg export took the collection out of the
                 // backend, so the next op on this core must find it open again
-                // (our cooperative-lock `released` flag is untouched by anki's
+                // (the cooperative-lock `released` flag is untouched by anki's
                 // internal take, so `ensure_open` wouldn't re-acquire — reopen
                 // explicitly).
                 self.reopen()?;

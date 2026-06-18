@@ -9,10 +9,10 @@
 //! - **`CollectionCore`** (below) — Shrike's op layer, written against the
 //!   adapter. It carries the vertical slice: open/close, the `col.mod`
 //!   watermark, the full search grammar, note read/create/update/delete, and
-//!   the duplicate policy on create. The **wholesale facade cutover stays off**
-//!   until coverage is complete — the hard safety rule (never co-manage one
+//!   the duplicate policy on create. The hard safety rule (never co-manage one
 //!   collection from two cores in a process) forbids per-op fallback, so the
-//!   core is reachable only through the parity harness until then.
+//!   core is reachable only through the parity harness until coverage is
+//!   complete.
 //!
 //! Pin policy: the anki git tag equals the pip wheel version; bumped together.
 
@@ -36,8 +36,8 @@ pub use adapter::{FieldsState, ServiceAdapter};
 pub use embed_text::{extract_image_refs, extract_sound_refs, EMBED_TEXT_VERSION};
 use shrike_error::{NativeError, NativeResult};
 
-// The collection contract — the `Collection` trait + its vocabulary — lives in
-// this crate (homed beside its sole impl).
+// The collection contract — the `Collection` trait + its vocabulary — homed
+// beside its sole impl.
 pub use contract::{
     Collection, CreateOutcome, DuplicatePolicy, ExportOutcome, ExportRequest, ExportScope,
     ImportOptions, ImportSummary, ImportUpdateCondition, OwnedFieldRow, PackageFormat,
@@ -46,7 +46,7 @@ pub use contract::{
 
 /// Shrike's collection core. One instance owns one open
 /// collection (instance-per-collection, no global state), mirroring the
-/// CollectionWrapper lifecycle it will eventually back.
+/// CollectionWrapper lifecycle it backs.
 pub struct CollectionCore {
     adapter: ServiceAdapter,
     collection_path: String,
@@ -120,11 +120,10 @@ impl CollectionCore {
         Ok(true)
     }
 
-    /// Re-acquire after a release. The file opened fine at boot, so
-    /// a failure here is overwhelmingly lock contention (another process —
-    /// usually Anki desktop — holds it), not corruption: it surfaces as the
-    /// BUSY tier, mirroring the Python wrapper's contextual classification.
-    /// The caller decides whether to retry; nothing here waits.
+    /// Re-acquire after a release. The file opened fine at boot, so a failure
+    /// here is overwhelmingly lock contention (another process — usually Anki
+    /// desktop — holds it), not corruption: it surfaces as the BUSY tier. The
+    /// caller decides whether to retry; nothing here waits.
     ///
     /// # Errors
     ///
@@ -134,7 +133,7 @@ impl CollectionCore {
     pub fn reopen(&self) -> NativeResult<()> {
         self.released
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        let _ = self.adapter.close_collection(); // a half-open handle is fine to close
+        let _ = self.adapter.close_collection(); // a half-open handle closes cleanly
         let base = self
             .collection_path
             .strip_suffix(".anki2")
@@ -336,9 +335,8 @@ impl CollectionCore {
 
 /// The store contract impl: every method forwards to the inherent impl,
 /// so the concrete core keeps its full API while the kernel and the host
-/// bindings consume `dyn Collection`. (The trait itself lives in
-/// [`crate::contract`]; this is the impl-only module — named distinctly so the
-/// two don't collide.)
+/// bindings consume `dyn Collection`. (The trait lives in [`crate::contract`];
+/// this is the impl-only module — named distinctly so the two don't collide.)
 #[allow(clippy::use_self)]
 mod contract_impl {
     use super::{CollectionCore, CreateOutcome, DuplicatePolicy, NativeResult};
@@ -671,7 +669,7 @@ mod contract_impl {
 
 #[cfg(test)]
 mod tests {
-    //! The slice-1 parity floor AND the index tripwires: every hardcoded
+    //! The parity floor AND the index tripwires: every hardcoded
     //! (service, method) pair is exercised against a real temp collection, so
     //! a tag bump that shuffles the generated dispatcher fails these tests
     //! instead of corrupting calls.
@@ -679,8 +677,7 @@ mod tests {
     use super::*;
 
     /// Test shim: drive the typed upsert with a JSON literal, assert on the
-    /// serialized results (the older call shape the assertions were
-    /// written against).
+    /// serialized results.
     fn upsert_json(
         core: &CollectionCore,
         notes_json: &str,
@@ -694,7 +691,7 @@ mod tests {
     }
 
     /// The deck counterpart: JSON literals in, the typed op's
-    /// serialized results out, keeping the pre-typed assertions verbatim.
+    /// serialized results out.
     fn upsert_decks_json(core: &CollectionCore, decks_json: &str) -> serde_json::Value {
         let decks: Vec<shrike_schemas::DeckInput> = serde_json::from_str(decks_json).unwrap();
         let results = core.upsert_decks(&decks).unwrap();
@@ -702,7 +699,7 @@ mod tests {
     }
 
     /// The note-type counterparts: JSON literals in, the typed ops'
-    /// serialized results out, keeping the pre-typed assertions verbatim.
+    /// serialized results out.
     fn note_types_json(core: &CollectionCore, json_str: &str) -> serde_json::Value {
         let inputs: Vec<shrike_schemas::NoteTypeInput> = serde_json::from_str(json_str).unwrap();
         serde_json::to_value(core.upsert_note_types(&inputs).unwrap()).unwrap()
@@ -878,11 +875,10 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// An update whose deck ref resolves to no deck must report
-    /// an error WITHOUT having written the fields. Resolving the deck after the
-    /// write would half-write the note (and bump col.mod) on a bad `#id` ref —
-    /// create_note_named resolves the deck before its write, and
-    /// update_note_named mirrors it.
+    /// An update whose deck ref resolves to no deck must report an error
+    /// WITHOUT having written the fields. Resolving the deck after the write
+    /// would half-write the note (and bump col.mod) on a bad `#id` ref, so the
+    /// deck is resolved before the write.
     #[test]
     fn s8b_update_bad_deck_half_writes_fields() {
         let (core, dir) = temp_core();
@@ -925,9 +921,9 @@ mod tests {
 
     #[test]
     fn read_surface_round_trip() {
-        // Tripwires for the step-2 (service, method) indices — deck_names,
-        // deck_tree, all_tags, notetype, strip_html, db_rows — plus the
-        // shape of the ported readers, all against a real temp collection.
+        // Tripwires for the read-surface (service, method) indices —
+        // deck_names, deck_tree, all_tags, notetype, strip_html, db_rows — plus
+        // the shape of the readers, all against a real temp collection.
         let (core, dir) = temp_core();
         let basic = core.notetype_id("Basic").unwrap();
         let CreateOutcome::Created(nid) = core
@@ -1049,12 +1045,12 @@ mod tests {
 
     #[test]
     fn read_wire_is_plain_serde_with_explicit_nulls() {
-        // ONE wire convention — plain
-        // serde of the schema types, where an unset `Option` is an explicit
-        // `null`, never a pruned key (the Pydantic shape the schema contract
-        // test pins). Shape-level, deliberately not byte-level: every
-        // consumer revalidates through the Pydantic models, so the contract
-        // is "parses back into the schema type with the same content".
+        // ONE wire convention — plain serde of the schema types, where an unset
+        // `Option` is an explicit `null`, never a pruned key (the Pydantic
+        // shape the schema contract test pins). Shape-level, deliberately not
+        // byte-level: every consumer revalidates through the Pydantic models,
+        // so the contract is "parses back into the schema type with the same
+        // content".
         let (core, dir) = temp_core();
         let basic = core.notetype_id("Basic").unwrap();
         let CreateOutcome::Created(nid) = core
@@ -1110,10 +1106,9 @@ mod tests {
 
     #[test]
     fn note_types_round_trip() {
-        // Step-4 tripwires (the legacy schema11 RPCs) + the ported note-type
-        // ops, against a real temp collection — including the data-safety
-        // property: note data survives renames
-        // and identity-based moves.
+        // Note-type tripwires (the legacy schema11 RPCs) + the note-type ops,
+        // against a real temp collection — including the data-safety property:
+        // note data survives renames and identity-based moves.
         let (core, dir) = temp_core();
 
         // Create a custom type (cloze flag off), then a note carrying data.
@@ -1383,7 +1378,7 @@ mod tests {
 
     #[test]
     fn media_and_prune_round_trip() {
-        // Step-5a tripwires (media + maintenance RPCs) + the ported ops.
+        // Media + maintenance RPC tripwires and their ops.
         let (core, dir) = temp_core();
         let basic = core.notetype_id("Basic").unwrap();
 
@@ -1496,8 +1491,8 @@ mod tests {
             .is_err());
 
         // store_prepared_media: per-item errors never sink the batch (the
-        // sequential prepare lives at the binding edge over the kernel's
-        // shared prepare — a Failed slot is already an error).
+        // sequential prepare lives at the binding edge over the kernel's shared
+        // prepare — a Failed slot is already an error).
         let prepared = vec![
             PreparedMedia {
                 index: 0,
@@ -1532,10 +1527,10 @@ mod tests {
 
     #[test]
     fn export_writes_through_a_planted_basename_symlink_safely() {
-        // Shared-host hazard: another user plants a symlink at
-        // the export basename pointing OUTSIDE the root. The temp+atomic-rename
-        // write must REPLACE that symlink with the real package, never follow
-        // it (which would redirect the operator-privileged write to the target).
+        // Shared-host hazard: another user plants a symlink at the export
+        // basename pointing OUTSIDE the root. The temp+atomic-rename write must
+        // REPLACE that symlink with the real package, never follow it (which
+        // would redirect the operator-privileged write to the target).
         let (core, dir) = temp_core();
         core.create_note(
             core.notetype_id("Basic").unwrap(),
@@ -1596,13 +1591,12 @@ mod tests {
 
     #[test]
     fn export_does_not_write_through_a_pre_planted_temp_dir_name() {
-        // The review hazard: the package's write target must not be a path
-        // an attacker can pre-create. The export mkdtemp's a securely-random,
-        // EXCLUSIVELY-created subdir in the parent — so even a pre-planted entry
-        // can't be the write target. Verify the package lands at the requested
-        // path (the export succeeded via a server-owned temp dir, not a planted
-        // one), the victim a planted name pointed at is untouched, and no temp
-        // dir lingers.
+        // The package's write target must not be a path an attacker can
+        // pre-create. The export mkdtemp's a securely-random, EXCLUSIVELY-
+        // created subdir in the parent — so even a pre-planted entry can't be
+        // the write target. Verify the package lands at the requested path (via
+        // a server-owned temp dir, not a planted one), the victim a planted
+        // name pointed at is untouched, and no temp dir lingers.
         let (core, dir) = temp_core();
         core.create_note(
             core.notetype_id("Basic").unwrap(),
@@ -1613,8 +1607,8 @@ mod tests {
         )
         .unwrap();
 
-        // Pre-plant a symlink at a guessable temp-style name (the old scheme's
-        // shape) pointing at a victim; the secure mkdtemp must not reuse it.
+        // Pre-plant a symlink at a guessable temp-style name pointing at a
+        // victim; the secure mkdtemp must not reuse it.
         let victim = dir.join("victim.txt");
         std::fs::write(&victim, b"keep me").unwrap();
         let planted = dir.join(".shrike-export-pre-planted");
@@ -1665,11 +1659,10 @@ mod tests {
 
     #[test]
     fn busy_surface_release_reopen() {
-        // The contention story: a second holder makes reopen BUSY;
-        // releasing hands the lock over; reopening after the holder leaves
-        // succeeds. (The second core never successfully co-manages the
-        // collection — it exists to HOLD the lock, which is the scenario the
-        // busy tier is for.)
+        // Contention: a second holder makes reopen BUSY; releasing hands the
+        // lock over; reopening after the holder leaves succeeds. (The second
+        // core never co-manages the collection — it exists to HOLD the lock,
+        // the scenario the busy tier is for.)
         let (core, dir) = temp_core();
         let path = core.collection_path.clone();
         let basic = core.notetype_id("Basic").unwrap();
@@ -1707,7 +1700,7 @@ mod tests {
 
     #[test]
     fn write_surface_round_trip() {
-        // Tripwires for the step-3 (service, method) indices and the ported
+        // Tripwires for the write-surface (service, method) indices and the
         // write ops, against a real temp collection.
         let (core, dir) = temp_core();
 
@@ -1863,19 +1856,18 @@ mod tests {
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
-    /// The interim gate: every hand-transcribed `(service, method)` index
-    /// in adapter.rs must be EXERCISED against a real collection — a bumped
-    /// anki whose dispatcher reordered would shift indices silently if any
-    /// constant escaped its tripwire. The test self-scans the constants from
-    /// the source (the SVC_ pin's pattern), drives the whole public surface
-    /// once, and asserts the dispatch recorder saw every pair. Build-time
-    /// derivation from anki's descriptors remains the preferred end-state.
+    /// Every hand-transcribed `(service, method)` index in adapter.rs must be
+    /// EXERCISED against a real collection — a bumped anki whose dispatcher
+    /// reordered would shift indices silently if any constant escaped its
+    /// tripwire. The test self-scans the constants from the source (the SVC_
+    /// pin's pattern), drives the whole public surface once, and asserts the
+    /// dispatch recorder saw every pair.
     ///
     /// The recorder fires at dispatch (before the call returns): this gate is
-    /// REACHABILITY; the sibling round-trip tests validate responses. Note
-    /// the parser treats every bare `const X: u32` in adapter.rs as a method
-    /// index (SVC_-prefixed ones as services) — an unrelated u32 const there
-    /// panics this test loudly rather than passing falsely.
+    /// REACHABILITY; the sibling round-trip tests validate responses. The
+    /// parser treats every bare `const X: u32` in adapter.rs as a method index
+    /// (SVC_-prefixed ones as services) — an unrelated u32 const there panics
+    /// this test loudly rather than passing falsely.
     #[test]
     fn every_method_constant_is_dispatched_by_the_surface() {
         // Parse `const NAME: u32 = N;` declarations out of adapter.rs.
