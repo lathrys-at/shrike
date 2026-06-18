@@ -1,4 +1,4 @@
-//! The engine contract (#342): what the kernel consumes, what engine crates
+//! The engine contract: what the kernel consumes, what engine crates
 //! implement, and nothing else. The kernel composes `Arc<dyn Embedder>` /
 //! `Arc<dyn Recognizer>` it is *given* at assembly — it never names a
 //! concrete engine, a runtime (ort), a platform (Apple/Android), or a
@@ -17,7 +17,7 @@
 //!   [`EmbedImages`], [`RecognizeMedia`]) — chunk-level, `Send + Sync`, no
 //!   futures, no threads, assuming *nothing* about execution. The ONE
 //!   adapter, [`Blocking`], bridges to the async traits over the owned
-//!   runtime's blocking pool (#374): an eager `spawn_blocking` with the
+//!   runtime's blocking pool: an eager `spawn_blocking` with the
 //!   `safe_batch` chunk loop inside — batching is execution policy, not
 //!   engine compute.
 //! - **Route 2 — naturally-async engines** (a completion-handler platform
@@ -32,7 +32,7 @@
 //!
 //! Pipeline *topology* — what must order before what — is the kernel's
 //! consistency model; independent engine futures are `try_join`ed by the
-//! kernel. Execution lives on the kernel's owned tokio runtime (#374):
+//! kernel. Execution lives on the kernel's owned tokio runtime:
 //! sync engines ride the blocking pool through [`Blocking`], async engines
 //! complete from their own sources. Engines spawn no threads themselves and
 //! never block a runtime worker.
@@ -98,14 +98,14 @@ impl MediaItem {
 /// small: this exists to give engines a routing/decoding hint, not to be a
 /// general MIME database.
 ///
-/// DELIBERATELY DISTINCT from `shrike_media::guess_mime`/`mime_extension`
-/// (#711): this is the engine routing-HINT (it carries `heic`/`aiff` an engine
+/// DELIBERATELY DISTINCT from `shrike_media::guess_mime`/`mime_extension`:
+/// this is the engine routing-HINT (it carries `heic`/`aiff` an engine
 /// may route on, omits store/response kinds like `pdf`/`txt`/`css`), while
 /// shrike-media's tables are the store/response MIME the media write/fetch
 /// paths serve. Keeping them apart is what keeps shrike-engine-api a LEAF (no
 /// dep on shrike-media → no media-fetch/SSRF dependency in the engine
 /// contract). Do NOT "consolidate" them into one table — the leaf rule
-/// outranks table-count==1 (Chesterton's fence; the lead's #711 ruling).
+/// outranks table-count==1 (Chesterton's fence).
 pub fn mime_for_name(name: &str) -> Option<String> {
     let ext = name.rsplit('.').next()?.to_ascii_lowercase();
     let mime = match ext.as_str() {
@@ -196,11 +196,11 @@ pub trait ImageResolver: Send + Sync {
     fn exists(&self, name: &str) -> bool;
 }
 
-// ── recognition (#228) ───────────────────────────────────────────────────────
+// ── recognition ───────────────────────────────────────────────────────
 
 /// Where a segment sits in its medium: a normalized top-left `[x, y, w, h]`
-/// box for OCR, or a `[start_seconds, duration_seconds]` time span for ASR
-/// (#410). One enum, not two optionals — a segment can't carry both, and
+/// box for OCR, or a `[start_seconds, duration_seconds]` time span for ASR.
+/// One enum, not two optionals — a segment can't carry both, and
 /// the type makes that unrepresentable. The flattened lowercase tag keeps
 /// the wire identical to the historical shape (`"bbox": [...]`), so
 /// existing derived rows parse unchanged and the span variant joins as
@@ -230,7 +230,7 @@ pub struct Segment {
 
 /// One media item's recognition: the flattened text (reading order), the
 /// overall confidence (engine-defined aggregate), and the retained segments
-/// (#228's one-pass/many-consumers rule: never flatten-and-discard).
+/// (the one-pass/many-consumers rule: never flatten-and-discard).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Recognition {
     /// The flattened text in reading order.
@@ -329,7 +329,7 @@ pub trait EmbedImages: Send + Sync + 'static {
     fn embed_image_chunk(&self, images: &[MediaItem]) -> NativeResult<Vec<Vec<f32>>>;
 
     /// The largest image batch this engine is proven safe to embed in one
-    /// call — the vision analogue of [`EmbedText::safe_batch`] (#211). An int8
+    /// call — the vision analogue of [`EmbedText::safe_batch`]. An int8
     /// vision graph that batches non-deterministically must be capped here so
     /// a note's image vector stays a pure function of its own image (the
     /// `reconcile`==rebuild invariant for image vectors). 1 = serial.
@@ -443,7 +443,7 @@ impl<E: RecognizeMedia> RecognizeMedia for WithPolicy<E> {
     }
 }
 
-/// Host-assembled identity + batch policy over a route-2 ASYNC engine (#721).
+/// Host-assembled identity + batch policy over a route-2 ASYNC engine.
 /// The async sibling of [`WithPolicy`]: the host injects the fingerprint/dim the
 /// engine can't know (text-prep versions, the describe prompt version, a probed
 /// dim) AND the proven-safe text batch size — exactly the three knobs sync
@@ -452,7 +452,7 @@ impl<E: RecognizeMedia> RecognizeMedia for WithPolicy<E> {
 /// `Blocking` adapter did (one engine `embed` call per `batch_size` chunk, in
 /// order), so the host's probed batch governs request size on the async path
 /// too. `recognize`/`embed_images` delegate unchanged (recognition has no batch
-/// knob; image embeds chunk per-item inside the engine, #501). Wrap the engine
+/// knob; image embeds chunk per-item inside the engine). Wrap the engine
 /// and hand the result straight to the kernel slot — no adapter in between.
 pub struct AsyncWithPolicy<E> {
     engine: Arc<E>,
@@ -523,14 +523,14 @@ impl<E: Recognizer> Recognizer for AsyncWithPolicy<E> {
     }
 }
 
-// ── the adapter: sync compute onto the owned runtime (#374 C) ───────────────
+// ── the adapter: sync compute onto the owned runtime ───────────────
 
 /// Route-1 engines become kernel-facing async engines here: each call moves
 /// the chunk loop onto the runtime's blocking pool via
 /// `tokio::task::spawn_blocking`. **Eager by contract**: the work is
 /// scheduled inside `embed()` itself, before the returned future is first
 /// polled — that is what lets the kernel build engine futures ahead of
-/// lexical/sibling work and genuinely overlap them (the #342 search/add
+/// lexical/sibling work and genuinely overlap them (the search/add
 /// overlap properties).
 ///
 /// Must be called in runtime context (kernel ops are — the action-exchange
@@ -579,7 +579,7 @@ impl<E: EmbedImages + 'static> ImageEmbedder for Blocking<E> {
     fn embed_images(&self, images: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
         let engine = Arc::clone(&self.0);
         run_blocking(move || {
-            // Chunk by the probed vision safe_batch (#211), exactly like the
+            // Chunk by the probed vision safe_batch, exactly like the
             // text path — a batch-variant int8 vision graph embeds serially so
             // an image vector never depends on its batch-mates.
             let chunk = engine.safe_batch().max(1);
@@ -627,7 +627,7 @@ mod tests {
         }
     }
 
-    /// The image analogue of `Toy`, for the vision-batching pin (#211).
+    /// The image analogue of `Toy`, for the vision-batching pin.
     struct ImageToy {
         batch_cap: usize,
         calls: std::sync::Mutex<Vec<usize>>,
@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(adapted.fingerprint().as_deref(), Some("toy:v1"));
     }
 
-    /// The vision path chunks by the (image) safe_batch too (#211): a
+    /// The vision path chunks by the (image) safe_batch too: a
     /// batch-variant int8 vision graph probed to 1 must embed images serially
     /// on the kernel path, not all-in-one — else the probe's verdict is inert
     /// where the reconcile==rebuild invariant for image vectors actually lives.
@@ -737,9 +737,9 @@ mod tests {
         );
     }
 
-    /// The eager-embed pin (#374 C): the blocking task is scheduled inside
+    /// The eager-embed pin: the blocking task is scheduled inside
     /// `embed()` itself — observable as the engine running WITHOUT the
-    /// returned future ever being polled. The #342 overlap properties
+    /// returned future ever being polled. The overlap properties
     /// (search embed ∥ lexical reads; orchestrator try_join) depend on this.
     #[test]
     fn blocking_embed_is_eager() {
@@ -816,7 +816,7 @@ mod tests {
     /// `AsyncWithPolicy` overrides the host-injected identity (fingerprint/dim),
     /// chunks the text path by the host `batch_size`, and falls back to the
     /// engine's own dim when the host pins none — the async sibling of
-    /// `with_policy_overrides_identity_and_batch` (#721).
+    /// `with_policy_overrides_identity_and_batch`.
     #[test]
     fn async_with_policy_overrides_identity_and_chunks_by_batch() {
         let toy = Arc::new(AsyncToy::default());
@@ -889,7 +889,7 @@ mod tests {
                     confidence: 0.8,
                     locator: Some(Locator::Bbox([0.1, 0.2, 0.3, 0.05])),
                 },
-                // The ASR shape: a time span, not a box (#410).
+                // The ASR shape: a time span, not a box.
                 Segment {
                     text: "spoken".into(),
                     confidence: 0.9,
@@ -908,7 +908,7 @@ mod tests {
         })
         .unwrap();
         assert!(!bare.contains("bbox") && !bare.contains("span"));
-        // Pre-#410 rows parse unchanged: bare segments and bbox'd segments.
+        // Older rows parse unchanged: bare segments and bbox'd segments.
         let old: Segment = serde_json::from_str(r#"{"text":"t","confidence":1.0}"#).unwrap();
         assert_eq!(old.locator, None);
         let boxed: Segment =

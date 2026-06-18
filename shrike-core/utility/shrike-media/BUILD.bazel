@@ -24,7 +24,7 @@ rust_library(
     ],
 )
 
-# `fetch_media_url` is async now (#721 S2); its no-socket validation test is
+# `fetch_media_url` is async now; its no-socket validation test is
 # `#[tokio::test]`, so the test build needs tokio (a dev-only dep — appended
 # here, on top of the lib deps `crate` inherits).
 rust_test(

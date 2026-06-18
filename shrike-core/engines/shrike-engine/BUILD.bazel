@@ -40,7 +40,7 @@ ENGINE_ONNX_DEPS = [
 ]
 
 # The remote-family deps (feature `remote`): the SSRF primitives + the async
-# transport (reqwest/tokio/futures, #721 S2 — route-2 async-direct, ureq gone) +
+# transport (reqwest/tokio/futures, route-2 async-direct) +
 # url + base64. Pure Rust, no ort.
 ENGINE_REMOTE_DEPS = [
     "//shrike-core/utility/shrike-network:shrike_network",
