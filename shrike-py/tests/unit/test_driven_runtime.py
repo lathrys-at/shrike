@@ -44,9 +44,9 @@ def test_install_start_shutdown_spawns_and_joins(fake_native: MagicMock) -> None
     rt.start()
     assert len(rt._threads) == 5  # 1 io + 1 sync + 3 compute
     names = {t.name for t in rt._threads}
-    assert "shrike-drive-io" in names
-    assert "shrike-drive-sync" in names
-    assert sum(n.startswith("shrike-drive-compute-") for n in names) == 3
+    assert "shrike-io" in names
+    assert "shrike-sync" in names
+    assert sum(n.startswith("shrike-work-") for n in names) == 3
 
     rt.shutdown()
     fake_native.drive_pools_shutdown.assert_called_once()
@@ -88,11 +88,11 @@ def test_io_is_confirmed_driving_before_leaves_spawn(
     rt.shutdown()
 
     probe_at = events.index("probe")
-    io_at = events.index("start:shrike-drive-io")
+    io_at = events.index("start:shrike-io")
     leaf_starts = [
         i
         for i, e in enumerate(events)
-        if e.startswith("start:shrike-drive-sync") or e.startswith("start:shrike-drive-compute-")
+        if e.startswith("start:shrike-sync") or e.startswith("start:shrike-work-")
     ]
     assert io_at < probe_at, events
     assert leaf_starts, events

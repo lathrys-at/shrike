@@ -61,12 +61,52 @@ def basic_note(wrapper):
 # thread-safe future.
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _driven_runtime():
+    """Install + park the kernel's committed driver threads for the session.
+
+    The kernel runs a harness-driven ``current_thread`` runtime with no lazy
+    fallback, so any test that opens a kernel — the ``KernelHarness`` *and* a
+    standalone ``CollectionWrapper`` (the ``wrapper`` fixture) — only makes
+    progress while a driver thread drives it. Autouse so it installs once per
+    test process regardless of which fixture opens the kernel (Bazel splits the
+    unit suite across processes, so a per-fixture dependency wouldn't cover a
+    target whose kernel-opening test doesn't use ``kernel_loop``). Install once
+    (the seam is set-once and the threads outlive any kernel, as in production)
+    via the production :class:`DrivenRuntime`, and tear down at session end.
+
+    Process-global guard: when the unit and native suites share one pytest
+    process (``pytest tests/unit tests/native``), both trees' autouse fixtures
+    fire — but the kernel runtime is set-once, so only the FIRST may park the
+    driver threads (a second ``drive_sync`` would hit "already claimed"). A marker
+    on the ``shrike_native`` module (the one object both conftests share) elects
+    the single owner."""
+    import shrike_native
+
+    from shrike.platform.driven_runtime import DrivenRuntime
+
+    if getattr(shrike_native, "_shrike_test_driven", False):
+        # Another suite's fixture already owns the driven runtime this process.
+        yield
+        return
+
+    shrike_native._shrike_test_driven = True
+    runtime = DrivenRuntime()
+    runtime.install()
+    runtime.start()
+    yield
+    runtime.shutdown()
+    shrike_native._shrike_test_driven = False
+
+
 @pytest.fixture(scope="session")
-def kernel_loop():
+def kernel_loop(_driven_runtime):
     """One asyncio loop on a dedicated daemon thread for the whole session.
 
     Per-test kernels are cheap (tests/native opens one per test at ~ms cost);
-    the loop thread is the only shared piece, carrying no per-test state.
+    the loop thread is the only shared piece, carrying no per-test state. Depends
+    on ``_driven_runtime`` so the kernel runtime is installed + driven before any
+    harness opens a kernel on this loop.
     """
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, name="kernel-loop", daemon=True)

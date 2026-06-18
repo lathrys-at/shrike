@@ -430,10 +430,10 @@ underneath is invisible to a handler (`drive_io` drives the runtime instead of t
 
 This **replaces** the prior model, in which the kernel self-drove a lazy multi-thread tokio runtime
 (tokio spawning its own worker + blocking-pool threads) and `dispatch_sync`/`dispatch_compute`
-bottomed out in `spawn_blocking`. The driven `current_thread` runtime is the runtime going
-forward; the transitional multi-thread default that let the bindings cut over incrementally is
-removed in #840, leaving the driven model alone. The harness installs the runtime via
-`init_driven_runtime` before any kernel op.
+bottomed out in `spawn_blocking`. The driven `current_thread` runtime is the only runtime; the
+transitional multi-thread default that let the bindings cut over incrementally has been removed,
+leaving the driven model alone. The harness installs the runtime via `init_driven_runtime` before
+any kernel op — an op before that panics, as there is no fallback.
 
 Decisions and invariants:
 
@@ -472,12 +472,12 @@ Read concurrency: the single `drive_sync` thread serializes all collection acces
 writes do not run concurrently, and a background rebuild/reconcile competes with data-plane ops on
 that one thread.
 
-Follow-ups:
+Done / follow-ups:
 
-- **#840 — remove the transitional multi-thread fallback.** The set-once seam carrying both the
+- **#840 — removed the transitional multi-thread fallback.** The set-once seam carrying both the
   driven and the prior multi-thread default existed only to let the bindings cut over incrementally;
-  #840 deletes the default path so the driven `current_thread` model is the sole runtime, completing
-  this decision.
+  #840 deleted the default path so the driven `current_thread` model is the sole runtime, completing
+  this decision (an op before the harness installs the runtime now panics — there is no fallback).
 - **#832 — chunk/stream the derived rebuild**, so a large rebuild does not monopolize `drive_sync`.
 - **#833 — a boot/drift "maintenance window"** returning try-again-later on data-plane routes during
   a rebuild/reconcile; #833 owns the concurrent-reads-vs-modifications decision.

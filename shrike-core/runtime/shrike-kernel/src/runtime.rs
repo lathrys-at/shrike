@@ -2,30 +2,22 @@
 //! kernel is idiomatic async Rust; hosts adapt the *action exchange* (an op in,
 //! a completion-backed future out via [`spawn_op`]) and never supply scheduling.
 //!
-//! # Two thread-provisioning models
+//! # The harness-driven runtime — the sole thread-provisioning model
 //!
-//! The runtime runs in one of two **modes**, fixed for the process at the seam:
+//! The kernel runs a single `current_thread` tokio runtime ([`init_driven_runtime`])
+//! and spawns **no threads of its own**: the harness commits **N + 2** threads
+//! and drives every one. [`drive_io`] (×1) owns + drives tokio's IO/timer drivers
+//! and the async executor (actor dispatch, the debounced saver's timers);
+//! [`drive_sync`] (×1) is the serialized collection / anki-sync execution thread,
+//! a consequence of anki's single-writer collection; [`drive_compute`] (×N) runs
+//! CPU-bound engine compute + blocking-fs leaves — the only place real
+//! parallelism lives, so the overlap property is "N ≥ 2". Submission is either
+//! the asyncio bridge (the server) or [`submit_blocking`] (a request thread
+//! submits a unit of work and blocks on its completion).
 //!
-//! - **Default — the lazily-built multi-thread runtime** ([`init_runtime`] with a
-//!   multi-thread runtime, or no `init_*` at all). tokio owns and spawns its own
-//!   worker + blocking-pool threads; nothing here drives it. This is the model
-//!   the PyO3 server and cabi run under. The `dispatch_sync`/`dispatch_compute`
-//!   enqueue helpers fall through to `Handle::spawn_blocking`, so shrike-core
-//!   spawns no thread of its own beyond tokio's pool.
-//!
-//! - **Driven — a harness-driven `current_thread` runtime** ([`init_driven_runtime`]).
-//!   The harness commits **N + 2** threads to the kernel and shrike-core spawns
-//!   none of its own: [`drive_io`] (×1, owns + drives tokio's IO/timer drivers
-//!   and the async executor — actor dispatch, the debounced saver's timers),
-//!   [`drive_sync`] (×1, the serialized collection / anki-sync execution thread —
-//!   a consequence of anki's single-writer collection), and [`drive_compute`]
-//!   (×N, CPU-bound engine compute + blocking-fs leaves; the only place real
-//!   parallelism lives, so the overlap property is "N ≥ 2"). Submission is either
-//!   the asyncio bridge (the server keeps it) or [`submit_blocking`] (a request
-//!   thread submits a unit of work and blocks on its completion).
-//!
-//! The mode is decided once, by which `init_*` ran (or the lazy default), and is
-//! published before any `handle`/[`block_on`]/dispatch call observes it.
+//! The runtime MUST be installed via [`init_driven_runtime`] before any kernel
+//! op: there is no lazy fallback, so [`handle`]/[`block_on`]/dispatch from an
+//! uninstalled runtime panics (a setup error — the harness installs first).
 //!
 //! # The sync-dispatch invariant
 //!
@@ -34,16 +26,9 @@
 //! sync op never executes on a runtime worker thread"**: anki's sync paths call
 //! `block_on`, and [`tokio::runtime::Handle::block_on`] PANICS from inside any
 //! runtime context (a worker thread is such a context — see the panic-repro test
-//! below). The discipline that makes sync safe:
-//!
-//! - **Default mode:** kernel-side sync ops that may `block_on` ride
-//!   `dispatch_sync`, which is `spawn_blocking` — a blocking-pool thread is NOT a
-//!   runtime context, so `block_on` is legal there.
-//! - **Driven mode:** `dispatch_sync` enqueues onto the [`drive_sync`] thread, a
-//!   plain OS thread (never a runtime context) — so `block_on` is legal there by
-//!   construction, not by a `spawn_blocking` discipline.
-//!
-//! Either way the [`SerializedCollection`](crate::SerializedCollection) actor
+//! below). `dispatch_sync` enqueues onto the [`drive_sync`] thread, a plain OS
+//! thread (never a runtime context) — so anki's `block_on` is legal there by
+//! construction. The [`SerializedCollection`](crate::SerializedCollection) actor
 //! routes every job through `dispatch_sync`, so a sync anki call can never land
 //! on a runtime worker. The `sync_dispatch_pin` test below pins this
 //! structurally. `docs/dev/decisions.md` records why a runtime handle-injection
@@ -69,31 +54,17 @@ use tokio::sync::{mpsc, oneshot, Notify};
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
-/// Which thread-provisioning model the process runs under. Set once,
-/// alongside the runtime, before any dispatch observes it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum RuntimeMode {
-    /// tokio owns its worker + blocking-pool threads; dispatch falls through to
-    /// `spawn_blocking`.
-    Default,
-    /// The harness drives a `current_thread` runtime and consumes the
-    /// [`drive_sync`]/[`drive_compute`] queues; dispatch enqueues onto them.
-    Driven,
-}
-
-static MODE: OnceLock<RuntimeMode> = OnceLock::new();
-
 /// A pool job: a boxed sync closure that carries its own completion channel, so
 /// finishing it wakes the awaiting async task. Unbounded queues, like the
 /// collection actor's channel — backpressure is the harness's committed pool
 /// size, not the channel.
 type PoolJob = Box<dyn FnOnce() + Send + 'static>;
 
-/// The driven-mode work queues + their receivers, installed by
-/// [`init_driven_runtime`]. The sync receiver is single-consumer (one
-/// [`drive_sync`] thread); the compute receiver is shared across the N
-/// [`drive_compute`] threads behind a mutex (each `recv` hands a job to one
-/// waiter). `None` in default mode.
+/// The work queues + their receivers, installed by [`init_driven_runtime`]. The
+/// sync receiver is single-consumer (one [`drive_sync`] thread); the compute
+/// receiver is shared across the N [`drive_compute`] threads behind a mutex
+/// (each `recv` hands a job to one waiter). Present once the harness has
+/// installed the driven runtime.
 struct DrivenPools {
     /// The senders are `Option` so [`shutdown_driven_pools`] can `.take()` them:
     /// dropping every sender closes the queue, so the [`drive_sync`] /
@@ -143,67 +114,34 @@ thread_local! {
     static IN_POOL_JOB: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Build the multi-thread default runtime (the lazy-init body, shared by
-/// `handle` and [`block_on`]).
-fn build_default_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("shrike-kernel")
-        .enable_all()
-        .build()
-        .expect("the kernel runtime must build")
-}
-
-/// The runtime, installing the multi-thread default (and `RuntimeMode::Default`)
-/// on first use if no host installed one.
+/// The installed runtime. Panics if [`init_driven_runtime`] has not run: there
+/// is no lazy fallback — the harness installs the driven runtime before any
+/// kernel op (a missing install is a setup error, not a runtime condition).
 fn runtime() -> &'static tokio::runtime::Runtime {
-    RUNTIME.get_or_init(|| {
-        // First touch with no host install ⇒ the default model. A Driven host
-        // always installs its runtime + mode before any lazy touch, so this
-        // set only ever publishes Default (and OnceLock keeps the first either
-        // way).
-        let _ = MODE.set(RuntimeMode::Default);
-        build_default_runtime()
-    })
+    RUNTIME
+        .get()
+        .expect("the driven runtime must be installed via init_driven_runtime before any kernel op")
 }
 
-/// Install a custom-built runtime before the first kernel op (a host with tuned
-/// pools; the degenerate single-thread proof). Runs in `RuntimeMode::Default`
-/// — tokio drives the installed runtime itself, so dispatch keeps falling
-/// through to `spawn_blocking`. A host that wants the harness-driven model uses
-/// [`init_driven_runtime`] instead.
+/// Install a `current_thread` runtime: the harness parks threads in
+/// [`drive_io`]/[`drive_sync`]/[`drive_compute`] to provide every thread the
+/// kernel uses; shrike-core spawns none of its own. The `dispatch_sync` /
+/// `dispatch_compute` helpers enqueue onto the driven queues.
+///
+/// The supplied runtime MUST be a `current_thread` runtime — one async thread
+/// the harness drives via [`drive_io`]. The driven queues are created here, so a
+/// job submitted before [`drive_sync`] / [`drive_compute`] is parked simply
+/// waits in the channel.
 ///
 /// # Errors
 ///
 /// Returns `Err` carrying the supplied runtime back if one is already installed
-/// (the seam is set-once — the first `handle`/[`block_on`] call installs the
-/// multi-thread default if no host did).
-pub fn init_runtime(runtime: tokio::runtime::Runtime) -> Result<(), tokio::runtime::Runtime> {
-    RUNTIME.set(runtime)?;
-    // We won the install ⇒ we own the mode (a competing init also goes through
-    // RUNTIME.set, which we just won).
-    let _ = MODE.set(RuntimeMode::Default);
-    Ok(())
-}
-
-/// Install a `current_thread` runtime in the **driven model**: the
-/// harness will park threads in [`drive_io`]/[`drive_sync`]/[`drive_compute`] to
-/// provide every thread the kernel uses. shrike-core spawns none of its own —
-/// the `dispatch_sync`/`dispatch_compute` helpers enqueue onto the driven
-/// queues instead of `spawn_blocking`.
-///
-/// The supplied runtime SHOULD be a `current_thread` runtime (that is the whole
-/// point — one async thread the harness drives via [`drive_io`]). The driven
-/// queues are created here, so a job submitted before [`drive_sync`] /
-/// [`drive_compute`] is parked simply waits in the channel.
-///
-/// # Errors
-///
-/// Returns `Err` carrying the supplied runtime back if one is already installed.
+/// (the seam is set-once).
 pub fn init_driven_runtime(
     runtime: tokio::runtime::Runtime,
 ) -> Result<(), tokio::runtime::Runtime> {
     RUNTIME.set(runtime)?;
-    // We won the runtime install, so the pools/mode below are uncontended.
+    // We won the runtime install, so the pools below are uncontended.
     let (sync_tx, sync_rx) = mpsc::unbounded_channel::<PoolJob>();
     let (compute_tx, compute_rx) = mpsc::unbounded_channel::<PoolJob>();
     let _ = DRIVEN.set(DrivenPools {
@@ -213,24 +151,26 @@ pub fn init_driven_runtime(
         compute_rx: Arc::new(Mutex::new(compute_rx)),
         shutdown: Notify::new(),
     });
-    let _ = MODE.set(RuntimeMode::Driven);
     Ok(())
 }
 
-/// The kernel runtime's handle (installing the multi-thread default on
-/// first use). Only the handle escapes — never the `Runtime` — so nothing
-/// can drop or block the runtime from inside it.
+/// The kernel runtime's handle. Only the handle escapes — never the `Runtime` —
+/// so nothing can drop or block the runtime from inside it.
+///
+/// # Panics
+///
+/// Panics if the driven runtime is not installed (see [`init_driven_runtime`]).
 pub(crate) fn handle() -> &'static tokio::runtime::Handle {
     runtime().handle()
 }
 
 /// Drive a future to completion on the kernel runtime from a non-async
-/// context (tests; a synchronous embedded host; the cabi driver thread).
-/// Installs the multi-thread default on first use if no host called
-/// [`init_runtime`]/[`init_driven_runtime`]. Async callers just `.await`.
+/// context (the [`drive_io`] driver thread; a synchronous embedded host).
+/// Async callers just `.await`.
 ///
 /// # Panics
 ///
+/// Panics if the driven runtime is not installed (see [`init_driven_runtime`]).
 /// Panics if called from inside the runtime — a runtime worker thread is a
 /// runtime context, and `tokio`'s nested-`block_on` guard refuses there. This
 /// is the same guard the module's sync-dispatch discipline relies on (pinned by
@@ -239,83 +179,64 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
     runtime().block_on(future)
 }
 
-/// **Driven mode: own + drive the runtime until `until` resolves.** The
-/// harness's one IO/timer-driver thread. The first call to the
-/// runtime's `block_on` takes ownership of tokio's IO + timer drivers and the
-/// async executor; every spawned task (the collection actor's dispatch loop, the
-/// debounced saver's timer, the tag refresher) is polled here, and timers fire.
-/// Other [`drive_sync`]/[`drive_compute`] threads do not own the drivers — they
-/// hook into this one.
+/// **Own + drive the runtime until `until` resolves.** The harness's one
+/// IO/timer-driver thread. The first call to the runtime's `block_on` takes
+/// ownership of tokio's IO + timer drivers and the async executor; every spawned
+/// task (the collection actor's dispatch loop, the debounced saver's timer, the
+/// tag refresher) is polled here, and timers fire. Other
+/// [`drive_sync`]/[`drive_compute`] threads do not own the drivers — they hook
+/// into this one.
 ///
 /// `until` is the harness's shutdown signal (resolved once shutdown begins and
 /// in-flight work has drained); when it resolves, `drive_io` returns and the
 /// harness joins it before interpreter finalization.
 ///
-/// In **default mode** this is a misuse (tokio self-drives) and returns an
-/// error — nothing in the default model calls it.
-///
 /// # Errors
 ///
-/// Returns an error if called in default mode.
+/// Returns an error if the driven runtime is not installed.
 pub fn drive_io<F: Future<Output = ()> + Send + 'static>(until: F) -> NativeResult<()> {
-    if mode() != RuntimeMode::Driven {
-        return Err(NativeError::internal(
-            "drive_io is a driven-mode entry point; the default runtime self-drives",
-        ));
-    }
+    let _ = DRIVEN.get().ok_or_else(driven_missing)?;
     block_on(until);
     Ok(())
 }
 
-/// **Driven mode: drive the runtime until [`shutdown_driven_pools`] is called.**
-/// The same as [`drive_io`] but parked on the pools' built-in shutdown signal,
-/// so a host with no shutdown future of its own (the binding) gets one
-/// `drive_io` thread whose `until` and the pool-queue close are tripped by one
-/// call. No lost wakeup against a racing shutdown: `shutdown_driven_pools` uses
-/// `notify_one`, which stores a permit when no waiter is parked yet, so a
-/// shutdown that fires before this thread reaches the await is consumed by it
-/// immediately.
+/// **Drive the runtime until [`shutdown_driven_pools`] is called.** The same as
+/// [`drive_io`] but parked on the pools' built-in shutdown signal, so a host
+/// with no shutdown future of its own (the binding) gets one `drive_io` thread
+/// whose `until` and the pool-queue close are tripped by one call. No lost
+/// wakeup against a racing shutdown: `shutdown_driven_pools` uses `notify_one`,
+/// which stores a permit when no waiter is parked yet, so a shutdown that fires
+/// before this thread reaches the await is consumed by it immediately.
 ///
 /// # Errors
 ///
-/// Returns an error if called in default mode, or if no driven pools are
-/// installed.
+/// Returns an error if the driven runtime is not installed.
 pub fn drive_io_until_shutdown() -> NativeResult<()> {
-    if mode() != RuntimeMode::Driven {
-        return Err(NativeError::internal(
-            "drive_io_until_shutdown is a driven-mode entry point; the default runtime self-drives",
-        ));
-    }
     let pools = DRIVEN.get().ok_or_else(driven_missing)?;
     block_on(pools.shutdown.notified());
     Ok(())
 }
 
-/// **Driven mode: the serialized collection / anki-sync execution thread**
-/// A plain OS thread blocking on the sync work queue and running each
-/// job to completion. One thread is a *consequence* of anki's single-writer
-/// collection (reads and writes serialize; anki forbids concurrent access), not
-/// a tuning choice. Because this thread is never inside the kernel runtime
-/// context, anki's own `block_on` is legal here — the structural form of the
-/// sync-never-on-a-runtime-worker invariant.
+/// **The serialized collection / anki-sync execution thread.** A plain OS thread
+/// blocking on the sync work queue and running each job to completion. One thread
+/// is a *consequence* of anki's single-writer collection (reads and writes
+/// serialize; anki forbids concurrent access), not a tuning choice. Because this
+/// thread is never inside the kernel runtime context, anki's own `block_on` is
+/// legal here — the structural form of the sync-never-on-a-runtime-worker
+/// invariant.
 ///
 /// Parks until the queue is closed (every sender dropped — i.e. harness
 /// shutdown), then returns so the harness can join it.
 ///
 /// # Errors
 ///
-/// Returns an error if called in default mode, or if the sync queue was already
-/// claimed by a prior `drive_sync` (exactly one thread drives it).
+/// Returns an error if the driven runtime is not installed, or if the sync queue
+/// was already claimed by a prior `drive_sync` (exactly one thread drives it).
 ///
 /// # Panics
 ///
 /// Panics if the sync-receiver mutex is poisoned (a prior holder panicked).
 pub fn drive_sync() -> NativeResult<()> {
-    if mode() != RuntimeMode::Driven {
-        return Err(NativeError::internal(
-            "drive_sync is a driven-mode entry point; the default runtime self-drives",
-        ));
-    }
     let pools = DRIVEN.get().ok_or_else(driven_missing)?;
     let mut rx = pools
         .sync_rx
@@ -343,18 +264,13 @@ pub fn drive_sync() -> NativeResult<()> {
 ///
 /// # Errors
 ///
-/// Returns an error if called in default mode.
+/// Returns an error if the driven runtime is not installed.
 ///
 /// # Panics
 ///
 /// Panics if the shared compute-receiver mutex is poisoned (a prior holder
 /// panicked).
 pub fn drive_compute() -> NativeResult<()> {
-    if mode() != RuntimeMode::Driven {
-        return Err(NativeError::internal(
-            "drive_compute is a driven-mode entry point; the default runtime self-drives",
-        ));
-    }
     let pools = DRIVEN.get().ok_or_else(driven_missing)?;
     let rx = Arc::clone(&pools.compute_rx);
     loop {
@@ -372,24 +288,21 @@ pub fn drive_compute() -> NativeResult<()> {
     Ok(())
 }
 
-/// **Driven mode: signal every committed thread to return so the harness can
-/// join them.** Drops the pool senders (closing the [`drive_sync`] /
-/// [`drive_compute`] queues, so their `recv` yields `None` and they return) and
-/// trips the [`drive_io_until_shutdown`] signal. Call it once, AFTER kernel work
-/// has quiesced (the collection actor drained), so no in-flight enqueue is
-/// holding a transient sender clone — then the queues close promptly and the
-/// joins are immediate. Idempotent: a second call finds the senders already
-/// taken and only re-trips the signal.
-///
-/// In **default mode** there are no committed threads to signal, so this is a
-/// no-op (tokio owns its own pool).
+/// **Signal every committed thread to return so the harness can join them.**
+/// Drops the pool senders (closing the [`drive_sync`] / [`drive_compute`] queues,
+/// so their `recv` yields `None` and they return) and trips the
+/// [`drive_io_until_shutdown`] signal. Call it once, AFTER kernel work has
+/// quiesced (the collection actor drained), so no in-flight enqueue is holding a
+/// transient sender clone — then the queues close promptly and the joins are
+/// immediate. Idempotent: a second call finds the senders already taken and only
+/// re-trips the signal. A no-op if the driven runtime was never installed.
 ///
 /// # Panics
 ///
 /// Panics if a sender-slot mutex is poisoned (a prior holder panicked).
 pub fn shutdown_driven_pools() {
     let Some(pools) = DRIVEN.get() else {
-        return; // default mode (or no driven install) — nothing to signal
+        return; // no driven install — nothing to signal
     };
     // Drop the senders: this is what closes the queues. Each parker returns
     // once its receiver sees every sender gone — the transient clones held by
@@ -421,14 +334,11 @@ pub fn shutdown_driven_pools() {
 /// async executor thread (it blocks). The asyncio server does NOT use this — it
 /// keeps the bridge (`spawn_op` + an awaited `asyncio.Future`).
 ///
-/// In **default mode** there is no driven pool, so the work runs inline on the
-/// calling thread — correct for a synchronous host with no committed pool, and
-/// it preserves the "block until complete, then return the value" contract.
-///
 /// # Errors
 ///
 /// Propagates the work's own `NativeResult`; an internal error if the driven
-/// compute worker vanished without producing one (the pool shut down mid-flight).
+/// runtime is not installed, or if the compute worker vanished without producing
+/// a result (the pool shut down mid-flight).
 pub fn submit_blocking<T: Send + 'static>(
     work: impl FnOnce() -> NativeResult<T> + Send + 'static,
 ) -> NativeResult<T> {
@@ -436,24 +346,19 @@ pub fn submit_blocking<T: Send + 'static>(
         !IN_POOL_JOB.with(Cell::get),
         "leaf-invariant: a pool job must not submit-and-block on further pool work (submit_blocking)"
     );
-    match mode() {
-        RuntimeMode::Driven => {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let job: PoolJob = Box::new(move || {
-                let _ = tx.send(run_in_pool_job(work));
-            });
-            DRIVEN
-                .get()
-                .ok_or_else(driven_missing)?
-                .compute_sender()
-                .ok_or_else(|| NativeError::internal("the compute pool is gone"))?
-                .send(job)
-                .map_err(|_| NativeError::internal("the compute pool is gone"))?;
-            rx.recv()
-                .map_err(|_| NativeError::internal("the compute worker dropped a job"))?
-        }
-        RuntimeMode::Default => run_in_pool_job(work),
-    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let job: PoolJob = Box::new(move || {
+        let _ = tx.send(run_in_pool_job(work));
+    });
+    DRIVEN
+        .get()
+        .ok_or_else(driven_missing)?
+        .compute_sender()
+        .ok_or_else(|| NativeError::internal("the compute pool is gone"))?
+        .send(job)
+        .map_err(|_| NativeError::internal("the compute pool is gone"))?;
+    rx.recv()
+        .map_err(|_| NativeError::internal("the compute worker dropped a job"))?
 }
 
 /// The action-exchange edge: spawn an op onto the kernel runtime and
@@ -482,17 +387,13 @@ pub fn spawn_op<T: Send + 'static>(
     }
 }
 
-// ── dispatch: route blocking work to the right pool, mode-agnostically ───────
+// ── dispatch: route blocking work onto the committed pools ───────────────────
 
 /// Run a unit of **anki-collection / sync** blocking work, returning an eagerly-
 /// scheduled future of its result. The collection actor and every kernel-side
 /// sync op route through here so a sync `block_on` can never land on a runtime
-/// worker:
-///
-/// - **Driven mode:** enqueue onto the [`drive_sync`] thread (a non-runtime
-///   context — anki `block_on` legal by construction).
-/// - **Default mode:** `tokio::task::spawn_blocking` (a blocking-pool thread —
-///   not a runtime context).
+/// worker: the work enqueues onto the [`drive_sync`] thread (a non-runtime
+/// context — anki `block_on` legal by construction).
 ///
 /// **Eager by contract** (like the engine `Blocking` adapter): the work is
 /// scheduled inside this call, before the returned future is first polled.
@@ -514,10 +415,8 @@ pub(crate) fn dispatch_sync<T: Send + 'static>(
 /// Run a unit of **CPU-bound compute / blocking-fs** work, returning an eagerly-
 /// scheduled future of its result. The engine `Blocking` adapter, the
 /// tag-centroid recompute, the index file save, the derived FTS5 rebuild, and
-/// the store-media decode route through here.
-///
-/// - **Driven mode:** enqueue onto the [`drive_compute`] pool (N threads).
-/// - **Default mode:** `Handle::spawn_blocking`.
+/// the store-media decode route through here, enqueuing onto the
+/// [`drive_compute`] pool (N threads).
 ///
 /// **Eager by contract**: the work is scheduled inside this call.
 ///
@@ -535,25 +434,23 @@ pub(crate) fn dispatch_compute<T: Send + 'static>(
     enqueue(QueueKind::Compute, work)
 }
 
-/// **Schedule a fire-and-forget compute job on the blocking pool, eagerly** —
-/// the seam the engine `Blocking` adapter's injected dispatcher calls. The job
-/// is the type-erased closure that owns its own result channel (engine-api wraps
-/// the engine compute so the awaiting future learns the outcome), so this only
-/// has to run it on the right pool:
-///
-/// - **Driven mode:** enqueue onto the [`drive_compute`] pool (N threads, the
-///   N ≥ 2 engine overlap).
-/// - **Default mode:** `Handle::spawn_blocking` (tokio's blocking pool).
+/// **Schedule a fire-and-forget compute job on the [`drive_compute`] pool,
+/// eagerly** — the seam the engine `Blocking` adapter's injected dispatcher
+/// calls. The job is the type-erased closure that owns its own result channel
+/// (engine-api wraps the engine compute so the awaiting future learns the
+/// outcome), so this only has to run it on the pool (N threads, the N ≥ 2 engine
+/// overlap).
 ///
 /// **Eager by contract**: the job is queued/scheduled inside this call, before
 /// control returns to the adapter — what keeps the engine future in flight
 /// before its first poll (the search/add overlap property).
 ///
-/// The job runs through [`run_in_pool_job`] for the same panic containment and
+/// The job runs through [`run_in_pool_job`] for the panic containment and
 /// leaf-invariant tripwire every kernel pool job gets: a panicking engine job
 /// loses only itself (its result channel drops, the awaiting future gets a clean
-/// error), the pool thread survives. If the pool is gone (shutdown) the job is
-/// dropped; its result channel closes and the awaiting future sees the error.
+/// error), the pool thread survives. If the pool is gone (shutdown, or no driven
+/// runtime installed) the job is dropped; its result channel closes and the
+/// awaiting future sees the error.
 pub fn submit_compute(job: Box<dyn FnOnce() + Send + 'static>) {
     debug_assert!(
         !IN_POOL_JOB.with(Cell::get),
@@ -565,15 +462,8 @@ pub fn submit_compute(job: Box<dyn FnOnce() + Send + 'static>) {
             Ok::<(), NativeError>(())
         });
     });
-    match mode() {
-        RuntimeMode::Driven => {
-            if let Some(sender) = DRIVEN.get().and_then(DrivenPools::compute_sender) {
-                let _ = sender.send(contained);
-            }
-        }
-        RuntimeMode::Default => {
-            handle().spawn_blocking(contained);
-        }
+    if let Some(sender) = DRIVEN.get().and_then(DrivenPools::compute_sender) {
+        let _ = sender.send(contained);
     }
 }
 
@@ -584,86 +474,56 @@ enum QueueKind {
     Compute,
 }
 
-/// The shared body of `dispatch_sync`/`dispatch_compute`: branch on mode,
-/// enqueue (driven) or `spawn_blocking` (default), and return an eager future of
-/// the result. Boxed so the two arms unify to one return type.
+/// The shared body of `dispatch_sync`/`dispatch_compute`: enqueue onto the
+/// targeted pool and return an eager future of the result. Boxed so the two
+/// callers unify to one return type.
 fn enqueue<T: Send + 'static>(
     kind: QueueKind,
     work: impl FnOnce() -> NativeResult<T> + Send + 'static,
 ) -> futures::future::BoxFuture<'static, NativeResult<T>> {
-    match mode() {
-        RuntimeMode::Driven => {
-            let (tx, rx) = oneshot::channel();
-            let job: PoolJob = Box::new(move || {
-                let _ = tx.send(run_in_pool_job(work));
-            });
-            // If the queue is gone (shutdown took the sender), the receiver
-            // closes empty → the internal error below.
-            if let Some(pools) = DRIVEN.get() {
-                let sender = match kind {
-                    QueueKind::Sync => pools.sync_sender(),
-                    QueueKind::Compute => pools.compute_sender(),
-                };
-                if let Some(sender) = sender {
-                    let _ = sender.send(job);
-                }
-            }
-            Box::pin(async move {
-                rx.await
-                    .map_err(|_| NativeError::internal("the driven pool dropped a job"))?
-            })
-        }
-        RuntimeMode::Default => {
-            // `Handle::spawn_blocking` (not the free `tokio::task::spawn_blocking`)
-            // so dispatch works from a non-async context too — the debounced
-            // saver's burst-cap path calls in synchronously.
-            let join = handle().spawn_blocking(move || run_in_pool_job(work));
-            Box::pin(async move {
-                join.await
-                    .map_err(|_| NativeError::internal("the blocking task failed"))?
-            })
+    let (tx, rx) = oneshot::channel();
+    let job: PoolJob = Box::new(move || {
+        let _ = tx.send(run_in_pool_job(work));
+    });
+    // If the queue is gone (shutdown took the sender, or no driven runtime
+    // installed), the receiver closes empty → the internal error below.
+    if let Some(pools) = DRIVEN.get() {
+        let sender = match kind {
+            QueueKind::Sync => pools.sync_sender(),
+            QueueKind::Compute => pools.compute_sender(),
+        };
+        if let Some(sender) = sender {
+            let _ = sender.send(job);
         }
     }
+    Box::pin(async move {
+        rx.await
+            .map_err(|_| NativeError::internal("the driven pool dropped a job"))?
+    })
 }
 
-/// The current mode (defaulting via the lazy runtime if neither `init_*` ran).
-fn mode() -> RuntimeMode {
-    if let Some(m) = MODE.get() {
-        return *m;
-    }
-    // No mode set yet ⇒ touch the runtime, which sets Default on lazy init.
-    let _ = runtime();
-    *MODE.get().unwrap_or(&RuntimeMode::Default)
-}
-
-/// Whether the runtime is installed in the driven model — the binding checks
-/// this right after [`init_driven_runtime`] so a lost install (a prior op
-/// already pinned the default runtime) is a loud error, not threads that quietly
-/// fail to drive. Does NOT trigger the lazy default install: an unset mode reads
-/// as "not driven" without pinning anything, so a later `init_driven_runtime`
-/// can still win.
+/// Whether the driven runtime has been installed. The binding checks this right
+/// after [`init_driven_runtime`] so a lost install (the set-once seam was already
+/// taken) is a loud error, not threads that quietly fail to drive.
 pub fn is_driven() -> bool {
-    MODE.get() == Some(&RuntimeMode::Driven)
+    DRIVEN.get().is_some()
 }
 
 /// Run a pool job body with the leaf-invariant tripwire armed AND its panic
-/// contained — the one place both modes converge, so resilience is uniform
-/// (default==driven) and DRY.
+/// contained — the one place every pool job converges, so resilience is uniform
+/// and DRY.
 ///
 /// - **Tripwire**: sets the `IN_POOL_JOB` thread-local for the duration, so a
 ///   `dispatch_*` called from within asserts (debug builds). An RAII guard
-///   clears it even on unwind, so a panicking job can't leave it armed on a
-///   reused blocking-pool thread (default mode) and spuriously trip a later
-///   legitimate dispatch.
+///   clears it even on unwind, so a panicking job can't leave it armed and
+///   spuriously trip a later legitimate dispatch.
 /// - **Panic containment**: `work` is run under `catch_unwind` and a caught
-///   panic becomes `Err(Internal)` rather than unwinding out. In DRIVEN mode the
-///   pool runs jobs on a long-lived OS thread with no per-job isolation, so an
-///   uncaught panic would KILL that thread — and the single `drive_sync` thread
-///   dying would wedge every future collection op (its receiver was taken with
-///   no replacement). Default mode's `spawn_blocking` already isolates a panic
-///   (tokio turns it into a `JoinError`) and reuses the thread; catching here
-///   gives DRIVEN the SAME "a panic loses only that one job, the pool survives,
-///   the caller gets a clean Err" resilience — the spec's default==driven parity.
+///   panic becomes `Err(Internal)` rather than unwinding out. The pool runs jobs
+///   on a long-lived OS thread with no per-job isolation, so an uncaught panic
+///   would KILL that thread — and the single `drive_sync` thread dying would
+///   wedge every future collection op (its receiver was taken with no
+///   replacement). Catching here keeps "a panic loses only that one job, the
+///   pool survives, the caller gets a clean Err".
 fn run_in_pool_job<T>(work: impl FnOnce() -> NativeResult<T>) -> NativeResult<T> {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     struct Disarm;
@@ -691,7 +551,134 @@ fn run_in_pool_job<T>(work: impl FnOnce() -> NativeResult<T>) -> NativeResult<T>
 }
 
 fn driven_missing() -> NativeError {
-    NativeError::internal("driven mode has no pools installed")
+    NativeError::internal("the driven runtime is not installed (call init_driven_runtime first)")
+}
+
+/// Test-support: install + drive the runtime so a test can run kernel futures.
+///
+/// **Not part of the stable API** — these are test fixtures for driving the
+/// kernel runtime in tests (the kernel's own integration binaries, and the cabi
+/// in-crate smoke), `pub` only so those external test crates can reach them.
+/// They compile only where the kernel does: the kernel is the `anki-core`
+/// capability (an optional, `anki-core`-gated dependency of the bindings), so a
+/// compute-only / minimal-core build pulls in neither the kernel nor this module.
+///
+/// The runtime is harness-driven with no lazy fallback, so a test process must
+/// commit the driver threads itself — the maintainer's "1 + N injected fixture".
+/// This module donates them, once per process (the seam is set-once and the
+/// committed threads outlive any kernel, exactly as in production):
+///
+/// - [`run`] installs a `current_thread` runtime and parks **1 `drive_io` + N
+///   `drive_compute`** threads (no sync), then runs a future via the submit +
+///   completion-channel shape — the threaded-host submission path.
+/// - [`run_with_sync`] adds the **`drive_sync`** thread for a test that opens a
+///   collection / exercises anki ops (the serialized-collection actor routes
+///   through `dispatch_sync`). Most kernel tests want this; a genuinely
+///   sync-free test uses [`run`].
+///
+/// The startup barrier is honored (`drive_io` first, [`spawn_op`]-probe, then the
+/// rest), so the IO thread owns tokio's drivers before any other thread parks.
+/// The threads are never joined: a test process keeps them parked for its life.
+pub mod testing {
+    use std::sync::OnceLock;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::*;
+
+    /// Number of `drive_compute` threads the fixture commits — two so independent
+    /// engine batches overlap (the "N ≥ 2" property), enough for any test.
+    const COMPUTE_THREADS: usize = 2;
+
+    /// One-time install + IO/compute thread spawn (the barrier-honored core,
+    /// shared by [`run`] and [`run_with_sync`]).
+    static STARTED: OnceLock<()> = OnceLock::new();
+    /// One-time `drive_sync` spawn, lazily added the first time a test wants sync.
+    static SYNC_STARTED: OnceLock<()> = OnceLock::new();
+
+    /// Park a committed driver thread in `entry`, naming it per the kernel's
+    /// thread-name scheme.
+    fn spawn(name: &str, entry: impl FnOnce() + Send + 'static) {
+        thread::Builder::new()
+            .name(name.to_string())
+            .spawn(entry)
+            .expect("a fixture driver thread spawns");
+    }
+
+    /// Install the driven runtime and park `drive_io` + N `drive_compute`, once
+    /// per process. Honors the startup barrier: spawn `drive_io`, probe until it
+    /// is driving, then spawn the compute workers.
+    fn ensure_started() {
+        STARTED.get_or_init(|| {
+            init_driven_runtime(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("the fixture current_thread runtime builds"),
+            )
+            .unwrap_or_else(|_| panic!("the test process owns the driven runtime seam"));
+
+            spawn("shrike-io", || {
+                let _ = drive_io_until_shutdown();
+            });
+            // The barrier: block until the IO thread owns the drivers before the
+            // rest park (a spawned op completes only once a thread is driving).
+            let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
+            drop(spawn_op(async move {
+                let _ = tx.send(());
+                Ok(())
+            }));
+            rx.recv_timeout(Duration::from_secs(30))
+                .expect("the IO thread drives the runtime (the startup barrier)");
+
+            for i in 0..COMPUTE_THREADS {
+                spawn(&format!("shrike-work-{i}"), || {
+                    let _ = drive_compute();
+                });
+            }
+        });
+    }
+
+    /// Add the `drive_sync` thread, once per process. The sync queue already
+    /// exists (created by `init_driven_runtime`), so parking the thread late is
+    /// fine — jobs enqueued before it parks simply wait.
+    fn ensure_sync() {
+        ensure_started();
+        SYNC_STARTED.get_or_init(|| {
+            spawn("shrike-sync", || {
+                let _ = drive_sync();
+            });
+        });
+    }
+
+    /// Submit `fut` onto the driven runtime and block the calling test thread on
+    /// its completion (the threaded-host submission shape — the request thread
+    /// must not `block_on` the runtime the IO thread owns). A timeout turns a
+    /// regression that fails to drive the op into a bounded failure, not a hang.
+    fn submit_and_wait<T: Send + 'static>(fut: impl Future<Output = T> + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<T>(1);
+        drop(spawn_op(async move {
+            let _ = tx.send(fut.await);
+            Ok(())
+        }));
+        rx.recv_timeout(Duration::from_secs(60))
+            .expect("the driven runtime completed the test future (no hang)")
+    }
+
+    /// Run a kernel future on the driven runtime with **1 io + N compute**
+    /// threads (no sync). For a test that does not open a collection.
+    pub fn run<T: Send + 'static>(fut: impl Future<Output = T> + Send + 'static) -> T {
+        ensure_started();
+        submit_and_wait(fut)
+    }
+
+    /// Run a kernel future on the driven runtime with **1 io + 1 sync + N
+    /// compute** threads — for a test that opens a collection / exercises anki
+    /// ops (the serialized-collection actor routes through the sync thread).
+    pub fn run_with_sync<T: Send + 'static>(fut: impl Future<Output = T> + Send + 'static) -> T {
+        ensure_sync();
+        submit_and_wait(fut)
+    }
 }
 
 #[cfg(test)]
@@ -708,16 +695,16 @@ mod sync_dispatch_pin {
     //!   dispatched *directly* from a `SerializedCollection` job inline on a
     //!   worker).
     //! - **Half 2** demonstrates the mandated dispatch site is safe: the SAME
-    //!   call on a `spawn_blocking` pool thread — the DEFAULT-mode dispatch
-    //!   target — succeeds and returns the sentinel.
+    //!   call on a plain OS thread — the structural form of the [`drive_sync`]
+    //!   dispatch target, never a runtime context — succeeds and returns the
+    //!   sentinel.
     //!
     //! The only variable between the halves is *which thread* runs `block_on`, so
     //! a regression that lets a sync call run on a runtime worker flips Half 2
-    //! from pass to panic. The DRIVEN-mode structural form of the invariant
-    //! (sync runs on the non-runtime `drive_sync` thread) is pinned end-to-end
-    //! by the `driven_mode.rs` integration binary, which can install the
-    //! process-global driven seam without colliding with this in-process suite.
-    //! Self-contained here: a locally-built runtime so the seam is untouched.
+    //! from pass to panic. The full driven-mode form of the invariant (sync runs
+    //! on the committed `drive_sync` thread) is pinned end-to-end by the
+    //! `driven_mode.rs` integration binary. Self-contained here: a locally-built
+    //! `current_thread` runtime so the process-global seam is untouched.
 
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -730,50 +717,51 @@ mod sync_dispatch_pin {
     }
 
     #[test]
-    fn block_on_panics_on_a_runtime_worker_but_rides_the_blocking_pool() {
-        // A dedicated multi-thread runtime — never the process-global seam,
-        // which other tests in this binary share.
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
+    fn block_on_panics_on_a_runtime_worker_but_rides_a_plain_thread() {
+        // A dedicated local current_thread runtime — never the process-global
+        // seam, which other tests in this binary share. Its block_on caller IS a
+        // runtime context, which is all Half 1 needs.
+        let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("test runtime builds");
         let handle = rt.handle().clone();
 
-        rt.block_on(async {
-            // ── Half 1: a runtime worker thread is a runtime context, so
-            // `block_on` MUST panic. Calling it directly inside this async
-            // block runs it on the worker polling us. Catch the unwind so the
-            // worker survives for half 2.
-            let inner = handle.clone();
-            let worker_result = catch_unwind(AssertUnwindSafe(|| sync_call_that_blocks_on(&inner)));
-            assert!(
-                worker_result.is_err(),
-                "Handle::block_on must panic on a runtime worker thread — if it \
-                 stopped panicking, the dispatch invariant can no longer be \
-                 pinned this way"
-            );
-
-            // ── Half 2: the SAME call on a `spawn_blocking` pool thread — the
-            // DEFAULT-mode dispatch target — succeeds and returns the sentinel.
-            let pooled = handle.clone();
-            let value = tokio::task::spawn_blocking(move || sync_call_that_blocks_on(&pooled))
-                .await
-                .expect("the spawn_blocking task itself must not fail");
-            assert_eq!(
-                value, 0x5031,
-                "block_on on a blocking-pool thread must run the sync call to \
-                 completion"
-            );
+        // ── Half 1: the runtime's own block_on driver thread is a runtime
+        // context, so a nested `block_on` MUST panic. Calling it inside the
+        // runtime's block_on runs it on that context. Catch the unwind so the
+        // thread survives for half 2.
+        let inner = handle.clone();
+        let worker_result = rt.block_on(async move {
+            catch_unwind(AssertUnwindSafe(|| sync_call_that_blocks_on(&inner)))
         });
+        assert!(
+            worker_result.is_err(),
+            "Handle::block_on must panic on a runtime context — if it stopped \
+             panicking, the dispatch invariant can no longer be pinned this way"
+        );
+
+        // ── Half 2: the SAME call on a plain OS thread — the structural form of
+        // the `drive_sync` dispatch target, never a runtime context — succeeds
+        // and returns the sentinel.
+        let pooled = handle.clone();
+        let value = std::thread::spawn(move || sync_call_that_blocks_on(&pooled))
+            .join()
+            .expect("the plain thread must not fail");
+        assert_eq!(
+            value, 0x5031,
+            "block_on on a plain (non-runtime) thread must run the sync call to \
+             completion"
+        );
     }
 }
 
 #[cfg(test)]
 mod leaf_invariant {
     //! The deadlock leaf-invariant tripwire: a pool job must never
-    //! enqueue-and-await further pool work. These run in the multi-thread suite
-    //! (default mode), where `dispatch_compute` is `spawn_blocking`.
+    //! enqueue-and-await further pool work. These run on the driven runtime (the
+    //! shared test fixture), where `dispatch_compute` enqueues onto the committed
+    //! `drive_compute` pool.
 
     use super::*;
 
@@ -781,42 +769,28 @@ mod leaf_invariant {
     /// a pure leaf — completes and never trips the assert.
     #[test]
     fn well_formed_dispatch_passes() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
         let out: NativeResult<u64> =
-            rt.block_on(async { dispatch_compute(|| Ok(0x5031_u64)).await });
+            testing::run(async { dispatch_compute(|| Ok(0x5031_u64)).await });
         assert_eq!(out.unwrap(), 0x5031);
     }
 
     /// A leaf job that RE-ENTERS dispatch (the deadlock shape) trips the
     /// debug-build tripwire. The nested dispatch happens INSIDE a running pool
     /// job (the tripwire's thread-local is set), so the `debug_assert!` in
-    /// `dispatch_compute` panics. In default mode the outer job runs on a
-    /// `spawn_blocking` thread, so tokio converts that panic into a `JoinError`
-    /// — surfacing as the future's `Err`, NOT an unwind to the caller. The
-    /// debug-build outcome is therefore the outer op resolving `Err`; release
-    /// builds compile the assert out and the op resolves `Ok`.
+    /// `dispatch_compute` panics. The outer job runs on a `drive_compute` thread
+    /// under `run_in_pool_job`, which catches that panic and turns it into the
+    /// outer job's `Err` — never an unwind to the caller. The debug-build outcome
+    /// is therefore the outer op resolving `Err`; release builds compile the
+    /// assert out and the op resolves `Ok`.
     #[test]
     fn nested_pool_dispatch_trips_the_tripwire_in_debug() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let handle = rt.handle().clone();
-        let out: NativeResult<()> = rt.block_on(async {
+        let out: NativeResult<()> = testing::run(async {
             // The OUTER pool job runs `run_in_pool_job` (sets the flag), and
             // from inside it synchronously builds a nested dispatch — exactly the
             // forbidden enqueue-from-a-pool-job shape.
-            let h2 = handle.clone();
             dispatch_compute(move || {
                 // Inside a pool job now (flag set). Building a nested dispatch
-                // future trips the debug_assert. Enter the runtime so the
-                // default-mode `spawn_blocking` path can schedule.
-                let _enter = h2.enter();
+                // future trips the debug_assert.
                 let _nested = dispatch_compute(|| Ok::<(), NativeError>(()));
                 Ok::<(), NativeError>(())
             })
@@ -826,26 +800,22 @@ mod leaf_invariant {
             assert!(
                 out.is_err(),
                 "a pool job re-entering dispatch must trip the leaf-invariant \
-                 debug_assert — the outer job panics, surfacing as the blocking \
-                 task's JoinError"
+                 debug_assert — the outer job panics, caught by run_in_pool_job \
+                 and surfaced as the job's Err"
             );
         } else {
             assert!(out.is_ok(), "release: the assert is compiled out");
         }
     }
 
-    /// `submit_compute` (default mode) schedules the fire-and-forget job on the
-    /// blocking pool — it runs to completion off the calling thread. The job
-    /// carries its own result channel (the engine `Blocking` adapter's shape), so
-    /// we observe completion + the thread it ran on through one.
+    /// `submit_compute` schedules the fire-and-forget job on the `drive_compute`
+    /// pool — it runs to completion off the calling thread. The job carries its
+    /// own result channel (the engine `Blocking` adapter's shape), so we observe
+    /// completion + the thread it ran on through one.
     #[test]
-    fn submit_compute_runs_off_thread_in_default_mode() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let _guard = rt.enter();
+    fn submit_compute_runs_off_thread() {
+        // Ensure the driven fixture is up (parks the drive_compute threads).
+        testing::run(async {});
         let caller = std::thread::current().id();
         let (tx, rx) = std::sync::mpsc::channel();
         submit_compute(Box::new(move || {
@@ -853,10 +823,10 @@ mod leaf_invariant {
         }));
         let ran_on = rx
             .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("submit_compute scheduled the job on the blocking pool");
+            .expect("submit_compute scheduled the job on the compute pool");
         assert_ne!(
             ran_on, caller,
-            "submit_compute ran the job off the calling thread (on the blocking pool)"
+            "submit_compute ran the job off the calling thread (on the compute pool)"
         );
     }
 }

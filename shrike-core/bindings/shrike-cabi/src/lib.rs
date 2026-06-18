@@ -294,14 +294,11 @@ const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// suspend/teardown). Ops admitted BEFORE the store are counted in [`INFLIGHT`]
 /// and the shutdown drains them to completion first.
 ///
-/// It starts `false` — the state of the default multi-thread lane too (a
-/// consumer that called neither [`shrike_runtime_init`] nor the drive entries,
-/// whose lazy-default worker threads DO drive spawned tasks), so that lane and
-/// every pre-shutdown op are wholly unaffected. It is never cleared in-process:
-/// the kernel runtime + mode are `OnceLock`s, so re-driving after shutdown is a
-/// no-op (the drive entries return at once on the already-tripped pools) and the
-/// runtime stays terminally undriven — pinned by `reinit_after_shutdown`, which
-/// asserts ops still fast-fail after a re-init, not that re-init "fails".
+/// It starts `false`, so every pre-shutdown op is admitted. It is never cleared
+/// in-process: the kernel runtime is a `OnceLock`, so re-driving after shutdown
+/// is a no-op (the drive entries return at once on the already-tripped pools) and
+/// the runtime stays terminally undriven — pinned by `reinit_after_shutdown`,
+/// which asserts ops still fast-fail after a re-init, not that re-init "fails".
 #[cfg(feature = "anki-core")]
 static DRIVER_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -371,17 +368,15 @@ fn finish_op() {
 
 /// Install the driven `current_thread` kernel runtime — install ONLY, no
 /// threads (shrike-cabi is shrike-core; the HOST owns thread provisioning).
-/// Returns whether the runtime is now driven: `true` on a fresh install (or a
-/// benign re-call where driven was already installed), `false` if the lazy
-/// default multi-thread runtime had already been pinned by an earlier op. The
-/// caller MUST NOT park drive threads when this is `false` — they would have no
-/// driven queues to consume and would return at once.
+/// Returns whether the runtime is now driven: `true` once installed (a fresh
+/// install, or a benign re-call where it was already installed), `false` only if
+/// the runtime fails to build. The host MUST call this (and then park the drive
+/// threads) before any op — the kernel has no lazy fallback runtime, so an op
+/// against an uninstalled runtime panics.
 ///
-/// Mirrors `shrike-pyo3`'s `init_driven_runtime`: a second call finds the
-/// runtime already set (the seam is set-once), so the first install stands and
-/// this returns `is_driven()` either way. If never called, the kernel lazily
-/// installs its DEFAULT multi-thread runtime on first use (whose worker threads
-/// drive spawned tasks) — fine for a host that doesn't want the driven model.
+/// Mirrors `shrike-pyo3`'s `init_driven_runtime`: a second call finds the runtime
+/// already set (the seam is set-once), so the first install stands and this
+/// returns `is_driven()` either way.
 ///
 /// # Host contract (the committed-thread lifecycle)
 ///
@@ -408,8 +403,7 @@ pub extern "C" fn shrike_runtime_init() -> bool {
             };
             // The seam is set-once: an already-installed runtime returns Err
             // carrying the runtime back, so the first install stands. `is_driven`
-            // reports whether that install was the driven one (a prior lazy
-            // default → false → the host must not park drive threads).
+            // confirms the runtime is installed.
             let _ = shrike_kernel::init_driven_runtime(rt);
             shrike_kernel::is_driven()
         }

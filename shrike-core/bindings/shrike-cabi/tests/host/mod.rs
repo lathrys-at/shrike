@@ -59,7 +59,7 @@ impl Host {
         let mut threads = Vec::with_capacity(2 + COMPUTE_THREADS);
         // 1. The IO thread FIRST — it must win tokio's first-block_on driver
         //    ownership.
-        threads.push(spawn("test-drive-io", shrike_drive_io));
+        threads.push(spawn("shrike-io", shrike_drive_io));
         // 2. The barrier: block until the IO thread is in its block_on driving
         //    the executor. Only then is it safe to park the rest.
         assert!(
@@ -67,12 +67,9 @@ impl Host {
             "shrike_runtime_probe confirms the IO thread is driving before the rest park"
         );
         // 3. Now sync + N compute — they hook into the IO thread's drivers.
-        threads.push(spawn("test-drive-sync", shrike_drive_sync));
+        threads.push(spawn("shrike-sync", shrike_drive_sync));
         for i in 0..COMPUTE_THREADS {
-            threads.push(spawn(
-                &format!("test-drive-compute-{i}"),
-                shrike_drive_compute,
-            ));
+            threads.push(spawn(&format!("shrike-work-{i}"), shrike_drive_compute));
         }
         Host { threads }
     }

@@ -544,11 +544,14 @@ pub trait BlockingDispatch: Send + Sync {
     fn submit(&self, job: Box<dyn FnOnce() + Send + 'static>);
 }
 
-/// The dispatcher [`Blocking`] uses when the host injects none: tokio's blocking
-/// pool via [`tokio::task::spawn_blocking`]. Requires an ambient tokio runtime
-/// (kernel ops run inside one); off-runtime it panics, the same contract the
-/// adapter has always had. Keeping a built-in default lets this crate be
-/// exercised standalone with no executor wired in.
+/// The **standalone, no-kernel** dispatcher [`Blocking`] uses when the host
+/// injects none: tokio's blocking pool via [`tokio::task::spawn_blocking`]. It is
+/// independent of the kernel runtime — engine-api has no dependency on it. The
+/// production path with the kernel always injects its own `BlockingDispatch`
+/// (the binding's `KernelDispatch` → the committed `drive_compute` pool), so this
+/// default serves only the compute-only build (no kernel to inject) and this
+/// crate's own standalone tests. Requires an ambient tokio runtime; off-runtime
+/// it panics, the contract the adapter has always had.
 pub struct DefaultDispatch;
 
 impl BlockingDispatch for DefaultDispatch {
@@ -705,8 +708,11 @@ mod tests {
     }
 
     fn test_runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
+        // A current_thread runtime: `DefaultDispatch` only needs an ambient
+        // runtime for `spawn_blocking` (the blocking pool is separate from the
+        // worker), and shrike-core uses no multi-thread runtime anywhere.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
             .build()
             .unwrap()
     }

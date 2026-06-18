@@ -33,6 +33,7 @@ shrike_native = pytest.importorskip("shrike_native")
 
 _OPEN_KERNEL = """
 import asyncio
+import threading
 import shrike_native
 
 class StubBackend:
@@ -43,6 +44,34 @@ class StubBackend:
         return "stub:v1"
     def embedding_dim(self):
         return 4
+
+def spawn_drivers():
+    # The kernel runtime is harness-driven with no lazy default, so the
+    # committed driver threads must be parked before any op. Honor the startup
+    # barrier: io first, probe until it drives, then sync + compute. Returns the
+    # threads so a test can shut down and join.
+    #
+    # DAEMON threads on purpose: these pins model the UNCLEAN exit (a crash /
+    # interpreter teardown WITHOUT drive_pools_shutdown). A non-daemon driver
+    # parks forever and would block process exit; a daemon is torn down at
+    # finalization — exactly the GIL-state-abort window the finalization gate
+    # guards, which is the property under test. The clean-shutdown pin still
+    # joins explicitly (a daemon joins fine once the pools close).
+    assert shrike_native.init_driven_runtime()
+    io = threading.Thread(target=shrike_native.drive_io, name="shrike-io", daemon=True)
+    io.start()
+    shrike_native.runtime_probe()
+    sync = threading.Thread(target=shrike_native.drive_sync, name="shrike-sync", daemon=True)
+    sync.start()
+    compute = [
+        threading.Thread(
+            target=shrike_native.drive_compute, name=f"shrike-work-{i}", daemon=True
+        )
+        for i in range(2)
+    ]
+    for t in compute:
+        t.start()
+    return [io, sync, *compute]
 
 async def open_kernel(collection_path, cache_dir):
     kernel = await shrike_native.async_kernel_open(collection_path, cache_dir)
@@ -101,6 +130,7 @@ def test_exit_without_close_is_clean(tmp_path) -> None:
             assert hits
             # Deliberately NO kernel.close(): the unclean exit path.
 
+        spawn_drivers()  # park the committed threads; deliberately not joined
         asyncio.run(main())
         """,
     )
@@ -130,6 +160,7 @@ def test_exit_with_inflight_ops_is_clean(tmp_path) -> None:
             # runtime while asyncio.run tears the loop down and the
             # interpreter exits.
 
+        spawn_drivers()  # park the committed threads; deliberately not joined
         asyncio.run(main())
         """,
     )
@@ -165,6 +196,7 @@ def test_exit_with_logging_bridge_and_inflight_ops_is_clean(tmp_path) -> None:
             # Return immediately: the ops above (and whatever they log) are
             # mid-flight on the kernel runtime while the interpreter exits.
 
+        spawn_drivers()  # park the committed threads; deliberately not joined
         asyncio.run(main())
         """,
     )
@@ -188,18 +220,7 @@ def test_driven_runtime_boot_serve_and_clean_shutdown(tmp_path) -> None:
     _run_teardown_script(
         tmp_path,
         """
-        import threading
-
-        shrike_native.init_driven_runtime()
-        io = threading.Thread(target=shrike_native.drive_io, name="drive-io")
-        sync = threading.Thread(target=shrike_native.drive_sync, name="drive-sync")
-        compute = [
-            threading.Thread(target=shrike_native.drive_compute, name=f"drive-compute-{{i}}")
-            for i in range(2)
-        ]
-        threads = [io, sync, *compute]
-        for t in threads:
-            t.start()
+        threads = spawn_drivers()
 
         async def main():
             kernel = await open_kernel({collection!r}, {cache!r})
@@ -254,6 +275,7 @@ def test_exit_after_gate_close_drops_late_python_work(tmp_path) -> None:
                 [(basic, 1, ["late", "x"], [])], "allow"
             ))
 
+        spawn_drivers()  # park the committed threads; deliberately not joined
         asyncio.run(main())
         """,
     )

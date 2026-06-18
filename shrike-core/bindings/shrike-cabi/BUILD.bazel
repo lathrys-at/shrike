@@ -195,3 +195,21 @@ rust_test(
         "@crates//:serde_json",
     ],
 )
+
+# The no-driven-runtime guard: own process where the runtime was NEVER installed
+# (no host parked the driver threads). There is no lazy default, so the open's
+# spawn hits the kernel's "runtime not installed" panic; the FFI guard catches it
+# and fires one internal-error completion — a clean error envelope, not UB. No
+# host fixture (the whole point is an uninstalled runtime).
+rust_test(
+    name = "no_driven_runtime_test",
+    size = "small",
+    srcs = ["tests/no_driven_runtime.rs"],
+    crate_root = "tests/no_driven_runtime.rs",
+    crate_features = CABI_FEATURES,
+    edition = "2021",
+    deps = [
+        ":shrike_cabi_lib",
+        "@crates//:serde_json",
+    ],
+)

@@ -48,6 +48,55 @@ from tests.integration.model_cache import (
 )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _driven_runtime() -> Iterator[None]:
+    """Install + park the kernel's committed driver threads for the session.
+
+    Most integration tests drive a server *subprocess* (its own process, with its
+    own driven runtime), so they're unaffected by the test process's runtime. But a
+    few exercise an in-process backend or native kernel attach (the embedding /
+    native-attach lane), whose ``.start()`` runs the batch-safety probe — which
+    touches the kernel runtime. The kernel runtime is harness-driven (no lazy
+    default), so an ``AsyncKernel`` op only makes progress while a driver thread
+    drives it. Install once (the seam is set-once and the threads outlive any
+    kernel, exactly as in production) and tear down at session end. A no-op on a
+    build without the kernel bridge (the compute-only extension), which those tests
+    skip anyway; an idle parked runtime costs the subprocess-only tests nothing.
+
+    Process-global guard: when this suite shares one pytest process with another
+    (the unit/native suites have the identical fixture), both trees' autouse
+    fixtures fire — but the kernel runtime is set-once, so only the FIRST may park
+    the driver threads (a second ``drive_sync`` would hit "already claimed"). A
+    marker on the ``shrike_native`` module (the one object the conftests share)
+    elects the single owner."""
+    try:
+        import shrike_native
+
+        from shrike.platform.driven_runtime import DrivenRuntime
+    except ImportError:
+        yield
+        return
+    if not hasattr(shrike_native, "init_driven_runtime"):
+        # A build without the driven-runtime bridge (compute-only); the
+        # kernel-driving tests skip on the missing CollectionCore/AsyncKernel.
+        yield
+        return
+    if getattr(shrike_native, "_shrike_test_driven", False):
+        # Another suite's fixture already owns the driven runtime this process.
+        yield
+        return
+
+    shrike_native._shrike_test_driven = True
+    runtime = DrivenRuntime()
+    runtime.install()
+    runtime.start()
+    try:
+        yield
+    finally:
+        runtime.shutdown()
+        shrike_native._shrike_test_driven = False
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Register the markers pyproject declares, so they're known under Bazel too —
     pyproject's [tool.pytest.ini_options] isn't read when the rootdir is the

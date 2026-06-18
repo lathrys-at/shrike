@@ -1,10 +1,11 @@
 //! The driven-mode acceptance gate, with the test PLAYING THE HOST.
 //!
 //! A SEPARATE test binary on purpose: the runtime seam (`init_driven_runtime`)
-//! is process-global, so this proof must not share a process with the in-crate
-//! suite (which runs on the lazily-installed DEFAULT multi-thread runtime).
-//! Here we call `shrike_runtime_init` FIRST, then — playing the host's role —
-//! park the committed threads in the C drive entries.
+//! is process-global and set-once, so this proof — which calls
+//! `shrike_runtime_init` itself and parks its own committed threads — must own
+//! its process rather than share the in-crate suite's seam. Here we call
+//! `shrike_runtime_init` FIRST, then — playing the host's role — park the
+//! committed threads in the C drive entries.
 //!
 //! What it pins: under the driven mode the C ABI advertises, the full open ->
 //! upsert -> search -> delete -> close flow runs and the completion callbacks

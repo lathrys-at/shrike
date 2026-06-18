@@ -219,12 +219,10 @@ fn decode_media_b64(py: Python<'_>, data: String) -> PyResult<Vec<u8>> {
 // bridge still submits ops, invisibly driven by the IO thread.
 
 /// Install a `current_thread` runtime in the driven model — call ONCE, before
-/// any kernel op, so the set-once seam wins over the lazy multi-thread default.
-/// Returns whether the runtime is now driven: `True` on a fresh install (or a
-/// benign re-call where driven was already installed), `False` if the default
-/// multi-thread runtime had already been pinned by an earlier op. The caller
-/// MUST NOT spawn drive threads when this is `False` — they would have no driven
-/// queues to consume and would error.
+/// any kernel op (the kernel has no lazy fallback, so an op before this panics).
+/// Returns whether the runtime is now installed: `True` once installed (a fresh
+/// install, or a benign re-call where it was already installed — the seam is
+/// set-once), `False` only if the runtime fails to build.
 #[cfg(feature = "anki-core")]
 #[pyfunction]
 fn init_driven_runtime(py: Python<'_>) -> PyResult<bool> {

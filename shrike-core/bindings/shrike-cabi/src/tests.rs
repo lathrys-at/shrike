@@ -37,13 +37,19 @@ fn user_data() -> (*mut c_void, mpsc::Receiver<String>) {
     (ptr, rx)
 }
 
-/// Drive `shrike_open` and return the handle pointer the callback yields.
+/// Drive `shrike_open` and return the handle pointer the callback yields. The
+/// C-ABI ops `spawn_op` onto the runtime and complete via the callback, so the
+/// kernel's shared driven fixture must be parking the driver threads — start it
+/// here (idempotent, process-global) so every handle-opening test is driven.
 fn open(collection: &str, cache: &str) -> *mut ShrikeHandle {
+    shrike_kernel::runtime::testing::run_with_sync(async {});
     let c_col = CString::new(collection).unwrap();
     let c_cache = CString::new(cache).unwrap();
     let (ud, rx) = user_data();
     unsafe { shrike_open(c_col.as_ptr(), c_cache.as_ptr(), collect, ud) };
-    let envelope = rx.recv().expect("open completion fired");
+    let envelope = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("open completion fired (the driven runtime must drive the op)");
     let v: serde_json::Value = serde_json::from_str(&envelope).unwrap();
     let ptr_int: usize = v
         .get("ok")
@@ -60,7 +66,9 @@ fn op(handle: *const ShrikeHandle, action: &str, params: &str) -> serde_json::Va
     let c_params = CString::new(params).unwrap();
     let (ud, rx) = user_data();
     unsafe { shrike_op(handle, c_action.as_ptr(), c_params.as_ptr(), collect, ud) };
-    let envelope = rx.recv().expect("op completion fired");
+    let envelope = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("op completion fired (the driven runtime must drive the op)");
     serde_json::from_str(&envelope).unwrap()
 }
 
@@ -130,12 +138,20 @@ fn temp_dir() -> std::path::PathBuf {
 /// delete -> close, ENTIRELY through the C ABI, with zero CPython in the
 /// process (the crate links no pyo3 — the layering check guarantees that
 /// structurally; this proves the composition runs).
+///
+/// Driven by the kernel's shared test fixture (1 io + 1 sync + N compute): the
+/// C-ABI ops `spawn_op` onto the runtime and block this thread on a callback, so
+/// the committed driver threads must be parked. The HashEmbedder is attached to
+/// the kernel behind the opaque handle — an in-crate-only reach (the public ABI
+/// can't attach an embedder), which is why this smoke stays in-crate rather than
+/// moving to an integration binary alongside the lexical-only driver proof.
 #[test]
 fn c_abi_open_upsert_search_delete_close() {
     let dir = temp_dir();
     let collection = dir.join("c.anki2").to_string_lossy().into_owned();
     let cache = dir.join("cache").to_string_lossy().into_owned();
 
+    // `open` starts the kernel's driven fixture (parks the driver threads).
     let handle = open(&collection, &cache);
     assert!(!handle.is_null());
 
@@ -146,7 +162,9 @@ fn c_abi_open_upsert_search_delete_close() {
     // SAFETY: `handle` is the live pointer from open, not yet closed.
     let kernel: Arc<Kernel> = unsafe { Arc::clone(&(*handle).kernel) };
     kernel.attach_embedder(Arc::new(HashEmbedder), None);
-    shrike_kernel::block_on(async { kernel.reindex_if_needed().await.unwrap() });
+    shrike_kernel::runtime::testing::run_with_sync(async move {
+        kernel.reindex_if_needed().await.unwrap()
+    });
 
     // upsert: one note via the wire-shaped action.
     let notes = serde_json::json!({
